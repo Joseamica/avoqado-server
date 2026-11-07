@@ -8,6 +8,7 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/p
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { utcTs } from '@/utils/sqlDates'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE, INBOX_PAGE_SIZE, OPEN_ORDER_STATUSES, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
@@ -92,9 +93,9 @@ export async function prepararFolioPagado(i: {
 }): Promise<TransitionResult> {
   const minutes = await prepMinutes(i.venueId, i.estimatedMinutes)
   const marcarCocina = await debeMarcarCocina(i.venueId, { orderId: i.orderId }) // nunca lanza
-  const r = await prisma.$transaction(
+  const r = await withDeadlockRetry(
     tx => prepararFolioPagadoEnTx(tx, { venueId: i.venueId, orderId: i.orderId, marcarCocina, minutes, now: i.now, reloj: i.reloj }),
-    ORDER_LOCK_WAIT_BUDGET,
+    { etiqueta: 'prepararFolioPagado', ...ORDER_LOCK_WAIT_BUDGET },
   )
   if (r.r === 'NOT_FOLIO') return { outcome: 'NOT_FOUND' }
   if (r.r !== 'OK') {

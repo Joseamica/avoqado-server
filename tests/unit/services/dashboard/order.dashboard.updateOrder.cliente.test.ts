@@ -173,7 +173,8 @@ describe('PUT del panel — autoridad histórica e inmutabilidad del cliente cob
     await updateOrder(VENUE, ORDER, { customerName: 'Kev' } as any)
     expect(prismaMock.order.update.mock.calls[0][0].data).toEqual({ customerName: 'Kev' })
     expect(sentencias).toEqual([])
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    // S5b (red por traba): `updateOrder` va SIEMPRE por withDeadlockRetry (una `$transaction` de un solo paso, sin candado nuevo: `sentencias` sigue vacío).
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
   it('regresión: un cliente que no es de este negocio sigue siendo 404', async () => {

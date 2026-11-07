@@ -15,7 +15,7 @@
 
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import { withDeadlockRetry } from '../../utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -42,7 +42,7 @@ export const COMP_REASONS = [
 ] as const
 
 export async function compOrderItemInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string; captureBenefits?: boolean },
 ) {
   const { venueId, orderId, itemId, reason, staffId } = params
@@ -141,7 +141,7 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
  * as the per-item comp.
  */
 export async function compWholeOrderInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   params: { venueId: string; orderId: string; reason: string; staffId?: string; captureBenefits?: boolean },
 ) {
   const { venueId, orderId, reason, staffId } = params

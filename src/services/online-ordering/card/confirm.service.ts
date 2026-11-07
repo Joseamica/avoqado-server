@@ -7,6 +7,7 @@
 import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
@@ -120,40 +121,43 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
     const request = charge.request as unknown as CardDraftRequest
     let created: { orderId: string; onlineOrderId: string; orderNumber: string } | null
     try {
-      created = await prisma.$transaction(async tx => {
-        await lockAdmission(tx, charge.venueId)
-        const won = await tx.onlineOrderCharge.updateMany({
-          where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
-          data: {
-            status: OnlineOrderChargeStatus.AUTHORIZED,
-            paymentIntentId: auth.paymentIntentId,
-            authorizedAt: now,
-            captureBefore: auth.captureBefore,
-            lastError: null,
-            stuckAlertedAt: null, // sale de PENDING_AUTH: la alerta del conciliador empieza de cero
-          },
-        })
-        if (won.count === 0) return null
-        const orderNumber = await pickOrderNumber(tx, charge.venueId)
-        const r = await writeOnlineOrderInTx(tx, {
-          venueId: charge.venueId,
-          externalId: request.externalId,
-          orderNumber,
-          quote: request.quote,
-          customer: request.customer,
-          customerId: null, // C9: el teléfono de la tarjeta no se verificó
-          note: request.note,
-          paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
-          trackingToken: charge.trackingToken,
-          requestHash: charge.requestHash,
-          acceptDeadlineAt: new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000),
-          whatsappConsent: request.whatsappConsent,
-          requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
-          channel: null,
-        })
-        await tx.onlineOrderCharge.update({ where: { id: charge.id }, data: { onlineOrderId: r.onlineOrderId } })
-        return { ...r, orderNumber }
-      }, TX_OPTIONS)
+      created = await withDeadlockRetry(
+        async tx => {
+          await lockAdmission(tx, charge.venueId)
+          const won = await tx.onlineOrderCharge.updateMany({
+            where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
+            data: {
+              status: OnlineOrderChargeStatus.AUTHORIZED,
+              paymentIntentId: auth.paymentIntentId,
+              authorizedAt: now,
+              captureBefore: auth.captureBefore,
+              lastError: null,
+              stuckAlertedAt: null, // sale de PENDING_AUTH: la alerta del conciliador empieza de cero
+            },
+          })
+          if (won.count === 0) return null
+          const orderNumber = await pickOrderNumber(tx, charge.venueId)
+          const r = await writeOnlineOrderInTx(tx, {
+            venueId: charge.venueId,
+            externalId: request.externalId,
+            orderNumber,
+            quote: request.quote,
+            customer: request.customer,
+            customerId: null, // C9: el teléfono de la tarjeta no se verificó
+            note: request.note,
+            paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
+            trackingToken: charge.trackingToken,
+            requestHash: charge.requestHash,
+            acceptDeadlineAt: new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000),
+            whatsappConsent: request.whatsappConsent,
+            requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
+            channel: null,
+          })
+          await tx.onlineOrderCharge.update({ where: { id: charge.id }, data: { onlineOrderId: r.onlineOrderId } })
+          return { ...r, orderNumber }
+        },
+        { etiqueta: 'confirmCardAuthorization', ...TX_OPTIONS },
+      )
     } catch (error) {
       // La llave ya tiene cuenta (no debería: la guarda de llaves de la tarea 4). Nada se creó: se libera la tarjeta.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {

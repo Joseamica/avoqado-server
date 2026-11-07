@@ -19,6 +19,7 @@ import {
 import { createHash } from 'node:crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import AppError, { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
@@ -638,90 +639,93 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   }
 
   try {
-    const result = await prisma.$transaction(async (tx): Promise<CreateOnlineOrderResult | AppError> => {
-      const before = await decidedBefore(tx)
-      if (before) return before
+    const result = await withDeadlockRetry(
+      async (tx): Promise<CreateOnlineOrderResult | AppError> => {
+        const before = await decidedBefore(tx)
+        if (before) return before
 
-      let orderNumber: string
-      try {
-        // Sólo lecturas y candados. La primera escritura (la cuenta) va fuera de este bloque: un rechazo guardado nunca confirma
-        // un pedido a medias.
-        // 6. R4: la admisión se serializa por negocio. Dentro del candado se repiten la repetición, los topes y el folio:
-        //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
-        await lockAdmission(tx, input.venueId)
+        let orderNumber: string
+        try {
+          // Sólo lecturas y candados. La primera escritura (la cuenta) va fuera de este bloque: un rechazo guardado nunca confirma
+          // un pedido a medias.
+          // 6. R4: la admisión se serializa por negocio. Dentro del candado se repiten la repetición, los topes y el folio:
+          //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
+          await lockAdmission(tx, input.venueId)
 
-        const again = await findReplay(tx, input.venueId, externalId, requestHash)
-        if (again) return again
+          const again = await findReplay(tx, input.venueId, externalId, requestHash)
+          if (again) return again
 
-        // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente. T7: sólo con teléfono.
-        if (phone) {
-          const pendingByPhone =
-            (await tx.onlineOrder.count({
-              where: { ...awaitingAcceptanceWhere(input.venueId), order: { customerPhone: phone } },
-            })) + (await tx.onlineOrderCharge.count({ where: { ...liveCardDraftsWhere(input.venueId, now), customerPhone: phone } }))
-          if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
-            throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+          // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente. T7: sólo con teléfono.
+          if (phone) {
+            const pendingByPhone =
+              (await tx.onlineOrder.count({
+                where: { ...awaitingAcceptanceWhere(input.venueId), order: { customerPhone: phone } },
+              })) + (await tx.onlineOrderCharge.count({ where: { ...liveCardDraftsWhere(input.venueId, now), customerPhone: phone } }))
+            if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
+              throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+            }
           }
-        }
-        const pendingInVenue =
-          (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(input.venueId) })) +
-          (await tx.onlineOrderCharge.count({ where: liveCardDraftsWhere(input.venueId, now) }))
-        if (pendingInVenue >= MAX_PENDING_PER_VENUE) {
-          throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
-            status: 'PAUSED',
-            reason: 'TOO_BUSY',
-          })
-        }
-        if (!requiresAcceptance) await admitFolio(tx, input.venueId, now)
-
-        orderNumber = await pickOrderNumber(tx, input.venueId)
-        // R52 (Codex f1 r5): el plazo se calculó con la hora de la petición (R23) y no se estira. Justo antes de escribir, con el reloj
-        // de ESTE momento, el folio tiene que nacer vigente y con la tienda abierta (la misma regla de apertura); si cotizar y esperar
-        // los candados cruzó el cierre (pidió 20:59:59, se escribe 21:00:05), la misma respuesta que fuera de horario, guardada igual.
-        if (horarioDelFolio) {
-          const alEscribir = reloj()
-          if (
-            acceptDeadlineAt.getTime() <= alEscribir.getTime() ||
-            !isWithinHours(horarioDelFolio.hours, alEscribir, horarioDelFolio.timezone)
-          ) {
-            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_CLOSED', {
-              status: 'CLOSED',
-              reason: 'OUTSIDE_HOURS',
+          const pendingInVenue =
+            (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(input.venueId) })) +
+            (await tx.onlineOrderCharge.count({ where: liveCardDraftsWhere(input.venueId, now) }))
+          if (pendingInVenue >= MAX_PENDING_PER_VENUE) {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
+              status: 'PAUSED',
+              reason: 'TOO_BUSY',
             })
           }
-        }
-      } catch (error) {
-        if (!isDefinitiveRejection(error)) throw error
-        return saveRejection(tx, error)
-      }
+          if (!requiresAcceptance) await admitFolio(tx, input.venueId, now)
 
-      const created = await writeOnlineOrderInTx(tx, {
-        venueId: input.venueId,
-        externalId,
-        orderNumber,
-        quote: toQuoteSnapshot(quote),
-        customer: { name: input.customer.name, phone, email: input.customer.email ?? null },
-        customerId,
-        note,
-        paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
-        trackingToken,
-        requestHash,
-        acceptDeadlineAt,
-        whatsappConsent: input.whatsappConsent === true,
-        requiresAcceptance,
-        channel: input.channel ?? null,
-      })
-      return {
-        orderId: created.orderId,
-        onlineOrderId: created.onlineOrderId,
-        trackingToken,
-        status: OnlineOrderStatus.PENDING_ACCEPTANCE,
-        orderNumber,
-        total: quote.total.toFixed(2),
-        acceptDeadlineAt: acceptDeadlineAt.toISOString(),
-        replay: false,
-      }
-    }, TX_OPTIONS)
+          orderNumber = await pickOrderNumber(tx, input.venueId)
+          // R52 (Codex f1 r5): el plazo se calculó con la hora de la petición (R23) y no se estira. Justo antes de escribir, con el reloj
+          // de ESTE momento, el folio tiene que nacer vigente y con la tienda abierta (la misma regla de apertura); si cotizar y esperar
+          // los candados cruzó el cierre (pidió 20:59:59, se escribe 21:00:05), la misma respuesta que fuera de horario, guardada igual.
+          if (horarioDelFolio) {
+            const alEscribir = reloj()
+            if (
+              acceptDeadlineAt.getTime() <= alEscribir.getTime() ||
+              !isWithinHours(horarioDelFolio.hours, alEscribir, horarioDelFolio.timezone)
+            ) {
+              throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_CLOSED', {
+                status: 'CLOSED',
+                reason: 'OUTSIDE_HOURS',
+              })
+            }
+          }
+        } catch (error) {
+          if (!isDefinitiveRejection(error)) throw error
+          return saveRejection(tx, error)
+        }
+
+        const created = await writeOnlineOrderInTx(tx, {
+          venueId: input.venueId,
+          externalId,
+          orderNumber,
+          quote: toQuoteSnapshot(quote),
+          customer: { name: input.customer.name, phone, email: input.customer.email ?? null },
+          customerId,
+          note,
+          paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
+          trackingToken,
+          requestHash,
+          acceptDeadlineAt,
+          whatsappConsent: input.whatsappConsent === true,
+          requiresAcceptance,
+          channel: input.channel ?? null,
+        })
+        return {
+          orderId: created.orderId,
+          onlineOrderId: created.onlineOrderId,
+          trackingToken,
+          status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+          orderNumber,
+          total: quote.total.toFixed(2),
+          acceptDeadlineAt: acceptDeadlineAt.toISOString(),
+          replay: false,
+        }
+      },
+      { etiqueta: 'createOnlineOrder', ...TX_OPTIONS },
+    )
     if (result instanceof AppError) throw result // Codex r3: el rechazo ya quedó guardado
 
     // T7: un folio sin pagar no se anuncia: las apps viejas lo tratarían como cuenta nueva (sale de las listas hasta pagarse).
@@ -962,8 +966,13 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           remainingBalance: true,
           paymentStatus: true,
           customerName: true,
-          payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
-          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
+          payments: {
+            // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
+            where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { createdAt: true },
+          },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,

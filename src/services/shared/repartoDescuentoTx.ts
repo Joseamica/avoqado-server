@@ -5,6 +5,7 @@
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
 import { buildItemDiscountRow } from './discount.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 import {
   aCentavos,
   comoJson,
@@ -302,7 +303,7 @@ export type ResultadoDeRecorte = {
  * necesita leerlos. Un error de base sale tal cual.
  */
 export async function recortarDescuentosDeRenglones(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   orderId: string,
   o: { renglones: string[]; venueId: string; staffId?: string | null; captureBenefits?: boolean },
 ): Promise<ResultadoDeRecorte> {

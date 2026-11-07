@@ -9,6 +9,7 @@ import {
   type OnlineOrderRejectReason,
 } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
@@ -290,11 +291,14 @@ export type AfterCasInTx = (tx: Prisma.TransactionClient, r: CasResult) => Promi
 async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasResult> {
   let result: CasResult
   try {
-    result = await prisma.$transaction(async tx => {
-      const r = await casTransitionInTx(tx, a)
-      if (afterCas) await afterCas(tx, r)
-      return r
-    }, ORDER_LOCK_WAIT_BUDGET)
+    result = await withDeadlockRetry(
+      async tx => {
+        const r = await casTransitionInTx(tx, a)
+        if (afterCas) await afterCas(tx, r)
+        return r
+      },
+      { etiqueta: 'casTransition', ...ORDER_LOCK_WAIT_BUDGET },
+    )
   } catch (error) {
     if (!(error instanceof OrderNotWritten)) throw error
     const current = await prisma.onlineOrder.findFirst({ where: { orderId: a.orderId, venueId: a.venueId }, select: { status: true } })

@@ -28,6 +28,7 @@ import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import { operationHash } from '../../utils/operationHash'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
@@ -1461,7 +1462,7 @@ export async function prepararVentaDeMostrador(
  * abre otra ni usa `prisma`. Lo llaman `createOrderWithItems` y `payGiftCardOnNewOrder` (crear y cobrar con saldo juntos, Q58).
  */
 export async function crearVentaDeMostradorEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   input: CreateOrderInput,
   prep: PreparacionDeVenta,
@@ -1890,10 +1891,14 @@ export async function terminarVentaDeMostrador(
   // maxTotalUses counter stale, not corrupt the order/payment.
   if (discounts.length > 0) {
     try {
-      await prisma.discount.updateMany({
-        where: { id: { in: discounts.map(discount => discount.id) } },
-        data: { currentUses: { increment: 1 } },
-      })
+      await withDeadlockRetry(
+        tx =>
+          tx.discount.updateMany({
+            where: { id: { in: discounts.map(discount => discount.id) } },
+            data: { currentUses: { increment: 1 } },
+          }),
+        { etiqueta: 'terminarVentaDeMostrador' },
+      )
     } catch (error) {
       logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
         orderId: order.id,
@@ -1963,7 +1968,10 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // medias que anular ni llave de idempotencia envenenada, así que el reintento del POS la crea normal.
   let created: VentaDeMostradorEnTx
   try {
-    created = await prisma.$transaction(tx => crearVentaDeMostradorEnTx(tx, venueId, input, prep), ORDER_LOCK_WAIT_BUDGET)
+    created = await withDeadlockRetry(tx => crearVentaDeMostradorEnTx(tx, venueId, input, prep), {
+      etiqueta: 'createOrderWithItems',
+      ...ORDER_LOCK_WAIT_BUDGET,
+    })
   } catch (error) {
     // Red de seguridad del índice único (venueId, externalId): con el candado de la llave, dos reintentos de ESTA ruta ya
     // no chocan, pero otro escritor de la misma llave sí puede (la orden de la terminal comparte el índice). Sólo ESE
@@ -2602,9 +2610,9 @@ export async function removeOrderDiscountInTransaction(
 }
 
 export async function removeOrderDiscount(venueId: string, orderId: string, orderDiscountId: string, staffId?: string) {
-  const { row, refund, stampRefund, totals } = await prisma.$transaction(
+  const { row, refund, stampRefund, totals } = await withDeadlockRetry(
     tx => removeOrderDiscountInTransaction(tx, venueId, orderId, orderDiscountId, staffId),
-    ORDER_LOCK_WAIT_BUDGET,
+    { etiqueta: 'removeOrderDiscount', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -2841,9 +2849,9 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     throw new BadRequestError('itemIds es requerido')
   }
 
-  const { source, newOrder, movedCount, sourceTotals, newTotals } = await prisma.$transaction(
+  const { source, newOrder, movedCount, sourceTotals, newTotals } = await withDeadlockRetry(
     tx => splitOrderItemsInTransaction(tx, venueId, orderId, itemIds, staffId),
-    ORDER_LOCK_WAIT_BUDGET,
+    { etiqueta: 'splitOrderItems', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -3012,7 +3020,10 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
 }
 
 export async function splitOrderBySeat(venueId: string, orderId: string, staffId?: string) {
-  const created = await prisma.$transaction(tx => splitOrderBySeatInTransaction(tx, venueId, orderId, staffId), ORDER_LOCK_WAIT_BUDGET)
+  const created = await withDeadlockRetry(tx => splitOrderBySeatInTransaction(tx, venueId, orderId, staffId), {
+    etiqueta: 'splitOrderBySeat',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
 
   const createdTotals = created.results
   const sourceTotals = created.sourceTotals
@@ -3424,10 +3435,10 @@ export async function publishMergedOrders(
 }
 
 export async function mergeOrders(venueId: string, targetOrderId: string, sourceOrderId: string, staffId?: string) {
-  const result = await prisma.$transaction(
-    tx => mergeOrdersInTransaction(tx, venueId, targetOrderId, sourceOrderId, staffId),
-    ORDER_LOCK_WAIT_BUDGET,
-  )
+  const result = await withDeadlockRetry(tx => mergeOrdersInTransaction(tx, venueId, targetOrderId, sourceOrderId, staffId), {
+    etiqueta: 'mergeOrders',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
   await publishMergedOrders(venueId, result, staffId)
   return result.data
 }
@@ -4834,7 +4845,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
-      paymentResult = await prisma.$transaction(
+      paymentResult = await withDeadlockRetry(
         async tx =>
           await registrarAbonoEnTx(
             tx,
@@ -4876,7 +4887,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             },
             reconciliationEnabled,
           ),
-        ORDER_LOCK_WAIT_BUDGET,
+        { etiqueta: 'payCashOrder', ...ORDER_LOCK_WAIT_BUDGET },
       )
       break // ganamos la transición
     } catch (err: any) {
@@ -5503,21 +5514,24 @@ export async function payGiftCardBalanceOnOrder(
 
   let hecho: AbonoConSaldoEnTx
   try {
-    hecho = await prisma.$transaction(async tx => {
-      // Q91: LO PRIMERO, el candado de la llave. Un reintento espera aquí al primer envío; si ése ya cobró, sale por su
-      // respuesta (el catch de abajo: `mismoCobro` ⇒ replay; si no, IDEMPOTENCY_KEY_REUSED).
-      const llave = await tomarLlaveDeCobro(tx, venueId, input.idempotencyKey)
-      if (llave.cobroPrevioId) throw new CobroYaRegistrado(llave.cobroPrevioId)
-      try {
-        const cobro = await prepararAbonoConSaldoEnTx(tx, ctx, llave.ahora)
-        const abono = await registrarAbonoEnTx(tx, cobro.contexto, cobro.entrada, reconciliationEnabled)
-        return { abono, canje: cobro.canje }
-      } catch (e) {
-        // Q91/Q94: se sella con el candado de la llave puesto (el siguiente envío no entra antes del sello); sólo lo definitivo.
-        sellarSiEsDefinitivo(venueId, input.idempotencyKey, e)
-        throw e
-      }
-    }, ORDER_LOCK_WAIT_BUDGET)
+    hecho = await withDeadlockRetry(
+      async tx => {
+        // Q91: LO PRIMERO, el candado de la llave. Un reintento espera aquí al primer envío; si ése ya cobró, sale por su
+        // respuesta (el catch de abajo: `mismoCobro` ⇒ replay; si no, IDEMPOTENCY_KEY_REUSED).
+        const llave = await tomarLlaveDeCobro(tx, venueId, input.idempotencyKey)
+        if (llave.cobroPrevioId) throw new CobroYaRegistrado(llave.cobroPrevioId)
+        try {
+          const cobro = await prepararAbonoConSaldoEnTx(tx, ctx, llave.ahora)
+          const abono = await registrarAbonoEnTx(tx, cobro.contexto, cobro.entrada, reconciliationEnabled)
+          return { abono, canje: cobro.canje }
+        } catch (e) {
+          // Q91/Q94: se sella con el candado de la llave puesto (el siguiente envío no entra antes del sello); sólo lo definitivo.
+          sellarSiEsDefinitivo(venueId, input.idempotencyKey, e)
+          throw e
+        }
+      },
+      { etiqueta: 'payGiftCardBalanceOnOrder', ...ORDER_LOCK_WAIT_BUDGET },
+    )
   } catch (err: any) {
     // r1 (A-2): carrera idempotente. Dos peticiones con la MISMA llave pasan la consulta de arriba; la segunda espera la
     // Order y, cuando entra, la cuenta ya está pagada o el saldo ya se consumió: falla ANTES del índice único de Payment
@@ -6025,50 +6039,53 @@ export async function payGiftCardOnNewOrder(
     cobrado: AbonoConSaldoEnTx
   }
   try {
-    hecho = await prisma.$transaction(async tx => {
-      // Q91: LO PRIMERO, el candado de la llave (antes que el de `externalId` de la cuenta). Un reintento espera aquí al primer
-      // envío; si ése ya cobró, sale por su respuesta (el catch de abajo compara la huella).
-      const tomada = await tomarLlaveDeCobro(tx, venueId, llave)
-      if (tomada.cobroPrevioId) throw new CobroYaRegistrado(tomada.cobroPrevioId)
-      try {
-        const creada = await crearVentaDeMostradorEnTx(tx, venueId, venta, prep)
-        // Segunda red: la cuenta de esta llave ya existía sin su cobro (otro escritor del índice). Sale como la ganadora: con
-        // cobro y la misma huella ⇒ su respuesta; si no, IDEMPOTENCY_KEY_REUSED (la orden va en el lugar del cobro: no se lee).
-        if ('existente' in creada) throw new CobroYaRegistrado(creada.existente.id)
-        const orderId = creada.order.id
-        const premio = venta.stampRewardId ? await canjearPremioDeLaVentaEnTx(tx, venueId, orderId, venta.stampRewardId) : null
-        const conPreparacion = await tx.orderItem.findFirst({
-          where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
-          select: { id: true },
-        })
-        // Arreglo tras S8: si un precio BAJÓ, la app sumó `amount` con la lista vieja; se cobra lo que la venta debe. La huella
-        // sigue siendo la del cuerpo enviado (con su `amount`), así el reintento con la misma llave reconoce este cobro.
-        const montoACobrar = await montoDeLaVentaNuevaEnTx(tx, venueId, orderId, monto, creada.venta.cambiosDePrecio)
-        const ctx: ContextoDeCobroConSaldo = {
-          venueId,
-          orderId,
-          orderNumber: creada.order.orderNumber,
-          tableId: null,
-          prueba,
-          monto: montoACobrar,
-          propina,
-          idempotencyKey: llave,
-          effectiveStaffId,
-          deviceId: deviceId ?? null,
-          marcarCocina: conPreparacion ? cocinaConPreparacion : cocinaSinPreparacion,
-          // La cuenta nace con su cliente primario (`orderCustomers`): la lealtad lo lee de ahí; esto es sólo el respaldo.
-          cliente: prep.normalizedCustomerId ? { id: prep.normalizedCustomerId, firstName: null, lastName: null } : null,
-          operationHash: huella,
+    hecho = await withDeadlockRetry(
+      async tx => {
+        // Q91: LO PRIMERO, el candado de la llave (antes que el de `externalId` de la cuenta). Un reintento espera aquí al primer
+        // envío; si ése ya cobró, sale por su respuesta (el catch de abajo compara la huella).
+        const tomada = await tomarLlaveDeCobro(tx, venueId, llave)
+        if (tomada.cobroPrevioId) throw new CobroYaRegistrado(tomada.cobroPrevioId)
+        try {
+          const creada = await crearVentaDeMostradorEnTx(tx, venueId, venta, prep)
+          // Segunda red: la cuenta de esta llave ya existía sin su cobro (otro escritor del índice). Sale como la ganadora: con
+          // cobro y la misma huella ⇒ su respuesta; si no, IDEMPOTENCY_KEY_REUSED (la orden va en el lugar del cobro: no se lee).
+          if ('existente' in creada) throw new CobroYaRegistrado(creada.existente.id)
+          const orderId = creada.order.id
+          const premio = venta.stampRewardId ? await canjearPremioDeLaVentaEnTx(tx, venueId, orderId, venta.stampRewardId) : null
+          const conPreparacion = await tx.orderItem.findFirst({
+            where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
+            select: { id: true },
+          })
+          // Arreglo tras S8: si un precio BAJÓ, la app sumó `amount` con la lista vieja; se cobra lo que la venta debe. La huella
+          // sigue siendo la del cuerpo enviado (con su `amount`), así el reintento con la misma llave reconoce este cobro.
+          const montoACobrar = await montoDeLaVentaNuevaEnTx(tx, venueId, orderId, monto, creada.venta.cambiosDePrecio)
+          const ctx: ContextoDeCobroConSaldo = {
+            venueId,
+            orderId,
+            orderNumber: creada.order.orderNumber,
+            tableId: null,
+            prueba,
+            monto: montoACobrar,
+            propina,
+            idempotencyKey: llave,
+            effectiveStaffId,
+            deviceId: deviceId ?? null,
+            marcarCocina: conPreparacion ? cocinaConPreparacion : cocinaSinPreparacion,
+            // La cuenta nace con su cliente primario (`orderCustomers`): la lealtad lo lee de ahí; esto es sólo el respaldo.
+            cliente: prep.normalizedCustomerId ? { id: prep.normalizedCustomerId, firstName: null, lastName: null } : null,
+            operationHash: huella,
+          }
+          const cobro = await prepararAbonoConSaldoEnTx(tx, ctx, tomada.ahora)
+          const abono = await registrarAbonoEnTx(tx, cobro.contexto, cobro.entrada, reconciliationEnabled)
+          return { creada, premio, ctx, cobrado: { abono, canje: cobro.canje } }
+        } catch (e) {
+          // Q91/Q94: se sella con el candado de la llave puesto; sólo lo definitivo.
+          sellarSiEsDefinitivo(venueId, llave, e)
+          throw e
         }
-        const cobro = await prepararAbonoConSaldoEnTx(tx, ctx, tomada.ahora)
-        const abono = await registrarAbonoEnTx(tx, cobro.contexto, cobro.entrada, reconciliationEnabled)
-        return { creada, premio, ctx, cobrado: { abono, canje: cobro.canje } }
-      } catch (e) {
-        // Q91/Q94: se sella con el candado de la llave puesto; sólo lo definitivo.
-        sellarSiEsDefinitivo(venueId, llave, e)
-        throw e
-      }
-    }, ORDER_LOCK_WAIT_BUDGET)
+      },
+      { etiqueta: 'payGiftCardOnNewOrder', ...ORDER_LOCK_WAIT_BUDGET },
+    )
   } catch (err: any) {
     // Después del rollback: si la llave ya tiene su cobro (un envío ganó la carrera), se responde ESE cobro sólo si es la misma
     // venta (la huella); un cuerpo distinto con la misma llave nunca recibe la venta ganadora como `replay`. Si la búsqueda de la
@@ -6153,165 +6170,168 @@ export async function returnGiftBalanceAndCancelOrder(
     propinaCents: Math.max(0, pesosToCents(Number(b.original.tipAmount)) - b.refundedTipsCents),
   })
 
-  const resultado = await prisma.$transaction(async tx => {
-    let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
-    try {
-      scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
-    } catch (error) {
-      if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
-      throw error
-    }
-    const cuenta = await tx.order.findUnique({
-      where: { id: orderId, venueId },
-      select: { id: true, status: true, paymentStatus: true, source: true, posRawData: true },
-    })
-    if (!cuenta) throw new NotFoundError('Order not found')
-    /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
-    const leerCobros = async () => ({
-      tender: await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } }),
-      cobros: await tx.payment.findMany({
-        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-        select: { id: true, tenderTypeId: true },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: MAX_SOBRES_POR_CUENTA + 1,
-      }),
-    })
-
-    // La primera devolución ESCRITA lleva siempre la llave `:0` (abajo): si existe, esta operación ya corrió.
-    const previo = await tx.payment.findUnique({
-      where: { venueId_idempotencyKey: { venueId, idempotencyKey: llaveDeReverso(0) } },
-      select: { orderId: true },
-    })
-    if (previo && previo.orderId !== orderId) {
-      throw new GiftCardError(
-        'IDEMPOTENCY_KEY_REUSED',
-        'Esta llave ya se usó para regresar el saldo de otra cuenta. Vuelve a intentarlo desde la cuenta.',
-        409,
-      )
-    }
-    if (claseDeEstado(cuenta.status) === 'CANCELADA') {
-      if (previo) return null // reintento de una operación que ya terminó
-      // Ronda 1 (fix 1): si ya no quedaba nada que regresar, la primera llamada canceló SIN escribir ninguna devolución y
-      // no existe `:0`. Su reintento (la respuesta se perdió y la cola lo reenvía) se reconoce porque TODOS los pagos vivos
-      // de la cuenta son del tender de regalo y ya están devueltos completos: es una repetición y nada se escribe. Este
-      // camino es el único que cancela esa cuenta (el guardia general rechaza una PARTIAL), así que no se rechaza antes.
-      const { tender, cobros } = await leerCobros()
-      const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
-      if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
-        let todoDevuelto = true
-        for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
-          const pendiente = pendienteDeDevolver(
-            await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
-          )
-          if (pendiente.ventaCents + pendiente.propinaCents > 0) {
-            todoDevuelto = false
-            break
-          }
-        }
-        if (todoDevuelto) return null
+  const resultado = await withDeadlockRetry(
+    async tx => {
+      let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
+      try {
+        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+      } catch (error) {
+        if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+        throw error
       }
-      throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
-    }
-    rechazarCancelacionLocalDeRappi(cuenta)
-    if (cuenta.paymentStatus === 'PAID') {
-      throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
-    }
-
-    const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId, reason: 'Saldo de tarjeta de regalo regresado' })
-    await assertNoLiveTerminalCharge(tx, { venueId, orderId })
-    const { tender, cobros } = await leerCobros()
-    if (!tender || cobros.length === 0 || cobros.some(c => c.tenderTypeId !== tender.id)) {
-      throw new GiftCardError(
-        'GIFT_CARD_TENDER_NOT_ALLOWED',
-        'Sólo se regresa el saldo y se cancela una cuenta cuyos únicos pagos son con tarjeta de regalo.',
-        409,
-      )
-    }
-    // Ronda 1 (fix 5): pasar del tope tiene su propio mensaje (antes decía que había pagos que no eran de saldo).
-    if (cobros.length > MAX_SOBRES_POR_CUENTA) {
-      throw new GiftCardError(
-        'GIFT_CARD_TENDER_NOT_ALLOWED',
-        `Esta cuenta tiene más de ${MAX_SOBRES_POR_CUENTA} cobros con saldo de tarjeta de regalo: no se pueden regresar todos de una vez. Pide al gerente que la revise.`,
-        409,
-        { motivo: 'DEMASIADOS_COBROS', maximo: MAX_SOBRES_POR_CUENTA },
-      )
-    }
-
-    // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
-    // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
-    // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
-    // de id y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
-    // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
-    // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
-    const bloqueos = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>()
-    for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
-      bloqueos.set(cobro.id, await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
-    }
-    // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
-    const porDevolver = cobros
-      .map(cobro => ({ cobro, bloqueado: bloqueos.get(cobro.id)!, ...pendienteDeDevolver(bloqueos.get(cobro.id)!) }))
-      .filter(p => p.ventaCents + p.propinaCents > 0)
-    const sobresDeLosCobros: string[] = []
-    for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
-    const sobres = await lockGiftCardsForUpdate(tx, sobresDeLosCobros)
-
-    // Ruling 7: un sobre DEACTIVATED no recibe saldo de vuelta (`revertirCanjeEnTx` le sumaría saldo a una tarjeta muerta,
-    // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta. La regla es la
-    // de la libreta (B1 r1, fix 5); aquí sólo cambia el texto.
-    await rechazarSiRegresaASobreDesactivado(tx, venueId, sobres, (cuales, cuantos) =>
-      cuantos === 1
-        ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
-        : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
-    )
-
-    // Llaves `:0`, `:1`… en el orden en que se ESCRIBEN: la primera devolución siempre es `:0` (la que reconoce el reintento).
-    let escritas = 0
-    for (const p of porDevolver) {
-      const { refundPaymentId } = await writeRefundInTx(tx, {
-        originalPaymentId: p.cobro.id,
-        venueId,
-        salesRefundCents: p.ventaCents,
-        tipRefundCents: p.propinaCents,
-        refundedItems: [],
-        reason: 'CANCELLED_ORDER',
-        note: 'Saldo de tarjeta de regalo regresado al cancelar la cuenta',
-        staffId: staffId ?? null,
-        idempotencyKey: llaveDeReverso(escritas),
-        tenderCommission: 'NONE',
-        shift: 'CLAIM_LIVE',
-        provenance: 'MANUAL',
-        bloqueado: p.bloqueado,
+      const cuenta = await tx.order.findUnique({
+        where: { id: orderId, venueId },
+        select: { id: true, status: true, paymentStatus: true, source: true, posRawData: true },
       })
-      escritas += 1
-      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, p.cobro.id)
-      await revertirCanjeEnTx(tx, {
-        venueId,
-        originalPaymentId: p.cobro.id,
-        refundPaymentId,
-        amount: new Prisma.Decimal(p.ventaCents + p.propinaCents).dividedBy(100),
-        staffId: staffId ?? null,
+      if (!cuenta) throw new NotFoundError('Order not found')
+      /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
+      const leerCobros = async () => ({
+        tender: await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } }),
+        cobros: await tx.payment.findMany({
+          where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+          select: { id: true, tenderTypeId: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: MAX_SOBRES_POR_CUENTA + 1,
+        }),
       })
-    }
 
-    const cancelada = await tx.order.update({
-      where: { id: orderId, venueId },
-      data: { status: 'CANCELLED', version: { increment: 1 } },
-      select: { tableId: true },
-    })
-    const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
-    const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
-    const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
-    const ownTable = reconciled.tables.find(table => table.id === cancelada.tableId)
-    const table = reconciled.tables.find(row => row.id === boundTable?.id) ?? ownTable ?? null
-    const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
-    const affectedRefs: HttpEnvelope['affectedRefs'] = [
-      { kind: 'Order', id: orderId },
-      ...reconciled.tables.map(row => ({ kind: 'Table' as const, id: row.id })),
-      ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
-      ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
-    ]
-    return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
-  }, ORDER_LOCK_WAIT_BUDGET)
+      // La primera devolución ESCRITA lleva siempre la llave `:0` (abajo): si existe, esta operación ya corrió.
+      const previo = await tx.payment.findUnique({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey: llaveDeReverso(0) } },
+        select: { orderId: true },
+      })
+      if (previo && previo.orderId !== orderId) {
+        throw new GiftCardError(
+          'IDEMPOTENCY_KEY_REUSED',
+          'Esta llave ya se usó para regresar el saldo de otra cuenta. Vuelve a intentarlo desde la cuenta.',
+          409,
+        )
+      }
+      if (claseDeEstado(cuenta.status) === 'CANCELADA') {
+        if (previo) return null // reintento de una operación que ya terminó
+        // Ronda 1 (fix 1): si ya no quedaba nada que regresar, la primera llamada canceló SIN escribir ninguna devolución y
+        // no existe `:0`. Su reintento (la respuesta se perdió y la cola lo reenvía) se reconoce porque TODOS los pagos vivos
+        // de la cuenta son del tender de regalo y ya están devueltos completos: es una repetición y nada se escribe. Este
+        // camino es el único que cancela esa cuenta (el guardia general rechaza una PARTIAL), así que no se rechaza antes.
+        const { tender, cobros } = await leerCobros()
+        const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
+        if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
+          let todoDevuelto = true
+          for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
+            const pendiente = pendienteDeDevolver(
+              await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
+            )
+            if (pendiente.ventaCents + pendiente.propinaCents > 0) {
+              todoDevuelto = false
+              break
+            }
+          }
+          if (todoDevuelto) return null
+        }
+        throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
+      }
+      rechazarCancelacionLocalDeRappi(cuenta)
+      if (cuenta.paymentStatus === 'PAID') {
+        throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
+      }
+
+      const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId, reason: 'Saldo de tarjeta de regalo regresado' })
+      await assertNoLiveTerminalCharge(tx, { venueId, orderId })
+      const { tender, cobros } = await leerCobros()
+      if (!tender || cobros.length === 0 || cobros.some(c => c.tenderTypeId !== tender.id)) {
+        throw new GiftCardError(
+          'GIFT_CARD_TENDER_NOT_ALLOWED',
+          'Sólo se regresa el saldo y se cancela una cuenta cuyos únicos pagos son con tarjeta de regalo.',
+          409,
+        )
+      }
+      // Ronda 1 (fix 5): pasar del tope tiene su propio mensaje (antes decía que había pagos que no eran de saldo).
+      if (cobros.length > MAX_SOBRES_POR_CUENTA) {
+        throw new GiftCardError(
+          'GIFT_CARD_TENDER_NOT_ALLOWED',
+          `Esta cuenta tiene más de ${MAX_SOBRES_POR_CUENTA} cobros con saldo de tarjeta de regalo: no se pueden regresar todos de una vez. Pide al gerente que la revise.`,
+          409,
+          { motivo: 'DEMASIADOS_COBROS', maximo: MAX_SOBRES_POR_CUENTA },
+        )
+      }
+
+      // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
+      // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
+      // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
+      // de id y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+      // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
+      // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
+      const bloqueos = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>()
+      for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
+        bloqueos.set(cobro.id, await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+      }
+      // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
+      const porDevolver = cobros
+        .map(cobro => ({ cobro, bloqueado: bloqueos.get(cobro.id)!, ...pendienteDeDevolver(bloqueos.get(cobro.id)!) }))
+        .filter(p => p.ventaCents + p.propinaCents > 0)
+      const sobresDeLosCobros: string[] = []
+      for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
+      const sobres = await lockGiftCardsForUpdate(tx, sobresDeLosCobros)
+
+      // Ruling 7: un sobre DEACTIVATED no recibe saldo de vuelta (`revertirCanjeEnTx` le sumaría saldo a una tarjeta muerta,
+      // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta. La regla es la
+      // de la libreta (B1 r1, fix 5); aquí sólo cambia el texto.
+      await rechazarSiRegresaASobreDesactivado(tx, venueId, sobres, (cuales, cuantos) =>
+        cuantos === 1
+          ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
+          : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
+      )
+
+      // Llaves `:0`, `:1`… en el orden en que se ESCRIBEN: la primera devolución siempre es `:0` (la que reconoce el reintento).
+      let escritas = 0
+      for (const p of porDevolver) {
+        const { refundPaymentId } = await writeRefundInTx(tx, {
+          originalPaymentId: p.cobro.id,
+          venueId,
+          salesRefundCents: p.ventaCents,
+          tipRefundCents: p.propinaCents,
+          refundedItems: [],
+          reason: 'CANCELLED_ORDER',
+          note: 'Saldo de tarjeta de regalo regresado al cancelar la cuenta',
+          staffId: staffId ?? null,
+          idempotencyKey: llaveDeReverso(escritas),
+          tenderCommission: 'NONE',
+          shift: 'CLAIM_LIVE',
+          provenance: 'MANUAL',
+          bloqueado: p.bloqueado,
+        })
+        escritas += 1
+        await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, p.cobro.id)
+        await revertirCanjeEnTx(tx, {
+          venueId,
+          originalPaymentId: p.cobro.id,
+          refundPaymentId,
+          amount: new Prisma.Decimal(p.ventaCents + p.propinaCents).dividedBy(100),
+          staffId: staffId ?? null,
+        })
+      }
+
+      const cancelada = await tx.order.update({
+        where: { id: orderId, venueId },
+        data: { status: 'CANCELLED', version: { increment: 1 } },
+        select: { tableId: true },
+      })
+      const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
+      const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
+      const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
+      const ownTable = reconciled.tables.find(table => table.id === cancelada.tableId)
+      const table = reconciled.tables.find(row => row.id === boundTable?.id) ?? ownTable ?? null
+      const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
+      const affectedRefs: HttpEnvelope['affectedRefs'] = [
+        { kind: 'Order', id: orderId },
+        ...reconciled.tables.map(row => ({ kind: 'Table' as const, id: row.id })),
+        ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
+        ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
+      ]
+      return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+    },
+    { etiqueta: 'returnGiftBalanceAndCancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   if (!resultado) return { replay: true }
   await publishCancelledOrder(venueId, resultado, staffId, 'Saldo de tarjeta de regalo regresado')
@@ -6753,10 +6773,10 @@ export async function cancelOrder(
   performedBy?: string,
   dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
 ): Promise<void> {
-  const result = await prisma.$transaction(
-    tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy, dentroDeLaTx),
-    ORDER_LOCK_WAIT_BUDGET,
-  )
+  const result = await withDeadlockRetry(tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy, dentroDeLaTx), {
+    etiqueta: 'cancelOrder',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
   await publishCancelledOrder(venueId, result, performedBy, reason)
 }
 
@@ -6888,13 +6908,16 @@ export async function executeExchangeInTransaction(
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
   for (let attempt = 0; ; attempt++) {
     try {
-      return await prisma.$transaction(async tx => {
-        const prepared = await prepareExchangeInTx(tx, input)
-        if (!('newSalePayments' in prepared)) return prepared
-        const settled: AbonoEnTx[] = []
-        for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
-        return finishExchangeInTx(tx, prepared, settled)
-      }, ORDER_LOCK_WAIT_BUDGET)
+      return await withDeadlockRetry(
+        async tx => {
+          const prepared = await prepareExchangeInTx(tx, input)
+          if (!('newSalePayments' in prepared)) return prepared
+          const settled: AbonoEnTx[] = []
+          for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
+          return finishExchangeInTx(tx, prepared, settled)
+        },
+        { etiqueta: 'executeExchangeInTransaction', ...ORDER_LOCK_WAIT_BUDGET },
+      )
     } catch (error) {
       if (!(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED')) throw error
       if (attempt >= 2)

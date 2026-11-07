@@ -46,11 +46,11 @@ export const applyServiceCharge = async (req: Request, res: Response, next: Next
     if (!parsed.success || parsed.data.action !== 'applyServiceCharge')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await serviceChargeService.applyServiceChargeInTransaction(tx, venueId, orderId, manifest.refs.serviceChargeId, staffId)
-      auditData = { serviceChargeId: manifest.refs.serviceChargeId, name: r.charge.name, amount: r.amount }
+      const auditData = { serviceChargeId: manifest.refs.serviceChargeId, name: r.charge.name, amount: r.amount }
       return {
+        audit: auditData,
         response: { status: 200, body: { success: true, data: r.totals } },
         affectedRefs: [
           { kind: 'Order', id: orderId },
@@ -58,6 +58,7 @@ export const applyServiceCharge = async (req: Request, res: Response, next: Next
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'ORDER_SERVICE_CHARGE_APPLIED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     }
@@ -82,11 +83,11 @@ export const removeServiceCharge = async (req: Request, res: Response, next: Nex
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
     const manifest: HttpManifest = { action: 'removeServiceCharge', refs: { orderId, orderServiceChargeId }, payload: {} }
-    let removedName: string | undefined
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const { row, totals } = await serviceChargeService.removeServiceChargeInTransaction(tx, venueId, orderId, orderServiceChargeId)
-      removedName = row.name
+      const removedName = row.name
       return {
+        audit: removedName,
         response: { status: 200, body: { success: true, data: totals } },
         affectedRefs: [
           { kind: 'Order', id: orderId },
@@ -94,6 +95,7 @@ export const removeServiceCharge = async (req: Request, res: Response, next: Nex
         ],
       }
     })
+    const removedName = reply.kind === 'TERMINAL' ? (reply.audit as string | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({
         action: 'ORDER_SERVICE_CHARGE_REMOVED',

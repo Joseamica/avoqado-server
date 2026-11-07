@@ -22,6 +22,7 @@ import { BadRequestError, ConflictError, ForbiddenError, InternalServerError, No
 import { getUserAccess, hasPermission } from '../access/access.service'
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
@@ -1303,230 +1304,233 @@ async function settleOrderForConfirmedCryptoPayment(
 
   for (let attempt = 1; attempt <= MAX_SETTLEMENT_ATTEMPTS; attempt++) {
     try {
-      return await prisma.$transaction(async tx => {
-        const completion = await completeAndAttributeB4BitPaymentInTx(tx, payment, processorPatch, reconciliationEnabled)
-        if (completion.ignoredAsOutOfOrder) return { webhookIgnored: true as const, reason: 'OUT_OF_ORDER' as const }
-        if (completion.preservedStatus) {
-          return {
-            webhookIgnored: true as const,
-            reason: 'PAYMENT_NOT_PENDING' as const,
-            preservedStatus: completion.preservedStatus,
+      return await withDeadlockRetry(
+        async tx => {
+          const completion = await completeAndAttributeB4BitPaymentInTx(tx, payment, processorPatch, reconciliationEnabled)
+          if (completion.ignoredAsOutOfOrder) return { webhookIgnored: true as const, reason: 'OUT_OF_ORDER' as const }
+          if (completion.preservedStatus) {
+            return {
+              webhookIgnored: true as const,
+              reason: 'PAYMENT_NOT_PENDING' as const,
+              preservedStatus: completion.preservedStatus,
+            }
           }
-        }
-        const isRedelivery = !completion.transitioned
+          const isRedelivery = !completion.transitioned
 
-        if (!payment.orderId) return null
+          if (!payment.orderId) return null
 
-        const fresh = await tx.order.findUnique({
-          where: { id: payment.orderId, venueId: payment.venueId },
-          select: {
-            id: true,
-            status: true,
-            paymentStatus: true,
-            subtotal: true,
-            discountAmount: true,
-            serviceChargeAmount: true,
-            // P12: el IVA que va aparte entra al saldo con la regla compartida (contrato, impuesto y estado).
-            contratoDePrecio: true,
-            taxAmount: true,
-            paidAmount: true,
-            remainingBalance: true,
-            completedAt: true,
-            version: true,
-          },
-        })
-        if (!fresh) {
-          logger.warn('⚠️ B4Bit: order linked to the payment no longer exists for this venue', {
-            orderId: payment.orderId,
-            venueId: payment.venueId,
+          const fresh = await tx.order.findUnique({
+            where: { id: payment.orderId, venueId: payment.venueId },
+            select: {
+              id: true,
+              status: true,
+              paymentStatus: true,
+              subtotal: true,
+              discountAmount: true,
+              serviceChargeAmount: true,
+              // P12: el IVA que va aparte entra al saldo con la regla compartida (contrato, impuesto y estado).
+              contratoDePrecio: true,
+              taxAmount: true,
+              paidAmount: true,
+              remainingBalance: true,
+              completedAt: true,
+              version: true,
+            },
           })
-          return null
-        }
+          if (!fresh) {
+            logger.warn('⚠️ B4Bit: order linked to the payment no longer exists for this venue', {
+              orderId: payment.orderId,
+              venueId: payment.venueId,
+            })
+            return null
+          }
 
-        /** El estado de la orden tal como quedó, para reportar sin recalcular nada. */
-        const untouched = (reason: CryptoSettlementResult['balanceSkipped']): CryptoSettlementResult => ({
-          isFullyPaid: fresh.paymentStatus === 'PAID',
-          becamePaid: false,
-          paidAmount: Number(fresh.paidAmount ?? 0).toFixed(2),
-          remainingBalance: Number(fresh.remainingBalance ?? 0).toFixed(2),
-          paymentStatus: fresh.paymentStatus,
-          ventaCerrada: false,
-          balanceSkipped: reason,
-        })
-
-        // 🔴 UNA ORDEN CANCELADA NO SE RESUCITA.
-        //
-        // La INICIACIÓN valida esto, pero entre iniciar y confirmar pasan minutos
-        // en los que alguien puede cancelar la cuenta. Sin el guard, el `CO` la
-        // dejaba `status: COMPLETED` + `paymentStatus: PAID`: una venta cancelada
-        // reaparecía cobrada. El `Payment` sí queda COMPLETED —el dinero llegó— y
-        // se grita en el log para que alguien lo concilie a mano.
-        if (fresh.status === 'CANCELLED' || fresh.status === 'DELETED') {
-          logger.error('🚨 [B4Bit] cobro confirmado sobre orden cancelada', {
-            paymentId: payment.id,
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-            amount: payment.amount.toString(),
-            orderStatus: fresh.status,
-            b4bitReference: payment.externalId,
-            action: 'el Payment quedó COMPLETED; decidir a mano si se reembolsa o se reabre la cuenta',
-          })
-          return untouched('ORDER_NOT_CHARGEABLE')
-        }
-
-        // Los pagos COMPLETED DURABLES — la única fuente de verdad de lo cobrado.
-        // `order.paidAmount` es un derivado y arrastra el valor equivocado si
-        // alguna vez se escribió mal; recalcular desde aquí lo repara solo.
-        const completedPayments = await tx.payment.findMany({
-          where: { orderId: payment.orderId, status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, type: true },
-        })
-
-        // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — y ya no hace falta un guard
-        // aquí para conseguirlo.
-        //
-        // Hasta el 2026-08-18 este bloque se SALTABA el recálculo cuando el `CO`
-        // era una reentrega sobre una orden con reembolsos, porque la aritmética
-        // sumaba TODOS los COMPLETED —el `Payment` NEGATIVO `type: REFUND`
-        // incluido— y hacía $200 + (−$200) = $0 pagados: la venta devuelta
-        // reaparecía debiendo $200, en el estado contradictorio `status COMPLETED`
-        // + `paymentStatus PARTIAL`.
-        //
-        // 🔑 El guard era un parche ACOTADO A CRIPTO sobre un defecto que era de
-        // los CUATRO canales. Ahora la causa está cerrada en la aritmética
-        // canónica: `computeOrderBalance` EXCLUYE los REFUND de `paidAmount` y los
-        // lleva en su propio carril (`refundedAmount`/`refundState`), igual que
-        // `refunded_money` de Square o `refundStatus` de Toast. Recalcular una
-        // cuenta reembolsada llega al MISMO resultado que ya tenía, así que evadir
-        // el recálculo dejó de comprar nada — y el guard sí costaba: obligaba a
-        // distinguir reentrega de cobro nuevo (`isRedelivery`), y equivocarse ahí
-        // dejaba una cuenta pidiendo dinero que el cliente YA pagó.
-        const balance = computeOrderBalance(fresh, completedPayments)
-
-        // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
-        // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
-        // humana, así que queda un rastro greppable — MISMO token en los cuatro
-        // canales de cobro.
-        if (balance.refundState !== 'NONE') {
-          logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
-            paymentId: payment.id,
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-            channel: 'b4bit',
-            isRedelivery,
-            refundState: balance.refundState,
-            refundedAmount: balance.refundedAmount.toFixed(2),
-          })
-        }
-
-        // 🔴 R8-1 (Codex recheck-12 P2): el dinero cripto que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED): conserva su
-        // estado, saldo 0, sin cierre nuevo ni efectos de saldar (un REFUNDED que la cubría daba un segundo vale). La iniciación
-        // rechaza una cuenta PAID, pero entre iniciar y confirmar la venta pudo saldarse por otro camino. `cerrada` es además el
-        // «ya estaba pagada» de siempre (un `CO` reentregado no re-marca ni crea otro vale).
-        const cobro = estadoDeCobroAlRecibirDinero(fresh.paymentStatus, true, {
-          paymentStatus: balance.isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
-          remainingBalance: balance.remainingBalance,
-        })
-
-        const transition = await tx.order.updateMany({
-          // El filtro de `status` cierra la carrera: si cancelan la orden entre la
-          // relectura y este write, la CAS no encuentra fila (count 0) y el
-          // reintento la relee ya CANCELLED, donde el guard de arriba la ataja.
-          // R8-1: y el de `paymentStatus`, la del estado previo — si otro camino la saldó en medio, el reintento lo relee.
-          where: {
-            id: payment.orderId,
-            venueId: payment.venueId,
-            version: fresh.version,
+          /** El estado de la orden tal como quedó, para reportar sin recalcular nada. */
+          const untouched = (reason: CryptoSettlementResult['balanceSkipped']): CryptoSettlementResult => ({
+            isFullyPaid: fresh.paymentStatus === 'PAID',
+            becamePaid: false,
+            paidAmount: Number(fresh.paidAmount ?? 0).toFixed(2),
+            remainingBalance: Number(fresh.remainingBalance ?? 0).toFixed(2),
             paymentStatus: fresh.paymentStatus,
-            status: { notIn: ['CANCELLED', 'DELETED'] },
-          },
-          data: {
-            // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
-            // bloque de `Order.total` en el docstring (cuota de envío de agregador).
-            paymentStatus: cobro.paymentStatus,
-            paidAmount: balance.paidAmount,
-            remainingBalance: cobro.remainingBalance,
-            version: { increment: 1 },
-            // `completedAt` se conserva si ya existía: la venta se cerró una vez,
-            // no una por cada reentrega del webhook.
-            ...(balance.isFullyPaid && !cobro.cerrada
-              ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() }
-              : {}),
-            // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
-            ...(balance.isFullyPaid && !cobro.cerrada && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
-          },
-        })
-
-        if (transition.count === 0) {
-          const conflict: Error & { code?: string } = new Error('B4BIT_ORDER_CAS_LOST')
-          conflict.code = 'B4BIT_ORDER_CAS_LOST'
-          throw conflict
-        }
-
-        // 🔴 EL VALE DE INVENTARIO — lo que este camino NO hacía y costaba stock.
-        //
-        // Hasta el 3-sep-2026 cripto cerraba la venta sin crear el vale ni deducir
-        // nada: un venue con recetas vendía y su inventario no bajaba, EN SILENCIO.
-        // Es el mismo defecto del capuchino de Testarudo (ORD-1788276418170) en otro
-        // camino de cobro, y por eso la 7ª invariante del vigilante de dinero avisa
-        // de que `via=TPV` cripto aparecería en serie.
-        //
-        // Nace AQUÍ DENTRO, en el mismo commit que la transición (fase 2 de la
-        // auditoría 2026-08-12): si el proceso muere después del commit y antes de
-        // deducir, queda un posting PENDING que el sweeper reaplica — en vez de una
-        // deducción perdida que nadie puede ver. Crearlo fuera dejaría la ventana
-        // exacta que la fase 2 existe para cerrar.
-        //
-        // 🔑 Sólo en la TRANSICIÓN REAL a pagado, igual que el hook de referidos: un
-        // abono parcial no descuenta (regla de `payments.md`), y un `CO` reentregado
-        // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
-        const becamePaid = balance.isFullyPaid && !cobro.cerrada
-        let postingId: string | null = null
-        let sesionDeValesCerrada = false
-        if (becamePaid) {
-          // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella
-          // no verían lo que esta transacción aún no ha commiteado.
-          const txItems = await tx.orderItem.findMany({
-            where: { orderId: payment.orderId },
-            include: { modifiers: { include: { modifier: true } } },
-            take: MAX_B4BIT_INVENTORY_POSTING_ITEMS + 1,
+            ventaCerrada: false,
+            balanceSkipped: reason,
           })
-          const posting = await crearValeDeInventario(tx, {
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-            items: txItems,
-            staffId: payment.processedById,
-          })
-          postingId = posting?.id ?? null
-          // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
-          if (completion.vales) {
-            const { cerrarSesionDeValesAlCerrarLaVenta } = await import('../mobile/areaTicketV7.mobile.service')
-            sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, completion.vales.session, {
+
+          // 🔴 UNA ORDEN CANCELADA NO SE RESUCITA.
+          //
+          // La INICIACIÓN valida esto, pero entre iniciar y confirmar pasan minutos
+          // en los que alguien puede cancelar la cuenta. Sin el guard, el `CO` la
+          // dejaba `status: COMPLETED` + `paymentStatus: PAID`: una venta cancelada
+          // reaparecía cobrada. El `Payment` sí queda COMPLETED —el dinero llegó— y
+          // se grita en el log para que alguien lo concilie a mano.
+          if (fresh.status === 'CANCELLED' || fresh.status === 'DELETED') {
+            logger.error('🚨 [B4Bit] cobro confirmado sobre orden cancelada', {
+              paymentId: payment.id,
               venueId: payment.venueId,
               orderId: payment.orderId,
+              amount: payment.amount.toString(),
+              orderStatus: fresh.status,
+              b4bitReference: payment.externalId,
+              action: 'el Payment quedó COMPLETED; decidir a mano si se reembolsa o se reabre la cuenta',
+            })
+            return untouched('ORDER_NOT_CHARGEABLE')
+          }
+
+          // Los pagos COMPLETED DURABLES — la única fuente de verdad de lo cobrado.
+          // `order.paidAmount` es un derivado y arrastra el valor equivocado si
+          // alguna vez se escribió mal; recalcular desde aquí lo repara solo.
+          const completedPayments = await tx.payment.findMany({
+            where: { orderId: payment.orderId, status: 'COMPLETED' },
+            select: { amount: true, tipAmount: true, type: true },
+          })
+
+          // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — y ya no hace falta un guard
+          // aquí para conseguirlo.
+          //
+          // Hasta el 2026-08-18 este bloque se SALTABA el recálculo cuando el `CO`
+          // era una reentrega sobre una orden con reembolsos, porque la aritmética
+          // sumaba TODOS los COMPLETED —el `Payment` NEGATIVO `type: REFUND`
+          // incluido— y hacía $200 + (−$200) = $0 pagados: la venta devuelta
+          // reaparecía debiendo $200, en el estado contradictorio `status COMPLETED`
+          // + `paymentStatus PARTIAL`.
+          //
+          // 🔑 El guard era un parche ACOTADO A CRIPTO sobre un defecto que era de
+          // los CUATRO canales. Ahora la causa está cerrada en la aritmética
+          // canónica: `computeOrderBalance` EXCLUYE los REFUND de `paidAmount` y los
+          // lleva en su propio carril (`refundedAmount`/`refundState`), igual que
+          // `refunded_money` de Square o `refundStatus` de Toast. Recalcular una
+          // cuenta reembolsada llega al MISMO resultado que ya tenía, así que evadir
+          // el recálculo dejó de comprar nada — y el guard sí costaba: obligaba a
+          // distinguir reentrega de cobro nuevo (`isRedelivery`), y equivocarse ahí
+          // dejaba una cuenta pidiendo dinero que el cliente YA pagó.
+          const balance = computeOrderBalance(fresh, completedPayments)
+
+          // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
+          // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
+          // humana, así que queda un rastro greppable — MISMO token en los cuatro
+          // canales de cobro.
+          if (balance.refundState !== 'NONE') {
+            logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+              paymentId: payment.id,
+              venueId: payment.venueId,
+              orderId: payment.orderId,
+              channel: 'b4bit',
+              isRedelivery,
+              refundState: balance.refundState,
+              refundedAmount: balance.refundedAmount.toFixed(2),
             })
           }
-          // R8: una cuenta de tarjetas pagada con cripto activa sus sobres en la MISMA transacción.
-          await activarSobresDeCuentaPagadaEnTx(tx, {
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-            staffId: payment.processedById ?? null,
-            items: txItems,
-          })
-        }
 
-        // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.
-        return {
-          isFullyPaid: balance.isFullyPaid,
-          becamePaid,
-          paidAmount: balance.paidAmount.toFixed(2),
-          remainingBalance: new Prisma.Decimal(cobro.remainingBalance).toFixed(2),
-          paymentStatus: cobro.paymentStatus,
-          ventaCerrada: cobro.cerrada,
-          postingId,
-          ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
-        }
-      }, ORDER_LOCK_WAIT_BUDGET)
+          // 🔴 R8-1 (Codex recheck-12 P2): el dinero cripto que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED): conserva su
+          // estado, saldo 0, sin cierre nuevo ni efectos de saldar (un REFUNDED que la cubría daba un segundo vale). La iniciación
+          // rechaza una cuenta PAID, pero entre iniciar y confirmar la venta pudo saldarse por otro camino. `cerrada` es además el
+          // «ya estaba pagada» de siempre (un `CO` reentregado no re-marca ni crea otro vale).
+          const cobro = estadoDeCobroAlRecibirDinero(fresh.paymentStatus, true, {
+            paymentStatus: balance.isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
+            remainingBalance: balance.remainingBalance,
+          })
+
+          const transition = await tx.order.updateMany({
+            // El filtro de `status` cierra la carrera: si cancelan la orden entre la
+            // relectura y este write, la CAS no encuentra fila (count 0) y el
+            // reintento la relee ya CANCELLED, donde el guard de arriba la ataja.
+            // R8-1: y el de `paymentStatus`, la del estado previo — si otro camino la saldó en medio, el reintento lo relee.
+            where: {
+              id: payment.orderId,
+              venueId: payment.venueId,
+              version: fresh.version,
+              paymentStatus: fresh.paymentStatus,
+              status: { notIn: ['CANCELLED', 'DELETED'] },
+            },
+            data: {
+              // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
+              // bloque de `Order.total` en el docstring (cuota de envío de agregador).
+              paymentStatus: cobro.paymentStatus,
+              paidAmount: balance.paidAmount,
+              remainingBalance: cobro.remainingBalance,
+              version: { increment: 1 },
+              // `completedAt` se conserva si ya existía: la venta se cerró una vez,
+              // no una por cada reentrega del webhook.
+              ...(balance.isFullyPaid && !cobro.cerrada
+                ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() }
+                : {}),
+              // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
+              ...(balance.isFullyPaid && !cobro.cerrada && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+            },
+          })
+
+          if (transition.count === 0) {
+            const conflict: Error & { code?: string } = new Error('B4BIT_ORDER_CAS_LOST')
+            conflict.code = 'B4BIT_ORDER_CAS_LOST'
+            throw conflict
+          }
+
+          // 🔴 EL VALE DE INVENTARIO — lo que este camino NO hacía y costaba stock.
+          //
+          // Hasta el 3-sep-2026 cripto cerraba la venta sin crear el vale ni deducir
+          // nada: un venue con recetas vendía y su inventario no bajaba, EN SILENCIO.
+          // Es el mismo defecto del capuchino de Testarudo (ORD-1788276418170) en otro
+          // camino de cobro, y por eso la 7ª invariante del vigilante de dinero avisa
+          // de que `via=TPV` cripto aparecería en serie.
+          //
+          // Nace AQUÍ DENTRO, en el mismo commit que la transición (fase 2 de la
+          // auditoría 2026-08-12): si el proceso muere después del commit y antes de
+          // deducir, queda un posting PENDING que el sweeper reaplica — en vez de una
+          // deducción perdida que nadie puede ver. Crearlo fuera dejaría la ventana
+          // exacta que la fase 2 existe para cerrar.
+          //
+          // 🔑 Sólo en la TRANSICIÓN REAL a pagado, igual que el hook de referidos: un
+          // abono parcial no descuenta (regla de `payments.md`), y un `CO` reentregado
+          // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
+          const becamePaid = balance.isFullyPaid && !cobro.cerrada
+          let postingId: string | null = null
+          let sesionDeValesCerrada = false
+          if (becamePaid) {
+            // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella
+            // no verían lo que esta transacción aún no ha commiteado.
+            const txItems = await tx.orderItem.findMany({
+              where: { orderId: payment.orderId },
+              include: { modifiers: { include: { modifier: true } } },
+              take: MAX_B4BIT_INVENTORY_POSTING_ITEMS + 1,
+            })
+            const posting = await crearValeDeInventario(tx, {
+              venueId: payment.venueId,
+              orderId: payment.orderId,
+              items: txItems,
+              staffId: payment.processedById,
+            })
+            postingId = posting?.id ?? null
+            // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+            if (completion.vales) {
+              const { cerrarSesionDeValesAlCerrarLaVenta } = await import('../mobile/areaTicketV7.mobile.service')
+              sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, completion.vales.session, {
+                venueId: payment.venueId,
+                orderId: payment.orderId,
+              })
+            }
+            // R8: una cuenta de tarjetas pagada con cripto activa sus sobres en la MISMA transacción.
+            await activarSobresDeCuentaPagadaEnTx(tx, {
+              venueId: payment.venueId,
+              orderId: payment.orderId,
+              staffId: payment.processedById ?? null,
+              items: txItems,
+            })
+          }
+
+          // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.
+          return {
+            isFullyPaid: balance.isFullyPaid,
+            becamePaid,
+            paidAmount: balance.paidAmount.toFixed(2),
+            remainingBalance: new Prisma.Decimal(cobro.remainingBalance).toFixed(2),
+            paymentStatus: cobro.paymentStatus,
+            ventaCerrada: cobro.cerrada,
+            postingId,
+            ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
+          }
+        },
+        { etiqueta: 'settleOrderForConfirmedCryptoPayment', ...ORDER_LOCK_WAIT_BUDGET },
+      )
     } catch (error: any) {
       // Se reintentan DOS cosas, y sólo dos: perder la CAS contra otro cobro, y
       // que el vale de inventario no se pudiera escribir (ver

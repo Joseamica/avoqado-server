@@ -10,7 +10,9 @@ import {
   isReceiptKeyCollision,
   type HttpEnvelope,
   type HttpManifest,
+  executeHttpOperation,
 } from '@/services/mobile/http-operation.mobile.service'
+import { prismaMock } from '../../../__helpers__/setup'
 
 const ID = '00000000-0000-4000-8000-000000000001'
 const DEVICE = '00000000-0000-4000-8000-000000000002'
@@ -354,4 +356,43 @@ test('finite payloads, strict refs, comp reason and split elements reject malfor
   for (const itemIds of [[], [''], [1], null]) {
     expect(manifestSchema.safeParse({ action: 'splitOrder', refs: { orderId: 'o' }, payload: { itemIds } }).success).toBe(false)
   }
+})
+
+describe('executeHttpOperation — la red por traba (40P01), R65 b', () => {
+  it('lo que el manejador deja para la bitácora (`audit`) sale del intento GANADOR, no del abortado', async () => {
+    // El doble global no modela `posSyncIntent`: se arma aquí con lo mínimo que toca el camino feliz.
+    ;(prismaMock as any).posSyncIntent = {
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 'reserva-1' }),
+      update: jest.fn().mockResolvedValue({}),
+    }
+    prismaMock.$queryRaw.mockResolvedValue([] as any)
+    let llamada = 0
+    prismaMock.$transaction.mockImplementation((async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    }) as any)
+    let intento = 0
+    const mutate = jest.fn(async () => ({
+      response: {
+        status: 200 as const,
+        body: { success: true as const, data: { subtotal: 100, discountAmount: 0, serviceChargeAmount: 0, total: 100, version: 2 } },
+      },
+      affectedRefs: receipt().affectedRefs,
+      audit: { intento: ++intento },
+    }))
+
+    try {
+      const reply = await executeHttpOperation(
+        { venueId: 'v1', actorId: 'staff-1', operation: { version: 1, id: ID, deviceId: DEVICE } as any, manifest: manifest as any },
+        mutate as any,
+      )
+
+      expect(mutate).toHaveBeenCalledTimes(2)
+      expect(reply).toMatchObject({ kind: 'TERMINAL', appliedNow: true, audit: { intento: 2 } })
+    } finally {
+      prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+    }
+  })
 })

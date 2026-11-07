@@ -420,7 +420,7 @@ import {
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
-import { isRetryableDbError } from '../../utils/serializableRetry'
+import { withDeadlockRetry, isRetryableDbError, type TxConReintento } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb, ventaConDevolucion } from '../fiscal/cfdi.service'
 import {
   terminalPaymentService,
@@ -1397,7 +1397,7 @@ type CommittedStandaloneSettlement = {
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
 export async function settleStandalonePaymentInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   /** `id` (Tarea 6a): la bitácora de la reapertura nombra el cobro; `newPayment` ya lo trae. */
@@ -1951,122 +1951,142 @@ async function updateOrderTotalsForStandalonePayment(
   // Pedidos en línea 1c (S1): la escritura de abajo lo pone si reabre una CANCELADA con este dinero (no se marca ni arma la cocina).
   let reabiertaEnEstaPasada = false
 
-  const updatedOrder =
-    options?.areaTicketAlreadyFinalized || options?.committedSettlement
-      ? order
-      : await prisma.$transaction(async tx => {
-          // Order lock first (Order → Payment → Shift), then the inputs again under it: a writer that committed after
-          // the pre-read above must never be overwritten with totals computed from that stale read.
-          if (!(await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId }))) {
-            throw new Error(`Order ${orderId} not found for total update`)
-          }
-          const current = await tx.order.findFirst({
-            where: { id: orderId, venueId: order.venueId },
-            select: {
-              subtotal: true,
-              discountAmount: true,
-              serviceChargeAmount: true,
-              // Codex r6 #2: P12 los lee; sin ellos en la huella, un IVA o un contrato que cambió se pisaba.
-              taxAmount: true,
-              contratoDePrecio: true,
-              paymentStatus: true,
-              servedById: true,
-              createdById: true,
-              // Tarea 6a: la reapertura de abajo decide con el estado releído bajo el candado.
-              status: true,
-              payments: summedPayments,
-            },
-          })
-          if (!current || standaloneTotalsInputs(current) !== standaloneTotalsInputs(order)) return null
-
-          // Founder 3-oct / Codex r9 #2: la misma regla, bajo el candado y con lo que se acaba de releer, en la MISMA transacción
-          // que los totales. La huella compara la CLASE del estado (Tarea 6d): dentro de la misma clase la regla da lo mismo;
-          // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
-          // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
-          if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
-            const estadoTrasCobro = await reabrirSiRecibeDinero(tx, {
-              venueId: order.venueId,
-              orderId,
-              status: current.status,
-              originSystem: order.originSystem,
-              source: order.source,
-              cobrado: totalPaid,
-              cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
-              canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
-              paymentId: currentPaymentId ?? null,
-              staffId: staffId ?? null,
+  // R65 b: `tpvPostingId` y `reabiertaEnEstaPasada` nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01
+  // no deja el vale ni la reapertura del anterior.
+  const sinTransaccion = Boolean(options?.areaTicketAlreadyFinalized || options?.committedSettlement)
+  const resultado = sinTransaccion
+    ? null
+    : await withDeadlockRetry(
+        async tx => {
+          let tpvPostingId: string | null = options?.committedSettlement?.postingId ?? null
+          let reabiertaEnEstaPasada = false
+          const updated = await (async () => {
+            // Order lock first (Order → Payment → Shift), then the inputs again under it: a writer that committed after
+            // the pre-read above must never be overwritten with totals computed from that stale read.
+            if (!(await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId }))) {
+              throw new Error(`Order ${orderId} not found for total update`)
+            }
+            const current = await tx.order.findFirst({
+              where: { id: orderId, venueId: order.venueId },
+              select: {
+                subtotal: true,
+                discountAmount: true,
+                serviceChargeAmount: true,
+                // Codex r6 #2: P12 los lee; sin ellos en la huella, un IVA o un contrato que cambió se pisaba.
+                taxAmount: true,
+                contratoDePrecio: true,
+                paymentStatus: true,
+                servedById: true,
+                createdById: true,
+                // Tarea 6a: la reapertura de abajo decide con el estado releído bajo el candado.
+                status: true,
+                payments: summedPayments,
+              },
             })
-            // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
-            reabiertaEnEstaPasada = estadoTrasCobro !== current.status
-          }
+            if (!current || standaloneTotalsInputs(current) !== standaloneTotalsInputs(order)) return null
 
-          const updated = await tx.order.update({
-            where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
-            data: {
-              paymentStatus: cobro.paymentStatus,
-              // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
-              paidAmount: totalPaid,
-              remainingBalance: cobro.remainingBalance,
-              // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
-              tipAmount: totalTip,
-              // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
-              total: newTotal,
-              // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
-              ...(shouldAssignServer && {
-                servedById: staffId,
-                createdById: order.createdById || staffId, // Also set createdById if null
-              }),
-              ...(isFullyPaid &&
-                !cobro.cerrada && {
-                  status: 'COMPLETED',
-                  completedAt: new Date(),
+            // Founder 3-oct / Codex r9 #2: la misma regla, bajo el candado y con lo que se acaba de releer, en la MISMA transacción
+            // que los totales. La huella compara la CLASE del estado (Tarea 6d): dentro de la misma clase la regla da lo mismo;
+            // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
+            // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
+            if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
+              const estadoTrasCobro = await reabrirSiRecibeDinero(tx, {
+                venueId: order.venueId,
+                orderId,
+                status: current.status,
+                originSystem: order.originSystem,
+                source: order.source,
+                cobrado: totalPaid,
+                cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
+                canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
+                paymentId: currentPaymentId ?? null,
+                staffId: staffId ?? null,
+              })
+              // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
+              reabiertaEnEstaPasada = estadoTrasCobro !== current.status
+            }
+
+            const updated = await tx.order.update({
+              where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
+              data: {
+                paymentStatus: cobro.paymentStatus,
+                // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
+                paidAmount: totalPaid,
+                remainingBalance: cobro.remainingBalance,
+                // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+                tipAmount: totalTip,
+                // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+                total: newTotal,
+                // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+                ...(shouldAssignServer && {
+                  servedById: staffId,
+                  createdById: order.createdById || staffId, // Also set createdById if null
                 }),
-              ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-              ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
-            },
-            include: {
-              items: {
-                include: {
-                  product: true,
-                  // ✅ Include modifiers with inventory-related fields for stock deduction
-                  modifiers: {
-                    include: {
-                      modifier: {
-                        select: {
-                          id: true,
-                          name: true,
-                          groupId: true,
-                          rawMaterialId: true,
-                          quantityPerUnit: true,
-                          unit: true,
-                          inventoryMode: true,
+                ...(isFullyPaid &&
+                  !cobro.cerrada && {
+                    status: 'COMPLETED',
+                    completedAt: new Date(),
+                  }),
+                ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+                ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
+              },
+              include: {
+                items: {
+                  include: {
+                    product: true,
+                    // ✅ Include modifiers with inventory-related fields for stock deduction
+                    modifiers: {
+                      include: {
+                        modifier: {
+                          select: {
+                            id: true,
+                            name: true,
+                            groupId: true,
+                            rawMaterialId: true,
+                            quantityPerUnit: true,
+                            unit: true,
+                            inventoryMode: true,
+                          },
                         },
                       },
                     },
                   },
                 },
               },
-            },
-          })
-
-          // El vale nace aquí dentro: mismo commit que la transición a PAID.
-          if (debeRegistrarPosting) {
-            const posting = await createSalePostingInTx(tx, {
-              venueId: updated.venueId,
-              orderId,
-              items: updated.items as any,
-              staffId,
             })
-            tpvPostingId = posting?.id ?? null
-          }
-          // R8: también cuando los cobros YA cubrían la cuenta (reconciliador de pagadas): ahí no nace vale, pero los
-          // sobres de una cuenta de tarjetas sí se activan. La activación es idempotente.
-          if (isFullyPaid) {
-            await activarSobresDeCuentaPagadaEnTx(tx, { venueId: updated.venueId, orderId, staffId: staffId ?? null, items: updated.items })
-          }
 
-          return updated
-        }, ORDER_LOCK_WAIT_BUDGET)
+            // El vale nace aquí dentro: mismo commit que la transición a PAID.
+            if (debeRegistrarPosting) {
+              const posting = await createSalePostingInTx(tx, {
+                venueId: updated.venueId,
+                orderId,
+                items: updated.items as any,
+                staffId,
+              })
+              tpvPostingId = posting?.id ?? null
+            }
+            // R8: también cuando los cobros YA cubrían la cuenta (reconciliador de pagadas): ahí no nace vale, pero los
+            // sobres de una cuenta de tarjetas sí se activan. La activación es idempotente.
+            if (isFullyPaid) {
+              await activarSobresDeCuentaPagadaEnTx(tx, {
+                venueId: updated.venueId,
+                orderId,
+                staffId: staffId ?? null,
+                items: updated.items,
+              })
+            }
+
+            return updated
+          })()
+          return { updated, tpvPostingId, reabiertaEnEstaPasada }
+        },
+        { etiqueta: 'updateOrderTotalsForStandalonePayment', ...ORDER_LOCK_WAIT_BUDGET },
+      )
+  if (resultado) {
+    tpvPostingId = resultado.tpvPostingId
+    reabiertaEnEstaPasada = resultado.reabiertaEnEstaPasada
+  }
+  const updatedOrder = sinTransaccion ? order : resultado!.updated
 
   if (!updatedOrder) {
     // The inputs moved under the lock and nothing was written. Rerun ONCE from a fresh read; a second change within
@@ -4281,8 +4301,12 @@ export async function recordOrderPayment(
           !lockedAreaCheckout &&
           cierreDelCobroSaldaLaCuenta(activeOrder)
         ) {
+          // S5b (paso 7): ÚNICO `as TxConReintento` fuera de serializableRetry.ts. Este cuerpo NO se envuelve en withDeadlockRetry:
+          // `exclusionPorReferencia` consolida registros repetidos y `closeRowFromPaymentTx` escribe bitácora SIN `tx` (y manda un correo
+          // a operaciones); repetirlo repetiría el correo y la bitácora. Si es víctima de una traba, la terminal reenvía el mismo cobro
+          // con su llave (como cualquier rechazo de hoy). Ver el brief de S5b, «La única excepción (R63 b)».
           committedStandaloneSettlement = await settleStandalonePaymentInTx(
-            tx,
+            tx as TxConReintento,
             venueId,
             activeOrder.id,
             newPayment,

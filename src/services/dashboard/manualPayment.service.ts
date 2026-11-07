@@ -24,7 +24,7 @@ import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rap
 import { assertNotCardOnlineOrderInTx } from '@/services/online-ordering/card/guards'
 import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
-import { isRetryableDbError } from '@/utils/serializableRetry'
+import { withDeadlockRetry, isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
 import { computeOrderBalance, type OrderBalance } from '@/services/shared/orderBalance'
@@ -99,7 +99,6 @@ export async function createManualPayment(
   const previous = await existingAttempt(prisma)
   if (previous) return previous
   if (!input.orderId) await assertVenueSalesEnabled(venueId)
-  let replayed = false
 
   // Validate waiter exists and belongs to this venue (don't let a client
   // forge an arbitrary staff ID and attribute a commission to someone
@@ -151,462 +150,478 @@ export async function createManualPayment(
   //   (totalVisits, totalSpent, lastVisitAt) must increment. TPV iterates ALL
   //   OrderCustomer rows for this. Without including secondaries, multi-customer
   //   orders silently undercount visits in customer dashboards.
-  let loyaltyCustomerId: string | null = null
-  let loyaltyOrderTotal: Prisma.Decimal = new Prisma.Decimal(0)
-  let loyaltyOrderId: string = ''
-  let loyaltyShouldEarn = false
-  const metricsCustomerIds = new Set<string>()
   // Independent of loyalty resolution: metrics fire for every queued customer
   // even when no primary customer can earn loyalty points (orderCustomers all
   // isPrimary=false, no input.customerId, no legacy order.customerId).
   // Stored in a holder object so TypeScript doesn't narrow the closure
   // assignment to `never` after the async transaction callback.
-  const metricsState: { orderTotal: Prisma.Decimal | null } = { orderTotal: null }
   // Mismo motivo que metricsState: un holder evita que TS estreche la
   // asignación dentro del callback async de la transacción a `never`.
-  const postingState: { id: string | null } = { id: null }
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
   const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
     '@/services/mobile/areaTicketV7.mobile.service'
   )
-  const sesionState: { cerrada: boolean } = { cerrada: false }
 
   // Keep the canonical transaction/budget visible to the financial architecture guards.
-  const result = await prisma
-    .$transaction(
-      async tx => {
-        // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), ANTES del candado de la
-        // venta: el mismo orden que la finalización y el registrador de la terminal. Cerrar aquí la sesión sin ella sería venta →
-        // sesión, al revés, y una terminal que registra a la vez se interbloquearía con este pago.
-        const vales = input.orderId ? await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId: input.orderId }) : null
-        sesionState.cerrada = false
-        const previous = await existingAttempt(tx)
-        if (previous) {
-          replayed = true
-          return previous
-        }
-        let anchorOrderId: string
-        let anchorOrderTotal: Prisma.Decimal
-        // T18f: el saldo CANÓNICO de la cuenta existente tras este pago (`computeOrderBalance`); null en la orden sombra.
-        let saldoCanonico: OrderBalance | null = null
-        let aggregatedTipAmount: Prisma.Decimal = tipAmount
-        let isShadow = false
-        // Captured from the existing order in Mode 1 so the post-payment update
-        // can recompute Order.total = subtotal - discount + cumulative tips.
-        let orderSubtotal: Prisma.Decimal = new Prisma.Decimal(0)
-        let orderDiscount: Prisma.Decimal = new Prisma.Decimal(0)
-        // Renglones de la orden existente: el vale de inventario los necesita
-        // para nacer en ESTA misma transacción cuando el pago la salda.
-        let orderItems: unknown[] = []
-        let yaEstabaPagada = false
+  // R65 b: todo lo que el cuerpo deja para después del commit (lealtad, métricas, vale, sesión) nace DENTRO de cada intento y sale en el
+  // retorno; un intento abortado por 40P01 no deja nada a medias.
+  const bundle = await withDeadlockRetry(
+    async tx => {
+      let loyaltyCustomerId: string | null = null
+      let loyaltyOrderTotal: Prisma.Decimal = new Prisma.Decimal(0)
+      let loyaltyOrderId: string = ''
+      let loyaltyShouldEarn = false
+      const metricsCustomerIds = new Set<string>()
+      const metricsState: { orderTotal: Prisma.Decimal | null } = { orderTotal: null }
+      const postingState: { id: string | null } = { id: null }
+      const sesionState: { cerrada: boolean } = { cerrada: false }
 
-        // Disciplina global de locks para dinero sobre una orden durable:
-        // Order → Payment (si aplica) → Shift. Una sombra todavía no tiene fila
-        // Order, así que conserva el camino seguro Shift → INSERT Order.
-        if (input.orderId) {
-          await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
-          // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
-          // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar la regla.
-          const venta = await tx.order.findFirst({
-            where: { id: input.orderId, venueId },
-            select: { paymentStatus: true, thirdPartyCashDue: true },
-          })
-          // Rappi 2b (T7): el pago manual no sabe repartir venta, propina y lo de Rappi ⇒ 409 antes de escribir.
-          if (venta) rechazarAccionDeCobroSobreRappiEnEfectivo(venta)
-          // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no recibe un pago manual (bajo el mismo candado).
-          await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: input.orderId })
-          // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
-          // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
-          // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún
-          // cobro que entra por otro canal la baja a PARTIAL, así que esta regla no se esquiva. (R8-3a: la regla R5-1 —cambiar el
-          // cliente de una venta cobrada pedía `payments:create`— quedó muerta detrás de ésta y se quitó.)
-          if (venta && esVentaYaCobrada(venta)) throw new BadRequestError(MENSAJE_VENTA_YA_COBRADA, CODIGO_VENTA_YA_COBRADA)
-        }
-        const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
+      // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), ANTES del candado de la
+      // venta: el mismo orden que la finalización y el registrador de la terminal. Cerrar aquí la sesión sin ella sería venta →
+      // sesión, al revés, y una terminal que registra a la vez se interbloquearía con este pago.
+      const vales = input.orderId ? await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId: input.orderId }) : null
+      sesionState.cerrada = false
+      const previous = await existingAttempt(tx)
+      if (previous) return { replay: previous }
+      let anchorOrderId: string
+      let anchorOrderTotal: Prisma.Decimal
+      // T18f: el saldo CANÓNICO de la cuenta existente tras este pago (`computeOrderBalance`); null en la orden sombra.
+      let saldoCanonico: OrderBalance | null = null
+      let aggregatedTipAmount: Prisma.Decimal = tipAmount
+      let isShadow = false
+      // Captured from the existing order in Mode 1 so the post-payment update
+      // can recompute Order.total = subtotal - discount + cumulative tips.
+      let orderSubtotal: Prisma.Decimal = new Prisma.Decimal(0)
+      let orderDiscount: Prisma.Decimal = new Prisma.Decimal(0)
+      // Renglones de la orden existente: el vale de inventario los necesita
+      // para nacer en ESTA misma transacción cuando el pago la salda.
+      let orderItems: unknown[] = []
+      let yaEstabaPagada = false
 
-        // ── ¿A QUÉ TURNO SE LE SUMA ESTE PAGO? ──────────────────────────────────────────────
-        //
-        // El turno abierto del NEGOCIO, no el de quien lo captura (`@/services/shared/turnoDeCaja.ts`):
-        // quién cobró vive en `processedById`.
-        //
-        // 🔴 El claim ES el incremento, y va PRIMERO: un `updateMany` condicionado a
-        // `{ venueId, status: 'OPEN', endTime: null }`, igual que los tres rieles de reembolso. Antes
-        // era un `shift.update({ where: { id } })` al FINAL de la transacción, y eso tenía dos
-        // agujeros de dinero: sin `venueId` aceptaba el turno de OTRO negocio, y sin `status` sumaba
-        // ventas a un turno ya CERRADO — reescribiendo hacia atrás un corte que una persona ya firmó.
-        //
-        // 🔴 Y va antes de crear nada porque el `shiftId` se estampa en la orden sombra y en el
-        // `Payment`: sellarlos con un turno cuyo claim no ganó dejaría dinero colgando de un turno al
-        // que nunca se le sumó, y un recálculo desde los pagos discreparía de su propio `totalSales`.
-        // El UPDATE además toma el candado de la fila, así que un cierre concurrente espera a que
-        // esta transacción termine y ve el incremento.
-        //
-        // ⚠️ PRECIO DECLARADO, a medir antes de un sábado ocupado: reclamar al PRINCIPIO significa que
-        // el candado sobre la fila del `Shift` se sostiene durante TODA esta transacción (órdenes,
-        // artículos, inventario, lealtad), y **todo pago del negocio contiende sobre esa misma fila**
-        // porque el turno es uno solo. Es correcto —es justo lo que impide sellar un `shiftId` cuyo
-        // claim no ganó— pero convierte el turno en un punto de serialización. Si aparece contención,
-        // la salida NO es soltar el candado: es acortar la transacción (sacar de ella lo que no es
-        // dinero), porque mover el claim al final devuelve el agujero que este cambio cerró.
-        const shiftClaim = await claimShiftForCapturedPayment(tx, {
-          venueId,
-          amountPesos: cobrado,
-          tipPesos: tipAmount,
-          // Una Order se cuenta al primer cobro durable; abonos posteriores no la
-          // vuelven a contar. La sombra nace y se salda con este primer cobro.
-          incrementTotalOrders: !input.orderId || priorCompletedPaymentCount === 0,
-          // Sin orden, la sombra nace después de este claim y SIN renglones: nunca es una cuenta de tarjetas.
-          orderId: input.orderId ?? null,
+      // Disciplina global de locks para dinero sobre una orden durable:
+      // Order → Payment (si aplica) → Shift. Una sombra todavía no tiene fila
+      // Order, así que conserva el camino seguro Shift → INSERT Order.
+      if (input.orderId) {
+        await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
+        // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
+        // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar la regla.
+        const venta = await tx.order.findFirst({
+          where: { id: input.orderId, venueId },
+          select: { paymentStatus: true, thirdPartyCashDue: true },
         })
-        const shiftId = shiftClaim.shiftId
+        // Rappi 2b (T7): el pago manual no sabe repartir venta, propina y lo de Rappi ⇒ 409 antes de escribir.
+        if (venta) rechazarAccionDeCobroSobreRappiEnEfectivo(venta)
+        // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no recibe un pago manual (bajo el mismo candado).
+        await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: input.orderId })
+        // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
+        // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
+        // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún
+        // cobro que entra por otro canal la baja a PARTIAL, así que esta regla no se esquiva. (R8-3a: la regla R5-1 —cambiar el
+        // cliente de una venta cobrada pedía `payments:create`— quedó muerta detrás de ésta y se quitó.)
+        if (venta && esVentaYaCobrada(venta)) throw new BadRequestError(MENSAJE_VENTA_YA_COBRADA, CODIGO_VENTA_YA_COBRADA)
+      }
+      const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 
-        if (input.orderId) {
-          // Mode 1 — attach to existing order
-          // Fetch ALL OrderCustomer rows (not filtered by isPrimary) so we can
-          // increment customer metrics for every customer associated with the
-          // order, while loyalty points still go only to the primary. Mirrors
-          // TPV's payment.tpv.service.ts handling.
-          const order = await tx.order.findFirst({
-            where: { id: input.orderId, venueId },
-            include: {
-              payments: { where: { status: TransactionStatus.COMPLETED } },
-              orderCustomers: { select: { customerId: true, isPrimary: true } },
-              // Sin los renglones el vale nacería vacío y la venta seguiría sin
-              // descontar del almacén — que es justo el hueco que este include cierra.
-              items: { include: { modifiers: { include: { modifier: true } } } },
-            },
-          })
+      // ── ¿A QUÉ TURNO SE LE SUMA ESTE PAGO? ──────────────────────────────────────────────
+      //
+      // El turno abierto del NEGOCIO, no el de quien lo captura (`@/services/shared/turnoDeCaja.ts`):
+      // quién cobró vive en `processedById`.
+      //
+      // 🔴 El claim ES el incremento, y va PRIMERO: un `updateMany` condicionado a
+      // `{ venueId, status: 'OPEN', endTime: null }`, igual que los tres rieles de reembolso. Antes
+      // era un `shift.update({ where: { id } })` al FINAL de la transacción, y eso tenía dos
+      // agujeros de dinero: sin `venueId` aceptaba el turno de OTRO negocio, y sin `status` sumaba
+      // ventas a un turno ya CERRADO — reescribiendo hacia atrás un corte que una persona ya firmó.
+      //
+      // 🔴 Y va antes de crear nada porque el `shiftId` se estampa en la orden sombra y en el
+      // `Payment`: sellarlos con un turno cuyo claim no ganó dejaría dinero colgando de un turno al
+      // que nunca se le sumó, y un recálculo desde los pagos discreparía de su propio `totalSales`.
+      // El UPDATE además toma el candado de la fila, así que un cierre concurrente espera a que
+      // esta transacción termine y ve el incremento.
+      //
+      // ⚠️ PRECIO DECLARADO, a medir antes de un sábado ocupado: reclamar al PRINCIPIO significa que
+      // el candado sobre la fila del `Shift` se sostiene durante TODA esta transacción (órdenes,
+      // artículos, inventario, lealtad), y **todo pago del negocio contiende sobre esa misma fila**
+      // porque el turno es uno solo. Es correcto —es justo lo que impide sellar un `shiftId` cuyo
+      // claim no ganó— pero convierte el turno en un punto de serialización. Si aparece contención,
+      // la salida NO es soltar el candado: es acortar la transacción (sacar de ella lo que no es
+      // dinero), porque mover el claim al final devuelve el agujero que este cambio cerró.
+      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+        venueId,
+        amountPesos: cobrado,
+        tipPesos: tipAmount,
+        // Una Order se cuenta al primer cobro durable; abonos posteriores no la
+        // vuelven a contar. La sombra nace y se salda con este primer cobro.
+        incrementTotalOrders: !input.orderId || priorCompletedPaymentCount === 0,
+        // Sin orden, la sombra nace después de este claim y SIN renglones: nunca es una cuenta de tarjetas.
+        orderId: input.orderId ?? null,
+      })
+      const shiftId = shiftClaim.shiftId
 
-          if (!order) {
-            throw new NotFoundError('Orden no encontrada')
-          }
+      if (input.orderId) {
+        // Mode 1 — attach to existing order
+        // Fetch ALL OrderCustomer rows (not filtered by isPrimary) so we can
+        // increment customer metrics for every customer associated with the
+        // order, while loyalty points still go only to the primary. Mirrors
+        // TPV's payment.tpv.service.ts handling.
+        const order = await tx.order.findFirst({
+          where: { id: input.orderId, venueId },
+          include: {
+            payments: { where: { status: TransactionStatus.COMPLETED } },
+            orderCustomers: { select: { customerId: true, isPrimary: true } },
+            // Sin los renglones el vale nacería vacío y la venta seguiría sin
+            // descontar del almacén — que es justo el hueco que este include cierra.
+            items: { include: { modifiers: { include: { modifier: true } } } },
+          },
+        })
 
-          // Reject payments on terminated orders. Without this guard, an admin
-          // could attach cash to a CANCELLED/DELETED order and revenue reports
-          // would credit a sale that the customer never confirmed.
-          if (order.status === 'CANCELLED' || order.status === 'DELETED') {
-            throw new BadRequestError('No se puede registrar un pago en una orden cancelada o eliminada')
-          }
+        if (!order) {
+          throw new NotFoundError('Orden no encontrada')
+        }
 
-          anchorOrderId = order.id
+        // Reject payments on terminated orders. Without this guard, an admin
+        // could attach cash to a CANCELLED/DELETED order and revenue reports
+        // would credit a sale that the customer never confirmed.
+        if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+          throw new BadRequestError('No se puede registrar un pago en una orden cancelada o eliminada')
+        }
 
-          // Capture subtotal/discount for the post-payment Order.total recomputation
-          // below (TPV alignment). Stored on closure so the order.update branch can
-          // reuse them without re-fetching.
-          orderSubtotal = new Prisma.Decimal(order.subtotal)
-          orderDiscount = new Prisma.Decimal(order.discountAmount ?? 0)
-          orderItems = order.items ?? []
-          yaEstabaPagada = order.paymentStatus === 'PAID'
+        anchorOrderId = order.id
 
-          // 🔴 T18f (Codex fase 2 r3 #2): lo pagado, el total y el saldo salen de la función CANÓNICA (`computeOrderBalance`), la misma
-          // que usa la terminal (`updateOrderTotalsForStandalonePayment`): propinas dentro del total y de lo pagado, IVA aparte según el
-          // contrato, y un REFUND NO reabre saldo (antes se sumaban TODOS los COMPLETED, con el reembolso negativo restando).
-          // Las filas ya vienen con `type`: sin él un reembolso sería indistinguible de un cobro negativo.
-          const saldoAntes = computeOrderBalance(order, order.payments)
-          saldoCanonico = computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
-          aggregatedTipAmount = saldoCanonico.tipAmount
-          anchorOrderTotal = saldoCanonico.total
+        // Capture subtotal/discount for the post-payment Order.total recomputation
+        // below (TPV alignment). Stored on closure so the order.update branch can
+        // reuse them without re-fetching.
+        orderSubtotal = new Prisma.Decimal(order.subtotal)
+        orderDiscount = new Prisma.Decimal(order.discountAmount ?? 0)
+        orderItems = order.items ?? []
+        yaEstabaPagada = order.paymentStatus === 'PAID'
 
-          if (saldoCanonico.paidAmount.greaterThan(anchorOrderTotal)) {
-            throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${saldoAntes.remainingBalance.toFixed(2)}`)
-          }
+        // 🔴 T18f (Codex fase 2 r3 #2): lo pagado, el total y el saldo salen de la función CANÓNICA (`computeOrderBalance`), la misma
+        // que usa la terminal (`updateOrderTotalsForStandalonePayment`): propinas dentro del total y de lo pagado, IVA aparte según el
+        // contrato, y un REFUND NO reabre saldo (antes se sumaban TODOS los COMPLETED, con el reembolso negativo restando).
+        // Las filas ya vienen con `type`: sin él un reembolso sería indistinguible de un cobro negativo.
+        const saldoAntes = computeOrderBalance(order, order.payments)
+        saldoCanonico = computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
+        aggregatedTipAmount = saldoCanonico.tipAmount
+        anchorOrderTotal = saldoCanonico.total
 
-          // Customer metrics + loyalty are only queued on FULL SETTLEMENT, matching
-          // TPV's `if (isFullyPaid)` guard. Per-payment metric increments would
-          // inflate totalVisits (4 partials of a $100 order = 4 visits instead of 1)
-          // and disconnect from TPV semantics. Both metrics and loyalty fire ONCE
-          // per order, with the FINAL order total — not per-payment amounts.
-          if (saldoCanonico.isFullyPaid) {
-            // Final order total drives BOTH loyalty (when there's a customer to
-            // earn) and metrics (for every customer on the order, regardless of
-            // primary). Set unconditionally on full settlement so metrics never
-            // run with 0.
-            metricsState.orderTotal = anchorOrderTotal
-            loyaltyOrderId = order.id
-            // Resolution: explicit input override > primary OrderCustomer > legacy column
-            const primaryCustomer = order.orderCustomers.find(oc => oc.isPrimary)
-            const resolvedCustomerId = input.customerId ?? primaryCustomer?.customerId ?? order.customerId ?? null
-            if (resolvedCustomerId) {
-              loyaltyCustomerId = resolvedCustomerId
-              loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(aggregatedTipAmount))
-              loyaltyShouldEarn = true
-            }
-            // Customer metrics: queue updates for ALL customers on the order
-            // (primary + secondaries + override + legacy column). Visits/spend
-            // increments ONCE per customer at settlement, using the final order
-            // total — not per-payment amounts.
-            for (const oc of order.orderCustomers) {
-              metricsCustomerIds.add(oc.customerId)
-            }
-            if (input.customerId) metricsCustomerIds.add(input.customerId)
-            if (order.customerId) metricsCustomerIds.add(order.customerId)
-          }
+        if (saldoCanonico.paidAmount.greaterThan(anchorOrderTotal)) {
+          throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${saldoAntes.remainingBalance.toFixed(2)}`)
+        }
 
-          // If admin attached a customer and the order didn't have one (no
-          // primary OrderCustomer AND no legacy customerId), create the link as
-          // primary so future reports / loyalty know who paid.
-          const hasPrimary = order.orderCustomers.some(oc => oc.isPrimary)
-          if (input.customerId && !order.customerId && !hasPrimary) {
-            await tx.orderCustomer.create({
-              data: { orderId: order.id, customerId: input.customerId, isPrimary: true },
-            })
-          }
-        } else {
-          // Mode 2 — create shadow order to anchor this standalone payment.
-          // Amounts follow the usual invoice structure:
-          //   subtotal = amount (the line value the admin claims)
-          //   + taxAmount  (IVA the admin declares, 0 default)
-          //   - discountAmount (promo the admin applied, 0 default)
-          //   + tipAmount
-          //   = total (what the client actually paid).
-          isShadow = true
-          const shadowTotal = cobrado.plus(tipAmount)
-          const orderNumber = `ORD-MANUAL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
-          const shadow = await tx.order.create({
-            data: {
-              venueId,
-              // 🔴 La orden sombra ancla un cobro que está ocurriendo AHORA: cae en el mismo
-              // turno que su `Payment`, reusando el `shiftId` ya resuelto arriba (nunca una
-              // segunda consulta, que podría devolver otro turno si alguien cierra caja en medio).
-              shiftId,
-              orderNumber,
-              type: 'MANUAL_ENTRY',
-              source: 'DASHBOARD_MANUAL',
-              status: 'COMPLETED',
-              paymentStatus: 'PAID',
-              // Única ruta donde un humano teclea el IVA a mano: sólo un valor > 0
-              // demuestra "aparte" (`contratoDePagoManual`). 0 o ausente no se adivina.
-              contratoDePrecio: contratoDePagoManual(taxAmount.toFixed(2)),
-              subtotal: amount,
-              taxAmount,
-              discountAmount,
-              total: shadowTotal,
-              paidAmount: shadowTotal,
-              remainingBalance: new Prisma.Decimal(0),
-              tipAmount,
-              completedAt: new Date(),
-              // Optional attributions — set when admin provides them so reports
-              // by table / customer pick these manual entries up too.
-              ...(input.tableId ? { tableId: input.tableId } : {}),
-              ...(input.customerId ? { customerId: input.customerId } : {}),
-              // createdBy = the admin who recorded it (audit trail).
-              // servedBy = the waiter who gets tip / commission credit.
-              createdById: staffId,
-              servedById: input.waiterId ?? staffId,
-              // Attribution + audit trail inside posRawData JSON so any future
-              // report can tell "this came from the admin dashboard, not a
-              // real order".
-              posRawData: {
-                manualEntry: true,
-                recordedByStaffId: staffId,
-                ...(input.waiterId ? { waiterId: input.waiterId } : {}),
-                ...(input.customerId ? { customerId: input.customerId } : {}),
-                ...(input.tableId ? { tableId: input.tableId } : {}),
-                ...(input.reason ? { reason: input.reason } : {}),
-              },
-            },
-          })
-          anchorOrderId = shadow.id
-          anchorOrderTotal = shadowTotal
-
-          // If a customer was attached, also create the OrderCustomer link as
-          // primary so loyalty / per-customer reports surface this entry. Queue
-          // both metrics + loyalty for the attached customer (no secondaries on
-          // shadow orders — they're single-customer by definition).
-          if (input.customerId) {
-            await tx.orderCustomer.create({
-              data: { orderId: shadow.id, customerId: input.customerId, isPrimary: true },
-            })
-            metricsCustomerIds.add(input.customerId)
-            metricsState.orderTotal = shadowTotal
-            loyaltyCustomerId = input.customerId
-            loyaltyOrderId = shadow.id
-            loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), shadowTotal.minus(tipAmount))
+        // Customer metrics + loyalty are only queued on FULL SETTLEMENT, matching
+        // TPV's `if (isFullyPaid)` guard. Per-payment metric increments would
+        // inflate totalVisits (4 partials of a $100 order = 4 visits instead of 1)
+        // and disconnect from TPV semantics. Both metrics and loyalty fire ONCE
+        // per order, with the FINAL order total — not per-payment amounts.
+        if (saldoCanonico.isFullyPaid) {
+          // Final order total drives BOTH loyalty (when there's a customer to
+          // earn) and metrics (for every customer on the order, regardless of
+          // primary). Set unconditionally on full settlement so metrics never
+          // run with 0.
+          metricsState.orderTotal = anchorOrderTotal
+          loyaltyOrderId = order.id
+          // Resolution: explicit input override > primary OrderCustomer > legacy column
+          const primaryCustomer = order.orderCustomers.find(oc => oc.isPrimary)
+          const resolvedCustomerId = input.customerId ?? primaryCustomer?.customerId ?? order.customerId ?? null
+          if (resolvedCustomerId) {
+            loyaltyCustomerId = resolvedCustomerId
+            loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(aggregatedTipAmount))
             loyaltyShouldEarn = true
           }
+          // Customer metrics: queue updates for ALL customers on the order
+          // (primary + secondaries + override + legacy column). Visits/spend
+          // increments ONCE per customer at settlement, using the final order
+          // total — not per-payment amounts.
+          for (const oc of order.orderCustomers) {
+            metricsCustomerIds.add(oc.customerId)
+          }
+          if (input.customerId) metricsCustomerIds.add(input.customerId)
+          if (order.customerId) metricsCustomerIds.add(order.customerId)
         }
 
-        // Gross/net amounts include tip — same convention as TPV recordFastPayment.
-        // VenueTransaction.grossAmount and Payment.netAmount must include tip so
-        // settlement reports total the actual cash collected, not just the sale price.
-        const grossWithTip = cobrado.plus(tipAmount)
-
-        const payment = await tx.payment.create({
+        // If admin attached a customer and the order didn't have one (no
+        // primary OrderCustomer AND no legacy customerId), create the link as
+        // primary so future reports / loyalty know who paid.
+        const hasPrimary = order.orderCustomers.some(oc => oc.isPrimary)
+        if (input.customerId && !order.customerId && !hasPrimary) {
+          await tx.orderCustomer.create({
+            data: { orderId: order.id, customerId: input.customerId, isPrimary: true },
+          })
+        }
+      } else {
+        // Mode 2 — create shadow order to anchor this standalone payment.
+        // Amounts follow the usual invoice structure:
+        //   subtotal = amount (the line value the admin claims)
+        //   + taxAmount  (IVA the admin declares, 0 default)
+        //   - discountAmount (promo the admin applied, 0 default)
+        //   + tipAmount
+        //   = total (what the client actually paid).
+        isShadow = true
+        const shadowTotal = cobrado.plus(tipAmount)
+        const orderNumber = `ORD-MANUAL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+        const shadow = await tx.order.create({
           data: {
             venueId,
-            orderId: anchorOrderId,
+            // 🔴 La orden sombra ancla un cobro que está ocurriendo AHORA: cae en el mismo
+            // turno que su `Payment`, reusando el `shiftId` ya resuelto arriba (nunca una
+            // segunda consulta, que podría devolver otro turno si alguien cierra caja en medio).
             shiftId,
-            idempotencyKey: input.idempotencyKey ?? null,
-            amount: cobrado,
-            tipAmount,
-            method: input.method,
-            source: input.source,
-            externalSource: input.externalSource ?? null,
-            // 🔑 Clasificación financiera SERVER-OWNED (auditoría 2026-08-15): este endpoint
-            // registra dinero que Avoqado NO procesó — una terminal ajena (BBVA), una
-            // transferencia directa, un cobro en otra app. La VENTA sí se registra (Avoqado
-            // centraliza use o no la TPV) y cuenta en ventas, corte, inventario y reportes;
-            // lo que NUNCA debe hacer es sumar al saldo "por depositar", porque ese dinero
-            // ya lo tiene el negocio o se lo deposita el otro banco.
-            // Efectivo capturado a mano sí entra al cajón; el resto es registro externo.
-            fundsFlow: input.method === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
+            orderNumber,
+            type: 'MANUAL_ENTRY',
+            source: 'DASHBOARD_MANUAL',
             status: 'COMPLETED',
-            processedById: staffId,
-            // Fee fields are required on Payment model — manual payments have no processor fees.
-            feePercentage: new Prisma.Decimal(0),
-            feeAmount: new Prisma.Decimal(0),
-            netAmount: grossWithTip,
-            // Payment has no dedicated notes column. Preserve the admin's reason
-            // (and tag the provenance) inside processorData so it's auditable.
-            processorData: {
+            paymentStatus: 'PAID',
+            // Única ruta donde un humano teclea el IVA a mano: sólo un valor > 0
+            // demuestra "aparte" (`contratoDePagoManual`). 0 o ausente no se adivina.
+            contratoDePrecio: contratoDePagoManual(taxAmount.toFixed(2)),
+            subtotal: amount,
+            taxAmount,
+            discountAmount,
+            total: shadowTotal,
+            paidAmount: shadowTotal,
+            remainingBalance: new Prisma.Decimal(0),
+            tipAmount,
+            completedAt: new Date(),
+            // Optional attributions — set when admin provides them so reports
+            // by table / customer pick these manual entries up too.
+            ...(input.tableId ? { tableId: input.tableId } : {}),
+            ...(input.customerId ? { customerId: input.customerId } : {}),
+            // createdBy = the admin who recorded it (audit trail).
+            // servedBy = the waiter who gets tip / commission credit.
+            createdById: staffId,
+            servedById: input.waiterId ?? staffId,
+            // Attribution + audit trail inside posRawData JSON so any future
+            // report can tell "this came from the admin dashboard, not a
+            // real order".
+            posRawData: {
               manualEntry: true,
-              ...(requestHash ? { manualPaymentRequestHash: requestHash } : {}),
-              shadowOrder: isShadow,
               recordedByStaffId: staffId,
+              ...(input.waiterId ? { waiterId: input.waiterId } : {}),
+              ...(input.customerId ? { customerId: input.customerId } : {}),
+              ...(input.tableId ? { tableId: input.tableId } : {}),
               ...(input.reason ? { reason: input.reason } : {}),
             },
           },
         })
+        anchorOrderId = shadow.id
+        anchorOrderTotal = shadowTotal
 
-        await recordPendingPaymentShiftReconciliation(tx, {
-          claim: shiftClaim,
-          venueId,
-          paymentId: payment.id,
-          orderId: anchorOrderId,
-          staffId,
-          channel: 'manualPayment',
-          amountPesos: cobrado,
-          tipPesos: tipAmount,
-          reconciliationEnabled,
-        })
-
-        // Mirror the TPV recordFastPayment side effects so financial reports stay
-        // aligned. These three writes used to be skipped for manual payments,
-        // causing settlement / shift / payment-allocation reports to under-count
-        // by the manual sales total.
-
-        // 1. VenueTransaction — drives settlement / payout reports.
-        await tx.venueTransaction.create({
-          data: {
-            venueId,
-            paymentId: payment.id,
-            type: 'PAYMENT',
-            grossAmount: grossWithTip,
-            feeAmount: new Prisma.Decimal(0),
-            netAmount: grossWithTip,
-            status: 'PENDING',
-          },
-        })
-
-        // 2. PaymentAllocation — joins payment ↔ order amount allocation.
-        // For manual payments we always allocate the full payment to its anchor
-        // order (no split). Mode 1 partial payments still create one allocation
-        // per call; the order accumulates them via PaymentAllocation rows.
-        await tx.paymentAllocation.create({
-          data: {
-            paymentId: payment.id,
-            orderId: anchorOrderId,
-            amount: cobrado,
-          },
-        })
-
-        // Only update existing-order totals in Mode 1; shadow orders were
-        // already created with final values and don't need a second update.
-        if (!isShadow) {
-          // ✅ TPV ALIGNMENT: paidAmount and Order.total must include cumulative tips.
-          // TPV's recordOrderPayment treats paidAmount as "cash collected (amount + tip)"
-          // and recomputes Order.total = subtotal + tax - discount + cumulative tips.
-          // Without this, reports that join Order.total vs Payment.netAmount see
-          // different sums (e.g. order.total=100, payment.netAmount=110, paidAmount=100).
-          // T18f: el saldo canónico calculado arriba (Modo 1; la sombra no entra a esta rama).
-          const saldo = saldoCanonico!
-          const newTotalPaid = saldo.paidAmount
-          const fullyPaid = saldo.isFullyPaid
-
-          await tx.order.update({
-            where: { id: anchorOrderId },
-            data: {
-              paymentStatus: fullyPaid ? 'PAID' : 'PARTIAL',
-              paidAmount: newTotalPaid,
-              remainingBalance: saldo.remainingBalance,
-              tipAmount: aggregatedTipAmount,
-              total: anchorOrderTotal,
-              // Flip status to COMPLETED only when the order is fully settled —
-              // matches the TPV path. Without this, "orders by status" reports
-              // count fully-paid orders as still pending.
-              ...(fullyPaid ? { status: 'COMPLETED', completedAt: new Date() } : {}),
-            },
+        // If a customer was attached, also create the OrderCustomer link as
+        // primary so loyalty / per-customer reports surface this entry. Queue
+        // both metrics + loyalty for the attached customer (no secondaries on
+        // shadow orders — they're single-customer by definition).
+        if (input.customerId) {
+          await tx.orderCustomer.create({
+            data: { orderId: shadow.id, customerId: input.customerId, isPrimary: true },
           })
-
-          // Vale durable de inventario, atómico con la transición a PAID. Sólo al
-          // SALDAR (un abono parcial no descuenta, igual que en el TPV) y sólo si
-          // la orden no venía ya pagada, para no abrir un segundo vale sobre una
-          // venta que ya dedujo.
-          if (fullyPaid && !yaEstabaPagada) {
-            const posting = await createSalePostingInTx(tx, {
-              venueId,
-              orderId: anchorOrderId,
-              items: orderItems as any,
-              staffId,
-            })
-            postingState.id = posting?.id ?? null
-            // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
-            if (vales)
-              sesionState.cerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId: anchorOrderId })
-            // R8: el pago manual que salda una cuenta de tarjetas activa sus sobres en la MISMA transacción.
-            await activarSobresDeCuentaPagadaEnTx(tx, {
-              venueId,
-              orderId: anchorOrderId,
-              staffId,
-              items: orderItems as Array<{ giftCardId?: string | null }>,
-            })
-          }
-        }
-        // Reference unused vars so TS doesn't complain — they're captured for
-        // possible future expansion (per-payment breakdown, audit detail).
-        void orderSubtotal
-        void orderDiscount
-        // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
-        await enqueuePaymentCommissionInTx(tx, payment.id)
-
-        logger.info('Manual payment created', {
-          paymentId: payment.id,
-          orderId: anchorOrderId,
-          venueId,
-          staffId,
-          amount: cobrado.toFixed(2),
-          source: input.source,
-          externalSource: input.externalSource,
-          shadowOrder: isShadow,
-          waiterId: input.waiterId ?? null,
-        })
-
-        return payment
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 5_000 },
-    )
-    .catch(async error => {
-      if (input.idempotencyKey && (error?.code === 'P2002' || isRetryableDbError(error))) {
-        const winner = await existingAttempt(prisma)
-        if (winner) {
-          replayed = true
-          return winner
-        }
-        if (isRetryableDbError(error)) {
-          if (retryAttempt >= 2)
-            throw new ConflictError('Conflicto de concurrencia. Reintenta con la misma llave de idempotencia.', 'PAYMENT_RETRY_REQUIRED')
-          await new Promise(resolve => setTimeout(resolve, 50 * 2 ** retryAttempt))
-          // Fresh invocation resets every post-commit effect; the outer attempt must not repeat them.
-          const retried = await createManualPayment(venueId, staffId, input, retryAttempt + 1)
-          replayed = true
-          return retried
+          metricsCustomerIds.add(input.customerId)
+          metricsState.orderTotal = shadowTotal
+          loyaltyCustomerId = input.customerId
+          loyaltyOrderId = shadow.id
+          loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), shadowTotal.minus(tipAmount))
+          loyaltyShouldEarn = true
         }
       }
-      throw error
-    })
+
+      // Gross/net amounts include tip — same convention as TPV recordFastPayment.
+      // VenueTransaction.grossAmount and Payment.netAmount must include tip so
+      // settlement reports total the actual cash collected, not just the sale price.
+      const grossWithTip = cobrado.plus(tipAmount)
+
+      const payment = await tx.payment.create({
+        data: {
+          venueId,
+          orderId: anchorOrderId,
+          shiftId,
+          idempotencyKey: input.idempotencyKey ?? null,
+          amount: cobrado,
+          tipAmount,
+          method: input.method,
+          source: input.source,
+          externalSource: input.externalSource ?? null,
+          // 🔑 Clasificación financiera SERVER-OWNED (auditoría 2026-08-15): este endpoint
+          // registra dinero que Avoqado NO procesó — una terminal ajena (BBVA), una
+          // transferencia directa, un cobro en otra app. La VENTA sí se registra (Avoqado
+          // centraliza use o no la TPV) y cuenta en ventas, corte, inventario y reportes;
+          // lo que NUNCA debe hacer es sumar al saldo "por depositar", porque ese dinero
+          // ya lo tiene el negocio o se lo deposita el otro banco.
+          // Efectivo capturado a mano sí entra al cajón; el resto es registro externo.
+          fundsFlow: input.method === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
+          status: 'COMPLETED',
+          processedById: staffId,
+          // Fee fields are required on Payment model — manual payments have no processor fees.
+          feePercentage: new Prisma.Decimal(0),
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: grossWithTip,
+          // Payment has no dedicated notes column. Preserve the admin's reason
+          // (and tag the provenance) inside processorData so it's auditable.
+          processorData: {
+            manualEntry: true,
+            ...(requestHash ? { manualPaymentRequestHash: requestHash } : {}),
+            shadowOrder: isShadow,
+            recordedByStaffId: staffId,
+            ...(input.reason ? { reason: input.reason } : {}),
+          },
+        },
+      })
+
+      await recordPendingPaymentShiftReconciliation(tx, {
+        claim: shiftClaim,
+        venueId,
+        paymentId: payment.id,
+        orderId: anchorOrderId,
+        staffId,
+        channel: 'manualPayment',
+        amountPesos: cobrado,
+        tipPesos: tipAmount,
+        reconciliationEnabled,
+      })
+
+      // Mirror the TPV recordFastPayment side effects so financial reports stay
+      // aligned. These three writes used to be skipped for manual payments,
+      // causing settlement / shift / payment-allocation reports to under-count
+      // by the manual sales total.
+
+      // 1. VenueTransaction — drives settlement / payout reports.
+      await tx.venueTransaction.create({
+        data: {
+          venueId,
+          paymentId: payment.id,
+          type: 'PAYMENT',
+          grossAmount: grossWithTip,
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: grossWithTip,
+          status: 'PENDING',
+        },
+      })
+
+      // 2. PaymentAllocation — joins payment ↔ order amount allocation.
+      // For manual payments we always allocate the full payment to its anchor
+      // order (no split). Mode 1 partial payments still create one allocation
+      // per call; the order accumulates them via PaymentAllocation rows.
+      await tx.paymentAllocation.create({
+        data: {
+          paymentId: payment.id,
+          orderId: anchorOrderId,
+          amount: cobrado,
+        },
+      })
+
+      // Only update existing-order totals in Mode 1; shadow orders were
+      // already created with final values and don't need a second update.
+      if (!isShadow) {
+        // ✅ TPV ALIGNMENT: paidAmount and Order.total must include cumulative tips.
+        // TPV's recordOrderPayment treats paidAmount as "cash collected (amount + tip)"
+        // and recomputes Order.total = subtotal + tax - discount + cumulative tips.
+        // Without this, reports that join Order.total vs Payment.netAmount see
+        // different sums (e.g. order.total=100, payment.netAmount=110, paidAmount=100).
+        // T18f: el saldo canónico calculado arriba (Modo 1; la sombra no entra a esta rama).
+        const saldo = saldoCanonico!
+        const newTotalPaid = saldo.paidAmount
+        const fullyPaid = saldo.isFullyPaid
+
+        await tx.order.update({
+          where: { id: anchorOrderId },
+          data: {
+            paymentStatus: fullyPaid ? 'PAID' : 'PARTIAL',
+            paidAmount: newTotalPaid,
+            remainingBalance: saldo.remainingBalance,
+            tipAmount: aggregatedTipAmount,
+            total: anchorOrderTotal,
+            // Flip status to COMPLETED only when the order is fully settled —
+            // matches the TPV path. Without this, "orders by status" reports
+            // count fully-paid orders as still pending.
+            ...(fullyPaid ? { status: 'COMPLETED', completedAt: new Date() } : {}),
+          },
+        })
+
+        // Vale durable de inventario, atómico con la transición a PAID. Sólo al
+        // SALDAR (un abono parcial no descuenta, igual que en el TPV) y sólo si
+        // la orden no venía ya pagada, para no abrir un segundo vale sobre una
+        // venta que ya dedujo.
+        if (fullyPaid && !yaEstabaPagada) {
+          const posting = await createSalePostingInTx(tx, {
+            venueId,
+            orderId: anchorOrderId,
+            items: orderItems as any,
+            staffId,
+          })
+          postingState.id = posting?.id ?? null
+          // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+          if (vales) sesionState.cerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId: anchorOrderId })
+          // R8: el pago manual que salda una cuenta de tarjetas activa sus sobres en la MISMA transacción.
+          await activarSobresDeCuentaPagadaEnTx(tx, {
+            venueId,
+            orderId: anchorOrderId,
+            staffId,
+            items: orderItems as Array<{ giftCardId?: string | null }>,
+          })
+        }
+      }
+      // Reference unused vars so TS doesn't complain — they're captured for
+      // possible future expansion (per-payment breakdown, audit detail).
+      void orderSubtotal
+      void orderDiscount
+      // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+      await enqueuePaymentCommissionInTx(tx, payment.id)
+
+      logger.info('Manual payment created', {
+        paymentId: payment.id,
+        orderId: anchorOrderId,
+        venueId,
+        staffId,
+        amount: cobrado.toFixed(2),
+        source: input.source,
+        externalSource: input.externalSource,
+        shadowOrder: isShadow,
+        waiterId: input.waiterId ?? null,
+      })
+
+      return {
+        result: payment,
+        loyaltyCustomerId,
+        loyaltyOrderTotal,
+        loyaltyOrderId,
+        loyaltyShouldEarn,
+        metricsCustomerIds,
+        metricsState,
+        postingState,
+        sesionState,
+      }
+    },
+    { etiqueta: 'createManualPayment', isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 5_000 },
+  ).catch(async error => {
+    if (input.idempotencyKey && (error?.code === 'P2002' || isRetryableDbError(error))) {
+      const winner = await existingAttempt(prisma)
+      if (winner) {
+        return { replay: winner }
+      }
+      if (isRetryableDbError(error)) {
+        if (retryAttempt >= 2)
+          throw new ConflictError('Conflicto de concurrencia. Reintenta con la misma llave de idempotencia.', 'PAYMENT_RETRY_REQUIRED')
+        await new Promise(resolve => setTimeout(resolve, 50 * 2 ** retryAttempt))
+        // Fresh invocation resets every post-commit effect; the outer attempt must not repeat them.
+        const retried = await createManualPayment(venueId, staffId, input, retryAttempt + 1)
+        return { replay: retried }
+      }
+    }
+    throw error
+  })
   // A unique-key loser rolled back ALL its writes. Never repeat customer metrics or other effects.
-  if (replayed) return result
+  if ('replay' in bundle) return bundle.replay as Payment
+  const {
+    result,
+    loyaltyCustomerId,
+    loyaltyOrderTotal,
+    loyaltyOrderId,
+    loyaltyShouldEarn,
+    metricsCustomerIds,
+    metricsState,
+    postingState,
+    sesionState,
+  } = bundle
 
   // Audit only the committed attempt, never an aborted Serializable retry.
   logAction({
