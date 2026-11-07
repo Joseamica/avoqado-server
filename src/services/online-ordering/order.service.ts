@@ -46,6 +46,7 @@ import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
 import { chargeMerchant, cardOnlineAvailable } from './card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -263,7 +264,7 @@ export function fromQuoteSnapshot(s: QuoteSnapshot): QuoteForOrder {
  * transacción de quien ya tomó los candados de admisión. La comparten pagar al recoger y la tarjeta (fase 2).
  */
 export async function writeOnlineOrderInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   i: {
     venueId: string
     externalId: string

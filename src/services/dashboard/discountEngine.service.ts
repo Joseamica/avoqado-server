@@ -12,6 +12,7 @@
 import logger from '@/config/logger'
 import { BadRequestError, ForbiddenError, NotFoundError, RegaloSinPermisoError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
 import { logAction, type LogActionParams } from './activity-log.service'
@@ -907,41 +908,53 @@ export async function applyDiscountToOrder(
   venueId?: string,
   puedeRegalar = false,
 ): Promise<ApplyDiscountResult> {
-  const audits: LogActionParams[] = []
-  const result = await prisma.$transaction(async tx => {
-    const tenant = await lockDiscountOrder(tx, orderId, venueId)
-    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE }) : null
-    if (!order) return orderNotFound(venueId)
-    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
+  // R65 b: las bitácoras nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01 no deja las suyas.
+  const { result, audits } = await withDeadlockRetry(
+    async tx => {
+      const audits: LogActionParams[] = []
+      const result = await (async () => {
+        const tenant = await lockDiscountOrder(tx, orderId, venueId)
+        const order = tenant
+          ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
+          : null
+        if (!order) return orderNotFound(venueId)
+        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
 
-    const picked = typeof discount === 'string'
-    const discountId = picked ? discount : discount.discountId
-    if (picked) {
-      const catalog = await tx.discount.findFirst({ where: { id: discountId, venueId: order.venueId, active: true }, select: { id: true } })
-      if (!catalog) throw new NotFoundError('Discount not found or inactive')
-    } else if (order.orderDiscounts.some(od => od.discountId === discountId)) {
-      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Discount already applied to this order' }
-    }
+        const picked = typeof discount === 'string'
+        const discountId = picked ? discount : discount.discountId
+        if (picked) {
+          const catalog = await tx.discount.findFirst({
+            where: { id: discountId, venueId: order.venueId, active: true },
+            select: { id: true },
+          })
+          if (!catalog) throw new NotFoundError('Discount not found or inactive')
+        } else if (order.orderDiscounts.some(od => od.discountId === discountId)) {
+          return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Discount already applied to this order' }
+        }
 
-    // `forceDiscountId`: a hand-picked rule is not automatic; every other eligibility and stacking rule still runs.
-    const fresh = (await evaluateOrderDiscounts(order, discountId, tx)).find(d => d.discountId === discountId)
-    if (!fresh) {
-      if (picked) throw new BadRequestError('This discount cannot be applied to this order')
-      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount cannot be applied to this order' }
-    }
+        // `forceDiscountId`: a hand-picked rule is not automatic; every other eligibility and stacking rule still runs.
+        const fresh = (await evaluateOrderDiscounts(order, discountId, tx)).find(d => d.discountId === discountId)
+        if (!fresh) {
+          if (picked) throw new BadRequestError('This discount cannot be applied to this order')
+          return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount cannot be applied to this order' }
+        }
 
-    // D1 (hz:f34960c5:D1): el tipo se lee aquí, bajo el candado; regalar la cuenta pide el permiso de cortesía, como D14 y `/comp`.
-    if (fresh.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
-    // D2 (hz:f34960c5:D2): «requiere aprobación» sólo lo cumple una cortesía, aprobada con `orders:comp`. Para otro tipo no hay
-    // todavía permiso que apruebe: se rechaza aunque llegue un autorizador (antes valía cualquier id que mandara la app).
-    if (fresh.requiresApproval && fresh.type !== 'COMP') {
-      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount requires manager approval' }
-    }
-    // Aquí una COMP ya trae `orders:comp` verificado: ésa ES la aprobación, aunque no quede autorizador registrado (dueño de la
-    // organización sin membresía en la sucursal, como la cortesía manual).
-    const aprobada = fresh.type === 'COMP' && fresh.requiresApproval ? { ...fresh, requiresApproval: false } : fresh
-    return applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
-  }, ORDER_LOCK_WAIT_BUDGET)
+        // D1 (hz:f34960c5:D1): el tipo se lee aquí, bajo el candado; regalar la cuenta pide el permiso de cortesía, como D14 y `/comp`.
+        if (fresh.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+        // D2 (hz:f34960c5:D2): «requiere aprobación» sólo lo cumple una cortesía, aprobada con `orders:comp`. Para otro tipo no hay
+        // todavía permiso que apruebe: se rechaza aunque llegue un autorizador (antes valía cualquier id que mandara la app).
+        if (fresh.requiresApproval && fresh.type !== 'COMP') {
+          return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount requires manager approval' }
+        }
+        // Aquí una COMP ya trae `orders:comp` verificado: ésa ES la aprobación, aunque no quede autorizador registrado (dueño de la
+        // organización sin membresía en la sucursal, como la cortesía manual).
+        const aprobada = fresh.type === 'COMP' && fresh.requiresApproval ? { ...fresh, requiresApproval: false } : fresh
+        return applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
+      })()
+      return { result, audits }
+    },
+    { etiqueta: 'applyDiscountToOrder', ...ORDER_LOCK_WAIT_BUDGET },
+  )
   for (const audit of audits) void logAction(audit)
   return result
 }
@@ -951,7 +964,7 @@ export async function applyDiscountToOrder(
  * Audits are collected, never emitted here — the caller flushes them only after its commit.
  */
 async function applyEvaluatedDiscount(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   order: Prisma.OrderGetPayload<{ include: { orderDiscounts: true } }>,
   discount: DiscountCalculationResult,
   audits: LogActionParams[],
@@ -1127,117 +1140,124 @@ export async function removeDiscountFromOrder(
   staffId?: string,
   venueId?: string,
 ): Promise<ApplyDiscountResult> {
-  const audits: LogActionParams[] = []
   // P3 (founder, 1-oct): la terminal devuelve puntos y premio como el móvil, con sus mismas funciones. Se cargan antes de tomar
   // el candado (igual que `removeOrderDiscount`).
   const { refundLoyaltyForOrderDiscount } = await import('../mobile/loyalty.mobile.service')
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
-  const result = await prisma.$transaction(async tx => {
-    // Lock first: the status, totals and the child row that decide the removal are all read under it.
-    const tenant = await lockDiscountOrder(tx, orderId, venueId)
-    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant } }) : null
-    if (!order) return orderNotFound(venueId)
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
-    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot remove discount from a paid order')
+  // R65 b: las bitácoras nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01 no deja las suyas.
+  const { result, audits } = await withDeadlockRetry(
+    async tx => {
+      const audits: LogActionParams[] = []
+      const result = await (async () => {
+        // Lock first: the status, totals and the child row that decide the removal are all read under it.
+        const tenant = await lockDiscountOrder(tx, orderId, venueId)
+        const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant } }) : null
+        if (!order) return orderNotFound(venueId)
+        // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+        // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+        rechazarSiEsImportada(order)
+        await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
+        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot remove discount from a paid order')
 
-    const orderDiscount = await tx.orderDiscount.findFirst({
-      where: { id: orderDiscountId, orderId },
-    })
+        const orderDiscount = await tx.orderDiscount.findFirst({
+          where: { id: orderDiscountId, orderId },
+        })
 
-    if (!orderDiscount) {
-      return { success: false, amount: 0, newOrderTotal: 0, error: 'Discount not found on this order' }
-    }
+        if (!orderDiscount) {
+          return { success: false, amount: 0, newOrderTotal: 0, error: 'Discount not found on this order' }
+        }
 
-    // P3: devoluciones en ESTA transacción, con el tenant ya bloqueado (Order → Customer/StampReward, el orden de siempre).
-    // Hoy el premio quedaba REDEEMED apuntando a una fila borrada y los puntos no volvían.
-    const puntos = await refundLoyaltyForOrderDiscount(tx, order.venueId, orderDiscount, staffId)
-    const premio = await refundStampRewardForOrderDiscount(tx, order.venueId, orderDiscount)
-    // R3-2: si la fila era espejo, su renglón deja de traer el descuento.
-    await revertirDescuentoDelRenglon(tx, orderId, orderDiscount)
-    await tx.orderDiscount.delete({ where: { id: orderDiscountId } })
-    // Codex r2 N2: quitar CUALQUIER fila libera lugar (las no espejo también consumen capacidad): las demás se re-reparten
-    // siempre, en esta misma transacción y antes de escribir los totales.
-    // Codex r2 N2/N3: primero vuelve el impuesto de la fila quitada —así el re-reparto de las demás lo tiene disponible—, luego
-    // se re-reparten (siempre) y al final se escriben los totales.
-    const devueltoDeLaFila = new Prisma.Decimal(orderDiscount.taxReduction ?? 0)
-    if (devueltoDeLaFila.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: devueltoDeLaFila } } })
-    const sincronizado = await sincronizarRepartos(tx, orderId)
+        // P3: devoluciones en ESTA transacción, con el tenant ya bloqueado (Order → Customer/StampReward, el orden de siempre).
+        // Hoy el premio quedaba REDEEMED apuntando a una fila borrada y los puntos no volvían.
+        const puntos = await refundLoyaltyForOrderDiscount(tx, order.venueId, orderDiscount, staffId)
+        const premio = await refundStampRewardForOrderDiscount(tx, order.venueId, orderDiscount)
+        // R3-2: si la fila era espejo, su renglón deja de traer el descuento.
+        await revertirDescuentoDelRenglon(tx, orderId, orderDiscount)
+        await tx.orderDiscount.delete({ where: { id: orderDiscountId } })
+        // Codex r2 N2: quitar CUALQUIER fila libera lugar (las no espejo también consumen capacidad): las demás se re-reparten
+        // siempre, en esta misma transacción y antes de escribir los totales.
+        // Codex r2 N2/N3: primero vuelve el impuesto de la fila quitada —así el re-reparto de las demás lo tiene disponible—, luego
+        // se re-reparten (siempre) y al final se escriben los totales.
+        const devueltoDeLaFila = new Prisma.Decimal(orderDiscount.taxReduction ?? 0)
+        if (devueltoDeLaFila.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: devueltoDeLaFila } } })
+        const sincronizado = await sincronizarRepartos(tx, orderId)
 
-    // Update order totals
-    const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount))
-    const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
-    // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
-    // not a tip and not a discount). It was omitted here, so removing a discount
-    // from a check that ALSO carried a service charge DROPPED the charge from the
-    // stored total and the customer underpaid.
-    //
-    // Reproduced on hardware against the real DB (NEXGO, 2026-08-06): should have
-    // recalculated $35 -> $55 and landed at $35. `order.mobile.service.ts` already
-    // included the charge; only this legacy path kept the old formula (since
-    // Nov 2025). The bug was LATENT: nobody could remove a discount from the TPV
-    // until that action was added, and that is what surfaced it.
-    // Misma función que los caminos de APLICAR: era la última copia a mano de la regla, y
-    // conservarla aparte es justo lo que dejó a los otros tres sin el cargo por servicio.
-    // Gana además el clamp de la mercancía, que aquí faltaba.
-    // 🔴 MONEY: aquí la base SUBE (se quita un descuento), así que un cargo PORCENTUAL sube
-    // con ella y el error va en la dirección contraria a los demás caminos: con el snapshot
-    // congelado el total sale BAJO y el NEGOCIO cobra de menos. Confirmado por Codex.
-    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
-    const newTotal = computeStoredOrderTotal({
-      subtotal: order.subtotal,
-      discountAmount: newDiscountAmount,
-      // P12: misma regla compartida que al aplicar.
-      contratoDePrecio: order.contratoDePrecio,
-      taxAmount: newTaxAmount,
-      status: order.status,
-      serviceChargeAmount: newServiceChargeAmount,
-      tipAmount: order.tipAmount,
-    }).toNumber()
+        // Update order totals
+        const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount))
+        const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
+        // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
+        // not a tip and not a discount). It was omitted here, so removing a discount
+        // from a check that ALSO carried a service charge DROPPED the charge from the
+        // stored total and the customer underpaid.
+        //
+        // Reproduced on hardware against the real DB (NEXGO, 2026-08-06): should have
+        // recalculated $35 -> $55 and landed at $35. `order.mobile.service.ts` already
+        // included the charge; only this legacy path kept the old formula (since
+        // Nov 2025). The bug was LATENT: nobody could remove a discount from the TPV
+        // until that action was added, and that is what surfaced it.
+        // Misma función que los caminos de APLICAR: era la última copia a mano de la regla, y
+        // conservarla aparte es justo lo que dejó a los otros tres sin el cargo por servicio.
+        // Gana además el clamp de la mercancía, que aquí faltaba.
+        // 🔴 MONEY: aquí la base SUBE (se quita un descuento), así que un cargo PORCENTUAL sube
+        // con ella y el error va en la dirección contraria a los demás caminos: con el snapshot
+        // congelado el total sale BAJO y el NEGOCIO cobra de menos. Confirmado por Codex.
+        const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
+        const newTotal = computeStoredOrderTotal({
+          subtotal: order.subtotal,
+          discountAmount: newDiscountAmount,
+          // P12: misma regla compartida que al aplicar.
+          contratoDePrecio: order.contratoDePrecio,
+          taxAmount: newTaxAmount,
+          status: order.status,
+          serviceChargeAmount: newServiceChargeAmount,
+          tipAmount: order.tipAmount,
+        }).toNumber()
 
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        discountAmount: newDiscountAmount,
-        taxAmount: newTaxAmount,
-        serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
-      },
-    })
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            discountAmount: newDiscountAmount,
+            taxAmount: newTaxAmount,
+            serviceChargeAmount: newServiceChargeAmount,
+            total: newTotal,
+            remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
+          },
+        })
 
-    // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
-    // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
-    if (orderDiscount.discountId && !orderDiscount.couponCodeId) {
-      await tx.discount.update({
-        where: { id: orderDiscount.discountId },
-        data: { currentUses: { decrement: 1 } },
-      })
-    }
+        // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
+        // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
+        if (orderDiscount.discountId && !orderDiscount.couponCodeId) {
+          await tx.discount.update({
+            where: { id: orderDiscount.discountId },
+            data: { currentUses: { decrement: 1 } },
+          })
+        }
 
-    logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
+        logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
 
-    audits.push({
-      staffId: staffId ?? null,
-      venueId: order.venueId,
-      action: 'DISCOUNT_REMOVED',
-      entity: 'Order',
-      entityId: orderId,
-      data: {
-        discountId: orderDiscount.discountId,
-        pointsRefunded: puntos?.pointsRefunded ?? 0,
-        stampRewardReturned: premio?.rewardId ?? null,
-      },
-    })
+        audits.push({
+          staffId: staffId ?? null,
+          venueId: order.venueId,
+          action: 'DISCOUNT_REMOVED',
+          entity: 'Order',
+          entityId: orderId,
+          data: {
+            discountId: orderDiscount.discountId,
+            pointsRefunded: puntos?.pointsRefunded ?? 0,
+            stampRewardReturned: premio?.rewardId ?? null,
+          },
+        })
 
-    return {
-      success: true,
-      amount: Number(orderDiscount.amount),
-      newOrderTotal: newTotal,
-    }
-  }, ORDER_LOCK_WAIT_BUDGET)
+        return {
+          success: true,
+          amount: Number(orderDiscount.amount),
+          newOrderTotal: newTotal,
+        }
+      })()
+      return { result, audits }
+    },
+    { etiqueta: 'removeDiscountFromOrder', ...ORDER_LOCK_WAIT_BUDGET },
+  )
   for (const audit of audits) void logAction(audit)
   return result
 }
@@ -1260,50 +1280,59 @@ export async function applyAutomaticDiscounts(
   appliedById?: string,
   venueId?: string,
 ): Promise<{ applied: DiscountCalculationResult[]; total: number }> {
-  const audits: LogActionParams[] = []
-  const result = await prisma.$transaction(async tx => {
-    const tenant = await lockDiscountOrder(tx, orderId, venueId)
-    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE }) : null
-    if (!order) throw new NotFoundError('Order not found')
-    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
-    // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
-    // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
-    // Rappi 2b (T10): tampoco un pedido de plataforma.
-    if (esOrdenImportada(order) || esPedidoDePlataforma(order)) return { applied: [], total: 0 }
-    // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
-    if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
+  // R65 b: las bitácoras nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01 no deja las suyas.
+  const { result, audits } = await withDeadlockRetry(
+    async tx => {
+      const audits: LogActionParams[] = []
+      const result = await (async () => {
+        const tenant = await lockDiscountOrder(tx, orderId, venueId)
+        const order = tenant
+          ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
+          : null
+        if (!order) throw new NotFoundError('Order not found')
+        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
+        // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
+        // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
+        // Rappi 2b (T10): tampoco un pedido de plataforma.
+        if (esOrdenImportada(order) || esPedidoDePlataforma(order)) return { applied: [], total: 0 }
+        // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
+        if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
 
-    const discounts = await evaluateOrderDiscounts(order, undefined, tx)
+        const discounts = await evaluateOrderDiscounts(order, undefined, tx)
 
-    const applied: DiscountCalculationResult[] = []
-    const usedDiscountIds: string[] = []
-    let totalDiscount = 0
+        const applied: DiscountCalculationResult[] = []
+        const usedDiscountIds: string[] = []
+        let totalDiscount = 0
 
-    for (const discount of discounts) {
-      // Skip discounts requiring approval in automatic mode
-      if (discount.requiresApproval) {
-        continue
-      }
+        for (const discount of discounts) {
+          // Skip discounts requiring approval in automatic mode
+          if (discount.requiresApproval) {
+            continue
+          }
 
-      const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
-      if (!current) throw new NotFoundError('Order not found')
-      const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, appliedById, undefined, usedDiscountIds)
+          const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
+          if (!current) throw new NotFoundError('Order not found')
+          const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, appliedById, undefined, usedDiscountIds)
 
-      if (outcome.success) {
-        applied.push(discount)
-        totalDiscount += discount.amount
-      }
-    }
+          if (outcome.success) {
+            applied.push(discount)
+            totalDiscount += discount.amount
+          }
+        }
 
-    // Usage counters go LAST and in ascending id order, so two batches never lock the same Discount rows in opposite
-    // orders (ABBA deadlock). Only when/in which order the counter rows are written changes — application order,
-    // amounts, caps and stacking above are untouched.
-    for (const id of usedDiscountIds.sort()) {
-      await tx.discount.update({ where: { id }, data: { currentUses: { increment: 1 } } })
-    }
+        // Usage counters go LAST and in ascending id order, so two batches never lock the same Discount rows in opposite
+        // orders (ABBA deadlock). Only when/in which order the counter rows are written changes — application order,
+        // amounts, caps and stacking above are untouched.
+        for (const id of usedDiscountIds.sort()) {
+          await tx.discount.update({ where: { id }, data: { currentUses: { increment: 1 } } })
+        }
 
-    return { applied, total: totalDiscount }
-  }, ORDER_LOCK_WAIT_BUDGET)
+        return { applied, total: totalDiscount }
+      })()
+      return { result, audits }
+    },
+    { etiqueta: 'applyAutomaticDiscounts', ...ORDER_LOCK_WAIT_BUDGET },
+  )
   for (const audit of audits) void logAction(audit)
   return result
 }

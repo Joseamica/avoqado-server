@@ -8,7 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
 import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
@@ -2016,7 +2016,7 @@ function descuentoDeLaSesion(
  * se borró después de abrir la sesión, la venta se registra igual con lo cobrado y la fila queda sin `discountId`: el dinero
  * ya se cobró, así que nunca lanza ni recalcula el precio.
  */
-async function contarUsoDelDescuento(tx: Prisma.TransactionClient, venueId: string, discountId: string | null): Promise<string | null> {
+async function contarUsoDelDescuento(tx: TxConReintento, venueId: string, discountId: string | null): Promise<string | null> {
   if (!discountId) return null
   const { count } = await tx.discount.updateMany({ where: { id: discountId, venueId }, data: { currentUses: { increment: 1 } } })
   return count > 0 ? discountId : null

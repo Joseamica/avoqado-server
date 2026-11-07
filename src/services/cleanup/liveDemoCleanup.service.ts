@@ -45,8 +45,6 @@ export const DELETION_TIMEOUT_MS = 60_000
 /** Espera por un lugar en el pool: en el minuto :00 este job compite con ~40 crones. */
 const DELETION_MAX_WAIT_MS = 10_000
 
-type DbClient = TxConReintento
-
 interface DisposableDemoSession {
   id: string
   venueId: string
@@ -144,7 +142,7 @@ function omitidaSinError(error: unknown, session: { sessionId: string; venue: { 
  * transacción. La AUDITORÍA sólo la del visitante del demo: el ActivityLog no cuelga del venue
  * y sobrevive a su borrado, así que la de cualquier otra persona se conserva como hasta hoy.
  */
-async function deleteDemoWasteTx(tx: DbClient, venueId: string, demoStaffId: string): Promise<number> {
+async function deleteDemoWasteTx(tx: TxConReintento, venueId: string, demoStaffId: string): Promise<number> {
   const movimientosDeInsumo = await tx.rawMaterialMovement.deleteMany({ where: { venueId, wasteReport: { venueId } } })
   const movimientosDeProducto = await tx.inventoryMovement.deleteMany({ where: { inventory: { venueId }, wasteReport: { venueId } } })
   const auditoria = await tx.activityLog.deleteMany({
@@ -343,7 +341,7 @@ export async function getLiveDemoStats(): Promise<{
  */
 // Exportada para el reinicio nocturno de los negocios demo (`services/demo/negociosDemo.service.ts`): la misma guardia
 // LIVE_DEMO protege los dos caminos.
-export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number> {
+export async function deleteVenueDataTx(tx: TxConReintento, venueId: string): Promise<number> {
   // 🔒 HARD GUARD — this function ERASES a venue and everything in it.
   // It must be physically impossible to point it at a real business: if a
   // LiveDemoSession row ever references a non-LIVE_DEMO venue (bug, manual

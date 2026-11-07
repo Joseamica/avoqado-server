@@ -8,6 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { ForbiddenError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
@@ -307,207 +308,210 @@ export async function applyCouponCode(
 
   // 🔴 Everything that decides the coupon — status, subtotal, applied discounts, customer, the coupon catalog and
   // its per-customer usage — is read under the canonical Order lock, in the SAME transaction that writes it.
-  const result = await prisma.$transaction(async (tx): Promise<ApplyCouponResult> => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
-      throw new NotFoundError('Order not found')
-    }
-    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
-    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
-    const order = await tx.order.findUnique({
-      where: { id: orderId, venueId },
-      include: { orderDiscounts: true },
-    })
-
-    if (!order) {
-      throw new NotFoundError('Order not found')
-    }
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cupones')
-
-    if (order.paymentStatus === 'PAID') {
-      return {
-        success: false,
-        discountName: '',
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'Cannot apply coupon to a paid order',
+  const result = await withDeadlockRetry(
+    async (tx): Promise<ApplyCouponResult> => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
       }
-    }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
+        include: { orderDiscounts: true },
+      })
 
-    // Validate coupon
-    const validation = await couponService.validateCouponCode(
-      venueId,
-      couponCode.toUpperCase(),
-      Number(order.subtotal),
-      order.customerId ?? undefined,
-      tx,
-    )
-
-    if (!validation.valid || !validation.coupon) {
-      return {
-        success: false,
-        discountName: '',
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: validation.error || 'Invalid coupon',
+      if (!order) {
+        throw new NotFoundError('Order not found')
       }
-    }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cupones')
 
-    const { coupon } = validation
-    const { discount } = coupon
-
-    // Check if this coupon's discount is already applied
-    const existingCouponDiscount = order.orderDiscounts.find(od => od.couponCodeId === coupon.id)
-    if (existingCouponDiscount) {
-      return {
-        success: false,
-        discountName: discount.name,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'This coupon has already been applied to this order',
+      if (order.paymentStatus === 'PAID') {
+        return {
+          success: false,
+          discountName: '',
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: 'Cannot apply coupon to a paid order',
+        }
       }
-    }
-    // D5 (Codex r3 #3): una orden lleva UN cupón: el canje es uno por orden (`CouponRedemption.orderId` único) y el segundo nunca contaría.
-    if (order.orderDiscounts.some(od => od.couponCodeId)) {
-      return {
-        success: false,
-        discountName: discount.name,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'Esta cuenta ya tiene un cupón. Quítalo antes de aplicar otro.',
+
+      // Validate coupon
+      const validation = await couponService.validateCouponCode(
+        venueId,
+        couponCode.toUpperCase(),
+        Number(order.subtotal),
+        order.customerId ?? undefined,
+        tx,
+      )
+
+      if (!validation.valid || !validation.coupon) {
+        return {
+          success: false,
+          discountName: '',
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: validation.error || 'Invalid coupon',
+        }
       }
-    }
-    // D14: regalar la cuenta con un cupón pide el permiso de cortesía, igual que la venta de D5 (`order.tpv.service.ts`). Antes del apartado.
-    if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías')
-    // D2 (Codex D1 r3 #1): un cupón no es la puerta de atrás de la «aprobación de gerente». Igual que el catálogo: una cortesía
-    // la aprueba `orders:comp` (arriba); un % o fijo que pide aprobación todavía no tiene aprobador y se rechaza.
-    if (discount.requiresApproval && discount.type !== 'COMP') {
-      return {
-        success: false,
-        discountName: discount.name,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'This discount requires manager approval',
+
+      const { coupon } = validation
+      const { discount } = coupon
+
+      // Check if this coupon's discount is already applied
+      const existingCouponDiscount = order.orderDiscounts.find(od => od.couponCodeId === coupon.id)
+      if (existingCouponDiscount) {
+        return {
+          success: false,
+          discountName: discount.name,
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: 'This coupon has already been applied to this order',
+        }
       }
-    }
-    // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
-    await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
-
-    // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
-    // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
-    // NEGATIVO, enmascarado como pagada por el Math.max(0,…) de remainingBalance. Bug real en prod
-    // (2026-07-30) por el camino gemelo del dashboard; este archivo tenía el defecto DUPLICADO.
-    // La rama COMP ya restaba lo aplicado; ahora las tres comparten base.
-    const subtotal = Number(order.subtotal)
-    const alreadyDiscounted = Number(order.discountAmount)
-    const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
-
-    if (remainingDiscountable <= 0) {
-      return {
-        success: false,
-        discountName: discount.name,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+      // D5 (Codex r3 #3): una orden lleva UN cupón: el canje es uno por orden (`CouponRedemption.orderId` único) y el segundo nunca contaría.
+      if (order.orderDiscounts.some(od => od.couponCodeId)) {
+        return {
+          success: false,
+          discountName: discount.name,
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: 'Esta cuenta ya tiene un cupón. Quítalo antes de aplicar otro.',
+        }
       }
-    }
+      // D14: regalar la cuenta con un cupón pide el permiso de cortesía, igual que la venta de D5 (`order.tpv.service.ts`). Antes del apartado.
+      if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías')
+      // D2 (Codex D1 r3 #1): un cupón no es la puerta de atrás de la «aprobación de gerente». Igual que el catálogo: una cortesía
+      // la aprueba `orders:comp` (arriba); un % o fijo que pide aprobación todavía no tiene aprobador y se rechaza.
+      if (discount.requiresApproval && discount.type !== 'COMP') {
+        return {
+          success: false,
+          discountName: discount.name,
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: 'This discount requires manager approval',
+        }
+      }
+      // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
+      await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
 
-    let discountAmount = 0
-    if (discount.type === 'PERCENTAGE') {
-      discountAmount = (remainingDiscountable * Number(discount.value)) / 100
-    } else if (discount.type === 'FIXED_AMOUNT') {
-      discountAmount = Math.min(Number(discount.value), remainingDiscountable)
-    } else if (discount.type === 'COMP') {
-      discountAmount = remainingDiscountable
-    }
+      // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
+      // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
+      // NEGATIVO, enmascarado como pagada por el Math.max(0,…) de remainingBalance. Bug real en prod
+      // (2026-07-30) por el camino gemelo del dashboard; este archivo tenía el defecto DUPLICADO.
+      // La rama COMP ya restaba lo aplicado; ahora las tres comparten base.
+      const subtotal = Number(order.subtotal)
+      const alreadyDiscounted = Number(order.discountAmount)
+      const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
 
-    // Apply max discount cap — un tope que no es nulo cuenta, incluido 0 (Codex r1).
-    if (discount.maxDiscountAmount != null) {
-      discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
-    }
+      if (remainingDiscountable <= 0) {
+        return {
+          success: false,
+          discountName: discount.name,
+          amount: 0,
+          newOrderTotal: Number(order.total),
+          error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+        }
+      }
 
-    // Defensa final: nunca más de lo que queda por descontar.
-    discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
+      let discountAmount = 0
+      if (discount.type === 'PERCENTAGE') {
+        discountAmount = (remainingDiscountable * Number(discount.value)) / 100
+      } else if (discount.type === 'FIXED_AMOUNT') {
+        discountAmount = Math.min(Number(discount.value), remainingDiscountable)
+      } else if (discount.type === 'COMP') {
+        discountAmount = remainingDiscountable
+      }
 
-    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-    // Create order discount record
-    const orderDiscount = await tx.orderDiscount.create({
-      data: {
-        orderId,
-        discountId: discount.id,
-        couponCodeId: coupon.id,
-        type: discount.type,
-        name: `${discount.name} (${couponCode.toUpperCase()})`,
-        value: Number(discount.value),
-        amount: discountAmount,
-        taxReduction: 0,
-        isAutomatic: false,
-        isManual: false,
-        appliedById: staffVenueId,
-        // B2: % de lo que queda (con promociones) ⇒ fila de CUENTA. R6: el tope del catálogo viaja en el reparto para que el
-        // siguiente recálculo lo respete (todo tope no nulo, incluido 0 — Codex r1 —, igual que el móvil y el motor).
-        reparto: comoJson(
-          nuevoRepartoDeCuenta({
-            conPromociones: true,
-            tope: discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null,
-          }),
-        ),
-      },
-    })
-    // Bajo el candado y ANTES de los totales: un fallo al escribirlos revierte también el reparto. B2b (D16): la
-    // sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
-    const sincronizado = await sincronizarRepartos(tx, orderId)
+      // Apply max discount cap — un tope que no es nulo cuenta, incluido 0 (Codex r1).
+      if (discount.maxDiscountAmount != null) {
+        discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
+      }
 
-    // Update order totals. El recorte de arriba ya garantiza newDiscountAmount <= subtotal;
-    // el clamp de la mercancía es cinturón-y-tirantes.
-    //
-    // 🔴 MONEY: la suma vive en `computeStoredOrderTotal` (shared/orderBalance.ts), no aquí.
-    // Escrita a mano OMITÍA `serviceChargeAmount` —ingreso gravable que SUMA al total y entra
-    // al corte y al CFDI—, así que aplicar un cupón borraba el cargo del total guardado.
-    const newDiscountAmount = alreadyDiscounted + discountAmount
-    // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
-    // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
-    // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
-    // verdad se cobra— lee el snapshot y no las filas.
-    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
-    const newTotal = computeStoredOrderTotal({
-      subtotal,
-      discountAmount: newDiscountAmount,
-      // P12: el IVA entra con la regla compartida (contrato y estado de la relectura bajo el candado).
-      contratoDePrecio: order.contratoDePrecio,
-      taxAmount: new Prisma.Decimal(order.taxAmount).plus(sincronizado.impuestoDevuelto),
-      status: order.status,
-      serviceChargeAmount: newServiceChargeAmount,
-      tipAmount: order.tipAmount,
-    }).toNumber()
+      // Defensa final: nunca más de lo que queda por descontar.
+      discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
 
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
+      // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+      await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+      // Create order discount record
+      const orderDiscount = await tx.orderDiscount.create({
+        data: {
+          orderId,
+          discountId: discount.id,
+          couponCodeId: coupon.id,
+          type: discount.type,
+          name: `${discount.name} (${couponCode.toUpperCase()})`,
+          value: Number(discount.value),
+          amount: discountAmount,
+          taxReduction: 0,
+          isAutomatic: false,
+          isManual: false,
+          appliedById: staffVenueId,
+          // B2: % de lo que queda (con promociones) ⇒ fila de CUENTA. R6: el tope del catálogo viaja en el reparto para que el
+          // siguiente recálculo lo respete (todo tope no nulo, incluido 0 — Codex r1 —, igual que el móvil y el motor).
+          reparto: comoJson(
+            nuevoRepartoDeCuenta({
+              conPromociones: true,
+              tope: discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null,
+            }),
+          ),
+        },
+      })
+      // Bajo el candado y ANTES de los totales: un fallo al escribirlos revierte también el reparto. B2b (D16): la
+      // sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
+      const sincronizado = await sincronizarRepartos(tx, orderId)
+
+      // Update order totals. El recorte de arriba ya garantiza newDiscountAmount <= subtotal;
+      // el clamp de la mercancía es cinturón-y-tirantes.
+      //
+      // 🔴 MONEY: la suma vive en `computeStoredOrderTotal` (shared/orderBalance.ts), no aquí.
+      // Escrita a mano OMITÍA `serviceChargeAmount` —ingreso gravable que SUMA al total y entra
+      // al corte y al CFDI—, así que aplicar un cupón borraba el cargo del total guardado.
+      const newDiscountAmount = alreadyDiscounted + discountAmount
+      // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
+      // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
+      // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
+      // verdad se cobra— lee el snapshot y no las filas.
+      const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
+      const newTotal = computeStoredOrderTotal({
+        subtotal,
         discountAmount: newDiscountAmount,
+        // P12: el IVA entra con la regla compartida (contrato y estado de la relectura bajo el candado).
+        contratoDePrecio: order.contratoDePrecio,
+        taxAmount: new Prisma.Decimal(order.taxAmount).plus(sincronizado.impuestoDevuelto),
+        status: order.status,
         serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
-      },
-    })
+        tipAmount: order.tipAmount,
+      }).toNumber()
 
-    // NOTE: Coupon redemption and usage counter increment moved to payment completion
-    // See finalizeCouponsForOrder() in payment.tpv.service.ts
-    // This follows Toast/Square best practice: coupons are "applied" at checkout
-    // but only "redeemed" (counted against limits) when payment succeeds.
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          discountAmount: newDiscountAmount,
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
+        },
+      })
 
-    return {
-      success: true,
-      orderDiscountId: orderDiscount.id,
-      couponId: coupon.id,
-      discountName: discount.name,
-      amount: discountAmount,
-      newOrderTotal: newTotal,
-    }
-  }, ORDER_LOCK_WAIT_BUDGET)
+      // NOTE: Coupon redemption and usage counter increment moved to payment completion
+      // See finalizeCouponsForOrder() in payment.tpv.service.ts
+      // This follows Toast/Square best practice: coupons are "applied" at checkout
+      // but only "redeemed" (counted against limits) when payment succeeds.
+
+      return {
+        success: true,
+        orderDiscountId: orderDiscount.id,
+        couponId: coupon.id,
+        discountName: discount.name,
+        amount: discountAmount,
+        newOrderTotal: newTotal,
+      }
+    },
+    { etiqueta: 'applyCouponCode', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   if (result.success) logger.info(`✅ Coupon applied: ${couponCode} (-$${result.amount})`, { venueId, orderId })
 

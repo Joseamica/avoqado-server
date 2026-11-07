@@ -1,5 +1,6 @@
 import { isOrderFullyReversed } from './referralReversalPolicy.service'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { Prisma, ReferralRewardGrant, ReferralTier } from '@prisma/client'
 import { computeTier, tierToLevel } from './referralQualification.service'
@@ -45,7 +46,7 @@ export async function isRewardRedeemed(discountId: string, tx: TxClient | typeof
  * already inside a transaction (e.g. `onOrderRefunded`) MUST use this
  * directly so every write in the refund flow lands in ONE transaction.
  */
-async function revokeTierRewardInTx(tx: TxClient, discountId: string, reason: string): Promise<void> {
+async function revokeTierRewardInTx(tx: TxConReintento, discountId: string, reason: string): Promise<void> {
   await tx.discount.update({
     where: { id: discountId },
     data: {
@@ -73,9 +74,12 @@ async function revokeTierRewardInTx(tx: TxClient, discountId: string, reason: st
  * commits or rolls back together.
  */
 export async function revokeTierReward(discountId: string, reason: string): Promise<void> {
-  await prisma.$transaction(async tx => {
-    await revokeTierRewardInTx(tx, discountId, reason)
-  })
+  await withDeadlockRetry(
+    async tx => {
+      await revokeTierRewardInTx(tx, discountId, reason)
+    },
+    { etiqueta: 'revokeTierReward' },
+  )
 }
 
 export interface OnOrderRefundedInput {
@@ -184,7 +188,7 @@ function levelOf(tier: ReferralTier | null): number {
  *     CouponCode (+ CustomerDiscount), grant → REVOKED.
  * Returns the grant id if it was REVOKED (for the ActivityLog summary).
  */
-async function revokePercentCouponGrant(tx: TxClient, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+async function revokePercentCouponGrant(tx: TxConReintento, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
   if (grant.status !== 'ISSUED') return null
 
   const redeemed = grant.discountId ? await isRewardRedeemed(grant.discountId, tx) : false
@@ -220,7 +224,7 @@ async function revokePercentCouponGrant(tx: TxClient, grant: ReferralRewardGrant
  *     grant → REVOKED with a reason documenting why — it must NEVER stay
  *     ISSUED (that would be a lie: the reward is gone, applied or not).
  */
-async function revokePermanentDiscountGrant(tx: TxClient, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+async function revokePermanentDiscountGrant(tx: TxConReintento, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
   if (grant.status !== 'ISSUED') return null
 
   const applied = grant.discountId ? await tx.orderDiscount.findFirst({ where: { discountId: grant.discountId } }) : null
@@ -242,7 +246,7 @@ async function revokePermanentDiscountGrant(tx: TxClient, grant: ReferralRewardG
  *   - `MANUAL_FULFILLED` (already handed over) → left alone, nothing to
  *     claw back from a physical product already given.
  */
-async function revokeFreeProductGrant(tx: TxClient, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+async function revokeFreeProductGrant(tx: TxConReintento, grant: ReferralRewardGrant, reason: string): Promise<string | null> {
   if (grant.status !== 'MANUAL_PENDING') return null
 
   await tx.referralRewardGrant.update({
@@ -299,85 +303,88 @@ async function revokeFreeProductGrant(tx: TxClient, grant: ReferralRewardGrant, 
  *      tier + the list of revoked grant ids so finance can reconcile.
  */
 export async function revertQualifiedReferral(input: RevertReferralRewardInput): Promise<void> {
-  await prisma.$transaction(async tx => {
-    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
-    if (!(await isOrderFullyReversed(input.orderId, input.venueId, tx))) return
-    await tx.referral.updateMany({
-      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
-    })
-    const referral = await tx.referral.findFirst({
-      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
-    })
-    if (!referral) return
+  await withDeadlockRetry(
+    async tx => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
+      if (!(await isOrderFullyReversed(input.orderId, input.venueId, tx))) return
+      await tx.referral.updateMany({
+        where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
+        data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
+      })
+      const referral = await tx.referral.findFirst({
+        where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
+      })
+      if (!referral) return
 
-    await tx.referral.update({
-      where: { id: referral.id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
-    })
+      await tx.referral.update({
+        where: { id: referral.id },
+        data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
+      })
 
-    const referrer = await tx.customer.update({
-      where: { id: referral.referrerCustomerId },
-      data: { referralCount: { decrement: 1 } },
-    })
+      const referrer = await tx.customer.update({
+        where: { id: referral.referrerCustomerId },
+        data: { referralCount: { decrement: 1 } },
+      })
 
-    const config = await tx.referralProgramConfig.findUnique({
-      where: { venueId: input.venueId },
-    })
-    if (!config) return
+      const config = await tx.referralProgramConfig.findUnique({
+        where: { venueId: input.venueId },
+      })
+      if (!config) return
 
-    const newTier = computeTier(referrer.referralCount, config)
-    if (newTier === referrer.referralTier) return
+      const newTier = computeTier(referrer.referralCount, config)
+      if (newTier === referrer.referralTier) return
 
-    // Tier dropped — revoke every grant the referrer no longer qualifies
-    // for, scoped by customer + tier level (NOT referralId — see the
-    // function doc above for why that would silently under-revoke).
-    const grants = await tx.referralRewardGrant.findMany({
-      where: {
-        customerId: referral.referrerCustomerId,
-        tierLevel: { gt: levelOf(newTier) },
-        status: { in: ['ISSUED', 'MANUAL_PENDING'] },
-      },
-    })
-
-    const revokedGrantIds: string[] = []
-    for (const grant of grants) {
-      let revokedId: string | null = null
-      if (grant.rewardType === 'PERCENT_COUPON') {
-        revokedId = await revokePercentCouponGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
-      } else if (grant.rewardType === 'PERMANENT_DISCOUNT') {
-        revokedId = await revokePermanentDiscountGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
-      } else if (grant.rewardType === 'FREE_PRODUCT') {
-        revokedId = await revokeFreeProductGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
-      }
-      if (revokedId) revokedGrantIds.push(revokedId)
-    }
-
-    await tx.customer.update({
-      where: { id: referrer.id },
-      data: {
-        referralTier: newTier,
-        tierUnlockedAt: newTier ? referrer.tierUnlockedAt : null,
-      },
-    })
-
-    await tx.activityLog.create({
-      data: {
-        venueId: input.venueId,
-        action: 'REFERRAL_TIER_REVERSED',
-        entity: 'Customer',
-        entityId: referrer.id,
-        data: {
-          previousTier: referrer.referralTier,
-          newTier,
-          triggeringReferralId: referral.id,
-          refundedOrderId: input.orderId,
-          revertReason: input.reason,
-          revokedGrantIds,
+      // Tier dropped — revoke every grant the referrer no longer qualifies
+      // for, scoped by customer + tier level (NOT referralId — see the
+      // function doc above for why that would silently under-revoke).
+      const grants = await tx.referralRewardGrant.findMany({
+        where: {
+          customerId: referral.referrerCustomerId,
+          tierLevel: { gt: levelOf(newTier) },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
         },
-      },
-    })
-  })
+      })
+
+      const revokedGrantIds: string[] = []
+      for (const grant of grants) {
+        let revokedId: string | null = null
+        if (grant.rewardType === 'PERCENT_COUPON') {
+          revokedId = await revokePercentCouponGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
+        } else if (grant.rewardType === 'PERMANENT_DISCOUNT') {
+          revokedId = await revokePermanentDiscountGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
+        } else if (grant.rewardType === 'FREE_PRODUCT') {
+          revokedId = await revokeFreeProductGrant(tx, grant, 'TIER_REVERSED_BY_REFUND')
+        }
+        if (revokedId) revokedGrantIds.push(revokedId)
+      }
+
+      await tx.customer.update({
+        where: { id: referrer.id },
+        data: {
+          referralTier: newTier,
+          tierUnlockedAt: newTier ? referrer.tierUnlockedAt : null,
+        },
+      })
+
+      await tx.activityLog.create({
+        data: {
+          venueId: input.venueId,
+          action: 'REFERRAL_TIER_REVERSED',
+          entity: 'Customer',
+          entityId: referrer.id,
+          data: {
+            previousTier: referrer.referralTier,
+            newTier,
+            triggeringReferralId: referral.id,
+            refundedOrderId: input.orderId,
+            revertReason: input.reason,
+            revokedGrantIds,
+          },
+        },
+      })
+    },
+    { etiqueta: 'revertQualifiedReferral' },
+  )
 }
 
 /**

@@ -673,7 +673,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
   // aterriza degrada al default seguro (sin consentimiento) y no merece bloquear el resto del
   // update; un opt-out (revoke) es evidencia legal de que la persona YA NO quiere marketing —
   // perderlo en silencio es peor que rechazar el PUT entero, así que su excepción se PROPAGA
-  // (fail CLOSED) y nada se escribe (corre antes del `prisma.customer.update` de abajo).
+  // (fail CLOSED) y nada se escribe (corre antes del `withDeadlockRetry(… customer.update …)` de abajo).
   let consentWarning: ConsentWarning | undefined
   if (data.marketingConsent !== undefined && data.marketingConsent !== existingCustomer.marketingConsent) {
     if (data.marketingConsent) {

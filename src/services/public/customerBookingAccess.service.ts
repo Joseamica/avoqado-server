@@ -176,7 +176,7 @@ export async function activateCustomerAccount(
  * espera, y `withSerializableRetry` reintenta al perdedor. Con el switch apagado no lee nada.
  */
 export async function assertCustomerCanCreateReservation(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: { customerId: string | null | undefined; venueId: string },
 ): Promise<void> {
   if (!(await venueRequiresApproval(tx, input.venueId))) return // switch apagado: ni se lee

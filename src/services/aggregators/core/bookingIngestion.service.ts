@@ -3,7 +3,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { NotFoundError } from '@/errors/AppError'
-import { withSerializableRetry } from '@/utils/serializableRetry'
+import { withSerializableRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { generateConfirmationCode } from '@/services/dashboard/reservation.dashboard.service'
 import { LockedClassSession, lockClassSession, sumOccupiedSeats, sumPassSeats } from '@/services/reservation/classBooking.service'
@@ -63,7 +63,7 @@ export async function ingestBookingRequested(conn: Conn, ev: BookingEv, now: Dat
   return finish(conn, ev, outcome)
 }
 
-async function decideTx(tx: Prisma.TransactionClient, conn: Conn, ev: BookingEv, classSessionId: string, now: Date): Promise<Outcome> {
+async function decideTx(tx: TxConReintento, conn: Conn, ev: BookingEv, classSessionId: string, now: Date): Promise<Outcome> {
   let session: LockedClassSession
   try {
     session = await lockClassSession(tx, conn.venueId, classSessionId)

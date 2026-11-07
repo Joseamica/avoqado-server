@@ -15,6 +15,7 @@
 
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -111,7 +112,10 @@ export async function compOrderItemInTransaction(
 export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
   const { venueId, orderId, itemId, reason, staffId } = params
 
-  const { item, totals, recorte } = await prisma.$transaction(tx => compOrderItemInTransaction(tx, params), ORDER_LOCK_WAIT_BUDGET)
+  const { item, totals, recorte } = await withDeadlockRetry(tx => compOrderItemInTransaction(tx, params), {
+    etiqueta: 'compOrderItem',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
 
   void logAction({
     action: 'ORDER_ITEM_COMPED',
@@ -198,10 +202,10 @@ export async function compWholeOrderInTransaction(
 export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
   const { venueId, orderId, reason, staffId } = params
 
-  const { order, items, compedAmount, totals, recorte } = await prisma.$transaction(
-    tx => compWholeOrderInTransaction(tx, params),
-    ORDER_LOCK_WAIT_BUDGET,
-  )
+  const { order, items, compedAmount, totals, recorte } = await withDeadlockRetry(tx => compWholeOrderInTransaction(tx, params), {
+    etiqueta: 'compWholeOrder',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
 
   void logAction({
     action: 'ORDER_COMPED',
