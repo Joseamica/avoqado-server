@@ -11,6 +11,13 @@ jest.mock('@/services/whatsapp.service', () => ({
 }))
 jest.mock('@/services/online-ordering/card/confirm.service', () => ({ __esModule: true, confirmCardAuthorization: jest.fn() }))
 
+const mockRejectOnlineOrder = jest.fn()
+jest.mock('@/services/online-ordering/transitions.service', () => ({
+  __esModule: true,
+  rejectOnlineOrder: (...a: unknown[]) => mockRejectOnlineOrder(...a),
+}))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ __esModule: true, logAction: jest.fn() }))
+
 const mockGetAuthorization = jest.fn()
 jest.mock('@/services/payments/provider-registry', () => ({
   __esModule: true,
@@ -19,6 +26,7 @@ jest.mock('@/services/payments/provider-registry', () => ({
 
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * Fase 2 (tarea 5): los avisos de un pedido en línea con tarjeta tienen su propia rama, ANTES del corte `payment_status !== 'paid'`
@@ -74,6 +82,24 @@ describe('avisos de Stripe de un pedido en línea con tarjeta', () => {
       data: { status: 'RELEASED', releasedAt: expect.any(Date) },
     })
     expect(confirmCardAuthorization).not.toHaveBeenCalled()
+  })
+
+  it('[repetirNoDuplica:reservation-deposit-webhook] un CAS que ganó en un intento ABORTADO (40P01) no deja `released`: si el ganador perdió el CAS, no hay bitácora', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(cargo('AUTHORIZED', { onlineOrder: { orderId: 'o1' } }) as any)
+    // intento 1: el CAS gana (count 1) y la transacción se aborta; intento 2 (el que hace commit): otro ya lo liberó (count 0); y el CAS de afuera también pierde.
+    prismaMock.onlineOrderCharge.updateMany
+      .mockResolvedValueOnce({ count: 1 } as any)
+      .mockResolvedValueOnce({ count: 0 } as any)
+      .mockResolvedValue({ count: 0 } as any)
+    mockRejectOnlineOrder.mockImplementationOnce(async (a: any) => {
+      await a.afterCas(prismaMock, {}) // intento abortado: su valor se descarta
+      const ganador = await a.afterCas(prismaMock, {})
+      a.alConfirmar(ganador)
+    })
+
+    await processStripeConnectWebhookEvent(event('payment_intent.canceled', { id: 'pi_1', metadata: META }))
+
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('payment_intent.canceled sobre un borrador no lo abandona a ciegas: relee la sesión propia (confirmar)', async () => {

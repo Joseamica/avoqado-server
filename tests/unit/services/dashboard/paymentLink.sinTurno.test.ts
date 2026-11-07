@@ -131,7 +131,7 @@ describe('completeCharge (liga de pago) — la orden NO se ata al turno abierto 
   })
 })
 
-describe('completeCharge (liga de pago) — S5b: la red por traba (40P01) publica sólo el intento ganador', () => {
+describe('[repetirNoDuplica:completeCharge] completeCharge (liga de pago) — S5b: la red por traba (40P01) publica sólo el intento ganador', () => {
   it('el vale (posting) sale del retorno del intento ganador y se aplica UNA sola vez', async () => {
     const { createSalePostingInTx, applySalePosting } = jest.requireMock('@/services/inventory/inventoryPosting.service') as {
       createSalePostingInTx: jest.Mock

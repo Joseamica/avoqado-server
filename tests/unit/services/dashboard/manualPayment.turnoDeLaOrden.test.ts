@@ -250,3 +250,33 @@ describe('createManualPayment — el conteo de cobros previos de una orden exist
     expect(shiftUpdateMany).not.toHaveBeenCalled()
   })
 })
+
+describe('createManualPayment — la red por traba (40P01), R65 b', () => {
+  it('[repetirNoDuplica:createManualPayment] la lealtad y las métricas van con la orden del intento GANADOR y salen una sola vez', async () => {
+    const { earnPoints } = jest.requireMock('@/services/dashboard/loyalty.dashboard.service') as { earnPoints: jest.Mock }
+    const { updateCustomerMetrics } = jest.requireMock('@/services/dashboard/customer.dashboard.service') as {
+      updateCustomerMetrics: jest.Mock
+    }
+    const { orderCreate } = transaccion({ id: 'turno-negocio', status: 'OPEN' })
+    orderCreate.mockReset()
+    orderCreate.mockResolvedValueOnce({ id: 'shadow-1' }).mockResolvedValueOnce({ id: 'shadow-2' })
+    const hacerTx = (prismaMock.$transaction as jest.Mock).getMockImplementation()!
+    let llamada = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any, opts: any) => {
+      const r = await hacerTx(cb, opts)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+    earnPoints.mockClear()
+    updateCustomerMetrics.mockClear()
+
+    await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoSuelto, customerId: 'customer-1' })
+
+    expect(llamada).toBe(2)
+    expect(orderCreate).toHaveBeenCalledTimes(2)
+    expect(earnPoints).toHaveBeenCalledTimes(1)
+    expect(earnPoints.mock.calls[0][3]).toBe('shadow-2')
+    expect(updateCustomerMetrics).toHaveBeenCalledTimes(1)
+    expect(updateCustomerMetrics.mock.calls[0][2]).toBe('shadow-2')
+  })
+})

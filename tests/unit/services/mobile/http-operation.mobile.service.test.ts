@@ -358,7 +358,7 @@ test('finite payloads, strict refs, comp reason and split elements reject malfor
   }
 })
 
-describe('executeHttpOperation — la red por traba (40P01), R65 b', () => {
+describe('[repetirNoDuplica:executeHttpOperation] executeHttpOperation — la red por traba (40P01), R65 b', () => {
   it('lo que el manejador deja para la bitácora (`audit`) sale del intento GANADOR, no del abortado', async () => {
     // El doble global no modela `posSyncIntent`: se arma aquí con lo mínimo que toca el camino feliz y se RESTAURA al terminar.
     const posSyncIntentOriginal = (prismaMock as any).posSyncIntent

@@ -1288,7 +1288,7 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
     )
   })
 
-  it('🔴 S5b · tras un 40P01 sólo cuenta el intento ganador: lo liquidado, el vale y el aviso salen de su retorno', async () => {
+  it('[repetirNoDuplica:settleCustomerBalance] 🔴 S5b · tras un 40P01 sólo cuenta el intento ganador: lo liquidado, el vale y el aviso salen de su retorno', async () => {
     const { applySalePosting } = jest.requireMock('@/services/inventory/inventoryPosting.service') as { applySalePosting: jest.Mock }
     prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
     // Intento 1: gana el CAS, crea pago y vale y LUEGO Postgres lo aborta. Intento 2: la cuenta ya no está pendiente (otro camino la cobró).

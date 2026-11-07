@@ -199,16 +199,20 @@ describe('cleanDemoData (trial→real conversion)', () => {
       prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
     })
 
-    it('los conteos son los del segundo intento, no los del abortado', async () => {
-      ;(prismaMock.payment.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 5 }).mockResolvedValue({ count: 2 })
+    it('[repetirNoDuplica:cleanDemoData] los conteos del intento ABORTADO no se cuelan: si el ganador se salta (GIFT_CARDS), nada de lo que borró el primero queda en el resultado', async () => {
+      // Intento 1: sin tarjetas ⇒ borra (cuenta 5 pagos) y se aborta. Intento 2: ya hay una tarjeta vendida ⇒ salta sin borrar nada.
+      ;(prismaMock.payment.deleteMany as jest.Mock).mockResolvedValue({ count: 5 })
+      ;(prismaMock.giftCard.findFirst as jest.Mock).mockResolvedValueOnce(null).mockResolvedValue({ id: 'gc1' })
       abortarElPrimerIntento()
 
       const r = await cleanDemoData(VENUE_ID)
 
-      expect(r.deletedPayments).toBe(2)
+      expect(r.skippedReason).toBe('GIFT_CARDS')
+      expect(r.deletedPayments).toBe(0)
+      expect(r.deletedOrders).toBe(0)
     })
 
-    it('un «salto» (GIFT_CARDS) del intento abortado no se queda pegado al resultado del ganador', async () => {
+    it('[repetirNoDuplica:cleanDemoData] un «salto» (GIFT_CARDS) del intento abortado no se queda pegado al resultado del ganador', async () => {
       ;(prismaMock.giftCard.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'gc1' }).mockResolvedValue(null)
       abortarElPrimerIntento()
 

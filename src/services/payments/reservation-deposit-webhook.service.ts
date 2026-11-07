@@ -699,14 +699,16 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
         return
       }
       // Apartado (o liberándose) → liberado. Sólo por CAS: lo demás ya tiene su desenlace.
+      // R65 b: `released` NUNCA se asigna desde el cuerpo reintentable; sale del retorno de `markReleased` en el intento que hizo commit
+      // (`alConfirmar`) o del último intento fuera de la transacción. Un intento abortado por 40P01 no deja un `true` que duplique la bitácora.
       let released = false
-      const markReleased = async (db: Prisma.TransactionClient) => {
+      const markReleased = async (db: Prisma.TransactionClient): Promise<boolean> => {
         const r = await db.onlineOrderCharge.updateMany({
           where: { id: chargeId, status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.RELEASING] } },
           data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
         })
         // ponytail: si la transacción del rechazo se revierte después de ganar aquí, el CAS de afuera vuelve a ganar: una bitácora.
-        if (r.count === 1) released = true
+        return r.count === 1
       }
       // Ruling T6: un pedido por aceptar cuya tarjeta soltó Stripe ya no tiene con qué cobrarse: se rechaza con PAYMENT_FAILED en
       // la MISMA transacción que libera el cargo.
@@ -718,10 +720,13 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
           staffId: null,
           reason: OnlineOrderRejectReason.PAYMENT_FAILED,
           afterCas: markReleased,
+          alConfirmar: valor => {
+            if (valor === true) released = true
+          },
         })
       }
       // Sin pedido, ya rechazado o si la transición se revirtió: el cargo igual queda liberado.
-      await markReleased(prisma)
+      if (await markReleased(prisma)) released = true
       if (released) {
         void logAction({
           venueId: charge.venueId,

@@ -13,6 +13,7 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { $transaction: jest.fn() } }))
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+import { logAction } from '@/services/dashboard/activity-log.service'
 jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderCancelled: jest.fn() }))
 jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({ getProductInventoryStatus: jest.fn() }))
 jest.mock('@/services/modules/module.service', () => ({
@@ -801,5 +802,43 @@ describe('D5: un update que hereda la nota de una fila vieja', () => {
     await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'fila-vieja' }], 1, true)
 
     expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
+  })
+})
+
+describe('S5b — la red por traba (40P01): lo que sale tras el commit es del intento ganador (R65 b)', () => {
+  it('[repetirNoDuplica:voidItems] anular: los vales que soltó el intento abortado (anuló TODO) no se firman si el ganador anuló sólo una parte', async () => {
+    const areaTicket = await import('@/services/mobile/areaTicketV7.mobile.service')
+    const soltar = jest
+      .spyOn(areaTicket, 'soltarValesAlCancelarLaVenta')
+      .mockResolvedValue({ sessionId: 'sesion-1', ticketIds: ['t1'] } as any)
+    const otra = {
+      ...line,
+      id: 'otra',
+      taxAmount: new Prisma.Decimal(0),
+      discountAmount: new Prisma.Decimal(0),
+      orderPromotionId: null,
+      isCortesia: false,
+      product: { categoryId: 'c1' },
+    }
+    let llamada = 0
+    globalDb.$transaction.mockImplementation(async (callback: any) => {
+      const r = await callback(tx)
+      if (++llamada === 1) {
+        // Intento 1 anuló la ÚNICA línea (soltó los vales) y se abortó; en el 2 ya hay otra línea: sólo es parcial.
+        tx.order.findUnique.mockResolvedValue({ ...order(), items: [line, otra] })
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      }
+      return r
+    })
+    ;(logAction as jest.Mock).mockClear()
+    try {
+      await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+
+      expect(llamada).toBe(2)
+      expect(soltar).toHaveBeenCalledTimes(1) // sólo el intento 1
+      expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'AREA_TICKET_CHECKOUT_CANCELLED')).toHaveLength(0)
+    } finally {
+      soltar.mockRestore()
+    }
   })
 })

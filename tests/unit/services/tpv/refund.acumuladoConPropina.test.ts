@@ -606,7 +606,7 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
   })
 })
 
-describe('S5b — recordRefund: la red por traba (40P01) deja sólo el intento ganador', () => {
+describe('[repetirNoDuplica:recordRefund] S5b — recordRefund: la red por traba (40P01) deja sólo el intento ganador', () => {
   it('el reparto venta/propina nace dentro de cada intento y el efecto del cajón sale UNA vez', async () => {
     const { postCashRefundToDrawer } = jest.requireMock('@/services/shared/cashDrawerPosting') as { postCashRefundToDrawer: jest.Mock }
     armar({}, [])

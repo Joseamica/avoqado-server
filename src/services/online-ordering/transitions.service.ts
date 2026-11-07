@@ -284,21 +284,27 @@ export async function netoCobradoPorCuenta(
   return new Map(filas.map(f => [f.orderId, new Prisma.Decimal(f._sum.amount ?? 0).plus(f._sum.tipAmount ?? 0)]))
 }
 
-/** Escritura extra en la MISMA transacción, después del CAS (fase 2: el estado del cargo de tarjeta). Lanzar revierte todo. */
-export type AfterCasInTx = (tx: TxConReintento, r: CasResult) => Promise<void>
+/**
+ * Escritura extra en la MISMA transacción, después del CAS (fase 2: el estado del cargo de tarjeta). Lanzar revierte todo. Lo que
+ * devuelve sale (por `alConfirmar`) SÓLO del intento que hizo commit: nada se asigna afuera desde el cuerpo reintentable (R65 b).
+ */
+export type AfterCasInTx = (tx: TxConReintento, r: CasResult) => Promise<unknown>
 
 /** `casTransitionInTx` en su propia transacción, con el presupuesto del candado de la orden. */
-async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasResult> {
+async function casTransition(a: CasArgs, afterCas?: AfterCasInTx, alConfirmar?: (valor: unknown) => void): Promise<CasResult> {
   let result: CasResult
   try {
-    result = await withDeadlockRetry(
+    const hecho = await withDeadlockRetry(
       async tx => {
         const r = await casTransitionInTx(tx, a)
-        if (afterCas) await afterCas(tx, r)
-        return r
+        const valor = afterCas ? await afterCas(tx, r) : undefined
+        return { r, valor }
       },
       { etiqueta: 'casTransition', ...ORDER_LOCK_WAIT_BUDGET },
     )
+    result = hecho.r
+    // Ya con la transacción confirmada: el valor es el del intento ganador (un intento abortado por 40P01 no deja nada).
+    alConfirmar?.(hecho.valor)
   } catch (error) {
     if (!(error instanceof OrderNotWritten)) throw error
     const current = await prisma.onlineOrder.findFirst({ where: { orderId: a.orderId, venueId: a.venueId }, select: { status: true } })
@@ -428,6 +434,8 @@ export async function rejectOnlineOrder(i: {
   allowCapturing?: true
   /** Fase 2: lo que el cargo escribe en la MISMA transacción (captura fallida, aviso de Stripe de «cancelado»). */
   afterCas?: AfterCasInTx
+  /** Después del commit: recibe lo que devolvió `afterCas` en el intento que confirmó. */
+  alConfirmar?: (valor: unknown) => void
 }): Promise<TransitionResult> {
   const r = await casTransition(
     {
@@ -439,6 +447,7 @@ export async function rejectOnlineOrder(i: {
       onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
     },
     i.afterCas,
+    i.alConfirmar,
   )
   if (r.r !== 'OK') return settled(r)
   if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)

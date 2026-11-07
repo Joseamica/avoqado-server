@@ -471,7 +471,7 @@ describe('getStampCardStatus', () => {
   })
 })
 
-describe('reverseStampForOrder: la red por traba (40P01) publica sólo el intento ganador (R65 b)', () => {
+describe('[repetirNoDuplica:reverseStampForOrder] reverseStampForOrder: la red por traba (40P01) publica sólo el intento ganador (R65 b)', () => {
   const traba = () => Object.assign(new Error('deadlock detected'), { code: '40P01' })
 
   beforeEach(() => {
