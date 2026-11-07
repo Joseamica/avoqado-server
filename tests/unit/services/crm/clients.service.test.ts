@@ -1716,7 +1716,9 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
 
 describe('C2 Tarea 5: lo vivo gana Usa, último cobro, «Cobrado · 30 días» y RFC', () => {
   function linked(
-    venues = [{ id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', demoExpiresAt: null, _count: { terminals: 2 } }],
+    venues: Array<Record<string, unknown>> = [
+      { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', demoExpiresAt: null, _count: { terminals: 2 } },
+    ],
   ) {
     prismaMock.crmAccount.findFirst.mockResolvedValue({ organizationId: ORG })
     prismaMock.venue.findMany.mockResolvedValue(venues)
