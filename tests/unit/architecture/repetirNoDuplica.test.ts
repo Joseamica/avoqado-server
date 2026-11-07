@@ -29,26 +29,25 @@ const DELAS_APERTURAS = Object.entries(revisado.aperturas as Record<string, { no
 const ADICIONALES = [
   'executeHttpOperation', // 15 handlers de mobile por un solo opener
   'reservation-deposit-webhook', // `released` sale del retorno del CAS (alConfirmar), no del cuerpo
+  'reconcileDeliveryOrderFromProvider', // `cerradoEnProveedor` y `selloPorRevertir` nacen dentro del intento
 ]
-/** Sin caso de unidad (se dice en el reporte): `reconcileDeliveryOrderFromProvider` sólo tiene andamiaje de integración. */
-const SOLO_ESTRUCTURAL = new Set(['reconcileDeliveryOrderFromProvider'])
-
 const textos = archivosDeTest(path.join(RAIZ, 'tests/unit')).map(f => fs.readFileSync(f, 'utf8'))
 
 describe('repetirNoDuplica: cada cuerpo con «lo de afuera al retorno» tiene su caso con 40P01', () => {
-  const esperados = [...new Set([...DELAS_APERTURAS, ...ADICIONALES])].filter(f => !SOLO_ESTRUCTURAL.has(f))
+  const esperados = [...new Set([...DELAS_APERTURAS, ...ADICIONALES])]
 
   it('el registro no está vacío (la nota sigue en el JSON revisado)', () => {
     expect(DELAS_APERTURAS.length).toBeGreaterThanOrEqual(18)
   })
 
-  it.each(esperados)('[%s] tiene un caso rotulado [repetirNoDuplica:%s]', funcion => {
-    const rotulo = `[repetirNoDuplica:${funcion}]`
-    const hay = textos.some(t => t.includes(rotulo))
+  it.each(esperados)('%s tiene un caso rotulado [repetirNoDuplica:<función>]', funcion => {
+    // Sólo cuenta un `it(`/`test(`/`describe(` vivo con el rótulo como título: ni un comentario ni `.skip`/`.todo`.
+    const vivo = new RegExp(`\\b(?:it|test|describe)\\(\\s*(['"\`])\\[repetirNoDuplica:${funcion}\\]`)
+    const hay = textos.some(t => vivo.test(t))
     expect({ funcion, hay }).toEqual({ funcion, hay: true })
   })
 
   it('el caso real del motor de descuentos (dos descuentos, el segundo intento deja uno) está rotulado', () => {
-    expect(textos.filter(t => t.includes('[repetirNoDuplica:applyAutomaticDiscounts]')).length).toBeGreaterThan(0)
+    expect(textos.filter(t => /\b(?:it|test)\(\s*['"`]\[repetirNoDuplica:applyAutomaticDiscounts\]/.test(t)).length).toBeGreaterThan(0)
   })
 })
