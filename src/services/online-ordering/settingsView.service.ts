@@ -1,7 +1,7 @@
 import { getAcceptingStatus, storeView } from './presence.service'
 import prisma from '@/utils/prismaClient'
 import { cardMerchantStatus } from './card/merchant'
-import { getSettings, storeRequirements } from './settings.service'
+import { getSettings, getSettingsWithSaved, storeRequirements } from './settings.service'
 import { NO_ONE_VENUE_TYPES } from './constants'
 
 /**
@@ -13,7 +13,8 @@ import { NO_ONE_VENUE_TYPES } from './constants'
  * dos veces y para que el estado salga de ESOS ajustes.
  */
 export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>) {
-  const settings = preloaded ?? (await getSettings(venueId))
+  // R66: con `preloaded` (lo que acaba de escribir el PUT) siempre hay fila; si no, la misma lectura dice si existe.
+  const { settings, saved } = preloaded ? { settings: preloaded, saved: true } : await getSettingsWithSaved(venueId)
   const [state, requirements, merchantStatus, venue] = await Promise.all([
     getAcceptingStatus(venueId, new Date(), settings),
     storeRequirements(venueId),
@@ -27,6 +28,8 @@ export async function settingsView(venueId: string, preloaded?: Awaited<ReturnTy
     lastToPayPollAt: lastToPayPollAt ? lastToPayPollAt.toISOString() : null,
     // R37: sólo una sugerencia para que el panel preseleccione; el servidor nunca elige «Nadie» solo.
     suggestedRequiresAcceptance: !(venue && NO_ONE_VENUE_TYPES.includes(venue.type)),
+    // Campo nuevo y opcional: el panel preselecciona la sugerencia por giro sólo si el negocio nunca guardó.
+    hasSavedSettings: saved,
     store: storeView(state),
     requirements,
     // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).

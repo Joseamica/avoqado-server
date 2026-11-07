@@ -24,6 +24,7 @@ import { listFolios } from '@/services/online-ordering/folios.service'
 import { INBOX_PAGE_SIZE } from '@/services/online-ordering/constants'
 
 const NOW = new Date('2026-11-06T18:30:00.000Z')
+const PAGADO_A = new Date('2026-11-06T17:45:00.000Z')
 const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?: string } = {}) => ({
   id: `oo${String(n).padStart(3, '0')}`,
   status: o.status ?? 'PENDING_ACCEPTANCE',
@@ -46,7 +47,8 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
     customerName: 'María',
     customerPhone: null,
     specialRequests: null,
-    items: [],
+    items: [{ productName: 'Flautas', productId: 'p1', product: null, quantity: 2, notes: null, unitPrice: new Prisma.Decimal('93.00'), total: new Prisma.Decimal('186.00'), modifiers: [] }],
+    payments: o.paymentStatus === 'PAID' ? [{ createdAt: PAGADO_A }] : [],
   },
 })
 
@@ -68,6 +70,11 @@ beforeEach(() => {
   }) as any)
   prismaMock.onlineOrder.count.mockImplementation((async (a: any) =>
     a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay) as any)
+})
+
+// T18g: las páginas y los conteos se leen en UNA transacción de sólo lectura (el mock la ejecuta contra el mismo prismaMock).
+beforeEach(() => {
+  ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
 })
 
 const listas = () => (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).filter(esLista)
@@ -96,6 +103,59 @@ describe('listFolios', () => {
       expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
       expect(q.take).toBe(INBOX_PAGE_SIZE + 1)
     }
+  })
+
+  it('T18b: cada folio trae paidAt (hora del cobro que lo saldó, null si no está pagado) en la MISMA lectura, sin consultas por folio', async () => {
+    POR_PAGAR = [row(1)]
+    POR_ENTREGAR = [row(3, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay[0].items[0]).toMatchObject({ unitPrice: 93, total: 186 })
+    expect(r.toPay[0].paidAt).toBeNull()
+    expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
+    const lista = listas()[0]
+    expect(lista.select.order.select.payments).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
+      // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
+    expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
+  })
+
+  it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados, y las 4 lecturas van por el `tx` (ninguna por el prisma global)', async () => {
+    POR_PAGAR = [row(1)]
+    CONTEOS = { toPay: 1, toDeliver: 0 }
+    // un `tx` DISTINTO del prismaMock global: si una lectura se escapa al `prisma`, se ve en el global
+    const tx = {
+      onlineOrder: {
+        findMany: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? POR_ENTREGAR : POR_PAGAR)),
+        count: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay)),
+      },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(tx))
+    prismaMock.$transaction.mockClear()
+    prismaMock.onlineOrder.findMany.mockClear()
+    prismaMock.onlineOrder.count.mockClear()
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay).toHaveLength(1)
+    expect(r.counts).toEqual({ toPay: 1, toDeliver: 0 })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const opts = (prismaMock.$transaction.mock.calls[0] as any[])[1]
+    expect(opts).toMatchObject({ isolationLevel: 'RepeatableRead' })
+    expect(opts.timeout).toBeGreaterThan(0)
+    expect(opts.maxWait).toBeGreaterThan(0)
+    // las 2 páginas y los 2 conteos, TODOS en el tx
+    expect(tx.onlineOrder.findMany).toHaveBeenCalledTimes(2)
+    expect(tx.onlineOrder.count).toHaveBeenCalledTimes(2)
+    // y NINGUNA lista ni conteo por el prisma global (las sincronizaciones previas no usan `select: INBOX_SELECT` ni `count`)
+    expect(listas()).toHaveLength(0)
+    expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled()
+  })
+
+  it('T18g: showTile es true con una lista no vacía aunque los conteos digan 0 (un folio que nació entre lecturas)', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ enabled: true, requiresAcceptance: true })
+    POR_PAGAR = [row(1)]
+    CONTEOS = { toPay: 0, toDeliver: 0 }
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay).toHaveLength(1)
+    expect(r).toMatchObject({ showTile: true, pollSeconds: 30 })
   })
 
   it('un folio con abono (PARTIAL) sale en toPay con su remaining y cuenta en counts.toPay; uno cuya cuenta se canceló no sale', async () => {

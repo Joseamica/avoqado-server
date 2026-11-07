@@ -8,10 +8,11 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
 jest.mock('@/services/online-ordering/settings.service', () => ({
   __esModule: true,
   getSettings: jest.fn(),
+  getSettingsWithSaved: jest.fn(),
   storeRequirements: jest.fn(async () => ({ address: true, phone: true, privacyNotice: true })),
 }))
 
-import { getSettings } from '@/services/online-ordering/settings.service'
+import { getSettings, getSettingsWithSaved } from '@/services/online-ordering/settings.service'
 import { settingsView } from '@/services/online-ordering/settingsView.service'
 
 const SETTINGS = { enabled: true, acceptsCardOnline: true, lastInboxPollAt: null }
@@ -23,7 +24,13 @@ const M = (o: Record<string, unknown> = {}) => ({
   ...o,
 })
 
-beforeEach(() => (getSettings as jest.Mock).mockResolvedValue(SETTINGS))
+// El mock de getSettingsWithSaved sigue a getSettings (cada prueba cambia getSettings); `saved` por omisión true.
+let SAVED = true
+beforeEach(() => {
+  SAVED = true
+  ;(getSettings as jest.Mock).mockResolvedValue(SETTINGS)
+  ;(getSettingsWithSaved as jest.Mock).mockImplementation(async () => ({ settings: await (getSettings as jest.Mock)(), saved: SAVED }))
+})
 
 describe('settingsView.card', () => {
   it('sin ningún comercio Stripe Connect: NOT_CONNECTED', async () => {
@@ -83,5 +90,27 @@ describe('settingsView: ¿Quién confirma? (T5)', () => {
     ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: true, lastToPayPollAt: null })
     prismaMock.venue.findUnique.mockResolvedValue({ type: 'FITNESS_STUDIO' } as any)
     expect((await settingsView('v1')).suggestedRequiresAcceptance).toBe(false)
+  })
+})
+
+describe('settingsView.hasSavedSettings (T18)', () => {
+  beforeEach(() => {
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING' } as any)
+  })
+
+  it('sin fila de ajustes: false', async () => {
+    SAVED = false
+    expect((await settingsView('v1')).hasSavedSettings).toBe(false)
+  })
+
+  it('con fila de ajustes: true', async () => {
+    expect((await settingsView('v1')).hasSavedSettings).toBe(true)
+  })
+
+  it('con preloaded (lo que acaba de escribir el PUT): true, sin leer la fila otra vez', async () => {
+    SAVED = false
+    expect((await settingsView('v1', SETTINGS as any)).hasSavedSettings).toBe(true)
+    expect(getSettingsWithSaved).not.toHaveBeenCalled()
   })
 })

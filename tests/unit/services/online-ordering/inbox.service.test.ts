@@ -49,6 +49,8 @@ const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
         product: { categoryId: 'cat-antojitos' },
         quantity: 2,
         notes: null,
+        unitPrice: new Prisma.Decimal('80.00'),
+        total: new Prisma.Decimal('186.00'),
         modifiers: [{ name: 'Salsa verde', quantity: 1 }],
       },
     ],
@@ -126,9 +128,18 @@ describe('listInbox', () => {
     expect(sel).toMatchObject({ productId: true, product: { select: { categoryId: true } } })
   })
 
+  it('T18c: cada renglón trae unitPrice (base) y total (con extras) en pesos, leídos en el mismo select', async () => {
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [row('P', 'ACCEPTED')])) as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.orders[0].items[0]).toMatchObject({ unitPrice: 80, total: 186 })
+    const lista = (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).find(q => !esSincronizacion(q))
+    expect(lista.select.order.select.items.select).toMatchObject({ unitPrice: true, total: true })
+    expect(lista.select.order.select.items.take).toBeGreaterThan(0)
+  })
+
   it('inbox items: un renglón sin producto (borrado o libre) da productId y categoryId null', async () => {
     const z: any = row('Z', 'ACCEPTED')
-    z.order.items = [{ productName: 'Libre', productId: null, product: null, quantity: 1, notes: null, modifiers: [] }]
+    z.order.items = [{ productName: 'Libre', productId: null, product: null, quantity: 1, notes: null, unitPrice: new Prisma.Decimal('5'), total: new Prisma.Decimal('5'), modifiers: [] }]
     prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [z])) as any)
     const r = await listInbox({ venueId: 'v1', now: NOW })
     expect(r.orders[0].items[0]).toMatchObject({ productId: null, categoryId: null })
@@ -458,7 +469,7 @@ describe('fase 2: cardStatus en la bandeja', () => {
     unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
     const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
     for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
-    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel'].sort())
+    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel', 'paidAt'].sort())
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()
