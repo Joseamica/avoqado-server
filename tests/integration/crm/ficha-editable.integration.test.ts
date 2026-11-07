@@ -439,7 +439,7 @@ describe('Tarea 4 · la ficha llega a todas las personas', () => {
     expect(ficha.contacts).toHaveLength(50)
     const resto = await listContacts(seller(ana), accountId, { cursor: ficha.contacts[49].id })
     expect(resto).toMatchObject({ total: 51, nextCursor: null, rows: [expect.objectContaining({ email, consentAt: expect.any(Date) })] })
-    // Sin cursor y con un límite de más: el servidor no trunca a escondidas (51 < 100) y dice el total.
+    // Sin cursor y con un límite de más: el servidor no trunca a escondidas (51 < 500) y dice el total.
     expect(await listContacts(seller(ana), accountId, { limit: 500 })).toMatchObject({ total: 51, nextCursor: null })
     expect((await listContacts(seller(ana), accountId, { limit: 500 })).rows).toHaveLength(51)
   })

@@ -1469,12 +1469,12 @@ describe('C2 Tarea 4: la Historia nombra a la persona en vivo, la ficha llega a 
       })
     })
 
-    it('con cursor salta el de la página anterior; limit 500 → 100; la última página no trae nextCursor', async () => {
+    it('con cursor salta el de la página anterior; limit 9999 → 500 (Codex r4: «Ver más» sube el límite); la última página no trae nextCursor', async () => {
       prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
       prismaMock.crmContact.findMany.mockResolvedValue([fila(50)])
       prismaMock.crmContact.count.mockResolvedValue(51)
-      const r = await listContacts(access(), ACCOUNT, { cursor: fila(49).id, limit: 500 })
-      expect(prismaMock.crmContact.findMany.mock.calls[0][0]).toMatchObject({ cursor: { id: fila(49).id }, skip: 1, take: 101 })
+      const r = await listContacts(access(), ACCOUNT, { cursor: fila(49).id, limit: 9999 })
+      expect(prismaMock.crmContact.findMany.mock.calls[0][0]).toMatchObject({ cursor: { id: fila(49).id }, skip: 1, take: 501 })
       expect(r).toMatchObject({ rows: [expect.objectContaining({ id: fila(50).id })], nextCursor: null, total: 51 })
     })
 

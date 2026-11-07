@@ -701,12 +701,13 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
 }
 
 const CONTACTS_PAGE = 50
-const CONTACTS_CAP = 100
+// Codex código r4: the SUPERADMIN asks one growing page (50, 100, 150…) instead of a cursor that can vanish; capped here.
+const CONTACTS_CAP = 500
 
 /**
  * The people of one account, 50 at a time (C2, Codex plan r1 H5): the ficha brings the first 50 and these the rest, so no
  * person is out of reach. Same order and fields as the ficha's, with each email's consent read in ONE query; page capped at
- * 100 by the server, with the real total. 404 when the caller cannot see the account.
+ * 500 by the server, with the real total (the SUPERADMIN raises `limit` 50, 100, 150… with no cursor). 404 when the caller cannot see the account.
  */
 export async function listContacts(access: CrmAccess, accountId: string, opts: { cursor?: string; limit?: number } = {}) {
   const visible = await prisma.crmAccount.findFirst({
