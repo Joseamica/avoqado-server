@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
+import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import { listFolios } from '@/services/online-ordering/folios.service'
 import { expireOnlineOrder, markOnlineOrderDelivered, markOnlineOrderReady } from '@/services/online-ordering/transitions.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
@@ -166,13 +167,63 @@ describe('T12 · listFolios contra Postgres', () => {
     const r = await listFolios({ venueId: f.venueId })
 
     expect(numeros(r.toPay)).toEqual([sinDinero.orderId, conAbono.orderId])
-    expect(r.toPay[1]).toMatchObject({ paymentStatus: 'PARTIAL', remaining: 50, total: 100 })
+    expect(r.toPay[1]).toMatchObject({ paymentStatus: 'PARTIAL', remaining: 50, total: 100, paidAt: null })
+    // R79: con un abono el seguimiento público dice cuánto se pagó y cuánto falta (pesos, sin reembolsos)
+    const tokenAbono = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: conAbono.onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(tokenAbono)).toMatchObject({ paid: false, paidAt: null, amountPaid: 50, remaining: 50, total: 100 })
+    const tokenSin = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: sinDinero.onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(tokenSin)).toMatchObject({ amountPaid: 0, remaining: 100 })
+    // T18c: precios por renglón en la misma lectura de la página
+    expect(r.toPay[0].items[0]).toMatchObject({ name: 'Flautas', quantity: 1, unitPrice: 100, total: 100 })
+    // T18b: el folio saldado trae la hora del cobro real (Payment COMPLETED), en la misma lectura de la página
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId: cobrado.orderId, status: 'COMPLETED' } })
+    expect(r.toDeliver[0].paidAt).toBe(cobro.createdAt.toISOString())
     expect(r.counts).toEqual({ toPay: 2, toDeliver: 1 })
     expect(numeros(r.toDeliver)).toEqual([cobrado.orderId])
     expect(r).toMatchObject({ showTile: true, nextCursors: { toPay: null, toDeliver: null } })
     // el pedido de «Mi equipo» nunca es folio
     expect(numeros([...r.toPay, ...r.toDeliver])).not.toContain(deEquipo.orderId)
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: cancelado.onlineOrderId } })).status).toBe('CANCELLED_BY_STAFF')
+  })
+
+  it('T18b: paidAt es la hora del COBRO aunque después haya un reembolso COMPLETED; el seguimiento público trae nombre, paidAt y precios por renglón', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    const antes = await getTrackingByToken(
+      (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken,
+    )
+    expect(antes).toMatchObject({ paid: false, paidAt: null, customerName: 'Ana ITEST' })
+
+    await efectivoDeLaTpv(orderId, CIEN)
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId, status: 'COMPLETED', type: { not: 'REFUND' } } })
+    // un reembolso COMPLETED posterior (negativo) NO puede volverse «la hora de pago»
+    const { id: _id, createdAt: _c, updatedAt: _u, ...resto } = cobro as any
+    await prisma.payment.create({
+      data: {
+        ...resto,
+        idempotencyKey: null,
+        type: 'REFUND',
+        amount: -cobro.amount,
+        createdAt: new Date(cobro.createdAt.getTime() + 60_000),
+      },
+    })
+
+    const token = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken
+    const t = await getTrackingByToken(token)
+    expect(t).toMatchObject({ paid: true, paidAt: cobro.createdAt.toISOString(), customerName: 'Ana ITEST', total: 100 })
+    expect(t!.items[0]).toMatchObject({ name: 'Flautas', quantity: 1, unitPrice: 100, total: 100 })
+    const r = await listFolios({ venueId: f.venueId })
+    expect(r.toDeliver.find(x => x.orderId === orderId)?.paidAt).toBe(cobro.createdAt.toISOString())
+  })
+
+  it('T18b: un cobro con Payment.type NULL (filas históricas) también da paidAt', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await efectivoDeLaTpv(orderId, CIEN)
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId, status: 'COMPLETED' } })
+    await prisma.payment.update({ where: { id: cobro.id }, data: { type: null } })
+    const token = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(token)).toMatchObject({ paid: true, paidAt: cobro.createdAt.toISOString() })
+    const r = await listFolios({ venueId: f.venueId })
+    expect(r.toDeliver.find(x => x.orderId === orderId)?.paidAt).toBe(cobro.createdAt.toISOString())
   })
 
   it('un folio que el dinero tardío pasó a ACCEPTED sale en toDeliver', async () => {

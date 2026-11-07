@@ -181,8 +181,9 @@ export function lockKey(tx: Prisma.TransactionClient, venueId: string, externalI
 /**
  * Codex r3: la primera DECISIÓN sobre una llave es durable (como Stripe, que también guarda el resultado de un error). Sin
  * migración, en la tabla genérica `IdempotencyRequest` (custodia de SIMs y comandos de la TPV): los prefijos `venue:` y
- * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: sin purga (sólo nacen al rechazar, volumen bajo);
- * si crecen, borrar por `expiresAt` (ya indexado).
+ * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: SIN purga. Desde R85 cada POST anónimo distinto en
+ * «Mi equipo» también deja una fila (acotado por el limitador por IP, no por volumen): la tabla crece sin tope hasta que alguien
+ * barra por `expiresAt` (ya indexado); ver `docs/audit/deuda-encontrada.md` (2026-11-06, IdempotencyRequest).
  */
 const rejectionKey = (venueId: string, customerId: string | null, idempotencyKey: string) => ({
   organizationId: `venue:${venueId}`,
@@ -455,13 +456,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   const sessionPhone =
     input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.verifiedPhone : null
   const customerId = sessionPhone ? input.customerId : null
-  // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato. La única lectura es el modo de la tienda (su fila de ajustes, por su
-  // llave): sin él no se sabe si se puede pedir sin sesión. Ni plan, ni tienda, ni la llave, y nunca una fila de rechazo `anon:` (la
-  // tienda pide el código y reintenta con la MISMA llave). En «Nadie» esa misma lectura es la de la tienda (paso 3).
+  // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato, sin plan ni tienda ni cotización: lo único que se lee primero es el
+  // modo de la tienda (su fila de ajustes, por su llave). R85: ese 401 SÍ se registra como la decisión de la llave (fila `anon:<llave>`,
+  // más abajo): una decisión por llave; si no, el original tardío —que aún cotiza fuera de su transacción— crea un segundo pedido
+  // (Codex fase 2 r1–r3). La tienda suelta la llave tras este 401; el reintento con sesión verificada usa `customer:<id>` y no choca.
+  // En «Nadie» esa misma lectura es la de la tienda (paso 3).
   const ajustesSinSesion = customerId ? undefined : await getSettings(input.venueId)
-  if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
-    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
-  }
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
   const phone = sessionPhone ? (canonicalPhoneE164(sessionPhone) ?? `+${sessionPhone.replace(/\D/g, '')}`) : null
@@ -477,6 +477,51 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     customerName: input.customer.name,
     customerPhone: phone ?? '',
   })
+
+  if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
+    // R85 (Codex fase 2 r3): UNA decisión por llave. Bajo el MISMO candado de la creación (`lockKey`), en una transacción corta:
+    //  1. si el original ya confirmó con esta huella, el reintento recibe SU folio (R79/R82);
+    //  2. si no, este 401 se REGISTRA como la decisión de la llave (el almacén de rechazos de `decidedBefore`, mismo `anon:<llave>`):
+    //     un original que aún cotiza fuera de su transacción, al llegar a ella, encuentra el rechazo y NO crea (recibe el mismo 401).
+    //  Sin esto la tienda soltaba la llave tras el 401 y el original terminaba creando: dos pedidos.
+    // Un pedido de esa llave con OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409, y no registra nada.
+    // Misma espera que la creación (`TX_OPTIONS`); un P2028 sale tal cual (5xx: la tienda conserva la llave), jamás como 401.
+    const rechazo = new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
+    const decisionDeLaLlave = rejectionKey(input.venueId, null, input.idempotencyKey)
+    const folio = await prisma.$transaction(async tx => {
+      await lockKey(tx, input.venueId, externalId)
+      try {
+        const replay = await findReplay(tx, input.venueId, externalId, requestHash)
+        if (replay) return replay
+      } catch (e) {
+        if (e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT') return null
+        throw e
+      }
+      const yaRegistrado = await tx.idempotencyRequest.findUnique({
+        where: { organizationId_actorStaffId_endpoint_idempotencyKey: decisionDeLaLlave },
+      })
+      // Una decisión por llave: si ya hay una con ESTA huella (el 401 de antes, o la que fuera: PRICE_CHANGED…), ésa se devuelve.
+      if (yaRegistrado && yaRegistrado.requestHash === requestHash) return yaRegistrado
+      if (!yaRegistrado) {
+        await tx.idempotencyRequest.create({
+          data: {
+            ...decisionDeLaLlave,
+            requestHash,
+            responseStatus: rechazo.statusCode,
+            responseBody: JSON.parse(JSON.stringify({ code: rechazo.code, message: rechazo.message, details: rechazo.details })),
+            expiresAt: new Date(now.getTime() + 24 * 3600_000),
+          },
+        })
+      }
+      return null
+    }, TX_OPTIONS)
+    if (folio && 'orderId' in folio) return folio
+    if (folio) {
+      const body = folio.responseBody as { code?: string; message: string; details?: unknown }
+      throw final(new AppError(body.message, folio.responseStatus, true, body.code, body.details))
+    }
+    throw rechazo
+  }
 
   const trackingToken = generateTrackingToken()
   const note = input.note?.trim() ? input.note.trim() : null
@@ -732,9 +777,24 @@ export interface PublicTracking {
   venueTimezone: string
   /** 1b: domicilio y teléfono del NEGOCIO (nunca los del comensal). */
   venueContact: VenueContact
-  items: Array<{ name: string; quantity: number; note: string | null; modifiers: Array<{ name: string; quantity: number }> }>
+  /** T18b: `unitPrice` y `total` del renglón en pesos (opcionales para quien ya lee esta respuesta). */
+  items: Array<{
+    name: string
+    quantity: number
+    note: string | null
+    unitPrice?: number
+    total?: number
+    modifiers: Array<{ name: string; quantity: number }>
+  }>
   total: number
   paid: boolean
+  /** T18b: el nombre con que se hizo el pedido (nunca teléfono ni correo). */
+  customerName?: string | null
+  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. */
+  paidAt?: string | null
+  /** R79: lo cobrado (cobros COMPLETED que no son REFUND) y lo que falta, en pesos; con abono el folio no vence (R18). Opcionales. */
+  amountPaid?: number
+  remaining?: number
   estimatedReadyAt: string | null
   acceptDeadlineAt: string
   rejectReason: OnlineOrderRejectReason | null
@@ -877,6 +937,9 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   }
 }
 
+/** Un cobro real: COMPLETED y `type` nulo o distinto de REFUND (`<> 'REFUND'` descartaría NULL; `orderBalance` cuenta NULL como cobro). */
+const CHARGE_FILTER = { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } satisfies Prisma.PaymentWhereInput
+
 async function orderTracking(token: string): Promise<PublicTracking | null> {
   const row = await prisma.onlineOrder.findUnique({
     where: { trackingToken: token },
@@ -895,18 +958,33 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
         select: {
           orderNumber: true,
           total: true,
+          paidAmount: true,
+          remainingBalance: true,
           paymentStatus: true,
+          customerName: true,
+          payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
+          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
             orderBy: [{ sequence: 'asc' }, { id: 'asc' }],
-            select: { productName: true, quantity: true, notes: true, modifiers: { take: 50, select: { name: true, quantity: true } } },
+            select: {
+              productName: true,
+              quantity: true,
+              notes: true,
+              unitPrice: true,
+              total: true,
+              modifiers: { take: 50, select: { name: true, quantity: true } },
+            },
           },
         },
       },
     },
   })
   if (!row) return null
+  // R82: lo cobrado y lo que falta son los de la cuenta, calculados por la función CANÓNICA de saldo (`orderBalance`: propinas dentro
+  // del total y de lo pagado, un reembolso no reabre saldo) cada vez que entra dinero. Son los mismos que la caja y `to-pay`, sin
+  // sumar nada aparte (ni filas topadas, ni una suma propia que olvide la propina).
   const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
   return {
     orderNumber: row.order.orderNumber,
@@ -922,10 +1000,16 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       name: i.productName ?? '',
       quantity: i.quantity,
       note: i.notes ?? null,
+      unitPrice: Number(new Prisma.Decimal(i.unitPrice).toFixed(2)),
+      total: Number(new Prisma.Decimal(i.total).toFixed(2)),
       modifiers: i.modifiers.map(m => ({ name: m.name ?? '', quantity: m.quantity })),
     })),
     total: Number(new Prisma.Decimal(row.order.total).toFixed(2)),
     paid: row.order.paymentStatus === PaymentStatus.PAID,
+    amountPaid: Number(new Prisma.Decimal(row.order.paidAmount).toFixed(2)),
+    remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.remainingBalance), 0).toDecimalPlaces(2).toNumber(),
+    customerName: row.order.customerName ?? null,
+    paidAt: row.order.paymentStatus === PaymentStatus.PAID ? (row.order.payments[0]?.createdAt.toISOString() ?? null) : null,
     estimatedReadyAt: row.estimatedReadyAt ? row.estimatedReadyAt.toISOString() : null,
     acceptDeadlineAt: row.acceptDeadlineAt.toISOString(),
     rejectReason: row.rejectReason ?? null,

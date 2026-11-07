@@ -377,10 +377,10 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
 
   const porPagar = foliosPorPagarWhere(p.venueId)
   const porEntregar = { venueId: p.venueId, requiresAcceptance: false, status: OnlineOrderStatus.ACCEPTED }
-  const page = (where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
+  const page = (db: Prisma.TransactionClient, where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
     p.section && p.section !== mine
       ? Promise.resolve([] as Awaited<ReturnType<typeof prisma.onlineOrder.findMany<{ select: typeof INBOX_SELECT }>>>)
-      : prisma.onlineOrder.findMany({
+      : db.onlineOrder.findMany({
           where: {
             ...where,
             ...(after && p.section === mine
@@ -391,11 +391,17 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
           take: INBOX_PAGE_SIZE + 1,
           select: INBOX_SELECT,
         })
-  const [payRows, deliverRows, toPayCount, toDeliverCount, settings] = await Promise.all([
-    page(porPagar, 'toPay'),
-    page(porEntregar, 'toDeliver'),
-    prisma.onlineOrder.count({ where: porPagar }),
-    prisma.onlineOrder.count({ where: porEntregar }),
+  // T18g (Codex fase 2 r4): las páginas y los conteos salen de UNA misma foto (sólo lectura, RepeatableRead): un folio que nace entre
+  // lecturas ya no puede salir en la lista con los conteos en 0. Las mismas 4 consultas acotadas de antes; los ajustes van aparte.
+  const [[payRows, deliverRows, toPayCount, toDeliverCount], settings] = await Promise.all([
+    prisma.$transaction(
+      async tx => {
+        const pay = await page(tx, porPagar, 'toPay')
+        const deliver = await page(tx, porEntregar, 'toDeliver')
+        return [pay, deliver, await tx.onlineOrder.count({ where: porPagar }), await tx.onlineOrder.count({ where: porEntregar })] as const
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 10_000, maxWait: 5_000 },
+    ),
     getSettings(p.venueId),
   ])
 
@@ -404,7 +410,8 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   const enabled = settings.enabled
   const requiresAcceptance = settings.requiresAcceptance
   // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen.
-  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0
+  // Defensivo: una lista con folios siempre enciende el mosaico, aunque los conteos digan otra cosa.
+  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0 || toPay.length + toDeliver.length > 0
   return {
     serverTime: now.toISOString(),
     enabled,
