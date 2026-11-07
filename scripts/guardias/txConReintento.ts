@@ -155,15 +155,22 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
       // Un import por defecto de un escritor (`import otroNombre from './escritor'`) también lo nombra.
       if (ts.isImportClause(n) && n.name && esEscritor(checker.getTypeAtLocation(n.name))) nombres.add(n.name.text)
       // Un tipo función (`type Cb = (tx: TxConReintento) => …`) es sólo un tipo: su nombre no es un valor que se pueda guardar.
-      if (ts.isFunctionLike(n) && !ts.isFunctionTypeNode(n) && conParametroMarcado(n as ts.SignatureDeclaration)) {
+      // Un callback DECLARADO con un tipo escritor (`cb: Ranura`, `afterCas?: AfterCasInTx`, `const abonar: AbonarSaldoAFavor`) también se vigila
+      // por nombre: sus usos como valor sólo se permiten hacia una ranura tipada (abajo).
+      if (
+        (ts.isParameter(n) || ts.isPropertySignature(n) || ts.isPropertyDeclaration(n) || ts.isVariableDeclaration(n)) &&
+        ts.isIdentifier(n.name) &&
+        n.type &&
+        esEscritor(checker.getTypeFromTypeNode(n.type))
+      )
+        nombres.add(n.name.text)
+      if (
+        ts.isFunctionLike(n) &&
+        !(ts.isFunctionTypeNode(n) && ts.isTypeAliasDeclaration(n.parent)) &&
+        conParametroMarcado(n as ts.SignatureDeclaration)
+      ) {
         const nombre = (n as ts.SignatureDeclaration).name ?? ((n.parent as ts.NamedDeclaration | undefined)?.name as ts.Node | undefined)
-        // Un callback con su TIPO escrito (`const abonar: AbonarSaldoAFavor = (t, …) => …`) es un valor de ranura tipada: sólo lo llama
-        // quien ya tiene un `TxConReintento`, así que no se vigila como un escritor suelto.
-        const ctx = ts.isArrowFunction(n) || ts.isFunctionExpression(n) ? checker.getContextualType(n) : undefined
-        const callbackTipado =
-          (ts.isVariableDeclaration(n.parent) && !!n.parent.type && esEscritor(checker.getTypeFromTypeNode(n.parent.type))) ||
-          (!!ctx && partes(ctx).some(p => esEscritor(p)))
-        if (!callbackTipado && nombre && (ts.isIdentifier(nombre) || ts.isPrivateIdentifier(nombre))) nombres.add(nombre.text)
+        if (nombre && (ts.isIdentifier(nombre) || ts.isPrivateIdentifier(nombre))) nombres.add(nombre.text)
       }
       ts.forEachChild(n, visitar)
     })
@@ -294,7 +301,31 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
         const tipo = ts.isShorthandPropertyAssignment(n)
           ? checker.getTypeOfSymbol(checker.getShorthandAssignmentValueSymbol(n)!)
           : checker.getTypeAtLocation(n)
-        if (esEscritor(tipo) && !seLlama(n))
+        // Un CALLBACK (parámetro, propiedad o variable con tipo; no una función declarada) puede viajar sólo hacia una ranura que a su vez
+        // exige la marca (`conRanura(cb, tx)`, `abonar: cb` en un literal tipado): quien lo llame ya tiene un `TxConReintento`. Hacia
+        // `Function`, `any`, `unknown`, un objeto sin tipo, `Reflect.apply`, `.call`… sigue fallando (R74).
+        const simbolo = ts.isShorthandPropertyAssignment(n) ? checker.getShorthandAssignmentValueSymbol(n) : checker.getSymbolAtLocation(n)
+        const decl = simbolo?.declarations?.[0]
+        const esCallback =
+          !!decl &&
+          (ts.isParameter(decl) ||
+            ts.isPropertySignature(decl) ||
+            ts.isPropertyDeclaration(decl) ||
+            ts.isPropertyAssignment(decl) ||
+            ts.isShorthandPropertyAssignment(decl) ||
+            ts.isVariableDeclaration(decl) ||
+            ts.isBindingElement(decl))
+        const ctx = ts.isShorthandPropertyAssignment(n)
+          ? (() => {
+              const c = checker.getContextualType(n.parent)
+              const p = c && checker.getNonNullableType(c).getProperty(n.name.text)
+              return p ? checker.getTypeOfSymbol(p) : undefined
+            })()
+          : ts.isExpression(n)
+            ? checker.getContextualType(n)
+            : undefined
+        const enRanura = esCallback && !!ctx && partes(ctx).some(p => esEscritor(p))
+        if (esEscritor(tipo) && !seLlama(n) && !enRanura)
           hallazgos.push(`(11) ${donde(n)}: un escritor sólo se llama (escribir(tx)); nunca se pasa, guarda ni enlaza`)
       }
       // Un método de objeto con la marca: si el objeto tiene un tipo esperado, esa propiedad tiene que ser un escritor (una tabla
@@ -321,6 +352,17 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
         const ctx = checker.getContextualType(f as ts.Expression)
         return !!ctx && partes(ctx).some(p => esEscritor(p))
       }
+      // Una función con la marca guardada en una variable cuyo TIPO escrito la borra (`const f: Function = …`, `: any`).
+      if (
+        esFuncionLiteral(n) &&
+        conParametroMarcado(n) &&
+        ts.isVariableDeclaration(n.parent) &&
+        n.parent.type &&
+        !esEscritor(checker.getTypeFromTypeNode(n.parent.type))
+      )
+        hallazgos.push(
+          `(11) ${donde(n)}: una función con TxConReintento guardada en una variable de tipo que borra la marca (Function, any…)`,
+        )
       if (esFuncionLiteral(n) && conParametroMarcado(n) && !esDeclaracion(n) && !esCuerpoDeApertura(n) && !enRanuraTipada(n))
         hallazgos.push(
           `(11) ${donde(n)}: una función con TxConReintento como valor; decláralo con nombre y llámalo, o pásalo a withDeadlockRetry`,

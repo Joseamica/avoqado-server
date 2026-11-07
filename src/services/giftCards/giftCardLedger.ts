@@ -87,8 +87,23 @@ const fechaAscNullsLast = (a: Date | null, b: Date | null): number =>
  * transacciones vieran el mismo par en orden distinto (40P01). El orden de CONSUMO (vencen antes → activados antes → id), el que
  * usa el canje, se aplica en memoria con lo leído bajo el candado.
  */
-/** Lo que sólo LEE puede llamarse con el cliente global o con cualquier `tx`; lo que escribe o bloquea pide `TxConReintento`. */
-export type DbDeLectura = Prisma.TransactionClient | PrismaClient
+type Lee<M> = {
+  [K in Extract<
+    keyof M,
+    'findUnique' | 'findFirst' | 'findMany' | 'findUniqueOrThrow' | 'findFirstOrThrow' | 'count' | 'aggregate' | 'groupBy'
+  >]: M[K]
+}
+/**
+ * Lo que sólo LEE puede llamarse con el cliente global o con cualquier `tx`: de cada tabla sólo los métodos de lectura (nada de
+ * `create`/`update`/`delete`). Lo que escribe o bloquea pide `TxConReintento`. (`$queryRaw` queda para las lecturas en SQL.)
+ */
+export type DbDeLectura = {
+  giftCard: Lee<Prisma.TransactionClient['giftCard']>
+  giftCardActivity: Lee<Prisma.TransactionClient['giftCardActivity']>
+  payment: Lee<Prisma.TransactionClient['payment']>
+  orderItem: Lee<Prisma.TransactionClient['orderItem']>
+  order: Lee<Prisma.TransactionClient['order']>
+} & Pick<Prisma.TransactionClient, '$queryRaw'>
 
 export async function lockGiftCardsForUpdate(tx: TxConReintento, ids: string[]): Promise<LockedGiftCard[]> {
   const unicos = [...new Set(ids)]
@@ -181,7 +196,7 @@ export async function dineroDeLaCuenta(
  * Si el dinero ya se devolvió completo (la cancelación con reembolso de R2) o lo que queda ya se entregó en mercancía con esos sobres
  * antes de desactivarlos (B7 r1, `medirDineroSinRespaldo`), no hay nada que avisar.
  */
-async function avisarSiCobraSobresDesactivados(tx: DbDeLectura, p: { venueId: string; orderId: string }): Promise<void> {
+async function avisarSiCobraSobresDesactivados(tx: TxConReintento, p: { venueId: string; orderId: string }): Promise<void> {
   const m = await medirDineroSinRespaldo(tx, p)
   if (!m?.sinRespaldo) return
   await recordGiftCardAnomaly(tx, {

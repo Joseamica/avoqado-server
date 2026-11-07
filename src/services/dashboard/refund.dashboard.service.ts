@@ -1368,7 +1368,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         // encima sería devolver dos veces. Nada se escribe: el rechazo va antes del turno, de la fila y del abono.
         if (chain?.kind === 'INHERIT' && respaldo && refundCents > respaldo.cents) throw raizYaDevuelta(respaldo.cents)
         // Saldo a favor: el medio de sistema resuelto con su revisión vigente; fuera del cajón y del banco, sin comercio.
-        const saldo = input.aSaldoAFavor
+        const saldo: { tender: RefundMoneySemantics; customerId: string; abonar: AbonarSaldoAFavor } | null = input.aSaldoAFavor
           ? {
               tender: { ...(await resolveStoreCreditTenderInTx(tx, input.venueId)), merchantAccountId: null, source: PaymentSource.OTHER },
               customerId: input.aSaldoAFavor.customerId,

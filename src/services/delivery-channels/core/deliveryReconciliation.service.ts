@@ -84,11 +84,11 @@ export async function reconcileDeliveryOrderFromProvider(
   /** `eventId`: el aviso que disparó la pasada; su rastro (reprecio/bloqueo) es el avance de ese aviso (N-3). */
   opts: { trigger: 'ROUTE' | 'JOB' | 'WEBHOOK'; eventId?: string },
 ): Promise<ResultadoReconciliacion> {
-  // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
-  const inicio = Date.now()
+  // `inicio` lo da el opener POR INTENTO (antes de esperar el candado): el reloj de la transacción de Prisma arranca otra vez en cada
+  // reintento por 40P01, así que su presupuesto de lectura también. Un intento reintentado no hereda el gasto del abortado.
   // R65 b: `cerradoEnProveedor` y `selloPorRevertir` (el negocio de la compensación escrita, para quitar el sello DESPUÉS del commit, D4
   // 24-oct) nacen DENTRO de cada intento y salen en el retorno.
-  const { r, cerradoEnProveedor, selloPorRevertir } = await withDeliveryOrderLockConReintento(orderId, async tx => {
+  const { r, cerradoEnProveedor, selloPorRevertir } = await withDeliveryOrderLockConReintento(orderId, async (tx, inicio) => {
     let cerradoEnProveedor = false
     let selloPorRevertir: string | null = null
     const r = await (async (): Promise<ResultadoReconciliacion> => {

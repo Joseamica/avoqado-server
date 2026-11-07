@@ -40,7 +40,7 @@ export type Revisado = {
   openersGenericos: Record<string, { cuerpo: number; motivo: string }>
   castsPermitidos: Record<string, { cantidad: number; motivo: string; efectos?: Efecto[] }>
   cuerposRevisados: Record<string, string>
-  /** `archivo#llamada` → motivo: una llamada cuyo NOMBRE parece un efecto (emit…, mandar…, setTimeout) pero sólo toca la base o es un plazo. */
+  /** `archivo#función#llamada` → motivo (UNA función y UNA llamada): una llamada cuyo NOMBRE parece un efecto (emit…, mandar…, setTimeout) pero sólo toca la base o es un plazo. */
   efectosRevisados?: Record<string, string>
 }
 const revisado = revisadoJson as unknown as Revisado
@@ -499,6 +499,7 @@ type Local = { efectos: string[]; globales: string[]; abre: string[]; llamadas: 
 function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos: Map<string, number>): string[] {
   const out: string[] = []
   const memo = new Map<ts.Node, Local>()
+  const efectosUsados = new Set<string>()
   const moduloDe = (n: ts.Node) => modulos.get(n.getSourceFile().fileName)!
   const local = (f: ts.FunctionLikeDeclaration): Local => {
     if (memo.has(f)) return memo.get(f)!
@@ -513,7 +514,9 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
         const receptor = ts.isPropertyAccessExpression(n.expression) ? raiz(n.expression.expression) : undefined
         const nombreReceptor = receptor && ts.isIdentifier(receptor) ? receptor.text : ''
         const metodo = ts.isPropertyAccessExpression(n.expression) && EFECTO_POR_METODO.has(nombre)
-        const efectoRevisado = rev.efectosRevisados?.[`${m.archivo}#${nombre}`] !== undefined
+        const claveEfecto = `${llave(f)}#${nombre}`
+        const efectoRevisado = rev.efectosRevisados?.[claveEfecto] !== undefined
+        if (efectoRevisado) efectosUsados.add(claveEfecto)
         if (
           !efectoRevisado &&
           (EFECTO_POR_NOMBRE.test(nombre) || EFECTO_WHATSAPP.test(nombre) || EFECTO_POR_RECEPTOR.test(nombreReceptor) || metodo)
@@ -556,6 +559,8 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
     }
     visitar(m.sf)
   }
+  for (const k of Object.keys(rev.efectosRevisados ?? {}))
+    if (!efectosUsados.has(k)) out.push(`(a) efectosRevisados: «${k}» no coincide con ninguna llamada de un cuerpo (entrada vieja)`)
   return out
 
   function revisarCuerpo(cuerpo: ts.FunctionLikeDeclaration, donde: string) {
@@ -888,23 +893,16 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
       expect(con(h, '(c)', 'withDeadlockRetry')).toHaveLength(1)
     })
 
-    it('una llamada con nombre de efecto pero revisada (efectosRevisados: archivo#llamada) no falla; en otro archivo, sí', () => {
-      const nombre = `${CLIENTE}export async function f() {\n  await withDeadlockRetry(async tx => {\n    await emitTierRewards(tx)\n  }, { etiqueta: 'f' })\n}\ndeclare function emitTierRewards(tx: any): Promise<void>`
-      expect(con(hallazgos({ 'src/a.ts': nombre }), '(a)', 'emitTierRewards')).toHaveLength(1)
-      expect(
-        con(
-          hallazgos({ 'src/a.ts': nombre }, { efectosRevisados: { 'src/a.ts#emitTierRewards': 'sólo escribe con tx' } }),
-          '(a)',
-          'emitTierRewards',
-        ),
-      ).toEqual([])
-      expect(
-        con(
-          hallazgos({ 'src/b.ts': nombre }, { efectosRevisados: { 'src/a.ts#emitTierRewards': 'sólo escribe con tx' } }),
-          '(a)',
-          'emitTierRewards',
-        ),
-      ).toHaveLength(1)
+    it('una llamada con nombre de efecto pero revisada (efectosRevisados: archivo#función#llamada) no falla; otra función u otra llamada, sí; una entrada vieja, también', () => {
+      const nombre = `${CLIENTE}export async function f() {\n  await withDeadlockRetry(async tx => {\n    await emitTierRewards(tx)\n    await emitOtraCosa(tx)\n  }, { etiqueta: 'f' })\n}\nexport async function g() {\n  await withDeadlockRetry(async tx => {\n    await emitTierRewards(tx)\n  }, { etiqueta: 'g' })\n}\ndeclare function emitTierRewards(tx: any): Promise<void>\ndeclare function emitOtraCosa(tx: any): Promise<void>`
+      const revisadas = { efectosRevisados: { 'src/a.ts#f#emitTierRewards': 'sólo escribe con tx' } }
+      const h = hallazgos({ 'src/a.ts': nombre }, revisadas)
+      // En `f` la llamada revisada pasa; la otra llamada de `f` y la MISMA llamada en `g` siguen fallando.
+      expect(con(h, '(a)', 'emitOtraCosa')).toHaveLength(1)
+      expect(con(h, '(a)', 'emitTierRewards')).toHaveLength(1)
+      // Una entrada que no coincide con nada es un hallazgo.
+      const vieja = hallazgos({ 'src/a.ts': nombre }, { efectosRevisados: { 'src/a.ts#h#nada': 'ya no existe' } })
+      expect(con(vieja, '(a)', 'entrada vieja')).toHaveLength(1)
     })
 
     it('messaging().send, canal.publish y sendX son efectos; sendero() no (sin /i: send + MAYÚSCULA)', () => {

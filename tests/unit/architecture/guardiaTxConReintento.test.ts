@@ -115,9 +115,8 @@ const callbackConTipo: Ranura = async (t, id) => {
   await escribir(t)
   void id
 }
-export async function guardaElCallbackTipado(tx: TxConReintento) {
-  const guardado = { cb: callbackConTipo }
-  await guardado.cb(tx, 'x')
+export async function pasaElCallbackTipadoALaRanura(tx: TxConReintento) {
+  await conRanura(callbackConTipo, tx)
 }
 export async function llenaLaRanura(tx: TxConReintento) {
   await conRanura(async (t, id) => {
@@ -136,6 +135,35 @@ export { escribir }
 
 /** Lo que falla, uno por archivo: [archivo, regla, código]. */
 const FALLAN: Array<[string, string, string]> = [
+  // Paso 8, ronda 1 (I2/m6): un callback con tipo NO queda libre; sólo viaja a una ranura que exige la marca.
+  [
+    'callbackAFunction',
+    '(11)',
+    `export async function t1(cb1: (tx: TxConReintento) => Promise<void>) { const e: Function = cb1; await e(prisma) }`,
+  ],
+  [
+    'callbackAReflect',
+    '(11)',
+    `export async function t2(cb2: (tx: TxConReintento) => Promise<void>) { Reflect.apply(cb2, undefined, [prisma]) }`,
+  ],
+  [
+    'callbackConCall',
+    '(11)',
+    `export async function t3(cb3: (tx: TxConReintento) => Promise<void>) { await cb3.call(null, prisma as any) }`,
+  ],
+  ['callbackAAny', '(11)', `export async function t4(cb4: (tx: TxConReintento) => Promise<void>) { const e: any = cb4; await e(prisma) }`],
+  [
+    'callbackEnObjetoSinTipo',
+    '(11)',
+    `export async function t5(cb5: (tx: TxConReintento) => Promise<void>) { const guardado = { cb: cb5 }; void guardado }`,
+  ],
+  ['escritorEnLineaEnFunction', '(11)', `export const f6: Function = async (tx: TxConReintento) => { await escribir(tx) }`],
+  ['escritorEnLineaEnAny', '(11)', `export const f7: any = async (tx: TxConReintento) => { await escribir(tx) }`],
+  [
+    'escritorEnLineaEnMapaFunction',
+    '(11)',
+    `export const m8: Record<string, Function> = { a: async (tx: TxConReintento) => { await escribir(tx) } }`,
+  ],
   ['variableAny', '(9)', `export async function f() { const db: any = prisma; await escribir(db) }`],
   ['alias', '(10)', `type Alias = TxConReintento\nexport async function f() { await escribir(prisma as unknown as Alias) }`],
   ['parametroAny', '(9)', `export async function f(db: any) { await escribir(db) }`],

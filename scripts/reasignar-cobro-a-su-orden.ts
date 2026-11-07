@@ -32,7 +32,6 @@ import {
   type OrdenFoto,
   type Veredicto,
 } from '../src/services/shared/reasignarCobro'
-import { withDeadlockRetry } from '../src/utils/serializableRetry'
 
 class Rechazo extends Error {
   constructor(readonly codigo: number) {
@@ -300,6 +299,8 @@ async function main(): Promise<void> {
   const { settleStandalonePaymentInTx } = await import('../src/services/tpv/payment.tpv.service')
   const { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } = await import('../src/services/shared/paymentShiftClaim')
   const { releaseTableIfSettled } = await import('../src/services/tpv/table.tpv.service')
+  // Dinámico como los demás: `serializableRetry` carga `prismaClient`, que arma su URL al cargarse, ANTES de `elegirBase()`.
+  const { withDeadlockRetry } = await import('../src/utils/serializableRetry')
 
   try {
     const cargados: Cargado[] = []

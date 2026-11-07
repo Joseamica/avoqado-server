@@ -638,7 +638,7 @@ export async function prepareExchangeCreditsInTx(
       folio: sale.order.orderNumber,
       tipo: 'CAMBIO',
     })
-  const aSaldo =
+  const aSaldo: { tender: RefundMoneySemantics; customerId: string; abonar: AbonarSaldoAFavor } | null =
     settlement.method === 'STORE_CREDIT'
       ? {
           tender: { ...(await resolveStoreCreditTenderInTx(tx, venueId)), merchantAccountId: null, source: 'OTHER' as const },
