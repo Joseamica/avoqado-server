@@ -8,6 +8,7 @@ import type {
   OperationInput,
   OperationReply,
 } from '@/services/mobile/http-operation.mobile.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 type RemoveInput = OperationInput<'removeServiceCharge'>
 
@@ -2088,7 +2089,14 @@ describe('Task7 complete native split receipts', () => {
     const service = await import('@/services/mobile/order.mobile.service')
     const m = i.manifest
     if (m.action === 'splitOrder') {
-      const r = await service.splitOrderItemsInTransaction(tx, venueId, m.refs.orderId, m.payload.itemIds, i.actorId, true)
+      const r = await service.splitOrderItemsInTransaction(
+        tx as unknown as TxConReintento,
+        venueId,
+        m.refs.orderId,
+        m.payload.itemIds,
+        i.actorId,
+        true,
+      )
       return {
         response: {
           status: 200,
@@ -2108,7 +2116,7 @@ describe('Task7 complete native split receipts', () => {
         ],
       }
     }
-    const r = await service.splitOrderBySeatInTransaction(tx, venueId, m.refs.orderId, i.actorId)
+    const r = await service.splitOrderBySeatInTransaction(tx as unknown as TxConReintento, venueId, m.refs.orderId, i.actorId)
     return {
       response: {
         status: 200,
@@ -2589,7 +2597,7 @@ describe('Task3 receipt coverage', () => {
     const { compOrderItemInTransaction, compWholeOrderInTransaction } = await import('@/services/mobile/comp-item.mobile.service')
     const r =
       m.action === 'compItem'
-        ? await compOrderItemInTransaction(tx, {
+        ? await compOrderItemInTransaction(tx as unknown as TxConReintento, {
             venueId,
             orderId: m.refs.orderId,
             itemId: m.refs.itemId,
@@ -2597,7 +2605,7 @@ describe('Task3 receipt coverage', () => {
             staffId: authorId,
             captureBenefits: true,
           })
-        : await compWholeOrderInTransaction(tx, {
+        : await compWholeOrderInTransaction(tx as unknown as TxConReintento, {
             venueId,
             orderId: m.refs.orderId,
             reason: m.payload.reason,
@@ -3225,7 +3233,13 @@ describe('Task4 receipt coverage', () => {
     }
     if (m.action === 'removeOrderDiscount') {
       const { removeOrderDiscountInTransaction } = await import('@/services/mobile/order.mobile.service')
-      const r = await removeOrderDiscountInTransaction(tx, venueId, m.refs.orderId, m.refs.orderDiscountId, i.actorId)
+      const r = await removeOrderDiscountInTransaction(
+        tx as unknown as TxConReintento,
+        venueId,
+        m.refs.orderId,
+        m.refs.orderDiscountId,
+        i.actorId,
+      )
       return {
         response: { status: 200, body: { success: true, data: r.totals } },
         effects: { loyaltyRefund: r.refund, stampRefund: r.stampRefund },
@@ -3248,7 +3262,14 @@ describe('Task4 receipt coverage', () => {
       }
     }
     const { redeemPointsToOrderInTransaction } = await import('@/services/mobile/loyalty.mobile.service')
-    const r = await redeemPointsToOrderInTransaction(tx, venueId, m.refs.orderId, m.refs.customerId, m.payload.points, i.actorId)
+    const r = await redeemPointsToOrderInTransaction(
+      tx as unknown as TxConReintento,
+      venueId,
+      m.refs.orderId,
+      m.refs.customerId,
+      m.payload.points,
+      i.actorId,
+    )
     return {
       response: {
         status: 200,
@@ -4722,11 +4743,11 @@ describe('Task8 native guard controls and observed rollback TDD', () => {
               return { response: { status: 200, body: { success: true, message: 'Mesa liberada' } }, affectedRefs: r.affectedRefs }
             }
             if (action === 'mergeOrders') {
-              const r = await mobile.mergeOrdersInTransaction(tx, venueId, target.id, source.id, authorId)
+              const r = await mobile.mergeOrdersInTransaction(tx as unknown as TxConReintento, venueId, target.id, source.id, authorId)
               capturedRefs = r.affectedRefs
               return { response: { status: 200, body: { success: true, data: r.data } }, affectedRefs: r.affectedRefs }
             }
-            const r = await mobile.cancelOrderInTransaction(tx, venueId, source.id, '  exact  ', authorId)
+            const r = await mobile.cancelOrderInTransaction(tx as unknown as TxConReintento, venueId, source.id, '  exact  ', authorId)
             return {
               response: { status: 200, body: { success: true, message: 'Orden cancelada exitosamente' } },
               affectedRefs: r.affectedRefs,
@@ -4910,7 +4931,7 @@ describe('Task8 native guard controls and observed rollback TDD', () => {
         async tx => {
           const r = await (
             await import('@/services/mobile/order.mobile.service')
-          ).cancelOrderInTransaction(tx, venueId, f.order.id, '  keep spaces  ', authorId)
+          ).cancelOrderInTransaction(tx as unknown as TxConReintento, venueId, f.order.id, '  keep spaces  ', authorId)
           expect(
             r.affectedRefs
               .filter(x => x.kind === 'KdsOrder')

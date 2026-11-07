@@ -42,6 +42,7 @@ import {
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -184,12 +185,19 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     let pidDelCanje = 0
     const canje = prisma.$transaction(async tx => {
       await lockExistingOrderForPayment(tx, { venueId, orderId: mercancia })
-      const cards = await lockGiftCardsForUpdate(tx, v.giftCardIds)
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, v.giftCardIds)
       pidDelCanje = await pidDe(tx)
       tomado.soltar()
       await soltar.promesa
       const pago = await crearCobroConSaldoEnTx(tx, { venueId, orderId: mercancia, monto: 200, staffId })
-      await canjearSobresEnTx(tx, { venueId, orderId: mercancia, paymentId: pago.id, amount: new Prisma.Decimal(200), cards, staffId })
+      await canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: mercancia,
+        paymentId: pago.id,
+        amount: new Prisma.Decimal(200),
+        cards,
+        staffId,
+      })
     }, ORDER_LOCK_WAIT_BUDGET)
     await tomado.promesa
     const cancelacion = resultado(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-concurrente-0001' }))
@@ -210,9 +218,16 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     await expect(
       prisma.$transaction(async tx => {
         await lockExistingOrderForPayment(tx, { venueId, orderId: mercancia })
-        const cards = await lockGiftCardsForUpdate(tx, v.giftCardIds)
+        const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, v.giftCardIds)
         const pago = await crearCobroConSaldoEnTx(tx, { venueId, orderId: mercancia, monto: 200, staffId })
-        await canjearSobresEnTx(tx, { venueId, orderId: mercancia, paymentId: pago.id, amount: new Prisma.Decimal(200), cards, staffId })
+        await canjearSobresEnTx(tx as unknown as TxConReintento, {
+          venueId,
+          orderId: mercancia,
+          paymentId: pago.id,
+          amount: new Prisma.Decimal(200),
+          cards,
+          staffId,
+        })
       }, ORDER_LOCK_WAIT_BUDGET),
     ).rejects.toMatchObject({ code: expect.stringMatching(/^GIFT_CARD_(BLOCKED|INSUFFICIENT_BALANCE)$/) })
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0], type: 'REDEEM' } })).toBe(0)
@@ -224,7 +239,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     // B libera y después bloquea una tarjeta por actividad sospechosa; A, con el diálogo abierto, confirma con una llave nueva.
     await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-otro-motivo-b', confirmacionNoDevuelto: true })
     await prisma.$transaction(async tx =>
-      operarSobreDeGerenteEnTx(tx, {
+      operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: v.giftCardIds[0],
         staffId,
@@ -245,7 +260,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
   it('🔴 un sobre bloqueado por OTRO motivo: iniciar ⇒ GIFT_CARD_BLOCKED y el reembolso sigue en GIFT_CARD_CANCEL_NOT_STARTED', async () => {
     const v = await venta()
     await prisma.$transaction(async tx =>
-      operarSobreDeGerenteEnTx(tx, {
+      operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: v.giftCardIds[0],
         staffId,
@@ -500,7 +515,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     const llave = 'cancelar-choque-0001'
     // Un bloqueo normal (motivo SUSPICIOUS_ACTIVITY) que por accidente usó la llave que la cancelación deriva para ese sobre.
     await prisma.$transaction(async tx =>
-      operarSobreDeGerenteEnTx(tx, {
+      operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: v.giftCardIds[0],
         staffId,

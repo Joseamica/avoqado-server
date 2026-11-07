@@ -107,6 +107,27 @@ const conUnion: Manejador | undefined = {
     await escribir(tx)
   },
 }
+type Ranura = (tx: TxConReintento, id: string) => Promise<void>
+export async function conRanura(cb: Ranura, tx: TxConReintento) {
+  await cb(tx, 'x')
+}
+const callbackConTipo: Ranura = async (t, id) => {
+  await escribir(t)
+  void id
+}
+export async function guardaElCallbackTipado(tx: TxConReintento) {
+  const guardado = { cb: callbackConTipo }
+  await guardado.cb(tx, 'x')
+}
+export async function llenaLaRanura(tx: TxConReintento) {
+  await conRanura(async (t, id) => {
+    await escribir(t)
+    void id
+  }, tx)
+}
+export async function conservaEscritores(tx: TxConReintento) {
+  await (servicio as typeof servicio).escribir(tx)
+}
 export async function metodoConUnion(tx: TxConReintento) {
   await conUnion?.escribir(tx)
 }
@@ -167,6 +188,12 @@ const FALLAN: Array<[string, string, string]> = [
     'metodoEnUnionConMapa',
     '(11)',
     `const h: Record<string, Function> | undefined = { async a(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h?.a(prisma) }`,
+  ],
+  ['asercionQuitaEscritores', '(11)', `export async function f() { await (servicio as Record<string, Function>).escribir(prisma) }`],
+  [
+    'asercionASinEscritor',
+    '(11)',
+    `export async function f() { const s = servicio as { escribir(tx: Cliente): Promise<void> }; await s.escribir(prisma) }`,
   ],
   ['variableInferida', '(9)', `export async function f(tx: TxConReintento) { const t = tx }`],
   ['apply', '(11)', `export function f() { return escribir.apply(null, [prisma as any]) }`],

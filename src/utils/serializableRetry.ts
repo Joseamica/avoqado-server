@@ -22,10 +22,11 @@ export interface SerializableRetryOptions {
  * El único `tx` con el que se escriben (o bloquean) las tablas de beneficios (`Discount`, `CouponCode`, `CouponRedemption`,
  * `StampReward`, `StampCard`, `StampEvent`, `Customer`, `LoyaltyTransaction`, `GiftCard`): sólo lo entrega `withDeadlockRetry` (o
  * `withSerializableRetry` con `reintentarInterbloqueo`), así que una escritura que no se repite al trabarse no compila (S5b, R65).
- * 🔴 Paso 1 de la fase 0: nace como alias SIN la marca para que cada paso compile; el paso 8 la prende con un `unique symbol`
- * (`Prisma.TransactionClient & { readonly [conReintento]: true }`) y el compilador lista lo que faltó.
+ * La marca es un `unique symbol` que existe sólo en el tipo (nunca en runtime): `withDeadlockRetry` y `withSerializableRetry` son los
+ * únicos que convierten un `tx` en `TxConReintento`, y la guardia (`scripts/guardias/txConReintento.ts`) vigila que nadie más lo haga.
  */
-export type TxConReintento = Prisma.TransactionClient
+declare const conReintento: unique symbol
+export type TxConReintento = Prisma.TransactionClient & { readonly [conReintento]: true }
 
 /** Intentos por bloqueo mutuo de `withDeadlockRetry`. Las pruebas de los cruces lo bajan a 1 para ver el rojo. */
 export const REINTENTO_POR_INTERBLOQUEO = { intentos: 4 }

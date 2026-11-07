@@ -37,6 +37,7 @@ import type { CreateOrderItemInput } from '@/services/mobile/order.mobile.servic
 import { getPaymentByKey, payNewOrder } from '@/controllers/mobile/giftCard.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -382,7 +383,7 @@ describe('pay-new-order · Postgres real', () => {
     let soltar!: () => void
     const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
     const T = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [giftCardId])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [giftCardId])
       avisar(await pidDe(tx))
       await puedeSoltar
     }, PRESUPUESTO)
@@ -450,7 +451,7 @@ describe('pay-new-order · Postgres real', () => {
     const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
     // Otra transacción toma el sobre y, antes de soltarlo, lo bloquea: el cobro que espera ese candado fallará al entrar.
     const T = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [t.id])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [t.id])
       avisar(await pidDe(tx))
       await puedeSoltar
       await tx.giftCard.update({ where: { id: t.id }, data: { status: 'BLOCKED' } })

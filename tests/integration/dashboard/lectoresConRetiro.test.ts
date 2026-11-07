@@ -36,6 +36,7 @@ import { getCategoryBreakdown } from '@/jobs/nightly-sales-summary.job'
 import { registerProductTools } from '@/mcp/tools/products'
 import type { McpScope } from '@/mcp/scope'
 import { limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 // La tool del MCP se llama directo: el guardia y el plan no son lo que se prueba aquí (tienen sus suites).
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -113,7 +114,7 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     })
     const fiscal = {} // forma vieja: retirar lo del 0 % no devuelve IVA ({}); la mezcla de la orden diría 5.17
     await prisma.$transaction(tx =>
-      writeRefundInTx(tx, {
+      writeRefundInTx(tx as unknown as TxConReintento, {
         originalPaymentId: a.pago.id,
         venueId,
         salesRefundCents: 5000,

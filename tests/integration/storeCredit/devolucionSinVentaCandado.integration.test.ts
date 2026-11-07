@@ -26,6 +26,7 @@ import { abonarSaldoAFavorEnTx, prepararSobreDeSaldoAFavorEnTx } from '@/service
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { tomarCandadoPrimerSobreSiHaceFaltaEnTx } from '@/services/storeCredit/primerSobreLock'
 import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90_000)
 
@@ -67,9 +68,9 @@ const devolverSinVenta = (e: Escenario) =>
  */
 async function darElPrimerSaldo(tx: Prisma.TransactionClient, e: Escenario, antesDeAbonar: () => Promise<void> = async () => {}) {
   await tomarCandadoPrimerSobreSiHaceFaltaEnTx(tx, e.venueId)
-  const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId: e.venueId, customerId: e.customerId })
+  const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId: e.venueId, customerId: e.customerId })
   await antesDeAbonar()
-  const abono = await abonarSaldoAFavorEnTx(tx, {
+  const abono = await abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
     preparado,
     monto: D(100),
     staffId: e.staffId,

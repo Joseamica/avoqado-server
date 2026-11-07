@@ -21,6 +21,7 @@ import { paymentIsAvoqadoSettled, type TenderSemanticsPayment } from '@/services
 import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, type LockedGiftCard } from '@/services/giftCards/giftCardLedger'
 import { recordGiftCardAnomaly } from '@/services/giftCards/giftCardAnomaly'
 import { EXCHANGE_REFUND_ROLE, sqlOrigenEconomico } from './exchangeMarks'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 export const TERMINAL_REFUND_AFTER_EXCHANGE = 'TERMINAL_REFUND_AFTER_EXCHANGE'
 
@@ -80,7 +81,7 @@ export interface AbonoDeSaldoDelCobro {
  * cobro con saldo. Sin abonos, ningún candado.
  */
 export async function sobresDeSaldoDelCobroEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   p: { venueId: string; paymentId: string },
 ): Promise<{ abonos: AbonoDeSaldoDelCobro[]; sobres: LockedGiftCard[] }> {
   const filas = await tx.$queryRaw<Array<{ refundPaymentId: string; giftCardId: string; montoCents: bigint | number }>>`
@@ -110,7 +111,7 @@ export async function sobresDeSaldoDelCobroEnTx(
  *   los abonos de ese cobro (puede haber varias destinatarias).
  */
 export async function avisarYCongelarSaldoDuplicadoEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   p: {
     venueId: string
     originalPaymentId: string

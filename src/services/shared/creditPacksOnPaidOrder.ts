@@ -5,6 +5,7 @@ import { ACCESS_TOKEN_SECRET } from '@/config/env'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { grantPackInTx } from '@/services/mobile/creditPack.mobile.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
  * Paquetes de créditos vendidos en un RENGLÓN de orden (Modo Autoservicio, Fase 0 · 0.d).
@@ -122,7 +123,7 @@ export const CREDIT_PACK_LINE_HELD = 'CREDIT_PACK_LINE_HELD' as const
  * único deja a lo más una compra por renglón. Lo imposible de entregar queda retenido con UNA anomalía por renglón.
  */
 export async function fulfillCreditPacksForOrder(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   orderId: string,
 ): Promise<{ delivered: number; skipped: number; held: number }> {
   await tx.$queryRaw`SELECT id FROM "OrderItem" WHERE "orderId" = ${orderId} AND "creditPackId" IS NOT NULL FOR UPDATE`

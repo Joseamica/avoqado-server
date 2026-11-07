@@ -2555,7 +2555,7 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
 
 /** Removes one applied order discount and recomputes totals. */
 export async function removeOrderDiscountInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   orderDiscountId: string,
@@ -2676,7 +2676,7 @@ async function vincularAlDuenoDelFiado(
  * OCCUPIED; currentOrderId keeps pointing at the source.
  */
 export async function splitOrderItemsInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   itemIds: string[],
@@ -2882,7 +2882,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
  *   vacía y para conservar su historial (es "la cuenta de la mesa").
  * - Requiere al menos 2 asientos distintos; si no, no hay nada que dividir.
  */
-export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string, staffId?: string) {
+export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId: string, orderId: string, staffId?: string) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
@@ -3058,7 +3058,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
  * comensales se re-aplican solos en el destino, así que esos no estorban.
  */
 export async function mergeOrdersInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   targetOrderId: string,
   sourceOrderId: string,
@@ -3450,7 +3450,7 @@ export interface CashPaymentInput {
    * Huella del reducer offline: corre DENTRO de la transacción que crea el `Payment` (plan
    * 2026-10-13-sync-retoma-por-llave). Si lanza, el cobro entero se revierte.
    */
-  dentroDeLaTx?: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => Promise<void>
+  dentroDeLaTx?: (tx: TxConReintento, cobro: { orderId: string; paymentId: string }) => Promise<void>
   amount: number // cents
   tip?: number // cents
   staffId?: string
@@ -3874,7 +3874,7 @@ export interface AbonoEnTxEntrada {
   /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
   tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
   /** Corre bajo el candado de la Order, con la cuenta releída y sus pagos previos, ANTES de cualquier escritura. */
-  trasCandadoDeOrden?: (tx: Prisma.TransactionClient, cuenta: CuentaBajoCandado) => Promise<void>
+  trasCandadoDeOrden?: (tx: TxConReintento, cuenta: CuentaBajoCandado) => Promise<void>
   dentroDeLaTx?: CashPaymentInput['dentroDeLaTx']
   /**
    * A quién atribuye la auditoría este abono (A8, ruling 3): `turno` va a `PAYMENT_WITHOUT_SHIFT.data.channel` y al aviso
@@ -3942,7 +3942,7 @@ export interface AbonoEnTx {
  * de un objeto. Cada llamador lo resuelve FUERA de la transacción, como siempre.
  */
 export async function registrarAbonoEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   ctx: AbonoEnTxContexto,
   entrada: AbonoEnTxEntrada,
   reconciliationEnabled: boolean,
@@ -5914,7 +5914,7 @@ async function esLaMismaVentaConSaldo(venueId: string, paymentId: string, idempo
  * hoy): cobrar el saldo sobre un total sin el premio que la caja descontó dejaría una deuda escondida. Rechaza TODO (409); la
  * transacción se deshace y el premio sigue intacto. Un error que no es del premio (la base) sube tal cual.
  */
-async function canjearPremioDeLaVentaEnTx(tx: Prisma.TransactionClient, venueId: string, orderId: string, rewardId: string) {
+async function canjearPremioDeLaVentaEnTx(tx: TxConReintento, venueId: string, orderId: string, rewardId: string) {
   const { canjearPremioEnTx } = await import('../wallet/redeemStampReward.service')
   try {
     return await canjearPremioEnTx(tx, venueId, orderId, rewardId)
@@ -6655,13 +6655,13 @@ export async function attachCustomerToOrder(
  * @param reason Cancellation reason
  */
 export async function cancelOrderInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   reason?: string,
   performedBy?: string,
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
-  dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
+  dentroDeLaTx?: (tx: TxConReintento, cancelada: { orderId: string }) => Promise<void>,
   /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
   opcionesDeGuardia?: OrderCancelGuardOptions,
 ) {
@@ -6771,7 +6771,7 @@ export async function cancelOrder(
   orderId: string,
   reason?: string,
   performedBy?: string,
-  dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
+  dentroDeLaTx?: (tx: TxConReintento, cancelada: { orderId: string }) => Promise<void>,
 ): Promise<void> {
   const result = await withDeadlockRetry(tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy, dentroDeLaTx), {
     etiqueta: 'cancelOrder',

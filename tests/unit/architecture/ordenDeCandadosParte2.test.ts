@@ -40,6 +40,8 @@ export type Revisado = {
   openersGenericos: Record<string, { cuerpo: number; motivo: string }>
   castsPermitidos: Record<string, { cantidad: number; motivo: string; efectos?: Efecto[] }>
   cuerposRevisados: Record<string, string>
+  /** `archivo#llamada` → motivo: una llamada cuyo NOMBRE parece un efecto (emit…, mandar…, setTimeout) pero sólo toca la base o es un plazo. */
+  efectosRevisados?: Record<string, string>
 }
 const revisado = revisadoJson as unknown as Revisado
 
@@ -511,7 +513,11 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
         const receptor = ts.isPropertyAccessExpression(n.expression) ? raiz(n.expression.expression) : undefined
         const nombreReceptor = receptor && ts.isIdentifier(receptor) ? receptor.text : ''
         const metodo = ts.isPropertyAccessExpression(n.expression) && EFECTO_POR_METODO.has(nombre)
-        if (EFECTO_POR_NOMBRE.test(nombre) || EFECTO_WHATSAPP.test(nombre) || EFECTO_POR_RECEPTOR.test(nombreReceptor) || metodo)
+        const efectoRevisado = rev.efectosRevisados?.[`${m.archivo}#${nombre}`] !== undefined
+        if (
+          !efectoRevisado &&
+          (EFECTO_POR_NOMBRE.test(nombre) || EFECTO_WHATSAPP.test(nombre) || EFECTO_POR_RECEPTOR.test(nombreReceptor) || metodo)
+        )
           r.efectos.push(`${donde(n)} ${n.expression.getText().slice(0, 50)}`)
         if (ABREN.has(nombre) && !revisada) r.abre.push(`${donde(n)} ${nombre}`)
         if (nombre === 'logAction' && !n.arguments.some(a => ts.isIdentifier(a) && a.text === 'tx'))
@@ -880,6 +886,25 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
       expect(con(h, '(a)', 'socketManager.emit')).toHaveLength(1)
       expect(con(h, '(a)', 'notifyCustomerPassUpdated')).toHaveLength(1)
       expect(con(h, '(c)', 'withDeadlockRetry')).toHaveLength(1)
+    })
+
+    it('una llamada con nombre de efecto pero revisada (efectosRevisados: archivo#llamada) no falla; en otro archivo, sí', () => {
+      const nombre = `${CLIENTE}export async function f() {\n  await withDeadlockRetry(async tx => {\n    await emitTierRewards(tx)\n  }, { etiqueta: 'f' })\n}\ndeclare function emitTierRewards(tx: any): Promise<void>`
+      expect(con(hallazgos({ 'src/a.ts': nombre }), '(a)', 'emitTierRewards')).toHaveLength(1)
+      expect(
+        con(
+          hallazgos({ 'src/a.ts': nombre }, { efectosRevisados: { 'src/a.ts#emitTierRewards': 'sólo escribe con tx' } }),
+          '(a)',
+          'emitTierRewards',
+        ),
+      ).toEqual([])
+      expect(
+        con(
+          hallazgos({ 'src/b.ts': nombre }, { efectosRevisados: { 'src/a.ts#emitTierRewards': 'sólo escribe con tx' } }),
+          '(a)',
+          'emitTierRewards',
+        ),
+      ).toHaveLength(1)
     })
 
     it('messaging().send, canal.publish y sendX son efectos; sendero() no (sin /i: send + MAYÚSCULA)', () => {

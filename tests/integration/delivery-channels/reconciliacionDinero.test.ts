@@ -23,6 +23,7 @@ import { updateProduct } from '@/services/dashboard/product.dashboard.service'
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 import { desenlace, hastaQue, nuevoRfc, retener } from '../fiscal/exclusionContable.fixtures'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 type Renglon = { linea: string; nombre: string; precio: string; tasa?: number; trat?: IvaTratamiento }
 
@@ -122,7 +123,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
   const manual = async (orderId: string, cents: number) => {
     const original = await prisma.payment.findFirstOrThrow({ where: { orderId, type: { not: 'REFUND' } } })
     await prisma.$transaction(tx =>
-      writeRefundInTx(tx, {
+      writeRefundInTx(tx as unknown as TxConReintento, {
         originalPaymentId: original.id,
         venueId,
         salesRefundCents: cents,
@@ -316,7 +317,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
 
     const original = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: { not: 'REFUND' } } })
     await prisma.$transaction(tx =>
-      writeRefundInTx(tx, {
+      writeRefundInTx(tx as unknown as TxConReintento, {
         originalPaymentId: original.id,
         venueId,
         salesRefundCents: 5000,
@@ -836,7 +837,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     // toma `Order FOR UPDATE`, escribe el REFUND y tarda en confirmar.
     jest.spyOn(uberAdapter, 'fetchOrder').mockImplementation(async () => {
       manual = prisma.$transaction(async tx => {
-        await writeRefundInTx(tx, {
+        await writeRefundInTx(tx as unknown as TxConReintento, {
           originalPaymentId: original.id,
           venueId,
           salesRefundCents: 5000,

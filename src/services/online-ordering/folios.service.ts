@@ -8,7 +8,7 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/p
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { utcTs } from '@/utils/sqlDates'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE, INBOX_PAGE_SIZE, OPEN_ORDER_STATUSES, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
@@ -53,7 +53,7 @@ const VENTANA_DE_CERRADOS_MS = 7 * 24 * 3_600_000
  * `requiresAcceptance` se lee antes del candado a propósito: nunca cambia (P1).
  */
 export async function prepararFolioPagadoEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   a: { venueId: string; orderId: string; marcarCocina: boolean; minutes: number; now?: Date; reloj?: Reloj },
 ): Promise<CasResult | { r: 'NOT_FOLIO' }> {
   const pedido = await tx.onlineOrder.findFirst({

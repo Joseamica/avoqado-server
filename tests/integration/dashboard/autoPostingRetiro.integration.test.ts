@@ -23,6 +23,7 @@ import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { processorDataDeDevoluciones } from '@/services/fiscal/deliveryFiscalDelta'
 import { limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(120000)
 
@@ -98,7 +99,7 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
     const fiscal = { '0.16': 1379 } // forma vieja
     const { refundPaymentId } = await prisma.$transaction(tx =>
       writeRefundInTx(
-        tx,
+        tx as unknown as TxConReintento,
         reembolso(pago.id, {
           refundedItems: [{ orderItemId: items[0].id, quantity: 1, amountCents: 10000 }],
           fiscalByRateCents: fiscal,

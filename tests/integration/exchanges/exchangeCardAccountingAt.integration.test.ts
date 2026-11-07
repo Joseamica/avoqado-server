@@ -4,6 +4,7 @@ import * as clock from '@/services/exchanges/exchangeAccountingAt'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 import { seedCardSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -51,7 +52,7 @@ it('uses one closing instant after a concurrent real refund across midnight, kee
       const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
       ready(pid)
       await gate
-      return writeRefundInTx(tx, {
+      return writeRefundInTx(tx as unknown as TxConReintento, {
         venueId: s.venueId,
         originalPaymentId: s.payments[0].id,
         salesRefundCents: 17500,

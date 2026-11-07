@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 
 export const RESERVA_TTL_MS = 2 * 60 * 1000
@@ -20,6 +21,21 @@ export async function withDeliveryOrderLock<T>(orderId: string, fn: (tx: Prisma.
       return fn(tx)
     },
     { timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
+  )
+}
+
+/**
+ * Lo mismo que `withDeliveryOrderLock`, con el reintento por bloqueo mutuo (40P01) de S5b: el cuerpo recibe `TxConReintento` y se repite
+ * COMPLETO si Postgres lo aborta. Sólo para el cuerpo que escribe tablas de beneficios (`deliveryReconciliation`); su cuerpo no
+ * publica nada fuera de la base: lo de después del commit sale de su retorno.
+ */
+export async function withDeliveryOrderLockConReintento<T>(orderId: string, fn: (tx: TxConReintento) => Promise<T>): Promise<T> {
+  return withDeadlockRetry(
+    async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`delivery-order:${orderId}`}, 0))::text`
+      return fn(tx)
+    },
+    { etiqueta: 'withDeliveryOrderLockConReintento', timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
   )
 }
 

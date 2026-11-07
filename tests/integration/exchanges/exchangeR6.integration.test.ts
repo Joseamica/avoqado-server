@@ -16,6 +16,7 @@ import * as ledger from '@/services/giftCards/giftCardLedger'
 import { seedClothingSale } from './seedExchange'
 import { sembrarVentaDeTarjetas, crearCobroConSaldoEnTx } from '../giftCards/sembrarTarjetasDeRegalo'
 import { planear, procesarEfectos, netoVivo, type MundoComisiones } from '../commission/_mundoComisiones'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -62,8 +63,14 @@ it.each([false, true])('serializes two sales paid A+B with exact balances (tende
         const ids: string[] = []
         for (const giftCardId of cards.giftCardIds) {
           const payment = await crearCobroConSaldoEnTx(tx, { ...s, orderId, monto: 100 })
-          const locked = await ledger.lockGiftCardsForUpdate(tx, [giftCardId])
-          await ledger.canjearSobresEnTx(tx, { ...s, orderId, paymentId: payment.id, amount: new Prisma.Decimal(100), cards: locked })
+          const locked = await ledger.lockGiftCardsForUpdate(tx as unknown as TxConReintento, [giftCardId])
+          await ledger.canjearSobresEnTx(tx as unknown as TxConReintento, {
+            ...s,
+            orderId,
+            paymentId: payment.id,
+            amount: new Prisma.Decimal(100),
+            cards: locked,
+          })
           ids.push(payment.id)
         }
         return ids
@@ -151,12 +158,12 @@ it('takes every Payment by id before returning multiple gift-card charges, even 
   await prisma.$transaction(async tx => {
     for (let i = 0; i < 2; i++) {
       const p = await crearCobroConSaldoEnTx(tx, { ...s, orderId: s.order.id, monto: 100 })
-      await ledger.canjearSobresEnTx(tx, {
+      await ledger.canjearSobresEnTx(tx as unknown as TxConReintento, {
         ...s,
         orderId: s.order.id,
         paymentId: p.id,
         amount: new Prisma.Decimal(100),
-        cards: await ledger.lockGiftCardsForUpdate(tx, cards.giftCardIds),
+        cards: await ledger.lockGiftCardsForUpdate(tx as unknown as TxConReintento, cards.giftCardIds),
       })
       ids.push(p.id)
     }

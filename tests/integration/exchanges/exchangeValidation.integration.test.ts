@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 import { seedClothingSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
@@ -31,7 +32,11 @@ const blocked = async (s: Seed, reason: string, message: string, orderItemId: st
   })
   expect(await counts(s)).toEqual(before)
 }
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/))
+beforeAll(() =>
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(
+    /^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/,
+  ),
+)
 afterAll(async () => {
   for (const s of fixtures) await s.cleanup()
   await prisma.$disconnect()
@@ -39,7 +44,7 @@ afterAll(async () => {
 
 async function refundOne(s: Seed) {
   return prisma.$transaction(tx =>
-    writeRefundInTx(tx, {
+    writeRefundInTx(tx as unknown as TxConReintento, {
       venueId: s.venueId,
       originalPaymentId: s.payments[1].id,
       salesRefundCents: 50000,

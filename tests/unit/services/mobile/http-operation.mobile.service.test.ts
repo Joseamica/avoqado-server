@@ -360,7 +360,8 @@ test('finite payloads, strict refs, comp reason and split elements reject malfor
 
 describe('executeHttpOperation — la red por traba (40P01), R65 b', () => {
   it('lo que el manejador deja para la bitácora (`audit`) sale del intento GANADOR, no del abortado', async () => {
-    // El doble global no modela `posSyncIntent`: se arma aquí con lo mínimo que toca el camino feliz.
+    // El doble global no modela `posSyncIntent`: se arma aquí con lo mínimo que toca el camino feliz y se RESTAURA al terminar.
+    const posSyncIntentOriginal = (prismaMock as any).posSyncIntent
     ;(prismaMock as any).posSyncIntent = {
       findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockResolvedValue({ id: 'reserva-1' }),
@@ -377,7 +378,10 @@ describe('executeHttpOperation — la red por traba (40P01), R65 b', () => {
     const mutate = jest.fn(async () => ({
       response: {
         status: 200 as const,
-        body: { success: true as const, data: { subtotal: 100, discountAmount: 0, serviceChargeAmount: 0, total: 100, version: 2 } },
+        body: {
+          success: true as const,
+          data: { subtotal: 100, discountAmount: 0, serviceChargeAmount: 0, total: 100, version: intento + 1 },
+        },
       },
       affectedRefs: receipt().affectedRefs,
       audit: { intento: ++intento },
@@ -391,7 +395,13 @@ describe('executeHttpOperation — la red por traba (40P01), R65 b', () => {
 
       expect(mutate).toHaveBeenCalledTimes(2)
       expect(reply).toMatchObject({ kind: 'TERMINAL', appliedNow: true, audit: { intento: 2 } })
+      // El sobre que se guardó (y el que contesta) es el del intento GANADOR: la `version` de su respuesta es la del intento 2.
+      const escrituras = (prismaMock as any).posSyncIntent.update.mock.calls
+      expect(escrituras).toHaveLength(2)
+      expect(escrituras[1][0].data.resultJson.originalResponse.body.data.version).toBe(2)
+      expect((reply as any).envelope.originalResponse.body.data.version).toBe(2)
     } finally {
+      ;(prismaMock as any).posSyncIntent = posSyncIntentOriginal
       prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
     }
   })

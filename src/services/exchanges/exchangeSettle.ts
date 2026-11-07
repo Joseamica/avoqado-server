@@ -14,6 +14,7 @@ import { ensureExchangeCreditTender, resolveExchangeCreditTenderInTx } from './e
 import { ExchangeError } from './exchangeErrors'
 import { prepareExchangeCreditsInTx, type PreparedExchange, type ExchangeTxEarly } from './exchangeTx'
 import type { CreateExchangeBody, ExchangeResponse, ExchangeTxInput } from './exchange.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 export interface ExchangeSettleTxInput {
   mode: 'SETTLE_CARD_CHARGE'
@@ -26,7 +27,7 @@ export type ExchangeReviewReason = 'ORIGINAL_CHANGED_WHILE_PENDING' | 'CHARGE_AM
 export class ExchangeGenerationChanged extends Error {}
 
 /** The stored sale is already grouped; never rebuild it from today's catalog. */
-export async function exchangeSalePostingInTx(tx: Prisma.TransactionClient, venueId: string, orderId: string, staffId: string) {
+export async function exchangeSalePostingInTx(tx: TxConReintento, venueId: string, orderId: string, staffId: string) {
   const items = await tx.orderItem.findMany({
     where: { orderId, order: { venueId } },
     take: TOPES_POR_ORDEN.renglones + 1,
@@ -39,7 +40,7 @@ export async function exchangeSalePostingInTx(tx: Prisma.TransactionClient, venu
 }
 
 export async function prepareCardSettlementInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: ExchangeSettleTxInput,
 ): Promise<PreparedExchange | ExchangeTxEarly> {
   const { venueId, exchangeId } = input

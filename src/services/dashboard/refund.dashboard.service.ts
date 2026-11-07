@@ -23,7 +23,7 @@ import {
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { withDeadlockRetry } from '../../utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { restockOrderItems } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
@@ -179,7 +179,7 @@ export interface IssueRefundResult {
  * folio, el personal y el tipo de `abonarSaldoAFavorEnTx`). `fila` es lo que la fila devolvió: su orden y su monto (venta + propina).
  */
 export type AbonarSaldoAFavor = (
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   refundPaymentId: string,
   preparado: SobrePreparado,
   fila: { orderId: string; montoCents: number },
@@ -720,7 +720,7 @@ export type WriteRefundInput = WriteRefundBase &
  * MISMO archivo — y ése es el de `issueRefund`. `shared/writeRefundInTx.ts` sólo lo re-exporta.
  */
 export async function writeRefundInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: WriteRefundInput,
 ): Promise<{ refundPaymentId: string; replay: boolean; abono?: AbonoDeSaldoAFavor }> {
   // El replay va PRIMERO, antes de validar saldo o cantidades: un reintento de algo que ya se

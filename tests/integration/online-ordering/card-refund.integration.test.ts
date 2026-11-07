@@ -17,13 +17,19 @@ import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
-import { advanceCardRefund, listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
+import {
+  advanceCardRefund,
+  listCardRefunds,
+  refundCardOnlineOrder,
+  resolveReversedCardRefund,
+} from '@/services/online-ordering/card/refund.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 import { getAvailableBalance, getSettlementTimeline } from '@/services/dashboard/availableBalance.dashboard.service'
 import { bucketKey, getEarningsSummary, getEarningsTimeSeries } from '@/services/superadmin/earnings.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -529,7 +535,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     await expect(
       prisma.$transaction(
         tx =>
-          writeRefundInTx(tx, {
+          writeRefundInTx(tx as unknown as TxConReintento, {
             venueId: venueId!,
             originalPaymentId: paymentId,
             salesRefundCents: 10_000,

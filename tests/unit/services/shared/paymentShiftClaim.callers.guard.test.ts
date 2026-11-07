@@ -1576,9 +1576,13 @@ function paymentResultStableUntilAudit(payment: AstCall, audit: AstCall): boolea
 function deadlockRetryOptionsAreCanonical(invocation: ts.CallExpression): boolean {
   const options = invocation.arguments[1]
   if (!options || !ts.isObjectLiteralExpression(options)) return false
-  return !options.properties.some(
-    p => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && staticPropertyName(p.name) === 'cliente',
-  )
+  const checker = SOURCE_CHECKERS.get(invocation.getSourceFile())
+  return !options.properties.some(p => {
+    if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) return staticPropertyName(p.name) === 'cliente'
+    // Un `cliente` escondido en un spread (`...opciones`): si el verificador resuelve el tipo del spread y trae `cliente`, tampoco es canónico.
+    if (ts.isSpreadAssignment(p) && checker) return Boolean(checker.getTypeAtLocation(p.expression).getProperty('cliente'))
+    return false
+  })
 }
 
 function isCanonicalDeadlockRetryImport(identifier: ts.Identifier, context: AstCall): boolean {
@@ -3307,6 +3311,8 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       const calls = parseCalls(
         'fixture.ts',
         `import { withDeadlockRetry } from '@/utils/serializableRetry'
+         declare const conCliente: { cliente: unknown; timeout: number }
+         declare const sinCliente: { timeout: number }
          export async function f(otro: unknown) { await withDeadlockRetry(async tx => { await tx.payment.create({ data: {} }) }, ${opciones}) }`,
       )
       const pago = calls.find(c => c.node.expression.getText() === 'tx.payment.create')!
@@ -3315,6 +3321,8 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     expect(camino("{ etiqueta: 'f' }")).toEqual([])
     expect(camino("{ etiqueta: 'f', cliente: otro }")).toBeUndefined()
     expect(camino("{ etiqueta: 'f', cliente }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', ...conCliente }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', ...sinCliente }")).toEqual([])
     expect(camino('opciones')).toBeUndefined()
   })
 

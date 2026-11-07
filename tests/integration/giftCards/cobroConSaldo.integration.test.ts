@@ -37,6 +37,7 @@ import { rechazoSellado, reiniciarSellosParaPruebas } from '@/services/giftCards
 import { payWithBalance } from '@/controllers/mobile/giftCard.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -266,8 +267,8 @@ describe('cobro con saldo · Postgres real', () => {
 
     // El gerente toma el candado del sobre y le cambia el código; no confirma hasta que el cobro esté esperando.
     const gerente = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [t.id])
-      const r = await operarSobreDeGerenteEnTx(tx, {
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [t.id])
+      const r = await operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: t.id,
         staffId,
@@ -502,7 +503,7 @@ describe('cobro con saldo · Postgres real', () => {
     })
     // Ese cobro ya se devolvió completo a la tarjeta (lo que hará el reembolso de B1): REFUND del tender + REDEEM_REVERSAL.
     await prisma.$transaction(async tx => {
-      const { refundPaymentId } = await writeRefundInTx(tx, {
+      const { refundPaymentId } = await writeRefundInTx(tx as unknown as TxConReintento, {
         originalPaymentId: r.paymentId,
         venueId,
         salesRefundCents: 30000,
@@ -515,7 +516,13 @@ describe('cobro con saldo · Postgres real', () => {
         shift: 'CLAIM_LIVE',
         provenance: 'MANUAL',
       })
-      await revertirCanjeEnTx(tx, { venueId, originalPaymentId: r.paymentId, refundPaymentId, amount: D(320), staffId })
+      await revertirCanjeEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        originalPaymentId: r.paymentId,
+        refundPaymentId,
+        amount: D(320),
+        staffId,
+      })
     }, PRESUPUESTO)
     expect(await saldoDe(t.id)).toBe('1000.00')
     const huella = async () => ({
@@ -612,8 +619,8 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
     const t = await tarjeta(1000)
     const orderId = await cuentaDeMercancia(1000)
     await prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [t.id])
-      await operarSobreDeGerenteEnTx(tx, {
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [t.id])
+      await operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: t.id,
         staffId,
@@ -759,8 +766,8 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
     const primero = await payGiftCardBalanceOnOrder(venueId, orderId, pedido(`${SUF}-q91-sello`)).catch(e => e)
     expect(primero).toMatchObject({ code: 'GIFT_CARD_INSUFFICIENT_BALANCE', message: 'Quedan $100.00 en la tarjeta de regalo.' })
     await prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [t.id])
-      await operarSobreDeGerenteEnTx(tx, {
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [t.id])
+      await operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId,
         giftCardId: t.id,
         staffId,
@@ -789,7 +796,7 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
     let soltar!: () => void
     const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
     const transaccion = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [giftCardId])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [giftCardId])
       avisar(await pidDe(tx))
       await puedeSoltar
     }, PRESUPUESTO)

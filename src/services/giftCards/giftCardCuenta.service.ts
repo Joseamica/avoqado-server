@@ -34,8 +34,6 @@ import { MAX_SOBRES_POR_CUENTA } from './giftCardLimits'
 import { WHERE_RENGLON_DE_TARJETA, esCuentaDeTarjetasSeleccionada } from './giftCardMarks'
 import { registrarSalidaDelSecreto, type AuditoriaDeTarjetas } from './giftCardSurface.service'
 
-type Tx = TxConReintento
-
 export const TEXTO_SIN_SECRETO = 'No se pudo mostrar el código. Intenta otra vez.'
 const NOTA_DE_CAMBIO_DE_DESTINO = 'Cambio de destino de la entrega'
 
@@ -273,7 +271,7 @@ export function leerNuevoDestino(b: {
  * S-4: sólo una tarjeta ACTIVE y vigente admite reenviar, cambiar el destino o mostrar el código. Bajo el candado del sobre. S8a: un
  * sobre de saldo a favor (EL predicado, `esSobreDeSaldoAFavor`) no admite ninguna de las tres, en cualquier estado.
  */
-async function bloquearVigente(tx: Tx, venueId: string, giftCardId: string, ahora: Date): Promise<LockedGiftCard> {
+async function bloquearVigente(tx: TxConReintento, venueId: string, giftCardId: string, ahora: Date): Promise<LockedGiftCard> {
   const [card] = await lockGiftCardsForUpdate(tx, [giftCardId])
   if (!card || card.venueId !== venueId || card.status === 'DEACTIVATED') throw tarjetaNoEncontrada()
   if (await esSobreDeSaldoAFavor(tx, card.id)) throw sobreDeSaldoNoElegible()
@@ -290,7 +288,7 @@ async function bloquearVigente(tx: Tx, venueId: string, giftCardId: string, ahor
 }
 
 /** A18: lo que `LockedGiftCard` no trae, releído bajo el candado. */
-async function releerEntrega(tx: Tx, giftCardId: string) {
+async function releerEntrega(tx: TxConReintento, giftCardId: string) {
   const f = await tx.giftCard.findUnique({
     where: { id: giftCardId },
     select: { recipientEmail: true, deliveryOperationKey: true, deliveryStatus: true, codeLast4: true },
@@ -332,7 +330,7 @@ const reinicioDeEntrega = (operationKey: string) => ({
 
 /** El reenvío al MISMO destino, bajo el candado. La misma llave que el último reenvío es su repetición: no toca nada. */
 async function reenviarEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   card: LockedGiftCard,
   f: Awaited<ReturnType<typeof releerEntrega>>,
   operationKey: string,

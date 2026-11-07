@@ -39,6 +39,7 @@ import {
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(120000)
 
@@ -279,7 +280,7 @@ describe('B7 · revisión nocturna', () => {
       const otroCierre = () =>
         prisma.$transaction(async tx => {
           await lockExistingOrderForPayment(tx, { venueId, orderId: venta.orderId })
-          await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId: venta.orderId })
+          await activarSobresDeCuentaPagadaEnTx(tx as unknown as TxConReintento, { venueId, orderId: venta.orderId })
         }, ORDER_LOCK_WAIT_BUDGET)
 
       await noche()
@@ -321,7 +322,7 @@ describe('B7 · revisión nocturna', () => {
       const sinDinero = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [300] })
       await prisma.$transaction(async tx => {
         await tx.order.update({ where: { id: sinDinero.orderId }, data: { status: 'CANCELLED' } })
-        await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId: sinDinero.orderId, staffId })
+        await desactivarSobresPendientesDeCuentaEnTx(tx as unknown as TxConReintento, { venueId, orderId: sinDinero.orderId, staffId })
       })
 
       const mercancia = await crearCuentaDeMercancia({ venueId, staffId, total: 100 })

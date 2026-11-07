@@ -6,6 +6,7 @@ import { GiftCardReconciliationJob } from '@/jobs/giftCardReconciliation.job'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { sembrarVentaDeTarjetas, sembrarVentaDeTarjetasSinPagar } from '../giftCards/sembrarTarjetasDeRegalo'
 import { seedClothingSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -49,7 +50,7 @@ it('ignores the real exchange credit pair during envelope activation and nightly
   for (const orderId of [s.order.id, e.newOrderId]) {
     const r = await prisma.$transaction(async tx => {
       expect(await lockExistingOrderForPayment(tx, { venueId: s.venueId, orderId })).toBe(true)
-      return activarSobresDeCuentaPagadaEnTx(tx, { venueId: s.venueId, orderId, staffId: s.staffId })
+      return activarSobresDeCuentaPagadaEnTx(tx as unknown as TxConReintento, { venueId: s.venueId, orderId, staffId: s.staffId })
     }, ORDER_LOCK_WAIT_BUDGET)
     expect(r).toEqual({ activated: [] })
   }

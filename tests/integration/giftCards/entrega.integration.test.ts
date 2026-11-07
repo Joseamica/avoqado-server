@@ -51,6 +51,7 @@ import { processWhatsappWebhook } from '@/services/whatsappWebhook.service'
 import { handleResendWebhook } from '@/controllers/webhooks/resend.webhook.controller'
 import { cambiarDestinoDeTarjeta, reenviarTarjeta } from '@/services/giftCards/giftCardCuenta.service'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba, pidDe, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -110,7 +111,7 @@ async function alguienEsperaA(pid: number): Promise<boolean> {
 async function reponer(id: string) {
   await prisma.$transaction(
     tx =>
-      operarSobreDeGerenteEnTx(tx, {
+      operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
         venueId: negocio.venueId,
         giftCardId: id,
         staffId: negocio.staffId,
@@ -166,7 +167,7 @@ describe('el reclamo en la fila', () => {
     // A reclama y NO confirma; B llega mientras A sostiene las filas. B termina sola (las salta) o se queda esperando el
     // candado de A: se le da la oportunidad de las dos antes de que A confirme.
     const a = await prisma.$transaction(async tx => {
-      const deA = await reclamarEntregasEnTx({ ahora, ids }, tx)
+      const deA = await reclamarEntregasEnTx({ ahora, ids }, tx as unknown as TxConReintento)
       const pidA = await pidDe(tx)
       reclamoB = reclamarEntregas({ ahora, ids })
       reclamoB.then(

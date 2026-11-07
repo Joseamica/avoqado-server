@@ -1,18 +1,23 @@
 {
   "_léeme": [
     "S5b (red por traba; R63–R65, R74). Lo leen ordenDeCandadosParte2.test.ts y la guardia scripts/guardias/txConReintento.ts: castsPermitidos y openersGenericos viven SÓLO aquí (Ruling 29).",
-    "corridaSobreSrc: false hasta el paso 8 (ahí se prende la marca); con true, la prueba y la guardia exigen todo src/.",
+    "corridaSobreSrc: true desde el paso 8 (ya está prendida la marca): la prueba y la guardia exigen todo src/ con CERO hallazgos.",
     "escritores: toda función con una escritura o candado de Discount, CouponCode, CouponRedemption, StampReward, StampCard, StampEvent, Customer, LoyaltyTransaction o GiftCard (directa, del asesor del cupón o indirecta por un padre). EN_TX = corre dentro de una transacción que alguien abre; SENTENCIA = hoy con el cliente global: cada sentencia en su propio withDeadlockRetry.",
     "aperturas: cada withDeadlockRetry (o withSerializableRetry con reintentarInterbloqueo: serializable) por función, con etiqueta = el nombre de la función. Semilla medida el 6-nov sobre 48b98c5a7: las 95 transacciones de la tabla del brief (sin la excepción recordOrderPayment), executeHttpOperation (Ruling 16) y las 39 sentencias de las 34 funciones SENTENCIA. nota = lo que el paso 3-7 tiene que hacer además de envolver.",
     "cuerposRevisados: archivo#función → motivo (Ruling 21). Exime de (c) y (7) la función ENTERA, no sólo su rama sin tx (la prueba no separa ramas): se lista sólo una función cuya única apertura es la rama que corre sin tx, y la revisión de código lo comprueba.",
-    "Lo que S6–S13 agreguen entra aquí en su tarea."
+    "Lo que S6–S13 agreguen entra aquí en su tarea.",
+    "efectosRevisados: archivo#llamada → motivo. Una llamada cuyo nombre parece un efecto (emit…, mandar…, setTimeout) pero que sólo toca la base o es un plazo; se revisa en el código antes de listarla. Techo de la prueba: los parámetros-callback que recibe un cuerpo y que ella no puede seguir (`afterCas` y `dentroDeLaTx` de `transitions.service.ts`/`capture.service.ts`) se revisan a mano; sus llamadores pasan funciones que sólo escriben con el `tx` que reciben (paso 7). `denyTx` de `bookingIngestion` queda SIN envolver: no escribe ninguna tabla protegida."
   ],
-  "corridaSobreSrc": false,
+  "corridaSobreSrc": true,
   "padresConAccionReferencial": ["Consumer", "CustomerGroup", "Order", "Staff", "StaffVenue", "Venue"],
   "openersGenericos": {
     "src/services/mobile/http-operation.mobile.service.ts#executeHttpOperation": {
       "cuerpo": 1,
       "motivo": "Ruling 16: abre la transacción y recibe el cuerpo (mutate) por parámetro; sus 15 manejadores son cuerpos de la red."
+    },
+    "src/services/delivery-channels/core/deliveryOrderLock.ts#withDeliveryOrderLockConReintento": {
+      "cuerpo": 1,
+      "motivo": "Paso 8: abre withDeadlockRetry con el candado del pedido de reparto y recibe el cuerpo por parámetro; sólo lo usa la reconciliación de reparto (deliveryReconciliation), que devuelve cerradoEnProveedor y selloPorRevertir en su retorno."
     }
   },
   "castsPermitidos": {
@@ -26,7 +31,7 @@
     },
     "src/services/tpv/payment.tpv.service.ts#recordOrderPayment": {
       "cantidad": 1,
-      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. Se escribe tx => cuerpo(tx as TxConReintento) (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave.",
+      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave.",
       "efectos": [
         {
           "archivo": "src/services/tpv/registroRepetido.ts",
@@ -46,7 +51,12 @@
       ]
     }
   },
-  "cuerposRevisados": {},
+  "cuerposRevisados": {
+    "src/services/dashboard/commission/commission-calculation.service.ts#createCommissionForPayment": "Sólo abre `$transaction` si NO le dan `options.db` (:267). Todos los llamadores dentro de una transacción de la red (`freezePaymentCommissionInTx`, :1675) pasan `{ db: tx }`, así que la rama que abre no corre. (c) y (7) revisados; la exime ENTERA.",
+    "src/services/dashboard/commission/commission-calculation.service.ts#createRefundCommission": "Igual: abre `$transaction` (:519) sólo sin `options.db`; su único llamador (`paymentEffects.service.ts:495`, dentro de la transacción del reembolso) pasa `{ db: tx }`.",
+    "src/services/dashboard/commission/commission-calculation.service.ts#createSplitCommissionForPayment": "Igual: abre `$transaction` (:1438) sólo sin `options.db`; su llamador (`freezePaymentCommissionInTx`, :1674) pasa `{ db: tx, sink }`.",
+    "src/services/promotions/promotion.service.ts#applyPromotionToOrder": "Abre `$transaction` (:69) sólo cuando NO recibe `tx` (`if (tx) return applyPromotionInTransaction(tx, …)` va antes). Los llamadores que corren dentro de una transacción de la red (`crearVentaDeMostradorEnTx` y `createOrderWithItems` de la TPV) le pasan su `tx`; el de `sync.mobile.service.ts` lo llama FUERA de toda red, a propósito."
+  },
   "escritores": {
     "src/controllers/dashboard/referrals/referrals.controller.ts#generateCustomerCodeHandler": {
       "clase": "SENTENCIA",
@@ -1011,6 +1021,16 @@
       "etiqueta": "reverseStampForOrder",
       "cantidad": 1,
       "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): revertida. El reintento por traba va DENTRO de su lazo de hoy por vencimiento (P2028): reemplaza su prisma.$transaction."
+    },
+    "src/services/delivery-channels/core/deliveryOrderLock.ts#withDeliveryOrderLockConReintento": {
+      "etiqueta": "withDeliveryOrderLockConReintento",
+      "cantidad": 1,
+      "nota": "Opener genérico del paso 8: lo usa sólo deliveryReconciliation; devuelve cerradoEnProveedor y selloPorRevertir en su retorno (R65 b)."
     }
+  },
+  "efectosRevisados": {
+    "src/services/referrals/referralQualification.service.ts#emitTierRewards": "El nombre empieza con `emit`, pero `emitTierRewards(tx, …)` sólo lee y escribe filas (`referralTierReward`, `referralRewardGrant`, `discount`, `couponCode`) con el `tx` que recibe; no publica nada (revisado en el código).",
+    "src/services/tpv/refund.tpv.service.ts#mandarCambiosARevisarEnTx": "El nombre empieza con `mandar`, pero `mandarCambiosARevisarEnTx(tx, …)` sólo hace `SELECT … FOR UPDATE`, `exchange.updateMany` y `activityLog.create` con su `tx` (`exchangeTerminalRefund.ts`); no manda nada fuera de la base.",
+    "src/services/delivery-channels/core/deliveryReconciliation.service.ts#setTimeout": "Es el plazo de la lectura de SÓLO LECTURA al proveedor de reparto (`leerConLimite`, AbortController), acotado por `CANDADO_TX_TIMEOUT_MS`: no escribe nada fuera de la base y repetirla es inocuo. Ver la nota del paso 8: es una lectura al proveedor DENTRO de la transacción, decisión de diseño de la reconciliación."
   }
 }

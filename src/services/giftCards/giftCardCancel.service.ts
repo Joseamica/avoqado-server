@@ -35,7 +35,6 @@ import {
 import { leerSiEsCuentaDeTarjetas } from './giftCardMarks'
 import { isGiftCardTenderKind } from './giftCardTender'
 
-type Tx = TxConReintento
 /** Lecturas que también corren fuera de una transacción (el detalle del dashboard, C4). */
 type Db = Prisma.TransactionClient | PrismaClient
 
@@ -88,7 +87,7 @@ export interface AlRegistrarReembolsoResultado {
 const SIN_CANCELAR: AlRegistrarReembolsoResultado = Object.freeze({ cuentaCancelada: false })
 const CERO = () => new Prisma.Decimal(0)
 
-async function leerCobroOriginal(tx: Tx, venueId: string, paymentId: string): Promise<CobroOriginalDeTarjetas | null> {
+async function leerCobroOriginal(tx: TxConReintento, venueId: string, paymentId: string): Promise<CobroOriginalDeTarjetas | null> {
   const fila = await tx.payment.findFirst({
     where: { id: paymentId, venueId },
     select: { orderId: true, tenderType: { select: { systemKind: true } } },
@@ -111,7 +110,7 @@ export async function sobresDeLaCuenta(tx: Db, orderId: string): Promise<string[
 }
 
 /** Los sobres que tocó un cobro con saldo (sus `REDEEM`). */
-async function sobresDelCanje(tx: Tx, venueId: string, paymentId: string): Promise<string[]> {
+async function sobresDelCanje(tx: TxConReintento, venueId: string, paymentId: string): Promise<string[]> {
   const canjes = await tx.giftCardActivity.findMany({
     where: { venueId, paymentId, type: 'REDEEM' },
     select: { giftCardId: true },
@@ -181,13 +180,13 @@ function todosEnCancelacion(sobres: Array<{ id: string; status: GiftCardStatus }
  * venta pagada ya no tiene activación en curso (la hizo el cobro que la saldó), así que un reembolso nunca espera sobres
  * que una activación tiene tomados. Sin pagar ⇒ ningún candado de sobre.
  */
-async function ventaPagada(tx: Tx, venueId: string, orderId: string): Promise<boolean> {
+async function ventaPagada(tx: TxConReintento, venueId: string, orderId: string): Promise<boolean> {
   const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
   return orden?.paymentStatus === 'PAID'
 }
 
 export async function bloquearSobresDelReembolsoEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; originalPaymentId: string | string[]; original?: CobroOriginalDeTarjetas },
 ): Promise<void> {
   const ids: string[] = []
@@ -209,7 +208,7 @@ export async function bloquearSobresDelReembolsoEnTx(
   if (ids.length > 0) await lockGiftCardsForUpdate(tx, ids)
 }
 
-export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoInput): Promise<AlRegistrarReembolsoResultado> {
+export async function alRegistrarReembolsoEnTx(tx: TxConReintento, p: AlRegistrarReembolsoInput): Promise<AlRegistrarReembolsoResultado> {
   const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, p.originalPaymentId))
   if (!original) return SIN_CANCELAR
   if (isGiftCardTenderKind(original.tenderSystemKind)) {
@@ -231,7 +230,7 @@ export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoIn
  * El dinero que la cuenta conserva YA con este reembolso escrito: cobros COMPLETED menos devoluciones COMPLETED, venta Y propina
  * (la propina también es dinero que el negocio guarda). Las devoluciones se guardan negativas (`summarizeRefunds`).
  */
-async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promise<Prisma.Decimal> {
+async function dineroConservado(tx: TxConReintento, venueId: string, orderId: string): Promise<Prisma.Decimal> {
   const cobros = await tx.payment.aggregate({
     where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     _sum: { amount: true, tipAmount: true },
@@ -257,7 +256,7 @@ async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promi
  * (activarla, cancelarla) toma ANTES la Order que este reembolso ya tiene, y nadie que tenga un sobre PENDING espera un turno.
  */
 async function cerrarVentaSinPagarSiYaNoQuedaDinero(
-  tx: Tx,
+  tx: TxConReintento,
   p: AlRegistrarReembolsoInput,
   orderId: string,
 ): Promise<AlRegistrarReembolsoResultado> {
@@ -309,7 +308,11 @@ export async function avisarVentaDeTarjetasCanceladaPorReembolso(p: {
 }
 
 /** R2: devolver dinero de una cuenta de tarjetas PAGADA = cancelarla. Sin pagar: un abono más (r1, fix 1). */
-async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput, orderId: string): Promise<AlRegistrarReembolsoResultado> {
+async function devolverVentaDeTarjetasEnTx(
+  tx: TxConReintento,
+  p: AlRegistrarReembolsoInput,
+  orderId: string,
+): Promise<AlRegistrarReembolsoResultado> {
   // E4 (excepción escrita): antes de leer o bloquear un solo sobre, la venta tiene que estar PAGADA. Sin pagar, sus sobres siguen
   // PENDING (no valen nada): la devolución se acepta por cualquier canal y, si deja la cuenta en $0, la cancela.
   if (!(await ventaPagada(tx, p.venueId, orderId))) return cerrarVentaSinPagarSiYaNoQuedaDinero(tx, p, orderId)
@@ -432,7 +435,7 @@ const DESBLOQUEO_DE_CANCELACION: OperacionDeGerente = {
  * `lockGiftCardsForUpdate`, el mismo helper (y el mismo orden, por id) que el canje y el reembolso; un orden propio aquí sí podría
  * cruzarse con el de ellos.
  */
-async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string): Promise<string[]> {
+async function abrirVentaDeTarjetasEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<string[]> {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw noEsVentaDeTarjetas()
   if (!(await leerSiEsCuentaDeTarjetas(tx, orderId))) throw noEsVentaDeTarjetas()
   const ids = await sobresDeLaCuenta(tx, orderId)
@@ -450,7 +453,7 @@ async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string
  * vez no espera. Devuelve los sobres cuya operación ya estaba registrada.
  */
 async function sobresYaOperadosConLaLlaveEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; staffId: string; operationKey: string; ids: string[]; op: OperacionDeGerente },
 ): Promise<Set<string>> {
   const claves = p.ids.map(id => claveDeSobre(p.operationKey, id))

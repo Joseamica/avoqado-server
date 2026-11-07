@@ -52,6 +52,7 @@ import { ExchangeError, itemNotReturnable as notReturnable } from './exchangeErr
 import { isExchangeCreditTenderKind, NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
 import { resolverPreciosDeLineas } from '../mobile/precioQueVioElCliente'
 import type { ExchangeResponse, ExchangeReturnedLine, ExchangeTakenLine, ExchangeTxInput, SaleForExchange } from './exchange.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 export type { ChainRefundResolution } from './exchangeChainRefund'
 
@@ -168,7 +169,7 @@ async function puertasTrasLaLlaveEnTx(
 
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */
 export async function prepareExchangeInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: ExchangeTxInput | ExchangeSettleTxInput,
 ): Promise<PreparedExchange | ExchangeTxEarly> {
   if ('mode' in input) return prepareCardSettlementInTx(tx, input)
@@ -609,7 +610,7 @@ export async function prepareExchangeInTx(
 
 /** Shared CREDIT writers; all existing Orders/Payments were claimed before this function. */
 export async function prepareExchangeCreditsInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   prepared: Omit<PreparedExchange, 'refundRows' | 'newSalePayments'>,
   slices: AllocationSlice[],
   chains: Map<string, ChainRefundResolution>,
@@ -868,11 +869,7 @@ async function createExchangeSaleInTx(
   return { id: order.id, orderNumber: order.orderNumber, createdAt: order.createdAt }
 }
 
-export async function finishExchangeInTx(
-  tx: Prisma.TransactionClient,
-  prepared: PreparedExchange,
-  settled: AbonoEnTx[],
-): Promise<ExchangeTxOutcome> {
+export async function finishExchangeInTx(tx: TxConReintento, prepared: PreparedExchange, settled: AbonoEnTx[]): Promise<ExchangeTxOutcome> {
   const p = prepared
   const { venueId } = p.input
   const cardOnly = p.existingCharge !== null && p.returnedCents === 0 && p.newSalePayments.length === 0 && settled.length === 0

@@ -48,6 +48,7 @@ import {
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -272,7 +273,7 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
     })
     await prisma.$transaction(async tx => {
       await lockExistingOrderForPayment(tx, { venueId, orderId: venta.orderId })
-      await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId: venta.orderId, staffId })
+      await activarSobresDeCuentaPagadaEnTx(tx as unknown as TxConReintento, { venueId, orderId: venta.orderId, staffId })
     }, ORDER_LOCK_WAIT_BUDGET)
     expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `giftcard:PAID_WITH_DEACTIVATED:${venta.orderId}` } })).toBe(1)
     const orden = await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })
@@ -306,7 +307,7 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
     const primeroTieneElCandado = new Promise<void>(resolve => (avisarQueTieneElCandado = resolve))
     const primero = prisma.$transaction(
       async tx => {
-        const hecho = await revertirCanjeEnTx(tx, entrada)
+        const hecho = await revertirCanjeEnTx(tx as unknown as TxConReintento, entrada)
         avisarQueTieneElCandado()
         await esperarAQueAlguienEspereA(await pidDe(tx))
         return hecho
@@ -314,7 +315,10 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       { timeout: 20_000, maxWait: 5_000 },
     )
     await primeroTieneElCandado
-    const segundo = prisma.$transaction(tx => revertirCanjeEnTx(tx, entrada), { timeout: 20_000, maxWait: 5_000 })
+    const segundo = prisma.$transaction(tx => revertirCanjeEnTx(tx as unknown as TxConReintento, entrada), {
+      timeout: 20_000,
+      maxWait: 5_000,
+    })
     const [a, b] = await Promise.all([primero, segundo])
 
     const comoTexto = (filas: Array<{ giftCardId: string; amount: Prisma.Decimal }>) =>

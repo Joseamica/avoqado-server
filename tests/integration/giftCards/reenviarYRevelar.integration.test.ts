@@ -54,6 +54,7 @@ import {
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -486,8 +487,8 @@ describe('el candado del sobre decide la repetición (molde de S2/S3: el primero
     const A = prisma.$transaction(
       async tx => {
         const pid = await pidDe(tx)
-        await lockGiftCardsForUpdate(tx, [id])
-        await operarSobreDeGerenteEnTx(tx, {
+        await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [id])
+        await operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
           venueId: negocio.venueId,
           giftCardId: id,
           staffId: negocio.staffId,

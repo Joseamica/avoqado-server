@@ -154,9 +154,16 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
     ts.forEachChild(sf, function visitar(n: ts.Node) {
       // Un import por defecto de un escritor (`import otroNombre from './escritor'`) también lo nombra.
       if (ts.isImportClause(n) && n.name && esEscritor(checker.getTypeAtLocation(n.name))) nombres.add(n.name.text)
-      if ((ts.isFunctionLike(n) || ts.isFunctionTypeNode(n)) && conParametroMarcado(n as ts.SignatureDeclaration)) {
+      // Un tipo función (`type Cb = (tx: TxConReintento) => …`) es sólo un tipo: su nombre no es un valor que se pueda guardar.
+      if (ts.isFunctionLike(n) && !ts.isFunctionTypeNode(n) && conParametroMarcado(n as ts.SignatureDeclaration)) {
         const nombre = (n as ts.SignatureDeclaration).name ?? ((n.parent as ts.NamedDeclaration | undefined)?.name as ts.Node | undefined)
-        if (nombre && (ts.isIdentifier(nombre) || ts.isPrivateIdentifier(nombre))) nombres.add(nombre.text)
+        // Un callback con su TIPO escrito (`const abonar: AbonarSaldoAFavor = (t, …) => …`) es un valor de ranura tipada: sólo lo llama
+        // quien ya tiene un `TxConReintento`, así que no se vigila como un escritor suelto.
+        const ctx = ts.isArrowFunction(n) || ts.isFunctionExpression(n) ? checker.getContextualType(n) : undefined
+        const callbackTipado =
+          (ts.isVariableDeclaration(n.parent) && !!n.parent.type && esEscritor(checker.getTypeFromTypeNode(n.parent.type))) ||
+          (!!ctx && partes(ctx).some(p => esEscritor(p)))
+        if (!callbackTipado && nombre && (ts.isIdentifier(nombre) || ts.isPrivateIdentifier(nombre))) nombres.add(nombre.text)
       }
       ts.forEachChild(n, visitar)
     })
@@ -253,6 +260,23 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
         if (!esEscritor(tipo) && llevaEscritor(tipo))
           hallazgos.push(`(11) ${donde(n)}: «as any» sobre un objeto con escritores deja llamarlos con cualquier cliente`)
       }
+      // (11) m3 (paso 4): una aserción a un tipo CONCRETO que le quita los escritores a un objeto (`(servicio as Record<string, Function>)
+      // .escribir(prisma)`): el destino debe seguir teniendo, como escritor, cada propiedad que lo era en el origen.
+      if ((ts.isAsExpression(n) || ts.isTypeAssertionExpression(n)) && !abierto(checker.getTypeFromTypeNode(n.type))) {
+        const origen = checker.getTypeAtLocation(n.expression)
+        const destino = checker.getTypeFromTypeNode(n.type)
+        if (!esEscritor(origen) && llevaEscritor(origen)) {
+          const pierde = checker
+            .getPropertiesOfType(origen)
+            .filter(p => esEscritor(checker.getTypeOfSymbol(p)))
+            .some(p => {
+              const q = checker.getPropertyOfType(destino, p.name)
+              return !q || !esEscritor(checker.getTypeOfSymbol(q))
+            })
+          if (pierde)
+            hallazgos.push(`(11) ${donde(n)}: una aserción que le quita los escritores a un objeto deja llamarlos con cualquier cliente`)
+        }
+      }
       if (ts.isShorthandPropertyAssignment(n)) {
         const esperado = checker.getContextualType(n.parent)?.getProperty(n.name.text)
         const valor = checker.getShorthandAssignmentValueSymbol(n)
@@ -290,7 +314,14 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
             )
         }
       }
-      if (esFuncionLiteral(n) && conParametroMarcado(n) && !esDeclaracion(n) && !esCuerpoDeApertura(n))
+      // Un callback que llena una RANURA TIPADA que exige la marca (`afterCas?: (tx: TxConReintento, …) => …`, `dentroDeLaTx`, `abonar`): sólo
+      // lo puede llamar quien ya tiene un `TxConReintento`, así que no escapa. Una ranura borrada (`Function`, `any`, sin tipo) sigue
+      // fallando: ahí sí se podría llamar con cualquier cliente.
+      const enRanuraTipada = (f: ts.Node) => {
+        const ctx = checker.getContextualType(f as ts.Expression)
+        return !!ctx && partes(ctx).some(p => esEscritor(p))
+      }
+      if (esFuncionLiteral(n) && conParametroMarcado(n) && !esDeclaracion(n) && !esCuerpoDeApertura(n) && !enRanuraTipada(n))
         hallazgos.push(
           `(11) ${donde(n)}: una función con TxConReintento como valor; decláralo con nombre y llámalo, o pásalo a withDeadlockRetry`,
         )

@@ -32,6 +32,7 @@ import {
   type OrdenFoto,
   type Veredicto,
 } from '../src/services/shared/reasignarCobro'
+import { withDeadlockRetry } from '../src/utils/serializableRetry'
 
 class Rechazo extends Error {
   constructor(readonly codigo: number) {
@@ -327,7 +328,7 @@ async function main(): Promise<void> {
     // Por negocio: el candado comprueba que cada orden siga siendo del negocio del cobro.
     const depsDe = (venueId: string): DepsAplicar => ({
       enTransaccion: fn =>
-        prisma.$transaction(
+        withDeadlockRetry(
           tx =>
             fn({
               bloquear: async ids => {
@@ -393,7 +394,7 @@ async function main(): Promise<void> {
                 })
               },
             }),
-          ORDER_LOCK_WAIT_BUDGET,
+          { etiqueta: 'reasignarCobroAsuOrden', ...ORDER_LOCK_WAIT_BUDGET },
         ),
       liberarMesa: (venue, tableId) => releaseTableIfSettled(venue, tableId),
     })

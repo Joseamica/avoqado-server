@@ -3,6 +3,7 @@ import { asignarPuesto, cambiarAsignacion } from '@/services/dashboard/rh/asigna
 import { deleteOrRetainStaffWithH1ProvenanceTx } from '@/services/superadmin/staffDeletion.service'
 import { sumarDias } from '@/services/dashboard/staffPay/periodos'
 import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
@@ -49,7 +50,7 @@ it('borra definitivamente a una persona con una cadena de 2 versiones de asignac
   const v2 = await cambiarAsignacion({ venueId: venueId!, assignmentId: v1.id, positionId: recepcion.id, fecha: hoy, actorId: actorId! })
   expect(v2.supersedesId).toBe(v1.id) // la cadena real: v2 → v1
 
-  const r = await prisma.$transaction(tx => deleteOrRetainStaffWithH1ProvenanceTx(tx, personaId!))
+  const r = await prisma.$transaction(tx => deleteOrRetainStaffWithH1ProvenanceTx(tx as unknown as TxConReintento, personaId!))
 
   expect(r.retainedForAudit).toBe(false)
   expect(await prisma.staff.findUnique({ where: { id: personaId } })).toBeNull()

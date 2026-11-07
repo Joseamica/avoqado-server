@@ -9,7 +9,7 @@ import {
   type OnlineOrderRejectReason,
 } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
@@ -144,7 +144,7 @@ export interface CasArgs {
  * `Order` desde los estados permitidos. Si otro actor ganó, el CAS da 0 y no se toca nada más. M-1: lanza `OrderNotWritten`
  * cuando cancela sin poder cancelar la cuenta, para que quien abrió la transacción la revierta entera.
  */
-export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs): Promise<CasResult> {
+export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise<CasResult> {
   const rule = RULES[a.kind]
   if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
   // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida. R52: también el
@@ -285,7 +285,7 @@ export async function netoCobradoPorCuenta(
 }
 
 /** Escritura extra en la MISMA transacción, después del CAS (fase 2: el estado del cargo de tarjeta). Lanzar revierte todo. */
-export type AfterCasInTx = (tx: Prisma.TransactionClient, r: CasResult) => Promise<void>
+export type AfterCasInTx = (tx: TxConReintento, r: CasResult) => Promise<void>
 
 /** `casTransitionInTx` en su propia transacción, con el presupuesto del candado de la orden. */
 async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasResult> {
