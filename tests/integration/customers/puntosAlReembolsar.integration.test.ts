@@ -505,7 +505,11 @@ describe('D6 · al reembolsar se quitan los puntos de esa venta', () => {
       let soltar!: () => void
       const hastaSoltar = new Promise<void>(resolve => (soltar = resolve))
       let pidListo!: (pid: number) => void
-      const pid = new Promise<number>(resolve => (pidListo = resolve))
+      let rechazarPid!: (error: unknown) => void
+      const pid = new Promise<number>((resolve, reject) => {
+        pidListo = resolve
+        rechazarPid = reject
+      })
       const otorgamiento = prisma.$transaction(
         async tx => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${order.id}))`
@@ -516,11 +520,19 @@ describe('D6 · al reembolsar se quitan los puntos de esa venta', () => {
         },
         { timeout: 30_000 },
       )
-      const reversa = quitarPuntosPorReembolso(venueId, r.refundId)
-      await esperarAQueAlguienEspereA(await pid)
-      soltar()
-      await otorgamiento
-      await reversa
+      otorgamiento.catch(rechazarPid)
+      let reversa: Promise<void> | undefined
+      try {
+        const pidDelOtorgamiento = await pid
+        reversa = quitarPuntosPorReembolso(venueId, r.refundId)
+        reversa.catch(() => undefined)
+        await esperarAQueAlguienEspereA(pidDelOtorgamiento)
+        soltar()
+        await Promise.all([otorgamiento, reversa])
+      } finally {
+        soltar()
+        await Promise.allSettled([otorgamiento, reversa])
+      }
       expect(await saldo(c)).toBe(0)
     })
 
