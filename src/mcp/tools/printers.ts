@@ -34,6 +34,27 @@ import type { McpScope } from '../scope'
 const AVISO_PANTALLA_PARA_CLIENTES =
   'La pantalla de cocina todavía no está lista para clientes. Por ahora sólo el equipo de Avoqado puede activarla.'
 
+/** La nota de `list_print_stations`: las categorías «Sólo vale» (su área no manda comanda) no cuentan como sin ruta. */
+function notaDeRuteo(routing: {
+  hasDefault: boolean
+  unroutedCategories: number
+  areaTicketOnlyUnrouted?: number
+  areasWithoutComanda?: Array<{ name: string }>
+}): string | undefined {
+  const soloVale = routing.areaTicketOnlyUnrouted ?? 0
+  const pendientes = routing.unroutedCategories - soloVale
+  const areas = routing.areasWithoutComanda?.map(a => a.name).join(', ')
+  // Codex r2 #3 y r3: con el mismo límite que dice el DASHBOARD (se puede cobrar sin vale; la cascada de rutas sigue).
+  const aparte =
+    soloVale > 0
+      ? ` Otras ${soloVale} son de ${areas}, que sólo sacan vale (sin comanda): al emitir no necesitan estación. Si uno de sus productos se cobra sin vale (desde Mesas, al dividir una cuenta o en otro aparato), su comanda va a la estación del producto o, si no tiene, sale marcada "SIN ESTACIÓN".`
+      : ''
+  if (!routing.hasDefault && pendientes > 0) {
+    return `${pendientes} categoría(s) sin ruta y sin estación default: sus productos imprimirían una comanda marcada "SIN ESTACIÓN". Asigna una estación o marca un default.${aparte}`
+  }
+  return aparte ? aparte.trim() : undefined
+}
+
 export function registerPrinterTools(server: McpServer, scope: McpScope): void {
   // Con la puerta abierta (1-nov) no hay aviso: decir «todavía no está lista» sería falso.
   const avisoPantalla = PANTALLA_ABIERTA_A_CLIENTES
@@ -91,11 +112,11 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         })),
         hasDefault: routing.hasDefault,
         unroutedCategories: routing.unroutedCategories,
+        // Aparatos claros: las «sin ruta» de áreas de vales sin comanda (sólo sacan vale) no son un problema.
+        areaTicketOnlyUnrouted: routing.areaTicketOnlyUnrouted,
+        areasWithoutComanda: routing.areasWithoutComanda?.map(a => a.name),
         pantallaDeCocina: stations.some(s => s.hasKitchenDisplay) ? avisoPantalla : undefined,
-        nota:
-          !routing.hasDefault && routing.unroutedCategories > 0
-            ? `${routing.unroutedCategories} categoría(s) sin ruta y sin estación default: sus productos imprimirían una comanda marcada "SIN ESTACIÓN". Asigna una estación o marca un default.`
-            : undefined,
+        nota: notaDeRuteo(routing),
       })
     },
   )

@@ -17,8 +17,10 @@
  */
 import { Prisma, PrinterConnectionType } from '@prisma/client'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { leerSoloVale, type SoloVale } from './routingSoloVale'
 import { assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
 import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
 import { isActiveSuperAdmin } from '../../mcp/scope'
@@ -361,16 +363,38 @@ export async function upsertGateway(venueId: string, input: UpsertGatewayInput, 
 }
 
 // ── Routing (category/product → station) ────────────────────────────
+const NADA_SOLO_VALE: SoloVale = { categoryIds: new Set(), areas: [] }
+
+/** «Sólo vale» decora el Ruteo; si su lectura falla, el Ruteo se ve como siempre (y queda en el log). */
+async function soloValeSinRomper(venueId: string): Promise<SoloVale> {
+  try {
+    return await leerSoloVale(venueId)
+  } catch (error) {
+    logger.warn('[Ruteo] no se pudo calcular «Sólo vale»; se muestra como siempre', { venueId, error })
+    return NADA_SOLO_VALE
+  }
+}
+
 export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   await assertVenue(venueId)
   const hasDefault = (await prisma.printStation.count({ where: { venueId, active: true, isDefault: true } })) > 0
   // Misma cascada del motor: sólo una estación activa del propio venue resuelve la categoría.
-  const unroutedCategories = hasDefault
-    ? 0
-    : await prisma.menuCategory.count({
-        where: { venueId, OR: [{ printStationId: null }, { printStation: { isNot: { venueId, active: true } } }] },
-      })
-  const summary = { unroutedCategories, hasDefault }
+  const sinRuta: Prisma.MenuCategoryWhereInput[] = [{ printStationId: null }, { printStation: { isNot: { venueId, active: true } } }]
+  const [unroutedCategories, soloVale] = await Promise.all([
+    hasDefault ? 0 : prisma.menuCategory.count({ where: { venueId, OR: sinRuta } }),
+    // La lista de productos de una categoría no lo usa: no se recalcula al desplegarla ni al paginarla (Codex r1 #4).
+    query.section === 'products' ? NADA_SOLO_VALE : soloValeSinRomper(venueId),
+  ])
+  // Aparatos claros: de las «sin ruta», cuántas son «Sólo vale» (su área no manda comanda). Campos nuevos y opcionales: sólo
+  // salen si el negocio tiene alguna; `unroutedCategories` no cambia de significado (lo leen dashboards viejos y el MCP).
+  const conSoloVale = soloVale.areas.length > 0
+  const areaTicketOnlyUnrouted =
+    hasDefault || !conSoloVale ? 0 : await prisma.menuCategory.count({ where: { venueId, id: { in: [...soloVale.categoryIds] }, OR: sinRuta } })
+  const summary = {
+    unroutedCategories,
+    hasDefault,
+    ...(conSoloVale && { areaTicketOnlyUnrouted, areasWithoutComanda: soloVale.areas }),
+  }
   if (query.section === 'summary') return { categories: [], products: [], ...summary }
 
   const categoryWhere: Prisma.MenuCategoryWhereInput = {
@@ -392,7 +416,13 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
         skip: skip,
         take: take,
       })
-      .then(rows => rows.map(({ _count, ...category }) => ({ ...category, productCount: _count.products })))
+      .then(rows =>
+        rows.map(({ _count, ...category }) => ({
+          ...category,
+          productCount: _count.products,
+          ...(soloVale.categoryIds.has(category.id) && { areaTicketOnly: true }),
+        })),
+      )
   const productPage = (skip: number, take: number) =>
     prisma.product
       .findMany({

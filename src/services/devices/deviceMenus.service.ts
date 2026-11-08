@@ -89,6 +89,55 @@ export async function resolveDeviceMenuFilter(venueId: string, terminalId: strin
   return filtroDelAparato(venueId, terminalId, menuIds, asignaciones, categorias)
 }
 
+/**
+ * Lo mismo que `resolveDeviceMenuFilter` para varios aparatos del negocio, en lecturas fijas (filas, plan, asignaciones y
+ * categorías) en vez de cuatro por aparato. La usa el Ruteo para «Sólo vale» (Aparatos claros, Codex r1 #4).
+ * `null` = pasado el tope de la lectura junta no se sabe qué muestra cada uno (Codex r2 #2): quien llama no decide nada.
+ */
+export async function resolveDeviceMenuFilters(
+  venueId: string,
+  terminalIds: ReadonlyArray<string>,
+): Promise<Map<string, DeviceMenuFilter> | null> {
+  const resultado = new Map<string, DeviceMenuFilter>(terminalIds.map(id => [id, TODO]))
+  if (terminalIds.length === 0) return resultado
+  const filas = await leerFilasDeLosAparatos(venueId, terminalIds)
+  if (filas.length === 0 || !(await venueHasFeatureAccess(venueId, DEVICE_MENUS_CODE))) return resultado
+
+  const menusDe = new Map<string, string[]>()
+  for (const f of filas) {
+    const suyos = menusDe.get(f.terminalId) ?? []
+    // El mismo tope por aparato que la lectura de uno solo (sus primeros menús por id).
+    if (suyos.length < MAX_MENUS_POR_APARATO) suyos.push(f.menuId)
+    menusDe.set(f.terminalId, suyos)
+  }
+  const [asignaciones, categorias] = await Promise.all([
+    leerAsignaciones([...new Set([...menusDe.values()].flat())]),
+    leerCategoriasActivasDelNegocio(venueId),
+  ])
+  // La lectura junta está topada: pasada, no se sabe qué le falta a cada uno (uno solo, por debajo de su tope, sí filtra).
+  if (asignaciones.length > MAX_ASIGNACIONES) {
+    logger.warn('[DeviceMenus] tope de asignaciones pasado en el lote: no se calcula', { venueId })
+    return null
+  }
+  for (const [terminalId, menuIds] of menusDe) {
+    const propios = new Set(menuIds)
+    resultado.set(
+      terminalId,
+      filtroDelAparato(venueId, terminalId, menuIds, asignaciones.filter(a => propios.has(a.menuId)), categorias),
+    )
+  }
+  return resultado
+}
+
+function leerFilasDeLosAparatos(venueId: string, terminalIds: ReadonlyArray<string>) {
+  return prisma.terminalMenu.findMany({
+    where: { terminalId: { in: [...terminalIds] }, menu: { venueId, active: true, appliesToDevices: true } },
+    select: { terminalId: true, menuId: true },
+    orderBy: [{ terminalId: 'asc' }, { menuId: 'asc' }],
+    take: MAX_MENUS_POR_APARATO * terminalIds.length,
+  })
+}
+
 /** La regla con sus topes: pasado uno, el aparato muestra todo. La usan `/settings` y el conteo del panel. */
 function filtroDelAparato(
   venueId: string,
