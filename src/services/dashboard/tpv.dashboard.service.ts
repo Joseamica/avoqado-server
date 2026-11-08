@@ -1,5 +1,5 @@
 import logger from '@/config/logger'
-import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import { DeviceFormFactor, FulfillmentMode, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { countUpdatedTerminals, lockTerminalRow, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
@@ -10,6 +10,7 @@ import prisma from '../../utils/prismaClient'
 import { ACTIVATABLE_TERMINAL_TYPES, type DeviceManagementDto, toDeviceManagementDto } from '../device-capabilities.service'
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
+import { extrasDeLaFicha, type ExtrasDeLaFicha } from './tpvDetailExtras'
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -215,7 +216,15 @@ export async function getTerminalsData(
  * @param tpvId - El ID de la terminal.
  * @returns La terminal encontrada.
  */
-export async function getTpvById(venueId: string, tpvId: string): Promise<DeviceManagementDto<Terminal>> {
+export async function getTpvById(
+  venueId: string,
+  tpvId: string,
+): Promise<
+  DeviceManagementDto<
+    Terminal & { fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null }
+  > &
+    ExtrasDeLaFicha
+> {
   // 1. Validar parámetros de entrada
   if (!venueId) {
     throw new NotFoundError('El ID del Venue es requerido.')
@@ -230,6 +239,8 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
       id: tpvId,
       venueId: venueId,
     },
+    // Aparatos claros: el área que emite y si manda comanda, para el letrero de arriba de la ficha (campo nuevo, opcional).
+    include: { fulfillmentArea: { select: { id: true, name: true, sendsComanda: true, active: true, fulfillmentMode: true } } },
   })
 
   // 3. Verificar si la terminal existe
@@ -237,7 +248,7 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
   }
 
-  return toDeviceManagementDto(terminal)
+  return { ...toDeviceManagementDto(terminal), ...(await extrasDeLaFicha(venueId, terminal)) }
 }
 
 export interface UpdateTpvActor {
