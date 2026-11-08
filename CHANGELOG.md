@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Logs del sistema (SUPERADMIN, `GET /superadmin/system-logs`): sin fecha, busca en Render sólo las últimas 24 h. Con el filtro «Error» y sin ventana, Render hojeaba todo el historial (3.6–27 s, y el 3-nov 8 fallos seguidos a los 20 s); con 24 h, 0.3–1.4 s medido el 8-nov. La respuesta suma `windowStart` y `olderEndTime` (opcionales) para «Ver anteriores», hasta los ~7 días que guarda Render. Si Render se cuelga, se rinde a los 7 s y reintenta una vez; si sigue, contesta 504 con un mensaje claro antes de los 20 s del navegador. El `limit` se acota a 1–100 también con basura.
 - Cupones al cobrar (D5): `POST /mobile/.../orders` y `POST /tpv/.../orders/with-items` aceptan `couponCode` opcional; el servidor lo valida, calcula el monto y liga la fila. El uso se cuenta al quedar pagada la venta por cualquier camino (`onOrderPaid`) y en el carrito gratis de la terminal. Validar devuelve textos en español; en la terminal, además, `couponId`, `code`, `scope`, `maxDiscountAmount` y `errorCode` opcionales.
 - AngelPay: las respuestas JSON HTTP omiten la clave de firma del webhook, también en cuentas anidadas, sin modificar sus datos persistidos ni las credenciales SDK solicitadas.
 

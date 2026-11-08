@@ -17,6 +17,7 @@
 
 import axios, { isAxiosError } from 'axios'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 
 const RENDER_API_BASE = 'https://api.render.com/v1'
 
@@ -51,6 +52,38 @@ export interface RenderLogsResponse {
   logs: RenderLogEntry[]
   hasMore: boolean
   nextEndTime?: string
+  /** Desde cuándo se buscó (ISO). Sin fecha elegida son las 24 h antes de `endTime` (o de ahora). */
+  windowStart?: string
+  /**
+   * Dónde sigue «Ver anteriores»: se manda como `endTime` (con el mismo `startTime` del operador, si eligió uno).
+   * Sin valor = ya no hay nada más atrás que buscar.
+   */
+  olderEndTime?: string
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/**
+ * Sin fecha elegida se busca sólo en las últimas 24 h. Con un filtro escaso («Error» sale cada ~6 h) y sin
+ * ventana, Render hojeaba TODO el historial hasta juntar 100: 1–5 s normalmente y más de 20 s cuando andaba
+ * lento (3-nov-2026, 8 fallos seguidos). Lo más viejo se pide con «Ver anteriores», de 24 h en 24 h.
+ */
+const DEFAULT_WINDOW_MS = DAY_MS
+/**
+ * «Ver anteriores» no ofrece ir más atrás de lo que Render guarda. Medido el 8-nov-2026: no hay logs de hace más
+ * de ~7.5 días. ponytail: fijo a 7 días; si se sube el plan de Render (más retención), súbelo aquí.
+ */
+const RENDER_RETENTION_MS = 7 * DAY_MS
+/**
+ * Render a veces se cuelga en una consulta que un instante después contesta en 0.4 s (medido el 8-nov: 1 de 13
+ * consultas de 24 h se colgó 60 s; la siguiente, igual, tardó 0.4 s). Por eso se rinde pronto y reintenta una vez.
+ * Todo junto (ownerId + 2 intentos) queda debajo del timeout del navegador (20 s): el SERVIDOR contesta primero.
+ */
+const OWNER_TIMEOUT_MS = 4_000
+const LOGS_TIMEOUT_MS = 7_000
+const LOGS_ATTEMPTS = 2
+
+function isTimeout(error: unknown): boolean {
+  return isAxiosError(error) && !error.response && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT')
 }
 
 function isConfigured(): { ok: true; apiKey: string; serviceId: string } | { ok: false; reason: string } {
@@ -86,7 +119,7 @@ async function getOwnerId(apiKey: string, serviceId: string): Promise<string> {
   if (cachedOwnerId) return cachedOwnerId
   const { data } = await axios.get<{ ownerId: string }>(`${RENDER_API_BASE}/services/${serviceId}`, {
     headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-    timeout: 20_000,
+    timeout: OWNER_TIMEOUT_MS,
   })
   if (!data.ownerId) {
     throw new Error('Render API returned a service without an ownerId — verify RENDER_SERVICE_ID.')
@@ -127,6 +160,13 @@ export async function fetchRenderLogs(params: FetchRenderLogsParams = {}): Promi
     // only has to set RENDER_API_KEY + RENDER_SERVICE_ID, not three vars.
     const ownerId = await getOwnerId(config.apiKey, config.serviceId)
 
+    // Ventana: el inicio del operador, o las 24 h antes del final (o de ahora), nunca más atrás de lo que Render guarda.
+    const now = Date.now()
+    const oldestAllowed = now - RENDER_RETENTION_MS
+    const endMs = params.endTime ? Date.parse(params.endTime) : now
+    const windowStart =
+      params.startTime ?? new Date(Math.max((Number.isNaN(endMs) ? now : endMs) - DEFAULT_WINDOW_MS, oldestAllowed)).toISOString()
+
     // Render API espera params repetidos (`?resource=srv-x&resource=srv-y`),
     // NO el `resource[]=...` que axios serializa por default. Construimos la
     // URL con URLSearchParams para tener control fino y no depender de `qs`.
@@ -134,27 +174,38 @@ export async function fetchRenderLogs(params: FetchRenderLogsParams = {}): Promi
     search.append('ownerId', ownerId)
     search.append('resource', config.serviceId)
     search.append('direction', 'backward')
-    search.append('limit', String(Math.min(params.limit ?? 100, 100)))
+    search.append('limit', String(Math.min(Math.max(params.limit || 100, 1), 100)))
     if (params.level) search.append('level', params.level)
     if (params.type) search.append('type', params.type)
-    if (params.startTime) search.append('startTime', params.startTime)
+    search.append('startTime', windowStart)
     if (params.endTime) search.append('endTime', params.endTime)
-    const { data } = await axios.get<{
-      hasMore: boolean
-      nextEndTime?: string
-      logs: Array<{
-        id: string
-        timestamp: string
-        message: string
-        labels: Array<{ name: string; value: string }>
-      }>
-    }>(`${RENDER_API_BASE}/logs?${search.toString()}`, {
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        Accept: 'application/json',
-      },
-      timeout: 20_000,
-    })
+    const pedirLogs = () =>
+      axios.get<{
+        hasMore: boolean
+        nextEndTime?: string
+        logs: Array<{
+          id: string
+          timestamp: string
+          message: string
+          labels: Array<{ name: string; value: string }>
+        }>
+      }>(`${RENDER_API_BASE}/logs?${search.toString()}`, {
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          Accept: 'application/json',
+        },
+        timeout: LOGS_TIMEOUT_MS,
+      })
+    let respuesta: Awaited<ReturnType<typeof pedirLogs>> | undefined
+    for (let intento = 1; !respuesta; intento++) {
+      try {
+        respuesta = await pedirLogs()
+      } catch (error) {
+        if (!isTimeout(error) || intento >= LOGS_ATTEMPTS) throw error
+        logger.warn(`[render-logs] Render no contestó en ${LOGS_TIMEOUT_MS} ms; reintento ${intento + 1}/${LOGS_ATTEMPTS}`)
+      }
+    }
+    const { data } = respuesta
 
     let logs: RenderLogEntry[] = (data.logs ?? []).map(entry => ({
       id: entry.id,
@@ -176,11 +227,27 @@ export async function fetchRenderLogs(params: FetchRenderLogsParams = {}): Promi
       logs,
       hasMore: data.hasMore,
       nextEndTime: data.nextEndTime,
+      windowStart,
+      // Más dentro de la ventana → sigue desde el más viejo devuelto; si no, desde el inicio de la ventana (salvo que
+      // el operador haya elegido ese inicio, o ya sea el límite de Render).
+      olderEndTime: data.hasMore
+        ? data.nextEndTime
+        : !params.startTime && Date.parse(windowStart) > oldestAllowed
+          ? windowStart
+          : undefined,
     }
   } catch (error) {
     if (isAxiosError(error)) {
       const status = error.response?.status
       const renderMessage = (error.response?.data as { message?: string } | undefined)?.message ?? error.message
+
+      if (isTimeout(error)) {
+        logger.warn(`[render-logs] Render API no contestó a tiempo: ${renderMessage}`)
+        throw new AppError(
+          'Render tardó demasiado en contestar. Vuelve a intentar en unos segundos o elige un rango de fecha más corto.',
+          504,
+        )
+      }
 
       if (status === 401 || status === 403) {
         return {
