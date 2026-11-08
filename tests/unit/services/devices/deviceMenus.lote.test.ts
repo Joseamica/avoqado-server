@@ -32,7 +32,7 @@ describe('resolveDeviceMenuFilters (por lote)', () => {
       ],
       ['c_quesos', 'c_pan', 'c_cafe'],
     )
-    const r = await resolveDeviceMenuFilters(V, ['t_cre', 't_caf', 't_caja'])
+    const r = (await resolveDeviceMenuFilters(V, ['t_cre', 't_caf', 't_caja']))!
     expect(r.get('t_cre')).toEqual({ visibleCategoryIds: ['c_pan', 'c_quesos'], visibleMenuIds: ['m_cre'] })
     expect(r.get('t_caf')).toEqual({ visibleCategoryIds: ['c_cafe'], visibleMenuIds: ['m_caf'] })
     expect(r.get('t_caja')).toEqual(TODO)
@@ -47,11 +47,11 @@ describe('resolveDeviceMenuFilters (por lote)', () => {
   it('sin el plan todos ven TODO, como en la PC', async () => {
     prepara([['t_cre', 'm_cre']], [['m_cre', 'c_quesos']], ['c_quesos'])
     tienePro.mockResolvedValue(false)
-    expect((await resolveDeviceMenuFilters(V, ['t_cre'])).get('t_cre')).toEqual(TODO)
+    expect((await resolveDeviceMenuFilters(V, ['t_cre']))!.get('t_cre')).toEqual(TODO)
   })
 
   it('sin aparatos no lee nada', async () => {
-    expect((await resolveDeviceMenuFilters(V, [])).size).toBe(0)
+    expect((await resolveDeviceMenuFilters(V, []))!.size).toBe(0)
     expect(prismaMock.terminalMenu.findMany).not.toHaveBeenCalled()
   })
 

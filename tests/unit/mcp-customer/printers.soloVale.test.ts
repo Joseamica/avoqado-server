@@ -36,7 +36,7 @@ describe('list_print_stations con «Sólo vale»', () => {
     expect(r.nota).not.toMatch(/^\d+ categoría\(s\) sin ruta/)
     expect(r.nota).toMatch(/Cremería, que sólo sacan vale/)
     // Codex r2 #3: con el mismo límite que dice el DASHBOARD.
-    expect(r.nota).toMatch(/Si uno de sus productos se cobra sin vale .*va a la estación del producto o, si no tiene, sale marcada "SIN ESTACIÓN"/)
+    expect(r.nota).toMatch(/Si uno de sus productos se cobra sin vale .*va a la estación del producto o de su categoría; si ninguna tiene, sale marcada "SIN ESTACIÓN"/)
   })
 
   it('con otras sin ruta, avisa sólo por ésas', async () => {

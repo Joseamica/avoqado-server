@@ -47,7 +47,7 @@ function notaDeRuteo(routing: {
   // Codex r2 #3 y r3: con el mismo límite que dice el DASHBOARD (se puede cobrar sin vale; la cascada de rutas sigue).
   const aparte =
     soloVale > 0
-      ? ` Otras ${soloVale} son de ${areas}, que sólo sacan vale (sin comanda): al emitir no necesitan estación. Si uno de sus productos se cobra sin vale (desde Mesas, al dividir una cuenta o en otro aparato), su comanda va a la estación del producto o, si no tiene, sale marcada "SIN ESTACIÓN".`
+      ? ` Otras ${soloVale} son de ${areas}, que sólo sacan vale (sin comanda): al emitir no necesitan estación. Si uno de sus productos se cobra sin vale (desde Mesas, al dividir una cuenta o en otro aparato), su comanda va a la estación del producto o de su categoría; si ninguna tiene, sale marcada "SIN ESTACIÓN".`
       : ''
   if (!routing.hasDefault && pendientes > 0) {
     return `${pendientes} categoría(s) sin ruta y sin estación default: sus productos imprimirían una comanda marcada "SIN ESTACIÓN". Asigna una estación o marca un default.${aparte}`
