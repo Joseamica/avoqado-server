@@ -37,7 +37,10 @@ describe('createPendingSaleVerification · createdAt opcional', () => {
       updatedAt: new Date(),
     })
     const tx = {
-      $queryRaw: jest.fn().mockResolvedValueOnce([{ id: 'p1', venueId: 'v1' }]).mockResolvedValueOnce([]),
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 'p1', venueId: 'v1' }])
+        .mockResolvedValueOnce([]),
       saleVerification: { create },
     }
     ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(tx))
