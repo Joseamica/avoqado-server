@@ -111,7 +111,8 @@ jobs:
         run: npm run lint -- --cache --cache-location node_modules/.cache/eslint/ --cache-strategy content
 
       - name: 🔍 TypeScript compilation check
-        run: npm run typecheck
+        # El chequeo completo rebasa 12 GB; el runner público tiene 16 GB. Mantener también tests/ y scripts/.
+        run: node --max-old-space-size=14336 node_modules/typescript/bin/tsc --noEmit
 
       # S5b (red por traba): ninguna escritura de beneficios con un `tx` que no venga de withDeadlockRetry. Paso aparte: no toca los
       # shards de las unitarias, Jest ni CRONOMETRO. Lleva la memoria del typecheck dentro del propio script de npm.
