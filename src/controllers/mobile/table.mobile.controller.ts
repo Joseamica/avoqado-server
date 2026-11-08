@@ -161,11 +161,16 @@ export async function clearTable(req: Request, res: Response): Promise<void> {
     const parsed = manifestSchema.safeParse({ action: 'clearTable', refs: { tableId }, payload: {} })
     if (!parsed.success || parsed.data.action !== 'clearTable')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
-    let result: Awaited<ReturnType<typeof tableService.clearTableInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest: parsed.data }, async tx => {
-      result = await tableService.clearTableInTransaction(tx, venueId, tableId)
-      return { response: { status: 200, body: { success: true, message: 'Mesa liberada' } }, affectedRefs: result.affectedRefs }
+      const result = await tableService.clearTableInTransaction(tx, venueId, tableId)
+      return {
+        audit: result,
+        response: { status: 200, body: { success: true, message: 'Mesa liberada' } },
+        affectedRefs: result.affectedRefs,
+      }
     })
+    const result =
+      reply.kind === 'TERMINAL' ? (reply.audit as Awaited<ReturnType<typeof tableService.clearTableInTransaction>> | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
       try {
         await tableService.publishClearedTable(venueId, result, staffId)
@@ -211,11 +216,14 @@ export async function moveOrder(req: Request, res: Response): Promise<void> {
     if (!parsed.success || parsed.data.action !== 'moveOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let result: Awaited<ReturnType<typeof tableService.moveOrderToTableInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
-      result = await tableService.moveOrderToTableInTransaction(tx, venueId, orderId, manifest.refs.targetTableId)
-      return { response: { status: 200, body: { success: true } }, affectedRefs: result.affectedRefs }
+      const result = await tableService.moveOrderToTableInTransaction(tx, venueId, orderId, manifest.refs.targetTableId)
+      return { audit: result, response: { status: 200, body: { success: true } }, affectedRefs: result.affectedRefs }
     })
+    const result =
+      reply.kind === 'TERMINAL'
+        ? (reply.audit as Awaited<ReturnType<typeof tableService.moveOrderToTableInTransaction>> | undefined)
+        : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
       try {
         await tableService.publishMovedOrder(venueId, result, staffId)
@@ -263,10 +271,10 @@ export async function assignOrder(req: Request, res: Response): Promise<void> {
     if (!parsed.success || parsed.data.action !== 'assignOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let assignment: Awaited<ReturnType<typeof tableService.assignOrderWaiterInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId, operation, manifest }, async tx => {
-      assignment = await tableService.assignOrderWaiterInTransaction(tx, venueId, orderId, manifest.refs.staffId)
+      const assignment = await tableService.assignOrderWaiterInTransaction(tx, venueId, orderId, manifest.refs.staffId)
       return {
+        audit: assignment,
         response: { status: 200, body: { success: true, data: assignment.data } },
         affectedRefs: [
           { kind: 'Order', id: orderId },
@@ -274,6 +282,10 @@ export async function assignOrder(req: Request, res: Response): Promise<void> {
         ],
       }
     })
+    const assignment =
+      reply.kind === 'TERMINAL'
+        ? (reply.audit as Awaited<ReturnType<typeof tableService.assignOrderWaiterInTransaction>> | undefined)
+        : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && assignment) {
       await tableService.publishOrderWaiterAssignment(venueId, assignment)
     }

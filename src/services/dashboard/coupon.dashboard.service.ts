@@ -9,6 +9,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from './reglasDeDescuento'
 import logger from '@/config/logger'
@@ -324,28 +325,32 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
     throw new BadRequestError('El código debe tener entre 3 y 30 caracteres')
   }
 
-  const coupon = await prisma.couponCode.create({
-    data: {
-      discountId: data.discountId,
-      code: normalizedCode,
-      maxUses: data.maxUses,
-      maxUsesPerCustomer: data.maxUsesPerCustomer,
-      minPurchaseAmount: data.minPurchaseAmount,
-      validFrom: data.validFrom,
-      validUntil: data.validUntil,
-      active: data.active ?? true,
-    },
-    include: {
-      discount: {
-        select: {
-          id: true,
-          name: true,
-          type: true,
-          value: true,
+  const coupon = await withDeadlockRetry(
+    tx =>
+      tx.couponCode.create({
+        data: {
+          discountId: data.discountId,
+          code: normalizedCode,
+          maxUses: data.maxUses,
+          maxUsesPerCustomer: data.maxUsesPerCustomer,
+          minPurchaseAmount: data.minPurchaseAmount,
+          validFrom: data.validFrom,
+          validUntil: data.validUntil,
+          active: data.active ?? true,
         },
-      },
-    },
-  })
+        include: {
+          discount: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              value: true,
+            },
+          },
+        },
+      }),
+    { etiqueta: 'createCouponCode' },
+  )
 
   logger.info(`🎫 Coupon code created: ${normalizedCode} for discount ${discount.name}`)
 
@@ -412,32 +417,34 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
     }
   }
 
-  const coupon = await prisma.couponCode
-    .update({
-      where: dondeEscribir(couponId, existing, cambio),
-      data: {
-        ...(normalizedCode !== undefined && { code: normalizedCode }),
-        ...(data.maxUses !== undefined && { maxUses: data.maxUses }),
-        ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
-        ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
-        ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
-        ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
-        ...(data.active !== undefined && { active: data.active }),
-      },
-      include: {
-        discount: {
-          select: {
-            id: true,
-            name: true,
-            type: true,
-            value: true,
+  const coupon = await withDeadlockRetry(
+    tx =>
+      tx.couponCode.update({
+        where: dondeEscribir(couponId, existing, cambio),
+        data: {
+          ...(normalizedCode !== undefined && { code: normalizedCode }),
+          ...(data.maxUses !== undefined && { maxUses: data.maxUses }),
+          ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
+          ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
+          ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
+          ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
+          ...(data.active !== undefined && { active: data.active }),
+        },
+        include: {
+          discount: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              value: true,
+            },
           },
         },
-      },
-    })
-    .catch(error => {
-      throw esCambioCruzado(error) ? new ConflictError(CAMBIO_CRUZADO) : error
-    })
+      }),
+    { etiqueta: 'updateCouponCode' },
+  ).catch(error => {
+    throw esCambioCruzado(error) ? new ConflictError(CAMBIO_CRUZADO) : error
+  })
 
   logger.info(`🎫 Coupon code updated: ${coupon.code}`)
 
@@ -474,9 +481,13 @@ export async function deleteCouponCode(venueId: string, couponId: string): Promi
     throw new NotFoundError('El cupón no existe')
   }
 
-  await prisma.couponCode.delete({
-    where: { id: couponId },
-  })
+  await withDeadlockRetry(
+    tx =>
+      tx.couponCode.delete({
+        where: { id: couponId },
+      }),
+    { etiqueta: 'deleteCouponCode' },
+  )
 
   logger.info(`🗑️ Coupon code deleted: ${existing.code} (${couponId})`)
 
@@ -555,17 +566,21 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
   }
 
   // Bulk create
-  const coupons = await prisma.couponCode.createMany({
-    data: codes.map(code => ({
-      discountId: data.discountId,
-      code,
-      maxUses: data.maxUsesPerCode,
-      maxUsesPerCustomer: data.maxUsesPerCustomer,
-      validFrom: data.validFrom,
-      validUntil: data.validUntil,
-      active: true,
-    })),
-  })
+  const coupons = await withDeadlockRetry(
+    tx =>
+      tx.couponCode.createMany({
+        data: codes.map(code => ({
+          discountId: data.discountId,
+          code,
+          maxUses: data.maxUsesPerCode,
+          maxUsesPerCustomer: data.maxUsesPerCustomer,
+          validFrom: data.validFrom,
+          validUntil: data.validUntil,
+          active: true,
+        })),
+      }),
+    { etiqueta: 'bulkGenerateCouponCodes' },
+  )
 
   logger.info(`🎫 Bulk generated ${coupons.count} coupon codes for discount ${discount.name}`)
 
@@ -791,46 +806,49 @@ export async function recordCouponRedemption(venueId: string, couponId: string, 
   }
 
   // Create redemption and increment usage counter in transaction
-  const result = await prisma.$transaction(async tx => {
-    // Create redemption record
-    const redemption = await tx.couponRedemption.create({
-      data: {
-        couponCodeId: couponId,
-        orderId,
-        customerId,
-        amountSaved,
-      },
-      include: {
-        couponCode: {
-          select: {
-            id: true,
-            code: true,
+  const result = await withDeadlockRetry(
+    async tx => {
+      // Create redemption record
+      const redemption = await tx.couponRedemption.create({
+        data: {
+          couponCodeId: couponId,
+          orderId,
+          customerId,
+          amountSaved,
+        },
+        include: {
+          couponCode: {
+            select: {
+              id: true,
+              code: true,
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
           },
         },
-        customer: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    })
+      })
 
-    // Increment usage counter
-    await tx.couponCode.update({
-      where: { id: couponId },
-      data: { currentUses: { increment: 1 } },
-    })
+      // Increment usage counter
+      await tx.couponCode.update({
+        where: { id: couponId },
+        data: { currentUses: { increment: 1 } },
+      })
 
-    // Also increment the parent discount's usage counter
-    await tx.discount.update({
-      where: { id: coupon.discountId },
-      data: { currentUses: { increment: 1 } },
-    })
+      // Also increment the parent discount's usage counter
+      await tx.discount.update({
+        where: { id: coupon.discountId },
+        data: { currentUses: { increment: 1 } },
+      })
 
-    return redemption
-  })
+      return redemption
+    },
+    { etiqueta: 'recordCouponRedemption' },
+  )
 
   logger.info(`🎫 Coupon redeemed: ${coupon.code} on order ${orderId}, saved ${amountSaved}`)
 

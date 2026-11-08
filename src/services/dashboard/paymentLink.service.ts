@@ -8,6 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
 import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
@@ -2015,7 +2016,7 @@ function descuentoDeLaSesion(
  * se borró después de abrir la sesión, la venta se registra igual con lo cobrado y la fila queda sin `discountId`: el dinero
  * ya se cobró, así que nunca lanza ni recalcula el precio.
  */
-async function contarUsoDelDescuento(tx: Prisma.TransactionClient, venueId: string, discountId: string | null): Promise<string | null> {
+async function contarUsoDelDescuento(tx: TxConReintento, venueId: string, discountId: string | null): Promise<string | null> {
   if (!discountId) return null
   const { count } = await tx.discount.updateMany({ where: { id: discountId, venueId }, data: { currentUses: { increment: 1 } } })
   return count > 0 ? discountId : null
@@ -2251,8 +2252,6 @@ export async function finalizePaymentLinkCheckout(args: {
   // frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null // for Payment.processedById
-  let orderIdForReferral: string | null = null
-  let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
   // transacción para poder sellar `Order.customerId`.
   const loyaltyCustomerId = await resolvePaymentLinkCustomerId(
@@ -2264,211 +2263,218 @@ export async function finalizePaymentLinkCheckout(args: {
   // Base de lealtad = lo cobrado por la venta, con IVA y SIN propina.
   const loyaltyBase = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
 
-  await prisma.$transaction(async tx => {
-    // 1. Mark session COMPLETED + record Stripe paymentIntent for reconciliation
-    await tx.checkoutSession.update({
-      where: { id: session.id },
-      data: {
-        status: 'COMPLETED',
-        completedAt: new Date(),
-        metadata: {
-          ...metadata,
-          stripePaymentIntentId,
-          ...(args.amountPaidCents != null ? { stripeAmountPaidCents: args.amountPaidCents } : {}),
-        } as unknown as Prisma.InputJsonValue,
-      },
-    })
-
-    // 2. Update payment link counters
-    await tx.paymentLink.update({
-      where: { id: session.paymentLink!.id },
-      data: {
-        totalCollected: { increment: session.amount },
-        paymentCount: { increment: 1 },
-      },
-    })
-
-    // 3. Always create an Order so every payment-link transaction shows up in
-    //    /orders and /payments alongside TPV in-person sales. ITEM links use
-    //    a TAKEOUT order with the real product; PAYMENT/DONATION links use
-    //    MANUAL_ENTRY (the enum doc says: "no items, no inventory impact,
-    //    filtered out of operational reports but kept in revenue totals")
-    //    so they don't clog kitchen prep queues or other operational views.
-    const isPaymentOrDonation = !isItemLink
-
-    // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
-    //
-    // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
-    // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
-    // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
-    // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
-    // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
-    // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
-    const order = await tx.order.create({
-      data: {
-        venueId,
-        orderNumber: `PL-${Date.now()}`,
-        type: isPaymentOrDonation ? 'MANUAL_ENTRY' : 'TAKEOUT',
-        source: 'PAYMENT_LINK',
-        createdById: session.paymentLink!.createdById,
-        ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
-        customerName: session.customerName,
-        customerEmail: session.customerEmail,
-        subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
-        discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
-        taxAmount: 0,
-        contratoDePrecio: 'IVA_INCLUIDO',
-        tipAmount,
-        total: session.amount,
-        paidAmount: session.amount,
-        remainingBalance: 0,
-        status: 'COMPLETED',
-        paymentStatus: 'PAID',
-        completedAt: new Date(),
-        ...(isItemLink && {
-          items: {
-            create: sessionItems.map(it => {
-              const mods = it.modifiers ?? []
-              const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
-              const lineTotal = (it.unitPrice + modSumPerUnit) * it.quantity
-              return {
-                productId: it.productId,
-                productName: it.productName,
-                quantity: it.quantity,
-                unitPrice: new Prisma.Decimal(it.unitPrice),
-                discountAmount: 0,
-                taxAmount: 0,
-                total: new Prisma.Decimal(lineTotal),
-                modifiers:
-                  mods.length > 0
-                    ? {
-                        create: mods.map(m => ({
-                          modifierId: m.modifierId,
-                          name: m.modifierName,
-                          quantity: m.quantity,
-                          price: new Prisma.Decimal(m.price),
-                        })),
-                      }
-                    : undefined,
-              }
-            }),
-          },
-        }),
-      },
-      // Los renglones con su id (y sus modificadores) son lo que el vale de
-      // inventario necesita para nacer dentro de esta misma transacción.
-      include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-    })
-
-    // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
-    if (descuentoDeLiga) {
-      const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
-      await tx.orderDiscount.create({
-        data: filaDeDescuentoDeLiga({
-          orderId: order.id,
-          foto: { ...descuentoDeLiga.foto, discountId },
-          montoPesos: descuentoDeLiga.descuento,
-          basePesos: descuentoDeLiga.base,
-        }),
+  // R65 b: lo que el cuerpo produce sale en su RETORNO; un intento abortado por 40P01 no deja nada a medias.
+  const { postingId, orderIdForReferral } = await withDeadlockRetry(
+    async tx => {
+      let orderIdForReferral: string | null = null
+      let postingId: string | null = null
+      // 1. Mark session COMPLETED + record Stripe paymentIntent for reconciliation
+      await tx.checkoutSession.update({
+        where: { id: session.id },
+        data: {
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          metadata: {
+            ...metadata,
+            stripePaymentIntentId,
+            ...(args.amountPaidCents != null ? { stripeAmountPaidCents: args.amountPaidCents } : {}),
+          } as unknown as Prisma.InputJsonValue,
+        },
       })
-      await sincronizarRepartos(tx, order.id)
-    }
 
-    // 3b. Vale durable de inventario, en la MISMA transacción que la orden PAID.
-    //     Antes se deducía en un `for` fuera de la transacción y con
-    //     `session.sessionId` como orderId: un crash entre el commit y ese loop
-    //     dejaba la venta cobrada, sin deducir y sin rastro. Ahora el vale nace
-    //     atómico con la venta y el sweeper rescata lo que no se aplique.
-    const posting = await createSalePostingInTx(tx, {
-      venueId,
-      orderId: order.id,
-      items: (order.items ?? []) as any,
-      staffId: primaryStaffId ?? session.paymentLink!.createdById,
-    })
-    postingId = posting?.id ?? null
+      // 2. Update payment link counters
+      await tx.paymentLink.update({
+        where: { id: session.paymentLink!.id },
+        data: {
+          totalCollected: { increment: session.amount },
+          paymentCount: { increment: 1 },
+        },
+      })
 
-    // 4. Create a Payment row linked to the Order. This is what the
-    //    /payments dashboard reads — without it, the transaction shows in
-    //    /ligas-de-pago but NOT in the unified payments view. We always
-    //    create one regardless of purpose so the user sees every incoming
-    //    peso in one place.
-    // Avoqado's application fee was already charged by Stripe at settlement;
-    // expose it on the Payment row so revenue reports stay accurate.
-    // applicationFeeCents is in MINOR units; convert to MAJOR (MXN) for the
-    // Decimal column. feePercentage is Decimal(5,4) so 0.0116 = 1.16%.
-    const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
-    const grossForPayment = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
-    const netAmount = grossForPayment.sub(feeAmount).gte(0) ? grossForPayment.sub(feeAmount) : new Prisma.Decimal(0)
-    // feePercentage = feeAmount / gross (when gross>0). Keep 4 decimal precision.
-    const feePercentage = grossForPayment.gt(0) ? feeAmount.div(grossForPayment).toDecimalPlaces(4) : new Prisma.Decimal(0)
+      // 3. Always create an Order so every payment-link transaction shows up in
+      //    /orders and /payments alongside TPV in-person sales. ITEM links use
+      //    a TAKEOUT order with the real product; PAYMENT/DONATION links use
+      //    MANUAL_ENTRY (the enum doc says: "no items, no inventory impact,
+      //    filtered out of operational reports but kept in revenue totals")
+      //    so they don't clog kitchen prep queues or other operational views.
+      const isPaymentOrDonation = !isItemLink
 
-    // Stripe's payment_method.type → nuestro método y forma SAT (OXXO = OTHER + '01', SPEI = BANK_TRANSFER…), en vez de
-    // que todo caiga en CREDIT_CARD. Ver `metodoDeStripe`.
-    // Codex r1 (19-oct): el webhook casi nunca trae el tipo (no expande `latest_charge`) y un OXXO caía a CREDIT_CARD/SAT 04.
-    // El cargo que ya se consultó arriba sí lo dice.
-    const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
-    const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
-    const fundsFlow = fundsFlowForStripePayment(tipoDeStripe)
+      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+      //
+      // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+      // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+      // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+      // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+      // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+      // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
+      const order = await tx.order.create({
+        data: {
+          venueId,
+          orderNumber: `PL-${Date.now()}`,
+          type: isPaymentOrDonation ? 'MANUAL_ENTRY' : 'TAKEOUT',
+          source: 'PAYMENT_LINK',
+          createdById: session.paymentLink!.createdById,
+          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+          customerName: session.customerName,
+          customerEmail: session.customerEmail,
+          subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
+          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
+          taxAmount: 0,
+          contratoDePrecio: 'IVA_INCLUIDO',
+          tipAmount,
+          total: session.amount,
+          paidAmount: session.amount,
+          remainingBalance: 0,
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+          completedAt: new Date(),
+          ...(isItemLink && {
+            items: {
+              create: sessionItems.map(it => {
+                const mods = it.modifiers ?? []
+                const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
+                const lineTotal = (it.unitPrice + modSumPerUnit) * it.quantity
+                return {
+                  productId: it.productId,
+                  productName: it.productName,
+                  quantity: it.quantity,
+                  unitPrice: new Prisma.Decimal(it.unitPrice),
+                  discountAmount: 0,
+                  taxAmount: 0,
+                  total: new Prisma.Decimal(lineTotal),
+                  modifiers:
+                    mods.length > 0
+                      ? {
+                          create: mods.map(m => ({
+                            modifierId: m.modifierId,
+                            name: m.modifierName,
+                            quantity: m.quantity,
+                            price: new Prisma.Decimal(m.price),
+                          })),
+                        }
+                      : undefined,
+                }
+              }),
+            },
+          }),
+        },
+        // Los renglones con su id (y sus modificadores) son lo que el vale de
+        // inventario necesita para nacer dentro de esta misma transacción.
+        include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+      })
 
-    const createdPayment = await tx.payment.create({
-      data: {
+      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+      if (descuentoDeLiga) {
+        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeLiga({
+            orderId: order.id,
+            foto: { ...descuentoDeLiga.foto, discountId },
+            montoPesos: descuentoDeLiga.descuento,
+            basePesos: descuentoDeLiga.base,
+          }),
+        })
+        await sincronizarRepartos(tx, order.id)
+      }
+
+      // 3b. Vale durable de inventario, en la MISMA transacción que la orden PAID.
+      //     Antes se deducía en un `for` fuera de la transacción y con
+      //     `session.sessionId` como orderId: un crash entre el commit y ese loop
+      //     dejaba la venta cobrada, sin deducir y sin rastro. Ahora el vale nace
+      //     atómico con la venta y el sweeper rescata lo que no se aplique.
+      const posting = await createSalePostingInTx(tx, {
         venueId,
         orderId: order.id,
-        // 🔴 Sello explícito: Stripe liquida este dinero. Ver fundsFlowForStripePayment.
-        fundsFlow,
-        // Commission attribution. Payment.processedById gets the FIRST
-        // attributed staff (used by receipts/reports as the "named seller").
-        // The full split — 1/N per staff when there are multiple — is
-        // frozen with this payment, right below (fase 3, A5), from the
-        // attributions join table. When the link has no
-        // attributions we leave processedById NULL and skip commission.
-        processedById: primaryStaffId ?? undefined,
-        // Link to the EcommerceMerchant channel so the dashboard's "Cuenta
-        // Comercial" column can render which Stripe/Blumon channel
-        // processed this payment (vs the in-person Banorte/Menta accounts).
-        ecommerceMerchantId: session.ecommerceMerchant?.id,
-        amount: grossForPayment,
-        tipAmount,
-        method,
-        tenderSatFormaPago,
-        source: 'WEB',
-        status: 'COMPLETED',
-        // FAST signals "no inventory / no operational fulfilment" so
-        // operational dashboards can skip it without affecting revenue.
-        type: isItemLink ? 'REGULAR' : 'FAST',
-        processor: 'stripe',
-        processorId: stripePaymentIntentId,
-        feePercentage,
-        feeAmount,
-        netAmount,
-        // Card brand + last 4 captured from the Stripe charge fetched above.
-        // Both nullable — async methods (OXXO, SPEI) won't populate them.
-        cardBrand: mapStripeCardBrandToEnum(chargeDetails.cardBrand),
-        maskedPan: chargeDetails.last4 ? `************${chargeDetails.last4}` : undefined,
-        receiptUrl: chargeDetails.receiptUrl ?? undefined,
-        // Idempotency: PaymentIntent IDs are already unique per Stripe;
-        // reuse as the key so duplicate webhooks (if they ever bypass the
-        // ProcessedStripeEvent guard) still no-op via the unique index.
-        idempotencyKey: stripePaymentIntentId ?? undefined,
-      },
-      select: { id: true },
-    })
-    // Fase 3 (A5, Codex r3-12): la comisión se CONGELA con el cobro, en esta misma transacción, como en la terminal. Antes
-    // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
-    // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
-    if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
-    // D7: la sesión apunta a su pago, como en Mercado Pago (la página alojada de Stripe es `cs_…` y el pago `pi_…`).
-    await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
-    // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
-    await activarSobresDeCuentaPagadaEnTx(tx, {
-      venueId,
-      orderId: order.id,
-      staffId: primaryStaffId ?? session.paymentLink!.createdById,
-      items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
-    })
-    orderIdForReferral = order.id
-    // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
-  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+        items: (order.items ?? []) as any,
+        staffId: primaryStaffId ?? session.paymentLink!.createdById,
+      })
+      postingId = posting?.id ?? null
+
+      // 4. Create a Payment row linked to the Order. This is what the
+      //    /payments dashboard reads — without it, the transaction shows in
+      //    /ligas-de-pago but NOT in the unified payments view. We always
+      //    create one regardless of purpose so the user sees every incoming
+      //    peso in one place.
+      // Avoqado's application fee was already charged by Stripe at settlement;
+      // expose it on the Payment row so revenue reports stay accurate.
+      // applicationFeeCents is in MINOR units; convert to MAJOR (MXN) for the
+      // Decimal column. feePercentage is Decimal(5,4) so 0.0116 = 1.16%.
+      const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
+      const grossForPayment = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
+      const netAmount = grossForPayment.sub(feeAmount).gte(0) ? grossForPayment.sub(feeAmount) : new Prisma.Decimal(0)
+      // feePercentage = feeAmount / gross (when gross>0). Keep 4 decimal precision.
+      const feePercentage = grossForPayment.gt(0) ? feeAmount.div(grossForPayment).toDecimalPlaces(4) : new Prisma.Decimal(0)
+
+      // Stripe's payment_method.type → nuestro método y forma SAT (OXXO = OTHER + '01', SPEI = BANK_TRANSFER…), en vez de
+      // que todo caiga en CREDIT_CARD. Ver `metodoDeStripe`.
+      // Codex r1 (19-oct): el webhook casi nunca trae el tipo (no expande `latest_charge`) y un OXXO caía a CREDIT_CARD/SAT 04.
+      // El cargo que ya se consultó arriba sí lo dice.
+      const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
+      const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
+      const fundsFlow = fundsFlowForStripePayment(tipoDeStripe)
+
+      const createdPayment = await tx.payment.create({
+        data: {
+          venueId,
+          orderId: order.id,
+          // 🔴 Sello explícito: Stripe liquida este dinero. Ver fundsFlowForStripePayment.
+          fundsFlow,
+          // Commission attribution. Payment.processedById gets the FIRST
+          // attributed staff (used by receipts/reports as the "named seller").
+          // The full split — 1/N per staff when there are multiple — is
+          // frozen with this payment, right below (fase 3, A5), from the
+          // attributions join table. When the link has no
+          // attributions we leave processedById NULL and skip commission.
+          processedById: primaryStaffId ?? undefined,
+          // Link to the EcommerceMerchant channel so the dashboard's "Cuenta
+          // Comercial" column can render which Stripe/Blumon channel
+          // processed this payment (vs the in-person Banorte/Menta accounts).
+          ecommerceMerchantId: session.ecommerceMerchant?.id,
+          amount: grossForPayment,
+          tipAmount,
+          method,
+          tenderSatFormaPago,
+          source: 'WEB',
+          status: 'COMPLETED',
+          // FAST signals "no inventory / no operational fulfilment" so
+          // operational dashboards can skip it without affecting revenue.
+          type: isItemLink ? 'REGULAR' : 'FAST',
+          processor: 'stripe',
+          processorId: stripePaymentIntentId,
+          feePercentage,
+          feeAmount,
+          netAmount,
+          // Card brand + last 4 captured from the Stripe charge fetched above.
+          // Both nullable — async methods (OXXO, SPEI) won't populate them.
+          cardBrand: mapStripeCardBrandToEnum(chargeDetails.cardBrand),
+          maskedPan: chargeDetails.last4 ? `************${chargeDetails.last4}` : undefined,
+          receiptUrl: chargeDetails.receiptUrl ?? undefined,
+          // Idempotency: PaymentIntent IDs are already unique per Stripe;
+          // reuse as the key so duplicate webhooks (if they ever bypass the
+          // ProcessedStripeEvent guard) still no-op via the unique index.
+          idempotencyKey: stripePaymentIntentId ?? undefined,
+        },
+        select: { id: true },
+      })
+      // Fase 3 (A5, Codex r3-12): la comisión se CONGELA con el cobro, en esta misma transacción, como en la terminal. Antes
+      // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
+      // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
+      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // D7: la sesión apunta a su pago, como en Mercado Pago (la página alojada de Stripe es `cs_…` y el pago `pi_…`).
+      await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
+      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+      await activarSobresDeCuentaPagadaEnTx(tx, {
+        venueId,
+        orderId: order.id,
+        staffId: primaryStaffId ?? session.paymentLink!.createdById,
+        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+      })
+      orderIdForReferral = order.id
+      return { postingId, orderIdForReferral }
+      // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
+    },
+    { etiqueta: 'finalizePaymentLinkCheckout', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
+  )
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -3112,210 +3118,213 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   // is frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink!.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null
-  let orderIdForReferral: string | null = null
-  let postingId: string | null = null
-  let loyaltyBase: Prisma.Decimal | null = null
-
-  await prisma.$transaction(async tx => {
-    // Update checkout session
-    await tx.checkoutSession.update({
-      where: { id: session.id },
-      data: {
-        status: 'COMPLETED',
-        completedAt: new Date(),
-        blumonCheckoutId: chargeResult.transactionId,
-        metadata: {
-          maskedPan: metadata.maskedPan,
-          cardBrand: metadata.cardBrand,
-          authorizationCode: chargeResult.authorizationCode,
-          transactionId: chargeResult.transactionId,
-          // Preserve tip and custom field data
-          ...(metadata.tipAmount && { tipAmount: metadata.tipAmount }),
-          ...(metadata.customFieldResponses && { customFieldResponses: metadata.customFieldResponses }),
-          // Preserve item list for reference + audit
-          ...(isItemLink && { items: sessionItems }),
-          ...(metadata.descuento && { descuento: metadata.descuento }),
-        } as unknown as Prisma.InputJsonValue,
-      },
-    })
-
-    // Update payment link counters
-    await tx.paymentLink.update({
-      where: { id: session.paymentLink!.id },
-      data: {
-        totalCollected: { increment: session.amount },
-        paymentCount: { increment: 1 },
-      },
-    })
-
-    // Always create an Order (parallels Stripe path). ITEM links get a real
-    // TAKEOUT order with line items + modifiers; PAYMENT/DONATION links get a
-    // MANUAL_ENTRY order so revenue reports stay consistent.
-    {
-      // Subtotal = ITEM ? sum(qty × (unitPrice + Σ modifier.price × modifier.qty))
-      //                  : session.amount - tip (for PAYMENT/DONATION the amount
-      //                  is already the gross + tip).
-      const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
-      // Con descuento, la sesión manda: base, descuento y lo cobrado (neto + propina) son los que vio y pagó la clienta.
-      const descuentoDeLiga = descuentoDeLaSesion(metadata, session.amount.sub(orderTipAmount), session.sessionId)
-      const subtotal = descuentoDeLiga
-        ? new Prisma.Decimal(descuentoDeLiga.base)
-        : isItemLink
-          ? sessionItems.reduce((sum, it) => {
-              const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
-              return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
-            }, new Prisma.Decimal(0))
-          : session.amount.sub(orderTipAmount)
-      const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
-      const total = descuentoDeLiga ? session.amount : subtotal.add(orderTipAmount)
-      // Lo cobrado por la venta, con IVA y SIN propina (sin descuento = subtotal): el cobro, la lealtad y la comisión.
-      const neto = total.sub(orderTipAmount)
-      loyaltyBase = neto
-
-      const orderNumber = `PL-${Date.now()}`
-
-      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
-      //
-      // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
-      // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
-      // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
-      // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
-      // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
-      // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
-      const order = await tx.order.create({
+  const { orderIdForReferral, postingId, loyaltyBase } = await withDeadlockRetry(
+    async tx => {
+      let orderIdForReferral: string | null = null
+      let postingId: string | null = null
+      let loyaltyBase: Prisma.Decimal | null = null
+      // Update checkout session
+      await tx.checkoutSession.update({
+        where: { id: session.id },
         data: {
-          venueId,
-          orderNumber,
-          type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
-          source: 'PAYMENT_LINK',
-          createdById: session.paymentLink!.createdById,
-          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
-          customerName: session.customerName,
-          customerEmail: session.customerEmail,
-          subtotal,
-          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
-          taxAmount,
-          contratoDePrecio: 'IVA_INCLUIDO',
-          tipAmount: orderTipAmount,
-          total,
-          paidAmount: total,
-          remainingBalance: 0,
           status: 'COMPLETED',
-          paymentStatus: 'PAID',
           completedAt: new Date(),
-          ...(isItemLink && {
-            items: {
-              create: sessionItems.map(it => {
-                const mods = it.modifiers ?? []
-                const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
-                const lineTotal = new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity)
-                return {
-                  productId: it.productId,
-                  productName: it.productName,
-                  quantity: it.quantity,
-                  unitPrice: new Prisma.Decimal(it.unitPrice),
-                  discountAmount: 0,
-                  taxAmount: 0,
-                  total: lineTotal,
-                  modifiers:
-                    mods.length > 0
-                      ? {
-                          create: mods.map(m => ({
-                            modifierId: m.modifierId,
-                            name: m.modifierName,
-                            quantity: m.quantity,
-                            price: new Prisma.Decimal(m.price),
-                          })),
-                        }
-                      : undefined,
-                }
-              }),
-            },
-          }),
+          blumonCheckoutId: chargeResult.transactionId,
+          metadata: {
+            maskedPan: metadata.maskedPan,
+            cardBrand: metadata.cardBrand,
+            authorizationCode: chargeResult.authorizationCode,
+            transactionId: chargeResult.transactionId,
+            // Preserve tip and custom field data
+            ...(metadata.tipAmount && { tipAmount: metadata.tipAmount }),
+            ...(metadata.customFieldResponses && { customFieldResponses: metadata.customFieldResponses }),
+            // Preserve item list for reference + audit
+            ...(isItemLink && { items: sessionItems }),
+            ...(metadata.descuento && { descuento: metadata.descuento }),
+          } as unknown as Prisma.InputJsonValue,
         },
-        // Los renglones con su id (y sus modificadores) son lo que el vale de
-        // inventario necesita para nacer dentro de esta misma transacción.
-        include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
 
-      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
-      if (descuentoDeLiga) {
-        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
-        await tx.orderDiscount.create({
-          data: filaDeDescuentoDeLiga({
-            orderId: order.id,
-            foto: { ...descuentoDeLiga.foto, discountId },
-            montoPesos: descuentoDeLiga.descuento,
-            basePesos: descuentoDeLiga.base,
-          }),
-        })
-        await sincronizarRepartos(tx, order.id)
-      }
-
-      // Vale durable de inventario, atómico con la orden PAID — mismo motivo
-      // que en el camino Stripe: antes se deducía fuera de la transacción y
-      // contra el id de la sesión de checkout, no contra la orden.
-      const posting = await createSalePostingInTx(tx, {
-        venueId,
-        orderId: order.id,
-        items: (order.items ?? []) as any,
-        staffId: primaryStaffId ?? session.paymentLink!.createdById,
-      })
-      postingId = posting?.id ?? null
-
-      logger.info('Order created for payment link (Blumon)', {
-        orderId: order.id,
-        orderNumber,
-        paymentLinkId: session.paymentLink!.id,
-        itemCount: sessionItems.length,
-        isItemLink,
-      })
-
-      // Create the unified Payment row so this transaction shows up in
-      // /payments alongside Stripe + TPV sales. Blumon doesn't surface an
-      // application_fee to us — fee/net columns are zeroed.
-      const createdPayment = await tx.payment.create({
+      // Update payment link counters
+      await tx.paymentLink.update({
+        where: { id: session.paymentLink!.id },
         data: {
+          totalCollected: { increment: session.amount },
+          paymentCount: { increment: 1 },
+        },
+      })
+
+      // Always create an Order (parallels Stripe path). ITEM links get a real
+      // TAKEOUT order with line items + modifiers; PAYMENT/DONATION links get a
+      // MANUAL_ENTRY order so revenue reports stay consistent.
+      {
+        // Subtotal = ITEM ? sum(qty × (unitPrice + Σ modifier.price × modifier.qty))
+        //                  : session.amount - tip (for PAYMENT/DONATION the amount
+        //                  is already the gross + tip).
+        const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
+        // Con descuento, la sesión manda: base, descuento y lo cobrado (neto + propina) son los que vio y pagó la clienta.
+        const descuentoDeLiga = descuentoDeLaSesion(metadata, session.amount.sub(orderTipAmount), session.sessionId)
+        const subtotal = descuentoDeLiga
+          ? new Prisma.Decimal(descuentoDeLiga.base)
+          : isItemLink
+            ? sessionItems.reduce((sum, it) => {
+                const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
+                return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
+              }, new Prisma.Decimal(0))
+            : session.amount.sub(orderTipAmount)
+        const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
+        const total = descuentoDeLiga ? session.amount : subtotal.add(orderTipAmount)
+        // Lo cobrado por la venta, con IVA y SIN propina (sin descuento = subtotal): el cobro, la lealtad y la comisión.
+        const neto = total.sub(orderTipAmount)
+        loyaltyBase = neto
+
+        const orderNumber = `PL-${Date.now()}`
+
+        // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+        //
+        // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+        // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+        // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+        // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+        // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+        // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
+        const order = await tx.order.create({
+          data: {
+            venueId,
+            orderNumber,
+            type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
+            source: 'PAYMENT_LINK',
+            createdById: session.paymentLink!.createdById,
+            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+            customerName: session.customerName,
+            customerEmail: session.customerEmail,
+            subtotal,
+            discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
+            taxAmount,
+            contratoDePrecio: 'IVA_INCLUIDO',
+            tipAmount: orderTipAmount,
+            total,
+            paidAmount: total,
+            remainingBalance: 0,
+            status: 'COMPLETED',
+            paymentStatus: 'PAID',
+            completedAt: new Date(),
+            ...(isItemLink && {
+              items: {
+                create: sessionItems.map(it => {
+                  const mods = it.modifiers ?? []
+                  const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
+                  const lineTotal = new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity)
+                  return {
+                    productId: it.productId,
+                    productName: it.productName,
+                    quantity: it.quantity,
+                    unitPrice: new Prisma.Decimal(it.unitPrice),
+                    discountAmount: 0,
+                    taxAmount: 0,
+                    total: lineTotal,
+                    modifiers:
+                      mods.length > 0
+                        ? {
+                            create: mods.map(m => ({
+                              modifierId: m.modifierId,
+                              name: m.modifierName,
+                              quantity: m.quantity,
+                              price: new Prisma.Decimal(m.price),
+                            })),
+                          }
+                        : undefined,
+                  }
+                }),
+              },
+            }),
+          },
+          // Los renglones con su id (y sus modificadores) son lo que el vale de
+          // inventario necesita para nacer dentro de esta misma transacción.
+          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+        })
+
+        // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+        if (descuentoDeLiga) {
+          const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+          await tx.orderDiscount.create({
+            data: filaDeDescuentoDeLiga({
+              orderId: order.id,
+              foto: { ...descuentoDeLiga.foto, discountId },
+              montoPesos: descuentoDeLiga.descuento,
+              basePesos: descuentoDeLiga.base,
+            }),
+          })
+          await sincronizarRepartos(tx, order.id)
+        }
+
+        // Vale durable de inventario, atómico con la orden PAID — mismo motivo
+        // que en el camino Stripe: antes se deducía fuera de la transacción y
+        // contra el id de la sesión de checkout, no contra la orden.
+        const posting = await createSalePostingInTx(tx, {
           venueId,
           orderId: order.id,
-          processedById: primaryStaffId ?? undefined,
-          // Same EcommerceMerchant link as the Stripe path — drives the
-          // dashboard's "Cuenta Comercial" column for payment-link rows.
-          ecommerceMerchantId: session.ecommerceMerchant?.id,
-          amount: neto,
-          tipAmount: orderTipAmount,
-          method: 'CREDIT_CARD',
-          source: 'WEB',
-          status: 'COMPLETED',
-          type: isItemLink ? 'REGULAR' : 'FAST',
-          processor: 'blumon',
-          processorId: chargeResult.transactionId,
-          feePercentage: 0,
-          feeAmount: 0,
-          netAmount: neto,
-          // Card details captured at tokenize time + persisted in
-          // CheckoutSession.metadata (see createCheckoutSession).
-          cardBrand: mapBlumonCardBrandToEnum(metadata.cardBrand),
-          maskedPan: typeof metadata.maskedPan === 'string' ? metadata.maskedPan : undefined,
-          idempotencyKey: chargeResult.transactionId,
-        },
-        select: { id: true },
-      })
-      // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
-      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
-      // D7: la sesión apunta a su pago, como en Mercado Pago (Blumon guarda el pago con su transactionId, no la sesión).
-      await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
-      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
-      await activarSobresDeCuentaPagadaEnTx(tx, {
-        venueId,
-        orderId: order.id,
-        staffId: primaryStaffId ?? session.paymentLink!.createdById,
-        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
-      })
-      orderIdForReferral = order.id
-    }
-    // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
-  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+          items: (order.items ?? []) as any,
+          staffId: primaryStaffId ?? session.paymentLink!.createdById,
+        })
+        postingId = posting?.id ?? null
+
+        logger.info('Order created for payment link (Blumon)', {
+          orderId: order.id,
+          orderNumber,
+          paymentLinkId: session.paymentLink!.id,
+          itemCount: sessionItems.length,
+          isItemLink,
+        })
+
+        // Create the unified Payment row so this transaction shows up in
+        // /payments alongside Stripe + TPV sales. Blumon doesn't surface an
+        // application_fee to us — fee/net columns are zeroed.
+        const createdPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: order.id,
+            processedById: primaryStaffId ?? undefined,
+            // Same EcommerceMerchant link as the Stripe path — drives the
+            // dashboard's "Cuenta Comercial" column for payment-link rows.
+            ecommerceMerchantId: session.ecommerceMerchant?.id,
+            amount: neto,
+            tipAmount: orderTipAmount,
+            method: 'CREDIT_CARD',
+            source: 'WEB',
+            status: 'COMPLETED',
+            type: isItemLink ? 'REGULAR' : 'FAST',
+            processor: 'blumon',
+            processorId: chargeResult.transactionId,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: neto,
+            // Card details captured at tokenize time + persisted in
+            // CheckoutSession.metadata (see createCheckoutSession).
+            cardBrand: mapBlumonCardBrandToEnum(metadata.cardBrand),
+            maskedPan: typeof metadata.maskedPan === 'string' ? metadata.maskedPan : undefined,
+            idempotencyKey: chargeResult.transactionId,
+          },
+          select: { id: true },
+        })
+        // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
+        if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+        // D7: la sesión apunta a su pago, como en Mercado Pago (Blumon guarda el pago con su transactionId, no la sesión).
+        await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
+        // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+        await activarSobresDeCuentaPagadaEnTx(tx, {
+          venueId,
+          orderId: order.id,
+          staffId: primaryStaffId ?? session.paymentLink!.createdById,
+          items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+        })
+        orderIdForReferral = order.id
+      }
+      return { orderIdForReferral, postingId, loyaltyBase }
+      // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
+    },
+    { etiqueta: 'completeCharge', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
+  )
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -4114,8 +4123,6 @@ export async function finalizeMercadoPagoCheckout(args: {
   const sessionItems: BundleItemSnapshot[] = Array.isArray(metadata.items) ? metadata.items : []
   const isItemLink = isLink && session.paymentLink!.purpose === 'ITEM' && sessionItems.length > 0
 
-  let orderIdForReferral: string | null = null
-  let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Aquí cubre TAMBIÉN el
   // checkout directo sin liga: es la misma función y el mismo `Order` COMPLETED,
   // y la regla es "acumula en cualquier venta con cliente" — excluirlo habría
@@ -4127,145 +4134,151 @@ export async function finalizeMercadoPagoCheckout(args: {
     session.attributedCustomerId,
   )
   try {
-    await prisma.$transaction(async tx => {
-      // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
-      // can't both create an Order.
-      const fresh = await tx.checkoutSession.findUnique({ where: { id: session.id }, select: { paymentId: true } })
-      if (fresh?.paymentId) return
+    const { postingId, orderIdForReferral } = await withDeadlockRetry(
+      async tx => {
+        let orderIdForReferral: string | null = null
+        let postingId: string | null = null
+        // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
+        // can't both create an Order.
+        const fresh = await tx.checkoutSession.findUnique({ where: { id: session.id }, select: { paymentId: true } })
+        if (fresh?.paymentId) return { postingId, orderIdForReferral }
 
-      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
-      //
-      // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
-      // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
-      // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
-      // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
-      // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
-      // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
-      const order = await tx.order.create({
-        data: {
-          venueId,
-          orderNumber: `${isLink ? 'PL' : 'VC'}-${Date.now()}`,
-          type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
-          source: isLink ? 'PAYMENT_LINK' : 'WEB',
-          createdById: session.paymentLink?.createdById ?? undefined,
-          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
-          customerEmail: session.customerEmail,
-          subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal,
-          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
-          taxAmount: 0,
-          contratoDePrecio: 'IVA_INCLUIDO',
-          tipAmount,
-          total: gross,
-          paidAmount: gross,
-          remainingBalance: 0,
-          status: 'COMPLETED',
-          paymentStatus: 'PAID',
-          completedAt: new Date(),
-          ...(isItemLink && {
-            items: {
-              create: sessionItems.map(it => {
-                const mods = it.modifiers ?? []
-                const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
-                const lineTotal = new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity)
-                return {
-                  productId: it.productId,
-                  productName: it.productName,
-                  quantity: it.quantity,
-                  unitPrice: new Prisma.Decimal(it.unitPrice),
-                  discountAmount: 0,
-                  taxAmount: 0,
-                  total: lineTotal,
-                  modifiers:
-                    mods.length > 0
-                      ? {
-                          create: mods.map(m => ({
-                            modifierId: m.modifierId,
-                            name: m.modifierName,
-                            quantity: m.quantity,
-                            price: new Prisma.Decimal(m.price),
-                          })),
-                        }
-                      : undefined,
-                }
-              }),
-            },
-          }),
-        },
-        include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-      })
-
-      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
-      if (descuentoDeLiga) {
-        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
-        await tx.orderDiscount.create({
-          data: filaDeDescuentoDeLiga({
-            orderId: order.id,
-            foto: { ...descuentoDeLiga.foto, discountId },
-            montoPesos: descuentoDeLiga.descuento,
-            basePesos: descuentoDeLiga.base,
-          }),
+        // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+        //
+        // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+        // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+        // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+        // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+        // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+        // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
+        const order = await tx.order.create({
+          data: {
+            venueId,
+            orderNumber: `${isLink ? 'PL' : 'VC'}-${Date.now()}`,
+            type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
+            source: isLink ? 'PAYMENT_LINK' : 'WEB',
+            createdById: session.paymentLink?.createdById ?? undefined,
+            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+            customerEmail: session.customerEmail,
+            subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal,
+            discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
+            taxAmount: 0,
+            contratoDePrecio: 'IVA_INCLUIDO',
+            tipAmount,
+            total: gross,
+            paidAmount: gross,
+            remainingBalance: 0,
+            status: 'COMPLETED',
+            paymentStatus: 'PAID',
+            completedAt: new Date(),
+            ...(isItemLink && {
+              items: {
+                create: sessionItems.map(it => {
+                  const mods = it.modifiers ?? []
+                  const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
+                  const lineTotal = new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity)
+                  return {
+                    productId: it.productId,
+                    productName: it.productName,
+                    quantity: it.quantity,
+                    unitPrice: new Prisma.Decimal(it.unitPrice),
+                    discountAmount: 0,
+                    taxAmount: 0,
+                    total: lineTotal,
+                    modifiers:
+                      mods.length > 0
+                        ? {
+                            create: mods.map(m => ({
+                              modifierId: m.modifierId,
+                              name: m.modifierName,
+                              quantity: m.quantity,
+                              price: new Prisma.Decimal(m.price),
+                            })),
+                          }
+                        : undefined,
+                  }
+                }),
+              },
+            }),
+          },
+          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
         })
-        await sincronizarRepartos(tx, order.id)
-      }
 
-      // Vale durable de inventario, atómico con la orden PAID (igual que
-      // Stripe/Blumon). Para un cobro de puro monto nace SKIPPED, que es lo que
-      // mantiene el invariante "orden PAID ⟺ vale existe".
-      const posting = await createSalePostingInTx(tx, {
-        venueId,
-        orderId: order.id,
-        items: (order.items ?? []) as any,
-        staffId: session.paymentLink?.createdById ?? null,
-      })
-      postingId = posting?.id ?? null
+        // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+        if (descuentoDeLiga) {
+          const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+          await tx.orderDiscount.create({
+            data: filaDeDescuentoDeLiga({
+              orderId: order.id,
+              foto: { ...descuentoDeLiga.foto, discountId },
+              montoPesos: descuentoDeLiga.descuento,
+              basePesos: descuentoDeLiga.base,
+            }),
+          })
+          await sincronizarRepartos(tx, order.id)
+        }
 
-      const createdPayment = await tx.payment.create({
-        data: {
+        // Vale durable de inventario, atómico con la orden PAID (igual que
+        // Stripe/Blumon). Para un cobro de puro monto nace SKIPPED, que es lo que
+        // mantiene el invariante "orden PAID ⟺ vale existe".
+        const posting = await createSalePostingInTx(tx, {
           venueId,
           orderId: order.id,
-          ecommerceMerchantId: session.ecommerceMerchant.id,
-          amount: subtotal,
-          tipAmount,
-          ...metodoDeMercadoPago(args.paymentTypeId),
-          // Lo liquida Mercado Pago, nunca el cajón (igual que Stripe): sin el sello, una devolución SPEI no se descontaba en
-          // la conciliación bancaria (la devolución hereda este valor).
-          fundsFlow: 'AVOQADO_PROCESSED',
-          source: 'WEB',
-          status: 'COMPLETED',
-          // FAST significa "sin inventario ni cumplimiento operativo"; una
-          // venta de productos sí los tiene, igual que en Stripe y Blumon.
-          type: isItemLink ? 'REGULAR' : 'FAST',
-          processor: 'mercadopago',
-          processorId,
-          processedById: attributedStaffIds[0] ?? undefined,
-          feePercentage,
-          feeAmount,
-          netAmount,
-          idempotencyKey: processorId,
-        },
-        select: { id: true },
-      })
-      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
-      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
-      await activarSobresDeCuentaPagadaEnTx(tx, {
-        venueId,
-        orderId: order.id,
-        staffId: session.paymentLink?.createdById ?? null,
-        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
-      })
-
-      await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
-
-      if (isLink) {
-        await tx.paymentLink.update({
-          where: { id: session.paymentLink!.id },
-          data: { totalCollected: { increment: gross }, paymentCount: { increment: 1 } },
+          items: (order.items ?? []) as any,
+          staffId: session.paymentLink?.createdById ?? null,
         })
-      }
+        postingId = posting?.id ?? null
 
-      orderIdForReferral = order.id
-      // La comisión se congela en esta transacción: el mismo tope de 10 s que las otras ligas y la terminal.
-    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+        const createdPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: order.id,
+            ecommerceMerchantId: session.ecommerceMerchant.id,
+            amount: subtotal,
+            tipAmount,
+            ...metodoDeMercadoPago(args.paymentTypeId),
+            // Lo liquida Mercado Pago, nunca el cajón (igual que Stripe): sin el sello, una devolución SPEI no se descontaba en
+            // la conciliación bancaria (la devolución hereda este valor).
+            fundsFlow: 'AVOQADO_PROCESSED',
+            source: 'WEB',
+            status: 'COMPLETED',
+            // FAST significa "sin inventario ni cumplimiento operativo"; una
+            // venta de productos sí los tiene, igual que en Stripe y Blumon.
+            type: isItemLink ? 'REGULAR' : 'FAST',
+            processor: 'mercadopago',
+            processorId,
+            processedById: attributedStaffIds[0] ?? undefined,
+            feePercentage,
+            feeAmount,
+            netAmount,
+            idempotencyKey: processorId,
+          },
+          select: { id: true },
+        })
+        if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+        // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+        await activarSobresDeCuentaPagadaEnTx(tx, {
+          venueId,
+          orderId: order.id,
+          staffId: session.paymentLink?.createdById ?? null,
+          items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+        })
+
+        await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
+
+        if (isLink) {
+          await tx.paymentLink.update({
+            where: { id: session.paymentLink!.id },
+            data: { totalCollected: { increment: gross }, paymentCount: { increment: 1 } },
+          })
+        }
+
+        orderIdForReferral = order.id
+        return { postingId, orderIdForReferral }
+        // La comisión se congela en esta transacción: el mismo tope de 10 s que las otras ligas y la terminal.
+      },
+      { etiqueta: 'finalizeMercadoPagoCheckout', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
+    )
 
     // Aplicar el vale YA COMMITEADO el cobro. Nunca puede tumbar una venta
     // cobrada: si truena, el posting queda pendiente y el sweeper lo retoma.

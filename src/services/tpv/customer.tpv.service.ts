@@ -8,6 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 
@@ -340,33 +341,37 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
   }
 
   // Create new customer
-  const customer = await prisma.customer.create({
-    data: {
-      venueId,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      phone: data.phone?.replace(/[\s\-()]/g, ''),
-      email: data.email?.toLowerCase(),
-    },
-    select: {
-      id: true,
-      firstName: true,
-      lastName: true,
-      email: true,
-      phone: true,
-      loyaltyPoints: true,
-      totalVisits: true,
-      totalSpent: true,
-      referralCode: true,
-      customerGroup: {
+  const customer = await withDeadlockRetry(
+    tx =>
+      tx.customer.create({
+        data: {
+          venueId,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          phone: data.phone?.replace(/[\s\-()]/g, ''),
+          email: data.email?.toLowerCase(),
+        },
         select: {
           id: true,
-          name: true,
-          color: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          loyaltyPoints: true,
+          totalVisits: true,
+          totalSpent: true,
+          referralCode: true,
+          customerGroup: {
+            select: {
+              id: true,
+              name: true,
+              color: true,
+            },
+          },
         },
-      },
-    },
-  })
+      }),
+    { etiqueta: 'quickCreateCustomer' },
+  )
 
   logger.info(`✅ Customer created from TPV`, {
     venueId,
@@ -393,7 +398,9 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         venuePrefix: cfg.codePrefix ?? venue?.slug ?? venueId.slice(-8),
         customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
       })
-      await prisma.customer.update({ where: { id: customer.id }, data: { referralCode: code } })
+      await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode: code } }), {
+        etiqueta: 'quickCreateCustomer',
+      })
 
       // TPV quick-add does not capture marketingConsent, so we fetch
       // it explicitly. Default to false — if a customer hasn't opted

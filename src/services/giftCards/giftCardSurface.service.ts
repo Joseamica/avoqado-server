@@ -10,6 +10,7 @@
  */
 import { Prisma, type GiftCardReason, type PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { GiftCardError, type GiftCardErrorCode } from './giftCardErrors'
@@ -262,44 +263,47 @@ export async function operarSobreDeGerente(
   staffId: string,
   input: OperacionDeGerenteHttp,
 ): Promise<{ activityIds: string[]; nuevoCodigo?: { display: string; last4: string }; replayed: boolean }> {
-  return prisma.$transaction(async tx => {
-    // Spec § 5.7: reponer se hace «con el folio de compra». Decisión del coordinador: folio de compra = `Order.orderNumber`
-    // de la cuenta que vendió el sobre (el número de cuenta que trae el comprobante); se compara sin importar mayúsculas ni
-    // espacios. No es secreto y la ruta exige `giftCards:manage`: basta la comparación directa (nota 4 del coordinador).
-    // La libreta (A4) no lo recibe.
-    if (input.tipo === 'REEMPLAZAR_CODIGO') {
-      const venta = await tx.orderItem.findFirst({
-        where: { giftCardId, order: { venueId } },
-        select: { order: { select: { orderNumber: true } } },
+  return withDeadlockRetry(
+    async tx => {
+      // Spec § 5.7: reponer se hace «con el folio de compra». Decisión del coordinador: folio de compra = `Order.orderNumber`
+      // de la cuenta que vendió el sobre (el número de cuenta que trae el comprobante); se compara sin importar mayúsculas ni
+      // espacios. No es secreto y la ruta exige `giftCards:manage`: basta la comparación directa (nota 4 del coordinador).
+      // La libreta (A4) no lo recibe.
+      if (input.tipo === 'REEMPLAZAR_CODIGO') {
+        const venta = await tx.orderItem.findFirst({
+          where: { giftCardId, order: { venueId } },
+          select: { order: { select: { orderNumber: true } } },
+        })
+        if (!venta || venta.order.orderNumber.trim().toUpperCase() !== input.folio.trim().toUpperCase()) {
+          throw new GiftCardError('GIFT_CARD_FOLIO_MISMATCH', 'Ese folio no es el número de cuenta de la compra de esta tarjeta.', 422)
+        }
+      }
+      const { replay, ...resultado } = await operarSobreDeGerenteEnTx(tx, {
+        venueId,
+        giftCardId,
+        staffId,
+        operationKey: input.operationKey,
+        op: aOperacionDeLaLibreta(input),
       })
-      if (!venta || venta.order.orderNumber.trim().toUpperCase() !== input.folio.trim().toUpperCase()) {
-        throw new GiftCardError('GIFT_CARD_FOLIO_MISMATCH', 'Ese folio no es el número de cuenta de la compra de esta tarjeta.', 422)
+      // ⭐ (D4, estado de HOY): repetir un bloqueo o un desbloqueo con su llave responde «hecho» sólo si la tarjeta sigue como esa
+      // operación la dejó. Un bloqueo en duda que sí llegó y que otra pestaña ya desbloqueó no se vuelve a anunciar: 409. El sobre
+      // ya está bloqueado por la libreta en esta transacción: la lectura es la de hoy.
+      if (replay && (input.tipo === 'BLOQUEAR' || input.tipo === 'DESBLOQUEAR')) {
+        const hoy = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { status: true } })
+        const bloqueo = input.tipo === 'BLOQUEAR'
+        if (hoy?.status !== (bloqueo ? 'BLOCKED' : 'ACTIVE')) {
+          // r1 (M2): code propio; `GIFT_CARD_BLOCKED` diría lo contrario del texto («hoy no está bloqueada»).
+          throw new GiftCardError(
+            'GIFT_CARD_STATE_CHANGED',
+            bloqueo
+              ? 'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.'
+              : 'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',
+            409,
+          )
+        }
       }
-    }
-    const { replay, ...resultado } = await operarSobreDeGerenteEnTx(tx, {
-      venueId,
-      giftCardId,
-      staffId,
-      operationKey: input.operationKey,
-      op: aOperacionDeLaLibreta(input),
-    })
-    // ⭐ (D4, estado de HOY): repetir un bloqueo o un desbloqueo con su llave responde «hecho» sólo si la tarjeta sigue como esa
-    // operación la dejó. Un bloqueo en duda que sí llegó y que otra pestaña ya desbloqueó no se vuelve a anunciar: 409. El sobre
-    // ya está bloqueado por la libreta en esta transacción: la lectura es la de hoy.
-    if (replay && (input.tipo === 'BLOQUEAR' || input.tipo === 'DESBLOQUEAR')) {
-      const hoy = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { status: true } })
-      const bloqueo = input.tipo === 'BLOQUEAR'
-      if (hoy?.status !== (bloqueo ? 'BLOCKED' : 'ACTIVE')) {
-        // r1 (M2): code propio; `GIFT_CARD_BLOCKED` diría lo contrario del texto («hoy no está bloqueada»).
-        throw new GiftCardError(
-          'GIFT_CARD_STATE_CHANGED',
-          bloqueo
-            ? 'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.'
-            : 'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',
-          409,
-        )
-      }
-    }
-    return { ...resultado, replayed: replay }
-  }, ORDER_LOCK_WAIT_BUDGET)
+      return { ...resultado, replayed: replay }
+    },
+    { etiqueta: 'operarSobreDeGerente', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 }

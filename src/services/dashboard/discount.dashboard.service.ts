@@ -9,6 +9,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from './reglasDeDescuento'
 import logger from '@/config/logger'
@@ -385,55 +386,59 @@ export async function createDiscount(venueId: string, data: CreateDiscountReques
     data.value = 100 // Comp is always 100%
   }
 
-  const discount = await prisma.discount.create({
-    data: {
-      venueId,
-      name: data.name,
-      description: data.description,
-      type: data.type,
-      value: data.value,
-      scope: data.scope || 'ORDER',
-      targetItemIds: data.targetItemIds || [],
-      targetCategoryIds: data.targetCategoryIds || [],
-      targetModifierIds: data.targetModifierIds || [],
-      targetModifierGroupIds: data.targetModifierGroupIds || [],
-      customerGroupId: data.customerGroupId,
-      isAutomatic: data.isAutomatic ?? false,
-      priority: data.priority ?? 0,
-      minPurchaseAmount: data.minPurchaseAmount,
-      maxDiscountAmount: data.maxDiscountAmount,
-      minQuantity: data.minQuantity,
-      buyQuantity: data.buyQuantity,
-      getQuantity: data.getQuantity,
-      getDiscountPercent: data.getDiscountPercent,
-      buyItemIds: data.buyItemIds || [],
-      getItemIds: data.getItemIds || [],
-      validFrom: data.validFrom,
-      validUntil: data.validUntil,
-      daysOfWeek: data.daysOfWeek || [],
-      timeFrom: data.timeFrom,
-      timeUntil: data.timeUntil,
-      maxTotalUses: data.maxTotalUses,
-      maxUsesPerCustomer: data.maxUsesPerCustomer,
-      requiresApproval: data.requiresApproval ?? false,
-      compReason: data.compReason,
-      applyBeforeTax: data.applyBeforeTax ?? true,
-      modifyTaxBasis: data.modifyTaxBasis ?? true,
-      isStackable: data.isStackable ?? false,
-      stackPriority: data.stackPriority ?? 0,
-      active: data.active ?? true,
-      createdById,
-    },
-    include: {
-      customerGroup: {
-        select: {
-          id: true,
-          name: true,
-          color: true,
+  const discount = await withDeadlockRetry(
+    tx =>
+      tx.discount.create({
+        data: {
+          venueId,
+          name: data.name,
+          description: data.description,
+          type: data.type,
+          value: data.value,
+          scope: data.scope || 'ORDER',
+          targetItemIds: data.targetItemIds || [],
+          targetCategoryIds: data.targetCategoryIds || [],
+          targetModifierIds: data.targetModifierIds || [],
+          targetModifierGroupIds: data.targetModifierGroupIds || [],
+          customerGroupId: data.customerGroupId,
+          isAutomatic: data.isAutomatic ?? false,
+          priority: data.priority ?? 0,
+          minPurchaseAmount: data.minPurchaseAmount,
+          maxDiscountAmount: data.maxDiscountAmount,
+          minQuantity: data.minQuantity,
+          buyQuantity: data.buyQuantity,
+          getQuantity: data.getQuantity,
+          getDiscountPercent: data.getDiscountPercent,
+          buyItemIds: data.buyItemIds || [],
+          getItemIds: data.getItemIds || [],
+          validFrom: data.validFrom,
+          validUntil: data.validUntil,
+          daysOfWeek: data.daysOfWeek || [],
+          timeFrom: data.timeFrom,
+          timeUntil: data.timeUntil,
+          maxTotalUses: data.maxTotalUses,
+          maxUsesPerCustomer: data.maxUsesPerCustomer,
+          requiresApproval: data.requiresApproval ?? false,
+          compReason: data.compReason,
+          applyBeforeTax: data.applyBeforeTax ?? true,
+          modifyTaxBasis: data.modifyTaxBasis ?? true,
+          isStackable: data.isStackable ?? false,
+          stackPriority: data.stackPriority ?? 0,
+          active: data.active ?? true,
+          createdById,
         },
-      },
-    },
-  })
+        include: {
+          customerGroup: {
+            select: {
+              id: true,
+              name: true,
+              color: true,
+            },
+          },
+        },
+      }),
+    { etiqueta: 'createDiscount' },
+  )
 
   logger.info(`🎟️ Discount created: ${discount.name} (${discount.id}) for venue ${venueId}`)
 
@@ -495,58 +500,60 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
     }
   }
 
-  const discount = await prisma.discount
-    .update({
-      where: dondeEscribir(discountId, existing, data as unknown as Record<string, unknown>),
-      data: {
-        ...(data.name !== undefined && { name: data.name }),
-        ...(data.description !== undefined && { description: data.description }),
-        ...(data.type !== undefined && { type: data.type }),
-        ...(data.value !== undefined && { value: data.value }),
-        ...(data.scope !== undefined && { scope: data.scope }),
-        ...(data.targetItemIds !== undefined && { targetItemIds: data.targetItemIds }),
-        ...(data.targetCategoryIds !== undefined && { targetCategoryIds: data.targetCategoryIds }),
-        ...(data.targetModifierIds !== undefined && { targetModifierIds: data.targetModifierIds }),
-        ...(data.targetModifierGroupIds !== undefined && { targetModifierGroupIds: data.targetModifierGroupIds }),
-        ...(data.customerGroupId !== undefined && { customerGroupId: data.customerGroupId }),
-        ...(data.isAutomatic !== undefined && { isAutomatic: data.isAutomatic }),
-        ...(data.priority !== undefined && { priority: data.priority }),
-        ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
-        ...(data.maxDiscountAmount !== undefined && { maxDiscountAmount: data.maxDiscountAmount }),
-        ...(data.minQuantity !== undefined && { minQuantity: data.minQuantity }),
-        ...(data.buyQuantity !== undefined && { buyQuantity: data.buyQuantity }),
-        ...(data.getQuantity !== undefined && { getQuantity: data.getQuantity }),
-        ...(data.getDiscountPercent !== undefined && { getDiscountPercent: data.getDiscountPercent }),
-        ...(data.buyItemIds !== undefined && { buyItemIds: data.buyItemIds }),
-        ...(data.getItemIds !== undefined && { getItemIds: data.getItemIds }),
-        ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
-        ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
-        ...(data.daysOfWeek !== undefined && { daysOfWeek: data.daysOfWeek }),
-        ...(data.timeFrom !== undefined && { timeFrom: data.timeFrom }),
-        ...(data.timeUntil !== undefined && { timeUntil: data.timeUntil }),
-        ...(data.maxTotalUses !== undefined && { maxTotalUses: data.maxTotalUses }),
-        ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
-        ...(data.requiresApproval !== undefined && { requiresApproval: data.requiresApproval }),
-        ...(data.compReason !== undefined && { compReason: data.compReason }),
-        ...(data.applyBeforeTax !== undefined && { applyBeforeTax: data.applyBeforeTax }),
-        ...(data.modifyTaxBasis !== undefined && { modifyTaxBasis: data.modifyTaxBasis }),
-        ...(data.isStackable !== undefined && { isStackable: data.isStackable }),
-        ...(data.stackPriority !== undefined && { stackPriority: data.stackPriority }),
-        ...(data.active !== undefined && { active: data.active }),
-      },
-      include: {
-        customerGroup: {
-          select: {
-            id: true,
-            name: true,
-            color: true,
+  const discount = await withDeadlockRetry(
+    tx =>
+      tx.discount.update({
+        where: dondeEscribir(discountId, existing, data as unknown as Record<string, unknown>),
+        data: {
+          ...(data.name !== undefined && { name: data.name }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.type !== undefined && { type: data.type }),
+          ...(data.value !== undefined && { value: data.value }),
+          ...(data.scope !== undefined && { scope: data.scope }),
+          ...(data.targetItemIds !== undefined && { targetItemIds: data.targetItemIds }),
+          ...(data.targetCategoryIds !== undefined && { targetCategoryIds: data.targetCategoryIds }),
+          ...(data.targetModifierIds !== undefined && { targetModifierIds: data.targetModifierIds }),
+          ...(data.targetModifierGroupIds !== undefined && { targetModifierGroupIds: data.targetModifierGroupIds }),
+          ...(data.customerGroupId !== undefined && { customerGroupId: data.customerGroupId }),
+          ...(data.isAutomatic !== undefined && { isAutomatic: data.isAutomatic }),
+          ...(data.priority !== undefined && { priority: data.priority }),
+          ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
+          ...(data.maxDiscountAmount !== undefined && { maxDiscountAmount: data.maxDiscountAmount }),
+          ...(data.minQuantity !== undefined && { minQuantity: data.minQuantity }),
+          ...(data.buyQuantity !== undefined && { buyQuantity: data.buyQuantity }),
+          ...(data.getQuantity !== undefined && { getQuantity: data.getQuantity }),
+          ...(data.getDiscountPercent !== undefined && { getDiscountPercent: data.getDiscountPercent }),
+          ...(data.buyItemIds !== undefined && { buyItemIds: data.buyItemIds }),
+          ...(data.getItemIds !== undefined && { getItemIds: data.getItemIds }),
+          ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
+          ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
+          ...(data.daysOfWeek !== undefined && { daysOfWeek: data.daysOfWeek }),
+          ...(data.timeFrom !== undefined && { timeFrom: data.timeFrom }),
+          ...(data.timeUntil !== undefined && { timeUntil: data.timeUntil }),
+          ...(data.maxTotalUses !== undefined && { maxTotalUses: data.maxTotalUses }),
+          ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
+          ...(data.requiresApproval !== undefined && { requiresApproval: data.requiresApproval }),
+          ...(data.compReason !== undefined && { compReason: data.compReason }),
+          ...(data.applyBeforeTax !== undefined && { applyBeforeTax: data.applyBeforeTax }),
+          ...(data.modifyTaxBasis !== undefined && { modifyTaxBasis: data.modifyTaxBasis }),
+          ...(data.isStackable !== undefined && { isStackable: data.isStackable }),
+          ...(data.stackPriority !== undefined && { stackPriority: data.stackPriority }),
+          ...(data.active !== undefined && { active: data.active }),
+        },
+        include: {
+          customerGroup: {
+            select: {
+              id: true,
+              name: true,
+              color: true,
+            },
           },
         },
-      },
-    })
-    .catch(error => {
-      throw esCambioCruzado(error) ? new ConflictError(CAMBIO_CRUZADO) : error
-    })
+      }),
+    { etiqueta: 'updateDiscount' },
+  ).catch(error => {
+    throw esCambioCruzado(error) ? new ConflictError(CAMBIO_CRUZADO) : error
+  })
 
   logger.info(`🎟️ Discount updated: ${discount.name} (${discount.id})`)
 
@@ -579,9 +586,13 @@ export async function deleteDiscount(venueId: string, discountId: string): Promi
     throw new NotFoundError('El descuento no existe')
   }
 
-  await prisma.discount.delete({
-    where: { id: discountId },
-  })
+  await withDeadlockRetry(
+    tx =>
+      tx.discount.delete({
+        where: { id: discountId },
+      }),
+    { etiqueta: 'deleteDiscount' },
+  )
 
   logger.info(`🗑️ Discount deleted: ${existing.name} (${discountId})`)
 
@@ -612,56 +623,60 @@ export async function cloneDiscount(venueId: string, discountId: string, created
   const invalido = validarCambioDeDescuento(null, original)
   if (invalido) throw new BadRequestError(`No se puede duplicar: ${invalido.charAt(0).toLowerCase()}${invalido.slice(1)}`)
 
-  const clone = await prisma.discount.create({
-    data: {
-      venueId,
-      name: `${original.name} (copia)`,
-      description: original.description,
-      type: original.type,
-      value: original.value,
-      scope: original.scope,
-      targetItemIds: original.targetItemIds,
-      targetCategoryIds: original.targetCategoryIds,
-      targetModifierIds: original.targetModifierIds,
-      targetModifierGroupIds: original.targetModifierGroupIds,
-      customerGroupId: original.customerGroupId,
-      isAutomatic: original.isAutomatic,
-      priority: original.priority,
-      minPurchaseAmount: original.minPurchaseAmount,
-      maxDiscountAmount: original.maxDiscountAmount,
-      minQuantity: original.minQuantity,
-      buyQuantity: original.buyQuantity,
-      getQuantity: original.getQuantity,
-      getDiscountPercent: original.getDiscountPercent,
-      buyItemIds: original.buyItemIds,
-      getItemIds: original.getItemIds,
-      validFrom: original.validFrom,
-      validUntil: original.validUntil,
-      daysOfWeek: original.daysOfWeek,
-      timeFrom: original.timeFrom,
-      timeUntil: original.timeUntil,
-      maxTotalUses: original.maxTotalUses,
-      maxUsesPerCustomer: original.maxUsesPerCustomer,
-      requiresApproval: original.requiresApproval,
-      compReason: original.compReason,
-      applyBeforeTax: original.applyBeforeTax,
-      modifyTaxBasis: original.modifyTaxBasis,
-      isStackable: original.isStackable,
-      stackPriority: original.stackPriority,
-      active: false, // Clone starts inactive
-      currentUses: 0, // Reset usage counter
-      createdById,
-    },
-    include: {
-      customerGroup: {
-        select: {
-          id: true,
-          name: true,
-          color: true,
+  const clone = await withDeadlockRetry(
+    tx =>
+      tx.discount.create({
+        data: {
+          venueId,
+          name: `${original.name} (copia)`,
+          description: original.description,
+          type: original.type,
+          value: original.value,
+          scope: original.scope,
+          targetItemIds: original.targetItemIds,
+          targetCategoryIds: original.targetCategoryIds,
+          targetModifierIds: original.targetModifierIds,
+          targetModifierGroupIds: original.targetModifierGroupIds,
+          customerGroupId: original.customerGroupId,
+          isAutomatic: original.isAutomatic,
+          priority: original.priority,
+          minPurchaseAmount: original.minPurchaseAmount,
+          maxDiscountAmount: original.maxDiscountAmount,
+          minQuantity: original.minQuantity,
+          buyQuantity: original.buyQuantity,
+          getQuantity: original.getQuantity,
+          getDiscountPercent: original.getDiscountPercent,
+          buyItemIds: original.buyItemIds,
+          getItemIds: original.getItemIds,
+          validFrom: original.validFrom,
+          validUntil: original.validUntil,
+          daysOfWeek: original.daysOfWeek,
+          timeFrom: original.timeFrom,
+          timeUntil: original.timeUntil,
+          maxTotalUses: original.maxTotalUses,
+          maxUsesPerCustomer: original.maxUsesPerCustomer,
+          requiresApproval: original.requiresApproval,
+          compReason: original.compReason,
+          applyBeforeTax: original.applyBeforeTax,
+          modifyTaxBasis: original.modifyTaxBasis,
+          isStackable: original.isStackable,
+          stackPriority: original.stackPriority,
+          active: false, // Clone starts inactive
+          currentUses: 0, // Reset usage counter
+          createdById,
         },
-      },
-    },
-  })
+        include: {
+          customerGroup: {
+            select: {
+              id: true,
+              name: true,
+              color: true,
+            },
+          },
+        },
+      }),
+    { etiqueta: 'cloneDiscount' },
+  )
 
   logger.info(`🎟️ Discount cloned: ${original.name} -> ${clone.name} (${clone.id})`)
 

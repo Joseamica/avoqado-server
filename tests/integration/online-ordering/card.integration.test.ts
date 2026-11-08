@@ -28,6 +28,7 @@ import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/onli
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { listOrders as listMobileOrders } from '@/services/mobile/order.mobile.service'
 import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -485,7 +486,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     const c = await chargeOf(key)
     await prisma.$transaction(async tx => {
       const req = c.request as any
-      const created = await writeOnlineOrderInTx(tx, {
+      const created = await writeOnlineOrderInTx(tx as unknown as TxConReintento, {
         venueId: venueId!,
         externalId: `web:${key}`,
         orderNumber: `WC${seq}`,
@@ -653,7 +654,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     const c = await chargeOf(key)
     const req = c.request as any
     await prisma.$transaction(tx =>
-      writeOnlineOrderInTx(tx, {
+      writeOnlineOrderInTx(tx as unknown as TxConReintento, {
         venueId: venueId!,
         externalId: `web:${key}`,
         orderNumber: `WX${seq}`,
@@ -826,7 +827,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await draft({ key })
     const req = (await chargeOf(key)).request as any
     const pickupOrder = await prisma.$transaction(tx =>
-      writeOnlineOrderInTx(tx, {
+      writeOnlineOrderInTx(tx as unknown as TxConReintento, {
         venueId: venueId!,
         externalId: `web:s2-move-${RUN}-${seq}`,
         orderNumber: `WM${seq}`,

@@ -18,6 +18,7 @@ import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { avisarOrdenCancelada, findLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -34,7 +35,6 @@ import {
 import { leerSiEsCuentaDeTarjetas } from './giftCardMarks'
 import { isGiftCardTenderKind } from './giftCardTender'
 
-type Tx = Prisma.TransactionClient
 /** Lecturas que también corren fuera de una transacción (el detalle del dashboard, C4). */
 type Db = Prisma.TransactionClient | PrismaClient
 
@@ -87,7 +87,7 @@ export interface AlRegistrarReembolsoResultado {
 const SIN_CANCELAR: AlRegistrarReembolsoResultado = Object.freeze({ cuentaCancelada: false })
 const CERO = () => new Prisma.Decimal(0)
 
-async function leerCobroOriginal(tx: Tx, venueId: string, paymentId: string): Promise<CobroOriginalDeTarjetas | null> {
+async function leerCobroOriginal(tx: TxConReintento, venueId: string, paymentId: string): Promise<CobroOriginalDeTarjetas | null> {
   const fila = await tx.payment.findFirst({
     where: { id: paymentId, venueId },
     select: { orderId: true, tenderType: { select: { systemKind: true } } },
@@ -110,7 +110,7 @@ export async function sobresDeLaCuenta(tx: Db, orderId: string): Promise<string[
 }
 
 /** Los sobres que tocó un cobro con saldo (sus `REDEEM`). */
-async function sobresDelCanje(tx: Tx, venueId: string, paymentId: string): Promise<string[]> {
+async function sobresDelCanje(tx: TxConReintento, venueId: string, paymentId: string): Promise<string[]> {
   const canjes = await tx.giftCardActivity.findMany({
     where: { venueId, paymentId, type: 'REDEEM' },
     select: { giftCardId: true },
@@ -180,13 +180,13 @@ function todosEnCancelacion(sobres: Array<{ id: string; status: GiftCardStatus }
  * venta pagada ya no tiene activación en curso (la hizo el cobro que la saldó), así que un reembolso nunca espera sobres
  * que una activación tiene tomados. Sin pagar ⇒ ningún candado de sobre.
  */
-async function ventaPagada(tx: Tx, venueId: string, orderId: string): Promise<boolean> {
+async function ventaPagada(tx: TxConReintento, venueId: string, orderId: string): Promise<boolean> {
   const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
   return orden?.paymentStatus === 'PAID'
 }
 
 export async function bloquearSobresDelReembolsoEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; originalPaymentId: string | string[]; original?: CobroOriginalDeTarjetas },
 ): Promise<void> {
   const ids: string[] = []
@@ -208,7 +208,7 @@ export async function bloquearSobresDelReembolsoEnTx(
   if (ids.length > 0) await lockGiftCardsForUpdate(tx, ids)
 }
 
-export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoInput): Promise<AlRegistrarReembolsoResultado> {
+export async function alRegistrarReembolsoEnTx(tx: TxConReintento, p: AlRegistrarReembolsoInput): Promise<AlRegistrarReembolsoResultado> {
   const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, p.originalPaymentId))
   if (!original) return SIN_CANCELAR
   if (isGiftCardTenderKind(original.tenderSystemKind)) {
@@ -230,7 +230,7 @@ export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoIn
  * El dinero que la cuenta conserva YA con este reembolso escrito: cobros COMPLETED menos devoluciones COMPLETED, venta Y propina
  * (la propina también es dinero que el negocio guarda). Las devoluciones se guardan negativas (`summarizeRefunds`).
  */
-async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promise<Prisma.Decimal> {
+async function dineroConservado(tx: TxConReintento, venueId: string, orderId: string): Promise<Prisma.Decimal> {
   const cobros = await tx.payment.aggregate({
     where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     _sum: { amount: true, tipAmount: true },
@@ -256,7 +256,7 @@ async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promi
  * (activarla, cancelarla) toma ANTES la Order que este reembolso ya tiene, y nadie que tenga un sobre PENDING espera un turno.
  */
 async function cerrarVentaSinPagarSiYaNoQuedaDinero(
-  tx: Tx,
+  tx: TxConReintento,
   p: AlRegistrarReembolsoInput,
   orderId: string,
 ): Promise<AlRegistrarReembolsoResultado> {
@@ -308,7 +308,11 @@ export async function avisarVentaDeTarjetasCanceladaPorReembolso(p: {
 }
 
 /** R2: devolver dinero de una cuenta de tarjetas PAGADA = cancelarla. Sin pagar: un abono más (r1, fix 1). */
-async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput, orderId: string): Promise<AlRegistrarReembolsoResultado> {
+async function devolverVentaDeTarjetasEnTx(
+  tx: TxConReintento,
+  p: AlRegistrarReembolsoInput,
+  orderId: string,
+): Promise<AlRegistrarReembolsoResultado> {
   // E4 (excepción escrita): antes de leer o bloquear un solo sobre, la venta tiene que estar PAGADA. Sin pagar, sus sobres siguen
   // PENDING (no valen nada): la devolución se acepta por cualquier canal y, si deja la cuenta en $0, la cancela.
   if (!(await ventaPagada(tx, p.venueId, orderId))) return cerrarVentaSinPagarSiYaNoQuedaDinero(tx, p, orderId)
@@ -431,7 +435,7 @@ const DESBLOQUEO_DE_CANCELACION: OperacionDeGerente = {
  * `lockGiftCardsForUpdate`, el mismo helper (y el mismo orden, por id) que el canje y el reembolso; un orden propio aquí sí podría
  * cruzarse con el de ellos.
  */
-async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string): Promise<string[]> {
+async function abrirVentaDeTarjetasEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<string[]> {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw noEsVentaDeTarjetas()
   if (!(await leerSiEsCuentaDeTarjetas(tx, orderId))) throw noEsVentaDeTarjetas()
   const ids = await sobresDeLaCuenta(tx, orderId)
@@ -449,7 +453,7 @@ async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string
  * vez no espera. Devuelve los sobres cuya operación ya estaba registrada.
  */
 async function sobresYaOperadosConLaLlaveEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; staffId: string; operationKey: string; ids: string[]; op: OperacionDeGerente },
 ): Promise<Set<string>> {
   const claves = p.ids.map(id => claveDeSobre(p.operationKey, id))
@@ -663,50 +667,57 @@ export async function iniciarCancelacionDeVenta(
   if (!venue) throw noEsVentaDeTarjetas()
   const timezone = venue.timezone || DEFAULT_TIMEZONE
 
-  const r = await prisma.$transaction(async tx => {
-    const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
-    const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { orderNumber: true } })
-    const op = bloqueoDeCancelacion(orden?.orderNumber ?? null)
-    // Reintento de la MISMA operación (el dashboard reintenta, `api.ts`): la libreta lo reconoce por su huella y no escribe.
-    const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, { venueId, staffId: p.staffId, operationKey: p.operationKey, ids, op })
-    if (repetidos.size === ids.length) {
-      // r1 M3: el reintento COMPLETO responde según el estado de HOY, bajo el candado de los sobres. Si esa cancelación sigue en
-      // curso, o ya terminó con la devolución (todos DEACTIVATED), es la misma respuesta. Si se liberó después (los sobres volvieron
-      // a ACTIVE, o cambiaron por otra cosa), responder «iniciada» le mentiría al panel con las tarjetas gastables: 409. Para
-      // cancelar otra vez el panel acuña una llave NUEVA por intento (D4); la misma llave sólo sirve para reintentar ese intento.
-      const hoy = await tx.giftCard.findMany({ where: { id: { in: ids }, venueId }, select: { id: true, status: true }, take: ids.length })
-      const sigue =
-        hoy.length > 0 && (hoy.every(s => s.status === 'DEACTIVATED') || todosEnCancelacion(hoy, await motivosDeBloqueoVigentes(tx, ids)))
-      if (!sigue) {
-        throw new GiftCardError(
-          'GIFT_CARD_CANCEL_NOT_STARTED',
-          'Esta cancelación ya se liberó y las tarjetas volvieron a estar disponibles. Si quieres cancelar la venta, inicia una nueva cancelación.',
-          409,
-        )
+  const r = await withDeadlockRetry(
+    async tx => {
+      const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
+      const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { orderNumber: true } })
+      const op = bloqueoDeCancelacion(orden?.orderNumber ?? null)
+      // Reintento de la MISMA operación (el dashboard reintenta, `api.ts`): la libreta lo reconoce por su huella y no escribe.
+      const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, { venueId, staffId: p.staffId, operationKey: p.operationKey, ids, op })
+      if (repetidos.size === ids.length) {
+        // r1 M3: el reintento COMPLETO responde según el estado de HOY, bajo el candado de los sobres. Si esa cancelación sigue en
+        // curso, o ya terminó con la devolución (todos DEACTIVATED), es la misma respuesta. Si se liberó después (los sobres volvieron
+        // a ACTIVE, o cambiaron por otra cosa), responder «iniciada» le mentiría al panel con las tarjetas gastables: 409. Para
+        // cancelar otra vez el panel acuña una llave NUEVA por intento (D4); la misma llave sólo sirve para reintentar ese intento.
+        const hoy = await tx.giftCard.findMany({
+          where: { id: { in: ids }, venueId },
+          select: { id: true, status: true },
+          take: ids.length,
+        })
+        const sigue =
+          hoy.length > 0 && (hoy.every(s => s.status === 'DEACTIVATED') || todosEnCancelacion(hoy, await motivosDeBloqueoVigentes(tx, ids)))
+        if (!sigue) {
+          throw new GiftCardError(
+            'GIFT_CARD_CANCEL_NOT_STARTED',
+            'Esta cancelación ya se liberó y las tarjetas volvieron a estar disponibles. Si quieres cancelar la venta, inicia una nueva cancelación.',
+            409,
+          )
+        }
+        return { giftCardIds: ids, bloqueadas: [] }
       }
-      return { giftCardIds: ids, bloqueadas: [] }
-    }
 
-    // La MISMA regla que pinta el botón del detalle (C4): `evaluarCancelacionDeVenta` (decisión 1 del coordinador).
-    const e = await evaluarCancelacionDeVenta(tx, { venueId, orderId, ids, timezone, ahora: new Date() })
-    if (e.error) throw e.error
-    // Ya en cancelación (otra persona la inició con otra llave): se respeta tal cual y no se escribe nada.
-    if (e.reason === 'IN_PROGRESS') return { giftCardIds: ids, bloqueadas: [] }
-    const bloqueadas: string[] = []
-    for (const s of e.sobres) {
-      // Sólo los ACTIVE: los que ya están BLOCKED aquí son de esta misma cancelación (la regla rechaza cualquier otro motivo).
-      if (s.status !== 'ACTIVE' || repetidos.has(s.id)) continue
-      const hecho = await operarSobreDeGerenteEnTx(tx, {
-        venueId,
-        giftCardId: s.id,
-        staffId: p.staffId,
-        operationKey: claveDeSobre(p.operationKey, s.id),
-        op,
-      })
-      if (!hecho.replay) bloqueadas.push(s.id)
-    }
-    return { giftCardIds: ids, bloqueadas }
-  }, ORDER_LOCK_WAIT_BUDGET)
+      // La MISMA regla que pinta el botón del detalle (C4): `evaluarCancelacionDeVenta` (decisión 1 del coordinador).
+      const e = await evaluarCancelacionDeVenta(tx, { venueId, orderId, ids, timezone, ahora: new Date() })
+      if (e.error) throw e.error
+      // Ya en cancelación (otra persona la inició con otra llave): se respeta tal cual y no se escribe nada.
+      if (e.reason === 'IN_PROGRESS') return { giftCardIds: ids, bloqueadas: [] }
+      const bloqueadas: string[] = []
+      for (const s of e.sobres) {
+        // Sólo los ACTIVE: los que ya están BLOCKED aquí son de esta misma cancelación (la regla rechaza cualquier otro motivo).
+        if (s.status !== 'ACTIVE' || repetidos.has(s.id)) continue
+        const hecho = await operarSobreDeGerenteEnTx(tx, {
+          venueId,
+          giftCardId: s.id,
+          staffId: p.staffId,
+          operationKey: claveDeSobre(p.operationKey, s.id),
+          op,
+        })
+        if (!hecho.replay) bloqueadas.push(s.id)
+      }
+      return { giftCardIds: ids, bloqueadas }
+    },
+    { etiqueta: 'iniciarCancelacionDeVenta', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   if (r.bloqueadas.length > 0) {
     void logAction({
@@ -740,60 +751,67 @@ export async function liberarCancelacionDeVenta(
       'Para liberar confirma que comprobaste que la devolución NO se hizo. Si no lo sabes, la tarjeta se queda bloqueada.',
     )
   }
-  const liberadas = await prisma.$transaction(async tx => {
-    const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
-    const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, {
-      venueId,
-      staffId: p.staffId,
-      operationKey: p.operationKey,
-      ids,
-      op: DESBLOQUEO_DE_CANCELACION,
-    })
-    const filas = await tx.giftCard.findMany({ where: { id: { in: ids }, venueId }, select: { id: true, status: true }, take: ids.length })
-    const estado = new Map(filas.map(s => [s.id, s.status]))
-    if (filas.some(s => s.status === 'DEACTIVATED')) {
-      throw new GiftCardError(
-        'GIFT_CARD_SALE_ALREADY_CANCELLED',
-        'Esta venta ya se canceló y su dinero ya se devolvió: no hay nada que liberar.',
-        409,
-      )
-    }
-    if (repetidos.size === ids.length) {
-      // ⭐ (D4, como el reintento de iniciar): la repetición COMPLETA responde según el estado de HOY, bajo el candado de los sobres.
-      // Esa liberación los dejó ACTIVE; si después se volvieron a bloquear (otra cancelación, otro motivo) o se devolvió la venta
-      // (arriba), responder «liberada» le mentiría al panel: 409. Para liberar otra vez, el panel acuña una llave nueva.
-      if (filas.some(s => s.status !== 'ACTIVE')) {
+  const liberadas = await withDeadlockRetry(
+    async tx => {
+      const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
+      const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, {
+        venueId,
+        staffId: p.staffId,
+        operationKey: p.operationKey,
+        ids,
+        op: DESBLOQUEO_DE_CANCELACION,
+      })
+      const filas = await tx.giftCard.findMany({
+        where: { id: { in: ids }, venueId },
+        select: { id: true, status: true },
+        take: ids.length,
+      })
+      const estado = new Map(filas.map(s => [s.id, s.status]))
+      if (filas.some(s => s.status === 'DEACTIVATED')) {
         throw new GiftCardError(
-          'GIFT_CARD_BLOCKED',
-          'Esta liberación ya se había hecho, pero después las tarjetas se volvieron a bloquear. Vuelve a abrir la venta para ver su estado.',
+          'GIFT_CARD_SALE_ALREADY_CANCELLED',
+          'Esta venta ya se canceló y su dinero ya se devolvió: no hay nada que liberar.',
           409,
         )
       }
-      return []
-    }
-    const motivos = await motivosDeBloqueoVigentes(tx, ids)
-    // Codex #7 (cierre): liberar saltándose una tarjeta bloqueada por OTRO motivo respondía éxito y el panel anunciaba «se pueden usar».
-    if (filas.some(f => f.status === 'BLOCKED' && motivos.get(f.id) !== GiftCardReason.CANCEL_IN_PROGRESS)) {
-      throw new GiftCardError(
-        'GIFT_CARD_BLOCKED',
-        'Una tarjeta de esta venta está bloqueada por otro motivo; revísala antes de liberar.',
-        409,
-      )
-    }
-    const hechas: string[] = []
-    for (const id of ids) {
-      if (repetidos.has(id) || estado.get(id) !== 'BLOCKED' || motivos.get(id) !== GiftCardReason.CANCEL_IN_PROGRESS) continue
-      const hecho = await operarSobreDeGerenteEnTx(tx, {
-        venueId,
-        giftCardId: id,
-        staffId: p.staffId,
-        operationKey: claveDeSobre(p.operationKey, id),
-        op: DESBLOQUEO_DE_CANCELACION,
-      })
-      if (!hecho.replay) hechas.push(id)
-    }
-    return hechas
-  }, ORDER_LOCK_WAIT_BUDGET)
+      if (repetidos.size === ids.length) {
+        // ⭐ (D4, como el reintento de iniciar): la repetición COMPLETA responde según el estado de HOY, bajo el candado de los sobres.
+        // Esa liberación los dejó ACTIVE; si después se volvieron a bloquear (otra cancelación, otro motivo) o se devolvió la venta
+        // (arriba), responder «liberada» le mentiría al panel: 409. Para liberar otra vez, el panel acuña una llave nueva.
+        if (filas.some(s => s.status !== 'ACTIVE')) {
+          throw new GiftCardError(
+            'GIFT_CARD_BLOCKED',
+            'Esta liberación ya se había hecho, pero después las tarjetas se volvieron a bloquear. Vuelve a abrir la venta para ver su estado.',
+            409,
+          )
+        }
+        return []
+      }
+      const motivos = await motivosDeBloqueoVigentes(tx, ids)
+      // Codex #7 (cierre): liberar saltándose una tarjeta bloqueada por OTRO motivo respondía éxito y el panel anunciaba «se pueden usar».
+      if (filas.some(f => f.status === 'BLOCKED' && motivos.get(f.id) !== GiftCardReason.CANCEL_IN_PROGRESS)) {
+        throw new GiftCardError(
+          'GIFT_CARD_BLOCKED',
+          'Una tarjeta de esta venta está bloqueada por otro motivo; revísala antes de liberar.',
+          409,
+        )
+      }
+      const hechas: string[] = []
+      for (const id of ids) {
+        if (repetidos.has(id) || estado.get(id) !== 'BLOCKED' || motivos.get(id) !== GiftCardReason.CANCEL_IN_PROGRESS) continue
+        const hecho = await operarSobreDeGerenteEnTx(tx, {
+          venueId,
+          giftCardId: id,
+          staffId: p.staffId,
+          operationKey: claveDeSobre(p.operationKey, id),
+          op: DESBLOQUEO_DE_CANCELACION,
+        })
+        if (!hecho.replay) hechas.push(id)
+      }
+      return hechas
+    },
+    { etiqueta: 'liberarCancelacionDeVenta', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   if (liberadas.length > 0) {
     void logAction({

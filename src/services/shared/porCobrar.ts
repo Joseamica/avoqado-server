@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
  * «Por cobrar» (fiado) como Toast (founder 26-oct): sólo es deuda del cliente lo que el cajero mandó a «Pagar después».
@@ -30,7 +31,7 @@ type VinculosDeLaCuenta = { customerId: string | null; orderCustomers: { custome
  * Codex r1 de D2) y de las métricas del cobro (Cliente → Cuenta, Codex r3). Al revés, copiar el vínculo cerraba un interbloqueo.
  * Devuelve los clientes apartados; quien copia el vínculo comprueba, ya con la mesa apartada, que sigan siendo los mismos.
  */
-export async function apartarClientesDelFiado(tx: Prisma.TransactionClient, venueId: string, orderIds: string[]): Promise<Set<string>> {
+export async function apartarClientesDelFiado(tx: TxConReintento, venueId: string, orderIds: string[]): Promise<Set<string>> {
   const cuentas: { payLater: boolean | null; customerId: string | null; orderCustomers?: { customerId: string }[] }[] = []
   for (const id of orderIds) {
     const cuenta = await tx.order.findFirst({
@@ -42,7 +43,9 @@ export async function apartarClientesDelFiado(tx: Prisma.TransactionClient, venu
   // Si alguna es fiado se apartan los clientes de TODAS: la cuenta que queda puede quedar a nombre del cliente de la otra.
   if (!cuentas.some(c => c.payLater === true)) return new Set()
   const ids = [
-    ...new Set(cuentas.flatMap(c => [c.customerId, ...(c.orderCustomers ?? []).map(oc => oc.customerId)]).filter((id): id is string => !!id)),
+    ...new Set(
+      cuentas.flatMap(c => [c.customerId, ...(c.orderCustomers ?? []).map(oc => oc.customerId)]).filter((id): id is string => !!id),
+    ),
   ].sort()
   if (ids.length) {
     await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
@@ -88,7 +91,8 @@ export function exigirUnSoloCliente(o: VinculosDeLaCuenta): void {
  */
 export function exigirClientesApartados(apartados: Set<string>, o: VinculosDeLaCuenta, accion: string): void {
   const ids = [o.customerId, ...o.orderCustomers.map(c => c.customerId)].filter((id): id is string => !!id)
-  if (ids.some(id => !apartados.has(id))) throw new ConflictError(`La cuenta cambió de cliente mientras se ${accion} — vuelve a intentar`, 'VERSION_CONFLICT')
+  if (ids.some(id => !apartados.has(id)))
+    throw new ConflictError(`La cuenta cambió de cliente mientras se ${accion} — vuelve a intentar`, 'VERSION_CONFLICT')
 }
 
 /**
@@ -100,4 +104,3 @@ export function combinarPayLater(a: boolean | null, b: boolean | null): boolean 
   if (a === null || b === null) return null
   return false
 }
-

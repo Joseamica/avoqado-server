@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import type { ConsentChannel } from '@prisma/client'
 import { plantillaDeAviso } from './privacyNoticeTemplate'
@@ -78,59 +79,62 @@ export async function getCurrentPrivacyNotice(venueId: string) {
  * El SELECT ... FOR UPDATE de la fila del customer da el orden total de `seq`.
  */
 async function writeConsent(p: ConsentParams, action: 'GRANTED' | 'REVOKED') {
-  await prisma.$transaction(async tx => {
-    const rows = await tx.$queryRaw<{ id: string; venueId: string }[]>`
+  await withDeadlockRetry(
+    async tx => {
+      const rows = await tx.$queryRaw<{ id: string; venueId: string }[]>`
       SELECT id, "venueId" FROM "Customer" WHERE id = ${p.customerId} AND "venueId" = ${p.venueId} FOR UPDATE`
-    if (rows.length === 0) throw new NotFoundError('Cliente no encontrado en este negocio')
+      if (rows.length === 0) throw new NotFoundError('Cliente no encontrado en este negocio')
 
-    let noticeVersionId: string | null = null
-    if (action === 'GRANTED') {
-      // 🔴 Consulta PROPIA, deliberadamente DISTINTA de getCurrentPrivacyNotice (arriba): esa
-      // función cae a la PLANTILLA cuando el venue no tiene versión propia (Task 8), y la
-      // plantilla NUNCA puede contar como aviso publicado — sólo una fila real guardada
-      // autoriza a capturar consentimiento. Confirmado con sabotaje: reusar
-      // getCurrentPrivacyNotice aquí hace que este candado deje de rechazar (ver reporte).
-      const notice = await tx.privacyNoticeVersion.findFirst({
-        where: { venueId: p.venueId },
-        orderBy: { createdAt: 'desc' },
-        select: { id: true },
+      let noticeVersionId: string | null = null
+      if (action === 'GRANTED') {
+        // 🔴 Consulta PROPIA, deliberadamente DISTINTA de getCurrentPrivacyNotice (arriba): esa
+        // función cae a la PLANTILLA cuando el venue no tiene versión propia (Task 8), y la
+        // plantilla NUNCA puede contar como aviso publicado — sólo una fila real guardada
+        // autoriza a capturar consentimiento. Confirmado con sabotaje: reusar
+        // getCurrentPrivacyNotice aquí hace que este candado deje de rechazar (ver reporte).
+        const notice = await tx.privacyNoticeVersion.findFirst({
+          where: { venueId: p.venueId },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        })
+        if (!notice) throw new BadRequestError('Registra el aviso de privacidad del negocio antes de capturar consentimiento')
+        noticeVersionId = notice.id
+      }
+
+      const last = await tx.consentEvent.findFirst({
+        where: { customerId: p.customerId },
+        orderBy: { seq: 'desc' },
+        select: { seq: true },
       })
-      if (!notice) throw new BadRequestError('Registra el aviso de privacidad del negocio antes de capturar consentimiento')
-      noticeVersionId = notice.id
-    }
+      const seq = (last?.seq ?? 0) + 1
 
-    const last = await tx.consentEvent.findFirst({
-      where: { customerId: p.customerId },
-      orderBy: { seq: 'desc' },
-      select: { seq: true },
-    })
-    const seq = (last?.seq ?? 0) + 1
-
-    await tx.consentEvent.create({
-      data: {
-        customerId: p.customerId,
-        venueId: p.venueId,
-        seq,
-        action,
-        channel: p.channel,
-        actorStaffId: p.actorStaffId ?? null,
-        noticeVersionId,
-        ip: p.ip ?? null,
-        userAgent: p.userAgent ?? null,
-      },
-    })
-    await tx.customer.update({ where: { id: p.customerId }, data: { marketingConsent: action === 'GRANTED' } })
-    await tx.activityLog.create({
-      data: {
-        action: action === 'GRANTED' ? 'MARKETING_CONSENT_GRANTED' : 'MARKETING_CONSENT_REVOKED',
-        entity: 'Customer',
-        entityId: p.customerId,
-        staffId: p.actorStaffId ?? null,
-        venueId: p.venueId,
-        data: { channel: p.channel, seq },
-      },
-    })
-  })
+      await tx.consentEvent.create({
+        data: {
+          customerId: p.customerId,
+          venueId: p.venueId,
+          seq,
+          action,
+          channel: p.channel,
+          actorStaffId: p.actorStaffId ?? null,
+          noticeVersionId,
+          ip: p.ip ?? null,
+          userAgent: p.userAgent ?? null,
+        },
+      })
+      await tx.customer.update({ where: { id: p.customerId }, data: { marketingConsent: action === 'GRANTED' } })
+      await tx.activityLog.create({
+        data: {
+          action: action === 'GRANTED' ? 'MARKETING_CONSENT_GRANTED' : 'MARKETING_CONSENT_REVOKED',
+          entity: 'Customer',
+          entityId: p.customerId,
+          staffId: p.actorStaffId ?? null,
+          venueId: p.venueId,
+          data: { channel: p.channel, seq },
+        },
+      })
+    },
+    { etiqueta: 'writeConsent' },
+  )
 }
 
 export const grantMarketingConsent = (p: ConsentParams) => writeConsent(p, 'GRANTED')

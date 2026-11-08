@@ -214,6 +214,12 @@ describe('referralProgram.service', () => {
   })
 
   describe('backfillLegacyReferralCodes', () => {
+    // S5b: cada update del backfill va en su propio withDeadlockRetry (una $transaction de un paso) y SÍ toca `customer`; la guardia
+    // estructural de la activación (su tx no trae `customer`) se queda como está en el beforeEach.
+    beforeEach(() => {
+      mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn({ customer: mockedPrisma.customer }))
+    })
+
     it('assigns codes to all null-code customers, draining in batches', async () => {
       mockedPrisma.customer.findMany
         .mockResolvedValueOnce([

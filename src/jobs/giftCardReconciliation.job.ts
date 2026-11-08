@@ -12,6 +12,7 @@ import {
 import { sqlOrdenEsCuentaDeTarjetas } from '../services/giftCards/giftCardMarks'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../services/shared/paymentShiftClaim'
 import prisma from '../utils/prismaClient'
+import { withDeadlockRetry } from '../utils/serializableRetry'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -183,22 +184,25 @@ async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagi
 }
 
 async function activarCuentaEnDb(c: CuentaDeTarjetas): Promise<{ activated: string[] }> {
-  return prisma.$transaction(async tx => {
-    // Mismo candado que el cobro: Order primero (la activación toma los sobres después).
-    if (!(await lockExistingOrderForPayment(tx, { venueId: c.venueId, orderId: c.orderId }))) return { activated: [] }
-    const resultado = await activarSobresDeCuentaPagadaEnTx(tx, { venueId: c.venueId, orderId: c.orderId, staffId: null })
-    // r1 M3: el rastro va en la MISMA transacción que activa: si no se puede escribir, la activación se deshace y la noche que
-    // sigue lo vuelve a intentar; nunca quedan sobres activados de noche sin su anomalía.
-    if (resultado.activated.length > 0) {
-      await recordGiftCardAnomaly(tx, {
-        check: 'PAID_WITH_PENDING',
-        id: c.orderId,
-        venueId: c.venueId,
-        detail: { activated: resultado.activated },
-      })
-    }
-    return resultado
-  }, ORDER_LOCK_WAIT_BUDGET)
+  return withDeadlockRetry(
+    async tx => {
+      // Mismo candado que el cobro: Order primero (la activación toma los sobres después).
+      if (!(await lockExistingOrderForPayment(tx, { venueId: c.venueId, orderId: c.orderId }))) return { activated: [] }
+      const resultado = await activarSobresDeCuentaPagadaEnTx(tx, { venueId: c.venueId, orderId: c.orderId, staffId: null })
+      // r1 M3: el rastro va en la MISMA transacción que activa: si no se puede escribir, la activación se deshace y la noche que
+      // sigue lo vuelve a intentar; nunca quedan sobres activados de noche sin su anomalía.
+      if (resultado.activated.length > 0) {
+        await recordGiftCardAnomaly(tx, {
+          check: 'PAID_WITH_PENDING',
+          id: c.orderId,
+          venueId: c.venueId,
+          detail: { activated: resultado.activated },
+        })
+      }
+      return resultado
+    },
+    { etiqueta: 'activarCuentaEnDb', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 }
 
 async function buscarCobrosConSaldoSinCanjeEnDb(o: { desde: Date } & Pagina): Promise<CobroSinCanje[]> {

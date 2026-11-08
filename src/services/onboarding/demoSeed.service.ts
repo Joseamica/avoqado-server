@@ -27,6 +27,7 @@ import {
 } from '@prisma/client'
 import { subDays, subHours } from 'date-fns'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import {
   assertDemoSeedCatalogGovernance,
@@ -1689,13 +1690,17 @@ async function seedCustomers(venueId: string, customerGroups: Array<{ id: string
 
   const createdCustomers = []
   for (const customer of customers) {
-    const created = await prisma.customer.create({
-      data: {
-        venueId,
-        ...customer,
-        active: true,
-      },
-    })
+    const created = await withDeadlockRetry(
+      tx =>
+        tx.customer.create({
+          data: {
+            venueId,
+            ...customer,
+            active: true,
+          },
+        }),
+      { etiqueta: 'seedCustomers' },
+    )
     createdCustomers.push(created)
   }
 

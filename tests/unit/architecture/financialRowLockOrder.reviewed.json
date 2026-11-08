@@ -195,10 +195,10 @@
       "loops": 0,
       "reason": "T10: el cobro de Stripe del pedido (un Payment por id de PaymentIntent) DESPUÉS de su Order (lockExistingOrderForPayment), igual que issueRefund; nunca en bucle."
     },
-    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregasEnTx": {
       "count": 1,
       "loops": 0,
-      "reason": "Tarjetas 1b (entrega): UN UPDATE en autocommit cuya subconsulta toma sobres por id ASC con FOR UPDATE SKIP LOCKED; nunca espera ni retiene Order ni Payment."
+      "reason": "Tarjetas 1b (entrega): UN UPDATE (hoy en su propio withDeadlockRetry, una sola sentencia) cuya subconsulta toma sobres por id ASC con FOR UPDATE SKIP LOCKED; nunca espera ni retiene Order ni Payment."
     },
     "src/services/giftCards/giftCardDelivery.service.ts#cerrarAtoradas": {
       "count": 1,
@@ -1257,10 +1257,10 @@
       "loops": 0,
       "reason": "Tarjetas 1b (entrega): la pasada llama al helper sin transacción propia (autocommit); el helper sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
     },
-    "src/services/giftCards/giftCardDelivery.service.ts#entregarTarjetas#reclamarEntregas": {
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas#reclamarEntregasEnTx": {
       "count": 1,
       "loops": 0,
-      "reason": "Tarjetas 1b (entrega): la pasada llama al helper sin transacción propia (autocommit); el helper sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
+      "reason": "Tarjetas 1b (entrega): la pasada llama a `reclamarEntregas`, cuya única sentencia va en su propio withDeadlockRetry; sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
     },
     "src/services/b4bit/b4bit.service.ts#initiateCryptoPayment#lockB4BitPaymentRow": {
       "count": 2,

@@ -25,6 +25,7 @@ import { recordRefund } from '@/services/tpv/refund.tpv.service'
 import { payGiftCardBalanceOnOrder } from '@/services/mobile/order.mobile.service'
 import { seedClothingSale } from '../exchanges/seedExchange'
 import { crearCuentaDeMercancia, esperarAQueAlguienEspereA, pidDe } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -110,7 +111,7 @@ const reembolsosDeTerminal = (s: Escenario) =>
 /** Un gerente ya lo había bloqueado antes de que llegara la terminal. */
 const bloquearAntes = (s: Escenario, giftCardId: string) =>
   prisma.$transaction(tx =>
-    operarSobreDeGerenteEnTx(tx, {
+    operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
       venueId: s.venueId,
       giftCardId,
       staffId: s.staffId,

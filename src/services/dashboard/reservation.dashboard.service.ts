@@ -327,165 +327,209 @@ export async function createReservation(
   const requestedPartySize = data.partySize ?? 1
   const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
-  const reservation = await withSerializableRetry(async tx => {
-    // 🔴 Fase 1 — el gate va PRIMERO, dentro de la MISMA transacción serializable que va a
-    // apartar el lugar. Fuera de ella no sirve: "leo APPROVED → la dueña rechaza → inserto"
-    // commitea igual, porque Postgres puede serializarlo como "la reserva ocurrió antes del
-    // rechazo". Sólo se gatean los orígenes de cliente; el staff (DASHBOARD/MCP) decide por
-    // su cuenta y el Live Demo se exceptúa explícitamente.
-    if ((context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER') && !context.skipCustomerApprovalGate) {
-      await assertCustomerCanCreateReservation(tx, { customerId: data.customerId, venueId })
-    }
+  const reservation = await withSerializableRetry(
+    async tx => {
+      // 🔴 Fase 1 — el gate va PRIMERO, dentro de la MISMA transacción serializable que va a
+      // apartar el lugar. Fuera de ella no sirve: "leo APPROVED → la dueña rechaza → inserto"
+      // commitea igual, porque Postgres puede serializarlo como "la reserva ocurrió antes del
+      // rechazo". Sólo se gatean los orígenes de cliente; el staff (DASHBOARD/MCP) decide por
+      // su cuenta y el Live Demo se exceptúa explícitamente.
+      if ((context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER') && !context.skipCustomerApprovalGate) {
+        await assertCustomerCanCreateReservation(tx, { customerId: data.customerId, venueId })
+      }
 
-    const persistedSettings = await getReservationSettings(venueId, tx)
-    const settings: ReservationConfig =
-      context.writeOrigin === 'PUBLIC' && context.paymentPolicyOverride
-        ? { ...persistedSettings, deposits: context.paymentPolicyOverride.deposits }
-        : persistedSettings
+      const persistedSettings = await getReservationSettings(venueId, tx)
+      const settings: ReservationConfig =
+        context.writeOrigin === 'PUBLIC' && context.paymentPolicyOverride
+          ? { ...persistedSettings, deposits: context.paymentPolicyOverride.deposits }
+          : persistedSettings
 
-    // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
-    // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
-    // hacía imposible registrar walk-ins con aviso mínimo configurado.
-    if (data.channel !== 'WALK_IN') {
-      enforceBookingWindow(data.startsAt, settings.scheduling)
-    }
+      // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
+      // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
+      // hacía imposible registrar walk-ins con aviso mínimo configurado.
+      if (data.channel !== 'WALK_IN') {
+        enforceBookingWindow(data.startsAt, settings.scheduling)
+      }
 
-    const autoConfirm = settings.scheduling.autoConfirm
-    const { product, products } = await validateResourceOwnership(tx, venueId, {
-      tableId: data.tableId,
-      bookedProductIds,
-      leadProductId,
-      productIdsWasProvided,
-    })
-    const isAppointment =
-      bookedProductIds.length > 0 &&
-      products.length === bookedProductIds.length &&
-      products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
-    if (context.appointmentHoldId && !isAppointment) {
-      throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
-    }
-
-    let modifierRows: ResolvedModifierRow[]
-    let modifierDelta: Prisma.Decimal
-    let finalEndsAt: Date
-    let finalDuration: number
-    // Fin del BLOQUE DE AGENDA (`endsAt` + buffer del servicio). `finalEndsAt`
-    // sigue siendo la hora del cliente; esta es la que aparta calendario.
-    let blockedEndsAt: Date
-
-    if (context.windowSemantics === 'base') {
-      const resolvedWindow = await resolveAppointmentWindow(tx, {
-        venueId,
-        productIds: bookedProductIds,
-        startsAt: data.startsAt,
-        baseEndsAt: data.endsAt,
-        modifierSelections: data.modifierSelections ?? [],
-        settings,
+      const autoConfirm = settings.scheduling.autoConfirm
+      const { product, products } = await validateResourceOwnership(tx, venueId, {
+        tableId: data.tableId,
+        bookedProductIds,
+        leadProductId,
+        productIdsWasProvided,
       })
-      modifierRows = resolvedWindow.modifierRows
-      modifierDelta = resolvedWindow.modifierPriceDelta
-      finalEndsAt = resolvedWindow.finalEndsAt
-      finalDuration = resolvedWindow.finalDurationMin
-      blockedEndsAt = resolvedWindow.blockedEndsAt
-    } else {
-      if (isAppointment && isStaffAware(settings)) {
-        const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
-        await assertLegacyAppointmentDurationFloor(tx, {
+      const isAppointment =
+        bookedProductIds.length > 0 &&
+        products.length === bookedProductIds.length &&
+        products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
+      if (context.appointmentHoldId && !isAppointment) {
+        throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
+      }
+
+      let modifierRows: ResolvedModifierRow[]
+      let modifierDelta: Prisma.Decimal
+      let finalEndsAt: Date
+      let finalDuration: number
+      // Fin del BLOQUE DE AGENDA (`endsAt` + buffer del servicio). `finalEndsAt`
+      // sigue siendo la hora del cliente; esta es la que aparta calendario.
+      let blockedEndsAt: Date
+
+      if (context.windowSemantics === 'base') {
+        const resolvedWindow = await resolveAppointmentWindow(tx, {
           venueId,
           productIds: bookedProductIds,
-          rawDurationMin: Math.min(data.duration, rawIntervalDurationMin),
+          startsAt: data.startsAt,
+          baseEndsAt: data.endsAt,
+          modifierSelections: data.modifierSelections ?? [],
           settings,
         })
-      }
-
-      const modifiers = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
-      modifierRows = modifiers.persistRows
-      modifierDelta = modifiers.totalDelta
-
-      finalDuration = data.duration + modifiers.totalDurationDelta
-      if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
-        throw new BadRequestError('La duración final debe estar entre 1 y 1440 minutos')
-      }
-
-      // INVARIANTE: el bloque guardado NUNCA puede ser más corto que la
-      // `duration` que se guarda junto a él.
-      //
-      // El widget suma las duraciones en el navegador y un servicio sin
-      // duración le suma cero, así que mandaba la ventana de un solo servicio;
-      // el servidor ya corregía `duration` sumando el catálogo (con relleno),
-      // pero se quedaba con el `endsAt` corto del cliente. Resultado: la
-      // descripción decía "Duración: 2 h 5 min" y Google Calendar apartaba
-      // 12:45–13:20 — 35 min (Amaena, 2026-08-05; misma familia que
-      // RES-PY45XU). La ventana sólo se ESTIRA: si recepción apartó a
-      // propósito más calendario del que dura el servicio, se respeta.
-      const rawEndsAtWithModifiers =
-        modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
-      const minimumEndsAt = new Date(data.startsAt.getTime() + finalDuration * 60_000)
-      finalEndsAt = minimumEndsAt > rawEndsAtWithModifiers ? minimumEndsAt : rawEndsAtWithModifiers
-      blockedEndsAt = applyBufferToEndsAt(finalEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: bookedProductIds }))
-    }
-
-    let effectiveAssignedStaffId = data.assignedStaffId ?? null
-    let overCapacity = false
-    const selfServiceStaffSelection = context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER'
-    let consumedAppointmentHoldId: string | null = null
-
-    if (isAppointment) {
-      // The final appointment window is read-only-resolved above. From this
-      // point onward every authorizing conflict/count/write is serialized by
-      // the same venue-scoped advisory lock and post-lock clock.
-      await lockAppointmentVenue(tx, venueId)
-      const staffAware = isStaffAware(settings)
-      const requestedStaffWasProvided = data.assignedStaffId !== undefined
-      const lockedHold = context.appointmentHoldId
-        ? await lockAndValidateNormalAppointmentHold(tx, {
+        modifierRows = resolvedWindow.modifierRows
+        modifierDelta = resolvedWindow.modifierPriceDelta
+        finalEndsAt = resolvedWindow.finalEndsAt
+        finalDuration = resolvedWindow.finalDurationMin
+        blockedEndsAt = resolvedWindow.blockedEndsAt
+      } else {
+        if (isAppointment && isStaffAware(settings)) {
+          const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
+          await assertLegacyAppointmentDurationFloor(tx, {
             venueId,
-            holdId: context.appointmentHoldId,
-            startsAt: data.startsAt,
-            rawEndsAt: data.endsAt,
-            finalEndsAt,
             productIds: bookedProductIds,
-            requestedStaffId: data.assignedStaffId,
-            requestedStaffWasProvided,
-            windowSemantics: context.windowSemantics,
+            rawDurationMin: Math.min(data.duration, rawIntervalDurationMin),
+            settings,
           })
-        : null
-      const checkedAt = lockedHold?.checkedAt ?? new Date()
-      if (lockedHold) {
-        consumedAppointmentHoldId = lockedHold.id
-        effectiveAssignedStaffId = requestedStaffWasProvided ? (data.assignedStaffId ?? null) : lockedHold.staffId
-      }
-
-      if (selfServiceStaffSelection && effectiveAssignedStaffId && settings.publicBooking.showStaffPicker !== true && !lockedHold) {
-        throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
-      }
-
-      if (lockedHold && (staffAware || lockedHold.staffId !== null)) {
-        if (!effectiveAssignedStaffId) {
-          throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
         }
-        await assertStaffEligible(tx, {
-          venueId,
-          staffId: effectiveAssignedStaffId,
-          productIds: bookedProductIds,
-          startsAt: data.startsAt,
-          endsAt: finalEndsAt,
-          checkedAt,
-          settings,
-          excludeHoldId: lockedHold.id,
-        })
-      } else if (!lockedHold && staffAware && (effectiveAssignedStaffId || shouldAutoAssign(true, settings))) {
-        effectiveAssignedStaffId = await resolveStaffAssignment(tx, {
-          venueId,
-          productIds: bookedProductIds,
-          startsAt: data.startsAt,
-          endsAt: finalEndsAt,
-          checkedAt,
-          settings,
-          requestedStaffId: effectiveAssignedStaffId ?? undefined,
-          excludeHoldId: undefined,
-        })
-      } else if (!lockedHold && effectiveAssignedStaffId) {
+
+        const modifiers = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
+        modifierRows = modifiers.persistRows
+        modifierDelta = modifiers.totalDelta
+
+        finalDuration = data.duration + modifiers.totalDurationDelta
+        if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
+          throw new BadRequestError('La duración final debe estar entre 1 y 1440 minutos')
+        }
+
+        // INVARIANTE: el bloque guardado NUNCA puede ser más corto que la
+        // `duration` que se guarda junto a él.
+        //
+        // El widget suma las duraciones en el navegador y un servicio sin
+        // duración le suma cero, así que mandaba la ventana de un solo servicio;
+        // el servidor ya corregía `duration` sumando el catálogo (con relleno),
+        // pero se quedaba con el `endsAt` corto del cliente. Resultado: la
+        // descripción decía "Duración: 2 h 5 min" y Google Calendar apartaba
+        // 12:45–13:20 — 35 min (Amaena, 2026-08-05; misma familia que
+        // RES-PY45XU). La ventana sólo se ESTIRA: si recepción apartó a
+        // propósito más calendario del que dura el servicio, se respeta.
+        const rawEndsAtWithModifiers =
+          modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
+        const minimumEndsAt = new Date(data.startsAt.getTime() + finalDuration * 60_000)
+        finalEndsAt = minimumEndsAt > rawEndsAtWithModifiers ? minimumEndsAt : rawEndsAtWithModifiers
+        blockedEndsAt = applyBufferToEndsAt(finalEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: bookedProductIds }))
+      }
+
+      let effectiveAssignedStaffId = data.assignedStaffId ?? null
+      let overCapacity = false
+      const selfServiceStaffSelection = context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER'
+      let consumedAppointmentHoldId: string | null = null
+
+      if (isAppointment) {
+        // The final appointment window is read-only-resolved above. From this
+        // point onward every authorizing conflict/count/write is serialized by
+        // the same venue-scoped advisory lock and post-lock clock.
+        await lockAppointmentVenue(tx, venueId)
+        const staffAware = isStaffAware(settings)
+        const requestedStaffWasProvided = data.assignedStaffId !== undefined
+        const lockedHold = context.appointmentHoldId
+          ? await lockAndValidateNormalAppointmentHold(tx, {
+              venueId,
+              holdId: context.appointmentHoldId,
+              startsAt: data.startsAt,
+              rawEndsAt: data.endsAt,
+              finalEndsAt,
+              productIds: bookedProductIds,
+              requestedStaffId: data.assignedStaffId,
+              requestedStaffWasProvided,
+              windowSemantics: context.windowSemantics,
+            })
+          : null
+        const checkedAt = lockedHold?.checkedAt ?? new Date()
+        if (lockedHold) {
+          consumedAppointmentHoldId = lockedHold.id
+          effectiveAssignedStaffId = requestedStaffWasProvided ? (data.assignedStaffId ?? null) : lockedHold.staffId
+        }
+
+        if (selfServiceStaffSelection && effectiveAssignedStaffId && settings.publicBooking.showStaffPicker !== true && !lockedHold) {
+          throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+        }
+
+        if (lockedHold && (staffAware || lockedHold.staffId !== null)) {
+          if (!effectiveAssignedStaffId) {
+            throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
+          }
+          await assertStaffEligible(tx, {
+            venueId,
+            staffId: effectiveAssignedStaffId,
+            productIds: bookedProductIds,
+            startsAt: data.startsAt,
+            endsAt: finalEndsAt,
+            checkedAt,
+            settings,
+            excludeHoldId: lockedHold.id,
+          })
+        } else if (!lockedHold && staffAware && (effectiveAssignedStaffId || shouldAutoAssign(true, settings))) {
+          effectiveAssignedStaffId = await resolveStaffAssignment(tx, {
+            venueId,
+            productIds: bookedProductIds,
+            startsAt: data.startsAt,
+            endsAt: finalEndsAt,
+            checkedAt,
+            settings,
+            requestedStaffId: effectiveAssignedStaffId ?? undefined,
+            excludeHoldId: undefined,
+          })
+        } else if (!lockedHold && effectiveAssignedStaffId) {
+          const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
+          await assertOrganizationStaffAvailability(tx, {
+            organizationId: membership.organizationId,
+            staffId: effectiveAssignedStaffId,
+            startsAt: data.startsAt,
+            endsAt: finalEndsAt,
+            checkedAt,
+            excludeHoldId: undefined,
+          })
+        }
+
+        const globalLimit = staffAware
+          ? (settings.scheduling.pacingMaxPerSlot ?? null)
+          : context.writeOrigin === 'DASHBOARD'
+            ? null
+            : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
+
+        if (!lockedHold && globalLimit !== null) {
+          const { reservations, holds } = await countAppointmentOccupancy(tx, {
+            venueId,
+            startsAt: data.startsAt,
+            endsAt: finalEndsAt,
+            checkedAt,
+          })
+          const occupancy = reservations + holds
+          if (occupancy >= globalLimit) {
+            if (staffAware && context.writeOrigin === 'DASHBOARD') {
+              if (!context.allowOverCapacity) {
+                throw new ConflictError('El horario está lleno. Confirma si deseas sobre-agendar.', 'OVER_CAPACITY_CONFIRMATION_REQUIRED', {
+                  preview: { startsAt: data.startsAt, endsAt: finalEndsAt, occupancy, limit: globalLimit },
+                })
+              }
+              overCapacity = true
+            } else {
+              throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+            }
+          }
+        }
+      } else if (effectiveAssignedStaffId) {
+        if (selfServiceStaffSelection && settings.publicBooking.showStaffPicker !== true) {
+          throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+        }
+        const checkedAt = new Date()
         const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
         await assertOrganizationStaffAvailability(tx, {
           organizationId: membership.organizationId,
@@ -493,89 +537,46 @@ export async function createReservation(
           startsAt: data.startsAt,
           endsAt: finalEndsAt,
           checkedAt,
-          excludeHoldId: undefined,
         })
       }
 
-      const globalLimit = staffAware
-        ? (settings.scheduling.pacingMaxPerSlot ?? null)
-        : context.writeOrigin === 'DASHBOARD'
-          ? null
-          : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
-
-      if (!lockedHold && globalLimit !== null) {
-        const { reservations, holds } = await countAppointmentOccupancy(tx, {
-          venueId,
-          startsAt: data.startsAt,
-          endsAt: finalEndsAt,
-          checkedAt,
-        })
-        const occupancy = reservations + holds
-        if (occupancy >= globalLimit) {
-          if (staffAware && context.writeOrigin === 'DASHBOARD') {
-            if (!context.allowOverCapacity) {
-              throw new ConflictError('El horario está lleno. Confirma si deseas sobre-agendar.', 'OVER_CAPACITY_CONFIRMATION_REQUIRED', {
-                preview: { startsAt: data.startsAt, endsAt: finalEndsAt, occupancy, limit: globalLimit },
-              })
-            }
-            overCapacity = true
-          } else {
-            throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
-          }
+      // Calculate deposit with validated product price (if configured as percentage)
+      let depositAmount: Prisma.Decimal | null = null
+      let depositStatus: string | null = null
+      let depositExpiresAt: Date | null = null
+      if (settings.deposits) {
+        const deposit = calculateDepositAmount(
+          settings.deposits,
+          requestedPartySize,
+          product?.price ? Number(new Prisma.Decimal(product.price).add(modifierDelta)) : null,
+        )
+        if (deposit.required && deposit.amount) {
+          depositAmount = deposit.amount
+          depositStatus = 'PENDING'
+          const requestedWindowMin = settings.deposits.paymentWindowHrs ?? 30
+          const effectiveWindowMin = Math.min(Math.max(requestedWindowMin, 30), 1440)
+          depositExpiresAt = new Date(Date.now() + effectiveWindowMin * 60_000)
         }
       }
-    } else if (effectiveAssignedStaffId) {
-      if (selfServiceStaffSelection && settings.publicBooking.showStaffPicker !== true) {
-        throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
-      }
-      const checkedAt = new Date()
-      const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
-      await assertOrganizationStaffAvailability(tx, {
-        organizationId: membership.organizationId,
+      const initialStatus: ReservationStatus = depositAmount ? 'PENDING' : autoConfirm ? 'CONFIRMED' : 'PENDING'
+
+      // Layer 0: External calendar busy-block check (Google Calendar et al.).
+      // Runs BEFORE table/staff overlap checks so a Google event blocking the
+      // venue or staff member rejects the request with a clear domain-specific
+      // error instead of the generic "horario ya reservado" message.
+      const externalBlock = await checkExternalBusyBlock(tx, {
+        venueId,
         staffId: effectiveAssignedStaffId,
         startsAt: data.startsAt,
         endsAt: finalEndsAt,
-        checkedAt,
       })
-    }
-
-    // Calculate deposit with validated product price (if configured as percentage)
-    let depositAmount: Prisma.Decimal | null = null
-    let depositStatus: string | null = null
-    let depositExpiresAt: Date | null = null
-    if (settings.deposits) {
-      const deposit = calculateDepositAmount(
-        settings.deposits,
-        requestedPartySize,
-        product?.price ? Number(new Prisma.Decimal(product.price).add(modifierDelta)) : null,
-      )
-      if (deposit.required && deposit.amount) {
-        depositAmount = deposit.amount
-        depositStatus = 'PENDING'
-        const requestedWindowMin = settings.deposits.paymentWindowHrs ?? 30
-        const effectiveWindowMin = Math.min(Math.max(requestedWindowMin, 30), 1440)
-        depositExpiresAt = new Date(Date.now() + effectiveWindowMin * 60_000)
+      if (externalBlock) {
+        throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
       }
-    }
-    const initialStatus: ReservationStatus = depositAmount ? 'PENDING' : autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-    // Layer 0: External calendar busy-block check (Google Calendar et al.).
-    // Runs BEFORE table/staff overlap checks so a Google event blocking the
-    // venue or staff member rejects the request with a clear domain-specific
-    // error instead of the generic "horario ya reservado" message.
-    const externalBlock = await checkExternalBusyBlock(tx, {
-      venueId,
-      staffId: effectiveAssignedStaffId,
-      startsAt: data.startsAt,
-      endsAt: finalEndsAt,
-    })
-    if (externalBlock) {
-      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-    }
-
-    // Layer 1: Check table overlap (FOR UPDATE NOWAIT)
-    if (data.tableId) {
-      const tableConflicts = await tx.$queryRaw<{ id: string }[]>`
+      // Layer 1: Check table overlap (FOR UPDATE NOWAIT)
+      if (data.tableId) {
+        const tableConflicts = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
@@ -583,14 +584,14 @@ export async function createReservation(
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
       `
-      if (tableConflicts.length > 0) {
-        throw new ConflictError('Este horario ya esta reservado para esta mesa')
+        if (tableConflicts.length > 0) {
+          throw new ConflictError('Este horario ya esta reservado para esta mesa')
+        }
       }
-    }
 
-    // Layer 1b: Check staff overlap
-    if (effectiveAssignedStaffId) {
-      const staffConflicts = await tx.$queryRaw<{ id: string }[]>`
+      // Layer 1b: Check staff overlap
+      if (effectiveAssignedStaffId) {
+        const staffConflicts = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
@@ -598,17 +599,17 @@ export async function createReservation(
         AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
       `
-      if (staffConflicts.length > 0) {
-        throw new ConflictError('Este horario ya esta reservado para este miembro del equipo')
+        if (staffConflicts.length > 0) {
+          throw new ConflictError('Este horario ya esta reservado para este miembro del equipo')
+        }
       }
-    }
 
-    // Layer 3: Product capacity gate
-    if (!isAppointment && leadProductId && product?.eventCapacity) {
-      const onlinePercent = settings.scheduling.onlineCapacityPercent
-      const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
+      // Layer 3: Product capacity gate
+      if (!isAppointment && leadProductId && product?.eventCapacity) {
+        const onlinePercent = settings.scheduling.onlineCapacityPercent
+        const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
-      const overlappingProductReservations = await tx.$queryRaw<{ partySize: number }[]>`
+        const overlappingProductReservations = await tx.$queryRaw<{ partySize: number }[]>`
           SELECT "partySize"
           FROM "Reservation"
           WHERE "venueId" = ${venueId}
@@ -618,100 +619,102 @@ export async function createReservation(
           FOR UPDATE
         `
 
-      const occupiedSeats = overlappingProductReservations.reduce((sum, r) => sum + (r.partySize ?? 1), 0)
-      if (occupiedSeats + requestedPartySize > effectiveCapacity) {
-        throw new ConflictError('No hay espacio disponible para este servicio en el horario seleccionado')
+        const occupiedSeats = overlappingProductReservations.reduce((sum, r) => sum + (r.partySize ?? 1), 0)
+        if (occupiedSeats + requestedPartySize > effectiveCapacity) {
+          throw new ConflictError('No hay espacio disponible para este servicio en el horario seleccionado')
+        }
       }
-    }
 
-    // Ensure confirmation code is unique within venue
-    let finalCode = confirmationCode
-    const existing = await tx.reservation.findUnique({
-      where: { venueId_confirmationCode: { venueId, confirmationCode: finalCode } },
-      select: { id: true },
-    })
-    if (existing) {
-      finalCode = generateConfirmationCode() // Retry once
-    }
-
-    const statusLog = appendStatusLog(null, initialStatus, createdById ?? null)
-
-    const reservation = await tx.reservation.create({
-      data: {
-        venueId,
-        confirmationCode: finalCode,
-        status: initialStatus,
-        channel: data.channel ?? 'DASHBOARD',
-        startsAt: data.startsAt,
-        endsAt: finalEndsAt,
-        blockedEndsAt,
-        duration: finalDuration,
-        customerId: data.customerId,
-        guestName: data.guestName,
-        guestPhone: data.guestPhone,
-        guestEmail: data.guestEmail,
-        partySize: requestedPartySize,
-        tableId: data.tableId,
-        productId: leadProductId,
-        productIds: productIdsWasProvided ? bookedProductIds : [],
-        assignedStaffId: effectiveAssignedStaffId,
-        depositAmount,
-        depositStatus: depositStatus as any,
-        depositExpiresAt,
-        idempotencyKey: depositAmount ? depositIdempotencyKey : undefined,
-        createdById,
-        confirmedAt: initialStatus === 'CONFIRMED' ? new Date() : null,
-        specialRequests: data.specialRequests,
-        internalNotes: data.internalNotes,
-        tags: data.tags ?? [],
-        statusLog,
-      },
-      include: {
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-        table: { select: { id: true, number: true, capacity: true } },
-        product: { select: { id: true, name: true, price: true } },
-        assignedStaff: { select: { id: true, firstName: true, lastName: true } },
-      },
-    })
-
-    if (modifierRows.length > 0) {
-      await tx.reservationModifier.createMany({
-        data: modifierRows.map(r => ({
-          reservationId: reservation.id,
-          productId: r.productId,
-          modifierId: r.modifierId,
-          name: r.name,
-          quantity: r.quantity,
-          price: r.price,
-        })),
+      // Ensure confirmation code is unique within venue
+      let finalCode = confirmationCode
+      const existing = await tx.reservation.findUnique({
+        where: { venueId_confirmationCode: { venueId, confirmationCode: finalCode } },
+        select: { id: true },
       })
-    }
+      if (existing) {
+        finalCode = generateConfirmationCode() // Retry once
+      }
 
-    // ---- Google Calendar push outbox (Phase 2) ----
-    // Co-commit one outbox row per target connection so the push is atomic
-    // with the reservation INSERT. Class reservations don't flow through this
-    // path — they're created in `createClassReservation` (public controller)
-    // which handles roster-update push semantics (spec §14.2).
-    const targets = await resolveReservationPushTargets(tx, {
-      venueId,
-      assignedStaffId: reservation.assignedStaffId ?? null,
-    })
-    const pushRowIds =
-      targets.length > 0
-        ? await enqueuePush(tx, {
-            source: { kind: 'reservation', reservationId: reservation.id },
-            venueId,
-            operation: 'CREATE',
-            targetConnectionIds: targets.map(t => t.id),
-          })
-        : []
+      const statusLog = appendStatusLog(null, initialStatus, createdById ?? null)
 
-    if (consumedAppointmentHoldId) {
-      await tx.slotHold.deleteMany({ where: { id: consumedAppointmentHoldId, venueId } })
-    }
+      const reservation = await tx.reservation.create({
+        data: {
+          venueId,
+          confirmationCode: finalCode,
+          status: initialStatus,
+          channel: data.channel ?? 'DASHBOARD',
+          startsAt: data.startsAt,
+          endsAt: finalEndsAt,
+          blockedEndsAt,
+          duration: finalDuration,
+          customerId: data.customerId,
+          guestName: data.guestName,
+          guestPhone: data.guestPhone,
+          guestEmail: data.guestEmail,
+          partySize: requestedPartySize,
+          tableId: data.tableId,
+          productId: leadProductId,
+          productIds: productIdsWasProvided ? bookedProductIds : [],
+          assignedStaffId: effectiveAssignedStaffId,
+          depositAmount,
+          depositStatus: depositStatus as any,
+          depositExpiresAt,
+          idempotencyKey: depositAmount ? depositIdempotencyKey : undefined,
+          createdById,
+          confirmedAt: initialStatus === 'CONFIRMED' ? new Date() : null,
+          specialRequests: data.specialRequests,
+          internalNotes: data.internalNotes,
+          tags: data.tags ?? [],
+          statusLog,
+        },
+        include: {
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+          table: { select: { id: true, number: true, capacity: true } },
+          product: { select: { id: true, name: true, price: true } },
+          assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+        },
+      })
 
-    return { reservation, pushRowIds, overCapacity }
-  })
+      if (modifierRows.length > 0) {
+        await tx.reservationModifier.createMany({
+          data: modifierRows.map(r => ({
+            reservationId: reservation.id,
+            productId: r.productId,
+            modifierId: r.modifierId,
+            name: r.name,
+            quantity: r.quantity,
+            price: r.price,
+          })),
+        })
+      }
+
+      // ---- Google Calendar push outbox (Phase 2) ----
+      // Co-commit one outbox row per target connection so the push is atomic
+      // with the reservation INSERT. Class reservations don't flow through this
+      // path — they're created in `createClassReservation` (public controller)
+      // which handles roster-update push semantics (spec §14.2).
+      const targets = await resolveReservationPushTargets(tx, {
+        venueId,
+        assignedStaffId: reservation.assignedStaffId ?? null,
+      })
+      const pushRowIds =
+        targets.length > 0
+          ? await enqueuePush(tx, {
+              source: { kind: 'reservation', reservationId: reservation.id },
+              venueId,
+              operation: 'CREATE',
+              targetConnectionIds: targets.map(t => t.id),
+            })
+          : []
+
+      if (consumedAppointmentHoldId) {
+        await tx.slotHold.deleteMany({ where: { id: consumedAppointmentHoldId, venueId } })
+      }
+
+      return { reservation, pushRowIds, overCapacity }
+    },
+    { reintentarInterbloqueo: true, etiqueta: 'createReservation' },
+  )
 
   logger.info(
     `✅ [RESERVATION] Created ${reservation.reservation.confirmationCode} | venue=${venueId} status=${reservation.reservation.status} table=${data.tableId ?? 'none'} staff=${reservation.reservation.assignedStaffId ?? 'none'}`,

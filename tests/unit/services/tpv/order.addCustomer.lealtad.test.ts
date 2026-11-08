@@ -583,4 +583,21 @@ describe('TPV createAndAddCustomerToOrder', () => {
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
   })
+
+  it('[repetirNoDuplica:createAndAddCustomerToOrder] 40P01 tras crear el cliente: el sello tardío va con el cliente del intento GANADOR, una sola vez', async () => {
+    prismaMock.customer.create.mockResolvedValueOnce({ id: 'nuevo-1' } as any).mockResolvedValueOnce({ id: 'nuevo-2' } as any)
+    let llamada = 0
+    prismaMock.$transaction.mockImplementation(async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+
+    await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)
+
+    expect(llamada).toBe(2)
+    expect(prismaMock.customer.create).toHaveBeenCalledTimes(2)
+    expect(mockLate).toHaveBeenCalledTimes(1)
+    expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'nuevo-2', ventaCobrada: true }))
+  })
 })

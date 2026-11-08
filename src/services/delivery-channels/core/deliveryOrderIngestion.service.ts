@@ -1,4 +1,5 @@
 import prisma from '../../../utils/prismaClient'
+import { withDeadlockRetry } from '../../../utils/serializableRetry'
 import logger from '../../../config/logger'
 import {
   DeliveryChannelLink,
@@ -277,268 +278,272 @@ export async function ingestDeliveryOrder(
   // (La concurrencia realista ya está acotada por dos lados: el ingreso del webhook descarta
   //  el duplicado con su índice único, y el job de reconciliación ya no se encima consigo
   //  mismo. Esto cierra el resto.)
-  const nuevaState: { valor: boolean } = { valor: false }
   // Holder para que TS no estreche la asignación dentro del callback async.
-  const postingState: { id: string | null } = { id: null }
   // Fuera de la transacción a propósito: la comanda se arma DESPUÉS y necesita los productos
   // que se resolvieron adentro, para poder rutear cada renglón a su estación.
-  const renglonesCreados: Array<{ id: string | null; productId: string | null }> = []
 
-  const order = await prisma.$transaction(
+  // R65 b: lo que el cuerpo deja para después del commit nace DENTRO de cada intento y sale en el retorno.
+  const { order, nuevaState, postingState, renglonesCreados } = await withDeadlockRetry(
     async tx => {
-      const yaExistia = await tx.order.findUnique({
-        where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
-        select: { id: true },
-      })
-      nuevaState.valor = !yaExistia
-      // Nombre local para el resto de la transacción. El de afuera se declara al cerrarla.
-      const esNueva = nuevaState.valor
-
-      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles" copiando lo que hacen el
-      // mostrador o la venta rápida. El pedido lo levanta el CLIENTE en la app del marketplace
-      // (Uber/Rappi/DiDi) y esto corre en su webhook, sin cajero ni cajón de por medio; encima
-      // `scheduledFor` permite pedidos programados para otro día. Meterlo en el turno abierto de
-      // ese instante le cargaría a un cajero una venta que nunca tocó.
-      const order = await tx.order.upsert({
-        where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
-        update: {
-          posRawData: normalized.raw as Prisma.InputJsonValue,
-          syncedAt: new Date(),
-          // Un reintento/actualización del mismo pedido puede traer contacto nuevo (Uber
-          // reenvía el evento tras enmascarar el teléfono) — se refresca igual que el crudo.
-          customerName: normalized.customer?.name ?? undefined,
-          customerPhone: normalized.customer?.phone ?? undefined,
-          customerPhonePin: normalized.customer?.phonePin ?? undefined,
-          deliveryChannelLinkId: link.id,
-        },
-        create: {
-          externalId: externalIdNamespaceado,
-          customerName: normalized.customer?.name ?? undefined,
-          customerPhone: normalized.customer?.phone ?? undefined,
-          customerPhonePin: normalized.customer?.phonePin ?? undefined,
-          deliveryChannelLinkId: link.id,
-          orderNumber: normalized.displayId,
-          source: normalized.source,
-          originSystem: OriginSystem.DELIVERY_PLATFORM,
-          type: OrderType.DELIVERY,
-          scheduledFor: normalized.scheduledFor ?? null,
-          // 🔴 CONFIRMED significa "ya le dijimos que sí al proveedor". En modo MANUAL NO se lo
-          // dijimos —nadie lo ha aceptado todavía— y marcarlo confirmado era una mentira con
-          // tres consecuencias: el POS no podía saber cuáles falta aceptar, el tablero decía
-          // que todo iba bien mientras el reloj de 11.5 min corría, y `denyDeliveryOrder`
-          // elegía CANCELAR en vez de RECHAZAR (protocolo equivocado y peor para el cliente,
-          // que ya creía tener su pedido confirmado).
-          status: link.orderAcceptanceMode === OrderAcceptanceMode.MANUAL ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
-          kitchenStatus: 'PENDING',
-          paymentStatus,
-          subtotal,
-          // México: el IVA ya va incluido en el precio — el impuesto que reporta el
-          // proveedor no es fuente fiscal (spec §5 de Uber, aplicado igual aquí).
-          taxAmount: new Prisma.Decimal(0),
-          contratoDePrecio: 'IVA_INCLUIDO',
-          discountAmount: descuento,
-          tipAmount: tip,
-          total,
-          // Partial payment tracking: cuánto liquidó la plataforma vs. cuánto queda por
-          // cobrar en persona (efectivo contra entrega).
-          paidAmount: pagadoExterno,
-          remainingBalance: porCobrar,
-          // Rappi 2b: lo escribe SÓLO la ingesta (el upsert de una reingesta no lo toca). `cashTipDue` existe sólo en ese carril:
-          // cada cobro reescribe `tipAmount` con lo cobrado y la propina por cobrar se perdería tras un abono chico.
-          // Con tarifa de Rappi en $0 el carril sigue (Codex código r1 #2): la marca es que el normalizado TRAE el campo, no su importe.
-          ...(p.thirdPartyCashDue != null ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
-          posRawData: normalized.raw as Prisma.InputJsonValue,
-          createdAt: normalized.placedAt,
-          syncedAt: new Date(),
-          venue: { connect: { id: venue.id } },
-        },
-      })
-
-      // La lectura del proveedor dice "ya aceptado": es la evidencia que recupera un 2xx
-      // perdido (AUTO que se cayó entre aceptar e ingerir). Nunca pisa una marca previa.
-      if (normalized.providerAccepted && !order.providerAcceptedAt) {
-        await tx.order.updateMany({
-          where: { id: order.id, providerAcceptedAt: null },
-          data: { providerAcceptedAt: normalized.providerAcceptedAt ?? new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+      const nuevaState: { valor: boolean } = { valor: false }
+      const postingState: { id: string | null } = { id: null }
+      const renglonesCreados: Array<{ id: string | null; productId: string | null }> = []
+      const order = await (async () => {
+        const yaExistia = await tx.order.findUnique({
+          where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
+          select: { id: true },
         })
-      }
+        nuevaState.valor = !yaExistia
+        // Nombre local para el resto de la transacción. El de afuera se declara al cerrarla.
+        const esNueva = nuevaState.valor
 
-      if (esNueva) {
-        // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
-        // reales), no con los items normalizados del canal.
-        const createdItems: unknown[] = []
-        // Índice explícito (no forEach con await): distintos pedidos con payloads idénticos
-        // reintentados producen el MISMO índice por línea → externalId sigue siendo idempotente.
-        // Necesario porque un pedido puede repetir el mismo externalId en 2 líneas (p.ej.
-        // "Taco" solo + "Taco" con extra queso) — usar solo `${externalId}-${item.externalId}`
-        // chocaría con @@unique([orderId, externalId]) de OrderItem (P2002) y tumbaría la tx
-        // completa, perdiendo el pedido pagado permanentemente (ver C1 en el review original).
-        for (let idx = 0; idx < normalized.items.length; idx++) {
-          const item = normalized.items[idx]
-          // `externalData` es el SKU que Avoqado escribió al publicar el menú; el
-          // `externalId` pertenece al catálogo del proveedor. Resolverlos al revés crea
-          // placeholders para productos que sí existen (Rappi devuelve ambos campos).
-          // Si el proveedor no devuelve nuestro SKU, el id externo sigue siendo el fallback
-          // determinístico — nunca `Date.now()`, que generaría un producto por ocurrencia.
-          const sku = item.externalData || item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
-          const productId = await resolveProductId(
-            tx,
-            venue.id,
-            sku,
-            item.name,
-            item.unitPrice,
-            item.externalId ? `${link.provider}:${item.externalId}` : null,
-          )
-          const createdItem = await tx.orderItem.create({
-            data: {
-              orderId: order.id,
-              productId,
-              productName: item.name,
-              productSku: sku,
-              quantity: item.quantity,
-              unitPrice: D(item.unitPrice),
-              // El mapper del proveedor ya entrega el total de línea (unitPrice×quantity +
-              // modificadores) como string decimal — se usa TAL CUAL, sin recomputar aquí.
-              total: D(item.total),
-              taxAmount: new Prisma.Decimal(0),
-              // 🔴 La instrucción del cliente ("Sin cebolla, por favor") — el mapper la extrae y
-              // ANTES se perdía aquí: la comanda salía sin ella y la cocina preparaba el platillo
-              // equivocado. Encontrado con un pedido REAL del sandbox (D8180, 27-ago); ningún
-              // test lo vio porque todos verifican al mapper, y el mapper estaba bien.
-              notes: item.notes ?? null,
-              // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
-              originSystem: OriginSystem.DELIVERY_PLATFORM,
-              externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
-              // KDS de Uber: id de LÍNEA del proveedor (cart_item_id) — distinto del
-              // externalId de arriba, que es del sync del POS.
-              externalLineId: item.lineId ?? null,
-            },
-          })
-          createdItems.push(createdItem)
-          renglonesCreados.push({ id: createdItem.id, productId: createdItem.productId })
+        // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles" copiando lo que hacen el
+        // mostrador o la venta rápida. El pedido lo levanta el CLIENTE en la app del marketplace
+        // (Uber/Rappi/DiDi) y esto corre en su webhook, sin cajero ni cajón de por medio; encima
+        // `scheduledFor` permite pedidos programados para otro día. Meterlo en el turno abierto de
+        // ese instante le cargaría a un cajero una venta que nunca tocó.
+        const order = await tx.order.upsert({
+          where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
+          update: {
+            posRawData: normalized.raw as Prisma.InputJsonValue,
+            syncedAt: new Date(),
+            // Un reintento/actualización del mismo pedido puede traer contacto nuevo (Uber
+            // reenvía el evento tras enmascarar el teléfono) — se refresca igual que el crudo.
+            customerName: normalized.customer?.name ?? undefined,
+            customerPhone: normalized.customer?.phone ?? undefined,
+            customerPhonePin: normalized.customer?.phonePin ?? undefined,
+            deliveryChannelLinkId: link.id,
+          },
+          create: {
+            externalId: externalIdNamespaceado,
+            customerName: normalized.customer?.name ?? undefined,
+            customerPhone: normalized.customer?.phone ?? undefined,
+            customerPhonePin: normalized.customer?.phonePin ?? undefined,
+            deliveryChannelLinkId: link.id,
+            orderNumber: normalized.displayId,
+            source: normalized.source,
+            originSystem: OriginSystem.DELIVERY_PLATFORM,
+            type: OrderType.DELIVERY,
+            scheduledFor: normalized.scheduledFor ?? null,
+            // 🔴 CONFIRMED significa "ya le dijimos que sí al proveedor". En modo MANUAL NO se lo
+            // dijimos —nadie lo ha aceptado todavía— y marcarlo confirmado era una mentira con
+            // tres consecuencias: el POS no podía saber cuáles falta aceptar, el tablero decía
+            // que todo iba bien mientras el reloj de 11.5 min corría, y `denyDeliveryOrder`
+            // elegía CANCELAR en vez de RECHAZAR (protocolo equivocado y peor para el cliente,
+            // que ya creía tener su pedido confirmado).
+            status: link.orderAcceptanceMode === OrderAcceptanceMode.MANUAL ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
+            kitchenStatus: 'PENDING',
+            paymentStatus,
+            subtotal,
+            // México: el IVA ya va incluido en el precio — el impuesto que reporta el
+            // proveedor no es fuente fiscal (spec §5 de Uber, aplicado igual aquí).
+            taxAmount: new Prisma.Decimal(0),
+            contratoDePrecio: 'IVA_INCLUIDO',
+            discountAmount: descuento,
+            tipAmount: tip,
+            total,
+            // Partial payment tracking: cuánto liquidó la plataforma vs. cuánto queda por
+            // cobrar en persona (efectivo contra entrega).
+            paidAmount: pagadoExterno,
+            remainingBalance: porCobrar,
+            // Rappi 2b: lo escribe SÓLO la ingesta (el upsert de una reingesta no lo toca). `cashTipDue` existe sólo en ese carril:
+            // cada cobro reescribe `tipAmount` con lo cobrado y la propina por cobrar se perdería tras un abono chico.
+            // Con tarifa de Rappi en $0 el carril sigue (Codex código r1 #2): la marca es que el normalizado TRAE el campo, no su importe.
+            ...(p.thirdPartyCashDue != null ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
+            posRawData: normalized.raw as Prisma.InputJsonValue,
+            createdAt: normalized.placedAt,
+            syncedAt: new Date(),
+            venue: { connect: { id: venue.id } },
+          },
+        })
 
-          // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
-          // — ya NO texto concatenado en notes (v1 legacy).
-          // `modifier.price` ya viene multiplicado por la cantidad del padre (Tarea 2); sólo
-          // falta la cantidad PROPIA del modifier para el monto total de esa línea.
-          for (const m of item.modifiers ?? []) {
-            await tx.orderItemModifier.create({
-              data: { orderItemId: createdItem.id, modifierId: null, name: m.name, quantity: m.quantity, price: D(m.price) },
-            })
-          }
-        }
-
-        // Rappi 2b: el envío del negocio como renglón propio. Va DESPUÉS de los platillos y fuera de `createdItems`/
-        // `renglonesCreados`: no descuenta inventario ni sale en la comanda, y su `externalId` (`…-envio`) no lo aparea por índice.
-        if (envioComoRenglon.greaterThan(0)) {
-          const envioProductId = await resolverProductoDeEnvio(tx, venue.id, envioComoRenglon.toFixed(2))
-          await tx.orderItem.create({
-            data: {
-              orderId: order.id,
-              productId: envioProductId,
-              productName: NOMBRE_RENGLON_ENVIO,
-              productSku: SKU_RENGLON_ENVIO,
-              quantity: 1,
-              unitPrice: envioComoRenglon,
-              total: envioComoRenglon,
-              taxAmount: new Prisma.Decimal(0),
-              originSystem: OriginSystem.DELIVERY_PLATFORM,
-              externalId: `${externalIdNamespaceado}-envio`,
-            },
+        // La lectura del proveedor dice "ya aceptado": es la evidencia que recupera un 2xx
+        // perdido (AUTO que se cayó entre aceptar e ingerir). Nunca pisa una marca previa.
+        if (normalized.providerAccepted && !order.providerAcceptedAt) {
+          await tx.order.updateMany({
+            where: { id: order.id, providerAcceptedAt: null },
+            data: { providerAcceptedAt: normalized.providerAcceptedAt ?? new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
           })
         }
 
-        // 🔴 El bug que este cambio mata: antes `Payment.amount` era `normalized.total`
-        // (que YA incluía la propina) y `Payment.tipAmount` la volvía a sumar aparte. Ahora
-        // el reparto es explícito: `amount` = la venta liquidada por la plataforma, SIN
-        // propina; `tipAmount` = la propina liquidada, aparte. `netAmount` se ajusta igual
-        // (Avoqado no cobra fee sobre este dinero, así que netAmount == amount).
-        if (pagadoExterno.greaterThan(0)) {
-          const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
-          if (existingPayments === 0) {
-            const payment = await tx.payment.create({
+        if (esNueva) {
+          // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
+          // reales), no con los items normalizados del canal.
+          const createdItems: unknown[] = []
+          // Índice explícito (no forEach con await): distintos pedidos con payloads idénticos
+          // reintentados producen el MISMO índice por línea → externalId sigue siendo idempotente.
+          // Necesario porque un pedido puede repetir el mismo externalId en 2 líneas (p.ej.
+          // "Taco" solo + "Taco" con extra queso) — usar solo `${externalId}-${item.externalId}`
+          // chocaría con @@unique([orderId, externalId]) de OrderItem (P2002) y tumbaría la tx
+          // completa, perdiendo el pedido pagado permanentemente (ver C1 en el review original).
+          for (let idx = 0; idx < normalized.items.length; idx++) {
+            const item = normalized.items[idx]
+            // `externalData` es el SKU que Avoqado escribió al publicar el menú; el
+            // `externalId` pertenece al catálogo del proveedor. Resolverlos al revés crea
+            // placeholders para productos que sí existen (Rappi devuelve ambos campos).
+            // Si el proveedor no devuelve nuestro SKU, el id externo sigue siendo el fallback
+            // determinístico — nunca `Date.now()`, que generaría un producto por ocurrencia.
+            const sku = item.externalData || item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
+            const productId = await resolveProductId(
+              tx,
+              venue.id,
+              sku,
+              item.name,
+              item.unitPrice,
+              item.externalId ? `${link.provider}:${item.externalId}` : null,
+            )
+            const createdItem = await tx.orderItem.create({
               data: {
-                amount: D(p.externallyPaidSale),
-                tipAmount: D(p.externallyPaidTip),
-                method: PaymentMethod.OTHER,
-                source: PaymentSource.DELIVERY_PLATFORM,
-                // 🔴 La plataforma liquida este dinero, NO Avoqado. `fundsFlow` es la ÚNICA
-                // autoridad de esa pregunta (`shared/tenderSemantics.ts`): sin él, este cobro
-                // se contaría como efectivo esperado en el cajón y el arqueo no cuadraría.
-                fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED,
-                // Tipo de pago del canal (auto-provisionado, idempotente): es el snapshot que
-                // `shared/tenderSemantics.ts` lee para responder "¿está en el cajón?" y
-                // "¿lo deposita Avoqado?". Sin él, el pago cae al fallback legacy.
-                tenderType: { connect: { id: tender.id } },
-                // 🔴 LA COMISIÓN DEL MARKETPLACE, congelada en el cobro igual que hace el TPV.
-                //
-                // Sin esto, los cortes, reportes y contabilidad del negocio mostraban la venta
-                // COMPLETA como ingreso: $100 de Uber se veían como $100 cuando Uber deposita
-                // ~$70. El dueño creía ganar 30% más de lo que gana, en cada pedido, para
-                // siempre — y lo descubría cuando el depósito no cuadraba con sus números.
-                //
-                // El porcentaje sale del tipo de pago del canal, que el dueño edita en la
-                // pantalla de tipos de pago (`VenueTenderType.commissionPercent`, cuyo propio
-                // comentario en el schema dice literalmente "e.g. Uber ~30%"). Se congela aquí
-                // y no se lee después: si mañana renegocia su comisión, los pedidos viejos
-                // deben seguir contando lo que de verdad les costó.
-                tenderCommissionPercent: tender.commissionPercent,
-                tenderCommissionAmount: computeTenderCommission(tender.commissionPercent, D(p.externallyPaidSale)),
-                tenderRevision: tender.revision,
-                externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
-                status: TransactionStatus.COMPLETED,
-                splitType: SplitType.FULLPAYMENT,
-                processor: link.provider.toLowerCase(),
-                // Avoqado NO procesó este dinero: fee 0, neto = monto. La comisión de la
-                // plataforma es entre restaurante y plataforma (fuera de Avoqado).
-                feePercentage: new Prisma.Decimal(0),
-                feeAmount: new Prisma.Decimal(0),
-                netAmount: D(p.externallyPaidSale),
+                orderId: order.id,
+                productId,
+                productName: item.name,
+                productSku: sku,
+                quantity: item.quantity,
+                unitPrice: D(item.unitPrice),
+                // El mapper del proveedor ya entrega el total de línea (unitPrice×quantity +
+                // modificadores) como string decimal — se usa TAL CUAL, sin recomputar aquí.
+                total: D(item.total),
+                taxAmount: new Prisma.Decimal(0),
+                // 🔴 La instrucción del cliente ("Sin cebolla, por favor") — el mapper la extrae y
+                // ANTES se perdía aquí: la comanda salía sin ella y la cocina preparaba el platillo
+                // equivocado. Encontrado con un pedido REAL del sandbox (D8180, 27-ago); ningún
+                // test lo vio porque todos verifican al mapper, y el mapper estaba bien.
+                notes: item.notes ?? null,
+                // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
                 originSystem: OriginSystem.DELIVERY_PLATFORM,
-                externalId: `${externalIdNamespaceado}-platform`,
-                posRawData: normalized.raw as Prisma.InputJsonValue,
-                venue: { connect: { id: venue.id } },
-                order: { connect: { id: order.id } },
+                externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
+                // KDS de Uber: id de LÍNEA del proveedor (cart_item_id) — distinto del
+                // externalId de arriba, que es del sync del POS.
+                externalLineId: item.lineId ?? null,
               },
             })
-            await tx.paymentAllocation.create({
-              data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
+            createdItems.push(createdItem)
+            renglonesCreados.push({ id: createdItem.id, productId: createdItem.productId })
+
+            // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
+            // — ya NO texto concatenado en notes (v1 legacy).
+            // `modifier.price` ya viene multiplicado por la cantidad del padre (Tarea 2); sólo
+            // falta la cantidad PROPIA del modifier para el monto total de esa línea.
+            for (const m of item.modifiers ?? []) {
+              await tx.orderItemModifier.create({
+                data: { orderItemId: createdItem.id, modifierId: null, name: m.name, quantity: m.quantity, price: D(m.price) },
+              })
+            }
+          }
+
+          // Rappi 2b: el envío del negocio como renglón propio. Va DESPUÉS de los platillos y fuera de `createdItems`/
+          // `renglonesCreados`: no descuenta inventario ni sale en la comanda, y su `externalId` (`…-envio`) no lo aparea por índice.
+          if (envioComoRenglon.greaterThan(0)) {
+            const envioProductId = await resolverProductoDeEnvio(tx, venue.id, envioComoRenglon.toFixed(2))
+            await tx.orderItem.create({
+              data: {
+                orderId: order.id,
+                productId: envioProductId,
+                productName: NOMBRE_RENGLON_ENVIO,
+                productSku: SKU_RENGLON_ENVIO,
+                quantity: 1,
+                unitPrice: envioComoRenglon,
+                total: envioComoRenglon,
+                taxAmount: new Prisma.Decimal(0),
+                originSystem: OriginSystem.DELIVERY_PLATFORM,
+                externalId: `${externalIdNamespaceado}-envio`,
+              },
+            })
+          }
+
+          // 🔴 El bug que este cambio mata: antes `Payment.amount` era `normalized.total`
+          // (que YA incluía la propina) y `Payment.tipAmount` la volvía a sumar aparte. Ahora
+          // el reparto es explícito: `amount` = la venta liquidada por la plataforma, SIN
+          // propina; `tipAmount` = la propina liquidada, aparte. `netAmount` se ajusta igual
+          // (Avoqado no cobra fee sobre este dinero, así que netAmount == amount).
+          if (pagadoExterno.greaterThan(0)) {
+            const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
+            if (existingPayments === 0) {
+              const payment = await tx.payment.create({
+                data: {
+                  amount: D(p.externallyPaidSale),
+                  tipAmount: D(p.externallyPaidTip),
+                  method: PaymentMethod.OTHER,
+                  source: PaymentSource.DELIVERY_PLATFORM,
+                  // 🔴 La plataforma liquida este dinero, NO Avoqado. `fundsFlow` es la ÚNICA
+                  // autoridad de esa pregunta (`shared/tenderSemantics.ts`): sin él, este cobro
+                  // se contaría como efectivo esperado en el cajón y el arqueo no cuadraría.
+                  fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED,
+                  // Tipo de pago del canal (auto-provisionado, idempotente): es el snapshot que
+                  // `shared/tenderSemantics.ts` lee para responder "¿está en el cajón?" y
+                  // "¿lo deposita Avoqado?". Sin él, el pago cae al fallback legacy.
+                  tenderType: { connect: { id: tender.id } },
+                  // 🔴 LA COMISIÓN DEL MARKETPLACE, congelada en el cobro igual que hace el TPV.
+                  //
+                  // Sin esto, los cortes, reportes y contabilidad del negocio mostraban la venta
+                  // COMPLETA como ingreso: $100 de Uber se veían como $100 cuando Uber deposita
+                  // ~$70. El dueño creía ganar 30% más de lo que gana, en cada pedido, para
+                  // siempre — y lo descubría cuando el depósito no cuadraba con sus números.
+                  //
+                  // El porcentaje sale del tipo de pago del canal, que el dueño edita en la
+                  // pantalla de tipos de pago (`VenueTenderType.commissionPercent`, cuyo propio
+                  // comentario en el schema dice literalmente "e.g. Uber ~30%"). Se congela aquí
+                  // y no se lee después: si mañana renegocia su comisión, los pedidos viejos
+                  // deben seguir contando lo que de verdad les costó.
+                  tenderCommissionPercent: tender.commissionPercent,
+                  tenderCommissionAmount: computeTenderCommission(tender.commissionPercent, D(p.externallyPaidSale)),
+                  tenderRevision: tender.revision,
+                  externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
+                  status: TransactionStatus.COMPLETED,
+                  splitType: SplitType.FULLPAYMENT,
+                  processor: link.provider.toLowerCase(),
+                  // Avoqado NO procesó este dinero: fee 0, neto = monto. La comisión de la
+                  // plataforma es entre restaurante y plataforma (fuera de Avoqado).
+                  feePercentage: new Prisma.Decimal(0),
+                  feeAmount: new Prisma.Decimal(0),
+                  netAmount: D(p.externallyPaidSale),
+                  originSystem: OriginSystem.DELIVERY_PLATFORM,
+                  externalId: `${externalIdNamespaceado}-platform`,
+                  posRawData: normalized.raw as Prisma.InputJsonValue,
+                  venue: { connect: { id: venue.id } },
+                  order: { connect: { id: order.id } },
+                },
+              })
+              await tx.paymentAllocation.create({
+                data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
+              })
+            }
+          }
+
+          // Inventario: el pedido entra PAGADO EN SU TOTALIDAD (nada por cobrar en persona)
+          // con renglones resueltos a productos REALES del catálogo, así que descuenta como
+          // cualquier otra venta — decisión del founder (2026-08-16) con paridad Toast/Square,
+          // donde un pedido de tercero es una orden más y deplete el stock igual. Regla de la
+          // plataforma: "stock deduction ONLY when fully paid" — por eso se gatea en
+          // porCobrar.isZero(), no en "hubo algún pago externo" (eso permitiría descontar un
+          // pedido parcialmente pagado).
+          //
+          // El vale nace en ESTA transacción (si la ingesta se cae, no queda un descuento
+          // huérfano) y se aplica tras el commit.
+          if (porCobrar.isZero()) {
+            const posting = await createSalePostingInTx(tx, {
+              venueId: venue.id,
+              orderId: order.id,
+              items: createdItems as any,
+            })
+            postingState.id = posting?.id ?? null
+            // R8: un pedido de reparto pagado activa los sobres que tuviera (hoy ninguno: sus renglones vienen del catálogo).
+            await activarSobresDeCuentaPagadaEnTx(tx, {
+              venueId: venue.id,
+              orderId: order.id,
+              staffId: null,
+              items: createdItems as Array<{ giftCardId?: string | null }>,
             })
           }
         }
-
-        // Inventario: el pedido entra PAGADO EN SU TOTALIDAD (nada por cobrar en persona)
-        // con renglones resueltos a productos REALES del catálogo, así que descuenta como
-        // cualquier otra venta — decisión del founder (2026-08-16) con paridad Toast/Square,
-        // donde un pedido de tercero es una orden más y deplete el stock igual. Regla de la
-        // plataforma: "stock deduction ONLY when fully paid" — por eso se gatea en
-        // porCobrar.isZero(), no en "hubo algún pago externo" (eso permitiría descontar un
-        // pedido parcialmente pagado).
-        //
-        // El vale nace en ESTA transacción (si la ingesta se cae, no queda un descuento
-        // huérfano) y se aplica tras el commit.
-        if (porCobrar.isZero()) {
-          const posting = await createSalePostingInTx(tx, {
-            venueId: venue.id,
-            orderId: order.id,
-            items: createdItems as any,
-          })
-          postingState.id = posting?.id ?? null
-          // R8: un pedido de reparto pagado activa los sobres que tuviera (hoy ninguno: sus renglones vienen del catálogo).
-          await activarSobresDeCuentaPagadaEnTx(tx, {
-            venueId: venue.id,
-            orderId: order.id,
-            staffId: null,
-            items: createdItems as Array<{ giftCardId?: string | null }>,
-          })
-        }
-      }
-      return order
-      // El default de Prisma (5 s) NO alcanza con la máquina cargada: un pedido REAL de Uber
-      // murió a los 5,056 ms a media transacción y el canal nunca lo aceptó. Ingerir un pedido
-      // que el canal YA cobró no puede perderse por lentitud del host.
+        return order
+        // El default de Prisma (5 s) NO alcanza con la máquina cargada: un pedido REAL de Uber
+        // murió a los 5,056 ms a media transacción y el canal nunca lo aceptó. Ingerir un pedido
+        // que el canal YA cobró no puede perderse por lentitud del host.
+      })()
+      return { order, nuevaState, postingState, renglonesCreados }
     },
-    { timeout: 20_000, maxWait: 10_000 },
+    { etiqueta: 'ingestDeliveryOrder', timeout: 20_000, maxWait: 10_000 },
   )
 
   // Lo decidió la transacción (ver `nuevaState` arriba). Va AQUÍ, pegado a su cierre, y no

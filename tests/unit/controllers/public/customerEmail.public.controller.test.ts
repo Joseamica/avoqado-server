@@ -5,13 +5,15 @@ jest.mock('@/config/logger', () => ({
 
 jest.mock('@/services/customer/consent.service')
 jest.mock('@/utils/customerActionToken')
-jest.mock('@/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('@/utils/prismaClient', () => {
+  const db: any = {
     customerCaptureToken: { findUnique: jest.fn(), updateMany: jest.fn() },
     customer: { updateMany: jest.fn() },
-  },
-}))
+  }
+  // S5b: la escritura del cumpleaños va por withDeadlockRetry (una $transaction de un paso): el tx es el mismo doble.
+  db.$transaction = (fn: (tx: unknown) => unknown) => fn(db)
+  return { __esModule: true, default: db }
+})
 
 import {
   getCustomerUnsubscribePage,

@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { resolveUserRoleForVenue } from '../../middlewares/checkPermission.middleware'
 import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
@@ -328,110 +329,114 @@ export async function revisarCortesiaPendiente(
     return { outcome: 'PREVIEW', originalPaymentKey: input.originalPaymentKey, snapshot }
   }
 
-  return prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: resolved.id }))) throw new NotFoundError('Orden original no encontrada')
-    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
-    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: resolved.id })
-    const order = await tx.order.findUnique({ where: { id: resolved.id, venueId, externalId: input.externalId }, select: orderSelect })
-    if (!order) throw new NotFoundError('Orden original no encontrada')
-    const { snapshot, items } = await readSnapshot(tx, order)
-    validateLines(input, snapshot, items)
-    if (tieneRenglonDeTarjeta(items)) changed()
-    rechazarSiEsImportada(order)
-    if (
-      !['PENDING', 'CONFIRMED', 'PREPARING', 'READY'].includes(order.status) ||
-      order.paymentStatus !== 'PENDING' ||
-      snapshot.paidAmountCents !== 0
-    )
-      throw new ConflictError('La cuenta ya no está abierta y sin pagos. Vuelve a revisarla.')
-    if (await tx.payment.count({ where: { venueId, orderId: order.id } }))
-      throw new ConflictError('La cuenta ya tiene un pago registrado. No se puede corregir con esta revisión.')
-    await assertCurrentOwnership(venueId, actor, order)
-    await assertNoLiveTerminalCharge(
-      tx,
-      { venueId, orderId: order.id },
-      {
-        mensaje: 'Hay un cobro de terminal sin resultado confirmado. Compruébalo antes de aplicar la cortesía.',
-      },
-    )
-
-    const before = digest(normalizeSnapshot(input.expected!))
-    const current = digest(snapshot)
-    const source = sourceDigest(venueId, input)
-    const missing = snapshot.lines.filter(line => !line.isCortesia)
-    if (before !== current) {
-      // Sólo el resultado EXACTO de esta revisión permite repetir una confirmación vieja.
-      // Tres huellas acotadas en el audit existente: no reconstruir el recálculo ni copiar cien líneas por fila.
-      if (missing.length || snapshot.totalCents !== 0) changed()
-      const proof = await tx.activityLog.findFirst({
-        where: {
-          venueId,
-          action: 'ORDER_ITEM_COMPED',
-          entity: 'OrderItem',
-          entityId: { in: snapshot.lines.map(line => line.id) },
-          AND: [
-            { data: { path: ['orderId'], equals: order.id } },
-            { data: { path: ['originalPaymentKey'], equals: input.originalPaymentKey } },
-            { data: { path: ['courtesyReview', 'before'], equals: before } },
-            { data: { path: ['courtesyReview', 'after'], equals: current } },
-            { data: { path: ['courtesyReview', 'source'], equals: source } },
-          ],
+  return withDeadlockRetry(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: resolved.id })))
+        throw new NotFoundError('Orden original no encontrada')
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: resolved.id })
+      const order = await tx.order.findUnique({ where: { id: resolved.id, venueId, externalId: input.externalId }, select: orderSelect })
+      if (!order) throw new NotFoundError('Orden original no encontrada')
+      const { snapshot, items } = await readSnapshot(tx, order)
+      validateLines(input, snapshot, items)
+      if (tieneRenglonDeTarjeta(items)) changed()
+      rechazarSiEsImportada(order)
+      if (
+        !['PENDING', 'CONFIRMED', 'PREPARING', 'READY'].includes(order.status) ||
+        order.paymentStatus !== 'PENDING' ||
+        snapshot.paidAmountCents !== 0
+      )
+        throw new ConflictError('La cuenta ya no está abierta y sin pagos. Vuelve a revisarla.')
+      if (await tx.payment.count({ where: { venueId, orderId: order.id } }))
+        throw new ConflictError('La cuenta ya tiene un pago registrado. No se puede corregir con esta revisión.')
+      await assertCurrentOwnership(venueId, actor, order)
+      await assertNoLiveTerminalCharge(
+        tx,
+        { venueId, orderId: order.id },
+        {
+          mensaje: 'Hay un cobro de terminal sin resultado confirmado. Compruébalo antes de aplicar la cortesía.',
         },
-        select: { id: true },
-      })
-      if (!proof) changed()
-    }
-    if (!missing.length) {
-      if (snapshot.totalCents !== 0) changed()
-      return { outcome: 'ALREADY_APPLIED', originalPaymentKey: input.originalPaymentKey, snapshot }
-    }
+      )
 
-    const results: Array<{ line: (typeof missing)[number]; result: Awaited<ReturnType<typeof compOrderItemInTransaction>> }> = []
-    for (const line of missing) {
-      const original = input.lines.find(original => original.externalId === line.externalId)!
-      const result = await compOrderItemInTransaction(tx, {
-        venueId,
-        orderId: order.id,
-        itemId: line.id,
-        reason: original.cortesiaReason,
-        staffId: actor.actorId,
-        captureBenefits: true,
-      })
-      results.push({ line, result })
-    }
-    const finalOrder = await tx.order.findUnique({ where: { id: order.id, venueId, externalId: input.externalId }, select: orderSelect })
-    if (!finalOrder) changed()
-    const final = await readSnapshot(tx, finalOrder)
-    validateLines(input, final.snapshot, final.items)
-    if (tieneRenglonDeTarjeta(final.items)) changed()
-    if (final.snapshot.totalCents !== 0 || final.snapshot.lines.some(line => !line.isCortesia))
-      throw new ConflictError('La cuenta conserva un importe por cobrar. No se aplicó la revisión de cortesía.')
-    const after = digest(final.snapshot)
-    for (const { line, result } of results) {
-      // El helper devuelve puntos/premios en la MISMA tx incluso sin captureBenefits; capturarlos conserva sus referencias.
-      // Los avisos posteriores de wallet pertenecen al adapter de efectos existente, no a una emisión sin recibo aquí.
-      await tx.activityLog.create({
-        data: {
-          venueId,
-          staffId: actor.actorId,
-          action: 'ORDER_ITEM_COMPED',
-          entity: 'OrderItem',
-          entityId: line.id,
-          data: {
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            originalPaymentKey: input.originalPaymentKey,
-            reason: input.lines.find(original => original.externalId === line.externalId)!.cortesiaReason,
-            productName: result.item.productName,
-            amount: Number(result.item.total),
-            ...(actor.overrideAuthorizedBy ? { overrideAuthorizedBy: actor.overrideAuthorizedBy } : {}),
-            descuentosRetirados: result.recorte.retiradas,
-            discountBenefits: result.recorte.benefits ?? [],
-            courtesyReview: { before, after, source },
+      const before = digest(normalizeSnapshot(input.expected!))
+      const current = digest(snapshot)
+      const source = sourceDigest(venueId, input)
+      const missing = snapshot.lines.filter(line => !line.isCortesia)
+      if (before !== current) {
+        // Sólo el resultado EXACTO de esta revisión permite repetir una confirmación vieja.
+        // Tres huellas acotadas en el audit existente: no reconstruir el recálculo ni copiar cien líneas por fila.
+        if (missing.length || snapshot.totalCents !== 0) changed()
+        const proof = await tx.activityLog.findFirst({
+          where: {
+            venueId,
+            action: 'ORDER_ITEM_COMPED',
+            entity: 'OrderItem',
+            entityId: { in: snapshot.lines.map(line => line.id) },
+            AND: [
+              { data: { path: ['orderId'], equals: order.id } },
+              { data: { path: ['originalPaymentKey'], equals: input.originalPaymentKey } },
+              { data: { path: ['courtesyReview', 'before'], equals: before } },
+              { data: { path: ['courtesyReview', 'after'], equals: current } },
+              { data: { path: ['courtesyReview', 'source'], equals: source } },
+            ],
           },
-        },
-      })
-    }
-    return { outcome: 'APPLIED', originalPaymentKey: input.originalPaymentKey, snapshot: final.snapshot }
-  }, ORDER_LOCK_WAIT_BUDGET)
+          select: { id: true },
+        })
+        if (!proof) changed()
+      }
+      if (!missing.length) {
+        if (snapshot.totalCents !== 0) changed()
+        return { outcome: 'ALREADY_APPLIED', originalPaymentKey: input.originalPaymentKey, snapshot }
+      }
+
+      const results: Array<{ line: (typeof missing)[number]; result: Awaited<ReturnType<typeof compOrderItemInTransaction>> }> = []
+      for (const line of missing) {
+        const original = input.lines.find(original => original.externalId === line.externalId)!
+        const result = await compOrderItemInTransaction(tx, {
+          venueId,
+          orderId: order.id,
+          itemId: line.id,
+          reason: original.cortesiaReason,
+          staffId: actor.actorId,
+          captureBenefits: true,
+        })
+        results.push({ line, result })
+      }
+      const finalOrder = await tx.order.findUnique({ where: { id: order.id, venueId, externalId: input.externalId }, select: orderSelect })
+      if (!finalOrder) changed()
+      const final = await readSnapshot(tx, finalOrder)
+      validateLines(input, final.snapshot, final.items)
+      if (tieneRenglonDeTarjeta(final.items)) changed()
+      if (final.snapshot.totalCents !== 0 || final.snapshot.lines.some(line => !line.isCortesia))
+        throw new ConflictError('La cuenta conserva un importe por cobrar. No se aplicó la revisión de cortesía.')
+      const after = digest(final.snapshot)
+      for (const { line, result } of results) {
+        // El helper devuelve puntos/premios en la MISMA tx incluso sin captureBenefits; capturarlos conserva sus referencias.
+        // Los avisos posteriores de wallet pertenecen al adapter de efectos existente, no a una emisión sin recibo aquí.
+        await tx.activityLog.create({
+          data: {
+            venueId,
+            staffId: actor.actorId,
+            action: 'ORDER_ITEM_COMPED',
+            entity: 'OrderItem',
+            entityId: line.id,
+            data: {
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              originalPaymentKey: input.originalPaymentKey,
+              reason: input.lines.find(original => original.externalId === line.externalId)!.cortesiaReason,
+              productName: result.item.productName,
+              amount: Number(result.item.total),
+              ...(actor.overrideAuthorizedBy ? { overrideAuthorizedBy: actor.overrideAuthorizedBy } : {}),
+              descuentosRetirados: result.recorte.retiradas,
+              discountBenefits: result.recorte.benefits ?? [],
+              courtesyReview: { before, after, source },
+            },
+          },
+        })
+      }
+      return { outcome: 'APPLIED', originalPaymentKey: input.originalPaymentKey, snapshot: final.snapshot }
+    },
+    { etiqueta: 'revisarCortesiaPendiente', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 }

@@ -74,7 +74,8 @@
     "sdk:test": "npx ts-node -r tsconfig-paths/register scripts/test-ecommerce-merchant-endpoints.ts",
     "sdk:errors": "npx ts-node -r tsconfig-paths/register scripts/test-error-parser.ts",
     "typecheck:build": "NODE_OPTIONS='--max-old-space-size=8192' tsc -p tsconfig.typecheck.json",
-    "typecheck:fast": "npx -y -p typescript@7.0.2 tsc -p tsconfig.ts7.json"
+    "typecheck:fast": "npx -y -p typescript@7.0.2 tsc -p tsconfig.ts7.json",
+    "guard:tx-con-reintento": "NODE_OPTIONS='--max-old-space-size=12288' ts-node -T scripts/guardias/txConReintento.ts"
   },
   "keywords": [],
   "author": "",

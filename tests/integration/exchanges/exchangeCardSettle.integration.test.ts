@@ -8,6 +8,7 @@ import { seedCardSale } from './seedExchange'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 import { markExchangeChargeInTx } from '@/services/exchanges/exchangeCharge'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -118,7 +119,7 @@ describe('settle card exchange by evidence', () => {
           type: 'REGULAR',
         },
       })
-      await settleStandalonePaymentInTx(tx, s.venueId, e.newOrderId, payment, s.staffId)
+      await settleStandalonePaymentInTx(tx as unknown as TxConReintento, s.venueId, e.newOrderId, payment, s.staffId)
       await markExchangeChargeInTx(tx, { venueId: s.venueId, orderId: e.newOrderId, paymentId: payment.id })
       return payment
     }, ORDER_LOCK_WAIT_BUDGET)

@@ -130,3 +130,37 @@ describe('completeCharge (liga de pago) — la orden NO se ata al turno abierto 
     expect(ligas.match(/NO se estampa `shiftId`, y es DELIBERADO/g)).toHaveLength(3)
   })
 })
+
+describe('[repetirNoDuplica:completeCharge] completeCharge (liga de pago) — S5b: la red por traba (40P01) publica sólo el intento ganador', () => {
+  it('el vale (posting) sale del retorno del intento ganador y se aplica UNA sola vez', async () => {
+    const { createSalePostingInTx, applySalePosting } = jest.requireMock('@/services/inventory/inventoryPosting.service') as {
+      createSalePostingInTx: jest.Mock
+      applySalePosting: jest.Mock
+    }
+    jest.clearAllMocks()
+    prismaMock.checkoutSession.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(sesionDeCheckout() as any)
+    prismaMock.checkoutSession.update.mockResolvedValue({} as any)
+    prismaMock.paymentLink.update.mockResolvedValue({} as any)
+    prismaMock.order.create.mockResolvedValue({ id: 'order-123', orderNumber: 'PL-123' } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-123' } as any)
+    createSalePostingInTx.mockResolvedValueOnce({ id: 'posting-intento-abortado' }).mockResolvedValue({ id: 'posting-ganador' })
+    // El primer intento corre completo (ya creó su vale) y LUEGO Postgres lo aborta.
+    let llamada = 0
+    prismaMock.$transaction.mockImplementation((async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    }) as any)
+
+    try {
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(createSalePostingInTx).toHaveBeenCalledTimes(2)
+      expect(applySalePosting).toHaveBeenCalledTimes(1)
+      expect(applySalePosting.mock.calls[0][0]).toBe('posting-ganador')
+    } finally {
+      prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+    }
+  })
+})

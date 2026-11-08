@@ -17,16 +17,18 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
-jest.mock('@/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('@/utils/prismaClient', () => {
+  const db: any = {
     customer: {
       findMany: (...a: unknown[]) => mockCustomerFind(...(a as [])),
       update: (...a: unknown[]) => mockCustomerUpdate(...(a as [])),
     },
     order: { findMany: jest.fn() }, // sibling customer tools register from this module
-  },
-}))
+  }
+  // S5b: las escrituras sueltas van por withDeadlockRetry (una $transaction de un paso): el tx es el mismo doble.
+  db.$transaction = (fn: (tx: unknown) => unknown) => fn(db)
+  return { __esModule: true, default: db }
+})
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope

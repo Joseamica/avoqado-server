@@ -15,6 +15,7 @@ import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { operarSobreDeGerente } from '@/services/giftCards/giftCardSurface.service'
 // ⭐ (A4 menor 5): la espera filtra por `pg_blocking_pids` del que tiene el candado (ver la siembra).
 import { esperarAQueAlguienEspereA, pidDe } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -63,15 +64,29 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const cajaUnoTieneElCandado = new Promise<void>(resolve => (avisarQueTieneCandado = resolve))
 
     const cajaUno = prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [s.id])
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
       avisarQueTieneCandado()
       await esperarAQueAlguienEspereA(await pidDe(tx))
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(600), cards, staffId })
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: cuid(),
+        amount: D(600),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
     const cajaDos = cajaUnoTieneElCandado.then(() =>
       prisma.$transaction(async tx => {
-        const cards = await lockGiftCardsForUpdate(tx, [s.id])
-        return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(600), cards, staffId })
+        const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+        return canjearSobresEnTx(tx as unknown as TxConReintento, {
+          venueId,
+          orderId: cuid(),
+          paymentId: cuid(),
+          amount: D(600),
+          cards,
+          staffId,
+        })
       }, PRESUPUESTO),
     )
 
@@ -92,15 +107,30 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
   it('⭐ (A4 menor 3) un canje con una foto VIEJA del sobre no escribe un saldo inventado: 409 de concurrencia y el saldo intacto', async () => {
     const s = await sobreActivo(1000)
     // La foto se toma bajo candado y la transacción termina: queda vieja en cuanto otra caja cobra.
-    const fotoVieja = await prisma.$transaction(tx => lockGiftCardsForUpdate(tx, [s.id]), PRESUPUESTO)
+    const fotoVieja = await prisma.$transaction(tx => lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id]), PRESUPUESTO)
     await prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(300), cards, staffId })
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: cuid(),
+        amount: D(300),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
 
     await expect(
       prisma.$transaction(
-        tx => canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(100), cards: fotoVieja, staffId }),
+        tx =>
+          canjearSobresEnTx(tx as unknown as TxConReintento, {
+            venueId,
+            orderId: cuid(),
+            paymentId: cuid(),
+            amount: D(100),
+            cards: fotoVieja,
+            staffId,
+          }),
         PRESUPUESTO,
       ),
     ).rejects.toMatchObject({ code: 'ORDER_PAYMENT_CONFLICT', statusCode: 409 })
@@ -116,8 +146,8 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const paymentId = cuid()
     const cobrar = () =>
       prisma.$transaction(async tx => {
-        const cards = await lockGiftCardsForUpdate(tx, [s.id])
-        return canjearSobresEnTx(tx, { venueId, orderId, paymentId, amount: D(100), cards, staffId })
+        const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+        return canjearSobresEnTx(tx as unknown as TxConReintento, { venueId, orderId, paymentId, amount: D(100), cards, staffId })
       }, PRESUPUESTO)
     await cobrar()
     await expect(cobrar()).rejects.toMatchObject({ code: 'P2002' })
@@ -129,7 +159,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const ajustar = (operationKey: string, monto: number) =>
       prisma.$transaction(
         tx =>
-          operarSobreDeGerenteEnTx(tx, {
+          operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
             venueId,
             giftCardId: s.id,
             staffId,
@@ -159,12 +189,19 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
   it('saldo = suma de la libreta después de cobros y ajustes (lo que revisa la noche)', async () => {
     const s = await sobreActivo(800)
     await prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(300), cards, staffId })
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: cuid(),
+        amount: D(300),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
     await prisma.$transaction(
       tx =>
-        operarSobreDeGerenteEnTx(tx, {
+        operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
           venueId,
           giftCardId: s.id,
           staffId,
@@ -185,14 +222,21 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const s = await sobreActivo(10000)
     const pago = cuid()
     await prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: pago, amount: D(5000), cards, staffId })
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: pago,
+        amount: D(5000),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
 
     await expect(
       prisma.$transaction(
         tx =>
-          operarSobreDeGerenteEnTx(tx, {
+          operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
             venueId,
             giftCardId: s.id,
             staffId,
@@ -206,7 +250,14 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
 
     // El reverso nunca se rechaza por el techo: regresa los $5,000 del canje.
     await prisma.$transaction(
-      tx => revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(5000), staffId }),
+      tx =>
+        revertirCanjeEnTx(tx as unknown as TxConReintento, {
+          venueId,
+          originalPaymentId: pago,
+          refundPaymentId: cuid(),
+          amount: D(5000),
+          staffId,
+        }),
       PRESUPUESTO,
     )
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: s.id } })).balance.toFixed(2)).toBe('10000.00')
@@ -227,13 +278,16 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const primeraTieneElCandado = new Promise<void>(resolve => (avisarQueTieneCandado = resolve))
 
     const primera = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [s.id])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
       avisarQueTieneCandado()
       await esperarAQueAlguienEspereA(await pidDe(tx)) // la segunda ya pasó su validación y está detenida en el candado
-      return operarSobreDeGerenteEnTx(tx, { venueId, giftCardId: s.id, staffId, operationKey: llave, op })
+      return operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, { venueId, giftCardId: s.id, staffId, operationKey: llave, op })
     }, PRESUPUESTO)
     const segunda = primeraTieneElCandado.then(() =>
-      prisma.$transaction(tx => operarSobreDeGerenteEnTx(tx, { venueId, giftCardId: s.id, staffId, operationKey: llave, op }), PRESUPUESTO),
+      prisma.$transaction(
+        tx => operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, { venueId, giftCardId: s.id, staffId, operationKey: llave, op }),
+        PRESUPUESTO,
+      ),
     )
 
     const [uno, dos] = await Promise.all([primera, segunda])
@@ -247,21 +301,41 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const s = await sobreActivo(1000)
     const pago = cuid()
     await prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: pago, amount: D(300), cards, staffId })
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: pago,
+        amount: D(300),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
     let avisarQueTieneCandado!: () => void
     const primeroTieneElCandado = new Promise<void>(resolve => (avisarQueTieneCandado = resolve))
 
     const primero = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [s.id])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [s.id])
       avisarQueTieneCandado()
       await esperarAQueAlguienEspereA(await pidDe(tx)) // el segundo ya leyó sus canjes y está detenido en el candado
-      return revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(300), staffId })
+      return revertirCanjeEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        originalPaymentId: pago,
+        refundPaymentId: cuid(),
+        amount: D(300),
+        staffId,
+      })
     }, PRESUPUESTO)
     const segundo = primeroTieneElCandado.then(() =>
       prisma.$transaction(
-        tx => revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(300), staffId }),
+        tx =>
+          revertirCanjeEnTx(tx as unknown as TxConReintento, {
+            venueId,
+            originalPaymentId: pago,
+            refundPaymentId: cuid(),
+            amount: D(300),
+            staffId,
+          }),
         PRESUPUESTO,
       ),
     )

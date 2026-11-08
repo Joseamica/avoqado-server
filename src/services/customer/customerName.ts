@@ -1,4 +1,5 @@
 import type { Customer, Prisma } from '@prisma/client'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /** Primera palabra → `firstName`; el resto → `lastName`. */
 export function splitName(name?: string | null): { firstName?: string; lastName?: string } {
@@ -11,7 +12,7 @@ export function splitName(name?: string | null): { firstName?: string; lastName?
 // Nombre del alta (spec 2026-10-14 §3.3). 🔴 Nunca pisa uno existente: el cliente que el negocio dio de alta como «Daniela
 // Ruiz» no se vuelve «Dany» porque escribió otra cosa en su teléfono. El apellido sólo se llena si estaba vacío.
 // Lo usan el alta por OTP (reservas) y el pedido en línea (ronda final, S3): los dos dentro de su transacción.
-export async function ponerNombreSiFalta(tx: Prisma.TransactionClient, customer: Customer, nombre?: string | null): Promise<Customer> {
+export async function ponerNombreSiFalta(tx: TxConReintento, customer: Customer, nombre?: string | null): Promise<Customer> {
   if (customer.firstName?.trim()) return customer
   const partes = splitName(nombre)
   if (!partes.firstName) return customer

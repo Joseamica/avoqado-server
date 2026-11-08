@@ -9,6 +9,7 @@ import { seedClothingSale } from './seedExchange'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { exchangeDetailFields } from '@/services/exchanges/exchangeDetail'
 import type { PrismaClient } from '@prisma/client'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
@@ -23,7 +24,7 @@ const seed = async (opts?: Parameters<typeof seedClothingSale>[0]) => {
 const detail = (s: Seed, paymentId = s.payments[0].id) => getTransactionDetail(s.venueId, paymentId)
 async function refund(s: Seed, paymentId: string, quantity: number, cents: number) {
   return prisma.$transaction(tx =>
-    writeRefundInTx(tx, {
+    writeRefundInTx(tx as unknown as TxConReintento, {
       venueId: s.venueId,
       originalPaymentId: paymentId,
       salesRefundCents: cents,
@@ -335,7 +336,7 @@ describe('exchange transaction detail', () => {
       },
     })
     await prisma.$transaction(tx =>
-      writeRefundInTx(tx, {
+      writeRefundInTx(tx as unknown as TxConReintento, {
         venueId: s.venueId,
         originalPaymentId: s.payments[0].id,
         salesRefundCents: 50000,

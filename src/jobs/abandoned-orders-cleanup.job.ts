@@ -3,6 +3,7 @@
 import { CronJob } from 'cron'
 import { Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
+import { withDeadlockRetry } from '../utils/serializableRetry'
 import logger from '../config/logger'
 import { conNegocio } from '../services/demo/candadoDemo'
 import { scheduleJob } from '../observability/jobContext'
@@ -164,7 +165,7 @@ export class AbandonedOrdersCleanupJob {
         try {
           // Lock the order, reread the SAME rule, and only then delete. A payment or item written concurrently holds the
           // order's foreign-key lock, so the lock waits for it and the reread sees it: the order is kept.
-          const desenlace = await prisma.$transaction(
+          const desenlace = await withDeadlockRetry(
             async tx => {
               if (!(await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id }))) return false
               const still = await tx.$queryRaw<Array<{ id: string }>>`
@@ -186,7 +187,7 @@ export class AbandonedOrdersCleanupJob {
               await tx.order.delete({ where: { id: order.id } })
               return true
             },
-            { timeout: 15_000, maxWait: 5_000 },
+            { etiqueta: 'runOnce', timeout: 15_000, maxWait: 5_000 },
           )
           if (desenlace === 'cancelled') {
             result.cancelled += 1

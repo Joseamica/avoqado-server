@@ -1,7 +1,7 @@
 import cuid from 'cuid'
 import { Prisma, StampRewardStatus, StampRewardType, type StampReward } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
@@ -98,7 +98,7 @@ export type TotalesDeOrden = Awaited<ReturnType<typeof recalculateOrderTotals>>
  * transacción ni escribe bitácora (eso va después del commit, `avisarPremioCanjeado`).
  */
 export async function canjearPremioEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   rewardId: string,
@@ -263,10 +263,10 @@ export async function redeemStampReward(
   // lo que decide el canje —estado, cliente, base, tope y el artículo gratis— se lee bajo ese candado con la MISMA
   // transacción, y quemar + descontar + recalcular van juntos: si algo falla después de quemar, el rollback devuelve
   // el premio a PENDING y la cuenta queda como estaba.
-  const { reward, discountAmount, totals } = await prisma.$transaction(
-    tx => canjearPremioEnTx(tx, venueId, orderId, rewardId),
-    ORDER_LOCK_WAIT_BUDGET,
-  )
+  const { reward, discountAmount, totals } = await withDeadlockRetry(tx => canjearPremioEnTx(tx, venueId, orderId, rewardId), {
+    etiqueta: 'redeemStampReward',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
 
   avisarPremioCanjeado(venueId, orderId, rewardId, reward, discountAmount, options.staffId)
 
@@ -289,7 +289,7 @@ export async function redeemStampReward(
  * Es un no-op silencioso para los descuentos normales, que son la inmensa mayoría.
  */
 export async function refundStampRewardForOrderDiscount(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   row: { id: string },
 ): Promise<{ rewardId: string; customerId: string; rewardLabel: string } | null> {

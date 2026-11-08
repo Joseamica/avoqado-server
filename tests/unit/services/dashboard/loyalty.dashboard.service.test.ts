@@ -1025,6 +1025,33 @@ describe('Loyalty Dashboard Service', () => {
       expect(prismaMock.$transaction).toHaveBeenCalled()
     })
 
+    it('corre el cuerpo de la transacción: el asiento EXPIRE se crea ANTES de restar el saldo', async () => {
+      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
+      const oldDate = new Date()
+      oldDate.setDate(oldDate.getDate() - 400)
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
+      prismaMock.loyaltyTransaction.findMany.mockResolvedValue([
+        {
+          ...createMockTransaction({ id: 'tx-1', points: 100, createdAt: oldDate }),
+          customer: { id: 'customer-1', loyaltyPoints: 80 },
+          customerId: 'customer-1',
+        },
+      ] as any)
+      prismaMock.$transaction.mockImplementationOnce(((cb: any) => cb(prismaMock)) as any)
+      prismaMock.loyaltyTransaction.create.mockResolvedValue({} as any)
+      prismaMock.customer.update.mockResolvedValue({} as any)
+
+      await expireOldPoints('venue-123')
+
+      const crear = prismaMock.loyaltyTransaction.create.mock.invocationCallOrder[0]
+      const restar = prismaMock.customer.update.mock.invocationCallOrder[0]
+      expect(crear).toBeLessThan(restar)
+      expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ customerId: 'customer-1', type: 'EXPIRE', points: -80 }),
+      })
+      expect(prismaMock.customer.update).toHaveBeenCalledWith({ where: { id: 'customer-1' }, data: { loyaltyPoints: { decrement: 80 } } })
+    })
+
     it('should skip customers with 0 points', async () => {
       const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
       const oldDate = new Date()

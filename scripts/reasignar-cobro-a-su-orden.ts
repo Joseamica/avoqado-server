@@ -299,6 +299,8 @@ async function main(): Promise<void> {
   const { settleStandalonePaymentInTx } = await import('../src/services/tpv/payment.tpv.service')
   const { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } = await import('../src/services/shared/paymentShiftClaim')
   const { releaseTableIfSettled } = await import('../src/services/tpv/table.tpv.service')
+  // Dinámico como los demás: `serializableRetry` carga `prismaClient`, que arma su URL al cargarse, ANTES de `elegirBase()`.
+  const { withDeadlockRetry } = await import('../src/utils/serializableRetry')
 
   try {
     const cargados: Cargado[] = []
@@ -327,7 +329,7 @@ async function main(): Promise<void> {
     // Por negocio: el candado comprueba que cada orden siga siendo del negocio del cobro.
     const depsDe = (venueId: string): DepsAplicar => ({
       enTransaccion: fn =>
-        prisma.$transaction(
+        withDeadlockRetry(
           tx =>
             fn({
               bloquear: async ids => {
@@ -393,7 +395,7 @@ async function main(): Promise<void> {
                 })
               },
             }),
-          ORDER_LOCK_WAIT_BUDGET,
+          { etiqueta: 'reasignarCobroAsuOrden', ...ORDER_LOCK_WAIT_BUDGET },
         ),
       liberarMesa: (venue, tableId) => releaseTableIfSettled(venue, tableId),
     })

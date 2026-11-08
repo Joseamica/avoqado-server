@@ -7,6 +7,7 @@ import { recorrerLibros } from '@/services/fiscal/librosDeOrdenes'
 import type { ParteDelLibro } from '@/services/fiscal/libroDeLaOrden'
 import { applyCustomerReturnPosting, rearmCustomerReturnPostingsInTx } from '@/services/inventory/inventoryPosting.service'
 import { seedClothingSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -55,7 +56,7 @@ async function mixedSale() {
 }
 
 function ordinaryRefund(tx: Prisma.TransactionClient, sale: Seed, at: Date) {
-  return writeRefundInTx(tx, {
+  return writeRefundInTx(tx as unknown as TxConReintento, {
     venueId: sale.venueId,
     originalPaymentId: sale.payments[0].id,
     salesRefundCents: 3334,

@@ -39,86 +39,89 @@ export async function ingestCheckin(conn: Conn, ev: CheckinEv, now: Date): Promi
   })
   if (dup) return { visitId: dup.id, duplicate: true, queuedValidation: false }
 
-  const result = await withSerializableRetry(async tx => {
-    const booking = await tx.aggregatorBooking.findFirst({
-      where: {
-        connectionId: conn.id,
-        externalUserId: ev.externalUserId,
-        decision: 'ACCEPTED',
-        reservation: {
-          venueId: conn.venueId,
-          status: { in: LINKABLE_STATUSES },
-          startsAt: { gte: new Date(ev.startedAt.getTime() - AFTER_MS), lte: new Date(ev.startedAt.getTime() + BEFORE_MS) },
+  const result = await withSerializableRetry(
+    async tx => {
+      const booking = await tx.aggregatorBooking.findFirst({
+        where: {
+          connectionId: conn.id,
+          externalUserId: ev.externalUserId,
+          decision: 'ACCEPTED',
+          reservation: {
+            venueId: conn.venueId,
+            status: { in: LINKABLE_STATUSES },
+            startsAt: { gte: new Date(ev.startedAt.getTime() - AFTER_MS), lte: new Date(ev.startedAt.getTime() + BEFORE_MS) },
+          },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-      select: { reservationId: true },
-    })
+        orderBy: { createdAt: 'desc' },
+        select: { reservationId: true },
+      })
 
-    // Candado de la reserva ANTES de crear la visita y decidir: el kiosco hace su check-in en una tx READ COMMITTED que
-    // no ve esta visita aún sin confirmar. Sin candado, «leí CONFIRMED → el kiosco confirma y su gancho no encuentra
-    // visita → creo la visita sin encolar» dejaba la visita PENDING hasta vencer (cobro perdido). Con el FOR UPDATE: si
-    // el kiosco confirmó antes, aquí se ve CHECKED_IN (o un 40001 que se reintenta y lo ve); si este candado va
-    // primero, el CAS del kiosco espera y su gancho, ya con esta visita confirmada, la encola.
-    let reservationId: string | null = null
-    let reservationStatus: string | null = null
-    if (booking?.reservationId) {
-      const locked = await tx.$queryRaw<{ id: string; status: string }[]>`
+      // Candado de la reserva ANTES de crear la visita y decidir: el kiosco hace su check-in en una tx READ COMMITTED que
+      // no ve esta visita aún sin confirmar. Sin candado, «leí CONFIRMED → el kiosco confirma y su gancho no encuentra
+      // visita → creo la visita sin encolar» dejaba la visita PENDING hasta vencer (cobro perdido). Con el FOR UPDATE: si
+      // el kiosco confirmó antes, aquí se ve CHECKED_IN (o un 40001 que se reintenta y lo ve); si este candado va
+      // primero, el CAS del kiosco espera y su gancho, ya con esta visita confirmada, la encola.
+      let reservationId: string | null = null
+      let reservationStatus: string | null = null
+      if (booking?.reservationId) {
+        const locked = await tx.$queryRaw<{ id: string; status: string }[]>`
         SELECT id, status::text AS status FROM "Reservation" WHERE id = ${booking.reservationId} FOR UPDATE
       `
-      // Una reserva cancelada, no-show o completada no se liga: el socio queda como visita sin reserva (en `AUTO` se
-      // valida igual; en `ON_VENUE_CHECKIN` la confirma la recepción) en vez de amarrarse a algo que nunca será CHECKED_IN.
-      if (locked[0] && LINKABLE_STATUSES.includes(locked[0].status as ReservationStatus)) {
-        reservationId = locked[0].id
-        reservationStatus = locked[0].status
+        // Una reserva cancelada, no-show o completada no se liga: el socio queda como visita sin reserva (en `AUTO` se
+        // valida igual; en `ON_VENUE_CHECKIN` la confirma la recepción) en vez de amarrarse a algo que nunca será CHECKED_IN.
+        if (locked[0] && LINKABLE_STATUSES.includes(locked[0].status as ReservationStatus)) {
+          reservationId = locked[0].id
+          reservationStatus = locked[0].status
+        }
       }
-    }
 
-    // El socio queda identificado con el usuario que trae su check-in (mismo helper que la reserva): uno que llega sin
-    // reservar, ni identidad previa, aparece en la lista con su nombre y no como un «sin nombre» indistinguible.
-    await resolvePassCustomer(tx, {
-      venueId: conn.venueId,
-      provider: conn.provider,
-      externalUserId: ev.externalUserId,
-      user: ev.user,
-    })
-
-    const visit = await tx.aggregatorVisit.create({
-      data: {
-        connectionId: conn.id,
+      // El socio queda identificado con el usuario que trae su check-in (mismo helper que la reserva): uno que llega sin
+      // reservar, ni identidad previa, aparece en la lista con su nombre y no como un «sin nombre» indistinguible.
+      await resolvePassCustomer(tx, {
         venueId: conn.venueId,
         provider: conn.provider,
         externalUserId: ev.externalUserId,
-        externalCheckinId: ev.externalCheckinId,
-        validationRef: ev.validationRef,
-        reservationId,
-        startedAt: ev.startedAt,
-        deadlineAt: ev.deadlineAt,
-        status: 'PENDING',
-      },
-      select: { id: true },
-    })
-
-    let queue: boolean
-    if (conn.confirmMode === 'AUTO') {
-      queue = true
-      // La reserva ya está bajo el candado de arriba: se usa su estado sin volver a bloquearla.
-      if (reservationId)
-        await checkInIfAdmits(tx, { id: visit.id, venueId: conn.venueId, provider: conn.provider, reservationId }, reservationStatus, now)
-    } else {
-      // Kiosco antes que webhook: si el estudio ya registró la asistencia, se valida ya.
-      queue = reservationStatus === 'CHECKED_IN'
-    }
-    if (queue) {
-      await enqueuePassOutbox(tx, {
-        venueId: conn.venueId,
-        connectionId: conn.id,
-        operation: 'VALIDATE_VISIT',
-        aggregatorVisitId: visit.id,
+        user: ev.user,
       })
-    }
-    return { visitId: visit.id, reservationId, queue }
-  })
+
+      const visit = await tx.aggregatorVisit.create({
+        data: {
+          connectionId: conn.id,
+          venueId: conn.venueId,
+          provider: conn.provider,
+          externalUserId: ev.externalUserId,
+          externalCheckinId: ev.externalCheckinId,
+          validationRef: ev.validationRef,
+          reservationId,
+          startedAt: ev.startedAt,
+          deadlineAt: ev.deadlineAt,
+          status: 'PENDING',
+        },
+        select: { id: true },
+      })
+
+      let queue: boolean
+      if (conn.confirmMode === 'AUTO') {
+        queue = true
+        // La reserva ya está bajo el candado de arriba: se usa su estado sin volver a bloquearla.
+        if (reservationId)
+          await checkInIfAdmits(tx, { id: visit.id, venueId: conn.venueId, provider: conn.provider, reservationId }, reservationStatus, now)
+      } else {
+        // Kiosco antes que webhook: si el estudio ya registró la asistencia, se valida ya.
+        queue = reservationStatus === 'CHECKED_IN'
+      }
+      if (queue) {
+        await enqueuePassOutbox(tx, {
+          venueId: conn.venueId,
+          connectionId: conn.id,
+          operation: 'VALIDATE_VISIT',
+          aggregatorVisitId: visit.id,
+        })
+      }
+      return { visitId: visit.id, reservationId, queue }
+    },
+    { reintentarInterbloqueo: true, etiqueta: 'ingestCheckin' },
+  )
 
   logger.info(
     `[PASES] check-in ${ev.externalCheckinId} visita=${result.visitId} reserva=${result.reservationId ?? '—'} modo=${conn.confirmMode} encolada=${result.queue}`,

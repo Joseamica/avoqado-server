@@ -111,7 +111,13 @@ jobs:
         run: npm run lint -- --cache --cache-location node_modules/.cache/eslint/ --cache-strategy content
 
       - name: 🔍 TypeScript compilation check
-        run: npm run typecheck
+        # El chequeo completo rebasa 12 GB; el runner público tiene 16 GB. Mantener también tests/ y scripts/.
+        run: node --max-old-space-size=14336 node_modules/typescript/bin/tsc --noEmit
+
+      # S5b (red por traba): ninguna escritura de beneficios con un `tx` que no venga de withDeadlockRetry. Paso aparte: no toca los
+      # shards de las unitarias, Jest ni CRONOMETRO. Lleva la memoria del typecheck dentro del propio script de npm.
+      - name: 🛡️ Guardia de la marca TxConReintento
+        run: npm run guard:tx-con-reintento
 
       - name: 🗄️ Generate Prisma Client
         run: npx prisma generate
@@ -120,6 +126,7 @@ jobs:
         run: npm run build
 
       - name: 🏪 Run integration tests
+        timeout-minutes: 35
         # 4 procesos en vez de 1 (24 → ~8 min, mismas pruebas; medido el 14-oct). Cada proceso usa su propia copia de la
         # base desechable (`<nombre>_<n>`, la crea TEMPLATE después de migrar; tests/__helpers__/base-por-proceso.ts la
         # elige con CI_DB_POR_PROCESO=1), así dos archivos nunca se pisan los datos. Mismo filtro que `npm run test:integration`.

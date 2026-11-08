@@ -8,6 +8,7 @@ import { cancelOrderInTransaction, publishCancelledOrder } from '@/services/mobi
 import * as orderService from '@/services/mobile/order.mobile.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { seedCardSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -246,7 +247,7 @@ describe('card exchange outcomes (E2)', () => {
   it('an already cancelled new order is released by evidence without cancelling it again', async () => {
     const { exchange: e } = await reserve()
     const removed = await prisma.$transaction(
-      tx => cancelOrderInTransaction(tx, s.venueId, e.newOrderId, 'List cancel', s.staffId),
+      tx => cancelOrderInTransaction(tx as unknown as TxConReintento, s.venueId, e.newOrderId, 'List cancel', s.staffId),
       ORDER_LOCK_WAIT_BUDGET,
     )
     await publishCancelledOrder(s.venueId, removed, s.staffId)

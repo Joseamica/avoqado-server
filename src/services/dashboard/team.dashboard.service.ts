@@ -1181,115 +1181,118 @@ export async function hardDeleteTeamMember(
     throw new BadRequestError('Deletion must be explicitly confirmed')
   }
 
-  const { staffId, deletedRecords } = await withSerializableRetry(async tx => {
-    const memberships = await tx.$queryRaw<Array<{ id: string; staffId: string; role: StaffRole }>>(Prisma.sql`
+  const { staffId, deletedRecords } = await withSerializableRetry(
+    async tx => {
+      const memberships = await tx.$queryRaw<Array<{ id: string; staffId: string; role: StaffRole }>>(Prisma.sql`
       SELECT id, "staffId", role
       FROM "StaffVenue"
       WHERE id = ${teamMemberId}
         AND "venueId" = ${venueId}
       FOR UPDATE
     `)
-    const checkedAt = new Date()
-    if (memberships.length === 0) {
-      throw new NotFoundError('Team member not found')
-    }
+      const checkedAt = new Date()
+      if (memberships.length === 0) {
+        throw new NotFoundError('Team member not found')
+      }
 
-    const staffId = memberships[0].staffId
-    const memberRole = memberships[0].role
+      const staffId = memberships[0].staffId
+      const memberRole = memberships[0].role
 
-    // El borrado permanente lo puede ejecutar el OWNER, no solo un SUPERADMIN. Estas dos
-    // guardas son las mismas que ya protegian la baja suave: sin ellas, abrir la accion al
-    // dueno permitiria borrar a un par o dejar el negocio sin nadie que lo administre.
-    if (memberRole === StaffRole.OWNER || memberRole === StaffRole.SUPERADMIN) {
-      throw new ConflictError(HARD_DELETE_PROTECTED_ROLE_MESSAGE)
-    }
+      // El borrado permanente lo puede ejecutar el OWNER, no solo un SUPERADMIN. Estas dos
+      // guardas son las mismas que ya protegian la baja suave: sin ellas, abrir la accion al
+      // dueno permitiria borrar a un par o dejar el negocio sin nadie que lo administre.
+      if (memberRole === StaffRole.OWNER || memberRole === StaffRole.SUPERADMIN) {
+        throw new ConflictError(HARD_DELETE_PROTECTED_ROLE_MESSAGE)
+      }
 
-    if (memberRole === StaffRole.ADMIN) {
-      const remainingAdmins = await tx.staffVenue.count({
+      if (memberRole === StaffRole.ADMIN) {
+        const remainingAdmins = await tx.staffVenue.count({
+          where: {
+            venueId,
+            role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
+            active: true,
+            id: { not: teamMemberId },
+          },
+        })
+        if (remainingAdmins === 0) {
+          throw new ConflictError(HARD_DELETE_LAST_ADMIN_MESSAGE)
+        }
+      }
+
+      const futureReservation = await tx.reservation.findFirst({
         where: {
           venueId,
-          role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
-          active: true,
-          id: { not: teamMemberId },
+          assignedStaffId: staffId,
+          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+          endsAt: { gt: checkedAt },
+        },
+        select: { id: true },
+      })
+      if (futureReservation) {
+        throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
+      }
+
+      const futureClassSession = await tx.classSession.findFirst({
+        where: {
+          venueId,
+          assignedStaffId: staffId,
+          status: 'SCHEDULED',
+          endsAt: { gt: checkedAt },
+        },
+        select: { id: true },
+      })
+      if (futureClassSession) {
+        throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
+      }
+
+      const candidateHolds = await tx.slotHold.findMany({
+        where: {
+          venueId,
+          staffId,
+          endsAt: { gt: checkedAt },
+          expiresAt: { gt: checkedAt },
+        },
+        select: {
+          expiresAt: true,
+          heldForReservationId: true,
+          heldForReservation: { select: { status: true } },
         },
       })
-      if (remainingAdmins === 0) {
-        throw new ConflictError(HARD_DELETE_LAST_ADMIN_MESSAGE)
+      if (candidateHolds.some(hold => isLiveSlotHold(hold, checkedAt))) {
+        throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
       }
-    }
 
-    const futureReservation = await tx.reservation.findFirst({
-      where: {
-        venueId,
-        assignedStaffId: staffId,
-        status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
-        endsAt: { gt: checkedAt },
-      },
-      select: { id: true },
-    })
-    if (futureReservation) {
-      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
-    }
+      // Track deleted records per attempt so rolled-back counts cannot leak.
+      const deletedRecords: Record<string, number> = {}
 
-    const futureClassSession = await tx.classSession.findFirst({
-      where: {
-        venueId,
-        assignedStaffId: staffId,
-        status: 'SCHEDULED',
-        endsAt: { gt: checkedAt },
-      },
-      select: { id: true },
-    })
-    if (futureClassSession) {
-      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
-    }
+      // 🔴 Commission money history (calculations, payouts, milestone achievements) is NOT deleted: the pay receipt reverses
+      // a voided commission against its row, and a queued refund reversal waits for its original (Codex bloque B #2).
 
-    const candidateHolds = await tx.slotHold.findMany({
-      where: {
-        venueId,
-        staffId,
-        endsAt: { gt: checkedAt },
-        expiresAt: { gt: checkedAt },
-      },
-      select: {
-        expiresAt: true,
-        heldForReservationId: true,
-        heldForReservation: { select: { status: true } },
-      },
-    })
-    if (candidateHolds.some(hold => isLiveSlotHold(hold, checkedAt))) {
-      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
-    }
-
-    // Track deleted records per attempt so rolled-back counts cannot leak.
-    const deletedRecords: Record<string, number> = {}
-
-    // 🔴 Commission money history (calculations, payouts, milestone achievements) is NOT deleted: the pay receipt reverses
-    // a voided commission against its row, and a queued refund reversal waits for its original (Codex bloque B #2).
-
-    // 1. Delete Commission Overrides (configuration, not money) for this staff in this venue
-    const deletedOverrides = await tx.commissionOverride.deleteMany({
-      where: {
-        staffId,
-        config: {
-          venueId,
+      // 1. Delete Commission Overrides (configuration, not money) for this staff in this venue
+      const deletedOverrides = await tx.commissionOverride.deleteMany({
+        where: {
+          staffId,
+          config: {
+            venueId,
+          },
         },
-      },
-    })
-    deletedRecords['commissionOverrides'] = deletedOverrides.count
+      })
+      deletedRecords['commissionOverrides'] = deletedOverrides.count
 
-    // 2. Finally, delete the StaffVenue record itself
-    await tx.staffVenue.delete({
-      where: { id: teamMemberId },
-    })
-    deletedRecords['staffVenue'] = 1
+      // 2. Finally, delete the StaffVenue record itself
+      await tx.staffVenue.delete({
+        where: { id: teamMemberId },
+      })
+      deletedRecords['staffVenue'] = 1
 
-    // Note: We intentionally do NOT delete the Staff record even if this is the last venue.
-    // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
-    // that would cause cascade failures. The user is effectively removed from this venue
-    // by deleting StaffVenue; their commission money history stays (see above).
-    return { staffId, deletedRecords }
-  })
+      // Note: We intentionally do NOT delete the Staff record even if this is the last venue.
+      // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
+      // that would cause cascade failures. The user is effectively removed from this venue
+      // by deleting StaffVenue; their commission money history stays (see above).
+      return { staffId, deletedRecords }
+    },
+    { reintentarInterbloqueo: true, etiqueta: 'hardDeleteTeamMember' },
+  )
 
   logger.info('Team member hard deleted', {
     teamMemberId,

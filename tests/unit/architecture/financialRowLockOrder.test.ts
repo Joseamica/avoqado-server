@@ -39,7 +39,7 @@ function loopsOf(node: ts.Node): number {
   let loops = 0
   for (let n: ts.Node | undefined = node.parent; n && !ts.isSourceFile(n); n = n.parent) {
     // El bucle de un job NO acumula filas si cada vuelta abre/termina su propia transacción.
-    if (ts.isCallExpression(n) && ['$transaction', 'withSerializableRetry', 'transaction'].includes(callName(n))) break
+    if (ts.isCallExpression(n) && ['$transaction', 'withSerializableRetry', 'withDeadlockRetry', 'transaction'].includes(callName(n))) break
     if (ts.isIterationStatement(n, false)) loops++
     if (ts.isCallExpression(n) && ['map', 'forEach', 'reduce', 'flatMap'].includes(callName(n))) loops++
   }

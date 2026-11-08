@@ -133,6 +133,6 @@ describe('price-contract rewrite authorization is source-qualified', () => {
     expect(REESCRITURA_AUTORIZADA.has('services/other.ts#mergeOrdersInTransaction')).toBe(false)
     expect(REESCRITURA_AUTORIZADA.has('services/mobile/order.mobile.service.ts#unreviewedWriter')).toBe(false)
     const mobile = fs.readFileSync(path.join(SRC, 'services/mobile/order.mobile.service.ts'), 'utf8')
-    expect(mobile).toMatch(/\$transaction\(\s*tx => mergeOrdersInTransaction\([\s\S]*?ORDER_LOCK_WAIT_BUDGET/)
+    expect(mobile).toMatch(/(\$transaction|withDeadlockRetry)\(\s*tx => mergeOrdersInTransaction\([\s\S]*?ORDER_LOCK_WAIT_BUDGET/)
   })
 })

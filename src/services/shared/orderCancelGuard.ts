@@ -5,6 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 import { findCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
  * Diseño §C.6 (11-sep): TODA ruta que cancela o anula una orden tiene que hacerlo bajo el MISMO candado de `Order` que
@@ -189,10 +190,7 @@ export async function assertOrderCancellableUnderLock(
   // cancelación la suelta en esta MISMA transacción (`RELEASING`) y el conciliador la libera con Stripe.
   const card = await findCardOnlineOrderInTx(tx, input)
   if (card?.charge?.status === 'CAPTURING') {
-    throw new ConflictError(
-      'Confirmando el pago con tarjeta de este pedido. Intenta en unos segundos.',
-      'ONLINE_ORDER_CONFIRMING_PAYMENT',
-    )
+    throw new ConflictError('Confirmando el pago con tarjeta de este pedido. Intenta en unos segundos.', 'ONLINE_ORDER_CONFIRMING_PAYMENT')
   }
   if (card?.charge?.status === 'AUTHORIZED') {
     await tx.onlineOrderCharge.updateMany({ where: { id: card.charge.id, status: 'AUTHORIZED' }, data: { status: 'RELEASING' } })
@@ -226,7 +224,7 @@ const PAGINA_DE_CANJES = 100
  * Los descuentos que no son canje se quedan como historia de la venta anulada.
  */
 export async function devolverCanjesDeVentaAnuladaEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
 ): Promise<CanjesDevueltos> {
   const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }

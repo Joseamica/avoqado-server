@@ -65,6 +65,7 @@ import { resolveChainRefund, type ChainRefundRoot } from '@/services/exchanges/e
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { costearYProyectarReembolso } from '@/services/payments/deferredTransactionCost.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const VENUE = 'cmvixy2n100006kwa5fvmb7r7'
 const ORDER = 'cmvixy2n200016kwa586a3ucx'
@@ -433,7 +434,7 @@ describe('writeRefundInTx con aSaldoAFavor', () => {
     ['moneyAs', { moneyAs: semanticaDeSaldo }],
     ['devolverCon', { devolverCon: 'BANK_TRANSFER' as const }],
   ])('es excluyente con %s', async (_n, extra) => {
-    await expect(writeRefundInTx(tx, entrada(extra))).rejects.toMatchObject({
+    await expect(writeRefundInTx(tx as unknown as TxConReintento, entrada(extra))).rejects.toMatchObject({
       statusCode: 400,
       code: 'STORE_CREDIT_REFUND_METHOD_CONFLICT',
     })
@@ -444,19 +445,21 @@ describe('writeRefundInTx con aSaldoAFavor', () => {
 
   it('lo pagado con saldo de regalo sólo regresa a su saldo', async () => {
     const conSaldo = bloqueado({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderSystemKind: 'GIFT_CARD' })
-    await expect(writeRefundInTx(tx, entrada({}, conSaldo))).rejects.toMatchObject({ code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    await expect(writeRefundInTx(tx as unknown as TxConReintento, entrada({}, conSaldo))).rejects.toMatchObject({
+      code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+    })
     expect(prepararSobreDeSaldoAFavorEnTx).not.toHaveBeenCalled()
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
   it('un crédito de cambio sin raíz no se manda a saldo (perdería su origen fiscal)', async () => {
     const credito = bloqueado({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderSystemKind: 'EXCHANGE_CREDIT' })
-    await expect(writeRefundInTx(tx, entrada({}, credito))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(writeRefundInTx(tx as unknown as TxConReintento, entrada({}, credito))).rejects.toMatchObject({ statusCode: 400 })
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
   it('regresa el abono junto con la fila', async () => {
-    const r = await writeRefundInTx(tx, entrada())
+    const r = await writeRefundInTx(tx as unknown as TxConReintento, entrada())
     expect(r).toEqual({ refundPaymentId: REFUND, replay: false, abono: abonoHecho(100) })
     expect(abonar).toHaveBeenCalledWith(tx, REFUND, preparado(), { orderId: ORDER, montoCents: 10000 })
   })

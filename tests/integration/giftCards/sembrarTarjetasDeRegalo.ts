@@ -14,6 +14,7 @@ import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { activarSobresDeCuentaPagadaEnTx, canjearSobresEnTx, lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const D = (pesos: number) => new Prisma.Decimal(pesos)
 const folio = (prefijo: string) => `${prefijo}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -204,7 +205,7 @@ export async function sembrarVentaDeTarjetas(p: {
   }
   await prisma.$transaction(async tx => {
     await lockExistingOrderForPayment(tx, { venueId: p.venueId, orderId: order.id })
-    await activarSobresDeCuentaPagadaEnTx(tx, { venueId: p.venueId, orderId: order.id, staffId: p.staffId })
+    await activarSobresDeCuentaPagadaEnTx(tx as unknown as TxConReintento, { venueId: p.venueId, orderId: order.id, staffId: p.staffId })
   }, ORDER_LOCK_WAIT_BUDGET)
   const activos = await prisma.giftCard.findMany({
     where: { id: { in: giftCardIds } },
@@ -375,9 +376,9 @@ export async function sembrarCanje(p: {
   await ensureGiftCardTender(prisma, p.venueId)
   return prisma.$transaction(async tx => {
     await lockExistingOrderForPayment(tx, { venueId: p.venueId, orderId })
-    const cards = await lockGiftCardsForUpdate(tx, p.giftCardIds)
+    const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, p.giftCardIds)
     const pagoConSaldo = await crearCobroConSaldoEnTx(tx, { venueId: p.venueId, orderId, monto: p.conSaldo, staffId: p.staffId, propina })
-    await canjearSobresEnTx(tx, {
+    await canjearSobresEnTx(tx as unknown as TxConReintento, {
       venueId: p.venueId,
       orderId,
       paymentId: pagoConSaldo.id,

@@ -15,6 +15,7 @@ import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 import { abrirTurno, limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -51,7 +52,7 @@ describe('writeRefundInTx — núcleo del reembolso', () => {
   it('REVERSE_PROPORTIONAL revierte la comision con el % del original, en PESOS', async () => {
     const { pago } = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30 })
     const { refundPaymentId, replay } = await prisma.$transaction(tx =>
-      writeRefundInTx(tx, ajusteDeReparto(pago.id, { fiscalByRateCents: { '0.16': 690 }, generation: 1 })),
+      writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(pago.id, { fiscalByRateCents: { '0.16': 690 }, generation: 1 })),
     )
     expect(replay).toBe(false)
     const fila = await prisma.payment.findUniqueOrThrow({ where: { id: refundPaymentId } })
@@ -79,8 +80,8 @@ describe('writeRefundInTx — núcleo del reembolso', () => {
     const { pago: sinTurno } = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30 })
     const { pago: conTurno } = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30, shiftId: turno.id })
 
-    const a = await prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(sinTurno.id)))
-    const b = await prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(conTurno.id)))
+    const a = await prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(sinTurno.id)))
+    const b = await prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(conTurno.id)))
 
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: a.refundPaymentId } })).shiftId).toBeNull()
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: b.refundPaymentId } })).shiftId).toBe(turno.id)
@@ -97,9 +98,9 @@ describe('writeRefundInTx — núcleo del reembolso', () => {
   it('el replay por idempotencyKey devuelve el mismo REFUND ANTES de validar cantidades', async () => {
     const { pago, order } = await sembrarCobro({ venueId, staffId, saleCents: 3000, commissionPercent: 30 })
     const input = ajusteDeReparto(pago.id, { salesRefundCents: 3000, idempotencyKey: `dlr:${order.id}:1` })
-    const uno = await prisma.$transaction(tx => writeRefundInTx(tx, input))
+    const uno = await prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, input))
     // Sin el replay, esto moriría: ya no queda nada que devolver de ese cobro.
-    const dos = await prisma.$transaction(tx => writeRefundInTx(tx, input))
+    const dos = await prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, input))
     expect(dos.refundPaymentId).toBe(uno.refundPaymentId)
     expect(dos.replay).toBe(true)
     expect(await prisma.payment.count({ where: { type: 'REFUND', orderId: order.id } })).toBe(1)
@@ -110,22 +111,26 @@ describe('writeRefundInTx — núcleo del reembolso', () => {
     const { pago: a } = await sembrarCobro({ venueId, staffId, saleCents: 3000, commissionPercent: 30 })
     const { pago: b } = await sembrarCobro({ venueId, staffId, saleCents: 3000, commissionPercent: 30 })
     const llave = `dlr:cruce:${a.id}`
-    await prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(a.id, { salesRefundCents: 1000, idempotencyKey: llave })))
+    await prisma.$transaction(tx =>
+      writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(a.id, { salesRefundCents: 1000, idempotencyKey: llave })),
+    )
     // Devolverle a B el reembolso de A le diría al reconciliador «ya quedó» sobre un cobro intacto.
     await expect(
-      prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(b.id, { salesRefundCents: 1000, idempotencyKey: llave }))),
+      prisma.$transaction(tx =>
+        writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(b.id, { salesRefundCents: 1000, idempotencyKey: llave })),
+      ),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' })
     expect(await prisma.payment.count({ where: { type: 'REFUND', orderId: b.orderId } })).toBe(0)
   })
 
   it('rechaza componentes negativos', async () => {
     const { pago } = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30 })
-    await expect(prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(pago.id, { salesRefundCents: -1 })))).rejects.toThrow(
-      /no negativos/i,
-    )
-    await expect(prisma.$transaction(tx => writeRefundInTx(tx, ajusteDeReparto(pago.id, { tipRefundCents: -1 })))).rejects.toThrow(
-      /no negativos/i,
-    )
+    await expect(
+      prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(pago.id, { salesRefundCents: -1 }))),
+    ).rejects.toThrow(/no negativos/i)
+    await expect(
+      prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, ajusteDeReparto(pago.id, { tipRefundCents: -1 }))),
+    ).rejects.toThrow(/no negativos/i)
     expect(await prisma.payment.count({ where: { type: 'REFUND', orderId: pago.orderId } })).toBe(0)
   })
 

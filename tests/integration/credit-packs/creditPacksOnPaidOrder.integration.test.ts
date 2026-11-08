@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { updateCreditPack, deactivateCreditPack } from '@/services/dashboard/creditPack.dashboard.service'
 import { buildCreditPackSnapshot, fulfillCreditPacksForOrder, CREDIT_PACK_LINE_HELD } from '@/services/shared/creditPacksOnPaidOrder'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const RUN = Date.now()
 
@@ -161,7 +162,7 @@ describe('Paquete vendido en un renglón de orden: entrega desde la foto (integr
   const entregar = () =>
     prisma.$transaction(async tx => {
       await tx.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } })
-      return fulfillCreditPacksForOrder(tx, order.id)
+      return fulfillCreditPacksForOrder(tx as unknown as TxConReintento, order.id)
     })
 
   it('entrega lo VENDIDO aunque antes de pagar la dueña cambie Yoga por Pilates, precio y vigencia, y lo desactive', async () => {
@@ -213,7 +214,9 @@ describe('Paquete vendido en un renglón de orden: entrega desde la foto (integr
   })
 
   it('una orden que no existe es NotFound', async () => {
-    await expect(prisma.$transaction(tx => fulfillCreditPacksForOrder(tx, 'cnoexisteestaorden0000000'))).rejects.toMatchObject({
+    await expect(
+      prisma.$transaction(tx => fulfillCreditPacksForOrder(tx as unknown as TxConReintento, 'cnoexisteestaorden0000000')),
+    ).rejects.toMatchObject({
       statusCode: 404,
     })
   })
