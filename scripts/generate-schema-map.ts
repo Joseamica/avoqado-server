@@ -494,6 +494,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   LoyaltyTransaction: 'Discounts, Loyalty & Credit Packs',
   CustomerOrderMetric: 'Discounts, Loyalty & Credit Packs',
   WalletPass: 'Discounts, Loyalty & Credit Packs',
+  WalletPassOutbox: 'Discounts, Loyalty & Credit Packs',
   WalletCardDesign: 'Discounts, Loyalty & Credit Packs',
   WalletPassRegistration: 'Discounts, Loyalty & Credit Packs',
   StampCard: 'Discounts, Loyalty & Credit Packs',
