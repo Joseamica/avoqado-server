@@ -355,6 +355,8 @@ export async function createPendingSaleVerification(data: {
   serialNumbers: string[]
   scannedProducts: ScannedProduct[]
   deviceId?: string
+  /** Hora real de la venta (venta del celular subida tarde): Cash Out paga por el día de `createdAt`. */
+  createdAt?: Date
 }): Promise<SaleVerificationResponse> {
   logger.info(`📸 [SALE VERIFICATION SERVICE] Creating PENDING verification for payment ${data.paymentId}`, {
     isPortabilidad: data.isPortabilidad,
@@ -381,6 +383,7 @@ export async function createPendingSaleVerification(data: {
         isPortabilidad: data.isPortabilidad,
         serialNumbers: data.serialNumbers,
         deviceId: data.deviceId ?? null,
+        ...(data.createdAt && { createdAt: data.createdAt }),
       },
     })
   })
