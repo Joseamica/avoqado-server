@@ -290,7 +290,7 @@ async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<Vent
     return ficha
   } catch (error) {
     if (ficha.orderId) {
-      if (!esAppError4xx(error)) throw await limpiarTrasElCobro(t, ficha.id, ficha.orderId, error)
+      if (!esAppError4xx(error)) throw await limpiarTrasElCobro(t, ficha, ficha.orderId, error)
       return await antesDeRechazar(t, ficha, ficha.orderId, error)
     }
     if (!esAppError4xx(error)) {
@@ -310,10 +310,7 @@ async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<Vent
  * reintento va por la recuperación de siempre. Sólo sin nada de eso se limpia y sale el rechazo.
  */
 async function antesDeRechazar(t: Trabajo, ficha: VentaDeCampo, orderId: string, error: AppError): Promise<VentaDeCampo> {
-  const pago = await prisma.payment.findUnique({
-    where: { venueId_idempotencyKey: { venueId: t.venueId, idempotencyKey: t.llave } },
-    select: { id: true, orderId: true, venueId: true, amount: true, status: true },
-  })
+  const pago = await cobroDeLaLlave(t)
   if (pago && esDeEstaVenta(t, pago, orderId, new Prisma.Decimal(ficha.precio))) {
     await escribir(t, ficha.id, { paymentId: pago.id })
     return { ...ficha, paymentId: pago.id }
@@ -322,7 +319,7 @@ async function antesDeRechazar(t: Trabajo, ficha: VentaDeCampo, orderId: string,
     await soltar(t, ficha.id)
     throw comoReintentable(t, error, 'un rechazo de la revisión con dinero en camino')
   }
-  throw await limpiarTrasElCobro(t, ficha.id, orderId, error)
+  throw await limpiarTrasElCobro(t, ficha, orderId, error)
 }
 
 /** La SIM quedó vendida en un renglón de ESTA orden: es nuestra venta, nunca un rechazo. */
@@ -334,6 +331,12 @@ async function vendidaEnEstaOrden(ficha: VentaDeCampo, orderId: string): Promise
   if (sim?.status !== 'SOLD' || !sim.orderItemId) return false
   return !!(await prisma.orderItem.findFirst({ where: { id: sim.orderItemId, orderId }, select: { id: true } }))
 }
+
+const cobroDeLaLlave = (t: Trabajo) =>
+  prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId: t.venueId, idempotencyKey: t.llave } },
+    select: { id: true, orderId: true, venueId: true, amount: true, status: true },
+  })
 
 /** Paso 6 (Codex r3 #6): el cobro de la llave es el de ESTA venta (su orden, su sucursal, su importe y completado). */
 const esDeEstaVenta = (
@@ -373,10 +376,10 @@ async function cobrar(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise
   try {
     pago = await recordOrderPayment(t.venueId, orderId, datosDelCobro(t, precio), t.staffId, t.orgId)
   } catch (error) {
-    throw await limpiarTrasElCobro(t, ficha.id, orderId, error)
+    throw await limpiarTrasElCobro(t, ficha, orderId, error)
   }
   // Codex r3 #6: el cobro que devuelve la llave tiene que ser de ESTA venta.
-  if (!esDeEstaVenta(t, pago, orderId, precio)) throw await limpiarTrasElCobro(t, ficha.id, orderId, llaveReusada())
+  if (!esDeEstaVenta(t, pago, orderId, precio)) throw await limpiarTrasElCobro(t, ficha, orderId, llaveReusada())
   await escribir(t, ficha.id, { paymentId: pago.id })
   return pago.id
 }
@@ -421,7 +424,8 @@ const COBRO_TRANSITORIO = new Set(['ORDER_PAYMENT_CONFLICT'])
  * rechazo. Si esa limpieza falla, sale VENTA_EN_PROCESO para que el celular reintente hasta que se pueda. Un 5xx, un desconocido
  * o un 409 transitorio del cobro sólo desocupan. Devuelve el error para lanzarlo.
  */
-async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, error: unknown): Promise<unknown> {
+async function limpiarTrasElCobro(t: Trabajo, ficha: VentaDeCampo, orderId: string, error: unknown): Promise<unknown> {
+  const fichaId = ficha.id
   if (!esAppError4xx(error)) {
     await soltar(t, fichaId)
     return error
@@ -432,7 +436,13 @@ async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, 
   }
   try {
     if (!(await sinCobros(t, orderId))) {
-      await soltar(t, fichaId) // con dinero en la cuenta no se cancela nada: el rechazo queda tal cual
+      await soltar(t, fichaId) // con dinero en la cuenta no se cancela nada
+      // Codex r3: el dinero es el cobro de ESTA venta, que confirmó a destiempo (una petición vieja): no hay rechazo. El
+      // reintento lo encuentra al empezar y completa los pasos 7 y 8. Con dinero ajeno, el rechazo queda tal cual.
+      const pago = await cobroDeLaLlave(t)
+      if (pago && esDeEstaVenta(t, pago, orderId, new Prisma.Decimal(ficha.precio))) {
+        return comoReintentable(t, error, 'un rechazo con el cobro de esta venta ya confirmado')
+      }
       return error
     }
     await cancelarCuentaSinCobrar(t.venueId, orderId, `Venta del celular rechazada: ${error.code ?? error.statusCode}`, t.staffId).catch(

@@ -874,6 +874,46 @@ describe('antes de un rechazo de la revisión, el cobro de la llave se busca otr
     expect(ficha()).toMatchObject({ estado: 'EN_CURSO', orderId: 'o9', paymentId: null, ocupacion: null })
   })
 
+  it('Codex r3: el cobro de A con nuestra llave confirma DESPUÉS de las lecturas de la revisión y ANTES de la limpieza → VENTA_EN_PROCESO; el reintento completa con ESE cobro', async () => {
+    conOrden()
+    scan.mockResolvedValue(simDisponible(D(120))) // la revisión ve otro precio: PRECIO_CAMBIO
+    // La última lectura antes de la limpieza (¿SIM vendida en esta orden?): justo ahí confirma el cobro de A.
+    db.serializedItem.findUnique.mockImplementationOnce(async () => {
+      db.payment.findUnique.mockResolvedValue(pagoDeA())
+      db.payment.count.mockResolvedValue(1)
+      return { status: 'AVAILABLE', orderItemId: null }
+    })
+
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(cancelar).not.toHaveBeenCalled()
+    expect(ficha()).toMatchObject({ estado: 'EN_CURSO', orderId: 'o9', paymentId: null, ocupacion: null })
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('VENTA_EN_PROCESO'),
+      expect.objectContaining({ code: 'PRECIO_CAMBIO' }),
+    )
+
+    cobrar.mockResolvedValue(pagoDeA()) // la llave devuelve el cobro que ya existe
+    const r = await registrarVentaDeCampo(ctx, venta())
+    expect(r).toMatchObject({ orderId: 'o9', paymentId: 'pA', repetida: false })
+    expect(ficha()).toMatchObject({ estado: 'COMPLETA', orderId: 'o9', paymentId: 'pA' })
+    expect(vender).not.toHaveBeenCalled() // ninguna orden nueva
+    expect(cobrar.mock.calls.map(c => [c[1], c[2].idempotencyKey])).toEqual([['o9', LLAVE]]) // el cobro de la llave, no uno nuevo
+    expect(evidencia).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pA' }))
+  })
+
+  it('el dinero que encuentra la limpieza NO es de nuestra llave (la cuenta la pagó el panel): el rechazo queda tal cual', async () => {
+    conOrden()
+    scan.mockResolvedValue(simDisponible(D(120)))
+    db.serializedItem.findUnique.mockImplementationOnce(async () => {
+      db.payment.count.mockResolvedValue(1)
+      return { status: 'AVAILABLE', orderItemId: null }
+    })
+
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(422, 'PRECIO_CAMBIO'))
+    expect(cancelar).not.toHaveBeenCalled()
+    expect(ficha()).toMatchObject({ orderId: 'o9', ocupacion: null })
+  })
+
   it('la SIM vendida en un renglón de OTRA orden (la PAX) y sin dinero en la nuestra → SIM_YA_VENDIDA definitivo, con la limpieza', async () => {
     conOrden()
     scan.mockResolvedValue(yaVendida)
