@@ -136,3 +136,28 @@ export const latidoSchema = z.object({
 
 /** Desvincular desde el celular: dice cuánto le queda por subir (la verdad es la suya; 0 para poder soltar). */
 export const desvincularSchema = z.object({ body: z.object({ porSubir: cuantos }).strict() })
+
+/** Lo que el celular puede mandar por la gracia (bloque 1, Tarea 7): cada tipo es una ruta normal del celular. */
+export const TIPOS_DE_ENVIO = ['VENTA', 'ENTRADA', 'SALIDA', 'CUSTODIA_ACEPTAR', 'CUSTODIA_RECHAZAR', 'EVIDENCIA'] as const
+
+/**
+ * POST /tpv/campo/gracia: el cuerpo viaja como TEXTO, exacto como lo llevaría la ruta normal, porque su huella se calcula
+ * sobre ese texto (`tipo\nvenueId\ncuerpoJson`).
+ */
+export const graciaSchema = z.object({
+  body: z
+    .object({
+      tipo: z.enum(TIPOS_DE_ENVIO),
+      venueId: z.string().min(1).max(50),
+      cuerpoJson: z.string().min(1).max(20_000, { message: 'El cuerpo es demasiado grande.' }),
+    })
+    .strict(),
+})
+
+/**
+ * La evidencia en la gracia y en «Aplicar» nombra su venta con la llave de la venta (`ventaLlave`) en vez del `paymentId`
+ * (el celular desvinculado nunca supo el pago). Lo demás se valida con el `body` de `createProofOfSaleSchema`, el de la ruta.
+ */
+export const evidenciaDeCampoLlaveSchema = z
+  .object({ ventaLlave: z.string().uuid({ message: 'La llave de la venta debe ser un UUID.' }) })
+  .passthrough()

@@ -13,6 +13,7 @@ import { listMySims } from '@/controllers/tpv/simCustody.tpv.controller'
 import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.service'
 import { registrarEntradaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
+import { recibirEnGracia } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
 /** La sesión de campo de mentira: la persona va en `x-persona`, su sucursal es v1 y su celular `cel-<persona>`. */
 jest.mock('@/middlewares/autenticarSesionDeCampo.middleware', () => ({
@@ -47,6 +48,7 @@ jest.mock('@/middlewares/validateVenueAccess.middleware', () => ({
 }))
 jest.mock('@/services/tpv/campo/checadaDeCampo.service', () => ({ registrarEntradaDeCampo: jest.fn(), registrarSalidaDeCampo: jest.fn() }))
 jest.mock('@/services/tpv/campo/ventaDeCampo.service', () => ({ registrarVentaDeCampo: jest.fn() }))
+jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({ recibirEnGracia: jest.fn() }))
 
 const entrada = registrarEntradaDeCampo as jest.Mock
 const venta = registrarVentaDeCampo as jest.Mock
@@ -202,5 +204,44 @@ describe('rutas del bloque 1', () => {
       .send({ porSubir: { total: 1 }, huellas: Array.from({ length: 501 }, () => 'a'.repeat(64)) })
     expect(r.status).toBe(400)
     expect(latido).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /campo/gracia (bloque 1, Tarea 7)', () => {
+  const gracia = recibirEnGracia as jest.Mock
+  const enviar = (celular: string, body: object) => request(app).post('/campo/gracia').set('x-celular', celular).send(body)
+  const cuerpo = { tipo: 'VENTA', venueId: 'v1', cuerpoJson: '{"llave":"x"}' }
+
+  beforeEach(() => gracia.mockReset())
+
+  it('pasa el celular de la credencial y el cuerpo; contesta el status y el body del servicio', async () => {
+    gracia.mockResolvedValue({ status: 202, body: { retenido: true, motivo: 'NO_REPORTADA' } })
+    const r = await enviar('cel-g1', cuerpo)
+    expect(r.status).toBe(202)
+    expect(r.body).toEqual({ retenido: true, motivo: 'NO_REPORTADA' })
+    expect(gracia).toHaveBeenCalledWith({ id: 'cel-g1' }, cuerpo)
+  })
+
+  it('tipo desconocido, una llave de más o un cuerpo de más de 20 000 → 400 sin llamar al servicio', async () => {
+    expect((await enviar('cel-g2', { ...cuerpo, tipo: 'OTRO' })).status).toBe(400)
+    expect((await enviar('cel-g2', { ...cuerpo, extra: 1 })).status).toBe(400)
+    expect((await enviar('cel-g2', { ...cuerpo, cuerpoJson: 'x'.repeat(20_001) })).status).toBe(400)
+    expect(gracia).not.toHaveBeenCalled()
+  })
+
+  it('un rechazo lleva sus datos al nivel de code', async () => {
+    gracia.mockRejectedValue(new ConflictError('usa tu sesión', 'USA_TU_SESION', { venueId: 'v1' }))
+    const r = await enviar('cel-g3', cuerpo)
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({ code: 'USA_TU_SESION', message: 'usa tu sesión', venueId: 'v1' })
+  })
+
+  it('tope de 60 por minuto por celular: la 61 sale 429 y otro celular sigue pasando', async () => {
+    gracia.mockResolvedValue({ status: 200, body: {} })
+    for (let i = 0; i < 60; i++) expect((await enviar('cel-tope', cuerpo)).status).toBe(200)
+    const r = await enviar('cel-tope', cuerpo)
+    expect(r.status).toBe(429)
+    expect(r.body).toMatchObject({ code: 'RATE_LIMIT' })
+    expect((await enviar('cel-otro', cuerpo)).status).toBe(200)
   })
 })

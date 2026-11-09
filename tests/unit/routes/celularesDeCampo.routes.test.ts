@@ -12,6 +12,12 @@ const desvincularMock = jest.fn()
 jest.mock('@/services/tpv/campo/celular/desvincularCelular.service', () => ({
   desvincularCelular: (...a: unknown[]) => desvincularMock(...a),
 }))
+const listarMock = jest.fn()
+const resolverMock = jest.fn()
+jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({
+  listarRetenidos: (...a: unknown[]) => listarMock(...a),
+  resolverRetenido: (...a: unknown[]) => resolverMock(...a),
+}))
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
     const raw = req.headers['x-test-auth-context']
@@ -115,5 +121,77 @@ describe('POST .../celulares-de-campo/:celularId/desvincular', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, data: resultado })
     expect(desvincularMock).toHaveBeenCalledWith({ celularId: 'cel1', organizationId: ORG, motivo: 'PANEL', porStaffId: 'gerente' })
+  })
+})
+
+describe('«Por revisar»: GET …/retenidos y POST …/retenidos/:retenidoId/resolver (Tarea 7)', () => {
+  const BASE = `/dashboard/organizations/${ORG}/celulares-de-campo/retenidos`
+
+  it('un WAITER recibe 403', async () => {
+    expect((await request(makeApp()).get(BASE).set(como('promotor', 'WAITER'))).status).toBe(403)
+    expect((await request(makeApp()).post(`${BASE}/r1/resolver`).set(como('promotor', 'WAITER')).send({ accion: 'APLICAR' })).status).toBe(
+      403,
+    )
+    expect(listarMock).not.toHaveBeenCalled()
+    expect(resolverMock).not.toHaveBeenCalled()
+  })
+
+  it('lista con estado como lista separada por coma y la paginación por omisión (50) → { success, data: { items, total } }', async () => {
+    listarMock.mockResolvedValue({ items: [], total: 0 })
+    const res = await request(makeApp()).get(`${BASE}?estado=PENDIENTE,APLICANDO&staffId=s1`).set(como('gerente', 'MANAGER'))
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: { items: [], total: 0 } })
+    expect(listarMock).toHaveBeenCalledWith(ORG, {
+      staffId: 's1',
+      venueId: undefined,
+      estado: ['PENDIENTE', 'APLICANDO'],
+      page: 1,
+      pageSize: 50,
+    })
+  })
+
+  it('un estado que no existe, pageSize de 101 o un filtro desconocido → 400', async () => {
+    for (const q of ['estado=PENDIENTE,OTRO', 'pageSize=101', 'page=0', 'orden=x']) {
+      expect((await request(makeApp()).get(`${BASE}?${q}`).set(como('gerente', 'MANAGER'))).status).toBe(400)
+    }
+    expect(listarMock).not.toHaveBeenCalled()
+  })
+
+  it('resolver: pasa el retenido, la organización de la ruta y quién lo resuelve', async () => {
+    resolverMock.mockResolvedValue({ estado: 'DESCARTADO', repetida: false })
+    const res = await request(makeApp())
+      .post(`${BASE}/r1/resolver`)
+      .set(como('gerente', 'MANAGER'))
+      .send({ accion: 'DESCARTAR', nota: 'prueba' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: { estado: 'DESCARTADO', repetida: false } })
+    expect(resolverMock).toHaveBeenCalledWith({
+      retenidoId: 'r1',
+      organizationId: ORG,
+      accion: 'DESCARTAR',
+      nota: 'prueba',
+      porStaffId: 'gerente',
+    })
+  })
+
+  it('resolver: 422 con sus datos al nivel de code; acción inválida o nota de más de 500 → 400', async () => {
+    const { ValidationError } = jest.requireActual('@/errors/AppError')
+    resolverMock.mockRejectedValue(new ValidationError('No se pudo aplicar.', 'NO_SE_PUDO_APLICAR', { motivo: 'PERSONA_SIN_ASIGNACION' }))
+    const res = await request(makeApp()).post(`${BASE}/r1/resolver`).set(como('gerente', 'MANAGER')).send({ accion: 'APLICAR' })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ code: 'NO_SE_PUDO_APLICAR', message: 'No se pudo aplicar.', motivo: 'PERSONA_SIN_ASIGNACION' })
+    resolverMock.mockClear()
+    expect((await request(makeApp()).post(`${BASE}/r1/resolver`).set(como('gerente', 'MANAGER')).send({ accion: 'BORRAR' })).status).toBe(
+      400,
+    )
+    expect(
+      (
+        await request(makeApp())
+          .post(`${BASE}/r1/resolver`)
+          .set(como('gerente', 'MANAGER'))
+          .send({ accion: 'APLICAR', nota: 'x'.repeat(501) })
+      ).status,
+    ).toBe(400)
+    expect(resolverMock).not.toHaveBeenCalled()
   })
 })

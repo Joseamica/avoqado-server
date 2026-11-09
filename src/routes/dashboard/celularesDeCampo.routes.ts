@@ -1,8 +1,10 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { validateRequest } from '../../middlewares/validation'
-import { generarCodigosSchema } from '../../schemas/dashboard/celularesDeCampo.schema'
+import AppError from '../../errors/AppError'
+import { generarCodigosSchema, listarRetenidosSchema, resolverRetenidoSchema } from '../../schemas/dashboard/celularesDeCampo.schema'
 import { generarCodigos } from '../../services/tpv/campo/celular/codigoDeCelular.service'
 import { desvincularCelular } from '../../services/tpv/campo/celular/desvincularCelular.service'
+import { listarRetenidos, resolverRetenido } from '../../services/tpv/campo/celular/graciaDelCelular.service'
 
 // Se monta en organizationDashboard.routes.ts detrás de authenticate + checkOrgAccess + requireOrgManager.
 const router = Router({ mergeParams: true })
@@ -29,5 +31,40 @@ router.post('/:celularId/desvincular', async (req: Request, res: Response, next:
     next(error)
   }
 })
+
+/** «Por revisar»: lo que un celular subió en su gracia y no se pudo aceptar solo. `estado` = uno o varios, separados por coma. */
+router.get('/retenidos', validateRequest(listarRetenidosSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { staffId, venueId, estado, page, pageSize } = req.query as any
+    const data = await listarRetenidos(req.params.orgId, { staffId, venueId, estado, page, pageSize })
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/** Aplicar o descartar un retenido. Los rechazos con datos (`motivo`, `rechazo`) van al mismo nivel que `code`. */
+router.post(
+  '/retenidos/:retenidoId/resolver',
+  validateRequest(resolverRetenidoSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await resolverRetenido({
+        retenidoId: req.params.retenidoId,
+        organizationId: req.params.orgId,
+        accion: req.body.accion,
+        nota: req.body.nota,
+        porStaffId: (req as any).authContext.userId,
+      })
+      res.json({ success: true, data })
+    } catch (error) {
+      const d = error instanceof AppError ? error.details : undefined
+      if (error instanceof AppError && d && typeof d === 'object' && !Array.isArray(d)) {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...d })
+      }
+      next(error)
+    }
+  },
+)
 
 export default router

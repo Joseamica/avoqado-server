@@ -21,6 +21,7 @@ import {
   desvincularSchema,
   entradaDeCampoSchema,
   entrarConPinSchema,
+  graciaSchema,
   latidoSchema,
   rechazarCustodiaSchema,
   renovarSesionSchema,
@@ -31,6 +32,7 @@ import { activarCelular } from '@/services/tpv/campo/celular/activarCelular.serv
 import { autenticarCelular } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { entrarConPin, renovarSesionDeCelular } from '@/services/tpv/campo/celular/entrarConPin.service'
+import { recibirEnGracia } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
@@ -170,6 +172,30 @@ router.post(
     const c = res.locals.celular
     return desvincularCelular({ celularId: c.id, organizationId: c.organizationId, motivo: 'CELULAR', porStaffId: c.staffId })
   }),
+)
+
+/**
+ * POST /tpv/campo/gracia — `{ tipo, venueId, cuerpoJson }` con la credencial del celular DESVINCULADO (bloque 1, A5). Lo que
+ * traía una huella de su último latido, dentro de 24 h, se aplica a nombre de la persona (el status y el body de la ruta
+ * normal, con `aplicadoEnGracia: true`); lo demás se retiene → 202 `{ retenido: true, motivo }`. Un retenido que ya existe
+ * contesta su desenlace. 403 OTRA_ORGANIZACION, 400, 409 USA_TU_SESION; reintentable: los EN_PROCESO, 429 y 5xx.
+ */
+router.post(
+  '/gracia',
+  autenticarCelular,
+  limitePorCelular(60),
+  validateRequest(graciaSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const r = await recibirEnGracia(res.locals.celular, req.body)
+      res.status(r.status).json(r.body)
+    } catch (error) {
+      if (error instanceof AppError && esObjeto(error.details)) {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...error.details })
+      }
+      next(error)
+    }
+  },
 )
 
 /**
