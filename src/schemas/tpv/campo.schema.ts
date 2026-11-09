@@ -23,3 +23,9 @@ export const ventaDeCampoBodySchema = z.object({
 export const ventaDeCampoSchema = z.object({ body: ventaDeCampoBodySchema })
 
 export type VentaDeCampoBody = z.infer<typeof ventaDeCampoBodySchema>
+
+/** Custodia del celular: aceptar varias SIMs (tope 50) o rechazar UNA. */
+export const aceptarCustodiaSchema = z.object({
+  body: z.object({ serialNumbers: z.array(z.string().min(1)).min(1).max(50) }),
+})
+export const rechazarCustodiaSchema = z.object({ body: z.object({ serialNumber: z.string().min(1) }) })

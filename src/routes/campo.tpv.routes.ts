@@ -7,7 +7,8 @@ import AppError, { NotFoundError } from '@/errors/AppError'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
-import { ventaDeCampoSchema } from '@/schemas/tpv/campo.schema'
+import { aceptarCustodia, rechazarCustodia } from '@/controllers/tpv/campo/custodiaDeCampo.controller'
+import { aceptarCustodiaSchema, rechazarCustodiaSchema, ventaDeCampoSchema } from '@/schemas/tpv/campo.schema'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import prisma from '@/utils/prismaClient'
 
@@ -37,6 +38,22 @@ router.post(
       next(error)
     }
   },
+)
+
+/** Custodia del celular: sin `simCustodyIdempotency`; «ya estaba hecho» (misma persona) es éxito con `repetida: true`. */
+router.post(
+  '/venues/:venueId/custodia/aceptar',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-sim-custody:accept'),
+  validateRequest(aceptarCustodiaSchema),
+  aceptarCustodia,
+)
+router.post(
+  '/venues/:venueId/custodia/rechazar',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-sim-custody:reject'),
+  validateRequest(rechazarCustodiaSchema),
+  rechazarCustodia,
 )
 
 export default router
