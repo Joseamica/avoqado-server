@@ -71,6 +71,7 @@ import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
 import { registerManualSaleTools } from './tools/manualSale'
 import { registerPromoterLocationTools } from './tools/promoterLocation'
+import { registerCelularesDeCampoTools } from './tools/celularesDeCampo'
 import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
@@ -198,6 +199,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
 
   if (flags.serializedEnabled) {
     registerSerializedTools(server, scope)
+    registerCelularesDeCampoTools(server, scope)
     registerSaleVerificationTools(server, scope)
     registerManualSaleTools(server, scope)
     registerCashOutTools(server, scope)
