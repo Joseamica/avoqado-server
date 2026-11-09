@@ -225,7 +225,14 @@ const PAGINA_DE_CANJES = 100
  */
 export async function devolverCanjesDeVentaAnuladaEnTx(
   tx: TxConReintento,
-  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
+  input: {
+    venueId: string
+    orderId: string
+    staffId?: string | null
+    camino: string
+    /** Sólo «Regresar saldo y cancelar»: la venta trae abonos que se regresan en esta misma transacción (`PAID` se sigue rechazando). */
+    abonosDeSaldoSeRegresanEnEstaTx?: boolean
+  },
 ): Promise<CanjesDevueltos> {
   const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }
   const quitadas: string[] = []
@@ -243,7 +250,9 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     // Import dinámico: order.mobile.service importa este módulo.
     const { removeOrderDiscountInTransaction } = await import('../mobile/order.mobile.service')
     for (const fila of canjes) {
-      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined)
+      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined, {
+        abonosDeSaldoSeRegresanEnEstaTx: input.abonosDeSaldoSeRegresanEnEstaTx,
+      })
       devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0
       if (r.stampRefund) devuelto.stampRewardsReturned.push(r.stampRefund.rewardId)
       quitadas.push(fila.id)
