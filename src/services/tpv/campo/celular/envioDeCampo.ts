@@ -304,7 +304,11 @@ async function custodiaHecha(
       take: TOPE_DE_EVENTOS,
     }),
     prisma.serializedItemCustodyEvent.findMany({
-      where: { ...base, eventType: tipo === 'CUSTODIA_ACEPTAR' ? 'ACCEPTED_BY_PROMOTER' : 'REJECTED_BY_PROMOTER', actorStaffId: ctx.staffId },
+      where: {
+        ...base,
+        eventType: tipo === 'CUSTODIA_ACEPTAR' ? 'ACCEPTED_BY_PROMOTER' : 'REJECTED_BY_PROMOTER',
+        actorStaffId: ctx.staffId,
+      },
       select,
       orderBy: { createdAt: 'desc' },
       take: TOPE_DE_EVENTOS,

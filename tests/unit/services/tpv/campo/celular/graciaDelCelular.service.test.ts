@@ -9,8 +9,8 @@ import { ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
-import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
-import { aplicarEnvio, huellaDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
+import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
+import { aplicarEnvio, efectoYaHecho, huellaDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
 import { listarRetenidos, recibirEnGracia, resolverRetenido } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -31,15 +31,21 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/middlewares/checkPermission.middleware', () => ({ staffHasPermissionInVenue: jest.fn() }))
-jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({ sucursalesDeLaPersona: jest.fn() }))
+jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({
+  sucursalesDeLaPersona: jest.fn(),
+  sucursalesDeCampoDeLaPersona: jest.fn(),
+}))
 jest.mock('@/services/tpv/campo/celular/envioDeCampo', () => ({
   ...jest.requireActual('@/services/tpv/campo/celular/envioDeCampo'),
   aplicarEnvio: jest.fn(),
+  efectoYaHecho: jest.fn(),
 }))
 
 const db = prisma as any
 const aplicar = aplicarEnvio as jest.Mock
 const sucursales = sucursalesDeLaPersona as jest.Mock
+const deCampo = sucursalesDeCampoDeLaPersona as jest.Mock
+const efecto = efectoYaHecho as jest.Mock
 const permiso = staffHasPermissionInVenue as jest.Mock
 const AHORA = new Date('2026-11-09T12:00:00.000Z')
 const HORA = 60 * 60 * 1000
@@ -106,6 +112,9 @@ beforeEach(() => {
   db.envioRetenidoDeCampo.count.mockImplementation(async ({ where }: any) => filas.filter(f => coincide(f, where)).length)
   db.serializedItemCustodyEvent.findMany.mockResolvedValue([])
   sucursales.mockResolvedValue([{ staffVenueId: 'sv1', venueId: 'v1', nombre: 'Sucursal Centro', role: 'CASHIER', pin: null }])
+  // Las de campo son las mismas salvo que la prueba diga otra cosa (T7).
+  deCampo.mockImplementation((...a: any[]) => sucursales(...a))
+  efecto.mockResolvedValue({ hecho: false })
   permiso.mockResolvedValue(true)
 })
 afterEach(() => jest.useRealTimers())
@@ -332,14 +341,20 @@ describe('recibirEnGracia', () => {
   })
 
   it('la evidencia no necesita huella: se aplica si está en plazo', async () => {
-    const e = envio(JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], ...CAPTURA }), 'EVIDENCIA')
+    const e = envio(
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion', ...CAPTURA }),
+      'EVIDENCIA',
+    )
     aplicar.mockResolvedValue(aplicado(200, { success: true }))
     expect(await recibirEnGracia(celular(), e)).toEqual({ status: 200, body: { success: true, aplicadoEnGracia: true } })
     expect(permiso).toHaveBeenCalledWith({ staffId: 's1', venueId: 'v1', permission: 'payments:create' })
   })
 
   it('evidencia de una venta sin ficha completa (o del celular nuevo) → retenida RECHAZADO VENTA_PENDIENTE', async () => {
-    const e = envio(JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], ...CAPTURA }), 'EVIDENCIA')
+    const e = envio(
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion', ...CAPTURA }),
+      'EVIDENCIA',
+    )
     aplicar.mockResolvedValue({ tipo: 'RECHAZADO', rechazo: { code: 'VENTA_PENDIENTE', message: 'La venta aún no está completa.' } })
     expect((await recibirEnGracia(celular(), e)).body).toEqual({ retenido: true, motivo: 'RECHAZADO' })
     expect(filas[0].rechazo).toMatchObject({ code: 'VENTA_PENDIENTE' })
@@ -651,19 +666,51 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     expect(filas[0].estado).toBe('APLICADO')
   })
 
-  it('S1 · la venta quedó hecha y el proceso cayó antes de guardar: el reintento PASADAS las 24 h vuelve a aplicar y queda APLICADO', async () => {
+  it('T2 · la venta quedó hecha y el proceso cayó antes de guardar: el reintento PASADAS las 24 h ve el efecto y queda APLICADO sin volver a aplicar', async () => {
     const e = envio()
     aplicar.mockRejectedValueOnce(new Error('se cayó el proceso después de la venta'))
     await expect(recibirEnGracia(reportado(e), e)).rejects.toThrow('se cayó')
     // Mientras tanto el supervisor no la puede descartar.
     await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'APLICACION_A_MEDIAS' })
 
-    aplicar.mockResolvedValueOnce(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+    const hecha = { orderId: 'o', paymentId: 'p', saleVerificationId: 'sv', recuperado: true }
+    efecto.mockResolvedValueOnce({ hecho: true, resultado: hecha })
     const tarde = await recibirEnGracia(reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) }), e)
-    expect(tarde).toEqual({ status: 200, body: { orderId: 'o', paymentId: 'p', repetida: true, aplicadoEnGracia: true } })
+    expect(tarde).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: hecha } })
+    expect(efecto).toHaveBeenCalledWith(
+      'VENTA',
+      { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
+      JSON.parse(e.cuerpoJson),
+      AHORA,
+    )
+    expect(aplicar).toHaveBeenCalledTimes(1)
     expect(filas).toHaveLength(1)
-    expect(filas[0]).toMatchObject({ estado: 'APLICADO', motivo: 'APLICADO_EN_GRACIA', resultado: { paymentId: 'p', repetida: true } })
-    expect(filas.some(f => f.motivo === 'FUERA_DE_PLAZO')).toBe(false)
+    expect(filas[0]).toMatchObject({ estado: 'APLICADO', motivo: 'APLICADO_EN_GRACIA', resultado: hecha })
+  })
+
+  it('T2 / R2-2 · una ENTRADA a medias SIN efecto + la persona dada de baja + reintento → no se checa; queda PENDIENTE PERSONA_DADA_DE_BAJA', async () => {
+    const e = envio(JSON.stringify({ llave: randomUUID() }), 'ENTRADA')
+    aplicar.mockRejectedValueOnce(new Error('se cayó antes de crear la checada'))
+    await expect(recibirEnGracia(reportado(e), e)).rejects.toThrow('se cayó')
+    expect(filas[0]).toMatchObject({ estado: 'APLICANDO', motivo: 'APLICADO_EN_GRACIA' })
+
+    deCampo.mockResolvedValue([]) // la dieron de baja
+    expect(await recibirEnGracia(reportado(e), e)).toEqual({ status: 202, body: { retenido: true, motivo: 'PERSONA_DADA_DE_BAJA' } })
+    expect(aplicar).toHaveBeenCalledTimes(1) // el reintento no ejecutó nada
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'PERSONA_DADA_DE_BAJA' })
+    // Ya es descartable: no tiene efecto.
+    expect(await resolver('DESCARTAR')).toEqual({ estado: 'DESCARTADO', repetida: false })
+  })
+
+  it('T2 · a medias SIN efecto y pasadas las 24 h → PENDIENTE FUERA_DE_PLAZO, sin volver a aplicar', async () => {
+    const e = envio()
+    aplicar.mockRejectedValueOnce(new ConflictError('procesando', 'VENTA_EN_PROCESO'))
+    await expect(recibirEnGracia(reportado(e), e)).rejects.toMatchObject({ code: 'VENTA_EN_PROCESO' })
+    const tarde = await recibirEnGracia(reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) }), e)
+    expect(tarde).toEqual({ status: 202, body: { retenido: true, motivo: 'FUERA_DE_PLAZO' } })
+    expect(aplicar).toHaveBeenCalledTimes(1)
+    expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'FUERA_DE_PLAZO' })
   })
 
   const custodia = () => envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-A', custodyVersion: 2 }] }), 'CUSTODIA_ACEPTAR')
@@ -672,73 +719,120 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     rechazo: { code: 'CUSTODIA_INCOMPLETA', message: 'm', detalle: { summary: { total: 1, succeeded: 0, failed: 1 } } },
   }
 
-  it('S2 · gracia: aceptó la custodia, cayó, la SIM se vendió; el reintento ve el rechazo pero la bitácora dice que aceptó → APLICADO', async () => {
+  const recuperada = { recuperadoDeLaBitacora: true, eventos: [{ serialNumber: 'SIM-A', at: AHORA.toISOString() }] }
+
+  it('R2-1 · gracia, PRIMER intento: la ruta normal ya la aceptó (respuesta perdida) y la SIM se vendió; el rechazo consulta el efecto → APLICADO', async () => {
     const e = custodia()
-    aplicar.mockRejectedValueOnce(new Error('se cayó'))
-    await expect(recibirEnGracia(reportado(e), e)).rejects.toThrow('se cayó')
     aplicar.mockResolvedValueOnce(simVendida)
-    db.serializedItemCustodyEvent.findMany.mockResolvedValueOnce([{ serialNumber: 'SIM-A', createdAt: AHORA }])
+    efecto.mockResolvedValueOnce({ hecho: true, resultado: recuperada })
     const r = await recibirEnGracia(reportado(e), e)
-    expect(r).toMatchObject({ status: 200, body: { resuelto: 'APLICADO' } })
-    expect(filas[0]).toMatchObject({ estado: 'APLICADO' })
-    expect(db.serializedItemCustodyEvent.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          serialNumber: { in: ['SIM-A'], mode: 'insensitive' },
-          eventType: 'ACCEPTED_BY_PROMOTER',
-          actorStaffId: 's1',
-          createdAt: { gte: AHORA },
-        }),
-      }),
+    expect(r).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: recuperada } })
+    expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: recuperada })
+    expect(efecto).toHaveBeenCalledWith(
+      'CUSTODIA_ACEPTAR',
+      { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
+      JSON.parse(e.cuerpoJson),
+      AHORA,
     )
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'YA_APLICADO' })
   })
 
-  it('S2 · gracia: sin evento de esa persona → PENDIENTE con su rechazo; en el PRIMER intento ni se busca', async () => {
+  it('gracia: rechazo y sin efecto → PENDIENTE con su rechazo', async () => {
     const e = custodia()
     aplicar.mockResolvedValueOnce(simVendida)
     expect((await recibirEnGracia(reportado(e), e)).body).toEqual({ retenido: true, motivo: 'RECHAZADO' })
-    expect(db.serializedItemCustodyEvent.findMany).not.toHaveBeenCalled()
+    expect(efecto).toHaveBeenCalledTimes(1)
     expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo: { code: 'CUSTODIA_INCOMPLETA' } })
-
-    const g = envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-B', custodyVersion: 1 }] }), 'CUSTODIA_ACEPTAR')
-    aplicar.mockRejectedValueOnce(new Error('se cayó')).mockResolvedValueOnce(simVendida)
-    await expect(recibirEnGracia(reportado(g), g)).rejects.toThrow()
-    expect((await recibirEnGracia(reportado(g), g)).body).toEqual({ retenido: true, motivo: 'RECHAZADO' })
-    expect(db.serializedItemCustodyEvent.findMany).toHaveBeenCalledTimes(1)
-    expect(filas[1]).toMatchObject({ estado: 'PENDIENTE', motivo: 'RECHAZADO' })
   })
 
-  it('S2 · «Aplicar»: aceptó, cayó antes de marcar, la SIM se vende, «Aplicar» otra vez → APLICADO, no PENDIENTE', async () => {
+  it('T2 · «Aplicar» reanuda un APLICANDO: primero el efecto; ya hecho → APLICADO sin ejecutar ni pedir asignación', async () => {
     const f = retenido({ tipo: 'CUSTODIA_RECHAZAR', cuerpoJson: JSON.stringify({ serialNumber: 'SIM-C', custodyVersion: 1 }) })
     aplicar.mockRejectedValueOnce(new ConflictError('cambió', 'CUSTODIA_EN_PROCESO'))
     await expect(resolver('APLICAR')).rejects.toMatchObject({ code: 'CUSTODIA_EN_PROCESO' })
     expect(f.estado).toBe('APLICANDO')
-    aplicar.mockResolvedValueOnce({ tipo: 'RECHAZADO', rechazo: { code: 'NOT_IN_YOUR_CUSTODY', message: 'ya no' } })
-    db.serializedItemCustodyEvent.findMany.mockResolvedValueOnce([{ serialNumber: 'SIM-C', createdAt: AHORA }])
-    expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', repetida: false })
+    sucursales.mockResolvedValue([]) // ya no está asignada: recuperar no es ejecutar
+    efecto.mockResolvedValueOnce({ hecho: true, resultado: { recuperadoDeLaBitacora: true } })
+    expect(await resolver('APLICAR')).toEqual({ estado: 'APLICADO', resultado: { recuperadoDeLaBitacora: true }, repetida: false })
+    expect(aplicar).toHaveBeenCalledTimes(1)
     expect(f).toMatchObject({ estado: 'APLICADO', resueltoPor: 'sup1' })
-    expect(db.serializedItemCustodyEvent.findMany.mock.calls[0][0].where).toMatchObject({
-      serialNumber: { in: ['SIM-C'], mode: 'insensitive' },
-      eventType: 'REJECTED_BY_PROMOTER',
-      actorStaffId: 's1',
-      createdAt: { gte: AHORA },
-    })
+    expect(efecto).toHaveBeenLastCalledWith(
+      'CUSTODIA_RECHAZAR',
+      { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
+      { serialNumber: 'SIM-C', custodyVersion: 1 },
+      AHORA,
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CAMPO_RETENIDO_APLICADO', data: expect.objectContaining({ recuperado: true }) }),
+    )
   })
 
-  it('S2 · «Aplicar»: una VENTA desde APLICANDO con rechazo vuelve a PENDIENTE sin buscar en la bitácora (su llave la haría «repetida»)', async () => {
+  it('T2 · «Aplicar» reanuda un APLICANDO sin efecto y la persona sin asignación → 422 PERSONA_SIN_ASIGNACION sin ejecutar (A6)', async () => {
+    const f = retenido({ estado: 'APLICANDO', tipo: 'ENTRADA', cuerpoJson: JSON.stringify({ llave: randomUUID() }) })
+    sucursales.mockResolvedValue([])
+    await expect(resolver('APLICAR')).rejects.toMatchObject({ details: { motivo: 'PERSONA_SIN_ASIGNACION' } })
+    expect(aplicar).not.toHaveBeenCalled()
+    expect(f.estado).toBe('APLICANDO')
+  })
+
+  it('«Aplicar»: una VENTA desde APLICANDO con rechazo y sin efecto vuelve a PENDIENTE', async () => {
     const f = retenido({ estado: 'APLICANDO' })
     aplicar.mockResolvedValueOnce(rechazado())
     await expect(resolver('APLICAR')).rejects.toMatchObject({ code: 'NO_SE_PUDO_APLICAR' })
     expect(f.estado).toBe('PENDIENTE')
-    expect(db.serializedItemCustodyEvent.findMany).not.toHaveBeenCalled()
+    expect(efecto).toHaveBeenCalledTimes(2) // antes de reanudar y antes de regresarla
   })
 
-  it('S2 · «Aplicar» de custodia desde PENDIENTE (primer intento) con rechazo → PENDIENTE sin buscar', async () => {
+  it('R2-1 · «Aplicar» desde PENDIENTE (primer intento): rechazo, pero la ruta normal ya la había aceptado → APLICADO, no PENDIENTE', async () => {
     const f = retenido({ tipo: 'CUSTODIA_RECHAZAR', cuerpoJson: JSON.stringify({ serialNumber: 'SIM-D', custodyVersion: 1 }) })
     aplicar.mockResolvedValueOnce({ tipo: 'RECHAZADO', rechazo: { code: 'NOT_IN_YOUR_CUSTODY', message: 'ya no' } })
-    await expect(resolver('APLICAR')).rejects.toMatchObject({ code: 'NO_SE_PUDO_APLICAR' })
-    expect(f.estado).toBe('PENDIENTE')
-    expect(db.serializedItemCustodyEvent.findMany).not.toHaveBeenCalled()
+    efecto.mockResolvedValueOnce({ hecho: true, resultado: { recuperadoDeLaBitacora: true } })
+    expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', resultado: { recuperadoDeLaBitacora: true } })
+    expect(f.estado).toBe('APLICADO')
+    expect(efecto).toHaveBeenCalledTimes(1) // desde PENDIENTE no hay nada que reanudar: sólo antes de regresarla
+  })
+
+  it('R2-1 · dos «Aplicar» a la vez: el primero cae tras aceptar, el segundo ve un rechazo; el efecto existe → APLICADO, nunca PENDIENTE', async () => {
+    const f = retenido({ tipo: 'CUSTODIA_ACEPTAR', cuerpoJson: JSON.stringify({ sims: [{ serialNumber: 'SIM-E', custodyVersion: 1 }] }) })
+    let caer!: () => void
+    aplicar
+      .mockImplementationOnce(() => new Promise((_, rechazar) => (caer = () => rechazar(new Error('cayó tras aceptar')))))
+      .mockImplementationOnce(async () => simVendida)
+    let aceptada = false
+    efecto.mockImplementation(async () => (aceptada ? { hecho: true, resultado: { recuperadoDeLaBitacora: true } } : { hecho: false }))
+    const a = resolver('APLICAR').then(
+      r => r,
+      e => e,
+    )
+    while (!aplicar.mock.calls.length) await tick()
+    aceptada = true // el primero ya aceptó la SIM en la base
+    const b = await resolver('APLICAR')
+    caer()
+    expect(await a).toMatchObject({ message: 'cayó tras aceptar' })
+    expect(b).toMatchObject({ estado: 'APLICADO' })
+    expect(f.estado).toBe('APLICADO')
+  })
+})
+
+describe('arreglo final 2: el tope y las sucursales de campo (T5, T7)', () => {
+  it('T5 · con 500 por revisar, una evidencia que se aplicaría sola (y quedaría PENDIENTE por VENTA_PENDIENTE) → 409 sin fila nueva', async () => {
+    for (let i = 0; i < 500; i++) filas.push({ id: `x${i}`, celularId: 'cel1', huella: `h${i}`, estado: 'PENDIENTE' })
+    const e = envio(
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion', ...CAPTURA }),
+      'EVIDENCIA',
+    )
+    aplicar.mockResolvedValue({ tipo: 'RECHAZADO', rechazo: { code: 'VENTA_PENDIENTE', message: 'm' } })
+    await expect(recibirEnGracia(celular(), e)).rejects.toMatchObject({ statusCode: 409, code: 'RETENIDOS_LLENOS' })
+    expect(filas).toHaveLength(500)
+    expect(aplicar).not.toHaveBeenCalled()
+  })
+
+  it('T7 · «dada de baja» se decide con las sucursales de CAMPO: alguien que ya sólo es gerente no aplica nada solo', async () => {
+    const e = envio()
+    sucursales.mockResolvedValue([{ staffVenueId: 'sv1', venueId: 'v1', nombre: 'Sucursal Centro', role: 'MANAGER', pin: null }])
+    deCampo.mockResolvedValue([])
+    expect((await recibirEnGracia(reportado(e), e)).body).toEqual({ retenido: true, motivo: 'PERSONA_DADA_DE_BAJA' })
+    expect(deCampo).toHaveBeenCalledWith('s1', 'org1')
+    expect(aplicar).not.toHaveBeenCalled()
   })
 })
 

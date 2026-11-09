@@ -11,13 +11,7 @@ import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { aceptarCustodiaDeCampo, rechazarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { createOrUpdateProofOfSale } from '@/services/tpv/sale-verification.service'
-import {
-  aplicarEnvio,
-  cuerpoValido,
-  efectoYaHecho,
-  huellaDelEnvio,
-  permisosDelEnvio,
-} from '@/services/tpv/campo/celular/envioDeCampo'
+import { aplicarEnvio, cuerpoValido, efectoYaHecho, huellaDelEnvio, permisosDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -252,7 +246,8 @@ describe('aplicarEnvio', () => {
     })
 
     it('T3 · sin destino estable (ni photoLabel ni replaceIndex) → CUERPO_INVALIDO: repetir la agregaría al final otra vez', async () => {
-      const { photoLabel: _sinDestino, ...alFinal } = fotos
+      const alFinal: Record<string, unknown> = { ...fotos }
+      delete alFinal.photoLabel
       expect(await aplicarEnvio(ctx, 'EVIDENCIA', alFinal)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
       expect(cuerpoValido('EVIDENCIA', alFinal)).toBe(false)
       expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
@@ -296,7 +291,9 @@ describe('cuerpoValido (S7, S9): el mismo esquema que aplicarEnvio, sin tocar la
     const foto = { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], ...captura }
     expect(cuerpoValido('EVIDENCIA', { ...foto, photoLabel: 'Vinculacion' })).toBe(true)
     expect(cuerpoValido('EVIDENCIA', { ...foto, replaceIndex: 0 })).toBe(true)
-    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion' })).toBe(false)
+    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion' })).toBe(
+      false,
+    )
     expect(cuerpoValido('VENTA', null)).toBe(false)
     expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
   })
@@ -329,7 +326,10 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
   describe('ENTRADA / SALIDA', () => {
     it('la checada de la persona con esa llave, en esa sucursal → hecho con su timeEntryId; en otra sucursal o sin checada → no', async () => {
       db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'v1' })
-      expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: true, resultado: { timeEntryId: 't1', recuperado: true } })
+      expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({
+        hecho: true,
+        resultado: { timeEntryId: 't1', recuperado: true },
+      })
       expect(db.timeEntry.findUnique).toHaveBeenLastCalledWith({
         where: { staffId_llaveEntrada: { staffId: 's1', llaveEntrada: llave } },
         select: { id: true, venueId: true },
@@ -403,7 +403,12 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
       asignada('A', 10)
       asignada('B', 10)
       decidio('A', 1)
-      const dos = { sims: [{ serialNumber: 'A', custodyVersion: 1 }, { serialNumber: 'B', custodyVersion: 1 }] }
+      const dos = {
+        sims: [
+          { serialNumber: 'A', custodyVersion: 1 },
+          { serialNumber: 'B', custodyVersion: 1 },
+        ],
+      }
       expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, dos, LIMITE)).toEqual({
         hecho: true,
         resultado: { recuperadoDeLaBitacora: true, eventos: [{ serialNumber: 'A', at: antes(1).toISOString() }], faltan: ['B'] },
