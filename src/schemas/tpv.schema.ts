@@ -307,11 +307,13 @@ export const recordPaymentBodySchema = z.object({
       // For order payments: Uses existing order number (e.g., "ORD-12345")
       orderReference: z
         .string()
-        .regex(/^(FAST|ORD|ORDER)-\d+$/, { message: 'orderReference must be FAST-{timestamp} or ORD-{number} format' })
+        .regex(/^(FAST|ORD|ORDER)-\d+$/, {
+          message: 'La referencia de la orden debe tener el formato FAST-{marca de tiempo} u ORD-{número}',
+        })
         .optional(),
 
       // Firebase Storage URLs of verification photos (uploaded before payment)
-      verificationPhotos: z.array(z.string().url({ message: 'Each photo must be a valid URL' })).optional(),
+      verificationPhotos: z.array(z.string().url({ message: 'Cada foto debe ser una dirección web válida' })).optional(),
 
       // Scanned barcodes from verification screen
       verificationBarcodes: z.array(z.string()).optional(),
@@ -375,7 +377,7 @@ export const recordPaymentBodySchema = z.object({
       },
       {
         message:
-          'Card payments require merchantAccountId OR blumonSerialNumber for merchant resolution. Cash payments should not have merchantAccountId.',
+          'Un cobro con tarjeta necesita la cuenta de comercio o el serial de Blumon para saber a qué comercio va. Un cobro en efectivo no debe llevar cuenta de comercio',
         path: ['merchantAccountId'],
       },
     )

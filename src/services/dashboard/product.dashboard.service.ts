@@ -183,12 +183,12 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
 
   // Kitchen name validation (max 50 chars)
   if (data.kitchenName && data.kitchenName.length > 50) {
-    throw new AppError('Kitchen name must be 50 characters or less', 400)
+    throw new AppError('El nombre para cocina debe tener 50 caracteres o menos', 400)
   }
 
   // Abbreviation validation (max 24 chars, like Square)
   if (data.abbreviation && data.abbreviation.length > 24) {
-    throw new AppError('Abbreviation must be 24 characters or less', 400)
+    throw new AppError('La abreviatura debe tener 24 caracteres o menos', 400)
   }
 
   // Duration validation (1-1440 minutes = 1 min to 24 hours)

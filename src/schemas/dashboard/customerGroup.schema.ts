@@ -16,11 +16,11 @@ import { z } from 'zod'
  */
 export const CreateCustomerGroupSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Group name is required').max(100, 'Group name must be less than 100 characters').trim(),
-    description: z.string().max(500, 'Description must be less than 500 characters').trim().optional(),
+    name: z.string().min(1, 'El nombre del grupo es obligatorio').max(100, 'El nombre del grupo admite hasta 100 caracteres').trim(),
+    description: z.string().max(500, 'La descripción admite hasta 500 caracteres').trim().optional(),
     color: z
       .string()
-      .regex(/^#[0-9A-Fa-f]{6}$/, 'Color must be a valid hex color (e.g., #FF5733)')
+      .regex(/^#[0-9A-Fa-f]{6}$/, 'El color debe ser un código hexadecimal válido, por ejemplo #FF5733')
       .optional(),
     autoAssignRules: z.record(z.any()).optional(), // JSON object for automatic group criteria
   }),
@@ -31,11 +31,11 @@ export const CreateCustomerGroupSchema = z.object({
  */
 export const UpdateCustomerGroupSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Group name is required').max(100).trim().optional(),
+    name: z.string().min(1, 'El nombre del grupo es obligatorio').max(100).trim().optional(),
     description: z.string().max(500).trim().optional(),
     color: z
       .string()
-      .regex(/^#[0-9A-Fa-f]{6}$/, 'Color must be a valid hex color')
+      .regex(/^#[0-9A-Fa-f]{6}$/, 'El color debe ser un código hexadecimal válido')
       .optional(),
     autoAssignRules: z.record(z.any()).optional(),
     active: z.boolean().optional(),
@@ -58,8 +58,8 @@ export const CustomerGroupsQuerySchema = z.object({
  */
 export const CustomerGroupParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
-    groupId: z.string().cuid('Invalid group ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
+    groupId: z.string().cuid('El ID del grupo no es válido'),
   }),
 })
 
@@ -69,9 +69,9 @@ export const CustomerGroupParamsSchema = z.object({
 export const AssignCustomersSchema = z.object({
   body: z.object({
     customerIds: z
-      .array(z.string().cuid('Invalid customer ID format'))
-      .min(1, 'At least one customer ID is required')
-      .max(100, 'Cannot assign more than 100 customers at once'),
+      .array(z.string().cuid('El ID del cliente no es válido'))
+      .min(1, 'Selecciona al menos un cliente')
+      .max(100, 'No puedes asignar más de 100 clientes a la vez'),
   }),
 })
 
@@ -81,9 +81,9 @@ export const AssignCustomersSchema = z.object({
 export const RemoveCustomersSchema = z.object({
   body: z.object({
     customerIds: z
-      .array(z.string().cuid('Invalid customer ID format'))
-      .min(1, 'At least one customer ID is required')
-      .max(100, 'Cannot remove more than 100 customers at once'),
+      .array(z.string().cuid('El ID del cliente no es válido'))
+      .min(1, 'Selecciona al menos un cliente')
+      .max(100, 'No puedes quitar más de 100 clientes a la vez'),
   }),
 })
 

@@ -122,8 +122,8 @@ export const validateCouponBodySchema = z.object({
 // ==========================================
 
 export const recordRedemptionBodySchema = z.object({
-  orderId: z.string().min(1, 'Order ID is required'),
-  amountSaved: z.number().min(0, 'Amount saved must be positive'),
+  orderId: z.string().min(1, 'El ID de la orden es obligatorio'),
+  amountSaved: z.number().min(0, 'El monto ahorrado no puede ser negativo'),
   customerId: z.string().optional(),
 })
 

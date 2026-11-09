@@ -22,7 +22,7 @@ export const rateCorrectionBodySchema = z
     missingCostMode: z.enum(['FIX_PAYMENT_ONLY', 'CREATE_COST']),
   })
   .refine(b => b.newVenueRates || b.newProviderRates, {
-    message: 'At least one of newVenueRates / newProviderRates is required',
+    message: 'Indica al menos las nuevas tasas del negocio o las del proveedor',
   })
 
 export type RateCorrectionBody = z.infer<typeof rateCorrectionBodySchema>

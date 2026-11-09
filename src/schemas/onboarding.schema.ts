@@ -38,7 +38,7 @@ export const SignupSchema = z.object({
  */
 export const StartOnboardingSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
 })
 
@@ -47,7 +47,7 @@ export const StartOnboardingSchema = z.object({
  */
 export const GetOnboardingProgressSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
 })
 
@@ -56,12 +56,12 @@ export const GetOnboardingProgressSchema = z.object({
  */
 export const UpdateStep1Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
-    email: z.string().email('Invalid email format'),
-    firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
-    lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long'),
+    email: z.string().email('El correo no es válido'),
+    firstName: z.string().min(1, 'El nombre es obligatorio').max(50, 'El nombre admite hasta 50 caracteres'),
+    lastName: z.string().min(1, 'El apellido es obligatorio').max(50, 'El apellido admite hasta 50 caracteres'),
     phone: z.string().optional(),
   }),
 })
@@ -71,11 +71,11 @@ export const UpdateStep1Schema = z.object({
  */
 export const UpdateStep2Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     onboardingType: z.nativeEnum(OnboardingType, {
-      errorMap: () => ({ message: 'Invalid onboarding type. Must be DEMO or REAL' }),
+      errorMap: () => ({ message: 'El tipo de alta debe ser demostración o real' }),
     }),
   }),
 })
@@ -85,15 +85,15 @@ export const UpdateStep2Schema = z.object({
  */
 export const UpdateStep3Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
-    name: z.string().min(1, 'Business name is required').max(100, 'Business name too long'),
+    name: z.string().min(1, 'El nombre del negocio es obligatorio').max(100, 'El nombre del negocio admite hasta 100 caracteres'),
     type: z.string().optional(),
     venueType: z.string().optional(),
     entityType: z
       .enum(['PERSONA_FISICA', 'PERSONA_MORAL'], {
-        errorMap: () => ({ message: 'Entity type must be PERSONA_FISICA or PERSONA_MORAL' }),
+        errorMap: () => ({ message: 'El tipo de persona debe ser persona física o persona moral' }),
       })
       .optional(),
     timezone: zTimezone,
@@ -103,7 +103,7 @@ export const UpdateStep3Schema = z.object({
     country: z.string().default('MX'),
     zipCode: z.string().optional(),
     phone: z.string().optional(),
-    email: z.string().email('Invalid email format').optional(),
+    email: z.string().email('El correo no es válido').optional(),
   }),
 })
 
@@ -112,17 +112,17 @@ export const UpdateStep3Schema = z.object({
  */
 export const UpdateStep4Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     method: z.enum(['manual', 'csv'], {
-      errorMap: () => ({ message: 'Method must be "manual" or "csv"' }),
+      errorMap: () => ({ message: 'El método debe ser manual o por archivo CSV' }),
     }),
     categories: z
       .array(
         z.object({
-          name: z.string().min(1, 'Category name is required'),
-          slug: z.string().min(1, 'Category slug is required'),
+          name: z.string().min(1, 'El nombre de la categoría es obligatorio'),
+          slug: z.string().min(1, 'La clave de la categoría es obligatoria'),
           description: z.string().optional(),
         }),
       )
@@ -130,13 +130,13 @@ export const UpdateStep4Schema = z.object({
     products: z
       .array(
         z.object({
-          name: z.string().min(1, 'Product name is required'),
-          sku: z.string().min(1, 'Product SKU is required'),
+          name: z.string().min(1, 'El nombre del producto es obligatorio'),
+          sku: z.string().min(1, 'El SKU del producto es obligatorio'),
           gtin: z.string().max(14).optional(),
           description: z.string().optional(),
-          price: z.number().positive('Price must be greater than 0'),
+          price: z.number().positive('El precio debe ser mayor a cero'),
           type: z.nativeEnum(ProductType).optional(),
-          categorySlug: z.string().min(1, 'Category slug is required'),
+          categorySlug: z.string().min(1, 'La clave de la categoría es obligatoria'),
         }),
       )
       .optional(),
@@ -148,16 +148,16 @@ export const UpdateStep4Schema = z.object({
  */
 export const UpdateStep5Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     teamInvites: z
       .array(
         z.object({
-          email: z.string().email('Invalid email format'),
-          firstName: z.string().min(1, 'First name is required'),
-          lastName: z.string().min(1, 'Last name is required'),
-          role: z.string().min(1, 'Role is required'),
+          email: z.string().email('El correo no es válido'),
+          firstName: z.string().min(1, 'El nombre es obligatorio'),
+          lastName: z.string().min(1, 'El apellido es obligatorio'),
+          role: z.string().min(1, 'El rol es obligatorio'),
         }),
       )
       .optional()
@@ -170,7 +170,7 @@ export const UpdateStep5Schema = z.object({
  */
 export const UpdateStep6Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     selectedFeatures: z.array(z.string()).default([]),
@@ -182,19 +182,19 @@ export const UpdateStep6Schema = z.object({
  */
 export const UpdateStep7Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     entityType: z.enum(['PERSONA_FISICA', 'PERSONA_MORAL'], {
-      errorMap: () => ({ message: 'Entity type must be PERSONA_FISICA or PERSONA_MORAL' }),
+      errorMap: () => ({ message: 'El tipo de persona debe ser persona física o persona moral' }),
     }),
     documents: z.object({
-      ineUrl: z.string().url('Invalid INE document URL').optional(),
-      rfcDocumentUrl: z.string().url('Invalid RFC document URL').optional(),
-      comprobanteDomicilioUrl: z.string().url('Invalid address proof URL').optional(),
-      caratulaBancariaUrl: z.string().url('Invalid bank statement URL').optional(),
-      actaDocumentUrl: z.string().url('Invalid Acta Constitutiva URL').optional(),
-      poderLegalUrl: z.string().url('Invalid power of attorney URL').optional(),
+      ineUrl: z.string().url('La dirección web del documento del INE no es válida').optional(),
+      rfcDocumentUrl: z.string().url('La dirección web del documento del RFC no es válida').optional(),
+      comprobanteDomicilioUrl: z.string().url('La dirección web del comprobante de domicilio no es válida').optional(),
+      caratulaBancariaUrl: z.string().url('La dirección web de la carátula bancaria no es válida').optional(),
+      actaDocumentUrl: z.string().url('La dirección web del acta constitutiva no es válida').optional(),
+      poderLegalUrl: z.string().url('La dirección web del poder legal no es válida').optional(),
     }),
   }),
 })
@@ -204,21 +204,21 @@ export const UpdateStep7Schema = z.object({
  */
 export const UpdateStep8Schema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
   body: z.object({
     clabe: z
       .string()
-      .regex(/^\d{18}$/, 'CLABE must be exactly 18 digits')
+      .regex(/^\d{18}$/, 'La CLABE debe tener exactamente 18 dígitos')
       .refine(
         clabe => {
           // Basic CLABE validation (check digit algorithm will be done in service)
           return clabe.length === 18
         },
-        { message: 'Invalid CLABE format' },
+        { message: 'La CLABE no es válida' },
       ),
     bankName: z.string().optional(),
-    accountHolder: z.string().min(1, 'Account holder name is required'),
+    accountHolder: z.string().min(1, 'El nombre del titular de la cuenta es obligatorio'),
   }),
 })
 
@@ -228,7 +228,7 @@ export const UpdateStep8Schema = z.object({
  */
 export const CompleteOnboardingSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID format'),
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
 })
 

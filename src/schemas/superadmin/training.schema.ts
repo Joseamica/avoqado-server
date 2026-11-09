@@ -5,21 +5,21 @@ import { z } from 'zod'
 
 export const trainingIdParamSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
   }),
 })
 
 export const trainingStepIdParamSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
-    stepId: z.string().min(1, 'Step ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
+    stepId: z.string().min(1, 'El ID del paso es obligatorio'),
   }),
 })
 
 export const trainingQuestionIdParamSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
-    questionId: z.string().min(1, 'Question ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
+    questionId: z.string().min(1, 'El ID de la pregunta es obligatorio'),
   }),
 })
 
@@ -40,8 +40,8 @@ export const listTrainingsQuerySchema = z.object({
 
 export const createTrainingSchema = z.object({
   body: z.object({
-    title: z.string().min(1, 'Title is required').max(200),
-    description: z.string().min(1, 'Description is required'),
+    title: z.string().min(1, 'El título es obligatorio').max(200),
+    description: z.string().min(1, 'La descripción es obligatoria'),
     coverImageUrl: z.string().url().optional(),
     category: z.enum(['VENTAS', 'INVENTARIO', 'PAGOS', 'ATENCION_CLIENTE', 'GENERAL']).optional(),
     difficulty: z.enum(['BASIC', 'INTERMEDIATE']).optional(),
@@ -59,7 +59,7 @@ export const createTrainingSchema = z.object({
 
 export const updateTrainingSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
   }),
   body: z.object({
     title: z.string().min(1).max(200).optional(),
@@ -83,12 +83,12 @@ export const updateTrainingSchema = z.object({
 
 export const createStepSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
   }),
   body: z.object({
     stepNumber: z.number().int().min(1),
-    title: z.string().min(1, 'Title is required').max(200),
-    instruction: z.string().min(1, 'Instruction is required'),
+    title: z.string().min(1, 'El título es obligatorio').max(200),
+    instruction: z.string().min(1, 'La instrucción es obligatoria'),
     mediaType: z.enum(['IMAGE', 'VIDEO']).optional(),
     mediaUrl: z.string().url().optional(),
     thumbnailUrl: z.string().url().optional(),
@@ -98,8 +98,8 @@ export const createStepSchema = z.object({
 
 export const updateStepSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
-    stepId: z.string().min(1, 'Step ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
+    stepId: z.string().min(1, 'El ID del paso es obligatorio'),
   }),
   body: z.object({
     stepNumber: z.number().int().min(1).optional(),
@@ -116,12 +116,12 @@ export const updateStepSchema = z.object({
 
 export const createQuizQuestionSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
   }),
   body: z.object({
     questionType: z.enum(['MULTIPLE_CHOICE', 'TRUE_FALSE', 'MULTI_SELECT']).optional(),
-    question: z.string().min(1, 'Question is required'),
-    options: z.array(z.string().min(1)).min(2, 'At least 2 options required').max(6),
+    question: z.string().min(1, 'La pregunta es obligatoria'),
+    options: z.array(z.string().min(1)).min(2, 'Se necesitan al menos 2 opciones').max(6),
     correctIndex: z.number().int().min(0),
     correctIndices: z.array(z.number().int().min(0)).optional(),
     position: z.number().int().min(0).optional(),
@@ -131,8 +131,8 @@ export const createQuizQuestionSchema = z.object({
 
 export const updateQuizQuestionSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
-    questionId: z.string().min(1, 'Question ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
+    questionId: z.string().min(1, 'El ID de la pregunta es obligatorio'),
   }),
   body: z.object({
     questionType: z.enum(['MULTIPLE_CHOICE', 'TRUE_FALSE', 'MULTI_SELECT']).optional(),
@@ -149,7 +149,7 @@ export const updateQuizQuestionSchema = z.object({
 
 export const updateProgressSchema = z.object({
   params: z.object({
-    trainingId: z.string().min(1, 'Training ID is required'),
+    trainingId: z.string().min(1, 'El ID de la capacitación es obligatorio'),
   }),
   body: z.object({
     staffId: z.string().optional(),

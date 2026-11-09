@@ -9,7 +9,7 @@ import { PIN_ERROR_MESSAGE, PIN_REGEX, optionalClearablePinSchema } from '../com
 const cuidOrUuid = z
   .string()
   .refine(val => /^c[a-z0-9]{19,}$/.test(val) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val), {
-    message: 'Invalid id format (must be CUID, CUID2, or UUID)',
+    message: 'El ID no es válido',
   })
 
 // Parameter schemas
@@ -50,11 +50,11 @@ export const InviteTeamMemberSchema = z.object({
   }),
   body: z
     .object({
-      email: z.string().email('Invalid email format').optional(),
-      firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
-      lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long'),
-      role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'Cannot invite SUPERADMIN role'),
-      message: z.string().max(500, 'Message too long').optional(),
+      email: z.string().email('El correo no es válido').optional(),
+      firstName: z.string().min(1, 'El nombre es obligatorio').max(50, 'El nombre admite hasta 50 caracteres'),
+      lastName: z.string().min(1, 'El apellido es obligatorio').max(50, 'El apellido admite hasta 50 caracteres'),
+      role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'No puedes invitar a alguien como superadministrador'),
+      message: z.string().max(500, 'El mensaje admite hasta 500 caracteres').optional(),
       type: z.enum(['email', 'tpv-only']).optional().default('email'),
       pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional(),
       // When true and role is OWNER, creates StaffVenue for all organization venues
@@ -75,7 +75,7 @@ export const InviteTeamMemberSchema = z.object({
         return true
       },
       {
-        message: 'Email is required for email invitations, PIN is required for TPV-only',
+        message: 'Para invitar por correo escribe el correo, y para una invitación sólo de TPV escribe el PIN',
         path: ['email'],
       },
     ),
@@ -90,7 +90,7 @@ export const UpdateTeamMemberSchema = z.object({
     .object({
       role: z
         .nativeEnum(StaffRole)
-        .refine(role => role !== StaffRole.SUPERADMIN, 'Cannot assign SUPERADMIN role')
+        .refine(role => role !== StaffRole.SUPERADMIN, 'No puedes asignar el rol de superadministrador')
         .optional(),
       active: z.boolean().optional(),
       // Rango compartido: ver src/schemas/common/pin.schema.ts. Aquí decía 4-6
@@ -98,7 +98,7 @@ export const UpdateTeamMemberSchema = z.object({
       // usan para alargar el PIN de su gerente— rechazaba los códigos largos.
       pin: optionalClearablePinSchema,
     })
-    .refine(data => Object.keys(data).length > 0, 'At least one field is required for update'),
+    .refine(data => Object.keys(data).length > 0, 'Cambia al menos un dato del miembro del equipo'),
 })
 
 // Type exports for TypeScript usage
