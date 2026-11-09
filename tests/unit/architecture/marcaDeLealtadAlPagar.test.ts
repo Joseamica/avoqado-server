@@ -107,21 +107,76 @@ function escritores(
   }
   for (const { file, source } of fuentes) {
     const sf = parsear({ file, source })
-    const variables: ts.VariableDeclaration[] = []
-    const asignaciones: ts.BinaryExpression[] = []
+    type Binding = { nodo: ts.Node; variable?: ts.VariableDeclaration }
+    const bindings = new Map<ts.Node, Map<string, Binding>>()
+    const asignaciones: { nodo: ts.Node; destino: ts.Expression; valor?: ts.Expression; directa: boolean }[] = []
+    const esAmbitoVar = (n: ts.Node) =>
+      ts.isSourceFile(n) || ts.isFunctionLike(n) || ts.isModuleBlock(n) || ts.isClassStaticBlockDeclaration(n)
+    const esAmbito = (n: ts.Node) =>
+      esAmbitoVar(n) ||
+      ts.isBlock(n) ||
+      ts.isCaseBlock(n) ||
+      ts.isCatchClause(n) ||
+      ts.isForStatement(n) ||
+      ts.isForOfStatement(n) ||
+      ts.isForInStatement(n) ||
+      ts.isClassLike(n)
+    const ambito = (n: ts.Node, deVar = false): ts.Node => {
+      for (let a = n.parent; a; a = a.parent) {
+        // var se eleva al CUERPO; los defaults de parámetros no atraviesan este bloque.
+        if (deVar && ts.isBlock(a) && ts.isFunctionLike(a.parent)) return a
+        if ((deVar ? esAmbitoVar : esAmbito)(a)) return a
+      }
+      return sf
+    }
+    const registrar = (nombre: ts.BindingName, scope: ts.Node, b: Binding) => {
+      if (!ts.isIdentifier(nombre)) {
+        for (const e of nombre.elements) if (ts.isBindingElement(e)) registrar(e.name, scope, b)
+        return
+      }
+      let locales = bindings.get(scope)
+      if (!locales) bindings.set(scope, (locales = new Map()))
+      // var sin inicializador puede conservar el parámetro recibido; una asignación posterior no lo reemplaza.
+      const comparteParametro = ts.isBlock(scope) && ts.isFunctionLike(scope.parent) && bindings.get(scope.parent)?.has(nombre.text)
+      // Una redeclaración ambigua tampoco permite elegir por defecto el valor exterior.
+      locales.set(nombre.text, locales.has(nombre.text) || comparteParametro ? { nodo: scope } : b)
+    }
     const recolectar = (n: ts.Node) => {
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) variables.push(n)
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) asignaciones.push(n)
+      if (ts.isVariableDeclaration(n)) {
+        const scope = ts.isCatchClause(n.parent) ? n.parent : ambito(n, !(n.parent.flags & ts.NodeFlags.BlockScoped))
+        registrar(n.name, scope, { nodo: n, variable: ts.isIdentifier(n.name) && !ts.isCatchClause(n.parent) ? n : undefined })
+      }
+      if (ts.isParameter(n)) registrar(n.name, n.parent, { nodo: n }) // El caller puede sustituir incluso un default.
+      if (ts.isFunctionDeclaration(n) && n.name) registrar(n.name, ambito(n), { nodo: n })
+      if (ts.isFunctionExpression(n) && n.name) registrar(n.name, n, { nodo: n })
+      if (ts.isClassLike(n) && n.name) {
+        if (ts.isClassDeclaration(n)) registrar(n.name, ambito(n), { nodo: n })
+        registrar(n.name, n, { nodo: n })
+      }
+      if ((ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n)) && ts.isIdentifier(n.name)) registrar(n.name, ambito(n), { nodo: n })
+      if (ts.isImportClause(n) && n.name) registrar(n.name, ambito(n), { nodo: n })
+      if (ts.isImportSpecifier(n) || ts.isNamespaceImport(n) || ts.isImportEqualsDeclaration(n)) registrar(n.name, ambito(n), { nodo: n })
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      )
+        asignaciones.push({ nodo: n, destino: n.left, valor: n.right, directa: n.operatorToken.kind === ts.SyntaxKind.EqualsToken })
+      if (
+        (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+        [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(n.operator)
+      )
+        asignaciones.push({ nodo: n, destino: n.operand, directa: false })
+      if (ts.isDeleteExpression(n)) asignaciones.push({ nodo: n, destino: n.expression, directa: false })
+      if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer))
+        asignaciones.push({ nodo: n, destino: n.initializer, directa: false })
       ts.forEachChild(n, recolectar)
     }
     recolectar(sf)
-    const esAmbito = (n: ts.Node) => ts.isBlock(n) || ts.isSourceFile(n) || ts.isForStatement(n) || ts.isForOfStatement(n)
-    const ambito = (n: ts.Node): ts.Node => (n.parent && !esAmbito(n.parent) ? ambito(n.parent) : n.parent)
-    const binding = (id: ts.Identifier) => {
+    const binding = (id: ts.Identifier): Binding | undefined => {
       for (let n: ts.Node | undefined = id.parent; n; n = n.parent) {
-        if (!esAmbito(n)) continue
-        const v = variables.find(v => (v.name as ts.Identifier).text === id.text && ambito(v) === n)
-        if (v) return v
+        const local = bindings.get(n)?.get(id.text)
+        if (local) return local
       }
       return undefined
     }
@@ -139,29 +194,59 @@ function escritores(
       throw new Error(`nombre opaco ${n.getText(sf)}`)
     }
     type Campo = { nombre: string; valor: ts.Expression; texto: string }
-    const valores = (v: ts.VariableDeclaration, hasta: number) => [
-      ...(v.initializer ? [v.initializer] : []),
-      ...asignaciones.filter(a => a.getStart(sf) < hasta && ts.isIdentifier(a.left) && binding(a.left) === v).map(a => a.right),
-    ]
-    const campos = (entrada: ts.Expression, hasta: number, vistos = new Set<ts.Node>()): Campo[] => {
+    type Destino = { id: ts.Identifier; campo?: string; opaco?: boolean }
+    const destinos = (entrada: ts.Expression): Destino[] => {
+      const e = desenvolver(entrada)
+      if (ts.isIdentifier(e)) return [{ id: e }]
+      if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression)) return [{ id: e.expression, campo: e.name.text }]
+      if (ts.isElementAccessExpression(e) && ts.isIdentifier(e.expression) && ts.isStringLiteral(e.argumentExpression))
+        return [{ id: e.expression, campo: e.argumentExpression.text }]
+      if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e))
+        return destinos(e.expression).map(d => ({ ...d, opaco: true }))
+      if (ts.isObjectLiteralExpression(e))
+        return e.properties.flatMap(p => {
+          const destino = ts.isPropertyAssignment(p)
+            ? p.initializer
+            : ts.isShorthandPropertyAssignment(p)
+              ? p.name
+              : ts.isSpreadAssignment(p)
+                ? p.expression
+                : undefined
+          return destino ? destinos(destino).map(d => ({ ...d, opaco: true })) : []
+        })
+      if (ts.isArrayLiteralExpression(e))
+        return e.elements.flatMap(el => (ts.isOmittedExpression(el) ? [] : destinos(el).map(d => ({ ...d, opaco: true }))))
+      if (ts.isSpreadElement(e)) return destinos(e.expression).map(d => ({ ...d, opaco: true }))
+      if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+        return destinos(e.left).map(d => ({ ...d, opaco: true }))
+      return []
+    }
+    const cambios = (v: Binding) =>
+      asignaciones.flatMap(a =>
+        destinos(a.destino)
+          .filter(d => binding(d.id) === v)
+          .map(d => ({ ...a, ...d })),
+      )
+    const valores = (v: Binding) => {
+      if (!v.variable) throw new Error(`binding opaco ${v.nodo.getText(sf)}`)
+      const writes = cambios(v)
+      if (writes.some(a => !a.directa || a.opaco || !a.valor)) throw new Error(`asignación opaca ${v.variable.name.getText(sf)}`)
+      // Unión conservadora, también después del sitio: un lazo/callback puede reutilizar ese binding.
+      return [...(v.variable.initializer ? [v.variable.initializer] : []), ...writes.filter(a => !a.campo).map(a => a.valor!)]
+    }
+    const campos = (entrada: ts.Expression, hasta: number, vistos = new Set<Binding>()): Campo[] => {
       const e = desenvolver(entrada)
       if (ts.isIdentifier(e)) {
         const v = binding(e)
         if (!v || vistos.has(v)) throw new Error(`binding opaco ${e.text}`)
+        // Un valor posterior puede ocurrir en otra vuelta, pero nunca acredita campos de esta escritura.
+        if ((v.variable && v.variable.getStart(sf) >= hasta) || cambios(v).some(a => a.nodo.getStart(sf) >= hasta))
+          throw new Error(`asignación opaca posterior ${e.text}`)
         const siguientes = new Set(vistos).add(v)
-        const bases = valores(v, hasta)
+        const bases = valores(v)
         if (!bases.length) throw new Error(`binding opaco sin valor ${e.text}`)
         const resultado = bases.flatMap(b => campos(b, hasta, siguientes))
-        for (const a of asignaciones) {
-          if (a.getStart(sf) >= hasta) continue
-          const l = a.left
-          if (ts.isPropertyAccessExpression(l) && ts.isIdentifier(l.expression) && binding(l.expression) === v)
-            resultado.push({ nombre: l.name.text, valor: a.right, texto: a.getText(sf) })
-          if (ts.isElementAccessExpression(l) && ts.isIdentifier(l.expression) && binding(l.expression) === v) {
-            if (!ts.isStringLiteral(l.argumentExpression)) throw new Error(`asignación opaca ${l.getText(sf)}`)
-            resultado.push({ nombre: l.argumentExpression.text, valor: a.right, texto: a.getText(sf) })
-          }
-        }
+        for (const a of cambios(v)) if (a.campo) resultado.push({ nombre: a.campo, valor: a.valor!, texto: a.nodo.getText(sf) })
         return resultado
       }
       if (ts.isConditionalExpression(e)) return [...campos(e.whenTrue, hasta, vistos), ...campos(e.whenFalse, hasta, vistos)]
@@ -206,15 +291,31 @@ function escritores(
         throw new Error(`propiedad opaca ${p.getText(sf)}`)
       })
     }
-    const puedeSerPaid = (entrada: ts.Expression, hasta: number, vistos = new Set<ts.Node>()): boolean => {
+    const puedeSerPaid = (entrada: ts.Expression, hasta: number, vistos = new Set<Binding>()): boolean => {
       const e = desenvolver(entrada)
       if (ts.isStringLiteral(e)) return !['PENDING', 'PARTIAL', 'REFUNDED'].includes(e.text)
-      if (/^PaymentStatus\.(PENDING|PARTIAL|REFUNDED)$/.test(e.getText(sf))) return false
+      if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && ['PENDING', 'PARTIAL', 'REFUNDED'].includes(e.name.text)) {
+        const b = binding(e.expression)
+        const spec = b?.nodo
+        if (spec && ts.isImportSpecifier(spec) && (spec.propertyName ?? spec.name).text === 'PaymentStatus' && !spec.isTypeOnly) {
+          const clause = spec.parent.parent
+          const declaration = clause.parent
+          if (
+            ts.isImportClause(clause) &&
+            !clause.isTypeOnly &&
+            ts.isImportDeclaration(declaration) &&
+            ts.isStringLiteral(declaration.moduleSpecifier) &&
+            declaration.moduleSpecifier.text === '@prisma/client' &&
+            !cambios(b!).length
+          )
+            return false
+        }
+      }
       if (ts.isConditionalExpression(e)) return puedeSerPaid(e.whenTrue, hasta, vistos) || puedeSerPaid(e.whenFalse, hasta, vistos)
       if (ts.isIdentifier(e)) {
         const v = binding(e)
-        if (v && !vistos.has(v)) {
-          const values = valores(v, hasta)
+        if (v?.variable && !vistos.has(v)) {
+          const values = valores(v)
           if (values.length) return values.some(b => puedeSerPaid(b, hasta, new Set(vistos).add(v)))
         }
       }
@@ -408,5 +509,261 @@ describe('probe del escáner REAL de escritores', () => {
       i ? f : { ...f, source: f.source + '\nfunction nuevo(tx, args) { return casTransitionInTx(tx, args) }' },
     )
     expect(() => escritores(nuevo)).toThrow(/contrato opaco orderExtra/)
+  })
+})
+
+describe('I3 fixround2: familia léxica del escáner REAL', () => {
+  const escanear = (source: string) => escritores([{ file: path.join(SRC, 'probe.ts'), source }])
+  const exterior = "const data = {paymentStatus: 'PENDING'}; "
+  it.each([
+    ['parámetro exacto del revisor', 'function pagar(tx, data) { tx.order.update({data}) }'],
+    ['parámetro default sustituible', "function pagar(tx, data = {paymentStatus:'PENDING'}) {tx.order.update({data})}"],
+    ['parámetro rest', 'function pagar(tx, ...data) {tx.order.update({data})}'],
+    ['arrow', 'const pagar = (tx, data) => tx.order.update({data})'],
+    ['función expresión', 'const pagar = function(tx, data) {tx.order.update({data})}'],
+    ['método de objeto', 'const acciones = {pagar(tx, data) {tx.order.update({data})}}'],
+    ['método de clase', 'class Acciones {pagar(tx, data) {tx.order.update({data})}}'],
+    ['setter', 'const acciones = {set pagar(data) {tx.order.update({data})}}'],
+    ['parámetro patrón renombrado', 'function pagar(tx, {payload: data}) {tx.order.update({data})}'],
+    ['parámetro patrón nested con default', "function pagar(tx, {payload: {data = {paymentStatus:'PENDING'}}}) {tx.order.update({data})}"],
+    ['parámetro patrón array/rest', 'function pagar(tx, [id, ...data]) {tx.order.update({data})}'],
+    ['variable patrón const', 'function pagar(tx, payload) {const {value: data} = payload; tx.order.update({data})}'],
+    ['variable patrón var array', 'function pagar(tx, payload) {{var [data] = payload} tx.order.update({data})}'],
+    ['catch simple', 'function pagar(tx) {try {throw payload} catch (data) {tx.order.update({data})}}'],
+    ['catch patrón', 'function pagar(tx) {try {throw payload} catch ({value: data}) {tx.order.update({data})}}'],
+    ['for let', 'function pagar(tx, payload) {for (let data = payload; seguir;) {tx.order.update({data})}}'],
+    ['for-of const', 'function pagar(tx, rows) {for (const data of rows) {tx.order.update({data})}}'],
+    ['for-in let', 'function pagar(tx, rows) {for (let data in rows) {tx.order.update({data})}}'],
+    ['for-of var hoisted', 'function pagar(tx, rows) {for (var data of rows) {} tx.order.update({data})}'],
+    ['var sin inicializador en bloque', 'function pagar(tx) {{var data} tx.order.update({data})}'],
+    ['let sin valor corta exterior', 'function pagar(tx) {let data; tx.order.update({data})}'],
+    [
+      'reutilización en lazo posterior',
+      "function pagar(tx) {let data={paymentStatus:'PENDING'}; for (let i=0;i<2;i++) {tx.order.update({data}); data={paymentStatus:'PAID'}}}",
+    ],
+    ['función local', 'function pagar(tx) {function data() {} tx.order.update({data})}'],
+    ['nombre propio función expresión', 'const pagar = function data(tx) {tx.order.update({data})}'],
+    ['clase local', 'function pagar(tx) {class data {} tx.order.update({data})}'],
+    ['enum local', 'function pagar(tx) {enum data {value} tx.order.update({data})}'],
+    ['asignación patrón objeto', 'function pagar(tx, payload) {let data = {}; ({data} = payload); tx.order.update({data})}'],
+    ['asignación patrón array', 'function pagar(tx, payload) {let data = {}; [data] = payload; tx.order.update({data})}'],
+    [
+      'asignación patrón default',
+      "function pagar(tx, payload) {let data = {}; ({value: data = {paymentStatus:'PENDING'}} = payload); tx.order.update({data})}",
+    ],
+    ['asignación patrón rest', 'function pagar(tx, payload) {let data = {}; [...data] = payload; tx.order.update({data})}'],
+    ['switch con binding local opaco', 'function pagar(tx, payload) {switch (tipo) {case 0: let data=payload; tx.order.update({data})}}'],
+    [
+      'asignación patrón a propiedad',
+      'function pagar(tx, payload) {const data = {}; ({value: data.paymentStatus} = payload); tx.order.update({data})}',
+    ],
+    ['asignación compuesta', 'function pagar(tx, payload) {let data = {}; data &&= payload; tx.order.update({data})}'],
+    [
+      'propiedad con asignación lógica',
+      'function pagar(tx, payload) {const data = {}; data.paymentStatus ||= payload; tx.order.update({data})}',
+    ],
+    ['incremento', 'function pagar(tx) {let data = {}; data++; tx.order.update({data})}'],
+    ['delete', 'function pagar(tx) {const data = {}; delete data.paymentStatus; tx.order.update({data})}'],
+    ['for-of asigna binding existente', 'function pagar(tx, rows) {let data = {}; for (data of rows) {tx.order.update({data})}}'],
+    ['for-in asigna binding existente', 'function pagar(tx, rows) {let data = {}; for (data in rows) {tx.order.update({data})}}'],
+    [
+      'propiedad computed desconocida',
+      'function pagar(tx, campo, payload) {const data = {}; data[campo] = payload; tx.order.update({data})}',
+    ],
+    [
+      'propiedad anidada no resuelta',
+      'function pagar(tx, payload) {const data = {}; data.nested.value = payload; tx.order.update({data})}',
+    ],
+  ])('un binding o write opaco no cae al exterior: %s', (_caso, source) => {
+    expect(() => escanear(exterior + source)).toThrow(/opaco/i)
+  })
+  it.each([
+    [
+      'estado parámetro sombreado',
+      "const paymentStatus='PENDING'; function pagar(tx, paymentStatus) {tx.order.update({data:{paymentStatus}})}",
+    ],
+    ['namespace enum parámetro', 'function pagar(tx, PaymentStatus) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}'],
+    ['namespace sin binding', 'function pagar(tx) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}'],
+    [
+      'namespace Prisma sombreado',
+      "import {PaymentStatus} from '@prisma/client'; function pagar(tx, PaymentStatus) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+    [
+      'namespace import sólo tipo',
+      "import type {PaymentStatus} from '@prisma/client'; function pagar(tx) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+    [
+      'namespace specifier sólo tipo',
+      "import {type PaymentStatus} from '@prisma/client'; function pagar(tx) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+    [
+      'namespace import de otro origen',
+      "import {PaymentStatus} from './other'; function pagar(tx) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+    [
+      'namespace enum local',
+      "function pagar(tx) {const PaymentStatus={PENDING:'PAID'}; tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+    ['var de bloque pertenece a función', exterior + "function pagar(tx) {{var data={paymentStatus:'PAID'}} tx.order.update({data})}"],
+    [
+      'var de for pertenece a función',
+      exterior + "function pagar(tx) {for (var data={paymentStatus:'PAID'}; false;) {} tx.order.update({data})}",
+    ],
+    [
+      'for-in no sombrea afuera',
+      "const data={paymentStatus:'PAID'}; function pagar(tx, rows) {for (const data in rows) {} tx.order.update({data})}",
+    ],
+    [
+      'for-of no sombrea afuera',
+      "const data={paymentStatus:'PAID'}; function pagar(tx, rows) {for (const data of rows) {} tx.order.update({data})}",
+    ],
+    ['propiedad literal indexada', "function pagar(tx) {const data={}; data['paymentStatus']='PAID'; tx.order.update({data})}"],
+    ['asignación directa conocida', "function pagar(tx) {let data; data={paymentStatus:'PAID'}; tx.order.update({data})}"],
+  ])('conserva raíz si el estado puede ser PAID: %s', (_caso, source) => {
+    expect([...escanear(source).keys()]).toEqual(['probe.ts#pagar:update:data'])
+  })
+  it.each([
+    ['bloque hermano', exterior + "function pagar(tx) {{const data={paymentStatus:'PAID'}} tx.order.update({data})}"],
+    ['otra función', exterior + "function otra() {var data={paymentStatus:'PAID'}} function pagar(tx) {tx.order.update({data})}"],
+    ['write de sombra', exterior + "function pagar(tx) {{let data={}; data.paymentStatus='PAID'} tx.order.update({data})}"],
+    ['catch fuera de alcance', exterior + 'function pagar(tx) {try {} catch(data) {} tx.order.update({data})}'],
+    [
+      'switch fuera de alcance',
+      exterior + "function pagar(tx) {switch (tipo) {case 0: const data={paymentStatus:'PAID'}} tx.order.update({data})}",
+    ],
+    [
+      'enum Prisma canónico',
+      "import {PaymentStatus} from '@prisma/client'; function pagar(tx) {tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})}",
+    ],
+  ])('no contamina un negativo conocido: %s', (_caso, source) => {
+    expect([...escanear(source).keys()]).toEqual([])
+  })
+  it('un valor futuro no acredita la marca de una escritura previa', () => {
+    expect(() =>
+      escanear(
+        "function pagar(tx) {let data={paymentStatus:'PAID'}; tx.order.update({data}); data={paymentStatus:'PAID',loyaltyEligibleAt:new Date()}}",
+      ),
+    ).toThrow(/opaco/i)
+  })
+  it('sigue fallando cerrado sin homónimo y conserva marker como propiedad real', () => {
+    expect(() => escanear('function pagar(tx, data) {tx.order.update({data})}')).toThrow(/opaco/i)
+    const row = escanear(
+      "function pagar(tx) {const data={paymentStatus:'PAID', loyaltyEligibleAt:new Date()}; tx.order.update({data})}",
+    ).get('probe.ts#pagar:update:data')
+    expect(row?.campos.has('loyaltyEligibleAt')).toBe(true)
+  })
+})
+
+describe('I3 R16: parámetros/defaults y var del cuerpo en el escáner REAL', () => {
+  const escanear = (source: string) => escritores([{ file: path.join(SRC, 'probe.ts'), source }])
+  it.each([
+    [
+      'función',
+      "const estado='PAID'; function pagar(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}",
+      'pagar',
+    ],
+    [
+      'función expresión',
+      "const estado='PAID'; const pagar=function(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}",
+      '(módulo)',
+    ],
+    [
+      'arrow',
+      "const estado='PAID'; const pagar=(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) => {var estado='PENDING'}",
+      'pagar',
+    ],
+    [
+      'método objeto',
+      "const estado='PAID'; const acciones={pagar(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}}",
+      '(módulo)',
+    ],
+    [
+      'método clase',
+      "const estado='PAID'; class Acciones {pagar(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}}",
+      '(módulo)',
+    ],
+    [
+      'constructor',
+      "const estado='PAID'; class Acciones {constructor(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}}",
+      '(módulo)',
+    ],
+    [
+      'var anidado',
+      "const estado='PAID'; function pagar(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {{var estado='PENDING'}}",
+      'pagar',
+    ],
+    [
+      'parámetro real homónimo',
+      "const estado='PENDING'; function pagar(tx, estado, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PENDING'}",
+      'pagar',
+    ],
+    [
+      'var redeclara parámetro y sólo se asigna después',
+      "function pagar(tx, estado) {var estado; tx.order.update({data:{paymentStatus:estado}}); estado='PENDING'}",
+      'pagar',
+    ],
+    [
+      'constructor conserva parámetro recibido',
+      "class Acciones {constructor(tx, estado) {var estado; tx.order.update({data:{paymentStatus:estado}}); estado='PENDING'}}",
+      '(módulo)',
+    ],
+  ])('DEFAULT ve el exterior/parámetro y nunca var del CUERPO: %s', (_caso, source, owner) => {
+    expect([...escanear(source).keys()]).toEqual([`probe.ts#${owner}:update:data`])
+  })
+  it.each([
+    ['función', "const estado='PAID'; function pagar(tx, disparo) {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}"],
+    [
+      'función expresión',
+      "const estado='PAID'; const pagar=function(tx, disparo) {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}",
+    ],
+    ['arrow', "const estado='PAID'; const pagar=(tx, disparo) => {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}"],
+    [
+      'método objeto',
+      "const estado='PAID'; const acciones={pagar(tx, disparo) {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}}",
+    ],
+    [
+      'método clase',
+      "const estado='PAID'; class Acciones {pagar(tx, disparo) {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}}",
+    ],
+    [
+      'constructor',
+      "const estado='PAID'; class Acciones {constructor(tx, disparo) {var estado='PENDING'; tx.order.update({data:{paymentStatus:estado}})}}",
+    ],
+    [
+      'var hoisted desde bloque',
+      "const estado='PAID'; function pagar(tx) {{var estado='PENDING'} tx.order.update({data:{paymentStatus:estado}})}",
+    ],
+    [
+      'exteriorPENDING no hereda bodyPAID',
+      "const estado='PENDING'; function pagar(tx, disparo=tx.order.update({data:{paymentStatus:estado}})) {var estado='PAID'}",
+    ],
+    [
+      'importPrisma visible desde default',
+      "import {PaymentStatus} from '@prisma/client'; function pagar(tx, disparo=tx.order.update({data:{paymentStatus:PaymentStatus.PENDING}})) {var PaymentStatus={PENDING:'PAID'}}",
+    ],
+  ])('conserva el negativo del entorno que realmente lee: %s', (_caso, source) => {
+    expect([...escanear(source).keys()]).toEqual([])
+  })
+  it('DATAdefault ya estaba protegido: conserva raíz u opaco, nunca omisión', () => {
+    let all: Map<string, Escritura>
+    try {
+      all = escanear(
+        "const data={paymentStatus:'PAID'}; function pagar(tx, disparo=tx.order.update({data})) {var data={paymentStatus:'PENDING'}}",
+      )
+    } catch (error) {
+      expect(String(error)).toMatch(/opaco/i)
+      return
+    }
+    expect([...all.keys()]).toEqual(['probe.ts#pagar:update:data'])
+  })
+  it('DATAcuerpo sigue leyendo su varPENDING y no el exteriorPAID', () => {
+    expect([
+      ...escanear(
+        "const data={paymentStatus:'PAID'}; function pagar(tx, disparo) {var data={paymentStatus:'PENDING'}; tx.order.update({data})}",
+      ).keys(),
+    ]).toEqual([])
+  })
+  it('var sin valor no reemplaza un parámetro DATA recibido', () => {
+    expect(() => escanear('function pagar(tx, data) {var data; tx.order.update({data})}')).toThrow(/opaco/i)
   })
 })
