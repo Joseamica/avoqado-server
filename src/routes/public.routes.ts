@@ -48,7 +48,7 @@ import {
   limiteDiarioDeIntentosDeCodigoEnAlta,
 } from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
-import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
+import { authenticateCustomer, authenticateCustomerOptional, activarReservasSiFalta } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { kioskCheckInCors } from '../middlewares/kioskCheckInCors.middleware'
@@ -164,7 +164,9 @@ const tokenQueNoSeDecodifica: ErrorRequestHandler = (err, req, res, next) => {
 router.use('/gift-cards', tokenQueNoSeDecodifica)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
-router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
+router.use(
+  cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'], exposedHeaders: ['x-customer-session'] }),
+)
 
 // Rate limiting: read endpoints (60 req/min), write (5 req/min), cancel (10 req/min)
 //
@@ -256,6 +258,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
@@ -277,6 +280,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
   reservationPublicController.createHold,
@@ -326,6 +330,7 @@ router.post(
   cancelLimit, // same rate envelope — destructive-ish public mutation
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: publicRescheduleBodySchema })),
   reservationPublicController.rescheduleReservation,
 )
@@ -346,6 +351,7 @@ router.get(
   readLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   validateRequest(publicBalanceQuerySchema),
   creditPackPublicController.getCustomerBalance,
 )
@@ -360,6 +366,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
@@ -377,6 +384,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   kioskCheckInController.consumeChallenge,
 )
 
@@ -388,13 +396,21 @@ router.post('/venues/:venueSlug/customer/register', authLimit, customerPortalCon
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 
 // Fase 0.B: el slug manda. Antes el portal usaba sólo el venue del JWT e ignoraba la URL.
-router.get('/venues/:venueSlug/customer/portal', readLimit, resolveVenueBySlug, authenticateCustomer, customerPortalController.getPortal)
+router.get(
+  '/venues/:venueSlug/customer/portal',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  activarReservasSiFalta,
+  customerPortalController.getPortal,
+)
 
 router.patch(
   '/venues/:venueSlug/customer/profile',
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
 )

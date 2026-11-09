@@ -559,7 +559,7 @@ describe('cableado: qué candados corre cada ruta', () => {
     ['POST /quote', () => request(app).post('/venues/flautas/ordering/quote').send({ items: body.items })],
   ])('%s: venue operativo (sin demo) y candado de plan en modo cerrado (R10, R14)', async (_ruta, llamar) => {
     expect((await llamar()).status).toBe(200)
-    expect(mockRan).toEqual(NUEVOS)
+    expect(mockRan).toEqual(_ruta === 'POST /quote' ? ['operational', 'ordering-auth', 'strict:ONLINE_ORDERING'] : NUEVOS)
   })
 
   it('POST /orders: el venue por slug AUNQUE esté desactivado → token de PEDIDOS; activo, operativo y plan los pide el servicio (P1-06, Codex r3)', async () => {

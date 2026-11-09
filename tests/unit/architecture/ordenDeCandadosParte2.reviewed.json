@@ -1028,6 +1028,10 @@
       "etiqueta": "withDeliveryOrderLockConReintento",
       "cantidad": 1,
       "nota": "Opener genérico del paso 8: lo usa sólo deliveryReconciliation; devuelve cerradoEnProveedor y selloPorRevertir en su retorno (R65 b)."
+    },
+    "src/middlewares/customerAuth.middleware.ts#activarReservasSiFalta": {
+      "etiqueta": "activarReservasSiFalta",
+      "cantidad": 1
     }
   },
   "efectosRevisados": {

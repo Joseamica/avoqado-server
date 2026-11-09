@@ -321,6 +321,60 @@ export interface CustomerTokenPayload extends jwt.JwtPayload {
   type: 'customer' // Distinguishes from staff tokens
 }
 
+export interface ContactoProbado {
+  tipo: 'PHONE' | 'EMAIL'
+  valor: string
+  metodo: 'WHATSAPP' | 'EMAIL_CODE' | 'GOOGLE'
+  probadoEn: number
+}
+
+export interface CustomerSessionPayload extends jwt.JwtPayload {
+  sub: string
+  venueId: string
+  type: 'customer_session'
+  v: number
+  contactos: ContactoProbado[]
+}
+
+/** Una visita renueva desde ahora; nunca arrastra el iat/exp de la sesión anterior. */
+export function generateCustomerSession(p: Omit<CustomerSessionPayload, 'type' | 'iat' | 'exp'>): string {
+  return jwt.sign({ sub: p.sub, venueId: p.venueId, type: 'customer_session', v: p.v, contactos: p.contactos }, ACCESS_TOKEN_SECRET!, {
+    expiresIn: 2592000,
+    algorithm: 'HS256',
+  })
+}
+
+export function verifyCustomerSession(token: string): CustomerSessionPayload {
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] })
+  if (
+    typeof decoded === 'string' ||
+    typeof decoded.sub !== 'string' ||
+    !decoded.sub.trim() ||
+    typeof decoded.venueId !== 'string' ||
+    !decoded.venueId.trim() ||
+    decoded.type !== 'customer_session' ||
+    !Number.isSafeInteger(decoded.v) ||
+    decoded.v < 0 ||
+    !Number.isFinite(decoded.iat) ||
+    !Number.isFinite(decoded.exp) ||
+    decoded.exp! <= decoded.iat! ||
+    !Array.isArray(decoded.contactos) ||
+    !decoded.contactos.every(
+      contacto =>
+        contacto &&
+        (contacto.tipo === 'PHONE' || contacto.tipo === 'EMAIL') &&
+        typeof contacto.valor === 'string' &&
+        contacto.valor.trim().length > 0 &&
+        ['WHATSAPP', 'EMAIL_CODE', 'GOOGLE'].includes(contacto.metodo) &&
+        Number.isFinite(contacto.probadoEn) &&
+        contacto.probadoEn >= 0,
+    )
+  ) {
+    throw new jwt.JsonWebTokenError('Sesión de cliente inválida.')
+  }
+  return decoded as CustomerSessionPayload
+}
+
 export interface ConsumerTokenPayload extends jwt.JwtPayload {
   sub: string // Consumer.id
   type: 'consumer'
