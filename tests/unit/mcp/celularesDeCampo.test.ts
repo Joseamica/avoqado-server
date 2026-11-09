@@ -18,6 +18,7 @@ const mockDesvincular = jest.fn()
 const mockRetenidos = jest.fn()
 const mockResolver = jest.fn()
 const mockCelular = jest.fn()
+const mockStaff = jest.fn()
 const mockAudit = jest.fn()
 jest.mock('@/services/modules/module.service', () => ({
   MODULE_CODES: { SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY' },
@@ -40,7 +41,10 @@ jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...a) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { celularDeCampo: { findFirst: (...a: unknown[]) => mockCelular(...a) } },
+  default: {
+    celularDeCampo: { findFirst: (...a: unknown[]) => mockCelular(...a) },
+    staff: { findFirst: (...a: unknown[]) => mockStaff(...a) },
+  },
 }))
 jest.mock('@/services/access/access.service', () => ({
   hasPermission: (access: { corePermissions: string[] }, permission: string) => access.corePermissions.includes(permission),
@@ -50,12 +54,18 @@ const venueId = 'cm12345678901234567890123'
 const orgId = 'cm52345678901234567890123'
 const staffId = 'cm42345678901234567890123'
 const promotor = 'cm62345678901234567890123'
+const venueB = 'cm72345678901234567890123'
+const venueC = 'cm82345678901234567890123'
 const scopeCon = (permisos: string[], scopes = ['mcp:read', 'mcp:write']): McpScope => ({
   staffId,
   activeOrg: orgId,
   scopes,
-  allowedVenueIds: [venueId],
-  perVenueAccess: new Map([[venueId, { corePermissions: permisos, organizationId: orgId, role: 'MANAGER' } as never]]),
+  // C es de la organización pero ahí es mesero (sin permisos de equipo): no es parte de su alcance de equipo.
+  allowedVenueIds: [venueId, venueC],
+  perVenueAccess: new Map([
+    [venueId, { corePermissions: permisos, organizationId: orgId, role: 'MANAGER' } as never],
+    [venueC, { corePermissions: [], organizationId: orgId, role: 'WAITER' } as never],
+  ]),
 })
 const TODOS = ['teams:read', 'teams:update']
 
@@ -95,6 +105,7 @@ beforeEach(() => {
   mockDesvincular.mockResolvedValue({ yaEstaba: false, porSubir: 2 })
   mockResolver.mockResolvedValue({ estado: 'APLICADO', repetida: false })
   mockCelular.mockResolvedValue({ id: 'cel1' })
+  mockStaff.mockResolvedValue({ id: promotor, firstName: 'Ana', lastName: 'Pérez' })
 })
 afterEach(async () => {
   await client?.close()
@@ -127,9 +138,11 @@ describe('lectura (teams:read, supervisor, módulo)', () => {
   it('lista con filtros y pagina; los retenidos sólo los sin resolver', async () => {
     await abrir(scopeCon(TODOS))
     expect(await call('promoter_phones', { venueId, q: 'ana', estado: 'ACTIVO', page: 2 })).toMatchObject({ ok: true, page: 2 })
-    expect(mockListar).toHaveBeenCalledWith(orgId, { q: 'ana', estado: 'ACTIVO', page: 2, pageSize: 25 })
+    expect(mockListar).toHaveBeenCalledWith(orgId, { q: 'ana', estado: 'ACTIVO', page: 2, pageSize: 25 }, [venueId])
     await call('promoter_phone_held_uploads', { venueId, staffId: promotor })
-    expect(mockRetenidos).toHaveBeenCalledWith(orgId, { staffId: promotor, estado: ['PENDIENTE', 'APLICANDO'], page: 1, pageSize: 25 })
+    expect(mockRetenidos).toHaveBeenCalledWith(orgId, { staffId: promotor, estado: ['PENDIENTE', 'APLICANDO'], page: 1, pageSize: 25 }, [
+      venueId,
+    ])
   })
 })
 
@@ -161,7 +174,7 @@ describe('manage_promoter_phone (teams:update, confirmación firmada)', () => {
     await abrir(scopeCon(TODOS))
     const r = await aplicar('manage_promoter_phone', { venueId, accion: 'GENERAR_CODIGO', staffId: promotor })
     expect(r.ok).toBe(true)
-    expect(mockCodigos).toHaveBeenCalledWith({ organizationId: orgId, generadoPor: staffId, staffIds: [promotor] })
+    expect(mockCodigos).toHaveBeenCalledWith({ organizationId: orgId, generadoPor: staffId, staffIds: [promotor], venueIds: [venueId] })
     expect(r.generados[0].codigo).toBe('ABCD1234')
     expect(JSON.stringify(mockAudit.mock.calls)).not.toContain('ABCD1234') // el código nunca va a la bitácora
   })
@@ -169,7 +182,14 @@ describe('manage_promoter_phone (teams:update, confirmación firmada)', () => {
     await abrir(scopeCon(TODOS))
     expect((await aplicar('manage_promoter_phone', { venueId, accion: 'DESVINCULAR', staffId: promotor })).ok).toBe(true)
     expect(mockCelular).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: orgId, staffIdVinculado: promotor } }))
-    expect(mockDesvincular).toHaveBeenCalledWith({ celularId: 'cel1', organizationId: orgId, motivo: 'MCP', porStaffId: staffId })
+    expect(mockDesvincular).toHaveBeenCalledWith({
+      celularId: 'cel1',
+      organizationId: orgId,
+      motivo: 'MCP',
+      porStaffId: staffId,
+      perdidoORobado: false,
+      venueIds: [venueId],
+    })
   })
   it('desvincular por celularId no busca a la persona', async () => {
     await abrir(scopeCon(TODOS))
@@ -186,6 +206,7 @@ describe('manage_promoter_phone (teams:update, confirmación firmada)', () => {
       accion: 'APLICAR',
       nota: 'ok',
       porStaffId: staffId,
+      venueIds: [venueId],
     })
     await aplicar('manage_promoter_phone', { venueId, accion: 'DESCARTAR_RETENIDO', retenidoId: 'r2' })
     expect(mockResolver).toHaveBeenLastCalledWith(expect.objectContaining({ retenidoId: 'r2', accion: 'DESCARTAR', porStaffId: staffId }))
@@ -216,5 +237,81 @@ describe('manage_promoter_phone (teams:update, confirmación firmada)', () => {
       ok: false,
       code: 'YA_RESUELTO',
     })
+  })
+})
+
+describe('arreglo final (S3, S8, S12)', () => {
+  it('S3 · un supervisor sólo de A pidiendo B: el guardia lo frena y ningún servicio se llama', async () => {
+    await abrir(scopeCon(TODOS))
+    for (const [tool, args] of [
+      ['promoter_phones', {}],
+      ['promoter_phone_held_uploads', {}],
+      ['manage_promoter_phone', { accion: 'APLICAR_RETENIDO', retenidoId: 'r1' }],
+    ] as const)
+      expect((await call(tool, { venueId: venueB, ...args })).isError).toBe(true)
+    expect(mockListar).not.toHaveBeenCalled()
+    expect(mockRetenidos).not.toHaveBeenCalled()
+    expect(mockResolver).not.toHaveBeenCalled()
+  })
+
+  it('S3 · el nombre del promotor se busca sólo en el alcance', async () => {
+    await abrir(scopeCon(TODOS))
+    await call('manage_promoter_phone', { venueId, accion: 'GENERAR_CODIGO', promoterName: 'Ana' })
+    expect(mockListar).toHaveBeenCalledWith(orgId, { q: 'Ana', page: 1, pageSize: 10 }, [venueId])
+  })
+
+  it('S12 · vista previa por staffId trae el nombre (buscado sólo en el alcance) y dice 7 días', async () => {
+    await abrir(scopeCon(TODOS))
+    const r = await call('manage_promoter_phone', { venueId, accion: 'GENERAR_CODIGO', staffId: promotor })
+    expect(r.change).toMatchObject({ promoter: 'Ana Pérez' })
+    expect(r.message).toContain('7 días')
+    expect(r.message).not.toContain('24 h')
+    expect(mockStaff.mock.calls[0][0].where).toMatchObject({ id: promotor, venues: { some: { venueId: { in: [venueId] } } } })
+    // Fuera del alcance no hay vista previa.
+    mockStaff.mockResolvedValue(null)
+    expect(await call('manage_promoter_phone', { venueId, accion: 'DESVINCULAR', staffId: 'cm99999999999999999999999' })).toMatchObject({
+      ok: false,
+    })
+    expect(mockDesvincular).not.toHaveBeenCalled()
+  })
+
+  it('S12 · la descripción de la tool dice que el código vale 7 días', async () => {
+    await abrir(scopeCon(TODOS))
+    const { tools } = await client.listTools()
+    const d = tools.find(t => t.name === 'manage_promoter_phone')!.description!
+    expect(d).toMatch(/7[- ]day/)
+    expect(d).not.toMatch(/24 h validity/)
+  })
+
+  it('S12 · NO_SE_PUDO_APLICAR devuelve su motivo y su rechazo', async () => {
+    const rechazo = { code: 'PERSONA_SIN_ASIGNACION', message: 'La persona ya no tiene asignación activa en esa sucursal.' }
+    mockResolver.mockRejectedValue(
+      new AppError('No se pudo aplicar.', 422, true, 'NO_SE_PUDO_APLICAR', { motivo: 'PERSONA_SIN_ASIGNACION', rechazo }),
+    )
+    await abrir(scopeCon(TODOS))
+    expect(await aplicar('manage_promoter_phone', { venueId, accion: 'APLICAR_RETENIDO', retenidoId: 'r1' })).toMatchObject({
+      ok: false,
+      code: 'NO_SE_PUDO_APLICAR',
+      motivo: 'PERSONA_SIN_ASIGNACION',
+      rechazo,
+    })
+  })
+
+  it('S12 · sin inventario serializado en la organización lo dice en llano', async () => {
+    mockListar.mockResolvedValue({ disponible: false, items: [], total: 0 })
+    await abrir(scopeCon(TODOS))
+    expect(await call('promoter_phones', { venueId })).toMatchObject({
+      ok: true,
+      disponible: false,
+      message: 'Esta organización no tiene inventario serializado',
+    })
+  })
+
+  it('S8 · DESVINCULAR con perdidoORobado lo pasa al servicio y la vista previa lo advierte', async () => {
+    await abrir(scopeCon(TODOS))
+    const vista = await call('manage_promoter_phone', { venueId, accion: 'DESVINCULAR', staffId: promotor, perdidoORobado: true })
+    expect(vista.message).toContain('Por revisar')
+    await aplicar('manage_promoter_phone', { venueId, accion: 'DESVINCULAR', staffId: promotor, perdidoORobado: true })
+    expect(mockDesvincular).toHaveBeenCalledWith(expect.objectContaining({ perdidoORobado: true }))
   })
 })

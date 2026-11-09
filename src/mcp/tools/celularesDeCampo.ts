@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { hasPermission } from '@/services/access/access.service'
 import { esSupervisorOMasDeLaOrganizacion } from '@/services/access/supervisorDeLaOrganizacion'
 import { listarCelularesDeCampo } from '@/services/tpv/campo/celular/celularesDeLaOrganizacion.service'
 import { generarCodigos } from '@/services/tpv/campo/celular/codigoDeCelular.service'
@@ -14,6 +15,7 @@ import { listarRetenidos, resolverRetenido } from '@/services/tpv/campo/celular/
 
 const SERIALIZED_OFF_MSG = 'El inventario serializado no está activo en este local (módulo SERIALIZED_INVENTORY apagado).'
 const NO_SUPERVISOR_MSG = 'Se requiere rol de supervisor o superior en la organización.'
+const SIN_INVENTARIO_MSG = 'Esta organización no tiene inventario serializado'
 const PAGE_SIZE = 25
 
 const ACCIONES = ['GENERAR_CODIGO', 'DESVINCULAR', 'APLICAR_RETENIDO', 'DESCARTAR_RETENIDO'] as const
@@ -21,7 +23,10 @@ const ACCIONES = ['GENERAR_CODIGO', 'DESVINCULAR', 'APLICAR_RETENIDO', 'DESCARTA
 export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
-  /** Alcance, módulo, permiso y supervisor; devuelve la organización o la respuesta de rechazo. */
+  /**
+   * Alcance, módulo, permiso y supervisor; devuelve la organización y las sucursales del alcance (S3): las de la conexión,
+   * de esta organización, donde tiene el permiso de equipo. Nada de fuera de ellas se lee ni se toca.
+   */
   async function entrar(venueId: string, permiso: 'teams:read' | 'teams:update') {
     guard.venueFilter(venueId) // ScopeError si el venue no es del alcance
     if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
@@ -33,7 +38,11 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
     if (!(await esSupervisorOMasDeLaOrganizacion({ userId: scope.staffId }, organizationId))) {
       return { rechazo: text({ ok: false, error: NO_SUPERVISOR_MSG }) }
     }
-    return { organizationId }
+    const venueIds = scope.allowedVenueIds.filter(v => {
+      const acceso = scope.perVenueAccess.get(v)
+      return !!acceso && acceso.organizationId === organizationId && hasPermission(acceso, permiso)
+    })
+    return { organizationId, venueIds }
   }
 
   server.tool(
@@ -48,8 +57,8 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
     async ({ venueId, q, estado, page }) => {
       const e = await entrar(venueId, 'teams:read')
       if (e.rechazo) return e.rechazo
-      const r = await listarCelularesDeCampo(e.organizationId!, { q, estado, page: page ?? 1, pageSize: PAGE_SIZE })
-      return text({ ok: true, page: page ?? 1, pageSize: PAGE_SIZE, ...r })
+      const r = await listarCelularesDeCampo(e.organizationId!, { q, estado, page: page ?? 1, pageSize: PAGE_SIZE }, e.venueIds)
+      return text({ ok: true, page: page ?? 1, pageSize: PAGE_SIZE, ...r, ...(!r.disponible && { message: SIN_INVENTARIO_MSG }) })
     },
   )
 
@@ -64,33 +73,34 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
     async ({ venueId, staffId, page }) => {
       const e = await entrar(venueId, 'teams:read')
       if (e.rechazo) return e.rechazo
-      const r = await listarRetenidos(e.organizationId!, {
-        staffId,
-        estado: ['PENDIENTE', 'APLICANDO'],
-        page: page ?? 1,
-        pageSize: PAGE_SIZE,
-      })
+      const r = await listarRetenidos(
+        e.organizationId!,
+        { staffId, estado: ['PENDIENTE', 'APLICANDO'], page: page ?? 1, pageSize: PAGE_SIZE },
+        e.venueIds,
+      )
       return text({ ok: true, page: page ?? 1, pageSize: PAGE_SIZE, ...r })
     },
   )
 
   server.tool(
     'manage_promoter_phone',
-    "Manage a promoter's field-app phone: GENERAR_CODIGO (new activation code for the promoter — returned to you, 24 h validity), DESVINCULAR (unlink the phone: it keeps a 24 h grace to upload what it had pending; the PAX terminal of the same person is untouched), APLICAR_RETENIDO / DESCARTAR_RETENIDO (apply or discard one held upload, by retenidoId). Identify the promoter by staffId or by promoterName — an ambiguous name returns the candidates instead of guessing; DESVINCULAR also accepts celularId. Only for venues with the SERIALIZED_INVENTORY module; supervisor or above. By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires teams:update.",
+    "Manage a promoter's field-app phone: GENERAR_CODIGO (new activation code for the promoter — returned to you, 7-day validity), DESVINCULAR (unlink the phone: it keeps a 24 h grace to upload what it had pending; with perdidoORobado:true — lost or stolen — nothing is applied on its own and everything it sends waits in held uploads; the PAX terminal of the same person is untouched), APLICAR_RETENIDO / DESCARTAR_RETENIDO (apply or discard one held upload, by retenidoId). Identify the promoter by staffId or by promoterName — an ambiguous name returns the candidates instead of guessing; DESVINCULAR also accepts celularId. Only for venues with the SERIALIZED_INVENTORY module; supervisor or above. By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires teams:update.",
     {
       venueId: z.string().describe('A venue of the org (must be in your scope)'),
       accion: z.enum(ACCIONES),
       staffId: z.string().optional().describe('Promoter staff id (GENERAR_CODIGO / DESVINCULAR)'),
       promoterName: z.string().optional().describe('Promoter name when the id is unknown'),
       celularId: z.string().optional().describe('Phone id (DESVINCULAR)'),
+      perdidoORobado: z.boolean().optional().describe('DESVINCULAR: the phone was lost or stolen — the grace applies nothing on its own'),
       retenidoId: z.string().optional().describe('Held upload id (APLICAR_RETENIDO / DESCARTAR_RETENIDO)'),
       nota: z.string().max(500).optional().describe('Optional note for the audit trail (held uploads)'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
-    async ({ venueId, accion, staffId, promoterName, celularId, retenidoId, nota, confirm }) => {
+    async ({ venueId, accion, staffId, promoterName, celularId, perdidoORobado, retenidoId, nota, confirm }) => {
       const e = await entrar(venueId, 'teams:update')
       if (e.rechazo) return e.rechazo
       const organizationId = e.organizationId!
+      const venueIds = e.venueIds!
 
       try {
         // --- retenidos: se identifican por su id ---
@@ -113,6 +123,7 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
             accion: aplicar ? 'APLICAR' : 'DESCARTAR',
             nota,
             porStaffId: scope.staffId,
+            venueIds,
           })
           await auditMcpWrite(scope, {
             action: aplicar ? 'CAMPO_RETENIDO_APLICADO_MCP' : 'CAMPO_RETENIDO_DESCARTADO_MCP',
@@ -128,10 +139,18 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
         // --- celular: se identifica la persona (id o nombre) ---
         let personaId = staffId ?? null
         let personaNombre: string | null = null
-        if (!personaId && !(accion === 'DESVINCULAR' && celularId)) {
+        if (personaId) {
+          // El nombre para la vista previa, y sólo de alguien con una sucursal dentro del alcance (S3, S12).
+          const p = await prisma.staff.findFirst({
+            where: { id: personaId, venues: { some: { venueId: { in: venueIds } } } },
+            select: { firstName: true, lastName: true },
+          })
+          if (!p) return text({ ok: false, error: 'No encontré a ese promotor en las sucursales de tu alcance.' })
+          personaNombre = `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim()
+        } else if (!(accion === 'DESVINCULAR' && celularId)) {
           if (!promoterName)
             return text({ ok: false, error: 'Indica staffId, promoterName' + (accion === 'DESVINCULAR' ? ' o celularId.' : '.') })
-          const { items } = await listarCelularesDeCampo(organizationId, { q: promoterName, page: 1, pageSize: 10 })
+          const { items } = await listarCelularesDeCampo(organizationId, { q: promoterName, page: 1, pageSize: 10 }, venueIds)
           if (items.length === 0) return text({ ok: false, error: `No encontré un promotor "${promoterName}" en esta organización.` })
           if (items.length > 1) {
             // resolve-don't-guess: se devuelven los candidatos y se frena
@@ -152,10 +171,10 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
               ok: false,
               requiresConfirmation: true,
               change: { accion, staffId: personaId, promoter: personaNombre },
-              message: `Esto generará un código nuevo de activación de celular para ${personaNombre ?? 'el promotor'} (vale 24 h; si ya tenía uno sin usar, se reemplaza). Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+              message: `Esto generará un código nuevo de activación de celular para ${personaNombre ?? 'el promotor'} (vale 7 días; si ya tenía uno sin usar, se reemplaza). Confirma con el operador; luego vuelve a llamar con confirm:true.`,
             })
           }
-          const r = await generarCodigos({ organizationId, generadoPor: scope.staffId, staffIds: [personaId!] })
+          const r = await generarCodigos({ organizationId, generadoPor: scope.staffId, staffIds: [personaId!], venueIds })
           await auditMcpWrite(scope, {
             action: 'CAMPO_CODIGO_GENERADO_MCP',
             entity: 'CodigoDeCelular',
@@ -181,24 +200,37 @@ export function registerCelularesDeCampoTools(server: McpServer, scope: McpScope
           return text({
             ok: false,
             requiresConfirmation: true,
-            change: { accion, celularId: celular, promoter: personaNombre },
-            message: `Esto desvinculará el celular${personaNombre ? ` de ${personaNombre}` : ''}: dejará de entrar y tendrá 24 h para subir lo que traiga pendiente. La terminal PAX de la misma persona no se toca. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+            change: { accion, celularId: celular, promoter: personaNombre, perdidoORobado: !!perdidoORobado },
+            message: `Esto desvinculará el celular${personaNombre ? ` de ${personaNombre}` : ''}: dejará de entrar${
+              perdidoORobado
+                ? ' y, como se perdió o lo robaron, nada de lo que mande se aplicará solo: todo quedará en Por revisar.'
+                : ' y tendrá 24 h para subir lo que traiga pendiente.'
+            } La terminal PAX de la misma persona no se toca. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
           })
         }
-        const r = await desvincularCelular({ celularId: celular, organizationId, motivo: 'MCP', porStaffId: scope.staffId })
+        const r = await desvincularCelular({
+          celularId: celular,
+          organizationId,
+          motivo: 'MCP',
+          porStaffId: scope.staffId,
+          perdidoORobado: perdidoORobado === true,
+          venueIds,
+        })
         await auditMcpWrite(scope, {
           action: 'CAMPO_CELULAR_DESVINCULADO_MCP',
           entity: 'CelularDeCampo',
           entityId: celular,
           venueId,
           organizationId,
-          data: { yaEstaba: r.yaEstaba },
+          data: { yaEstaba: r.yaEstaba, perdidoORobado: r.perdidoORobado },
         })
         return text({ ok: true, ...r })
       } catch (err) {
-        // Errores de negocio de los servicios (AppError con code): se devuelven como respuesta, no como caída.
-        const a = err as { message?: string; code?: string; statusCode?: number }
-        if (a.statusCode && a.statusCode < 500) return text({ ok: false, error: a.message, code: a.code })
+        // Errores de negocio de los servicios (AppError con code): se devuelven como respuesta, no como caída, con sus datos
+        // (NO_SE_PUDO_APLICAR trae `motivo` y `rechazo`, S12).
+        const a = err as { message?: string; code?: string; statusCode?: number; details?: unknown }
+        const datos = a.details && typeof a.details === 'object' && !Array.isArray(a.details) ? a.details : {}
+        if (a.statusCode && a.statusCode < 500) return text({ ...datos, ok: false, error: a.message, code: a.code })
         throw err
       }
     },
