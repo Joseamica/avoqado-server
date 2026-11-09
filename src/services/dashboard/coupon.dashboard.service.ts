@@ -15,6 +15,8 @@ import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuent
 import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -789,25 +791,14 @@ export async function recordCouponRedemption(venueId: string, couponId: string, 
     throw new NotFoundError('El cupón no existe')
   }
 
-  // Verify order exists and belongs to venue
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-  })
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Check if order already has a coupon redemption
-  const existingRedemption = await prisma.couponRedemption.findUnique({
-    where: { orderId },
-  })
-  if (existingRedemption) {
-    throw new BadRequestError('This order already has a coupon redemption')
-  }
-
   // Create redemption and increment usage counter in transaction
   const result = await withDeadlockRetry(
     async tx => {
+      // No escribe importes ni Order: el modo débil excluye cambios de estado sin bloquear las FK de métricas.
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
+      const existingRedemption = await tx.couponRedemption.findUnique({ where: { orderId } })
+      if (existingRedemption) throw new BadRequestError('This order already has a coupon redemption')
+
       // Create redemption record
       const redemption = await tx.couponRedemption.create({
         data: {
@@ -815,6 +806,7 @@ export async function recordCouponRedemption(venueId: string, couponId: string, 
           orderId,
           customerId,
           amountSaved,
+          redeemedAt: new Date(),
         },
         include: {
           couponCode: {
@@ -847,7 +839,7 @@ export async function recordCouponRedemption(venueId: string, couponId: string, 
 
       return redemption
     },
-    { etiqueta: 'recordCouponRedemption' },
+    { etiqueta: 'recordCouponRedemption', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
   logger.info(`🎫 Coupon redeemed: ${coupon.code} on order ${orderId}, saved ${amountSaved}`)

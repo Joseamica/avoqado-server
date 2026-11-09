@@ -56,13 +56,13 @@
   },
   "services/b4bit/b4bit.service.ts#initiateCryptoPayment": {
     "clase": "EXCEPCION",
-    "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "categoria": "CREA_CUENTA",
+    "motivo": "R13: sin orderId crea una Order PENDING; con existente sólo crea Payment PENDING tras comprobar su status, sin editar Order/hijos/beneficios. El resto son metadatos Payment y emisión externa; se conserva el inventario Payment canónico YA_RECHAZA, sin afirmar dinero capturado."
   },
   "services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Confirmación CO de B4Bit: el Payment ya confirmado se registra; si Order está CANCELLED/DELETED retorna ORDER_NOT_CHARGEABLE sin editarla. En viva recalcula desde pagos COMPLETED y conserva CAS que excluye anuladas."
   },
   "services/cleanup/liveDemoCleanup.service.ts#deleteVenueDataTx": {
     "clase": "EXCEPCION",
@@ -70,14 +70,13 @@
     "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
   },
   "services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
-    "clase": "EXCEPCION",
-    "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "clase": "EDITOR",
+    "motivo": "R13: canje público ordinario sin evidencia de dinero; ATRIBUCION en la misma transacción antes de duplicado, canje y ambos contadores. Conserva FOR NO KEY UPDATE compatible con FK Customer/métricas."
   },
   "services/dashboard/customer.dashboard.service.ts#settleCustomerBalance": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Liquidación de saldo del cliente: el listado y el CAS bajo lock excluyen CANCELLED/DELETED; sólo el CAS ganador registra Payment CASH y los efectos de saldar. No permite edición ordinaria de una anulada."
   },
   "services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
     "clase": "EDITOR",
@@ -104,7 +103,7 @@
   "services/dashboard/manualPayment.service.ts#createManualPayment": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Registro de pago manual: sobre Order existente toma COBRO y rechaza CANCELLED/DELETED antes de confirmar la tx; sin orderId crea sombra nueva y Payment en la misma escritura. Las modificaciones pertenecen al pago, no a un editor libre."
   },
   "services/dashboard/manualSale.service.ts#createOneManualSale": {
     "clase": "EXCEPCION",
@@ -119,7 +118,7 @@
   "services/dashboard/order.dashboard.service.ts#settleOrder": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Liquidación en efectivo de una cuenta: bajo COBRO relee y rechazarCobroNuevoSobreCancelada impide CANCELLED/DELETED antes de CAS/pago/efectos. Conserva la operación financiera existente sin bypass de edición."
   },
   "services/dashboard/order.dashboard.service.ts#updateOrder": {
     "clase": "EDITOR_TOPOLOGICO",
@@ -234,7 +233,7 @@
   "services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Finaliza un cobro de vales desde sus dos registradores de pago; requiere jerarquía locked y rechaza CANCELLED/DELETED bajo Order. La rama de conciliación suma Payments COMPLETED y conserva intento/efectos, sin canje ordinario independiente."
   },
   "services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout": {
     "clase": "EXCEPCION",
@@ -290,7 +289,7 @@
   "services/mobile/order.mobile.service.ts#registrarAbonoEnTx": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Núcleo financiero de abonos: bajo COBRO rechaza efectivo nuevo sobre anulada; replay/dinero ya recibido conserva reapertura, Payment COMPLETED y saldo en la misma tx. Callers son cobro, saldo y cambio con sus guardas; no editor ordinario de beneficios."
   },
   "services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction": {
     "clase": "EDITOR"
@@ -347,12 +346,12 @@
   "services/online-ordering/card/capture.service.ts#finishCapture": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Cierre de captura online cuyo proveedor reportó succeeded: compara monto, CAS CAPTURING y Payment real. La transición ACCEPT y efectos son atómicos; si no acepta revierte y deja CONFIRMING_PAYMENT para conciliación, sin canje público libre."
   },
   "services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Sólo el liberador que relee al proveedor y encuentra piStatus succeeded: registra captura ya hecha, Payment y saldo bajo COBRO con CAS RELEASING y MoneyAnomaly. No es una ruta ordinaria sin evidencia de captura."
   },
   "services/online-ordering/order.service.ts#writeOnlineOrderInTx": {
     "clase": "EXCEPCION",
@@ -393,7 +392,7 @@
   "services/shared/cuponDeLaVenta.ts#canjearCuponEnTx": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Helper privado del canje al cerrar: finalizeCouponsForOrder exige PAID y ausencia de canje; el otro caller sólo crea una Order propia FREE_CART pagada en esa misma tx. No admite la ruta pública de canje sobre una existente impaga."
   },
   "services/shared/orderCancelGuard.ts#devolverCanjesDeVentaAnuladaEnTx": {
     "clase": "EXCEPCION",
@@ -403,7 +402,7 @@
   "services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Conciliación de estado de plataforma: el UPDATE exige status distinto de COMPLETED/CANCELLED/DELETED y criterio financiero de pago suficiente o plataforma aceptada a cero, además de CAS del estado. No revive anuladas ni consume beneficios."
   },
   "services/shared/repartoDescuentoTx.ts#conservarDescuentoHistorico": {
     "clase": "AYUDANTE_HISTORICO"
@@ -487,17 +486,17 @@
   "services/tpv/payment.tpv.service.ts#recordFastPayment": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Registro FAST: crea Order propia y Payment en una tx; si hay solicitud ligada delega recordOrderPayment. Replay conserva pago, y la liga de cliente usa su guard S2; colisión/segunda captura registran evidencia financiera sin ofrecer edición ordinaria."
   },
   "services/tpv/payment.tpv.service.ts#settleStandalonePaymentInTx": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Helper de registro/reasignación de un Payment ya existente: agrega COMPLETED bajo el lock del caller, conserva reapertura/estado cerrado y recalcula saldo. Callers financieros: recordOrderPayment y cambio con existingCharge, no una ruta de edición de metadata."
   },
   "services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+    "motivo": "Conciliación privada del registrador de pagos o reconcileOrderFromPayments: suma Payments COMPLETED, relee bajo COBRO y verifica inputs antes de actualizar derivados. Omite su tx sólo con settlement ya comprometido por el caller; no editor libre de beneficios."
   },
   "services/tpv/table.tpv.service.ts#assignTable": {
     "clase": "EDITOR_TOPOLOGICO"

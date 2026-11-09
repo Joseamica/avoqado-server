@@ -132,7 +132,8 @@
     },
     "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
       "clase": "EN_TX",
-      "etiqueta": "recordCouponRedemption"
+      "etiqueta": "recordCouponRedemption",
+      "nota": "R13: conserva esta raíz/transacción/retry; Order ATRIBUCION FOR NO KEY UPDATE primero, guard/duplicado y después canje/CouponCode/Discount. No espera Order con lock fuerte ni reordena los otros escritores."
     },
     "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
       "clase": "SENTENCIA",
@@ -555,7 +556,8 @@
     },
     "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
       "etiqueta": "recordCouponRedemption",
-      "cantidad": 1
+      "cantidad": 1,
+      "nota": "R13: conserva esta raíz/transacción/retry; Order ATRIBUCION FOR NO KEY UPDATE primero, guard/duplicado y después canje/CouponCode/Discount. No espera Order con lock fuerte ni reordena los otros escritores."
     },
     "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
       "etiqueta": "updateCouponCode",

@@ -399,26 +399,54 @@ describe('X7 · recordCouponRedemption contra finalizeCouponsForOrder de otra ve
 // ───────────────────────── X8 ─────────────────────────
 describe('X8 · recordCouponRedemption contra applyAutomaticDiscounts sobre LA MISMA cuenta pendiente (prevención)', () => {
   it('con 1 intento terminan las dos y sin warn: el canje espera la cuenta sin retener nada', async () => {
-    const n = await negocio()
-    await prisma.discount.create({
-      data: { venueId: n.venueId, name: 'Auto', type: 'FIXED_AMOUNT', value: 5, scope: 'ORDER', isAutomatic: true, active: true },
+    await conIntentos(1, async () => {
+      const n = await negocio()
+      await prisma.discount.create({
+        data: { venueId: n.venueId, name: 'Auto', type: 'FIXED_AMOUNT', value: 5, scope: 'ORDER', isAutomatic: true, active: true },
+      })
+      const cuenta = await venta(n)
+      // El motor toma la cuenta y se detiene antes de sus contadores.
+      const barrera = aparcar({ modelo: 'discount', operacion: 'update' })
+      const motor = manejada(applyAutomaticDiscounts(cuenta.id, undefined, n.venueId))
+      let canje: Promise<unknown> | undefined
+      let fallo: unknown,
+        huboFallo = false
+      const secundarios: unknown[] = []
+      try {
+        const pid = await aTiempo(barrera.pid, 15_000, 'el motor detenido con la cuenta tomada')
+        canje = manejada(recordCouponRedemption(n.venueId, n.couponId, cuenta.id, 10))
+        const espera = await esperarBloqueado(prisma, {
+          bloqueadoPor: [pid],
+          consulta: /FROM\s+"Order"[\s\S]*FOR NO KEY UPDATE/,
+          ms: 10_000,
+        })
+        expect(espera).not.toBeNull() // el canje espera Order ANTES del INSERT y de consumir los cupos
+        expect(await usos(n)).toEqual({ cupon: 0, descuento: 0, canjes: 0 })
+        barrera.soltar()
+        const res = await aTiempo(Promise.allSettled([motor, canje]), 20_000, 'las dos operaciones terminan')
+        expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
+        expect(huboInterbloqueo()).toBe(false)
+        expect(await usos(n)).toEqual({ cupon: 1, descuento: 1, canjes: 1 })
+        expect(await prisma.orderDiscount.count({ where: { orderId: cuenta.id } })).toBe(1)
+      } catch (error) {
+        huboFallo = true
+        fallo = error
+      } finally {
+        barrera.soltar()
+        const resultados = await Promise.allSettled([motor, ...(canje ? [canje] : [])])
+        secundarios.push(...resultados.flatMap(r => (r.status === 'rejected' ? [r.reason] : [])))
+        try {
+          barrera.restaurar()
+        } catch (error) {
+          secundarios.push(error)
+        }
+      }
+      if (secundarios.length) {
+        const Constructor = (globalThis as unknown as { AggregateError: new (errors: unknown[], message: string) => Error }).AggregateError
+        throw new Constructor([...(huboFallo ? [fallo] : []), ...secundarios], 'X8: participantes recogidos')
+      }
+      if (huboFallo) throw fallo
     })
-    const cuenta = await venta(n)
-    // El motor toma la cuenta y se detiene antes de sus contadores.
-    const barrera = aparcar({ modelo: 'discount', operacion: 'update' })
-    const motor = manejada(applyAutomaticDiscounts(cuenta.id, undefined, n.venueId))
-    const pid = await aTiempo(barrera.pid, 15_000, 'el motor detenido con la cuenta tomada').catch(e => {
-      barrera.restaurar()
-      throw e
-    })
-    const canje = manejada(recordCouponRedemption(n.venueId, n.couponId, cuenta.id, 10))
-    const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /CouponRedemption/, ms: 10_000 })
-    expect(espera).not.toBeNull() // el canje espera el KEY SHARE de la cuenta
-    const res = await conIntentos(1, () => soltarYEsperar({ aparcada: { promesa: motor, barrera }, otra: canje }))
-    expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
-    expect(huboInterbloqueo()).toBe(false)
-    expect((await usos(n)).canjes).toBe(1)
-    expect(await prisma.orderDiscount.count({ where: { orderId: cuenta.id } })).toBe(1)
   })
 })
 

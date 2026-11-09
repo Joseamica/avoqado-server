@@ -268,9 +268,9 @@ describe('Cuenta anulada no se edita: inventario P2-5b', () => {
     }
     expect(problemas).toEqual([])
   })
-  it('los cinco caminos de atribución conservan FOR NO KEY UPDATE a través de su helper', () => {
+  it('los caminos de atribución y el canje público R13 conservan FOR NO KEY UPDATE a través de su helper', () => {
     for (const key of Object.keys(inventario).filter(key =>
-      /#(attachCustomerToOrder|linkCustomerToExistingOrder|updateGuestInfo|leerVentaBajoCandado)$/.test(key),
+      /#(attachCustomerToOrder|linkCustomerToExistingOrder|updateGuestInfo|leerVentaBajoCandado|recordCouponRedemption)$/.test(key),
     )) {
       const body = funciones.get(key)!
       expect(body).toMatch(/bloquearCuentaParaEditar\(tx,\s*\{ venueId, orderId \},\s*'ATRIBUCION'\)/)

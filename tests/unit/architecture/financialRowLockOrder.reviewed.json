@@ -1321,6 +1321,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "R13: una Order por transacción, ATRIBUCION explícita FOR NO KEY UPDATE; excluye cambios de estado sin bloquear la FK Order de métricas. No escribe dinero ni Order; guard y duplicado preceden canje y contadores."
     }
   }
 }

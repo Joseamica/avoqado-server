@@ -1317,6 +1317,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': 1,
+  'src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption': 1,
   'src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment': 2,
   'src/services/dashboard/refund.dashboard.service.ts#issueRefund': 1,
   'src/services/tpv/refund.tpv.service.ts#recordRefund': 1,
