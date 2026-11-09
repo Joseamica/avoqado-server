@@ -15,13 +15,20 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, Validati
 import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
-import { aplicarEnvio, huellaDelEnvio, permisosDelEnvio, Rechazo, TipoDeEnvio } from './envioDeCampo'
+import { aplicarEnvio, huellaDelEnvio, permisosDelEnvio, Rechazo, ResultadoDelEnvio, TipoDeEnvio } from './envioDeCampo'
 import { sucursalesDeLaPersona } from './personasDeCampo'
 
 const GRACIA_MS = 24 * 60 * 60 * 1000
 
 export type EstadoDelRetenido = 'PENDIENTE' | 'APLICANDO' | 'APLICADO' | 'DESCARTADO'
-export type MotivoDeRetencion = 'NO_REPORTADA' | 'FUERA_DE_PLAZO' | 'PERSONA_DADA_DE_BAJA' | 'SIN_PERMISO' | 'RECHAZADO'
+export type MotivoDeRetencion =
+  | 'NO_REPORTADA'
+  | 'FUERA_DE_PLAZO'
+  | 'PERSONA_DADA_DE_BAJA'
+  | 'SIN_PERMISO'
+  | 'RECHAZADO'
+  /** No se retuvo: la gracia lo aplicó sola. La fila guarda su desenlace por huella (un reintento lo recibe igual). */
+  | 'APLICADO_EN_GRACIA'
 export type RetenidoDeCampo = {
   id: string
   staffId: string
@@ -30,7 +37,7 @@ export type RetenidoDeCampo = {
   sucursal: string
   tipo: TipoDeEnvio
   motivo: MotivoDeRetencion
-  rechazo: { code: string; message: string } | null
+  rechazo: { code: string; message: string; detalle?: unknown } | null
   resumen: string
   createdAt: Date
   estado: EstadoDelRetenido
@@ -93,7 +100,18 @@ export async function recibirEnGracia(
     e.tipo,
     cuerpo,
   )
-  if (r.tipo === 'RECHAZADO') return retener(celular, e, huella, 'RECHAZADO', r.rechazo)
+  // La custodia aceptada en parte YA tiene efecto: queda APLICADA con las filas fallidas, igual que en «Aplicar».
+  if (r.tipo === 'RECHAZADO' && !aceptadaEnParte(e.tipo, r)) return retener(celular, e, huella, 'RECHAZADO', r.rechazo)
+  const resultado = r.tipo === 'APLICADO' ? r.body : r.rechazo.detalle
+  // Su desenlace queda guardado por huella: un reintento (aun pasadas las 24 h o tras una baja) recibe lo mismo.
+  const guardado = await guardar(celular, e, huella, {
+    motivo: 'APLICADO_EN_GRACIA',
+    estado: 'APLICADO',
+    resultado: comoJson(resultado),
+    resueltoAt: new Date(),
+    ...(r.tipo === 'RECHAZADO' && { rechazo: comoJson(r.rechazo) }),
+  })
+  if (guardado) return guardado
   void logAction({
     staffId: celular.staffId,
     venueId: e.venueId,
@@ -103,8 +121,13 @@ export async function recibirEnGracia(
     entityId: celular.id,
     data: { tipo: e.tipo, huella, celularId: celular.id },
   })
+  if (r.tipo === 'RECHAZADO') return { status: 200, body: { resuelto: 'APLICADO', resultado: comoJson(resultado) } }
   return { status: r.status, body: { ...(r.body as object), aplicadoEnGracia: true } }
 }
+
+/** Una custodia aceptada en parte: el servicio la rechaza (CUSTODIA_INCOMPLETA), pero algunas SIMs sí quedaron aceptadas. */
+const aceptadaEnParte = (tipo: string, r: ResultadoDelEnvio) =>
+  r.tipo === 'RECHAZADO' && tipo === 'CUSTODIA_ACEPTAR' && (r.rechazo.detalle as any)?.summary?.succeeded > 0
 
 async function motivoParaRetener(
   celular: CelularDeCampo,
@@ -133,6 +156,27 @@ async function retener(
   motivo: MotivoDeRetencion,
   rechazo: Rechazo | null,
 ): Promise<{ status: number; body: unknown }> {
+  return (
+    (await guardar(celular, e, huella, { motivo, ...(rechazo && { rechazo: comoJson(rechazo) }) })) ?? {
+      status: 202,
+      body: { retenido: true, motivo },
+    }
+  )
+}
+
+/** Inserta la fila de esta huella; si otra subida con la misma huella le ganó (P2002), devuelve el desenlace de ésa. */
+async function guardar(
+  celular: CelularDeCampo,
+  e: { tipo: TipoDeEnvio; venueId: string; cuerpoJson: string },
+  huella: string,
+  datos: {
+    motivo: MotivoDeRetencion
+    rechazo?: Prisma.InputJsonValue
+    estado?: 'APLICADO'
+    resultado?: Prisma.InputJsonValue
+    resueltoAt?: Date
+  },
+): Promise<{ status: number; body: unknown } | null> {
   try {
     await prisma.envioRetenidoDeCampo.create({
       data: {
@@ -143,8 +187,7 @@ async function retener(
         tipo: e.tipo,
         huella,
         cuerpoJson: e.cuerpoJson,
-        motivo,
-        ...(rechazo && { rechazo: comoJson(rechazo) }),
+        ...datos,
       },
     })
   } catch (error) {
@@ -154,7 +197,7 @@ async function retener(
     if (!previo) throw error
     return desenlaceDelRetenido(previo)
   }
-  return { status: 202, body: { retenido: true, motivo } }
+  return null
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -231,7 +274,7 @@ export async function listarRetenidos(
   return {
     total,
     items: filas.map(r => {
-      const rechazo = r.rechazo as { code?: string; message?: string } | null
+      const rechazo = r.rechazo as { code?: string; message?: string; detalle?: unknown } | null
       const v = sucursal.get(r.venueId)
       return {
         id: r.id,
@@ -241,7 +284,13 @@ export async function listarRetenidos(
         sucursal: v?.name ?? '',
         tipo: r.tipo as TipoDeEnvio,
         motivo: r.motivo as MotivoDeRetencion,
-        rechazo: rechazo ? { code: String(rechazo.code ?? ''), message: String(rechazo.message ?? '') } : null,
+        rechazo: rechazo
+          ? {
+              code: String(rechazo.code ?? ''),
+              message: String(rechazo.message ?? ''),
+              ...(rechazo.detalle !== undefined && { detalle: rechazo.detalle }),
+            }
+          : null,
         resumen: resumenDe(r, v?.timezone ?? 'America/Mexico_City'),
         createdAt: r.createdAt,
         estado: r.estado as EstadoDelRetenido,
@@ -249,6 +298,8 @@ export async function listarRetenidos(
     }),
   }
 }
+
+const enProceso = () => new ConflictError('Este envío cambió mientras lo revisabas. Vuelve a intentar.', 'RETENIDO_EN_PROCESO')
 
 const noSePudo = (detalle: Record<string, unknown>) =>
   new ValidationError('No se pudo aplicar. Revisa el motivo y vuelve a intentar.', 'NO_SE_PUDO_APLICAR', detalle)
@@ -295,7 +346,12 @@ export async function resolverRetenido(p: {
       where: { id, organizationId, estado: 'PENDIENTE' },
       data: { estado: 'DESCARTADO', resueltoAt: new Date(), resueltoPor: p.porStaffId, nota: p.nota ?? null },
     })
-    if (count === 0) return (await segunComoQuedo(p)) as { estado: 'DESCARTADO'; repetida: boolean }
+    if (count === 0) {
+      const ya = await segunComoQuedo(p)
+      // Un «Aplicar» simultáneo lo regresó a PENDIENTE entre el CAS y la relectura: nunca se contesta la fila cruda.
+      if ('organizationId' in ya) throw enProceso()
+      return ya
+    }
     const r = await prisma.envioRetenidoDeCampo.findFirst({ where: { id, organizationId } })
     if (r) bitacora(r, 'CAMPO_RETENIDO_DESCARTADO')
     return { estado: 'DESCARTADO', repetida: false }
@@ -320,7 +376,7 @@ export async function resolverRetenido(p: {
     const otra = await segunComoQuedo(p)
     if (!('organizationId' in otra)) return otra
     // Cambió entre la lectura y el CAS y no quedó resuelto: nunca se aplica sin haberlo tomado (APLICANDO).
-    throw new ConflictError('Este envío cambió mientras lo revisabas. Vuelve a intentar.', 'RETENIDO_EN_PROCESO')
+    throw enProceso()
   }
 
   // Desde aquí ya no se descarta. A nombre de la persona y de SU celular, sin revisar sus permisos (lo autoriza el
@@ -331,8 +387,7 @@ export async function resolverRetenido(p: {
     leerJson(r.cuerpoJson),
   )
 
-  const aceptadasEnParte = res.tipo === 'RECHAZADO' && r.tipo === 'CUSTODIA_ACEPTAR' && (res.rechazo.detalle as any)?.summary?.succeeded > 0
-  if (res.tipo === 'APLICADO' || aceptadasEnParte) {
+  if (res.tipo === 'APLICADO' || aceptadaEnParte(r.tipo, res)) {
     const resultado = comoJson(res.tipo === 'APLICADO' ? res.body : res.rechazo.detalle)
     // Lo aplicado gana sobre cualquier otro estado: si otro «Aplicar» simultáneo lo regresó a PENDIENTE (o alguien lo
     // descartó en ese hueco), la fila no puede quedar sin decir que ya tiene efecto.
@@ -352,6 +407,14 @@ export async function resolverRetenido(p: {
 
   // Rechazo definitivo: no dejó efecto (la venta cancela su cuenta, la checada es una transacción). Vuelve a PENDIENTE.
   const rechazo = comoJson(res.rechazo)
-  await prisma.envioRetenidoDeCampo.updateMany({ where: { id, estado: 'APLICANDO' }, data: { estado: 'PENDIENTE', rechazo } })
+  const vuelta = await prisma.envioRetenidoDeCampo.updateMany({
+    where: { id, estado: 'APLICANDO' },
+    data: { estado: 'PENDIENTE', rechazo },
+  })
+  if (vuelta.count === 0) {
+    // Otro «Aplicar» simultáneo ya lo resolvió (p. ej. APLICADO): se contesta eso, no un falso 422.
+    const otra = await segunComoQuedo(p)
+    if (!('organizationId' in otra)) return otra
+  }
   throw noSePudo({ rechazo })
 }

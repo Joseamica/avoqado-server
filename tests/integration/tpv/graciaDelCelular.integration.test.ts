@@ -146,7 +146,19 @@ describe('POST /tpv/campo/gracia', () => {
     expect(evidencias).toHaveLength(1)
     expect(evidencias[0]).toMatchObject({ status: 'PENDING', staffId: promotorId, serialNumbers: [sim.serialNumber] })
     expect(fichas[0]).toMatchObject({ estado: 'COMPLETA', celularId: celular.id })
-    expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id } })).toBe(0)
+    // No se retuvo: su desenlace queda por huella (fuera de «sin resolver»), y el reintento lo recibe igual.
+    expect(await prisma.envioRetenidoDeCampo.findMany({ where: { celularId: celular.id } })).toEqual([
+      expect.objectContaining({
+        estado: 'APLICADO',
+        motivo: 'APLICADO_EN_GRACIA',
+        resultado: expect.objectContaining({ paymentId: res.body.paymentId }),
+      }),
+    ])
+    const otraVez = await enGracia(credencial, 'VENTA', cuerpoJson)
+    expect(otraVez.status).toBe(200)
+    expect(otraVez.body).toEqual({ resuelto: 'APLICADO', resultado: expect.objectContaining({ paymentId: res.body.paymentId }) })
+    const sinResolver = await listarRetenidos(orgId, { estado: ['PENDIENTE', 'APLICANDO'], page: 1, pageSize: 50 })
+    expect(sinResolver.items.some(i => i.resumen.includes(sim.serialNumber))).toBe(false)
 
     // La evidencia nombra la venta por su llave (el celular desvinculado nunca supo el pago).
     const foto = `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2Fgracia.jpg`

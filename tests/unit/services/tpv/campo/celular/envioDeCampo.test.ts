@@ -226,6 +226,13 @@ describe('aplicarEnvio', () => {
       expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
     })
 
+    it('VERIFICATION_MOVED (la venta cambió de tienda, «vuelve a intentarlo») se lanza: es reintentable', async () => {
+      db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
+      const movida = new ConflictError('La venta cambió de tienda mientras se guardaba; vuelve a intentarlo', 'VERIFICATION_MOVED')
+      evidencia.mockRejectedValue(movida)
+      await expect(aplicarEnvio(ctx, 'EVIDENCIA', fotos)).rejects.toBe(movida)
+    })
+
     it('el 404 o el 400 del servicio son definitivos (RECHAZADO con su código)', async () => {
       db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
       evidencia.mockRejectedValue(new BadRequestError('número sin captura', 'CAPTURE_REQUIRED'))

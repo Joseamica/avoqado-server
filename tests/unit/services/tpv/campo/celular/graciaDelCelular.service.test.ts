@@ -125,7 +125,66 @@ describe('recibirEnGracia', () => {
         data: { tipo: 'VENTA', huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson), celularId: 'cel1' },
       }),
     )
-    expect(filas).toHaveLength(0)
+    // Su desenlace queda por huella (fuera de la lista por omisión, que sólo trae PENDIENTE y APLICANDO).
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({
+      estado: 'APLICADO',
+      motivo: 'APLICADO_EN_GRACIA',
+      huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson),
+      resultado: { orderId: 'o', paymentId: 'p', repetida: false },
+      resueltoAt: AHORA,
+    })
+  })
+
+  it('lo aplicado en gracia, reintentado pasadas las 24 h o tras una baja, devuelve lo guardado y no se retiene', async () => {
+    const e = envio()
+    aplicar.mockResolvedValue(aplicado())
+    await recibirEnGracia(reportado(e), e)
+    const tarde = await recibirEnGracia(reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 25 * HORA) }), e)
+    expect(tarde).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: { orderId: 'o', paymentId: 'p', repetida: false } } })
+    sucursales.mockResolvedValue([])
+    expect((await recibirEnGracia(reportado(e), e)).body).toMatchObject({ resuelto: 'APLICADO' })
+    expect(aplicar).toHaveBeenCalledTimes(1)
+    expect(filas).toHaveLength(1)
+  })
+
+  it('si al guardar lo aplicado otra subida ya dejó la fila de esa huella (P2002), contesta lo guardado', async () => {
+    const e = envio()
+    const huella = huellaDelEnvio('VENTA', 'v1', e.cuerpoJson)
+    aplicar.mockImplementation(async () => {
+      filas.push({ id: 'otra', celularId: 'cel1', huella, estado: 'APLICADO', resultado: { paymentId: 'p0' } })
+      return aplicado()
+    })
+    expect(await recibirEnGracia(reportado(e), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: { paymentId: 'p0' } } })
+    expect(filas).toHaveLength(1)
+  })
+
+  it('custodia aceptada en parte en la gracia → fila APLICADA con las fallidas en resultado y 200 { resuelto: APLICADO }', async () => {
+    const e = envio(
+      JSON.stringify({
+        sims: [
+          { serialNumber: 'A', custodyVersion: 1 },
+          { serialNumber: 'B', custodyVersion: 1 },
+        ],
+      }),
+      'CUSTODIA_ACEPTAR',
+    )
+    const detalle = { summary: { total: 2, succeeded: 1, failed: 1 }, fallidas: [{ serialNumber: 'B', status: 'error', code: 'X' }] }
+    aplicar.mockResolvedValue({ tipo: 'RECHAZADO', rechazo: { code: 'CUSTODIA_INCOMPLETA', message: 'm', detalle } })
+    expect(await recibirEnGracia(reportado(e), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: detalle } })
+    expect(filas[0]).toMatchObject({
+      estado: 'APLICADO',
+      motivo: 'APLICADO_EN_GRACIA',
+      resultado: detalle,
+      rechazo: { code: 'CUSTODIA_INCOMPLETA' },
+    })
+    // Ninguna aceptada: se retiene como cualquier rechazo.
+    const g = envio(JSON.stringify({ sims: [{ serialNumber: 'C', custodyVersion: 1 }] }), 'CUSTODIA_ACEPTAR')
+    aplicar.mockResolvedValue({
+      tipo: 'RECHAZADO',
+      rechazo: { code: 'CUSTODIA_INCOMPLETA', message: 'm', detalle: { ...detalle, summary: { total: 1, succeeded: 0, failed: 1 } } },
+    })
+    expect((await recibirEnGracia(reportado(g), g)).body).toEqual({ retenido: true, motivo: 'RECHAZADO' })
   })
 
   it('la misma llave de venta con OTRA SIM es otra huella → NO_REPORTADA (202 y una fila), sin aplicar', async () => {
@@ -491,7 +550,7 @@ describe('listarRetenidos', () => {
     })
   })
 
-  it('el resumen de cada tipo: checada → hora local, custodia → series, evidencia → fotos; el rechazo sin su detalle', async () => {
+  it('el resumen de cada tipo: checada → hora local, custodia → series, evidencia → fotos; el rechazo con su detalle', async () => {
     const hora = '2026-11-09T15:05:00.000Z'
     const filasDeTipo = [
       retenido({ id: 'a', tipo: 'ENTRADA', cuerpoJson: JSON.stringify({ llave: 'x', ocurrioAt: hora }) }),
@@ -509,7 +568,8 @@ describe('listarRetenidos', () => {
     db.envioRetenidoDeCampo.count.mockResolvedValue(5)
     const { items } = await listarRetenidos('org1', { page: 1, pageSize: 50 })
     expect(items.map(i => i.resumen)).toEqual(['Entrada a las 09:05 del 9-nov', 'SIMs A, B', 'SIM C', '2 fotos', ''])
-    expect(items[4].rechazo).toEqual({ code: 'SIM_YA_VENDIDA', message: 'ya' })
+    expect(items[4].rechazo).toEqual({ code: 'SIM_YA_VENDIDA', message: 'ya', detalle: { x: 1 } })
+    expect(items[0].rechazo).toBeNull()
   })
 })
 
@@ -530,5 +590,24 @@ describe('resolverRetenido: lo que se aplica nunca queda sin decirlo', () => {
     expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO' })
     expect(f.estado).toBe('APLICADO')
     await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'YA_APLICADO' })
+  })
+})
+
+describe('resolverRetenido: carreras (ronda 1)', () => {
+  it('DESCARTAR cuyo CAS no toca nada y la relectura sigue PENDIENTE → 409 RETENIDO_EN_PROCESO, nunca la fila cruda', async () => {
+    retenido()
+    db.envioRetenidoDeCampo.updateMany.mockResolvedValueOnce({ count: 0 })
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ statusCode: 409, code: 'RETENIDO_EN_PROCESO' })
+    expect(filas[0].estado).toBe('PENDIENTE')
+  })
+
+  it('el rechazo de un «Aplicar» cuando otro ya lo dejó APLICADO → contesta lo aplicado con repetida, no un 422', async () => {
+    const f = retenido()
+    aplicar.mockImplementation(async () => {
+      Object.assign(f, { estado: 'APLICADO', resultado: { paymentId: 'pB' } }) // el otro «Aplicar» terminó primero
+      return rechazado()
+    })
+    expect(await resolver('APLICAR')).toEqual({ estado: 'APLICADO', resultado: { paymentId: 'pB' }, repetida: true })
+    expect(f).toMatchObject({ estado: 'APLICADO', rechazo: null })
   })
 })

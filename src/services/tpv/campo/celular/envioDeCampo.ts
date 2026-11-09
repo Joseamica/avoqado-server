@@ -48,7 +48,8 @@ const PERMISOS: Record<TipoDeEnvio, string[]> = {
 }
 export const permisosDelEnvio = (tipo: TipoDeEnvio): string[] => PERMISOS[tipo]
 
-const REINTENTABLES = new Set(['VENTA_EN_PROCESO', 'CUSTODIA_EN_PROCESO', 'CHECADA_EN_PROCESO'])
+// VERIFICATION_MOVED: la venta cambió de tienda mientras se guardaba la evidencia («vuelve a intentarlo»).
+const REINTENTABLES = new Set(['VENTA_EN_PROCESO', 'CUSTODIA_EN_PROCESO', 'CHECADA_EN_PROCESO', 'VERIFICATION_MOVED'])
 
 const rechazado = (code: string, message: string, detalle?: unknown): ResultadoDelEnvio => ({
   tipo: 'RECHAZADO',

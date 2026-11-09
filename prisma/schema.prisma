@@ -21665,7 +21665,7 @@ model EnvioRetenidoDeCampo {
   huella         String
   /// El cuerpo tal como llegó (texto exacto: su huella se calcula sobre él).
   cuerpoJson     String
-  /// NO_REPORTADA | FUERA_DE_PLAZO | PERSONA_DADA_DE_BAJA | SIN_PERMISO | RECHAZADO
+  /// NO_REPORTADA | FUERA_DE_PLAZO | PERSONA_DADA_DE_BAJA | SIN_PERMISO | RECHAZADO | APLICADO_EN_GRACIA (no se retuvo: guarda el desenlace)
   motivo         String
   rechazo        Json?
   /// PENDIENTE → APLICANDO → APLICADO, o PENDIENTE → DESCARTADO. Desde APLICANDO ya no se descarta.
