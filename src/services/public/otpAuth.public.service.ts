@@ -6,8 +6,8 @@ import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
-import { generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.service'
-import { canonicalPhoneE164, normalizarTelefonoMx } from '@/utils/phone'
+import { generateCustomerSession, generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.service'
+import { canonicalPhoneE164, normalizarTelefonoMx, phonesMatch } from '@/utils/phone'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 import { ponerNombreSiFalta } from '@/services/customer/customerName'
@@ -31,6 +31,8 @@ const TTL_MS = 10 * 60 * 1000
  * (`GIFT_CARD_PHONE`, `giftCardPhone.service.ts`): ninguno de los dos toca los del otro.
  */
 const PROPOSITO = 'CUSTOMER_LOGIN'
+/** S8: el cambio de número usa su propio reto (mismas reglas de tiempo e intentos): no consume ni invalida el de entrar. */
+export type PropositoDeReto = typeof PROPOSITO | 'CUSTOMER_PHONE_CHANGE'
 
 // 🔴 Los dos pasos del reto usan ESTA función: si pedir y verificar normalizaran distinto, el reto no se encontraría.
 // Sin dígitos no hay teléfono: con '' `resolveIdentity` caería al camino del correo con `email: undefined`, y Prisma ignora un
@@ -53,7 +55,7 @@ export async function requestOtp(args: PedirCodigo): Promise<{ ok: true }> {
  * El reto y el envío de `requestOtp`. `true` sólo si el proveedor aceptó el mensaje: `requestOtp` lo ignora (como siempre: la página no
  * dice si se mandó), pero Google lo necesita para no afirmar «te mandamos un código» cuando el correo no salió (codex-s7-r1 #2).
  */
-async function pedirCodigo(args: PedirCodigo): Promise<boolean> {
+export async function pedirCodigo(args: PedirCodigo, proposito: PropositoDeReto = PROPOSITO): Promise<boolean> {
   const destination = destinoDelReto(args.channel, args.destination)
   const now = Date.now()
 
@@ -61,16 +63,16 @@ async function pedirCodigo(args: PedirCodigo): Promise<boolean> {
   // estudios distintos sin que uno invalide o rate-limite al otro.
   const venueId = args.venueId
   const last30s = await prisma.otpChallenge.count({
-    where: { venueId, destination, purpose: PROPOSITO, createdAt: { gt: new Date(now - 30_000) } },
+    where: { venueId, destination, purpose: proposito, createdAt: { gt: new Date(now - 30_000) } },
   })
   if (last30s > 0) throw new BadRequestError('Espera un momento antes de pedir otro código.')
   const lastHour = await prisma.otpChallenge.count({
-    where: { venueId, destination, purpose: PROPOSITO, createdAt: { gt: new Date(now - 3_600_000) } },
+    where: { venueId, destination, purpose: proposito, createdAt: { gt: new Date(now - 3_600_000) } },
   })
   if (lastHour >= 5) throw new BadRequestError('Demasiados códigos solicitados. Intenta más tarde.')
 
   await prisma.otpChallenge.updateMany({
-    where: { venueId, destination, channel: args.channel, purpose: PROPOSITO, consumedAt: null },
+    where: { venueId, destination, channel: args.channel, purpose: proposito, consumedAt: null },
     data: { consumedAt: new Date() },
   })
 
@@ -83,6 +85,7 @@ async function pedirCodigo(args: PedirCodigo): Promise<boolean> {
       codeHash: hashOtpCode(code),
       expiresAt: new Date(now + TTL_MS),
       ip: args.ip ?? null,
+      ...(proposito !== PROPOSITO ? { purpose: proposito } : {}),
     },
   })
 
@@ -135,28 +138,7 @@ export async function verifyOtp(
   // S7: una prueba que no sirve se rechaza también ANTES del reto (400, sin gastar intento).
   const vinculo = args.purpose === 'SESSION' && args.vincular ? verificarPruebaPendiente(args.vincular, args.venueId) : null
 
-  // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
-  // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
-  const challenge = await prisma.otpChallenge.findFirst({
-    where: { venueId: args.venueId, destination, channel: args.channel, purpose: PROPOSITO, consumedAt: null },
-    orderBy: { createdAt: 'desc' },
-  })
-  if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
-  // 🔴 El intento se aparta en la base ANTES de comparar (auditoría 2026-10-01): escribir `attempts + 1` sobre lo leído aquí
-  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos. Este CAS y el de consumo de abajo tienen
-  // una COPIA en `giftCardPhone.service.ts` (`verificarCodigoDeTelefono`, la caja): si cambias uno, revisa el otro.
-  const apartado =
-    challenge.attempts < challenge.maxAttempts &&
-    (
-      await prisma.otpChallenge.updateMany({
-        where: { id: challenge.id, consumedAt: null, attempts: { lt: challenge.maxAttempts } },
-        data: { attempts: { increment: 1 } },
-      })
-    ).count === 1
-  // Sin intento que apartar sólo se rechaza: marcar el reto como usado le quemaría el último intento correcto a quien sí lo apartó
-  // y va a mitad de su verificación. Con `attempts = maxAttempts` el reto ya no admite más pruebas.
-  if (!apartado) throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
-  if (challenge.codeHash !== hashOtpCode(args.code)) throw new BadRequestError('Código incorrecto.')
+  const challenge = await apartarReto({ venueId: args.venueId, channel: args.channel, destination, code: args.code })
 
   if (args.purpose === 'SESSION') {
     const contacto: ContactoProbado =
@@ -209,10 +191,22 @@ export async function verifyOtp(
   // Post-commit: si la transacción falló, nadie recibe sesión.
   // H1: para PEDIR, el token de PEDIDOS (prueba el teléfono; reservas y portal lo rechazan). Sin `purpose`, el de siempre.
   // El teléfono va en la forma canónica (`+521…` → `+52…`), la misma con la que el pedido lo guarda y cuenta su tope.
+  // S8 (codex-s8-r1 #2): una ficha que ya cambió de número (`versionDeSesion` > 0) deja fuera a los dos tokens de hoy (cuentan como
+  // versión 0, S6): las páginas de hoy reciben entonces la sesión única, que el middleware acepta para pedir y para reservar. 🔴 SÓLO si
+  // el contacto que se acaba de probar está en la ficha (codex-s8-r2 #1): la ficha hallada por el `Consumer` ligado (contacto viejo)
+  // recibe el token de hoy, que S6 rechaza; firmarle una sesión de versión nueva le devolvía la ficha al número viejo.
+  const probado: ContactoProbado =
+    args.channel === 'whatsapp'
+      ? { tipo: 'PHONE', valor: destination, metodo: 'WHATSAPP', probadoEn: Math.floor(Date.now() / 1000) }
+      : { tipo: 'EMAIL', valor: destination, metodo: 'EMAIL_CODE', probadoEn: Math.floor(Date.now() / 1000) }
+  const enLaFicha =
+    probado.tipo === 'PHONE' ? phonesMatch(destination, customer.phone) : customer.email?.trim().toLowerCase() === destination
   const token =
-    args.purpose === 'ORDERING'
-      ? generateOrderingCustomerToken(customer.id, args.venueId, canonicalPhoneE164(destination) ?? destination)
-      : generateCustomerToken(customer.id, args.venueId)
+    customer.versionDeSesion > 0 && enLaFicha
+      ? generateCustomerSession({ sub: customer.id, venueId: args.venueId, v: customer.versionDeSesion, contactos: [probado] })
+      : args.purpose === 'ORDERING'
+        ? generateOrderingCustomerToken(customer.id, args.venueId, canonicalPhoneE164(destination) ?? destination)
+        : generateCustomerToken(customer.id, args.venueId)
   return {
     token,
     /** Fase 1: sin `purpose`, el controller lo compone en `bookingAccess`. */
@@ -222,12 +216,45 @@ export async function verifyOtp(
 }
 
 /**
+ * El reto vivo de ese destino, con su intento apartado y el código comparado (fuera de la Tx; el consumo va dentro, `consumirReto`).
+ * `destination` ya normalizado (`destinoDelReto`).
+ */
+export async function apartarReto(
+  args: { venueId: string; channel: 'whatsapp' | 'email'; destination: string; code: string },
+  proposito: PropositoDeReto = PROPOSITO,
+): Promise<{ id: string }> {
+  // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
+  // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
+  const challenge = await prisma.otpChallenge.findFirst({
+    where: { venueId: args.venueId, destination: args.destination, channel: args.channel, purpose: proposito, consumedAt: null },
+    orderBy: { createdAt: 'desc' },
+  })
+  if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
+  // 🔴 El intento se aparta en la base ANTES de comparar (auditoría 2026-10-01): escribir `attempts + 1` sobre lo leído aquí
+  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos. Este CAS y el de consumo de abajo tienen
+  // una COPIA en `giftCardPhone.service.ts` (`verificarCodigoDeTelefono`, la caja): si cambias uno, revisa el otro.
+  const apartado =
+    challenge.attempts < challenge.maxAttempts &&
+    (
+      await prisma.otpChallenge.updateMany({
+        where: { id: challenge.id, consumedAt: null, attempts: { lt: challenge.maxAttempts } },
+        data: { attempts: { increment: 1 } },
+      })
+    ).count === 1
+  // Sin intento que apartar sólo se rechaza: marcar el reto como usado le quemaría el último intento correcto a quien sí lo apartó
+  // y va a mitad de su verificación. Con `attempts = maxAttempts` el reto ya no admite más pruebas.
+  if (!apartado) throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
+  if (challenge.codeHash !== hashOtpCode(args.code)) throw new BadRequestError('Código incorrecto.')
+  return { id: challenge.id }
+}
+
+/**
  * 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
  * simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
  * token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
  * exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
  */
-async function consumirReto(tx: TxConReintento, challengeId: string): Promise<void> {
+export async function consumirReto(tx: TxConReintento, challengeId: string): Promise<void> {
   const consumed = await tx.otpChallenge.updateMany({
     where: { id: challengeId, consumedAt: null },
     data: { consumedAt: new Date() },

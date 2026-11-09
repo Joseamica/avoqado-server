@@ -48,7 +48,12 @@ import {
   limiteDiarioDeIntentosDeCodigoEnAlta,
 } from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
-import { authenticateCustomer, authenticateCustomerOptional, activarReservasSiFalta } from '../middlewares/customerAuth.middleware'
+import {
+  authenticateCustomer,
+  authenticateCustomerOptional,
+  authenticateCustomerParaCambioDeNumero,
+  activarReservasSiFalta,
+} from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { kioskCheckInCors } from '../middlewares/kioskCheckInCors.middleware'
@@ -83,6 +88,8 @@ import {
   otpVerifySchema,
   sessionNuevaFichaSchema,
   googleSessionSchema,
+  customerPhoneChangeRequestSchema,
+  customerPhoneChangeVerifySchema,
 } from '../schemas/dashboard/creditPack.schema'
 import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
@@ -415,6 +422,24 @@ router.patch(
   activarReservasSiFalta,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
+)
+
+// S8 (P2-1): cambiar de número. Nunca editando el campo (`customer/profile` lo sigue prohibiendo): se prueba el nuevo con su código.
+router.post(
+  '/venues/:venueSlug/customer/phone/request',
+  writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerParaCambioDeNumero,
+  validateRequest(customerPhoneChangeRequestSchema),
+  customerPortalController.requestPhoneChange,
+)
+router.post(
+  '/venues/:venueSlug/customer/phone/verify',
+  authLimit,
+  resolveVenueBySlug,
+  authenticateCustomerParaCambioDeNumero,
+  validateRequest(customerPhoneChangeVerifySchema),
+  customerPortalController.verifyPhoneChange,
 )
 
 // ---- Passwordless OTP login (WhatsApp / email) ----

@@ -83,3 +83,27 @@ export async function updateProfile(req: Request, res: Response, next: NextFunct
     next(error)
   }
 }
+
+/**
+ * POST /public/venues/:venueSlug/customer/phone/request — S8: pide el código al número NUEVO.
+ */
+export async function requestPhoneChange(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.pedirCambioDeTelefono(auth.venueId, auth, req.body.phone, req.ip))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /public/venues/:venueSlug/customer/phone/verify — S8: confirma el código; responde la sesión nueva.
+ */
+export async function verifyPhoneChange(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.confirmarCambioDeTelefono(auth.venueId, auth, req.body.phone, req.body.code))
+  } catch (error) {
+    next(error)
+  }
+}

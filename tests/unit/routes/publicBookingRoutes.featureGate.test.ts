@@ -77,6 +77,11 @@ jest.mock('@/middlewares/customerAuth.middleware', () => ({
     req.customerAuth = null
     next()
   },
+  // S8 (cambiar de número): sin esta variante el router no carga. Passthrough como `authenticateCustomer`.
+  authenticateCustomerParaCambioDeNumero: (req: any, _res: any, next: any) => {
+    req.customerAuth = { customerId: 'cust_1', venueId: 'venue_pub_1' }
+    next()
+  },
 }))
 // Fase 0.B: resolveVenueBySlug va antes de la identidad. NO se mockea: el real consulta
 // `prisma.venue.findFirst` (ya mockeado abajo), así los casos "slug desconocido" y "DB

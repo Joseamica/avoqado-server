@@ -11,11 +11,14 @@
 import bcrypt from 'bcryptjs'
 import { CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
-import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerSession, type ContactoProbado } from '@/jwt.service'
-import { phonesMatch } from '@/utils/phone'
+import { normalizarTelefonoMx, phonesMatch } from '@/utils/phone'
+import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
+import { apartarReto, consumirReto, pedirCodigo } from '@/services/public/otpAuth.public.service'
+import { fichaConContacto, repetirSiChoca, tapar, type SesionEmitida } from '@/services/public/sesionDeCliente.service'
 
 /**
  * 🔴 Toda cuenta nueva se crea con código (auditoría de seguridad 2026-09-30/10-01, decisión del founder del 1-oct): `verifyOtp`
@@ -259,5 +262,115 @@ export async function getCustomerPortal(venueId: string, customerId: string, aut
     },
     stampCard,
     invitadaRequiereEntrar,
+  }
+}
+
+// ---- S8 (P2-1): cambiar de número ----
+
+const RETO_DE_CAMBIO = 'CUSTOMER_PHONE_CHANGE' as const
+
+/**
+ * Cambiar de número pide una sesión que ya probó un contacto, o el token de pedidos de hoy (firma el teléfono). El token de reservas de
+ * hoy ya lo frena S6; una sesión sin contactos (contraseña) se frena aquí (R1): la contraseña prueba la ficha, no un contacto.
+ */
+function exigirContactoProbado(auth: CustomerAuthContext): void {
+  const probo = auth.contactos.length > 0 || (auth.tipo === 'PEDIDOS_DE_HOY' && !!auth.verifiedPhone)
+  if (auth.tipo === 'RESERVAS_DE_HOY' || !probo) {
+    throw new UnauthorizedError('Entra otra vez para cambiar tu número', 'CUSTOMER_REAUTH_REQUIRED')
+  }
+}
+
+function telefonoNuevo(phone: string): string {
+  const nuevo = normalizarTelefonoMx(phone)
+  if (!nuevo) throw new BadRequestError('Teléfono inválido')
+  return nuevo
+}
+
+const mismoNumero = () => new BadRequestError('Ese ya es tu número.', 'CUSTOMER_PHONE_SAME')
+
+/** POST /venues/:venueSlug/customer/phone/request — el código va por WhatsApp al número NUEVO (reto propio, mismas reglas). */
+export async function pedirCambioDeTelefono(venueId: string, auth: CustomerAuthContext, phone: string, ip?: string | null) {
+  exigirContactoProbado(auth)
+  const nuevo = telefonoNuevo(phone)
+  const actual = await prisma.customer.findFirst({ where: { id: auth.customerId, venueId }, select: { phone: true } })
+  if (phonesMatch(nuevo, actual?.phone)) throw mismoNumero()
+  await pedirCodigo({ venueId, channel: 'whatsapp', destination: nuevo, ip }, RETO_DE_CAMBIO)
+  return { ok: true as const }
+}
+
+/**
+ * Dentro de la Tx de `confirmarCambioDeTelefono`: con la ficha bajo candado, el número nuevo REEMPLAZA al viejo en `Customer.phone` y en
+ * su `Consumer` (si tenía el viejo), sube `versionDeSesion` (S6 deja fuera toda sesión anterior, también las del mismo segundo) y deja
+ * bitácora. Si el número es de otra ficha, 409 y no se mueve nada: el rollback devuelve el reto sin consumir.
+ */
+async function cambiarTelefonoEnTx(tx: TxConReintento, venueId: string, auth: CustomerAuthContext, nuevo: string, retoId: string) {
+  await consumirReto(tx, retoId)
+  await tx.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${auth.customerId} AND "venueId" = ${venueId} FOR NO KEY UPDATE`
+  const ficha = await tx.customer.findUniqueOrThrow({ where: { id: auth.customerId } })
+  // R3: lo que probó la sesión sigue en la ficha (el panel pudo cambiarlo entre el middleware y el candado).
+  const sigue =
+    (!auth.verifiedPhone || phonesMatch(auth.verifiedPhone, ficha.phone)) &&
+    auth.contactos.every(c =>
+      c.tipo === 'PHONE' ? phonesMatch(c.valor, ficha.phone) : c.valor.trim().toLowerCase() === ficha.email?.trim().toLowerCase(),
+    )
+  // codex-s8-r1 #1: otra petición con una sesión de la MISMA versión ya cambió el número (y la dejó fuera) mientras ésta esperaba el
+  // candado; o el panel desactivó la ficha. Los dos tokens de hoy cuentan como versión 0 (S6).
+  if (!sigue || (auth.v ?? 0) < ficha.versionDeSesion) throw new UnauthorizedError('Token inválido o expirado', 'CUSTOMER_TOKEN_INVALID')
+  if (ficha.active === false) throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+  if (phonesMatch(nuevo, ficha.phone)) throw mismoNumero()
+
+  // «Otra ficha» se busca ANTES de escribir (lo ya guardado, en cualquier formato, da el 409 con su aviso; codex-s8-r2 #2) y otra vez
+  // DESPUÉS (codex-s8-r1 #4: lo que otro guardó en otro formato mientras tanto; el mismo formato choca en el índice único,
+  // `repetirSiChoca` repite y la primera búsqueda ya lo ve). Queda abierto sólo lo que el panel escriba en otro formato y aún sin commit
+  // (deuda anotada: el panel compara por texto exacto).
+  const contacto: ContactoProbado = { tipo: 'PHONE', valor: nuevo, metodo: 'WHATSAPP', probadoEn: 0 }
+  const deOtraFicha = () =>
+    new ConflictError('Ese número ya está en otra ficha de este negocio.', 'TELEFONO_DE_OTRA_FICHA', { otraFicha: tapar(contacto) })
+  if (await fichaConContacto(tx, venueId, contacto, ficha.id)) throw deOtraFicha()
+  const cambiada = await tx.customer.update({
+    where: { id: ficha.id },
+    data: { phone: nuevo, versionDeSesion: { increment: 1 } },
+  })
+  if (await fichaConContacto(tx, venueId, contacto, ficha.id)) throw deOtraFicha()
+  const consumer = ficha.consumerId ? await tx.consumer.findUnique({ where: { id: ficha.consumerId } }) : null
+  if (consumer?.phone && ficha.phone && phonesMatch(consumer.phone, ficha.phone)) {
+    // codex-s8-r1 #3: CAS sobre el teléfono leído: otra ficha (de otro negocio) que comparta el Consumer y lo cambie a la vez no se pisa.
+    await tx.consumer.updateMany({ where: { id: consumer.id, phone: consumer.phone }, data: { phone: nuevo } })
+  }
+  await tx.activityLog.create({
+    data: {
+      action: 'CUSTOMER_PHONE_CHANGED_BY_CUSTOMER',
+      entity: 'Customer',
+      entityId: ficha.id,
+      venueId,
+      data: { de: ficha.phone, a: nuevo },
+    },
+  })
+  return cambiada
+}
+
+/** POST /venues/:venueSlug/customer/phone/verify — confirma el código y responde la sesión nueva (versión nueva, sólo el número nuevo). */
+export async function confirmarCambioDeTelefono(
+  venueId: string,
+  auth: CustomerAuthContext,
+  phone: string,
+  code: string,
+): Promise<SesionEmitida> {
+  exigirContactoProbado(auth)
+  const nuevo = telefonoNuevo(phone)
+  const reto = await apartarReto({ venueId, channel: 'whatsapp', destination: nuevo, code }, RETO_DE_CAMBIO)
+  const ficha = await repetirSiChoca(() =>
+    withDeadlockRetry(tx => cambiarTelefonoEnTx(tx, venueId, auth, nuevo, reto.id), { etiqueta: 'confirmarCambioDeTelefono' }),
+  )
+  // R5: los contactos de antes menos todo teléfono, más el nuevo, recién probado.
+  const contactos: ContactoProbado[] = [
+    ...auth.contactos.filter(c => c.tipo !== 'PHONE'),
+    { tipo: 'PHONE', valor: nuevo, metodo: 'WHATSAPP', probadoEn: Math.floor(Date.now() / 1000) },
+  ]
+  return {
+    token: generateCustomerSession({ sub: ficha.id, venueId, v: ficha.versionDeSesion, contactos }),
+    customer: { id: ficha.id, firstName: ficha.firstName, lastName: ficha.lastName, email: ficha.email, phone: ficha.phone },
+    contactos,
+    otraFicha: null,
   }
 }

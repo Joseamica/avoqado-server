@@ -157,7 +157,7 @@ export async function fichaConContacto(
 }
 
 /** Se tapa el contacto que la clienta PROBÓ (no cómo lo guarda la otra ficha): no se le enseña nada de una ficha ajena. */
-function tapar(c: ContactoProbado): OtraFicha {
+export function tapar(c: ContactoProbado): OtraFicha {
   const enmascarado =
     c.tipo === 'PHONE'
       ? enmascararDestino({ deliveryChannel: 'WHATSAPP', recipientPhone: c.valor, recipientEmail: null })

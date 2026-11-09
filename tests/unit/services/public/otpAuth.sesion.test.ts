@@ -13,6 +13,7 @@ jest.mock('@/services/public/customerBookingAccess.service', () => ({
 jest.mock('@/services/whatsapp.service', () => ({ __esModule: true, sendOtpWhatsApp: jest.fn(async () => undefined) }))
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendOtpCodeEmail: jest.fn(async () => true) } }))
 
+import jwt from 'jsonwebtoken'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { hashOtpCode } from '@/lib/otp'
 import { verifyCustomerSession } from '@/jwt.service'
@@ -218,6 +219,40 @@ describe('verifyOtp · SESSION (S7)', () => {
     ).toBe(true)
     expect(otpVerifySchema.safeParse({ email: EMAIL, code: CODE, purpose: 'OTRO' }).success).toBe(false)
     expect(otpVerifySchema.safeParse({ email: EMAIL, code: CODE, alNoEncontrar: 'CREAR' }).success).toBe(false)
+  })
+})
+
+describe('S8 · páginas de hoy después de un cambio de número (codex-s8-r1 #2)', () => {
+  it('ficha con versionDeSesion > 0: ORDERING y reservas sin purpose reciben la sesión única (versión de la ficha) en vez del token viejo', async () => {
+    for (const purpose of ['ORDERING', undefined] as const) {
+      armarReto(PHONE)
+      prismaMock.customer.findUnique.mockResolvedValue({ ...FICHA, phone: PHONE, versionDeSesion: 2 } as any)
+      const r: any = await verifyOtp({
+        venueId: VENUE,
+        channel: 'whatsapp',
+        destination: PHONE,
+        code: CODE,
+        ...(purpose ? { purpose } : {}),
+      })
+      expect(verifyCustomerSession(r.token)).toMatchObject({
+        sub: FICHA.id,
+        v: 2,
+        contactos: [expect.objectContaining({ tipo: 'PHONE', valor: PHONE })],
+      })
+    }
+  })
+})
+
+describe('S8 · el número viejo no recupera la ficha (codex-s8-r2 #1)', () => {
+  it('ficha con versión > 0 hallada por el Consumer ligado (su teléfono ya es otro) ⇒ token de hoy (S6 lo rechaza), nunca una sesión', async () => {
+    armarReto(PHONE)
+    prismaMock.consumer.findMany.mockResolvedValue([{ id: FICHA.consumerId, phone: PHONE }] as any)
+    prismaMock.customer.findFirst.mockImplementation(async (q: any) =>
+      q?.where?.consumerId ? ({ ...FICHA, phone: '+525599990000', versionDeSesion: 1 } as any) : null,
+    )
+    const r: any = await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: PHONE, code: CODE, purpose: 'ORDERING' })
+    expect(() => verifyCustomerSession(r.token)).toThrow()
+    expect((jwt.decode(r.token) as jwt.JwtPayload).type).toBe('customer_ordering')
   })
 })
 

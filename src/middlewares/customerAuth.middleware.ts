@@ -46,6 +46,8 @@ export interface CustomerAuthContext {
   accountActivatedAt: Date | null
   /** Sólo el teléfono probado por la sesión o firmado por el token de pedidos anterior. */
   verifiedPhone?: string
+  /** S8: la versión con que se firmó la sesión (sólo `SESION`; los dos tokens de hoy cuentan como 0, igual que arriba). */
+  v?: number
 }
 
 export interface PublicVenueContext {
@@ -173,6 +175,7 @@ async function resolveCustomerAuth(
       contactos,
       accountActivatedAt: customer.accountActivatedAt,
       ...(verifiedPhone ? { verifiedPhone } : {}),
+      ...(session ? { v: session.v } : {}),
     },
     ...(session ? { session } : {}),
   }

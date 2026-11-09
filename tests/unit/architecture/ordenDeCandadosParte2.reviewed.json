@@ -450,6 +450,10 @@
     "src/services/public/sesionDeCliente.service.ts#bloquearFicha": {
       "clase": "EN_TX",
       "etiqueta": "bloquearFicha"
+    },
+    "src/services/public/customerPortal.public.service.ts#cambiarTelefonoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "cambiarTelefonoEnTx"
     }
   },
   "aperturas": {
@@ -1055,6 +1059,10 @@
     },
     "src/services/public/sesionDeCliente.service.ts#crearFichaConPrueba": {
       "etiqueta": "crearFichaConPrueba",
+      "cantidad": 1
+    },
+    "src/services/public/customerPortal.public.service.ts#confirmarCambioDeTelefono": {
+      "etiqueta": "confirmarCambioDeTelefono",
       "cantidad": 1
     }
   },

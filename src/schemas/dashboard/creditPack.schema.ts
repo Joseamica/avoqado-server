@@ -236,3 +236,18 @@ export const googleSessionSchema = z
     firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
   })
   .strict()
+
+/** S8: cambiar de número (pedir el código y confirmarlo). */
+export const customerPhoneChangeRequestSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z.object({ phone: z.string().min(8, 'Teléfono inválido').max(32, 'El teléfono es muy largo') }).strict(),
+})
+export const customerPhoneChangeVerifySchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z
+    .object({
+      phone: z.string().min(8, 'Teléfono inválido').max(32, 'El teléfono es muy largo'),
+      code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
+    })
+    .strict(),
+})

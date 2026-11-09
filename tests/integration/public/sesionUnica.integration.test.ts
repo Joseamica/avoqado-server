@@ -309,6 +309,28 @@ it.each([
   ],
   ['post', '/venues/:venueSlug/auth/session/nueva-ficha', ['authLimit', 'validateRequest', 'otpAuthController.crearFichaNueva']],
   ['post', '/venues/:venueSlug/auth/google', ['authLimit', 'validateRequest', 'otpAuthController.entrarConGoogle']],
+  [
+    'post',
+    '/venues/:venueSlug/customer/phone/request',
+    [
+      'writeLimit',
+      'resolveVenueBySlug',
+      'authenticateCustomerParaCambioDeNumero',
+      'validateRequest',
+      'customerPortalController.requestPhoneChange',
+    ],
+  ],
+  [
+    'post',
+    '/venues/:venueSlug/customer/phone/verify',
+    [
+      'authLimit',
+      'resolveVenueBySlug',
+      'authenticateCustomerParaCambioDeNumero',
+      'validateRequest',
+      'customerPortalController.verifyPhoneChange',
+    ],
+  ],
 ] as const)('cadena declarada %s %s conserva todos sus pasos', (method, routePath, expected) => {
   const text = fs.readFileSync(path.resolve(__dirname, '../../../src/routes/public.routes.ts'), 'utf8')
   const source = ts.createSourceFile('public.routes.ts', text, ts.ScriptTarget.Latest, true)
@@ -682,5 +704,204 @@ describe('S7 · entrar con la sesión única', () => {
     expect(no.body.token).toBeUndefined()
     expect(await prisma.otpChallenge.count({ where: { venueId, destination: empresa, channel: 'email' } })).toBe(1)
     expect(await prisma.customer.count({ where: { venueId, email: empresa } })).toBe(0)
+  })
+})
+
+// ==================== S8 (P2-1): cambiar de número ====================
+
+const retoDeCambio = (destination: string) =>
+  prisma.otpChallenge.create({
+    data: {
+      venueId: venueId!,
+      channel: 'whatsapp',
+      destination,
+      purpose: 'CUSTOMER_PHONE_CHANGE',
+      codeHash: hashOtpCode(CODIGO),
+      expiresAt: new Date(Date.now() + 600_000),
+    },
+  })
+const firmar = (sub: string, type: string, extra: Record<string, unknown> = {}) =>
+  jwt.sign({ sub, venueId, type, ...extra }, SECRET, { algorithm: 'HS256', expiresIn: '30d' })
+
+describe('S8 · cambiar de número', () => {
+  it('reemplaza el número en la ficha y en su Consumer, sube la versión, y SÓLO la sesión nueva sirve (también contra las del mismo segundo)', async () => {
+    const viejo = telS7(1)
+    const nuevoTel = telS7(2)
+    const consumer = await prisma.consumer.create({ data: { phone: viejo } })
+    const a = await ficha({ phone: viejo, consumerId: consumer.id, loyaltyPoints: 30 })
+    const contacto = { tipo: 'PHONE', valor: viejo, metodo: 'WHATSAPP', probadoEn: Math.floor(Date.now() / 1000) - 60 }
+    const sesionVieja = firmar(a.id, 'customer_session', { v: 0, contactos: [contacto] })
+    const pedidosDeHoy = firmar(a.id, 'customer_ordering', { verifiedPhone: viejo })
+
+    const pedir = await post('customer/phone/request').set('Authorization', `Bearer ${sesionVieja}`).send({ phone: nuevoTel })
+    expect(pedir.status).toBe(200)
+    expect(await prisma.otpChallenge.count({ where: { venueId, destination: nuevoTel, purpose: 'CUSTOMER_PHONE_CHANGE' } })).toBe(1)
+    // El código lo plantamos nosotros (el enviado es aleatorio): mismo reto, mismo propósito.
+    await prisma.otpChallenge.deleteMany({ where: { venueId, destination: nuevoTel } })
+    await retoDeCambio(nuevoTel)
+
+    const res = await post('customer/phone/verify').set('Authorization', `Bearer ${sesionVieja}`).send({ phone: nuevoTel, code: CODIGO })
+    expect(res.status).toBe(200)
+    expect(res.body.customer).toMatchObject({ id: a.id, phone: nuevoTel })
+    expect(res.body.contactos).toEqual([expect.objectContaining({ tipo: 'PHONE', valor: nuevoTel })])
+    expect((jwt.verify(res.body.token, SECRET) as jwt.JwtPayload).v).toBe(1)
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({
+      phone: nuevoTel,
+      versionDeSesion: 1,
+      loyaltyPoints: 30,
+    })
+    expect((await prisma.consumer.findUniqueOrThrow({ where: { id: consumer.id } })).phone).toBe(nuevoTel)
+    expect(
+      await prisma.activityLog.findMany({ where: { venueId, action: 'CUSTOMER_PHONE_CHANGED_BY_CUSTOMER' }, select: { data: true } }),
+    ).toEqual([{ data: { de: viejo, a: nuevoTel } }])
+
+    // Review Focus #4: firmadas en el MISMO segundo (`iat`) que la de reemplazo, con la versión vieja, quedan fuera; la nueva no.
+    const { iat } = jwt.verify(res.body.token, SECRET) as jwt.JwtPayload
+    const mismoSegundo = firmar(a.id, 'customer_session', { iat, v: 0, contactos: [{ ...contacto, valor: nuevoTel }] })
+    const pedidosMismoSegundo = firmar(a.id, 'customer_ordering', { iat, verifiedPhone: nuevoTel })
+    expect((jwt.decode(mismoSegundo) as jwt.JwtPayload).iat).toBe(iat)
+    for (const vieja of [sesionVieja, pedidosDeHoy, mismoSegundo, pedidosMismoSegundo]) {
+      const r = await post('ordering/quote')
+        .set('Authorization', `Bearer ${vieja}`)
+        .send({ items: [{ productId, quantity: 1 }] })
+      expect(r.status).toBe(401)
+    }
+    expect((await sirve(res.body.token)).status).toBe(200)
+  })
+
+  it('quien después entra con el número viejo no llega a esta ficha (ni por la sesión nueva ni por el OTP de pedidos de hoy)', async () => {
+    const viejo = telS7(3)
+    const consumer = await prisma.consumer.create({ data: { phone: viejo } })
+    const a = await ficha({ phone: viejo, consumerId: consumer.id })
+    await retoDeCambio(telS7(4))
+    const cambio = await post('customer/phone/verify')
+      .set('Authorization', `Bearer ${firmar(a.id, 'customer_ordering', { verifiedPhone: viejo })}`)
+      .send({ phone: telS7(4), code: CODIGO })
+    expect(cambio.status).toBe(200)
+
+    await reto('whatsapp', viejo)
+    const sesion = await verificar({ phone: viejo, alNoEncontrar: 'PREGUNTAR' })
+    expect(sesion.body.fichaNueva).toBe(true)
+    await reto('whatsapp', viejo)
+    const pedidos = await post('auth/otp/verify').send({ phone: viejo, code: CODIGO, purpose: 'ORDERING' })
+    expect(pedidos.status).toBe(200)
+    expect(pedidos.body.customer.id).not.toBe(a.id)
+  })
+
+  it('número de otra ficha ⇒ 409 TELEFONO_DE_OTRA_FICHA, nada cambia y el código sigue sirviendo', async () => {
+    const a = await ficha({ phone: telS7(5) })
+    // La otra ficha guarda el número como lo escribió el panel (10 dígitos, sin lada): el índice único no lo ve; la búsqueda sí.
+    const b = await ficha({ phone: telS7(6).slice(3), loyaltyPoints: 80 })
+    await retoDeCambio(telS7(6))
+    const token = firmar(a.id, 'customer_session', {
+      v: 0,
+      contactos: [{ tipo: 'PHONE', valor: telS7(5), metodo: 'WHATSAPP', probadoEn: 1 }],
+    })
+    const res = await post('customer/phone/verify')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ phone: telS7(6), code: CODIGO })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ code: 'TELEFONO_DE_OTRA_FICHA', details: { otraFicha: { contacto: 'PHONE' } } })
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ phone: telS7(5), versionDeSesion: 0 })
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({ phone: telS7(6).slice(3), loyaltyPoints: 80 })
+    expect(await prisma.otpChallenge.count({ where: { venueId, destination: telS7(6), consumedAt: null } })).toBe(1)
+    expect((await sirve(token)).status).toBe(200)
+  })
+
+  it('codex-s8-r1 #2: después del cambio, entrar por las páginas de hoy con el número NUEVO da un token que SÍ sirve', async () => {
+    const a = await ficha({ phone: telS7(1), accountActivatedAt: new Date() })
+    await retoDeCambio(telS7(2))
+    const cambio = await post('customer/phone/verify')
+      .set('Authorization', `Bearer ${firmar(a.id, 'customer_ordering', { verifiedPhone: telS7(1) })}`)
+      .send({ phone: telS7(2), code: CODIGO })
+    expect(cambio.status).toBe(200)
+    for (const body of [{ purpose: 'ORDERING' }, {}]) {
+      await reto('whatsapp', telS7(2))
+      const entra = await post('auth/otp/verify').send({ phone: telS7(2), code: CODIGO, ...body })
+      expect(entra.status).toBe(200)
+      expect(entra.body.customer.id).toBe(a.id)
+      const quote = await post('ordering/quote')
+        .set('Authorization', `Bearer ${entra.body.token}`)
+        .send({ items: [{ productId, quantity: 1 }] })
+      expect(quote.status).toBe(200)
+      expect((await sirve(entra.body.token)).status).toBe(200)
+    }
+  })
+
+  it('codex-s8-r1 #1: una petición con sesión vieja que esperaba el candado mientras otro cambio subía la versión ⇒ 401, sin escribir', async () => {
+    const correo = correoS7('dos-cambios')
+    const a = await ficha({ email: correo, phone: telS7(3) })
+    await retoDeCambio(telS7(4))
+    const soloCorreo = firmar(a.id, 'customer_session', {
+      v: 0,
+      contactos: [{ tipo: 'EMAIL', valor: correo, metodo: 'EMAIL_CODE', probadoEn: 1 }],
+    })
+    let segunda: Promise<request.Response> | undefined
+    await prisma.$transaction(
+      async tx => {
+        // El primer cambio (de otra petición con la misma sesión) ya tiene la ficha y sube la versión; la segunda ya pasó el middleware.
+        await tx.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${a.id} FOR NO KEY UPDATE`
+        await tx.customer.update({ where: { id: a.id }, data: { phone: telS7(5), versionDeSesion: { increment: 1 } } })
+        segunda = post('customer/phone/verify')
+          .set('Authorization', `Bearer ${soloCorreo}`)
+          .send({ phone: telS7(4), code: CODIGO })
+          .then(r => r)
+        await hastaQueEspere()
+      },
+      { timeout: 30_000 },
+    )
+    const res = await segunda!
+    expect(res.status).toBe(401)
+    expect(res.body.code).toBe('CUSTOMER_TOKEN_INVALID')
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ phone: telS7(5), versionDeSesion: 1 })
+    expect(await prisma.otpChallenge.count({ where: { venueId, destination: telS7(4), consumedAt: null } })).toBe(1)
+  })
+
+  it('codex-s8-r2 #2: otra ficha con el número EXACTO ⇒ 409 con el aviso (no un 500 del índice único)', async () => {
+    const a = await ficha({ phone: telS7(5) })
+    await ficha({ phone: telS7(6) })
+    await retoDeCambio(telS7(6))
+    const token = firmar(a.id, 'customer_session', {
+      v: 0,
+      contactos: [{ tipo: 'PHONE', valor: telS7(5), metodo: 'WHATSAPP', probadoEn: 1 }],
+    })
+    const res = await post('customer/phone/verify')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ phone: telS7(6), code: CODIGO })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ code: 'TELEFONO_DE_OTRA_FICHA', details: { otraFicha: { contacto: 'PHONE' } } })
+  })
+
+  it('codex-s8-r2 #1: el número viejo que todavía halla la ficha por su Consumer recibe el token de hoy, que ya no sirve', async () => {
+    const viejo = telS7(7)
+    const consumer = await prisma.consumer.create({ data: { phone: viejo } })
+    // El estado que deja el cruce: la ficha ya cambió (versión 1, número nuevo) y su Consumer conserva el viejo.
+    const a = await ficha({ phone: telS7(1), consumerId: consumer.id, versionDeSesion: 1 })
+    await reto('whatsapp', viejo)
+    const entra = await post('auth/otp/verify').send({ phone: viejo, code: CODIGO, purpose: 'ORDERING' })
+    expect(entra.status).toBe(200)
+    expect(entra.body.customer.id).toBe(a.id) // el camino de hoy la encuentra por el Consumer…
+    const quote = await post('ordering/quote')
+      .set('Authorization', `Bearer ${entra.body.token}`)
+      .send({ items: [{ productId, quantity: 1 }] })
+    expect(quote.status).toBe(401) // …pero su token no entra
+    expect((await sirve(entra.body.token)).status).toBe(401)
+  })
+
+  it('token de reservas de hoy ⇒ 401 CUSTOMER_REAUTH_REQUIRED; sesión de contraseña (sin contactos) también', async () => {
+    const a = await ficha({ phone: telS7(7), email: correoS7('cambio'), password: await bcrypt.hash('secreto-s8', 4) })
+    const viejo = firmar(a.id, 'customer')
+    const r1 = await post('customer/phone/request')
+      .set('Authorization', `Bearer ${viejo}`)
+      .send({ phone: telS7(1) })
+    expect(r1.status).toBe(401)
+    expect(r1.body).toMatchObject({ code: 'CUSTOMER_REAUTH_REQUIRED', message: 'Entra otra vez para cambiar tu número' })
+    const login = await post('customer/login').send({ email: correoS7('cambio'), password: 'secreto-s8' })
+    const r2 = await post('customer/phone/request')
+      .set('Authorization', `Bearer ${login.body.token}`)
+      .send({ phone: telS7(1) })
+    expect(r2.status).toBe(401)
+    expect(r2.body.code).toBe('CUSTOMER_REAUTH_REQUIRED')
+    expect(await prisma.otpChallenge.count({ where: { venueId, destination: telS7(1) } })).toBe(0)
   })
 })
