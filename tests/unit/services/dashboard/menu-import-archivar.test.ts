@@ -178,10 +178,12 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
   })
 
   it('D16 · «Combinar» sólo busca grupos vivos; «Reemplazar» también los apagados', async () => {
+    conservados()
     await importMenu(V, conLeche('merge'), HUMANO)
     expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]).toMatchObject({ where: { active: true } })
 
     prismaMock.modifierGroup.findFirst.mockClear()
+    conservados()
     await importMenu(V, conLeche('replace'), HUMANO)
     expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]?.where).not.toHaveProperty('active')
   })
