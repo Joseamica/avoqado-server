@@ -275,6 +275,7 @@ export async function getModifiersLowStock(venueId: string): Promise<ModifierLow
     JOIN "ModifierGroup" mg ON m."groupId" = mg.id
     JOIN "RawMaterial" rm ON m."rawMaterialId" = rm.id
     WHERE mg."venueId" = ${venueId}
+      AND m."active" = true -- D16: un extra archivado ya no se vende: su insumo no debe alertar
       AND rm."currentStock" <= rm."reorderPoint"
     ORDER BY (rm."currentStock" / NULLIF(rm."reorderPoint", 0)) ASC
   `

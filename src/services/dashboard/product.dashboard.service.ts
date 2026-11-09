@@ -625,8 +625,8 @@ export async function createProduct(venueId: string, productData: CreateProductD
           printStationId: productFields.printStationId,
         })
         if (modifierGroupIds?.length) {
-          // D16: un grupo archivado ya no se enlaza (la FK dejó de impedirlo). Con el negocio tomado: un borrado en curso termina antes.
-          await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
+          // D16: un grupo archivado ya no se enlaza (la FK dejó de impedirlo). Va después de la guardia de catálogo, que ya tomó el
+          // negocio `FOR NO KEY UPDATE`: un borrado en curso termina antes. No tomar aquí `FOR SHARE`: subir el candado es deadlock.
           const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
           if (vivos !== new Set(modifierGroupIds).size) throw new AppError('Grupo de modificadores no encontrado', 404)
         }
@@ -977,19 +977,18 @@ export async function updateProduct(
     // Plan 6b (D10): encender toma la admisión exclusiva ANTES de la organización; sin encendido, el orden de siempre (plan 4).
     if (plan) await encenderBajoCandados(tx, { venueId, productId, plan, staffId, origen })
     else if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
-    // D16: la validación de arriba corrió sin candado; con el negocio tomado (antes que el producto: negocio → producto) un borrado
-    // en curso termina antes. Si no, este PATCH re-enlazaría un grupo recién archivado.
-    if (modifierGroupIds?.length) {
-      await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
-      const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
-      if (vivos !== new Set(modifierGroupIds).size) throw new AppError(`Invalid modifier group IDs: ${modifierGroupIds.join(', ')}`, 400)
-    }
     await assertLegacyCatalogProductUpdateGovernance(tx, {
       venueId,
       productId,
       requestedActive: productData.active === true,
       actor,
     })
+    // D16: la validación de arriba corrió sin candado. La guardia de catálogo ya tomó el negocio (`FOR NO KEY UPDATE`): un borrado en
+    // curso terminó antes. Si no, este PATCH re-enlazaría un grupo recién archivado.
+    if (modifierGroupIds?.length) {
+      const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
+      if (vivos !== new Set(modifierGroupIds).size) throw new AppError(`Invalid modifier group IDs: ${modifierGroupIds.join(', ')}`, 400)
+    }
     await assertLegacyProductReferencesForVenue(tx, {
       venueId,
       categoryId: productData.categoryId,

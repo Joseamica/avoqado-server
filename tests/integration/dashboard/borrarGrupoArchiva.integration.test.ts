@@ -208,6 +208,22 @@ describe('Borrar un grupo de extras lo archiva', () => {
   })
 })
 
+describe('Candados', () => {
+  it('dos ediciones de productos con extras a la vez no se traban entre sí', async () => {
+    const x = await negocio()
+    const { categoryId, productId, grupoId } = await grupoConExtra(x)
+    const otro = await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `OT-${x.rfc}`, name: 'Otro', price: 10 } })
+
+    const r = await Promise.allSettled(
+      [...Array(6)].map((_, i) =>
+        updateProduct(x.venueId, i % 2 ? productId : otro.id, { modifierGroupIds: [grupoId], name: `Nombre ${i}` } as any, SERVICIO as any),
+      ),
+    )
+
+    expect(r.filter(y => y.status === 'rejected').map(y => String((y as PromiseRejectedResult).reason))).toEqual([])
+  })
+})
+
 describe('Recetas y grupos archivados', () => {
   async function lineaVariable(x: Negocio, categoryId: string, grupoId: string, marca: string) {
     const { id: productId } = await prisma.product.create({
@@ -287,22 +303,25 @@ describe('Importar menú con grupos archivados', () => {
     expect((await getModifierGroups(x.venueId)).map(g => g.id)).toEqual([vivo.id])
   })
 
-  it('«Combinar» con un archivado: regresa con las reglas y el precio del archivo, y cuenta como creado (como si fuera nuevo)', async () => {
+  it('«Combinar» con un archivado crea uno nuevo: las reglas y el precio del archivo, sin tocar la liga vieja', async () => {
     const x = await negocio()
-    const { grupoId, extraId } = await grupoConExtra(x) // obligatorio, «Shot» a $20
+    const { productId, grupoId, extraId } = await grupoConExtra(x) // obligatorio, «Shot» a $20
+    const { corto } = await ligaConExtra(x, productId, extraId)
+    const ligaAntes = await getPaymentLinkByShortCode(corto)
     await deleteModifierGroup(x.venueId, grupoId)
 
     const r = await importMenu(x.venueId, archivoCon('merge', x, 'Extras', 'Shot') as any, SERVICIO) // opcional, «Shot» a $25
 
-    expect(await prisma.modifierGroup.findUniqueOrThrow({ where: { id: grupoId }, select: { active: true, required: true } })).toEqual({
-      active: true,
-      required: false,
-    })
+    expect(await prisma.modifierGroup.findUniqueOrThrow({ where: { id: grupoId }, select: { active: true } })).toEqual({ active: false })
     expect(await prisma.modifier.findUniqueOrThrow({ where: { id: extraId }, select: { active: true, price: true } })).toMatchObject({
-      active: true,
-      price: new Prisma.Decimal(25),
+      active: false,
+      price: new Prisma.Decimal(20),
     })
+    const [nuevo] = await getModifierGroups(x.venueId)
+    expect(nuevo.id).not.toBe(grupoId)
+    expect(nuevo.required).toBe(false)
     expect(r.stats).toMatchObject({ modifierGroups: 1, modifiers: 1 })
+    expect(await getPaymentLinkByShortCode(corto)).toEqual(ligaAntes)
   })
 
   it('«Reemplazar» con un vivo y un archivado del mismo nombre: regresa el que estaba vivo', async () => {

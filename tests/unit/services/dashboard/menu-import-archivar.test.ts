@@ -177,16 +177,13 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true } })
   })
 
-  it('D16 · «Combinar» con un grupo ARCHIVADO lo trata como nuevo: toma las reglas y el precio del archivo', async () => {
-    conservados()
-
+  it('D16 · «Combinar» sólo busca grupos vivos; «Reemplazar» también los apagados', async () => {
     await importMenu(V, conLeche('merge'), HUMANO)
+    expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]).toMatchObject({ where: { active: true } })
 
-    expect(prismaMock.modifierGroup.update).toHaveBeenCalledWith({
-      where: { id: 'grupo-leche' },
-      data: { active: true, required: false, allowMultiple: true, minSelections: 0, maxSelections: 2 },
-    })
-    expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true, price: 30 } })
+    prismaMock.modifierGroup.findFirst.mockClear()
+    await importMenu(V, conLeche('replace'), HUMANO)
+    expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]?.where).not.toHaveProperty('active')
   })
 
   it('REGRESIÓN · «Combinar» no archiva ni toca categorías ajenas al archivo; la nueva se asigna como hoy', async () => {

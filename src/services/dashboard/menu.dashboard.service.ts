@@ -1853,7 +1853,6 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let productsUpdated = 0
   let modifierGroupsCreated = 0
   let modifiersCreated = 0
-  const gruposRevividos = new Set<string>()
   let productsArchived = 0
   let productsRestored = 0
   let productsKeptOnRecipe = 0
@@ -2243,13 +2242,12 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
             for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
               // Check if modifier group exists by name
-              // D16: un archivado puede compartir nombre con uno vivo; gana el vivo o, en reemplazar (ya apagó a todos), el último que lo estuvo.
+              // D16: «combinar» ignora los archivados y crea uno nuevo, como cuando se borraban: ni precios viejos ni cambiarle el precio a
+              // una liga vieja. «Reemplazar» sí los reusa, porque acaba de apagar a todos (gana el último que estuvo vivo).
               let modifierGroup = await tx.modifierGroup.findFirst({
-                where: { venueId, name: groupData.name },
+                where: { venueId, name: groupData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
                 orderBy: [{ active: 'desc' }, { updatedAt: 'desc' }],
               })
-              // D16 (Codex r1): traer un archivado equivale a crearlo: toma las reglas y el precio del archivo, también en «combinar».
-              const comoNuevo = data.mode === 'replace' || !modifierGroup?.active || gruposRevividos.has(modifierGroup.id)
 
               if (!modifierGroup) {
                 // Create new modifier group
@@ -2264,13 +2262,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                   },
                 })
                 modifierGroupsCreated++
-              } else if (comoNuevo) {
-                // Plan 5 (P5-R15): the file is the truth for an archived group, and always in replace. It keeps its id and references,
-                // and takes the file's selection rules and comes back ON. It counts as created, as when it was deleted.
-                if (!modifierGroup.active) {
-                  modifierGroupsCreated++
-                  gruposRevividos.add(modifierGroup.id)
-                }
+              } else if (data.mode === 'replace') {
+                // Plan 5 (P5-R15): in replace the file is the truth. A reused group (replace archived it above) keeps its id and
+                // references, and takes the file's selection rules and comes back ON. It counts as created, as when it was deleted.
+                if (!modifierGroup.active) modifierGroupsCreated++
                 await tx.modifierGroup.update({
                   where: { id: modifierGroup.id },
                   data: {
@@ -2317,8 +2312,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                     },
                   })
                   modifiersCreated++
-                } else if (comoNuevo) {
-                  // Plan 5 (P5-R15): applies the file's price to the reused extra of an archived group (same id: live links and past sales keep
+                } else if (data.mode === 'replace') {
+                  // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
                   if (!existingModifier.active) modifiersCreated++
                   await tx.modifier.update({
