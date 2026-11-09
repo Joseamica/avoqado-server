@@ -1,10 +1,18 @@
 -- App de campo, bloque 1 (plan 2026-11-09-app-de-campo-bloque-1-entrada-por-persona): el celular de la persona, su código de
--- activación y lo que un celular desvinculado subió y espera revisión. Sólo agrega tres tablas nuevas (vacías) con sus índices:
--- ningún enum, ningún ALTER de una tabla existente, ninguna fila se mueve. Las tablas nacen vacías, así que sus índices se
--- crean al instante y no bloquean a nadie.
+-- activación y lo que un celular desvinculado subió y espera revisión. Agrega tres tablas nuevas (vacías) con sus índices y
+-- UNA columna nula sin default en "ventas_de_campo" (tabla del bloque 0 que sólo usa el celular; sólo catálogo, sin reescribir
+-- la tabla). Ningún enum, ningún ALTER de una tabla que usen las terminales, ninguna fila se mueve.
+-- `lock_timeout`: si una transacción larga tuviera "ventas_de_campo", la migración falla a los 5 s en vez de formar fila.
 --
 -- Reversión (no se ejecuta):
+--   ALTER TABLE "ventas_de_campo" DROP COLUMN "celularId";
 --   DROP TABLE "envios_retenidos_de_campo"; DROP TABLE "codigos_de_celular"; DROP TABLE "celulares_de_campo";
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+-- AlterTable
+ALTER TABLE "ventas_de_campo" ADD COLUMN     "celularId" TEXT;
 
 -- CreateTable
 CREATE TABLE "celulares_de_campo" (
@@ -67,11 +75,9 @@ CREATE TABLE "envios_retenidos_de_campo" (
     "cuerpoJson" TEXT NOT NULL,
     "motivo" TEXT NOT NULL,
     "rechazo" JSONB,
-    "ocupacion" TEXT,
-    "enProcesoHasta" TIMESTAMP(3),
+    "estado" TEXT NOT NULL DEFAULT 'PENDIENTE',
     "resueltoAt" TIMESTAMP(3),
     "resueltoPor" TEXT,
-    "resolucion" TEXT,
     "nota" TEXT,
     "resultado" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -99,8 +105,10 @@ CREATE UNIQUE INDEX "codigos_de_celular_codigo_key" ON "codigos_de_celular"("cod
 CREATE UNIQUE INDEX "codigos_de_celular_organizationId_staffId_key" ON "codigos_de_celular"("organizationId", "staffId");
 
 -- CreateIndex
-CREATE INDEX "envios_retenidos_de_campo_organizationId_resueltoAt_created_idx" ON "envios_retenidos_de_campo"("organizationId", "resueltoAt", "createdAt");
+CREATE INDEX "envios_retenidos_de_campo_organizationId_estado_createdAt_idx" ON "envios_retenidos_de_campo"("organizationId", "estado", "createdAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "envios_retenidos_de_campo_celularId_huella_key" ON "envios_retenidos_de_campo"("celularId", "huella");
 
+
+COMMIT;

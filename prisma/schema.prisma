@@ -21583,6 +21583,8 @@ model VentaDeCampo {
   orderId            String?            @unique
   paymentId          String?            @unique
   saleVerificationId String?
+  /// El celular de campo que la mandó (bloque 1); nulo en las anteriores.
+  celularId          String?
   ocupacion          String?
   ocupadaHasta       DateTime?
   createdAt          DateTime           @default(now())
@@ -21666,19 +21668,16 @@ model EnvioRetenidoDeCampo {
   /// NO_REPORTADA | FUERA_DE_PLAZO | PERSONA_DADA_DE_BAJA | SIN_PERMISO | RECHAZADO
   motivo         String
   rechazo        Json?
-  /// Quién lo está resolviendo: toda escritura posterior lo lleva en el where.
-  ocupacion      String?
-  enProcesoHasta DateTime?
+  /// PENDIENTE → APLICANDO → APLICADO, o PENDIENTE → DESCARTADO. Desde APLICANDO ya no se descarta.
+  estado         String    @default("PENDIENTE")
   resueltoAt     DateTime?
   resueltoPor    String?
-  /// APLICADO | DESCARTADO
-  resolucion     String?
   nota           String?
   resultado      Json?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   @@unique([celularId, huella])
-  @@index([organizationId, resueltoAt, createdAt])
+  @@index([organizationId, estado, createdAt])
   @@map("envios_retenidos_de_campo")
 }
