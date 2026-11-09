@@ -12,6 +12,7 @@ import type { Server } from 'http'
 import { randomUUID } from 'crypto'
 import request from 'supertest'
 import app from '@/app'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
@@ -100,7 +101,11 @@ beforeAll(async () => {
   await new Promise<void>(listo => server.once('listening', () => listo()))
 })
 
-beforeEach(() => jest.spyOn(moduleService, 'isModuleEnabled').mockResolvedValue(true))
+beforeEach(() => {
+  jest.spyOn(moduleService, 'isModuleEnabled').mockResolvedValue(true)
+  // La gracia decide la baja con las sucursales de CAMPO (T7): aquí la sucursal tiene el módulo.
+  jest.spyOn(moduleService, 'venuesWithModule').mockImplementation(async ids => new Set(ids))
+})
 afterEach(() => jest.restoreAllMocks())
 
 afterAll(async () => {
@@ -165,10 +170,28 @@ describe('POST /tpv/campo/gracia', () => {
     const foto = `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2Fgracia.jpg`
     // Con sus campos de captura (S9): son la llave de idempotencia de la foto.
     const captura = { captureSeq: 1, captureDeviceId: celular.id, idempotencyKey: randomUUID(), capturedAt: new Date().toISOString() }
-    const ev = await enGracia(credencial, 'EVIDENCIA', JSON.stringify({ ventaLlave: llave, photoUrls: [foto], ...captura }))
+    // Sin destino estable (T3) → 400: agregada al final, repetirla la pondría otra vez.
+    const alFinal = await enGracia(credencial, 'EVIDENCIA', JSON.stringify({ ventaLlave: llave, photoUrls: [foto], ...captura }))
+    expect(alFinal.status).toBe(400)
+    expect(alFinal.body).toMatchObject({ code: 'CUERPO_INVALIDO' })
+    const evidenciaJson = JSON.stringify({ ventaLlave: llave, photoUrls: [foto], photoLabel: 'Vinculacion', ...captura })
+    const ev = await enGracia(credencial, 'EVIDENCIA', evidenciaJson)
     expect(ev.status).toBe(200)
     expect(ev.body).toMatchObject({ success: true, aplicadoEnGracia: true })
     expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: evidencias[0].id } })).photos).toEqual([foto])
+
+    // El proceso cayó tras subir la foto y antes de guardar el desenlace (la fila sigue APLICANDO): el reintento ve la captura
+    // en la verificación (T1) y queda APLICADO, sin otra foto.
+    const filaEv = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id, tipo: 'EVIDENCIA' } })
+    await prisma.envioRetenidoDeCampo.update({
+      where: { id: filaEv.id },
+      data: { estado: 'APLICANDO', resultado: Prisma.DbNull, resueltoAt: null },
+    })
+    const otra = await enGracia(credencial, 'EVIDENCIA', evidenciaJson)
+    expect(otra.status).toBe(200)
+    expect(otra.body).toMatchObject({ resuelto: 'APLICADO', resultado: { verificationId: evidencias[0].id, recuperado: true } })
+    expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: evidencias[0].id } })).photos).toEqual([foto])
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: filaEv.id } })).toMatchObject({ estado: 'APLICADO' })
   })
 
   it('una ficha EN_CURSO creada antes de desvincular + la gracia con el mismo cuerpo → UNA orden, UN cobro y la ficha COMPLETA', async () => {
@@ -295,5 +318,122 @@ describe('POST /tpv/campo/gracia', () => {
     })
     expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({ estado: 'APLICADO' })
     await prisma.serializedItemCustodyEvent.deleteMany({ where: { serializedItemId: sim.id } })
+  })
+
+  it('R2-1 · la ruta normal aceptó la custodia y se perdió la respuesta; la SIM se vendió y se desvinculó: la gracia → APLICADO, no PENDIENTE', async () => {
+    consecutivo += 1
+    const sim = await prisma.serializedItem.create({
+      data: {
+        venueId,
+        categoryId: categoriaDeCaja,
+        serialNumber: `8955${String(Date.now()).slice(-9)}${String(consecutivo).padStart(6, '0')}`,
+        createdBy: supervisorId,
+        custodyState: 'PROMOTER_PENDING',
+        assignedPromoterId: promotorId,
+        custodyVersion: 2,
+      },
+    })
+    // La asignación que le dio la versión 2 (la bitácora de custodia no guarda la versión: es el límite inferior).
+    await prisma.serializedItemCustodyEvent.create({
+      data: {
+        serializedItemId: sim.id,
+        serialNumber: sim.serialNumber,
+        eventType: 'ASSIGNED_TO_PROMOTER',
+        fromState: 'SUPERVISOR_HELD',
+        toState: 'PROMOTER_PENDING',
+        fromStaffId: supervisorId,
+        toStaffId: promotorId,
+        actorStaffId: supervisorId,
+        createdAt: new Date(Date.now() - 60_000),
+      },
+    })
+    const cuerpo = { sims: [{ serialNumber: sim.serialNumber, custodyVersion: 2 }] }
+    const cuerpoJson = JSON.stringify(cuerpo)
+    const { credencial, celular } = await celularQueReportaYSeDesvincula(
+      [huellaDelEnvio('CUSTODIA_ACEPTAR', venueId, cuerpoJson)],
+      async token => {
+        // Por la ruta normal: la aceptó el servidor, pero el celular no supo la respuesta (sigue en su cola).
+        const normal = await request(server)
+          .post(`/api/v1/tpv/campo/venues/${venueId}/custodia/aceptar`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(cuerpo)
+        expect(normal.status).toBe(200)
+        expect(normal.body.summary).toMatchObject({ succeeded: 1 })
+      },
+    )
+    // Después la SIM se vendió desde la PAX.
+    await prisma.serializedItem.update({ where: { id: sim.id }, data: { custodyState: 'SOLD' } })
+
+    const r = await enGracia(credencial, 'CUSTODIA_ACEPTAR', cuerpoJson)
+
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({
+      resuelto: 'APLICADO',
+      resultado: { recuperadoDeLaBitacora: true, eventos: [expect.objectContaining({ serialNumber: sim.serialNumber })] },
+    })
+    const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id, tipo: 'CUSTODIA_ACEPTAR' } })
+    expect(fila).toMatchObject({ estado: 'APLICADO', motivo: 'APLICADO_EN_GRACIA' })
+    await expect(
+      resolverRetenido({ retenidoId: fila.id, organizationId: orgId, accion: 'DESCARTAR', porStaffId: supervisorId }),
+    ).rejects.toMatchObject({ code: 'YA_APLICADO' })
+    await prisma.serializedItemCustodyEvent.deleteMany({ where: { serializedItemId: sim.id } })
+  })
+
+  it('R2-2 · una entrada a medias (APLICANDO, sin checada) + la persona dada de baja + el reintento → ninguna checada; PENDIENTE PERSONA_DADA_DE_BAJA', async () => {
+    const otra = await prisma.staff.create({
+      data: {
+        email: `gracia-baja-${sufijo}@example.test`,
+        firstName: 'Baja',
+        lastName: 'Gracia',
+        organizations: { create: { organizationId: orgId, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId, role: 'CASHIER', active: true } },
+      },
+    })
+    try {
+      const llave = randomUUID()
+      const cuerpoJson = JSON.stringify({ llave })
+      const huella = huellaDelEnvio('ENTRADA', venueId, cuerpoJson)
+      const c = await crearCelularConSesion({ staffId: otra.id, organizationId: orgId, venueId, role: 'CASHIER' })
+      const latido = await request(server)
+        .post('/api/v1/tpv/campo/latido')
+        .set(CABECERA_CREDENCIAL, c.credencial)
+        .send({ porSubir: { total: 1 }, huellas: [huella] })
+      expect(latido.status).toBe(200)
+      await desvincularCelular({ celularId: c.celular.id, organizationId: orgId, motivo: 'CELULAR', porStaffId: otra.id })
+      // La gracia la admitió y dejó su fila APLICANDO, y el proceso cayó ANTES de crear la checada.
+      await prisma.envioRetenidoDeCampo.create({
+        data: {
+          organizationId: orgId,
+          celularId: c.celular.id,
+          staffId: otra.id,
+          venueId,
+          tipo: 'ENTRADA',
+          huella,
+          cuerpoJson,
+          motivo: 'APLICADO_EN_GRACIA',
+          estado: 'APLICANDO',
+        },
+      })
+      await prisma.staffVenue.updateMany({ where: { staffId: otra.id }, data: { active: false } }) // la dieron de baja
+
+      const r = await enGracia(c.credencial, 'ENTRADA', cuerpoJson)
+
+      expect(r.status).toBe(202)
+      expect(r.body).toEqual({ retenido: true, motivo: 'PERSONA_DADA_DE_BAJA' })
+      expect(await prisma.timeEntry.count({ where: { staffId: otra.id } })).toBe(0)
+      expect(await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: c.celular.id } })).toMatchObject({
+        estado: 'PENDIENTE',
+        motivo: 'PERSONA_DADA_DE_BAJA',
+      })
+    } finally {
+      await prisma.envioRetenidoDeCampo.deleteMany({ where: { staffId: otra.id } })
+      await prisma.celularDeCampo.deleteMany({ where: { staffId: otra.id } })
+      await prisma.refreshGrant.deleteMany({ where: { session: { staffId: otra.id } } })
+      await prisma.session.deleteMany({ where: { staffId: otra.id } })
+      await prisma.timeEntry.deleteMany({ where: { staffId: otra.id } })
+      await prisma.staffVenue.deleteMany({ where: { staffId: otra.id } })
+      await prisma.staffOrganization.deleteMany({ where: { staffId: otra.id } })
+      await prisma.staff.delete({ where: { id: otra.id } })
+    }
   })
 })

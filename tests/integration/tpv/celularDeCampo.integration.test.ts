@@ -24,6 +24,7 @@ import { moduleService } from '@/services/modules/module.service'
 import { autenticarCelular, CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
+import { listarCelularesDeCampo } from '@/services/tpv/campo/celular/celularesDeLaOrganizacion.service'
 
 jest.setTimeout(120000)
 
@@ -578,5 +579,65 @@ describe('Tarea 6: desvincular', () => {
     expect((await desvincular(c.credencial, { porSubir: -1 })).status).toBe(400)
     const sin = await request(server).post('/api/v1/tpv/campo/desvincular').send({ porSubir: 0 })
     expect(sin.status).toBe(401)
+  })
+})
+
+describe('arreglo final 2 (T4, T6)', () => {
+  it('T4 · desvincular normal y DESPUÉS reportarlo perdido → sinGracia sin tocar la fecha, en la bitácora; la gracia ya no aplica nada sola', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    const normal = await desvincularCelular({ celularId: c.celularId, organizationId: orgId, motivo: 'PANEL', porStaffId: promotorBId })
+    expect(normal).toMatchObject({ yaEstaba: false, sinGracia: false })
+
+    const perdido = await desvincularCelular({
+      celularId: c.celularId,
+      organizationId: orgId,
+      motivo: 'PANEL',
+      porStaffId: promotorBId,
+      perdidoORobado: true,
+    })
+    expect(perdido).toMatchObject({ yaEstaba: true, sinGracia: true, perdidoORobado: true, desvinculadoAt: normal.desvinculadoAt })
+    expect(await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })).toMatchObject({
+      sinGracia: true,
+      motivoDesvinculo: 'PANEL',
+      desvinculadoAt: new Date(normal.desvinculadoAt),
+    })
+    // `logAction` va mockeado en la integración: se revisa la llamada.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CAMPO_CELULAR_REPORTADO_PERDIDO', organizationId: orgId, entityId: c.celularId }),
+    )
+
+    // La gracia: aun con la huella reportada y en plazo, queda por revisar.
+    const cuerpoJson = JSON.stringify({ llave: randomUUID() })
+    const r = await request(server)
+      .post('/api/v1/tpv/campo/gracia')
+      .set(CABECERA_CREDENCIAL, c.credencial)
+      .send({ tipo: 'ENTRADA', venueId, cuerpoJson })
+    expect(r.status).toBe(202)
+    expect(r.body).toEqual({ retenido: true, motivo: 'CELULAR_PERDIDO' })
+    await prisma.envioRetenidoDeCampo.deleteMany({ where: { celularId: c.celularId } })
+  })
+
+  it('T6 · la última checada de la lista: UNA por persona, la más reciente de sus sucursales en 48 h, desde Postgres', async () => {
+    const hace = (h: number) => new Date(Date.now() - h * 3600_000)
+    await prisma.timeEntry.createMany({
+      data: [
+        ...Array.from({ length: 30 }, (_, i) => ({ staffId: promotorId, venueId, clockInTime: hace(5 + i) })),
+        { staffId: promotorId, venueId, clockInTime: hace(2), clockInLatitude: 19.4 },
+        { staffId: promotorId, venueId: venue2Id, clockInTime: hace(1) }, // de otra sucursal: sólo cuenta si está en la lista
+        { staffId: promotorBId, venueId, clockInTime: hace(60) }, // fuera de las 48 h
+      ],
+    })
+    try {
+      const enLaSucursal = await listarCelularesDeCampo(orgId, { venueId, page: 1, pageSize: 50 })
+      const ana = enLaSucursal.items.find(i => i.staffId === promotorId)!
+      expect(ana.ultimaChecada).toMatchObject({ conUbicacion: true, venueId })
+      expect(Math.abs(new Date(ana.ultimaChecada!.at).getTime() - hace(2).getTime())).toBeLessThan(60_000)
+      expect(enLaSucursal.items.find(i => i.staffId === promotorBId)!.ultimaChecada).toBeNull()
+
+      const toda = await listarCelularesDeCampo(orgId, { page: 1, pageSize: 50 })
+      expect(toda.items.find(i => i.staffId === promotorId)!.ultimaChecada).toMatchObject({ conUbicacion: false, venueId: venue2Id })
+    } finally {
+      await prisma.timeEntry.deleteMany({ where: { staffId: { in: [promotorId, promotorBId] } } })
+    }
   })
 })
