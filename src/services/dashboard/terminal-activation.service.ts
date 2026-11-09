@@ -350,7 +350,7 @@ export async function checkTerminalActivationStatus(serialNumber: string) {
  * @param length Code length (default: 6)
  * @returns Uppercase alphanumeric code
  */
-function generateSecureCode(length: number = 6): string {
+export function generateSecureCode(length: number = 6): string {
   const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // Exclude confusing chars (0,O,1,I)
   let code = ''
 
