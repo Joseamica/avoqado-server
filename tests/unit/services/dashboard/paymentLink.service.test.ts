@@ -954,6 +954,56 @@ describe('PaymentLink Service', () => {
 
       await expect(updatePaymentLink(VENUE_ID, 'pl-123', { title: 'Nope' })).rejects.toThrow(BadRequestError)
     })
+
+    describe('un extra archivado que la liga ya traía', () => {
+      const conExtras = (productId: string) => ({
+        id: productId,
+        modifierGroups: [
+          {
+            group: {
+              id: 'g1',
+              name: 'Extras',
+              required: false,
+              minSelections: 0,
+              maxSelections: null,
+              modifiers: [
+                { id: 'm-arch', active: false },
+                { id: 'm-ok', active: true },
+              ],
+            },
+          },
+        ],
+      })
+      const editar = (productId: string, modifierId: string) =>
+        updatePaymentLink(VENUE_ID, 'pl-123', { items: [{ productId, quantity: 1, modifiers: [{ modifierId, quantity: 1 }] }] } as any)
+
+      beforeEach(() => {
+        ;(prismaMock as any).paymentLinkItem = { findMany: jest.fn(), deleteMany: jest.fn(), create: jest.fn() }
+        prismaMock.paymentLink.findUnique.mockResolvedValueOnce({ id: 'pl-123', venueId: VENUE_ID, status: 'ACTIVE' })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink())
+      })
+
+      it('se conserva al editar: la liga ya enviada mantiene su precio', async () => {
+        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [{ modifierId: 'm-arch' }] }])
+        prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
+
+        await expect(editar('p1', 'm-arch')).resolves.toBeDefined()
+      })
+
+      it('no se puede agregar un archivado que la liga no traía', async () => {
+        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [] }])
+        prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
+
+        await expect(editar('p1', 'm-arch')).rejects.toThrow(/no pertenecen/)
+      })
+
+      it('no vale haberlo traído en OTRO producto de la liga', async () => {
+        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p2', modifiers: [{ modifierId: 'm-arch' }] }])
+        prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
+
+        await expect(editar('p1', 'm-arch')).rejects.toThrow(/no pertenecen/)
+      })
+    })
   })
 
   // ─── ARCHIVE ──────────────────────────────────────
