@@ -32,7 +32,7 @@ const token = () =>
   jwt.sign({ sub: promotorId, orgId: orgA, venueId: venueA, role: 'CASHIER' }, process.env.ACCESS_TOKEN_SECRET as string, {
     expiresIn: '15m',
   })
-const post = (sucursal: string, accion: 'aceptar' | 'rechazar', body: unknown) =>
+const post = (sucursal: string, accion: 'aceptar' | 'rechazar', body: object) =>
   request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/custodia/${accion}`).set('Authorization', `Bearer ${token()}`).send(body)
 
 let consecutivo = 0
