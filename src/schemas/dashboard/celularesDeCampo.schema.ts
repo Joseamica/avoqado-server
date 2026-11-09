@@ -7,6 +7,11 @@ export const generarCodigosSchema = z.object({
   ]),
 })
 
+/** POST …/:celularId/desvincular — `perdidoORobado` (S8): la gracia ya no aplica nada sola. Sin cuerpo = no. */
+export const desvincularCelularSchema = z.object({
+  body: z.object({ perdidoORobado: z.boolean().optional() }).strict().optional(),
+})
+
 export const ESTADOS_DEL_RETENIDO = ['PENDIENTE', 'APLICANDO', 'APLICADO', 'DESCARTADO'] as const
 
 /** GET …/retenidos — `estado` es uno o varios separados por coma (`PENDIENTE,APLICANDO` = sin resolver). */

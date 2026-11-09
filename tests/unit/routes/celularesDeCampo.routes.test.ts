@@ -176,7 +176,24 @@ describe('POST .../celulares-de-campo/:celularId/desvincular', () => {
     const res = await request(makeApp()).post(URL_DESVINCULAR).set(como('gerente', 'MANAGER')).send({})
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, data: resultado })
-    expect(desvincularMock).toHaveBeenCalledWith({ celularId: 'cel1', organizationId: ORG, motivo: 'PANEL', porStaffId: 'gerente' })
+    expect(desvincularMock).toHaveBeenCalledWith({
+      celularId: 'cel1',
+      organizationId: ORG,
+      motivo: 'PANEL',
+      porStaffId: 'gerente',
+      perdidoORobado: false,
+    })
+  })
+
+  it('S8 · «lo perdió o se lo robaron» viaja como perdidoORobado: true; otra cosa que no sea booleano → 400', async () => {
+    desvincularMock.mockResolvedValue({ ...resultado, perdidoORobado: true })
+    const res = await request(makeApp()).post(URL_DESVINCULAR).set(como('gerente', 'MANAGER')).send({ perdidoORobado: true })
+    expect(res.status).toBe(200)
+    expect(desvincularMock).toHaveBeenCalledWith(expect.objectContaining({ perdidoORobado: true }))
+    desvincularMock.mockClear()
+    const malo = await request(makeApp()).post(URL_DESVINCULAR).set(como('gerente', 'MANAGER')).send({ perdidoORobado: 'si' })
+    expect(malo.status).toBe(400)
+    expect(desvincularMock).not.toHaveBeenCalled()
   })
 })
 

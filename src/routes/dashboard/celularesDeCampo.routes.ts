@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import AppError from '../../errors/AppError'
 import {
+  desvincularCelularSchema,
   generarCodigosSchema,
   listarCelularesSchema,
   listarRetenidosSchema,
@@ -35,19 +36,24 @@ router.post('/codigos', validateRequest(generarCodigosSchema), async (req: Reque
   }
 })
 
-router.post('/:celularId/desvincular', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const data = await desvincularCelular({
-      celularId: req.params.celularId,
-      organizationId: req.params.orgId,
-      motivo: 'PANEL',
-      porStaffId: (req as any).authContext.userId,
-    })
-    res.json({ success: true, data })
-  } catch (error) {
-    next(error)
-  }
-})
+router.post(
+  '/:celularId/desvincular',
+  validateRequest(desvincularCelularSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await desvincularCelular({
+        celularId: req.params.celularId,
+        organizationId: req.params.orgId,
+        motivo: 'PANEL',
+        porStaffId: (req as any).authContext.userId,
+        perdidoORobado: req.body?.perdidoORobado === true,
+      })
+      res.json({ success: true, data })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 /** «Por revisar»: lo que un celular subió en su gracia y no se pudo aceptar solo. `estado` = uno o varios, separados por coma. */
 router.get('/retenidos', validateRequest(listarRetenidosSchema), async (req: Request, res: Response, next: NextFunction) => {

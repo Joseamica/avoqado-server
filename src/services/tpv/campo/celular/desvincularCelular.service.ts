@@ -6,6 +6,7 @@
 import { NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
+import { sucursalesDeLaPersona } from './personasDeCampo'
 import { revocarSesionesDelCelular } from './sesionDeCelular'
 
 const GRACIA_MS = 24 * 60 * 60 * 1000
@@ -15,15 +16,43 @@ export async function desvincularCelular(p: {
   organizationId: string
   motivo: 'PANEL' | 'CELULAR' | 'MCP'
   porStaffId: string | null
-}): Promise<{ desvinculadoAt: string; graciaHasta: string; porSubir: number; huellasReportadas: number; yaEstaba: boolean }> {
+  /** S8: lo perdió o se lo robaron. La gracia ya no aplica nada sola: todo lo que llegue queda «por revisar». */
+  perdidoORobado?: boolean
+  /** El alcance de quien desvincula (el MCP, S3): la persona tiene que tener una sucursal dentro. El panel no lo pasa. */
+  venueIds?: string[]
+}): Promise<{
+  desvinculadoAt: string
+  graciaHasta: string
+  porSubir: number
+  huellasReportadas: number
+  yaEstaba: boolean
+  perdidoORobado: boolean
+}> {
   const ahora = new Date()
+  const noEncontrado = () => new NotFoundError('Celular no encontrado.', 'CELULAR_NO_ENCONTRADO')
+  if (p.venueIds) {
+    const alcance = p.venueIds
+    const cel = await prisma.celularDeCampo.findFirst({
+      where: { id: p.celularId, organizationId: p.organizationId },
+      select: { staffId: true },
+    })
+    const suyas = cel ? await sucursalesDeLaPersona(cel.staffId, p.organizationId) : []
+    if (!suyas.some(s => alcance.includes(s.venueId))) throw noEncontrado()
+  }
   // El CAS decide quién desvincula; quien llega después sólo ve lo que ya había (yaEstaba).
   const { count } = await prisma.celularDeCampo.updateMany({
     where: { id: p.celularId, organizationId: p.organizationId, staffIdVinculado: { not: null } },
-    data: { staffIdVinculado: null, sesionId: null, desvinculadoAt: ahora, desvinculadoPor: p.porStaffId, motivoDesvinculo: p.motivo },
+    data: {
+      staffIdVinculado: null,
+      sesionId: null,
+      desvinculadoAt: ahora,
+      desvinculadoPor: p.porStaffId,
+      motivoDesvinculo: p.motivo,
+      ...(p.perdidoORobado && { sinGracia: true }),
+    },
   })
   const fila = await prisma.celularDeCampo.findFirst({ where: { id: p.celularId, organizationId: p.organizationId } })
-  if (!fila) throw new NotFoundError('Celular no encontrado.', 'CELULAR_NO_ENCONTRADO')
+  if (!fila) throw noEncontrado()
 
   const desvinculadoAt = fila.desvinculadoAt ?? ahora
   const resultado = {
@@ -32,6 +61,7 @@ export async function desvincularCelular(p: {
     porSubir: fila.porSubir,
     huellasReportadas: fila.huellasPorSubir.length,
     yaEstaba: count === 0,
+    perdidoORobado: fila.sinGracia,
   }
   if (count === 0) return resultado
 
@@ -43,7 +73,12 @@ export async function desvincularCelular(p: {
     action: 'CAMPO_CELULAR_DESVINCULADO',
     entity: 'CelularDeCampo',
     entityId: fila.id,
-    data: { motivo: p.motivo, porSubir: resultado.porSubir, huellasReportadas: resultado.huellasReportadas },
+    data: {
+      motivo: p.motivo,
+      porSubir: resultado.porSubir,
+      huellasReportadas: resultado.huellasReportadas,
+      perdidoORobado: resultado.perdidoORobado,
+    },
   })
   return resultado
 }
