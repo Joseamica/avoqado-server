@@ -604,7 +604,7 @@ describe('registrarSalidaDeCampo', () => {
     expect(r).toMatchObject({ repetida: false, totalHours: 8 })
   })
 
-  it('reemplazar el cierre automático de una checada APROBADA la regresa a PENDIENTE y la bitácora guarda la aprobación anterior', async () => {
+  it('reemplazar el cierre automático de una checada APROBADA la deja APROBADA (sin tocar quién ni cuándo) y la bitácora dice que las horas cambiaron', async () => {
     const aprobadaEl = t('09:00', 4)
     const e = entrada({
       clockOutTime: t('03:00', 4),
@@ -619,14 +619,17 @@ describe('registrarSalidaDeCampo', () => {
 
     await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
 
-    expect(entradas[0]).toMatchObject({ validationStatus: 'PENDING', validatedBy: null, validatedAt: null, validationNote: null })
+    // Sin regresarla a PENDIENTE: el depósito que se creó al aprobar se contaría dos veces al aprobar otra vez.
+    expect(entradas[0]).toMatchObject({
+      validationStatus: 'APPROVED',
+      validatedBy: 'supervisor-1',
+      validatedAt: aprobadaEl,
+      validationNote: 'ok',
+      totalHours: 8,
+    })
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({
-          validacionAnterior: 'APPROVED',
-          validadaPor: 'supervisor-1',
-          validadaEl: aprobadaEl.toISOString(),
-        }),
+        data: expect.objectContaining({ validacionAnterior: 'APPROVED', horasAntes: 18, horasDespues: 8 }),
       }),
     )
   })
@@ -642,7 +645,7 @@ describe('registrarSalidaDeCampo', () => {
     )
   })
 
-  it('si un supervisor la aprobó entre la lectura y la escritura, relee y también la regresa a PENDIENTE', async () => {
+  it('si un supervisor la aprobó entre la lectura y la escritura, relee: queda APROBADA y la bitácora lo dice', async () => {
     const e = entrada({ clockOutTime: t('03:00', 4), status: 'CLOCKED_OUT', autoClockOut: true })
     antesDeActualizar = () =>
       Object.assign(entradas[0], { validationStatus: 'APPROVED', validatedBy: 'supervisor-1', validatedAt: t('09:00', 4) })
@@ -650,7 +653,8 @@ describe('registrarSalidaDeCampo', () => {
     await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
 
     expect((prisma as any).timeEntry.updateMany).toHaveBeenCalledTimes(2)
-    expect(entradas[0]).toMatchObject({ validationStatus: 'PENDING', validatedBy: null })
+    expect(entradas[0]).toMatchObject({ validationStatus: 'APPROVED', validatedBy: 'supervisor-1' })
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validacionAnterior: 'APPROVED' }) }))
   })
 
   it('la nota usa la zona del negocio; con una zona inválida cae a ISO y la salida igual se guarda', async () => {

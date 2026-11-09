@@ -7,7 +7,7 @@
  * forman en fila. Si el cierre automático ya cerró la entrada, la salida real lo reemplaza y queda en la bitácora; si la
  * cerró una persona, se rechaza. Plan: docs/superpowers/plans/2026-11-08-app-de-campo-bloque-0-tuberia.md.
  */
-import { Prisma, TimeEntryStatus, TimeEntryValidation } from '@prisma/client'
+import { Prisma, TimeEntryStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
 import type { EntradaDeCampoBody, SalidaDeCampoBody } from '@/schemas/tpv/campo.schema'
@@ -141,8 +141,6 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           autoClockOut: true,
           status: true,
           validationStatus: true,
-          validatedBy: true,
-          validatedAt: true,
           totalHours: true,
           notes: true,
           breaks: { select: { id: true, startTime: true, endTime: true } },
@@ -181,8 +179,6 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
         const venue = await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } })
         nota = `Salida real del celular; reemplazó el cierre automático de ${enLaZona(cierreAutomatico, venue?.timezone ?? 'America/Mexico_City')}`
       }
-      // Las horas aprobadas ya no son las de ahora: la checada vuelve a revisión (como «regresar a pendiente»).
-      const desaprobar = cierreAutomatico !== null && e.validationStatus === TimeEntryValidation.APPROVED
 
       const { count } = await tx.timeEntry.updateMany({
         // Todo lo que se leyó para decidir: si otro escritor lo cambió (la PAX abrió un descanso, el job la cerró, un
@@ -208,7 +204,6 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           clockOutAccuracy: v.accuracy,
           checkOutPhotoUrl: v.checkOutPhotoUrl,
           ...(nota && { autoClockOut: false, notes: e.notes ? `${e.notes}\n${nota}` : nota }),
-          ...(desaprobar && { validationStatus: TimeEntryValidation.PENDING, validatedBy: null, validatedAt: null, validationNote: null }),
         },
       })
       if (count === 0) continue // otro escritor la cambió entre la lectura y la escritura: se relee y se decide otra vez
@@ -221,9 +216,10 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
         resultado: { timeEntryId: e.id, repetida: false, hora: hora.toISOString(), totalHours },
         reemplazo: cierreAutomatico && {
           cierreAutomatico,
-          totalHoursAntes: Number(e.totalHours),
+          // La validación no se toca (regresarla a PENDIENTE dejaba vivo el depósito de la aprobación y aprobar otra vez
+          // lo duplicaba): la bitácora dice con qué estado estaba y cómo cambiaron las horas, para el supervisor.
           validacionAnterior: e.validationStatus,
-          ...(desaprobar && { validadaPor: e.validatedBy, validadaEl: e.validatedAt?.toISOString() ?? null }),
+          horasAntes: Number(e.totalHours),
         },
       }
     }
@@ -243,7 +239,7 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
         salidaReal: resultado.hora,
         origenHora: origen,
         llaveSalida: v.llave,
-        totalHoursAhora: resultado.totalHours,
+        horasDespues: resultado.totalHours,
       },
     })
   }
