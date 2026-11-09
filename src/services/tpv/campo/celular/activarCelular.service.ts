@@ -4,12 +4,13 @@
  * al anterior y corta SÓLO sus sesiones (la PAX de la persona sigue).
  */
 import { CelularDeCampo, CodigoDeCelular, Prisma } from '@prisma/client'
-import { createHash, randomBytes, timingSafeEqual } from 'crypto'
+import { randomBytes } from 'crypto'
 import AppError, { ConflictError, ForbiddenError, GoneError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { newCommandCredential } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
 import { INTENTOS_DEL_CODIGO } from './codigoDeCelular.service'
+import { pinCoincide } from './credencial'
 import { sucursalesDeLaPersona } from './personasDeCampo'
 import { crearSesionDeCelular, revocarSesionesDelCelular, SesionDeCelular, sucursalesParaElCelular } from './sesionDeCelular'
 
@@ -22,14 +23,6 @@ const VENTANA_DE_REINTENTO_MS = 10 * 60 * 1000
 class CodigoCambio extends Error {}
 
 const codigoUsado = () => new ConflictError('Ese código ya se usó. Pide uno nuevo a tu supervisor.', 'CODIGO_USADO')
-
-/** Tiempo constante: se comparan los sha256 (mismo largo), no los PINes. */
-function pinCoincide(guardado: string | null, pin: string): boolean {
-  if (!guardado) return false
-  const a = createHash('sha256').update(guardado).digest()
-  const b = createHash('sha256').update(pin).digest()
-  return timingSafeEqual(a, b)
-}
 
 /** Sin sucursales → 403; ninguna con PIN → 409. No compara ningún PIN: eso va después de reservar el intento. */
 async function sucursalesConPin(codigo: CodigoDeCelular) {

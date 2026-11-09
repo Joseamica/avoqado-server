@@ -90,3 +90,18 @@ export const activarCelularSchema = z.object({
     })
     .strict(),
 })
+
+/** Entrar con PIN (bloque 1): la credencial del celular va en la cabecera; aquí sólo el PIN y, si tiene varias, la sucursal. */
+export const entrarConPinSchema = z.object({
+  body: z
+    .object({
+      pin: z.string().regex(/^\d{4,10}$/, { message: 'El PIN son de 4 a 10 dígitos.' }),
+      venueId: z.string().min(1).max(50).optional(),
+    })
+    .strict(),
+})
+
+/** Renovar la sesión del celular: el refresh es opaco (64 hex), no un JWT. */
+export const renovarSesionSchema = z.object({
+  body: z.object({ refreshToken: z.string().regex(/^[a-f0-9]{64}$/, { message: 'El refresh no es válido.' }) }).strict(),
+})

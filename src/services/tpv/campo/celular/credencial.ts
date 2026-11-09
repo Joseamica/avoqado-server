@@ -2,7 +2,7 @@
  * La credencial del celular de campo: 64 hex que el celular manda en `X-Celular-Credencial`. En Postgres sólo vive su
  * sha256 (`CelularDeCampo.credencialHash`, único). Identifica al APARATO, no a la persona: entrar sigue pidiendo el PIN.
  */
-import { createHash } from 'crypto'
+import { createHash, timingSafeEqual } from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import { UnauthorizedError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
@@ -13,6 +13,14 @@ export const CABECERA_CREDENCIAL = 'x-celular-credencial'
 export const deviceIdDelCelular = (celularId: string): string => `celular:${celularId}`
 
 export const hashDeCredencial = (credencial: string): string => createHash('sha256').update(credencial).digest('hex')
+
+/** PIN contra el guardado, en tiempo constante: se comparan los sha256 (mismo largo), no los PINes. Nunca se registra. */
+export function pinCoincide(guardado: string | null, pin: string): boolean {
+  if (!guardado) return false
+  const a = createHash('sha256').update(guardado).digest()
+  const b = createHash('sha256').update(pin).digest()
+  return timingSafeEqual(a, b)
+}
 
 /** Deja la fila en `res.locals.celular` en cualquier estado (vinculado o no): cada ruta decide qué hace con un desvinculado. */
 export async function autenticarCelular(req: Request, res: Response, next: NextFunction) {

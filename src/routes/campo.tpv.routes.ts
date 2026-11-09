@@ -14,11 +14,15 @@ import {
   aceptarCustodiaSchema,
   activarCelularSchema,
   entradaDeCampoSchema,
+  entrarConPinSchema,
   rechazarCustodiaSchema,
+  renovarSesionSchema,
   salidaDeCampoSchema,
   ventaDeCampoSchema,
 } from '@/schemas/tpv/campo.schema'
 import { activarCelular } from '@/services/tpv/campo/celular/activarCelular.service'
+import { autenticarCelular } from '@/services/tpv/campo/celular/credencial'
+import { entrarConPin, renovarSesionDeCelular } from '@/services/tpv/campo/celular/entrarConPin.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import prisma from '@/utils/prismaClient'
@@ -75,6 +79,58 @@ router.post(
       next(error)
     }
   },
+)
+
+/**
+ * Entrar y renovar llevan la credencial del celular (`X-Celular-Credencial`) y UN tope de 30 por minuto por celular
+ * (compartido entre las dos), nunca por IP. Va después de la credencial: la llave es el celular.
+ */
+const porCelular = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (_req: Request, res: Response) => `celular:${res.locals.celular.id}`,
+  message: { error: 'RATE_LIMIT', code: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+})
+
+/** Rechazos con datos al nivel de `code`; PIN_BLOQUEADO además dice en `Retry-After` cuántos segundos esperar. */
+const conDatos =
+  (handler: (req: Request, res: Response) => Promise<unknown>) => async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.status(200).json(await handler(req, res))
+    } catch (error) {
+      if (error instanceof AppError && esObjeto(error.details)) {
+        if (error.code === 'PIN_BLOQUEADO') res.set('Retry-After', String(error.details.reintentaEn))
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...error.details })
+      }
+      next(error)
+    }
+  }
+
+/**
+ * POST /tpv/campo/entrar — `{ pin, venueId? }` → 200 `{ sesion, sucursales, horaDelServidor }`. Rechazos: 401
+ * CELULAR_DESVINCULADO, 429 PIN_BLOQUEADO (`reintentaEn`), 403 SIN_SUCURSAL y SIN_ACCESO_A_LA_SUCURSAL, 409 ELIGE_SUCURSAL
+ * (`sucursales`) y SIN_PIN, 401 PIN_INCORRECTO (`intentosAntesDeEsperar`); reintentable: 409 ENTRADA_EN_PROCESO.
+ */
+router.post(
+  '/entrar',
+  autenticarCelular,
+  porCelular,
+  validateRequest(entrarConPinSchema),
+  conDatos((req, res) => entrarConPin(res.locals.celular, req.body)),
+)
+
+/**
+ * POST /tpv/campo/renovar — `{ refreshToken }` → 200 `{ accessToken, refreshToken, venueId }`. 401 SESION_INVALIDA o
+ * SIN_ACCESO_A_LA_SUCURSAL: el celular vuelve a pedir el PIN; 401 CELULAR_DESVINCULADO: pide un código nuevo.
+ */
+router.post(
+  '/renovar',
+  autenticarCelular,
+  porCelular,
+  validateRequest(renovarSesionSchema),
+  conDatos((req, res) => renovarSesionDeCelular(res.locals.celular, req.body.refreshToken)),
 )
 
 /**
