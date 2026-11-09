@@ -20,6 +20,7 @@ import { hashToken } from '@/services/auth/refreshGrant.service'
 import { createSession } from '@/services/auth/session.service'
 import { isSessionAliveCached } from '@/services/auth/sessionCache'
 import { generateSecureCode } from '@/services/dashboard/terminal-activation.service'
+import { moduleService } from '@/services/modules/module.service'
 import { autenticarCelular, CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
@@ -113,6 +114,10 @@ beforeAll(async () => {
   server = app.listen(0, '127.0.0.1')
   await new Promise<void>(listo => server.once('listening', () => listo()))
 })
+
+// Activar y entrar sólo cuentan las sucursales de promotora CON el módulo (S13): aquí todas lo tienen.
+beforeEach(() => jest.spyOn(moduleService, 'venuesWithModule').mockImplementation(async ids => new Set(ids)))
+afterEach(() => jest.restoreAllMocks())
 
 afterAll(async () => {
   await new Promise<void>(listo => server.close(() => listo()))
@@ -520,7 +525,7 @@ describe('Tarea 6: desvincular', () => {
       expect.objectContaining({
         action: 'CAMPO_CELULAR_DESVINCULADO',
         entityId: c.celularId,
-        data: { motivo: 'CELULAR', porSubir: 2, huellasReportadas: 2 },
+        data: { motivo: 'CELULAR', porSubir: 2, huellasReportadas: 2, perdidoORobado: false },
       }),
     )
 

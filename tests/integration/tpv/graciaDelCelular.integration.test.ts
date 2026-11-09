@@ -17,6 +17,7 @@ import { CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { huellaDelEnvio, TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
 import { listarRetenidos, resolverRetenido } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import { aceptarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { moduleService } from '@/services/modules/module.service'
 import * as pagos from '@/services/tpv/payment.tpv.service'
 import { crearCelularConSesion } from '../../helpers/celularDeCampo'
@@ -162,7 +163,9 @@ describe('POST /tpv/campo/gracia', () => {
 
     // La evidencia nombra la venta por su llave (el celular desvinculado nunca supo el pago).
     const foto = `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2Fgracia.jpg`
-    const ev = await enGracia(credencial, 'EVIDENCIA', JSON.stringify({ ventaLlave: llave, photoUrls: [foto] }))
+    // Con sus campos de captura (S9): son la llave de idempotencia de la foto.
+    const captura = { captureSeq: 1, captureDeviceId: celular.id, idempotencyKey: randomUUID(), capturedAt: new Date().toISOString() }
+    const ev = await enGracia(credencial, 'EVIDENCIA', JSON.stringify({ ventaLlave: llave, photoUrls: [foto], ...captura }))
     expect(ev.status).toBe(200)
     expect(ev.body).toMatchObject({ success: true, aplicadoEnGracia: true })
     expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: evidencias[0].id } })).photos).toEqual([foto])
@@ -256,5 +259,41 @@ describe('POST /tpv/campo/gracia', () => {
     expect(r.status).toBe(409)
     expect(r.body).toMatchObject({ code: 'USA_TU_SESION' })
     await desvincularCelular({ celularId: vivo.celular.id, organizationId: orgId, motivo: 'CELULAR', porStaffId: promotorId })
+  })
+
+  it('S2 · «Aplicar» aceptó la custodia y cayó antes de marcar; la SIM se vendió: «Aplicar» otra vez → APLICADO por la bitácora, no PENDIENTE', async () => {
+    consecutivo += 1
+    const sim = await prisma.serializedItem.create({
+      data: {
+        venueId,
+        categoryId: categoriaDeCaja,
+        serialNumber: `8954${String(Date.now()).slice(-9)}${String(consecutivo).padStart(6, '0')}`,
+        createdBy: promotorId,
+        custodyState: 'PROMOTER_PENDING',
+        assignedPromoterId: promotorId,
+        custodyVersion: 1,
+      },
+    })
+    const cuerpo = { sims: [{ serialNumber: sim.serialNumber, custodyVersion: 1 }] }
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([])
+    const retenido = await enGracia(credencial, 'CUSTODIA_ACEPTAR', JSON.stringify(cuerpo)) // sin huella: por revisar
+    expect(retenido.body).toEqual({ retenido: true, motivo: 'NO_REPORTADA' })
+    const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id, tipo: 'CUSTODIA_ACEPTAR' } })
+
+    // El primer «Aplicar» tomó la fila y aceptó la SIM; el proceso cayó antes de marcarla APLICADO.
+    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { estado: 'APLICANDO' } })
+    const aceptada = await aceptarCustodiaDeCampo({ venueId, staffId: promotorId, role: 'CASHIER' }, cuerpo)
+    expect(aceptada.body.summary).toMatchObject({ succeeded: 1, failed: 0 })
+    // Mientras tanto la SIM se vendió (desde la PAX u otro celular).
+    await prisma.serializedItem.update({ where: { id: sim.id }, data: { custodyState: 'SOLD' } })
+
+    const r = await resolverRetenido({ retenidoId: fila.id, organizationId: orgId, accion: 'APLICAR', porStaffId: supervisorId })
+    expect(r.estado).toBe('APLICADO')
+    expect(r.resultado).toMatchObject({
+      recuperadoDeLaBitacora: true,
+      eventos: [expect.objectContaining({ serialNumber: sim.serialNumber })],
+    })
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({ estado: 'APLICADO' })
+    await prisma.serializedItemCustodyEvent.deleteMany({ where: { serializedItemId: sim.id } })
   })
 })

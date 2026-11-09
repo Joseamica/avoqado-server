@@ -229,7 +229,8 @@ describe('aplicarEnvio', () => {
 
     it('S9 · sin los campos de captura → CUERPO_INVALIDO antes de buscar la venta (repetir «Aplicar» no duplica fotos)', async () => {
       for (const falta of ['captureSeq', 'captureDeviceId', 'idempotencyKey', 'capturedAt']) {
-        const { [falta]: _quitado, ...sinUno } = fotos as Record<string, unknown>
+        const sinUno: Record<string, unknown> = { ...fotos }
+        delete sinUno[falta]
         expect(await aplicarEnvio(ctx, 'EVIDENCIA', sinUno)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
       }
       expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
