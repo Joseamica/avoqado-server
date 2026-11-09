@@ -64,7 +64,7 @@ export interface CreateAngelPayUserAccountInput {
  */
 export async function createAngelPayUserAccount(input: CreateAngelPayUserAccountInput): Promise<AngelPayUserAccount> {
   if (!EMAIL_REGEX.test(input.email)) {
-    throw new ValidationError('Invalid email format')
+    throw new ValidationError('Formato de correo inválido')
   }
   if (input.pin !== undefined && !PIN_REGEX.test(input.pin)) {
     throw new ValidationError('PIN must be 6 numeric digits')
@@ -236,9 +236,9 @@ export async function softDeleteAngelPayUserAccount(id: string, changedBy: strin
  */
 export async function reactivateAngelPayUserAccount(id: string, changedBy: string): Promise<AngelPayUserAccount> {
   const existing = await prisma.angelPayUserAccount.findUnique({ where: { id } })
-  if (!existing) throw new NotFoundError(`AngelPay account ${id} not found`)
+  if (!existing) throw new NotFoundError(`Cuenta AngelPay ${id} no encontrada`)
   if (existing.status !== AngelPayAccountStatus.DELETED) {
-    throw new ConflictError(`Only DELETED accounts can be reactivated. Current status: ${existing.status}`)
+    throw new ConflictError(`Sólo se reactivan las cuentas eliminadas. Estado actual: ${existing.status}`)
   }
   const nextStatus = existing.pin ? AngelPayAccountStatus.ACTIVE : AngelPayAccountStatus.PENDING_PIN
   return prisma.angelPayUserAccount.update({
@@ -382,7 +382,7 @@ export async function getAngelPayUserAccountPin(id: string): Promise<string | nu
     select: { pin: true, pinEncrypted: true },
   })
   if (!account) {
-    throw new NotFoundError('AngelPay account not found')
+    throw new NotFoundError('Cuenta AngelPay no encontrada')
   }
   if (account.pin) return account.pin
   if (!account.pinEncrypted) return null

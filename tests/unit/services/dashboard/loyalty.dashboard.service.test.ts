@@ -162,7 +162,7 @@ describe('Loyalty Dashboard Service', () => {
         updateLoyaltyConfig('venue-123', {
           pointsPerDollar: -1,
         }),
-      ).rejects.toThrow('Points per dollar must be non-negative')
+      ).rejects.toThrow('Los puntos por peso no pueden ser negativos')
     })
 
     it('should throw BadRequestError if pointsPerVisit is negative', async () => {
@@ -176,7 +176,7 @@ describe('Loyalty Dashboard Service', () => {
         updateLoyaltyConfig('venue-123', {
           pointsPerVisit: -5,
         }),
-      ).rejects.toThrow('Points per visit must be non-negative')
+      ).rejects.toThrow('Los puntos por visita no pueden ser negativos')
     })
 
     it('should throw BadRequestError if redemptionRate is negative', async () => {
@@ -190,7 +190,7 @@ describe('Loyalty Dashboard Service', () => {
         updateLoyaltyConfig('venue-123', {
           redemptionRate: -0.01,
         }),
-      ).rejects.toThrow('Redemption rate must be non-negative')
+      ).rejects.toThrow('El valor de canje no puede ser negativo')
     })
 
     it('should throw BadRequestError if minPointsRedeem is negative', async () => {
@@ -204,7 +204,7 @@ describe('Loyalty Dashboard Service', () => {
         updateLoyaltyConfig('venue-123', {
           minPointsRedeem: -100,
         }),
-      ).rejects.toThrow('Minimum redemption points must be non-negative')
+      ).rejects.toThrow('El mínimo de puntos para canjear no puede ser negativo')
     })
 
     it('should throw BadRequestError if pointsExpireDays is negative (not null)', async () => {
@@ -218,7 +218,7 @@ describe('Loyalty Dashboard Service', () => {
         updateLoyaltyConfig('venue-123', {
           pointsExpireDays: -30,
         }),
-      ).rejects.toThrow('Points expiration days must be non-negative or null')
+      ).rejects.toThrow('Los días para que venzan los puntos no pueden ser negativos')
     })
 
     it('should allow pointsExpireDays to be null (no expiration)', async () => {
@@ -388,7 +388,7 @@ describe('Loyalty Dashboard Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
       await expect(getCustomerPointsBalance('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(getCustomerPointsBalance('venue-123', 'nonexistent')).rejects.toThrow('Customer not found')
+      await expect(getCustomerPointsBalance('venue-123', 'nonexistent')).rejects.toThrow('Cliente no encontrado')
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {
@@ -855,7 +855,7 @@ describe('Loyalty Dashboard Service', () => {
 
       await expect(adjustPoints('venue-123', 'nonexistent', 100, 'Bonus', 'staff-123')).rejects.toThrow(NotFoundError)
 
-      await expect(adjustPoints('venue-123', 'nonexistent', 100, 'Bonus', 'staff-123')).rejects.toThrow('Customer not found')
+      await expect(adjustPoints('venue-123', 'nonexistent', 100, 'Bonus', 'staff-123')).rejects.toThrow('Cliente no encontrado')
     })
 
     it('should throw BadRequestError if adjustment would result in negative balance', async () => {
@@ -866,7 +866,7 @@ describe('Loyalty Dashboard Service', () => {
       await expect(adjustPoints('venue-123', 'customer-123', -150, 'Penalty', 'staff-123')).rejects.toThrow(BadRequestError)
 
       await expect(adjustPoints('venue-123', 'customer-123', -150, 'Penalty', 'staff-123')).rejects.toThrow(
-        'Cannot adjust points. Would result in negative balance (-50)',
+        'No se pueden ajustar los puntos: el saldo quedaría negativo (-50)',
       )
     })
 
@@ -920,7 +920,7 @@ describe('Loyalty Dashboard Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
       await expect(getLoyaltyTransactions('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(getLoyaltyTransactions('venue-123', 'nonexistent')).rejects.toThrow('Customer not found')
+      await expect(getLoyaltyTransactions('venue-123', 'nonexistent')).rejects.toThrow('Cliente no encontrado')
     })
 
     it('should enforce multi-tenant isolation (customer belongs to venue)', async () => {

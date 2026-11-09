@@ -14,7 +14,7 @@ import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema, optiona
  */
 export const SignupSchema = z.object({
   body: z.object({
-    email: z.string().email('Formato de correo invalido'),
+    email: z.string().email('Formato de correo inválido'),
     password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres'),
     firstName: z.string().optional().default(''),
     lastName: z.string().optional().default(''),
@@ -247,12 +247,12 @@ export const GetMenuTemplateSchema = z.object({
 
 export const V2StepParamsSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('ID de organizacion invalido'),
+    organizationId: z.string().cuid('ID de organización inválido'),
     // Steps 8 (payment providers), 9 (buy TPV) and 10 (plan) are optional/env-gated
     // wizard steps. They must be inside the regex so the wizard can save their
     // skip / connected / plan-selected state. Bumping this cap is required whenever
     // a new trailing wizard step is added (see ENABLE_ONBOARDING_* / ENABLE_VENUE_BASE_SUBSCRIPTION flags).
-    stepNumber: z.string().regex(/^([1-9]|10)$/, 'Numero de paso invalido (1-10)'),
+    stepNumber: z.string().regex(/^([1-9]|10)$/, 'Número de paso inválido (1-10)'),
   }),
 })
 
@@ -262,18 +262,18 @@ export const V2StepParamsSchema = z.object({
 
 export const V2AcceptTermsSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('ID de organizacion invalido'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
-    termsAccepted: z.boolean().refine(val => val === true, { message: 'Debes aceptar los terminos de servicio' }),
+    termsAccepted: z.boolean().refine(val => val === true, { message: 'Debes aceptar los términos de servicio' }),
     privacyAccepted: z.boolean().refine(val => val === true, { message: 'Debes aceptar el aviso de privacidad' }),
-    termsVersion: z.string().min(1, 'La version de los terminos es requerida'),
+    termsVersion: z.string().min(1, 'La versión de los términos es requerida'),
   }),
 })
 
 export const V2CompleteSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('ID de organizacion invalido'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
     // Locale captured from the wizard's active i18n language, used for the plan

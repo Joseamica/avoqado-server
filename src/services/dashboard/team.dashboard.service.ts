@@ -306,7 +306,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
   })
 
   if (!staffVenue) {
-    throw new NotFoundError('Team member not found')
+    throw new NotFoundError('Miembro del equipo no encontrado')
   }
 
   // RH: sus puestos vigentes hoy, con la MISMA definición que la lista de Personas (una consulta indexada).
@@ -430,7 +430,7 @@ export async function inviteTeamMember(
 }> {
   // Validate role - can't invite SUPERADMIN
   if (request.role === StaffRole.SUPERADMIN) {
-    throw new BadRequestError('Cannot invite SUPERADMIN role')
+    throw new BadRequestError('No se puede invitar con el rol de superadministrador')
   }
 
   // Prevent privilege escalation: the inviter may only invite roles at or below
@@ -452,7 +452,7 @@ export async function inviteTeamMember(
   })
 
   if (!venue) {
-    throw new NotFoundError('Venue not found')
+    throw new NotFoundError('Negocio no encontrado')
   }
 
   // Get inviter info
@@ -465,7 +465,7 @@ export async function inviteTeamMember(
   })
 
   if (!inviter) {
-    throw new NotFoundError('Inviter not found')
+    throw new NotFoundError('No se encontró a quien invita')
   }
 
   // Determine email to use
@@ -502,7 +502,7 @@ export async function inviteTeamMember(
   } else {
     // Traditional email invitation
     if (!request.email) {
-      throw new BadRequestError('Email is required for standard invitations')
+      throw new BadRequestError('El correo es obligatorio para esta invitación')
     }
     email = request.email.toLowerCase()
     // hz:f26b3afc:D4: un usuario demo tiene contraseña pública; invitarlo abriría este negocio a cualquiera con ella.
@@ -543,7 +543,7 @@ export async function inviteTeamMember(
     // Allow if inviteToAllVenues is true - we'll update their role and add to other venues
     // Otherwise block if they're already an active member
     if (existingStaffVenue && existingStaffVenue.active && !shouldInviteToAllVenues) {
-      throw new BadRequestError('User is already a team member of this venue')
+      throw new BadRequestError('Esta persona ya es parte del equipo de este negocio')
     }
   }
 
@@ -841,7 +841,7 @@ export async function inviteTeamMember(
 export async function updateTeamMember(venueId: string, teamMemberId: string, updates: UpdateTeamMemberRequest): Promise<TeamMember> {
   // Validate role if updating - can't assign SUPERADMIN
   if (updates.role === StaffRole.SUPERADMIN) {
-    throw new BadRequestError('Cannot assign SUPERADMIN role')
+    throw new BadRequestError('No se puede asignar el rol de superadministrador')
   }
 
   // Get current team member
@@ -856,7 +856,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
   })
 
   if (!existingStaffVenue) {
-    throw new NotFoundError('Team member not found')
+    throw new NotFoundError('Miembro del equipo no encontrado')
   }
 
   // Prevent privilege escalation via role change. `callerRole` is the caller's
@@ -918,7 +918,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     })
 
     if (adminCount === 0) {
-      throw new BadRequestError('Cannot deactivate the last venue administrator')
+      throw new BadRequestError('No se puede desactivar al último administrador del negocio')
     }
   }
 
@@ -1110,7 +1110,7 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
   })
 
   if (!existingStaffVenue) {
-    throw new NotFoundError('Team member not found')
+    throw new NotFoundError('Miembro del equipo no encontrado')
   }
 
   // Prevent removing yourself if you're the only OWNER/ADMIN
@@ -1129,7 +1129,7 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
     })
 
     if (adminCount === 0) {
-      throw new BadRequestError('Cannot remove the last venue administrator')
+      throw new BadRequestError('No se puede quitar al último administrador del negocio')
     }
   }
 
@@ -1178,7 +1178,7 @@ export async function hardDeleteTeamMember(
   actorId?: string,
 ): Promise<{ deletedRecords: Record<string, number> }> {
   if (!confirmDeletion) {
-    throw new BadRequestError('Deletion must be explicitly confirmed')
+    throw new BadRequestError('Confirma que quieres eliminarlo')
   }
 
   const { staffId, deletedRecords } = await withSerializableRetry(
@@ -1192,7 +1192,7 @@ export async function hardDeleteTeamMember(
     `)
       const checkedAt = new Date()
       if (memberships.length === 0) {
-        throw new NotFoundError('Team member not found')
+        throw new NotFoundError('Miembro del equipo no encontrado')
       }
 
       const staffId = memberships[0].staffId
@@ -1374,12 +1374,12 @@ export async function resendInvitation(venueId: string, invitationId: string, _i
   })
 
   if (!invitation) {
-    throw new NotFoundError('Invitation not found')
+    throw new NotFoundError('Invitación no encontrada')
   }
 
   // Check if the invitation belongs to the same venue
   if (invitation.venueId !== venueId) {
-    throw new UnauthorizedError('Cannot resend invitation from different venue')
+    throw new UnauthorizedError('No se puede reenviar una invitación de otro negocio')
   }
 
   // Extend expiration date by 7 days
@@ -1448,7 +1448,7 @@ export async function cancelInvitation(venueId: string, invitationId: string): P
   })
 
   if (!invitation) {
-    throw new NotFoundError('Invitation not found or already processed')
+    throw new NotFoundError('La invitación no existe o ya se procesó')
   }
 
   await prisma.invitation.update({

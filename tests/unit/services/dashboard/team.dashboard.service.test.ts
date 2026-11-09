@@ -251,7 +251,7 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
   })
 
   it('preserves the explicit confirmation guard before opening a transaction', async () => {
-    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, false)).rejects.toThrow('Deletion must be explicitly confirmed')
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, false)).rejects.toThrow('Confirma que quieres eliminarlo')
 
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
@@ -262,7 +262,7 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
     prismaMock.$queryRaw.mockResolvedValue([])
 
     await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).rejects.toThrow(NotFoundError)
-    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).rejects.toThrow('Team member not found')
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).rejects.toThrow('Miembro del equipo no encontrado')
 
     expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
     expectNoHardDeleteWrites()

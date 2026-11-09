@@ -81,15 +81,15 @@ describe('calculateTotals', () => {
   })
 
   it('throws if an item references an unknown catalogKey', () => {
-    expect(() => calculateTotals([{ catalogKey: 'FAKE_MODEL', quantity: 1 }])).toThrow(/Unknown catalog key/)
+    expect(() => calculateTotals([{ catalogKey: 'FAKE_MODEL', quantity: 1 }])).toThrow(/catálogo desconocido/)
   })
 
   it('throws if quantity < 1', () => {
-    expect(() => calculateTotals([{ catalogKey: 'PAX_A910S', quantity: 0 }])).toThrow(/quantity/i)
+    expect(() => calculateTotals([{ catalogKey: 'PAX_A910S', quantity: 0 }])).toThrow(/cantidad/i)
   })
 
   it('throws if items array is empty', () => {
-    expect(() => calculateTotals([])).toThrow(/At least one item/i)
+    expect(() => calculateTotals([])).toThrow(/al menos un producto/i)
   })
 })
 
@@ -205,7 +205,7 @@ describe('assignSerials', () => {
           },
         ],
       }),
-    ).rejects.toThrow(/not paid/i)
+    ).rejects.toThrow(/no está pagado/i)
   })
 
   it('rejects if order fulfillmentStatus is already SERIALS_ASSIGNED', async () => {
@@ -213,7 +213,7 @@ describe('assignSerials', () => {
       ...orderWithItemsPaid,
       fulfillmentStatus: 'SERIALS_ASSIGNED',
     })
-    await expect(assignSerials({ orderId: 'ord_paid', assignedBy: 's@a.io', items: [] })).rejects.toThrow(/already assigned/i)
+    await expect(assignSerials({ orderId: 'ord_paid', assignedBy: 's@a.io', items: [] })).rejects.toThrow(/ya está asignado/i)
   })
 
   it('rejects if units count per item does not match quantity', async () => {
@@ -224,7 +224,7 @@ describe('assignSerials', () => {
         assignedBy: 's@a.io',
         items: [{ orderItemId: 'oi_1', units: [{ name: 'A1', serial: 'S1' }] }],
       }),
-    ).rejects.toThrow(/expected 2 units/i)
+    ).rejects.toThrow(/se esperaban 2 unidades/i)
   })
 
   it('rejects if a serial is empty', async () => {
@@ -243,7 +243,7 @@ describe('assignSerials', () => {
           },
         ],
       }),
-    ).rejects.toThrow(/serial is required/i)
+    ).rejects.toThrow(/número de serie es obligatorio/i)
   })
 
   it('fires the shipped email after creating terminals', async () => {
@@ -291,7 +291,7 @@ describe('markShipped', () => {
       id: 'o',
       fulfillmentStatus: 'AWAITING_SERIALS',
     })
-    await expect(markShipped({ orderId: 'o', trackingNumber: 'T1', carrier: 'DHL' })).rejects.toThrow(/must be SERIALS_ASSIGNED/i)
+    await expect(markShipped({ orderId: 'o', trackingNumber: 'T1', carrier: 'DHL' })).rejects.toThrow(/series asignadas/i)
   })
 
   it('updates fulfillmentStatus + tracking when valid', async () => {
@@ -322,7 +322,7 @@ describe('markDelivered', () => {
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({
       fulfillmentStatus: 'AWAITING_SERIALS',
     })
-    await expect(markDelivered({ orderId: 'o' })).rejects.toThrow(/must be SHIPPED/i)
+    await expect(markDelivered({ orderId: 'o' })).rejects.toThrow(/debe enviarse/i)
   })
 
   it('updates fulfillmentStatus + deliveredAt', async () => {
@@ -358,7 +358,7 @@ describe('uploadSpeiProof', () => {
         venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
       }),
-    ).rejects.toThrow(/not a SPEI order/i)
+    ).rejects.toThrow(/no es por SPEI/i)
   })
 
   it('rejects already-PAID orders', async () => {
@@ -375,7 +375,7 @@ describe('uploadSpeiProof', () => {
         venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
       }),
-    ).rejects.toThrow(/already paid/i)
+    ).rejects.toThrow(/ya está pagado/i)
   })
 
   it('rejects oversize files (>10MB)', async () => {
@@ -409,7 +409,7 @@ describe('uploadSpeiProof', () => {
         venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/zip', originalname: 'r.zip', size: 100 },
       }),
-    ).rejects.toThrow(/file type|mimetype/i)
+    ).rejects.toThrow(/tipo de archivo/i)
   })
 
   it('uploads to Firebase + updates order to PROOF_UPLOADED + generates approval token', async () => {
@@ -455,7 +455,7 @@ describe('uploadSpeiProof', () => {
         venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
       }),
-    ).rejects.toThrow(/order not found/i)
+    ).rejects.toThrow(/pedido no encontrado/i)
     expect(uploadFileMock).not.toHaveBeenCalled()
     expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
   })
@@ -472,7 +472,7 @@ describe('approveSpei', () => {
       paymentStatus: 'AWAITING_PROOF',
       items: [],
     })
-    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io', token: 'T1' })).rejects.toThrow(/not in PROOF_UPLOADED/i)
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io', token: 'T1' })).rejects.toThrow(/comprobante por revisar/i)
   })
 
   it('marks PAID + AWAITING_SERIALS and clears approval token (single-use)', async () => {
@@ -534,7 +534,7 @@ describe('approveSpei', () => {
       .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PAID', speiApprovalToken: null, items: [] })
     ;(prisma.terminalOrder.update as jest.Mock).mockRejectedValue(Object.assign(new Error('not found'), { code: 'P2025' }))
     await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'magic-link', token: 'T1' })).rejects.toThrow(
-      /not in PROOF_UPLOADED state \(current: PAID\)/,
+      /comprobante por revisar \(estado actual: PAID\)/,
     )
   })
 })
@@ -547,7 +547,7 @@ describe('rejectSpei', () => {
   it('rejects if order is not PROOF_UPLOADED', async () => {
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({ id: 'ord_1', paymentStatus: 'PAID' })
     await expect(rejectSpei({ orderId: 'ord_1', reason: 'falso', rejectedBy: 'sales@avoqado.io', token: 'T1' })).rejects.toThrow(
-      /not in PROOF_UPLOADED/i,
+      /comprobante por revisar/i,
     )
   })
 

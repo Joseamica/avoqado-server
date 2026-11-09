@@ -194,7 +194,7 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
   // Duration validation (1-1440 minutes = 1 min to 24 hours)
   if (data.duration !== undefined && data.duration !== null) {
     if (data.duration < 1 || data.duration > 1440) {
-      throw new AppError('Duration must be between 1 and 1440 minutes', 400)
+      throw new AppError('La duración debe ser de 1 a 1440 minutos', 400)
     }
   }
 
@@ -215,7 +215,7 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
     case 'APPOINTMENTS_SERVICE':
       // Services cannot track inventory
       if ('trackInventory' in data && data.trackInventory === true) {
-        throw new AppError('Services cannot track inventory', 400)
+        throw new AppError('Los servicios no llevan inventario', 400)
       }
       break
 
@@ -223,14 +223,14 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
       // Event date is recommended but not strictly required (can be TBD)
       // Capacity validation
       if (data.eventCapacity !== undefined && data.eventCapacity !== null && data.eventCapacity < 1) {
-        throw new AppError('Event capacity must be at least 1', 400)
+        throw new AppError('El cupo del evento debe ser de al menos 1', 400)
       }
       break
 
     case 'DIGITAL':
       // Digital products cannot track inventory (infinite by nature)
       if ('trackInventory' in data && data.trackInventory === true) {
-        throw new AppError('Digital products cannot track inventory', 400)
+        throw new AppError('Los productos digitales no llevan inventario', 400)
       }
       // Download URL is recommended but can be added later
       break
@@ -238,13 +238,13 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
     case 'DONATION':
       // Donations cannot track inventory
       if ('trackInventory' in data && data.trackInventory === true) {
-        throw new AppError('Donations cannot track inventory', 400)
+        throw new AppError('Las donaciones no llevan inventario', 400)
       }
       // Suggested amounts validation
       if (data.suggestedAmounts) {
         for (const amount of data.suggestedAmounts) {
           if (amount <= 0) {
-            throw new AppError('Suggested donation amounts must be positive', 400)
+            throw new AppError('Los montos sugeridos de donación deben ser positivos', 400)
           }
         }
       }
@@ -1632,7 +1632,7 @@ export async function getProductTypesForVenue(venueId: string): Promise<{
   })
 
   if (!venue) {
-    throw new AppError('Venue not found', 404)
+    throw new AppError('Negocio no encontrado', 404)
   }
 
   const venueType = venue.type || 'OTHER'
