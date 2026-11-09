@@ -182,7 +182,7 @@ async function aplicarEnGracia(
     action: 'CAMPO_GRACIA_APLICADA',
     entity: 'CelularDeCampo',
     entityId: celular.id,
-    data: { tipo: e.tipo, huella: fila.huella, celularId: celular.id, ...(recuperado && { recuperado: true }) },
+    data: { tipo: e.tipo, huella: fila.huella, celularId: celular.id, ...(recuperado ? { recuperado: true } : {}) },
   })
   if (r.tipo === 'RECHAZADO') return { status: 200, body: { resuelto: 'APLICADO', resultado } }
   return { status: r.status, body: { ...(r.body as object), aplicadoEnGracia: true } }
