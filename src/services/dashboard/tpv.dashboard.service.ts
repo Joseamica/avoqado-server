@@ -11,6 +11,25 @@ import { ACTIVATABLE_TERMINAL_TYPES, type DeviceManagementDto, toDeviceManagemen
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
 import { extrasDeLaFicha, type ExtrasDeLaFicha } from './tpvDetailExtras'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+
+/**
+ * Aparatos claros, Paso 2: letrero opcional de la lista. Misma regla que `extrasDeLaFicha` (interruptor + plan).
+ * Si falla, la lista responde como siempre, sin `areaTickets`.
+ */
+async function leerValesDeLaLista(venueId: string): Promise<{ enabled: boolean; activeAreaCount: number } | undefined> {
+  try {
+    const [ajustes, activeAreaCount] = await Promise.all([
+      prisma.venueAreaTicketSettings.findUnique({ where: { venueId }, select: { enabled: true } }),
+      prisma.fulfillmentArea.count({ where: { venueId, active: true } }),
+    ])
+    const enabled = Boolean(ajustes?.enabled) && (await venueHasFeatureAccess(venueId, 'AREA_TICKETS'))
+    return { enabled, activeAreaCount }
+  } catch (error) {
+    logger.warn('[Lista de aparatos] no se pudieron leer los vales; se responde sin ellos', { venueId, error })
+    return undefined
+  }
+}
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -150,6 +169,9 @@ export async function getTerminalsData(
       },
       skip,
       take,
+      include: {
+        fulfillmentArea: { select: { id: true, name: true, active: true, sendsComanda: true, fulfillmentMode: true } },
+      },
     }),
     prisma.terminal.count({
       where: whereClause,
@@ -198,6 +220,8 @@ export async function getTerminalsData(
     ),
   )
 
+  const areaTickets = await leerValesDeLaLista(venueId)
+
   // 6. Estructurar y devolver la respuesta final
   return {
     data: terminalsWithStats,
@@ -207,6 +231,7 @@ export async function getTerminalsData(
       pageSize,
       pageCount: Math.ceil(total / pageSize),
     },
+    ...(areaTickets ? { areaTickets } : {}),
   }
 }
 
