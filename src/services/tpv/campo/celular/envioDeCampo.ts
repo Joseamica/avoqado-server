@@ -101,6 +101,32 @@ const validar = <T>(schema: ZodTypeAny, cuerpo: unknown): T | null => {
   return r.success ? (r.data as T) : null
 }
 
+/** El esquema de la ruta normal de cada tipo (la evidencia va aparte: nombra su venta con `ventaLlave`). */
+const ESQUEMAS: Record<Exclude<TipoDeEnvio, 'EVIDENCIA'>, ZodTypeAny> = {
+  VENTA: ventaDeCampoBodySchema,
+  ENTRADA: entradaDeCampoBodySchema,
+  SALIDA: salidaDeCampoBodySchema,
+  CUSTODIA_ACEPTAR: aceptarCustodiaSchema.shape.body,
+  CUSTODIA_RECHAZAR: rechazarCustodiaSchema.shape.body,
+}
+
+/**
+ * La evidencia: su llave de venta y el resto validado con el esquema de la ruta (el id de prueba sólo llena `paymentId`).
+ * Fuera de su ruta exige los campos de captura (S9): son la llave de idempotencia de la foto, y sin ellos repetir
+ * «Aplicar» la agregaría otra vez.
+ */
+function evidenciaValida(cuerpo: unknown): { ventaLlave: string; resto: Record<string, unknown> } | null {
+  const conLlave = validar<{ ventaLlave: string; paymentId?: unknown }>(evidenciaDeCampoLlaveSchema, cuerpo)
+  if (!conLlave) return null
+  const { ventaLlave, paymentId: _ignorado, ...resto } = conLlave
+  const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: cuid() })
+  return b && capturaDe(b) ? { ventaLlave, resto } : null
+}
+
+/** ¿El cuerpo pasa el esquema de su tipo? Sin tocar la base: la gracia lo revisa antes de retener nada (S7). */
+export const cuerpoValido = (tipo: TipoDeEnvio, cuerpo: unknown): boolean =>
+  tipo === 'EVIDENCIA' ? evidenciaValida(cuerpo) !== null : validar(ESQUEMAS[tipo], cuerpo) !== null
+
 export async function aplicarEnvio(
   ctx: { venueId: string; orgId: string; staffId: string; celularId: string },
   tipo: TipoDeEnvio,
@@ -110,26 +136,26 @@ export async function aplicarEnvio(
   try {
     switch (tipo) {
       case 'VENTA': {
-        const b = validar<any>(ventaDeCampoBodySchema, cuerpo)
+        const b = validar<any>(ESQUEMAS.VENTA, cuerpo)
         if (!b) return cuerpoInvalido()
         const r = await registrarVentaDeCampo({ venueId, orgId, staffId, celularId }, b)
         return aplicado(r.repetida ? 200 : 201, r)
       }
       case 'ENTRADA': {
-        const b = validar<any>(entradaDeCampoBodySchema, cuerpo)
+        const b = validar<any>(ESQUEMAS.ENTRADA, cuerpo)
         if (!b) return cuerpoInvalido()
         const r = await registrarEntradaDeCampo({ venueId, staffId }, b)
         return aplicado(r.repetida ? 200 : 201, r)
       }
       case 'SALIDA': {
-        const b = validar<any>(salidaDeCampoBodySchema, cuerpo)
+        const b = validar<any>(ESQUEMAS.SALIDA, cuerpo)
         if (!b) return cuerpoInvalido()
         return aplicado(200, await registrarSalidaDeCampo({ venueId, staffId }, b))
       }
       case 'CUSTODIA_ACEPTAR':
       case 'CUSTODIA_RECHAZAR': {
         const aceptar = tipo === 'CUSTODIA_ACEPTAR'
-        const b = validar<any>((aceptar ? aceptarCustodiaSchema : rechazarCustodiaSchema).shape.body, cuerpo)
+        const b = validar<any>(ESQUEMAS[tipo], cuerpo)
         if (!b) return cuerpoInvalido()
         const { role } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
         if (!role) return rechazado('PERSONA_SIN_ASIGNACION', 'La persona ya no está asignada a esta sucursal.')
@@ -137,18 +163,16 @@ export async function aplicarEnvio(
         return desenlaceDeCustodia(aceptar ? await aceptarCustodiaDeCampo(q, b) : await rechazarCustodiaDeCampo(q, b))
       }
       case 'EVIDENCIA': {
-        const conLlave = validar<{ ventaLlave: string; paymentId?: unknown }>(evidenciaDeCampoLlaveSchema, cuerpo)
-        if (!conLlave) return cuerpoInvalido()
-        const { ventaLlave, paymentId: _ignorado, ...resto } = conLlave
-        // El resto se valida con el esquema de la ruta ANTES de buscar la venta (el id de prueba sólo llena el campo).
-        const proofBody = createProofOfSaleSchema.shape.body
-        if (!validar(proofBody, { ...resto, paymentId: cuid() })) return cuerpoInvalido()
+        // Se valida ANTES de buscar la venta.
+        const valida = evidenciaValida(cuerpo)
+        if (!valida) return cuerpoInvalido()
+        const { ventaLlave, resto } = valida
 
         const ficha = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId, llave: ventaLlave } } })
         if (!ficha || ficha.estado !== 'COMPLETA' || !ficha.paymentId || ficha.staffId !== staffId || ficha.celularId !== celularId) {
           return rechazado('VENTA_PENDIENTE', 'La venta de esta evidencia todavía no está completa.')
         }
-        const b = validar<any>(proofBody, { ...resto, paymentId: ficha.paymentId })!
+        const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: ficha.paymentId })!
         // El mismo acomodo que `createProofOfSale` (sale-verification.tpv.controller.ts).
         const result = await createOrUpdateProofOfSale(
           venueId,

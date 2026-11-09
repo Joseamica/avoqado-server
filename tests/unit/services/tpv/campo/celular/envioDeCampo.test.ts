@@ -11,7 +11,7 @@ import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { aceptarCustodiaDeCampo, rechazarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { createOrUpdateProofOfSale } from '@/services/tpv/sale-verification.service'
-import { aplicarEnvio, huellaDelEnvio, permisosDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
+import { aplicarEnvio, cuerpoValido, huellaDelEnvio, permisosDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
 
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { ventaDeCampo: { findUnique: jest.fn() } } }))
 jest.mock('@/middlewares/checkPermission.middleware', () => ({ resolveUserRoleForVenue: jest.fn() }))
@@ -167,7 +167,8 @@ describe('aplicarEnvio', () => {
   })
 
   describe('EVIDENCIA nombra su venta con ventaLlave', () => {
-    const fotos = { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion' }
+    const captura = { captureSeq: 1, captureDeviceId: 'cel', idempotencyKey: 'k1', capturedAt: '2026-11-09T10:00:00.000Z' }
+    const fotos = { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion', ...captura }
     const fichaCompleta = { estado: 'COMPLETA', staffId: 's1', celularId: 'cel1', paymentId: 'ckpago000000000000000000a' }
 
     it('de una venta COMPLETA de esa persona y ese celular → el servicio de la TPV con el paymentId de la ficha', async () => {
@@ -226,6 +227,15 @@ describe('aplicarEnvio', () => {
       expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
     })
 
+    it('S9 · sin los campos de captura → CUERPO_INVALIDO antes de buscar la venta (repetir «Aplicar» no duplica fotos)', async () => {
+      for (const falta of ['captureSeq', 'captureDeviceId', 'idempotencyKey', 'capturedAt']) {
+        const { [falta]: _quitado, ...sinUno } = fotos as Record<string, unknown>
+        expect(await aplicarEnvio(ctx, 'EVIDENCIA', sinUno)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
+      }
+      expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
+      expect(evidencia).not.toHaveBeenCalled()
+    })
+
     it('VERIFICATION_MOVED (la venta cambió de tienda, «vuelve a intentarlo») se lanza: es reintentable', async () => {
       db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
       const movida = new ConflictError('La venta cambió de tienda mientras se guardaba; vuelve a intentarlo', 'VERIFICATION_MOVED')
@@ -240,5 +250,25 @@ describe('aplicarEnvio', () => {
       evidencia.mockRejectedValue(new NotFoundError('no está'))
       expect(await aplicarEnvio(ctx, 'EVIDENCIA', fotos)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { message: 'no está' } })
     })
+  })
+})
+
+describe('cuerpoValido (S7, S9): el mismo esquema que aplicarEnvio, sin tocar la base', () => {
+  const captura = { captureSeq: 1, captureDeviceId: 'cel', idempotencyKey: 'k1', capturedAt: '2026-11-09T10:00:00.000Z' }
+  it('cada tipo con su esquema', () => {
+    expect(cuerpoValido('VENTA', cuerpoVenta)).toBe(true)
+    expect(cuerpoValido('VENTA', { serialNumber: '1', precioVisto: 0 })).toBe(false)
+    expect(cuerpoValido('ENTRADA', { llave })).toBe(true)
+    expect(cuerpoValido('ENTRADA', { llave: 'no-uuid' })).toBe(false)
+    expect(cuerpoValido('SALIDA', { llave, llaveEntrada: randomUUID() })).toBe(true)
+    expect(cuerpoValido('SALIDA', { llave })).toBe(false)
+    expect(cuerpoValido('CUSTODIA_ACEPTAR', { sims: [{ serialNumber: 'A', custodyVersion: 1 }] })).toBe(true)
+    expect(cuerpoValido('CUSTODIA_ACEPTAR', { sims: [] })).toBe(false)
+    expect(cuerpoValido('CUSTODIA_RECHAZAR', { serialNumber: 'A', custodyVersion: 1 })).toBe(true)
+    expect(cuerpoValido('CUSTODIA_RECHAZAR', { serialNumber: 'A' })).toBe(false)
+    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], ...captura })).toBe(true)
+    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'] })).toBe(false)
+    expect(cuerpoValido('VENTA', null)).toBe(false)
+    expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
   })
 })
