@@ -47,8 +47,10 @@ const DESVINCULADO = new Date(AHORA.getTime() - 2 * HORA)
 
 /** La tabla de retenidos en memoria. */
 let filas: any[]
-const coincide = (f: any, where: any) =>
-  Object.entries(where).every(([k, v]: [string, any]) => (v && typeof v === 'object' && 'in' in v ? v.in.includes(f[k]) : f[k] === v))
+const coincide = (f: any, where: any): boolean =>
+  Object.entries(where).every(([k, v]: [string, any]) =>
+    k === 'AND' ? v.every((w: any) => coincide(f, w)) : v && typeof v === 'object' && 'in' in v ? v.in.includes(f[k]) : f[k] === v,
+  )
 const tick = () => new Promise(r => setImmediate(r))
 
 const cuerpoVenta = (extra: object = {}) => JSON.stringify({ llave: randomUUID(), serialNumber: '89520001', precioVisto: 0, ...extra })
@@ -637,7 +639,11 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     const e = envio()
     aplicar.mockImplementation(async () => {
       expect(filas).toHaveLength(1)
-      expect(filas[0]).toMatchObject({ estado: 'APLICANDO', motivo: 'APLICADO_EN_GRACIA', huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson) })
+      expect(filas[0]).toMatchObject({
+        estado: 'APLICANDO',
+        motivo: 'APLICADO_EN_GRACIA',
+        huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson),
+      })
       return aplicado()
     })
     await recibirEnGracia(reportado(e), e)
@@ -660,9 +666,11 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     expect(filas.some(f => f.motivo === 'FUERA_DE_PLAZO')).toBe(false)
   })
 
-  const custodia = () =>
-    envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-A', custodyVersion: 2 }] }), 'CUSTODIA_ACEPTAR')
-  const simVendida = { tipo: 'RECHAZADO', rechazo: { code: 'CUSTODIA_INCOMPLETA', message: 'm', detalle: { summary: { total: 1, succeeded: 0, failed: 1 } } } }
+  const custodia = () => envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-A', custodyVersion: 2 }] }), 'CUSTODIA_ACEPTAR')
+  const simVendida = {
+    tipo: 'RECHAZADO',
+    rechazo: { code: 'CUSTODIA_INCOMPLETA', message: 'm', detalle: { summary: { total: 1, succeeded: 0, failed: 1 } } },
+  }
 
   it('S2 · gracia: aceptó la custodia, cayó, la SIM se vendió; el reintento ve el rechazo pero la bitácora dice que aceptó → APLICADO', async () => {
     const e = custodia()
@@ -764,5 +772,30 @@ describe('arreglo final: lo que llega a la gracia (S7, S8, S9)', () => {
     expect(r).toEqual({ status: 202, body: { retenido: true, motivo: 'CELULAR_PERDIDO' } })
     expect(aplicar).not.toHaveBeenCalled()
     expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'CELULAR_PERDIDO' })
+  })
+})
+
+describe('alcance del que pregunta (S3, MCP)', () => {
+  it('listarRetenidos sólo de las sucursales del alcance', async () => {
+    db.envioRetenidoDeCampo.findMany.mockResolvedValue([])
+    db.envioRetenidoDeCampo.count.mockResolvedValue(0)
+    await listarRetenidos('org1', { page: 1, pageSize: 25 }, ['vA'])
+    expect(db.envioRetenidoDeCampo.findMany.mock.calls[0][0].where).toMatchObject({
+      organizationId: 'org1',
+      AND: [{ venueId: { in: ['vA'] } }],
+    })
+  })
+
+  it('«Aplicar» y «Descartar» de un retenido de una sucursal fuera del alcance → 404 sin tocarlo', async () => {
+    const f = retenido({ venueId: 'vB' })
+    await expect(resolver('APLICAR', { venueIds: ['vA'] })).rejects.toMatchObject({ statusCode: 404 })
+    await expect(resolver('DESCARTAR', { venueIds: ['vA'] })).rejects.toMatchObject({ statusCode: 404 })
+    expect(f.estado).toBe('PENDIENTE')
+    expect(aplicar).not.toHaveBeenCalled()
+    // Dentro del alcance sigue igual.
+    aplicar.mockResolvedValue(aplicado())
+    db.venue.findUnique.mockResolvedValue({ organizationId: 'org1' })
+    sucursales.mockResolvedValue([{ staffVenueId: 'sv', venueId: 'vB', nombre: 'B', role: 'CASHIER', pin: null }])
+    expect(await resolver('APLICAR', { venueIds: ['vB'] })).toMatchObject({ estado: 'APLICADO' })
   })
 })

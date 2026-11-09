@@ -158,7 +158,11 @@ async function aplicarEnGracia(
 
   if (!conEfecto && !recuperado) {
     // Rechazo definitivo sin efecto: queda por revisar con su rechazo.
-    const { count } = await terminar({ estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo: comoJson(r.tipo === 'RECHAZADO' ? r.rechazo : null) })
+    const { count } = await terminar({
+      estado: 'PENDIENTE',
+      motivo: 'RECHAZADO',
+      rechazo: comoJson(r.tipo === 'RECHAZADO' ? r.rechazo : null),
+    })
     return count === 0 ? comoQuedo() : { status: 202, body: { retenido: true, motivo: 'RECHAZADO' } }
   }
 
@@ -197,8 +201,9 @@ const aceptadaEnParte = (tipo: string, r: ResultadoDelEnvio) =>
 async function custodiaYaHecha(r: EnvioRetenidoDeCampo, organizationId: string): Promise<unknown | null> {
   if (r.tipo !== 'CUSTODIA_ACEPTAR' && r.tipo !== 'CUSTODIA_RECHAZAR') return null
   const c = leerJson(r.cuerpoJson)
-  const series = (r.tipo === 'CUSTODIA_ACEPTAR' ? (Array.isArray(c?.sims) ? c.sims : []).map((s: any) => s?.serialNumber) : [c?.serialNumber])
-    .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+  const series = (
+    r.tipo === 'CUSTODIA_ACEPTAR' ? (Array.isArray(c?.sims) ? c.sims : []).map((s: any) => s?.serialNumber) : [c?.serialNumber]
+  ).filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
   if (series.length === 0) return null
   const eventos = await prisma.serializedItemCustodyEvent.findMany({
     where: {
@@ -305,9 +310,14 @@ function resumenDe(r: EnvioRetenidoDeCampo, zona: string): string {
   }
 }
 
+/** El alcance de quien pregunta (el MCP, S3): sólo retenidos de esas sucursales. El panel no lo pasa (toda la org, A7). */
+const enElAlcance = (venueIds?: string[]): Prisma.EnvioRetenidoDeCampoWhereInput =>
+  venueIds ? { AND: [{ venueId: { in: venueIds } }] } : {}
+
 export async function listarRetenidos(
   organizationId: string,
   f: { staffId?: string; venueId?: string; estado?: EstadoDelRetenido | EstadoDelRetenido[]; page: number; pageSize: number },
+  venueIds?: string[],
 ): Promise<{ items: RetenidoDeCampo[]; total: number }> {
   const estados = f.estado === undefined ? undefined : Array.isArray(f.estado) ? f.estado : [f.estado]
   const where: Prisma.EnvioRetenidoDeCampoWhereInput = {
@@ -315,6 +325,7 @@ export async function listarRetenidos(
     ...(f.staffId && { staffId: f.staffId }),
     ...(f.venueId && { venueId: f.venueId }),
     ...(estados && { estado: { in: estados } }),
+    ...enElAlcance(venueIds),
   }
   const [filas, total] = await Promise.all([
     prisma.envioRetenidoDeCampo.findMany({
@@ -371,8 +382,10 @@ const noSePudo = (detalle: Record<string, unknown>) =>
   new ValidationError('No se pudo aplicar. Revisa el motivo y vuelve a intentar.', 'NO_SE_PUDO_APLICAR', detalle)
 
 /** Un CAS que no tocó nada: se relee y se contesta según dónde quedó el retenido. */
-async function segunComoQuedo(p: { retenidoId: string; organizationId: string; accion: 'APLICAR' | 'DESCARTAR' }) {
-  const r = await prisma.envioRetenidoDeCampo.findFirst({ where: { id: p.retenidoId, organizationId: p.organizationId } })
+async function segunComoQuedo(p: { retenidoId: string; organizationId: string; accion: 'APLICAR' | 'DESCARTAR'; venueIds?: string[] }) {
+  const r = await prisma.envioRetenidoDeCampo.findFirst({
+    where: { id: p.retenidoId, organizationId: p.organizationId, ...enElAlcance(p.venueIds) },
+  })
   if (!r) throw new NotFoundError('No encontramos ese envío.', 'RETENIDO_NO_ENCONTRADO')
   if (r.estado === 'APLICADO') {
     if (p.accion === 'APLICAR') return { estado: 'APLICADO' as const, resultado: r.resultado, repetida: true }
@@ -394,8 +407,11 @@ export async function resolverRetenido(p: {
   accion: 'APLICAR' | 'DESCARTAR'
   nota?: string
   porStaffId: string
+  /** El alcance de quien resuelve (el MCP, S3): uno de otra sucursal no se encuentra. El panel no lo pasa. */
+  venueIds?: string[]
 }): Promise<{ estado: 'APLICADO' | 'DESCARTADO'; resultado?: unknown; repetida: boolean }> {
   const { retenidoId: id, organizationId } = p
+  const alcance = enElAlcance(p.venueIds)
   const bitacora = (r: EnvioRetenidoDeCampo, action: string, extra: object = {}) =>
     void logAction({
       staffId: p.porStaffId,
@@ -409,7 +425,7 @@ export async function resolverRetenido(p: {
 
   if (p.accion === 'DESCARTAR') {
     const { count } = await prisma.envioRetenidoDeCampo.updateMany({
-      where: { id, organizationId, estado: 'PENDIENTE' },
+      where: { id, organizationId, estado: 'PENDIENTE', ...alcance },
       data: { estado: 'DESCARTADO', resueltoAt: new Date(), resueltoPor: p.porStaffId, nota: p.nota ?? null },
     })
     if (count === 0) {
@@ -448,7 +464,7 @@ export async function resolverRetenido(p: {
   const desdeAplicando = r.estado === 'APLICANDO'
 
   const { count } = await prisma.envioRetenidoDeCampo.updateMany({
-    where: { id, organizationId, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
+    where: { id, organizationId, estado: { in: ['PENDIENTE', 'APLICANDO'] }, ...alcance },
     data: { estado: 'APLICANDO' },
   })
   if (count === 0) {
