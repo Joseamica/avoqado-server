@@ -276,7 +276,9 @@ export async function finishCapture(
             paymentStatus: PaymentStatus.PAID,
             paidAmount: yaCobrado.plus(capturedAmount),
             remainingBalance: 0,
-            ...(order.paymentStatus !== PaymentStatus.PAID ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: meta.staffId } : {}),
+            ...(order.paymentStatus !== PaymentStatus.PAID && new Prisma.Decimal(order.total).gt(0)
+              ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: meta.staffId }
+              : {}),
           },
         })
         const posting = await createSalePostingInTx(tx, { venueId, orderId, items: order.items as any, staffId: meta.staffId })

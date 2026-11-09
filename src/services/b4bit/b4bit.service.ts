@@ -1457,7 +1457,7 @@ async function settleOrderForConfirmedCryptoPayment(
                 : {}),
               // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
               ...(balance.isFullyPaid && !cobro.cerrada && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
-              ...(balance.isFullyPaid && !cobro.cerrada && fresh.onlineOrder?.venueId === payment.venueId
+              ...(balance.isFullyPaid && balance.total.gt(0) && !cobro.cerrada && fresh.onlineOrder?.venueId === payment.venueId
                 ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: payment.processedById }
                 : {}),
             },

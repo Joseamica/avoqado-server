@@ -1433,6 +1433,7 @@ async function cuentaQueSigueAlCobro(tx: Prisma.TransactionClient, paymentId: st
       version: true,
       status: true,
       paymentStatus: true,
+      onlineOrder: { select: { venueId: true } },
       contratoDePrecio: true,
       subtotal: true,
       discountAmount: true,
@@ -1491,6 +1492,7 @@ async function moverCuentaAlImporte(
   tx: Prisma.TransactionClient,
   { orden, articuloId, tipo }: Awaited<ReturnType<typeof cuentaQueSigueAlCobro>>,
   importe: number,
+  editedById: string,
 ) {
   await rechazarSiCuentaAnuladaEnTx(tx, { venueId: orden.venueId, orderId: orden.id })
   const nuevo = new Prisma.Decimal(importe).toDecimalPlaces(2)
@@ -1504,6 +1506,9 @@ async function moverCuentaAlImporte(
       paidAmount: saldo.paidAmount,
       remainingBalance: saldo.remainingBalance,
       ...(saldo.isFullyPaid ? { paymentStatus: 'PAID' as const } : {}),
+      ...(saldo.isFullyPaid && saldo.total.gt(0) && orden.paymentStatus !== 'PAID' && orden.onlineOrder?.venueId === orden.venueId
+        ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: editedById }
+        : {}),
       version: { increment: 1 },
     },
   })
@@ -1693,7 +1698,7 @@ export async function editOrgSaleVerification(
               : {}),
           },
         })
-        if (cuenta) cuentaMovida = await moverCuentaAlImporte(tx, cuenta, params.amount!)
+        if (cuenta) cuentaMovida = await moverCuentaAlImporte(tx, cuenta, params.amount!, params.editedById)
       }
     }
 
