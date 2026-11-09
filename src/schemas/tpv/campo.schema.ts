@@ -67,3 +67,26 @@ export type SalidaDeCampoBody = z.infer<typeof salidaDeCampoBodySchema>
 const simConVersion = z.object({ serialNumber: z.string().min(1), custodyVersion: z.number().int().nonnegative() })
 export const aceptarCustodiaSchema = z.object({ body: z.object({ sims: z.array(simConVersion).min(1).max(50) }) })
 export const rechazarCustodiaSchema = z.object({ body: simConVersion })
+
+/** Activar el celular (bloque 1): el código del supervisor (se pasa a mayúsculas), el PIN de la persona y el aparato. */
+const textoDelAparato = z.string().max(60).optional()
+export const activarCelularSchema = z.object({
+  body: z
+    .object({
+      codigo: z
+        .string()
+        .regex(/^[A-Za-z0-9]{6}$/, { message: 'El código son 6 letras o números.' })
+        .transform(c => c.toUpperCase()),
+      pin: z.string().regex(/^\d{4,10}$/, { message: 'El PIN son de 4 a 10 dígitos.' }),
+      aparato: z
+        .object({
+          aparatoId: z.string().min(8).max(100),
+          marca: textoDelAparato,
+          modelo: textoDelAparato,
+          versionAndroid: textoDelAparato,
+          versionApp: textoDelAparato,
+        })
+        .strict(),
+    })
+    .strict(),
+})

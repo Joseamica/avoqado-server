@@ -12,11 +12,13 @@ import { validateRequest } from '@/middlewares/validation'
 import { aceptarCustodia, rechazarCustodia } from '@/controllers/tpv/campo/custodiaDeCampo.controller'
 import {
   aceptarCustodiaSchema,
+  activarCelularSchema,
   entradaDeCampoSchema,
   rechazarCustodiaSchema,
   salidaDeCampoSchema,
   ventaDeCampoSchema,
 } from '@/schemas/tpv/campo.schema'
+import { activarCelular } from '@/services/tpv/campo/celular/activarCelular.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import prisma from '@/utils/prismaClient'
@@ -39,6 +41,41 @@ const porPersona = () =>
 
 /** Los datos de un rechazo van al mismo nivel que `code` sólo si son un objeto (un arreglo saldría como «0», «1»…). */
 const esObjeto = (d: unknown): d is Record<string, unknown> => !!d && typeof d === 'object' && !Array.isArray(d)
+
+/**
+ * POST /tpv/campo/activar — SIN token: el código del supervisor + el PIN dan la credencial del celular y su sesión (bloque 1).
+ * 201 nuevo, 200 repetida (el mismo aparato reintenta dentro de 10 min). Los topes van por aparato y por la ruta entera,
+ * nunca por IP (los promotores comparten la red del celular). Rechazos con datos (`intentosRestantes`) al nivel de `code`.
+ */
+const limiteDeActivar = (max: number, keyGenerator: (req: Request) => string) =>
+  rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator,
+    message: { error: 'RATE_LIMIT', code: 'RATE_LIMIT', message: 'Demasiados intentos. Espera unos minutos e intenta de nuevo.' },
+  })
+router.post(
+  '/activar',
+  limiteDeActivar(300, () => 'activar'),
+  limiteDeActivar(20, req => {
+    const aparatoId = req.body?.aparato?.aparatoId
+    return typeof aparatoId === 'string' ? `aparato:${aparatoId.slice(0, 100)}` : 'aparato:sin-id'
+  }),
+  validateRequest(activarCelularSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const r = await activarCelular(req.body)
+      res.status(r.status).json(r.body)
+    } catch (error) {
+      if (error instanceof AppError && esObjeto(error.details)) {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...error.details })
+      }
+      next(error)
+    }
+  },
+)
 
 /**
  * POST /tpv/campo/venues/:venueId/ventas — la venta de una SIM. 201 nueva, 200 repetida (misma llave).
