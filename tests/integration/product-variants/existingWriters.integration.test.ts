@@ -347,7 +347,9 @@ describe('🔴 las apps publicadas guardan el precio de una variante (formulario
     res.type.mockReturnValue(res)
     await listMobile({ params: { venueId: n.venueId } } as any, res, jest.fn())
     // D6: el catálogo sale ya serializado (res.send); sin versión cae a res.json
-    const data = (res.json.mock.calls.length ? JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) : JSON.parse(res.send.mock.calls[0][0])).data
+    const data = (
+      res.json.mock.calls.length ? JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) : JSON.parse(res.send.mock.calls[0][0])
+    ).data
     return data.find((p: any) => p.id === productId)
   }
   async function guardar(productId: string, body: Record<string, unknown>) {

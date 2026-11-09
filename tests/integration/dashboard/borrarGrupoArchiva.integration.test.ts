@@ -104,9 +104,19 @@ describe('Borrar un grupo de extras lo archiva', () => {
       data: { venueId: x.venueId, orderNumber: `D16-${randomUUID()}`, subtotal: 0, taxAmount: 0, total: 0 },
     })
     const renglon = await prisma.orderItem.create({
-      data: { orderId: orden.id, productId, productName: 'Café', quantity: 1, unitPrice: new Prisma.Decimal(70), taxAmount: 0, total: new Prisma.Decimal(70) },
+      data: {
+        orderId: orden.id,
+        productId,
+        productName: 'Café',
+        quantity: 1,
+        unitPrice: new Prisma.Decimal(70),
+        taxAmount: 0,
+        total: new Prisma.Decimal(70),
+      },
     })
-    const vendido = await prisma.orderItemModifier.create({ data: { orderItemId: renglon.id, modifierId: extraId, name: 'Shot', price: 20 } })
+    const vendido = await prisma.orderItemModifier.create({
+      data: { orderItemId: renglon.id, modifierId: extraId, name: 'Shot', price: 20 },
+    })
     const historial = await prisma.modifierPriceHistory.count({ where: { modifierId: extraId } })
 
     await expect(deleteModifierGroup(x.venueId, grupoId)).resolves.toBeUndefined()
@@ -122,7 +132,9 @@ describe('Borrar un grupo de extras lo archiva', () => {
   it('sin red: una venta de la cola que trae un extra del grupo archivado se acepta con su precio', async () => {
     const x = await negocio()
     const { productId, grupoId, extraId } = await grupoConExtra(x)
-    const staffId = (await prisma.staff.create({ data: { email: `d16-venta-${x.rfc.toLowerCase()}@example.test`, firstName: 'V', lastName: 'Enta' } })).id
+    const staffId = (
+      await prisma.staff.create({ data: { email: `d16-venta-${x.rfc.toLowerCase()}@example.test`, firstName: 'V', lastName: 'Enta' } })
+    ).id
     personal.push(staffId)
     await prisma.staffVenue.create({ data: { venueId: x.venueId, staffId, role: 'MANAGER' } })
     await deleteModifierGroup(x.venueId, grupoId)
@@ -160,15 +172,29 @@ describe('Borrar un grupo de extras lo archiva', () => {
     const { categoryId, productId, grupoId } = await grupoConExtra(x)
     await deleteModifierGroup(x.venueId, grupoId)
 
-    await expect(assignModifierGroupToProduct(x.venueId, productId, { modifierGroupId: grupoId } as any)).rejects.toMatchObject({ statusCode: 404 })
-    await expect(updateProduct(x.venueId, productId, { modifierGroupIds: [grupoId] } as any, SERVICIO as any)).rejects.toMatchObject({ statusCode: 400 })
+    await expect(assignModifierGroupToProduct(x.venueId, productId, { modifierGroupId: grupoId } as any)).rejects.toMatchObject({
+      statusCode: 404,
+    })
+    await expect(updateProduct(x.venueId, productId, { modifierGroupIds: [grupoId] } as any, SERVICIO as any)).rejects.toMatchObject({
+      statusCode: 400,
+    })
     await expect(
-      createProduct(x.venueId, { name: 'Té', sku: `TE-${x.rfc}`, price: 40, categoryId, modifierGroupIds: [grupoId] } as any, SERVICIO as any),
+      createProduct(
+        x.venueId,
+        { name: 'Té', sku: `TE-${x.rfc}`, price: 40, categoryId, modifierGroupIds: [grupoId] } as any,
+        SERVICIO as any,
+      ),
     ).rejects.toMatchObject({ statusCode: 404 })
     await expect(
       createProductWithVariants(
         x.venueId,
-        { name: 'Taco', categoryId, modifierGroupIds: [grupoId], options: [{ name: 'Tamaño', values: ['Chico'] }], variants: [{ values: ['Chico'], price: 30 }] } as any,
+        {
+          name: 'Taco',
+          categoryId,
+          modifierGroupIds: [grupoId],
+          options: [{ name: 'Tamaño', values: ['Chico'] }],
+          variants: [{ values: ['Chico'], price: 30 }],
+        } as any,
         SERVICIO as any,
       ),
     ).rejects.toMatchObject({ statusCode: 404 })
@@ -193,7 +219,13 @@ describe('Borrar un grupo de extras lo archiva', () => {
     const actor = { type: 'SERVICE', servicePrincipalId: 'D16_PRUEBA' } as any
     const f = await createProductWithVariants(
       x.venueId,
-      { name: 'Taco', categoryId, modifierGroupIds: [grupo.id], options: [{ name: 'Tamaño', values: ['Chico'] }], variants: [{ values: ['Chico'], price: 30 }] },
+      {
+        name: 'Taco',
+        categoryId,
+        modifierGroupIds: [grupo.id],
+        options: [{ name: 'Tamaño', values: ['Chico'] }],
+        variants: [{ values: ['Chico'], price: 30 }],
+      },
       actor,
     )
     expect(await prisma.productModifierGroup.count({ where: { groupId: grupo.id } })).toBe(1) // la prueba sólo vale con la variante enlazada
@@ -230,10 +262,27 @@ describe('Recetas y grupos archivados', () => {
       data: { venueId: x.venueId, categoryId, sku: `R-${marca}-${x.rfc}`, name: `Latte ${marca}`, price: 60 },
     })
     const leche = await prisma.rawMaterial.create({
-      data: { venueId: x.venueId, name: `Leche ${marca}`, sku: `L-${marca}-${x.rfc}`, category: 'DAIRY', unit: 'LITER', unitType: 'VOLUME', currentStock: 5, minimumStock: 1, reorderPoint: 2, costPerUnit: 20, avgCostPerUnit: 20 } as any,
+      data: {
+        venueId: x.venueId,
+        name: `Leche ${marca}`,
+        sku: `L-${marca}-${x.rfc}`,
+        category: 'DAIRY',
+        unit: 'LITER',
+        unitType: 'VOLUME',
+        currentStock: 5,
+        minimumStock: 1,
+        reorderPoint: 2,
+        costPerUnit: 20,
+        avgCostPerUnit: 20,
+      } as any,
     })
     const receta = await prisma.recipe.create({
-      data: { productId, portionYield: 1, totalCost: 4, lines: { create: [{ rawMaterialId: leche.id, quantity: 0.2, unit: 'LITER', isVariable: true, linkedModifierGroupId: grupoId }] } } as any,
+      data: {
+        productId,
+        portionYield: 1,
+        totalCost: 4,
+        lines: { create: [{ rawMaterialId: leche.id, quantity: 0.2, unit: 'LITER', isVariable: true, linkedModifierGroupId: grupoId }] },
+      } as any,
       include: { lines: true },
     })
     return { productId, lineaId: receta.lines[0].id }
@@ -268,7 +317,16 @@ describe('Importar menú con grupos archivados', () => {
             name: 'Café',
             sku: `P-${x.rfc}`,
             price: 100,
-            modifierGroups: [{ name: grupo, required: false, allowMultiple: false, minSelections: 0, maxSelections: 1, modifiers: [{ name: extra, price: 25 }] }],
+            modifierGroups: [
+              {
+                name: grupo,
+                required: false,
+                allowMultiple: false,
+                minSelections: 0,
+                maxSelections: 1,
+                modifiers: [{ name: extra, price: 25 }],
+              },
+            ],
           },
         ],
       },
