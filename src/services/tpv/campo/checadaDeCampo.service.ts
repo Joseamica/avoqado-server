@@ -7,8 +7,9 @@
  * forman en fila. Si el cierre automático ya cerró la entrada, la salida real lo reemplaza y queda en la bitácora; si la
  * cerró una persona, se rechaza. Plan: docs/superpowers/plans/2026-11-08-app-de-campo-bloque-0-tuberia.md.
  */
-import { Prisma, TimeEntryStatus } from '@prisma/client'
-import { ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
+import { Prisma, TimeEntryStatus, TimeEntryValidation } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
+import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
 import type { EntradaDeCampoBody, SalidaDeCampoBody } from '@/schemas/tpv/campo.schema'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertAttendanceEnabled } from '@/services/dashboard/attendanceGate'
@@ -29,6 +30,17 @@ const candado = (tx: Prisma.TransactionClient, staffId: string) =>
 
 const horaDe = (v: { ocurrioAt?: string; origenHora?: 'RELOJ_ANCLADO' | 'RELOJ_DEL_CELULAR' }, ahora: Date) =>
   resolverHoraDelCelular({ ocurrioAt: v.ocurrioAt ? new Date(v.ocurrioAt) : undefined, origen: v.origenHora }, ahora)
+
+const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+/** «03:00 del 4-nov (America/Mexico_City)»; con una zona que no existe, la hora en ISO (la salida no se pierde por la nota). */
+function enLaZona(d: Date, zona: string) {
+  try {
+    const [hhmm, dia, mes] = formatInTimeZone(d, zona, 'HH:mm|d|M').split('|')
+    return `${hhmm} del ${dia}-${MESES[Number(mes) - 1]} (${zona})`
+  } catch {
+    return d.toISOString()
+  }
+}
 
 /** POST …/checadas/entrada. */
 export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, ahora = new Date()) {
@@ -53,6 +65,21 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
         timeEntryId: abierta.id,
         venueId: abierta.venueId,
         clockInTime: abierta.clockInTime.toISOString(),
+      })
+    }
+
+    // Un turno ya cerrado que termina después de esta hora: la entrada caería dentro de él (horas contadas dos veces).
+    const encimada = await tx.timeEntry.findFirst({
+      where: { staffId: q.staffId, clockOutTime: { gt: hora } },
+      select: { id: true, venueId: true, clockInTime: true, clockOutTime: true },
+      orderBy: { clockOutTime: 'desc' },
+    })
+    if (encimada) {
+      throw new ConflictError('Esta entrada cae dentro de un turno que ya registraste.', 'ENTRADA_SE_ENCIMA', {
+        timeEntryId: encimada.id,
+        venueId: encimada.venueId,
+        clockInTime: encimada.clockInTime.toISOString(),
+        clockOutTime: encimada.clockOutTime!.toISOString(),
       })
     }
 
@@ -82,6 +109,10 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
 
 /** POST …/checadas/salida. */
 export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, ahora = new Date()) {
+  // Nunca se busca «la de la persona en la sucursal»: sin nombre de entrada, no hay salida.
+  if (!v.timeEntryId === !v.llaveEntrada) {
+    throw new BadRequestError('La salida nombra su entrada: manda timeEntryId o llaveEntrada, sólo uno.', 'SALIDA_SIN_ENTRADA')
+  }
   const { hora, origen } = horaDe(v, ahora)
   const { resultado, reemplazo } = await prisma.$transaction(async tx => {
     await candado(tx, q.staffId)
@@ -108,6 +139,10 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           clockInTime: true,
           clockOutTime: true,
           autoClockOut: true,
+          status: true,
+          validationStatus: true,
+          validatedBy: true,
+          validatedAt: true,
           totalHours: true,
           notes: true,
           breaks: { select: { id: true, startTime: true, endTime: true } },
@@ -117,6 +152,19 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       if (hora < e.clockInTime) throw new ValidationError('La salida es antes que la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
       const cierreAutomatico = e.clockOutTime
       if (cierreAutomatico && !e.autoClockOut) throw new ConflictError('Esta entrada ya tiene salida.', 'YA_TIENE_SALIDA')
+      // Una entrada posterior de la persona que empezó antes de esta salida: el turno se encimaría con ella.
+      const siguiente = await tx.timeEntry.findFirst({
+        where: { staffId: q.staffId, clockInTime: { gt: e.clockInTime, lt: hora } },
+        select: { id: true, venueId: true, clockInTime: true },
+        orderBy: { clockInTime: 'asc' },
+      })
+      if (siguiente) {
+        throw new ConflictError('Esta salida cae después de una entrada que ya registraste.', 'SALIDA_SE_ENCIMA', {
+          timeEntryId: siguiente.id,
+          venueId: siguiente.venueId,
+          clockInTime: siguiente.clockInTime.toISOString(),
+        })
+      }
 
       // Un descanso abierto, que termina después de la salida o que terminó el sistema (el job usa la misma hora para el
       // descanso y para el cierre) termina a la hora de la salida. Los que terminó una persona antes no se tocan.
@@ -128,10 +176,24 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       const minutosDeDescanso = descansos.reduce((t, b) => t + (b.endTime.getTime() - b.startTime.getTime()) / 60_000, 0)
       const minutos = (hora.getTime() - e.clockInTime.getTime()) / 60_000 - minutosDeDescanso
       const totalHours = Math.min(Math.max(0, Number((minutos / 60).toFixed(2))), MAX_HORAS)
-      const nota = cierreAutomatico && `Salida real del celular; reemplazó el cierre automático de ${cierreAutomatico.toISOString()}`
+      let nota: string | null = null
+      if (cierreAutomatico) {
+        const venue = await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } })
+        nota = `Salida real del celular; reemplazó el cierre automático de ${enLaZona(cierreAutomatico, venue?.timezone ?? 'America/Mexico_City')}`
+      }
+      // Las horas aprobadas ya no son las de ahora: la checada vuelve a revisión (como «regresar a pendiente»).
+      const desaprobar = cierreAutomatico !== null && e.validationStatus === TimeEntryValidation.APPROVED
 
       const { count } = await tx.timeEntry.updateMany({
-        where: { id: e.id, clockOutTime: e.clockOutTime, autoClockOut: e.autoClockOut },
+        // Todo lo que se leyó para decidir: si otro escritor lo cambió (la PAX abrió un descanso, el job la cerró, un
+        // supervisor la aprobó), 0 filas y se relee.
+        where: {
+          id: e.id,
+          clockOutTime: e.clockOutTime,
+          autoClockOut: e.autoClockOut,
+          status: e.status,
+          validationStatus: e.validationStatus,
+        },
         data: {
           clockOutTime: hora,
           status: TimeEntryStatus.CLOCKED_OUT,
@@ -146,16 +208,23 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           clockOutAccuracy: v.accuracy,
           checkOutPhotoUrl: v.checkOutPhotoUrl,
           ...(nota && { autoClockOut: false, notes: e.notes ? `${e.notes}\n${nota}` : nota }),
+          ...(desaprobar && { validationStatus: TimeEntryValidation.PENDING, validatedBy: null, validatedAt: null, validationNote: null }),
         },
       })
       if (count === 0) continue // otro escritor la cambió entre la lectura y la escritura: se relee y se decide otra vez
 
+      // Después de ganar la escritura condicional: la fila de la entrada queda bloqueada hasta el commit.
       for (const b of descansos) {
         if (b.cambia) await tx.timeEntryBreak.update({ where: { id: b.id }, data: { endTime: b.endTime } })
       }
       return {
         resultado: { timeEntryId: e.id, repetida: false, hora: hora.toISOString(), totalHours },
-        reemplazo: cierreAutomatico && { cierreAutomatico, totalHoursAntes: Number(e.totalHours) },
+        reemplazo: cierreAutomatico && {
+          cierreAutomatico,
+          totalHoursAntes: Number(e.totalHours),
+          validacionAnterior: e.validationStatus,
+          ...(desaprobar && { validadaPor: e.validatedBy, validadaEl: e.validatedAt?.toISOString() ?? null }),
+        },
       }
     }
     throw new ConflictError('La entrada cambió mientras se guardaba la salida. Reintenta.', 'CHECADA_EN_PROCESO')
@@ -169,10 +238,11 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       entity: 'TimeEntry',
       entityId: resultado.timeEntryId,
       data: {
+        ...reemplazo,
         cierreAutomatico: reemplazo.cierreAutomatico.toISOString(),
         salidaReal: resultado.hora,
+        origenHora: origen,
         llaveSalida: v.llave,
-        totalHoursAntes: reemplazo.totalHoursAntes,
         totalHoursAhora: resultado.totalHours,
       },
     })

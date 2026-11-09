@@ -32,15 +32,30 @@ let consecutivo: number
 /** Se corre antes del primer `updateMany` de la entrada: simula a otro escritor (el cierre automático) en medio. */
 let antesDeActualizar: (() => void) | null
 let cola: Promise<void>
+let zona: string
 
 const igual = (a: unknown, b: unknown) => (a instanceof Date && b instanceof Date ? a.getTime() === b.getTime() : a === b)
-/** El `where` de Prisma que usa el servicio: igualdad, `{ in }` y llaves compuestas (`staffId_llaveEntrada`). */
+const OPERADORES: Record<string, (valor: any, x: any) => boolean> = {
+  in: (valor, x) => x.includes(valor),
+  gt: (valor, x) => valor != null && valor > x,
+  lt: (valor, x) => valor != null && valor < x,
+  not: (valor, x) => !igual(valor, x),
+}
+/** El `where` de Prisma que usa el servicio: igualdad, `in`/`gt`/`lt`/`not` y llaves compuestas (`staffId_llaveEntrada`). */
 function coincide(f: Fila, where: Fila): boolean {
   return Object.entries(where).every(([k, w]) => {
     if (w === undefined) return true
-    if (w && typeof w === 'object' && !(w instanceof Date)) return 'in' in w ? w.in.includes(f[k]) : coincide(f, w)
+    if (w && typeof w === 'object' && !(w instanceof Date)) {
+      const ops = Object.keys(w)
+      return ops.every(o => o in OPERADORES) ? ops.every(o => OPERADORES[o](f[k], w[o])) : coincide(f, w)
+    }
     return igual(f[k], w)
   })
+}
+const ordenar = (filas: Fila[], orderBy?: Record<string, 'asc' | 'desc'>) => {
+  if (!orderBy) return filas
+  const [[k, dir]] = Object.entries(orderBy)
+  return [...filas].sort((x, y) => (x[k] - y[k]) * (dir === 'desc' ? -1 : 1))
 }
 const conDescansos = (f: Fila) => ({ ...f, breaks: descansos.filter(b => b.timeEntryId === f.id).map(b => ({ ...b })) })
 const tiempo = () => new Promise(listo => setImmediate(listo)) // cada consulta cede el turno, como la base
@@ -49,10 +64,26 @@ function armarBase() {
   const db: any = {
     timeEntry: {
       findUnique: jest.fn(async ({ where }) => (await tiempo(), entradas.filter(f => coincide(f, where)).map(conDescansos)[0] ?? null)),
-      findFirst: jest.fn(async ({ where }) => (await tiempo(), entradas.filter(f => coincide(f, where)).map(conDescansos)[0] ?? null)),
+      findFirst: jest.fn(
+        async ({ where, orderBy }) => (
+          await tiempo(),
+          ordenar(
+            entradas.filter(f => coincide(f, where)),
+            orderBy,
+          ).map(conDescansos)[0] ?? null
+        ),
+      ),
       create: jest.fn(async ({ data }) => {
         await tiempo()
-        const fila = { id: `te-${++consecutivo}`, clockOutTime: null, autoClockOut: false, notes: null, totalHours: null, ...data }
+        const fila = {
+          id: `te-${++consecutivo}`,
+          clockOutTime: null,
+          autoClockOut: false,
+          notes: null,
+          totalHours: null,
+          validationStatus: 'PENDING',
+          ...data,
+        }
         entradas.push(fila)
         return { ...fila }
       }),
@@ -68,6 +99,7 @@ function armarBase() {
         return { count: cuales.length }
       }),
     },
+    venue: { findUnique: jest.fn(async () => (await tiempo(), { timezone: zona })) },
     timeEntryBreak: {
       update: jest.fn(async ({ where, data }) => {
         await tiempo()
@@ -112,6 +144,10 @@ const entrada = (extra: Fila = {}) => {
     totalHours: null,
     llaveEntrada: null,
     llaveSalida: null,
+    validationStatus: 'PENDING',
+    validatedBy: null,
+    validatedAt: null,
+    validationNote: null,
     ...extra,
   }
   entradas.push(fila)
@@ -130,6 +166,7 @@ beforeEach(() => {
   consecutivo = 0
   antesDeActualizar = null
   cola = Promise.resolve()
+  zona = 'America/Mexico_City'
   armarBase()
   ;(assertAttendanceEnabled as jest.Mock).mockResolvedValue(undefined)
 })
@@ -216,6 +253,38 @@ describe('registrarEntradaDeCampo', () => {
     expect(entradas).toHaveLength(2)
   })
 
+  it('una entrada de las 08:55 (guardada sin señal) que sube a las 18:00, cuando la persona hizo 09:00–17:00 en una PAX → 409 ENTRADA_SE_ENCIMA', async () => {
+    const pax = entrada({ venueId: 'venue-B', clockInTime: t('09:00'), clockOutTime: t('17:00'), status: 'CLOCKED_OUT', totalHours: 8 })
+
+    const error = await registrarEntradaDeCampo(q, { llave: LLAVE, ocurrioAt: t('08:55').toISOString() }, t('18:00')).catch(e => e)
+
+    expect(error).toMatchObject({
+      statusCode: 409,
+      code: 'ENTRADA_SE_ENCIMA',
+      details: { timeEntryId: pax.id, venueId: 'venue-B', clockInTime: t('09:00').toISOString(), clockOutTime: t('17:00').toISOString() },
+    })
+    expect(entradas).toHaveLength(1)
+  })
+
+  it('ENTRADA_SE_ENCIMA nombra el turno cerrado que termina más tarde', async () => {
+    entrada({ clockInTime: t('07:00'), clockOutTime: t('08:00'), status: 'CLOCKED_OUT' })
+    const ultimo = entrada({ clockInTime: t('09:00'), clockOutTime: t('17:00'), status: 'CLOCKED_OUT' })
+
+    const error = await registrarEntradaDeCampo(q, { llave: LLAVE, ocurrioAt: t('06:00').toISOString() }, t('18:00')).catch(e => e)
+
+    expect(error).toMatchObject({ code: 'ENTRADA_SE_ENCIMA', details: { timeEntryId: ultimo.id } })
+  })
+
+  it('una entrada justo a la hora de la salida anterior (17:00 = 17:00) sí se acepta; un turno de otra persona no cuenta', async () => {
+    entrada({ clockInTime: t('09:00'), clockOutTime: t('17:00'), status: 'CLOCKED_OUT' })
+    entrada({ staffId: 'staff-2', clockInTime: t('09:00'), clockOutTime: t('23:00'), status: 'CLOCKED_OUT' })
+
+    const r = await registrarEntradaDeCampo(q, { llave: LLAVE, ocurrioAt: t('17:00').toISOString() }, t('18:00'))
+
+    expect(r).toMatchObject({ repetida: false, hora: t('17:00').toISOString() })
+    expect(entradas).toHaveLength(3)
+  })
+
   it('con la asistencia apagada → el 403 de assertAttendanceEnabled y nada se crea', async () => {
     ;(assertAttendanceEnabled as jest.Mock).mockRejectedValue(new AttendanceDisabledError())
 
@@ -287,6 +356,16 @@ describe('registrarSalidaDeCampo', () => {
       checkOutPhotoUrl: 'https://fotos.test/salida.jpg',
     })
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('sin timeEntryId ni llaveEntrada → 400, nunca busca «la de la persona en la sucursal»', async () => {
+    entrada()
+
+    const error = await registrarSalidaDeCampo(q, { llave: LLAVE } as any, t('17:00')).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 400, code: 'SALIDA_SIN_ENTRADA' })
+    expect((prisma as any).timeEntry.findFirst).not.toHaveBeenCalled()
+    expect(entradas[0].clockOutTime).toBeNull()
   })
 
   it('la salida guardada sin señal nombra su entrada por llaveEntrada', async () => {
@@ -393,7 +472,7 @@ describe('registrarSalidaDeCampo', () => {
       clockOutRecibidaAt: ahora,
       // Se conserva el motivo del sistema y la nota que ya había.
       autoClockOutNote: '[Sistema] Salida automática: Hora de cierre programada (03:00)',
-      notes: `Llegó con uniforme\nSalida real del celular; reemplazó el cierre automático de ${t('03:00', 4).toISOString()}`,
+      notes: 'Llegó con uniforme\nSalida real del celular; reemplazó el cierre automático de 03:00 del 4-nov (America/Mexico_City)',
     })
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -402,7 +481,12 @@ describe('registrarSalidaDeCampo', () => {
         action: 'TIME_ENTRY_AUTO_CLOCKOUT_REPLACED',
         entity: 'TimeEntry',
         entityId: e.id,
-        data: expect.objectContaining({ cierreAutomatico: t('03:00', 4).toISOString(), salidaReal: t('17:00').toISOString() }),
+        data: expect.objectContaining({
+          cierreAutomatico: t('03:00', 4).toISOString(),
+          salidaReal: t('17:00').toISOString(),
+          origenHora: 'RELOJ_DEL_CELULAR',
+          validacionAnterior: 'PENDING',
+        }),
       }),
     )
   })
@@ -475,6 +559,108 @@ describe('registrarSalidaDeCampo', () => {
     expect(entradas[0]).toMatchObject({ clockOutTime: t('17:00'), autoClockOut: false })
     expect(descansos[0].endTime).toEqual(t('17:00'))
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_AUTO_CLOCKOUT_REPLACED' }))
+  })
+
+  it('si la PAX abrió un descanso entre la lectura y la escritura (cambió el estado), relee y lo cierra con la salida', async () => {
+    const e = entrada()
+    antesDeActualizar = () => {
+      descanso(e.id, t('15:00'), null)
+      entradas[0].status = 'ON_BREAK'
+    }
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('17:00'))
+
+    expect((prisma as any).timeEntry.updateMany).toHaveBeenCalledTimes(2)
+    expect(r.totalHours).toBe(6)
+    expect(descansos[0].endTime).toEqual(t('17:00'))
+    expect(entradas[0]).toMatchObject({ status: 'CLOCKED_OUT', breakMinutes: 120 })
+  })
+
+  it('el cierre automático cerró a las 12:00 por duración máxima y la persona hizo 13:00–16:00 en una PAX: la salida real de las 17:00 → 409 SALIDA_SE_ENCIMA', async () => {
+    const e = entrada({ clockOutTime: t('12:00'), status: 'CLOCKED_OUT', autoClockOut: true, totalHours: 3 })
+    const pax = entrada({ venueId: 'venue-B', clockInTime: t('13:00'), clockOutTime: t('16:00'), status: 'CLOCKED_OUT' })
+
+    const error = await registrarSalidaDeCampo(
+      q,
+      { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() },
+      t('17:00'),
+    ).catch(e => e)
+
+    expect(error).toMatchObject({
+      statusCode: 409,
+      code: 'SALIDA_SE_ENCIMA',
+      details: { timeEntryId: pax.id, venueId: 'venue-B', clockInTime: t('13:00').toISOString() },
+    })
+    expect(entradas[0]).toMatchObject({ clockOutTime: t('12:00'), autoClockOut: true })
+  })
+
+  it('una salida justo a la hora de la entrada siguiente (17:00 = 17:00) sí se acepta; una entrada anterior no cuenta', async () => {
+    entrada({ clockInTime: t('06:00'), clockOutTime: t('08:00'), status: 'CLOCKED_OUT' })
+    const e = entrada()
+    entrada({ venueId: 'venue-B', clockInTime: t('17:00') })
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('17:00'))
+
+    expect(r).toMatchObject({ repetida: false, totalHours: 8 })
+  })
+
+  it('reemplazar el cierre automático de una checada APROBADA la regresa a PENDIENTE y la bitácora guarda la aprobación anterior', async () => {
+    const aprobadaEl = t('09:00', 4)
+    const e = entrada({
+      clockOutTime: t('03:00', 4),
+      status: 'CLOCKED_OUT',
+      autoClockOut: true,
+      totalHours: 18,
+      validationStatus: 'APPROVED',
+      validatedBy: 'supervisor-1',
+      validatedAt: aprobadaEl,
+      validationNote: 'ok',
+    })
+
+    await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
+
+    expect(entradas[0]).toMatchObject({ validationStatus: 'PENDING', validatedBy: null, validatedAt: null, validationNote: null })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          validacionAnterior: 'APPROVED',
+          validadaPor: 'supervisor-1',
+          validadaEl: aprobadaEl.toISOString(),
+        }),
+      }),
+    )
+  })
+
+  it.each(['PENDING', 'REJECTED'])('reemplazar el cierre automático de una checada %s la deja como estaba', async validationStatus => {
+    const e = entrada({ clockOutTime: t('03:00', 4), status: 'CLOCKED_OUT', autoClockOut: true, validationStatus, validatedBy: 'sup' })
+
+    await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
+
+    expect(entradas[0]).toMatchObject({ validationStatus, validatedBy: 'sup', autoClockOut: false })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ validacionAnterior: validationStatus }) }),
+    )
+  })
+
+  it('si un supervisor la aprobó entre la lectura y la escritura, relee y también la regresa a PENDIENTE', async () => {
+    const e = entrada({ clockOutTime: t('03:00', 4), status: 'CLOCKED_OUT', autoClockOut: true })
+    antesDeActualizar = () =>
+      Object.assign(entradas[0], { validationStatus: 'APPROVED', validatedBy: 'supervisor-1', validatedAt: t('09:00', 4) })
+
+    await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
+
+    expect((prisma as any).timeEntry.updateMany).toHaveBeenCalledTimes(2)
+    expect(entradas[0]).toMatchObject({ validationStatus: 'PENDING', validatedBy: null })
+  })
+
+  it('la nota usa la zona del negocio; con una zona inválida cae a ISO y la salida igual se guarda', async () => {
+    zona = 'Zona/Inexistente'
+    const e = entrada({ clockOutTime: t('03:00', 4), status: 'CLOCKED_OUT', autoClockOut: true })
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('10:00', 4))
+
+    expect(r.totalHours).toBe(8)
+    expect(entradas[0].notes).toBe(`Salida real del celular; reemplazó el cierre automático de ${t('03:00', 4).toISOString()}`)
   })
 
   it('si una persona la cerró entre la lectura y la escritura (0 filas), relee y responde YA_TIENE_SALIDA', async () => {

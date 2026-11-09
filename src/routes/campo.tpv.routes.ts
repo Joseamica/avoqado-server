@@ -67,8 +67,9 @@ router.post(
 /**
  * La checada del celular: la persona sale del token (no hay PIN) y `requireVenueMembership` exige que siga activa y con
  * su rol en la sucursal de la dirección, contra la base. Entrada: 201 nueva, 200 repetida. Salida: 200.
- * Rechazos: 409 YA_TIENE_ENTRADA (con `timeEntryId`, `venueId` y `clockInTime` al mismo nivel), 404, 422
- * SALIDA_ANTES_DE_ENTRADA, 409 YA_TIENE_SALIDA; reintentable: 409 CHECADA_EN_PROCESO y cualquier 5xx.
+ * Rechazos: 409 YA_TIENE_ENTRADA y ENTRADA_SE_ENCIMA / SALIDA_SE_ENCIMA (con el `timeEntryId`, `venueId` y horas del
+ * otro turno al mismo nivel), 400 SALIDA_SIN_ENTRADA, 404, 422 SALIDA_ANTES_DE_ENTRADA, 409 YA_TIENE_SALIDA;
+ * reintentable: 409 CHECADA_EN_PROCESO y cualquier 5xx.
  */
 const checada =
   (registrar: typeof registrarEntradaDeCampo | typeof registrarSalidaDeCampo, nueva: number) =>
@@ -77,7 +78,8 @@ const checada =
       const r = await registrar({ venueId: req.params.venueId, staffId: req.authContext!.userId }, req.body)
       res.status(r.repetida ? 200 : nueva).json(r)
     } catch (error) {
-      if (error instanceof AppError && error.code === 'YA_TIENE_ENTRADA') {
+      // Los rechazos con datos (YA_TIENE_ENTRADA, ENTRADA_SE_ENCIMA, SALIDA_SE_ENCIMA) los llevan al mismo nivel que `code`.
+      if (error instanceof AppError && error.details && typeof error.details === 'object') {
         return res.status(error.statusCode).json({ code: error.code, message: error.message, ...(error.details as object) })
       }
       next(error)

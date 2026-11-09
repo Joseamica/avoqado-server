@@ -148,6 +148,26 @@ describe('POST /tpv/campo/venues/:venueId/checadas/*', () => {
     })
   })
 
+  it('una entrada guardada sin señal que cae dentro de un turno ya cerrado (PAX) → 409 ENTRADA_SE_ENCIMA con los datos del turno al mismo nivel', async () => {
+    const pax = await prisma.timeEntry.create({
+      data: { staffId: promotorId, venueId: otraSucursalId, clockInTime: a(0), clockOutTime: a(8), status: 'CLOCKED_OUT', totalHours: 8 },
+    })
+
+    const res = await checar('entrada', { llave: randomUUID(), ocurrioAt: new Date(a(0).getTime() - 5 * 60 * 1000).toISOString() })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      code: 'ENTRADA_SE_ENCIMA',
+      timeEntryId: pax.id,
+      venueId: otraSucursalId,
+      clockInTime: a(0).toISOString(),
+      clockOutTime: a(8).toISOString(),
+    })
+    expect(await prisma.timeEntry.count({ where: { staffId: promotorId } })).toBe(1)
+    // Justo a la hora de su salida sí se puede.
+    expect((await checar('entrada', { llave: randomUUID(), ocurrioAt: a(8).toISOString() })).status).toBe(201)
+  })
+
   it('una persona dada de baja en la sucursal de la dirección, con su token vivo → 403 en entrada y salida, y nada se escribe', async () => {
     const entrada = await checar('entrada', { llave: randomUUID() }, otraSucursalId)
     const salida = await checar('salida', { llave: randomUUID(), llaveEntrada: randomUUID() }, otraSucursalId)
@@ -179,7 +199,10 @@ describe('POST /tpv/campo/venues/:venueId/checadas/*', () => {
     const fila = await prisma.timeEntry.findUniqueOrThrow({ where: { id: auto.id }, include: { breaks: true } })
     expect(fila).toMatchObject({ clockOutTime: a(8), autoClockOut: false, breakMinutes: 300 })
     expect(Number(fila.totalHours)).toBe(3)
-    expect(fila.notes).toBe(`Salida real del celular; reemplazó el cierre automático de ${a(18).toISOString()}`)
+    // En la zona del negocio (la sucursal nace con America/Mexico_City), p. ej. «03:00 del 4-nov (America/Mexico_City)».
+    expect(fila.notes).toMatch(
+      /^Salida real del celular; reemplazó el cierre automático de \d{2}:\d{2} del \d{1,2}-[a-z]{3} \(America\/Mexico_City\)$/,
+    )
     expect(fila.breaks[0]).toMatchObject({ startTime: a(3), endTime: a(8) })
     // `logAction` lo mockea el setup de integración (tests/__helpers__/integration-setup.ts): se revisa la llamada.
     expect(logAction).toHaveBeenCalledWith(
