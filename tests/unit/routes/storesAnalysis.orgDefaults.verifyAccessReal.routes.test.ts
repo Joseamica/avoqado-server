@@ -178,7 +178,7 @@ describe('puerta de la sucursal con el verifyAccess REAL', () => {
     const res = await request(makeApp()).put(`${BASE}/org-tpv-defaults`).set(como('cajero', 'CASHIER')).send({ settings: {} })
 
     expect(res.status).toBe(403)
-    expect(res.body.message).toBe('Owner access required')
+    expect(res.body.message).toBe('Se requiere acceso de propietario')
   })
 
   it('🔴 DELETE org-attendance-config: al OWNER de UNA tienda también lo frena la regla nueva', async () => {
