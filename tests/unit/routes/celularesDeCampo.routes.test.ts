@@ -8,6 +8,10 @@ const generarCodigosMock = jest.fn()
 jest.mock('@/services/tpv/campo/celular/codigoDeCelular.service', () => ({
   generarCodigos: (...a: unknown[]) => generarCodigosMock(...a),
 }))
+const desvincularMock = jest.fn()
+jest.mock('@/services/tpv/campo/celular/desvincularCelular.service', () => ({
+  desvincularCelular: (...a: unknown[]) => desvincularMock(...a),
+}))
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
     const raw = req.headers['x-test-auth-context']
@@ -45,7 +49,9 @@ beforeEach(() => {
   generarCodigosMock.mockResolvedValue({ generados: [], omitidos: [], restantes: 0 })
   prismaMock.staff.findUnique.mockResolvedValue({ active: true, firstName: 'Ana', lastName: 'P' } as any)
   prismaMock.staffVenue.findFirst.mockImplementation((({ where }: any) => {
-    const f = SUCURSAL.find(x => x.staffId === where?.staffId && (where?.role === undefined || (where.role.in ?? [where.role]).includes(x.role)))
+    const f = SUCURSAL.find(
+      x => x.staffId === where?.staffId && (where?.role === undefined || (where.role.in ?? [where.role]).includes(x.role)),
+    )
     return Promise.resolve(f ? { id: 'sv' } : null)
   }) as any)
   // Miembros de la organización: el promotor es MEMBER; el gerente, MEMBER con sucursal MANAGER.
@@ -60,7 +66,10 @@ beforeEach(() => {
 
 describe('POST .../celulares-de-campo/codigos', () => {
   it('un WAITER recibe 403 insufficient_role', async () => {
-    const res = await request(makeApp()).post(URL).set(como('promotor', 'WAITER')).send({ staffIds: ['a'] })
+    const res = await request(makeApp())
+      .post(URL)
+      .set(como('promotor', 'WAITER'))
+      .send({ staffIds: ['a'] })
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ success: false, error: 'insufficient_role' })
     expect(generarCodigosMock).not.toHaveBeenCalled()
@@ -74,7 +83,10 @@ describe('POST .../celulares-de-campo/codigos', () => {
   })
 
   it('un supervisor genera: 200 { success, data } y generadoPor = su userId', async () => {
-    const res = await request(makeApp()).post(URL).set(como('gerente', 'MANAGER')).send({ staffIds: ['a'] })
+    const res = await request(makeApp())
+      .post(URL)
+      .set(como('gerente', 'MANAGER'))
+      .send({ staffIds: ['a'] })
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, data: { generados: [], omitidos: [], restantes: 0 } })
     expect(generarCodigosMock).toHaveBeenCalledWith({ organizationId: ORG, generadoPor: 'gerente', staffIds: ['a'] })
@@ -84,5 +96,24 @@ describe('POST .../celulares-de-campo/codigos', () => {
     const res = await request(makeApp()).post(URL).set(como('gerente', 'MANAGER')).send({ todosLosSinCelular: true })
     expect(res.status).toBe(200)
     expect(generarCodigosMock).toHaveBeenCalledWith({ organizationId: ORG, generadoPor: 'gerente', todosLosSinCelular: true })
+  })
+})
+
+describe('POST .../celulares-de-campo/:celularId/desvincular', () => {
+  const URL_DESVINCULAR = `/dashboard/organizations/${ORG}/celulares-de-campo/cel1/desvincular`
+  const resultado = { desvinculadoAt: 'x', graciaHasta: 'y', porSubir: 2, huellasReportadas: 2, yaEstaba: false }
+
+  it('un WAITER recibe 403 y no se desvincula nada', async () => {
+    const res = await request(makeApp()).post(URL_DESVINCULAR).set(como('promotor', 'WAITER')).send({})
+    expect(res.status).toBe(403)
+    expect(desvincularMock).not.toHaveBeenCalled()
+  })
+
+  it('un supervisor desvincula: 200 { success, data } con motivo PANEL, su userId y la organización de la ruta', async () => {
+    desvincularMock.mockResolvedValue(resultado)
+    const res = await request(makeApp()).post(URL_DESVINCULAR).set(como('gerente', 'MANAGER')).send({})
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: resultado })
+    expect(desvincularMock).toHaveBeenCalledWith({ celularId: 'cel1', organizationId: ORG, motivo: 'PANEL', porStaffId: 'gerente' })
   })
 })

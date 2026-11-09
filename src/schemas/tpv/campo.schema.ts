@@ -133,3 +133,6 @@ export const latidoSchema = z.object({
     })
     .strict(),
 })
+
+/** Desvincular desde el celular: dice cuánto le queda por subir (la verdad es la suya; 0 para poder soltar). */
+export const desvincularSchema = z.object({ body: z.object({ porSubir: cuantos }).strict() })

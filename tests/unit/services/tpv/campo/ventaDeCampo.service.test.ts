@@ -259,6 +259,11 @@ describe('venta nueva', () => {
     await registrarVentaDeCampo({ ...ctx, celularId: 'cel1' }, venta())
     expect(tabla.create).toHaveBeenLastCalledWith({ data: expect.objectContaining({ celularId: 'cel1' }) })
     expect(ficha()!.celularId).toBe('cel1')
+
+    // Sin celular (la PAX, o una llamada de antes del bloque 1): la ficha no lleva celularId, o sea, queda nula.
+    filas = []
+    await registrarVentaDeCampo(ctx, venta())
+    expect(ficha()!.celularId ?? null).toBeNull()
   })
 })
 

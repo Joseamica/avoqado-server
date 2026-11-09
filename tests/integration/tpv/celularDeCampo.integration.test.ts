@@ -21,6 +21,7 @@ import { createSession } from '@/services/auth/session.service'
 import { isSessionAliveCached } from '@/services/auth/sessionCache'
 import { generateSecureCode } from '@/services/dashboard/terminal-activation.service'
 import { autenticarCelular, CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
+import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
 
 jest.setTimeout(120000)
@@ -465,5 +466,112 @@ describe('Tarea 5: el latido y el candado por la ruta real', () => {
       .set('X-Device-Id', `celular:${c.celularId}`)
     expect(r.status).toBe(401)
     expect(r.body.code).toBe('SESION_INVALIDA')
+  })
+})
+
+describe('Tarea 6: desvincular', () => {
+  const huella = (n: string) => n.repeat(64)
+  const desvincular = (credencial: string, body: Record<string, unknown>) =>
+    request(server).post('/api/v1/tpv/campo/desvincular').set(CABECERA_CREDENCIAL, credencial).send(body)
+  const misSims = (token: string) =>
+    request(server).get(`/api/v1/tpv/campo/venues/${venueId}/mis-sims`).set('Authorization', `Bearer ${token}`)
+
+  it('con algo por subir → 409 TIENE_POR_SUBIR y sigue vinculado; con 0 → 200, su token da 401 en la SIGUIENTE petición y la PAX de la persona sigue', async () => {
+    const pax = await createSession({ staffId: promotorId, venueId, deviceId: `PAX-${sufijo}`, authMethod: 'PIN' })
+    const tokenPax = jwt.sign(
+      { sub: promotorId, orgId, venueId, role: 'CASHIER', sid: pax.id },
+      process.env.ACCESS_TOKEN_SECRET as string,
+      { expiresIn: '15m' },
+    )
+    const c = (await activar(await nuevoCodigo())).body
+    await request(server)
+      .post('/api/v1/tpv/campo/latido')
+      .set(CABECERA_CREDENCIAL, c.credencial)
+      .send({ porSubir: { total: 2, ventas: 2 }, huellas: [huella('a'), huella('b')] })
+    expect((await misSims(c.sesion.accessToken)).status).toBe(200)
+
+    const pendiente = await desvincular(c.credencial, { porSubir: 2 })
+    expect(pendiente.status).toBe(409)
+    expect(pendiente.body.code).toBe('TIENE_POR_SUBIR')
+    expect((await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })).staffIdVinculado).toBe(promotorId)
+    expect((await misSims(c.sesion.accessToken)).status).toBe(200)
+
+    const r = await desvincular(c.credencial, { porSubir: 0 })
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ porSubir: 2, huellasReportadas: 2, yaEstaba: false })
+    const fila = await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })
+    expect(fila).toMatchObject({
+      staffIdVinculado: null,
+      sesionId: null,
+      desvinculadoPor: promotorId,
+      motivoDesvinculo: 'CELULAR',
+      porSubir: 2,
+      huellasPorSubir: [huella('a'), huella('b')],
+    })
+    expect(r.body.desvinculadoAt).toBe(fila.desvinculadoAt!.toISOString())
+    expect(r.body.graciaHasta).toBe(new Date(fila.desvinculadoAt!.getTime() + 24 * 3600 * 1000).toISOString())
+
+    const siguiente = await misSims(c.sesion.accessToken)
+    expect(siguiente.status).toBe(401)
+    expect(['SESION_CERRADA', 'CELULAR_DESVINCULADO']).toContain(siguiente.body.code)
+    expect((await request(server).get('/api/v1/me/venues').set('Authorization', `Bearer ${tokenPax}`)).status).toBe(200)
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CAMPO_CELULAR_DESVINCULADO',
+        entityId: c.celularId,
+        data: { motivo: 'CELULAR', porSubir: 2, huellasReportadas: 2 },
+      }),
+    )
+
+    // La segunda vez no escribe: mismos datos y yaEstaba.
+    const otra = await desvincular(c.credencial, { porSubir: 0 })
+    expect(otra.status).toBe(200)
+    expect(otra.body).toMatchObject({ yaEstaba: true, desvinculadoAt: r.body.desvinculadoAt, porSubir: 2, huellasReportadas: 2 })
+    expect((await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })).updatedAt).toEqual(fila.updatedAt)
+
+    // Y el latido ya lo ve desvinculado, con su gracia.
+    const latido = await request(server)
+      .post('/api/v1/tpv/campo/latido')
+      .set(CABECERA_CREDENCIAL, c.credencial)
+      .send({ porSubir: { total: 0 }, huellas: [] })
+    expect(latido.body).toMatchObject({ estado: 'DESVINCULADO', graciaHasta: r.body.graciaHasta })
+  })
+
+  it('desde el panel (motivo PANEL): otra organización → 404 sin tocar nada; la propia desvincula con quién y por qué', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+
+    await expect(
+      desvincularCelular({ celularId: c.celularId, organizationId: 'otra-org', motivo: 'PANEL', porStaffId: promotorBId }),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect((await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })).staffIdVinculado).toBe(promotorId)
+    expect((await misSims(c.sesion.accessToken)).status).toBe(200)
+
+    const r = await desvincularCelular({ celularId: c.celularId, organizationId: orgId, motivo: 'PANEL', porStaffId: promotorBId })
+    expect(r).toMatchObject({ yaEstaba: false, porSubir: 0, huellasReportadas: 0 })
+    expect(await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })).toMatchObject({
+      staffIdVinculado: null,
+      desvinculadoPor: promotorBId,
+      motivoDesvinculo: 'PANEL',
+    })
+    expect((await misSims(c.sesion.accessToken)).status).toBe(401)
+    expect((await desvincularCelular({ celularId: c.celularId, organizationId: orgId, motivo: 'PANEL', porStaffId: null })).yaEstaba).toBe(
+      true,
+    )
+  })
+
+  it('dos desvincular a la vez → una escribe y la otra yaEstaba', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    const rs = await Promise.all([desvincular(c.credencial, { porSubir: 0 }), desvincular(c.credencial, { porSubir: 0 })])
+    expect(rs.map(r => r.status)).toEqual([200, 200])
+    expect(rs.map(r => r.body.yaEstaba).sort()).toEqual([false, true])
+  })
+
+  it('cuerpo mal formado → 400; sin credencial → 401', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    expect((await desvincular(c.credencial, {})).status).toBe(400)
+    expect((await desvincular(c.credencial, { porSubir: -1 })).status).toBe(400)
+    const sin = await request(server).post('/api/v1/tpv/campo/desvincular').send({ porSubir: 0 })
+    expect(sin.status).toBe(401)
   })
 })

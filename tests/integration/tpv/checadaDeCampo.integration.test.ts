@@ -2,7 +2,7 @@
  * La checada del celular (App de campo, bloque 0, Tarea 6) por la RUTA real (app + token) y contra Postgres REAL.
  *
  * Lo que el unit no puede probar: el candado de la persona en Postgres (dos entradas a la vez), los dos únicos de las
- * llaves, `requireVenueMembership` contra la base (dada de baja en la sucursal con token vivo) y el reemplazo de un cierre
+ * llaves, el candado `autenticarSesionDeCampo` contra la base (dada de baja en la sucursal de su sesión, con el token vivo: 403 SIN_ACCESO_A_LA_SUCURSAL) y el reemplazo de un cierre
  * automático con filas de verdad (descanso y nota; la bitácora, por la llamada a `logAction`, que el setup mockea).
  *
  * Correr (va a la nube con su base propia; nunca contra av-db-25):
@@ -212,12 +212,24 @@ describe('POST /tpv/campo/venues/:venueId/checadas/*', () => {
     expect((await prisma.timeEntry.findUniqueOrThrow({ where: { id: e2.body.timeEntryId } })).clockOutTime).toBeNull()
   })
 
-  it('una persona dada de baja en la sucursal de la dirección, con su token vivo → 403 en entrada y salida, y nada se escribe', async () => {
-    const entrada = await checar('entrada', { llave: randomUUID() }, otraSucursalId)
-    const salida = await checar('salida', { llave: randomUUID(), llaveEntrada: randomUUID() }, otraSucursalId)
+  it('una persona dada de baja en la sucursal de su sesión, con su token vivo → 403 SIN_ACCESO_A_LA_SUCURSAL en entrada y salida, y nada se escribe', async () => {
+    // La sesión nace en la otra sucursal con el StaffVenue activo y luego la dan de baja ahí: el token sigue vivo.
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: true } })
+    const deLaOtra = (await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId: otraSucursalId, role: 'CASHIER' }))
+      .token
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: false } })
+    token = deLaOtra
+    try {
+      const entrada = await checar('entrada', { llave: randomUUID() }, otraSucursalId)
+      const salida = await checar('salida', { llave: randomUUID(), llaveEntrada: randomUUID() }, otraSucursalId)
 
-    expect([entrada.status, salida.status]).toEqual([403, 403])
-    expect(await prisma.timeEntry.count({ where: { staffId: promotorId } })).toBe(0)
+      expect([entrada.status, salida.status]).toEqual([403, 403])
+      expect([entrada.body.code, salida.body.code]).toEqual(['SIN_ACCESO_A_LA_SUCURSAL', 'SIN_ACCESO_A_LA_SUCURSAL'])
+      expect(await prisma.timeEntry.count({ where: { staffId: promotorId } })).toBe(0)
+    } finally {
+      // El celular de la prueba reemplazó al de siempre: se vuelve a dejar uno vivo en la sucursal de las demás.
+      token = (await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId, role: 'CASHIER' })).token
+    }
   })
 
   it('el cierre automático cerró a las «03:00» la entrada y su descanso de las «12:00»: la salida real de las «17:00» lo reemplaza, con nota y bitácora; otra salida después → 409 YA_TIENE_SALIDA', async () => {

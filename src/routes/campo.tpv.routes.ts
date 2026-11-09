@@ -6,7 +6,7 @@
  */
 import { NextFunction, Request, Response, Router } from 'express'
 import rateLimit from 'express-rate-limit'
-import AppError, { ForbiddenError, NotFoundError } from '@/errors/AppError'
+import AppError, { ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { autenticarSesionDeCampo } from '@/middlewares/autenticarSesionDeCampo.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { requireVenueMembership } from '@/middlewares/validateVenueAccess.middleware'
@@ -18,6 +18,7 @@ import { createProofOfSaleSchema } from '@/schemas/tpv.schema'
 import {
   aceptarCustodiaSchema,
   activarCelularSchema,
+  desvincularSchema,
   entradaDeCampoSchema,
   entrarConPinSchema,
   latidoSchema,
@@ -28,6 +29,7 @@ import {
 } from '@/schemas/tpv/campo.schema'
 import { activarCelular } from '@/services/tpv/campo/celular/activarCelular.service'
 import { autenticarCelular } from '@/services/tpv/campo/celular/credencial'
+import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { entrarConPin, renovarSesionDeCelular } from '@/services/tpv/campo/celular/entrarConPin.service'
 import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
@@ -152,6 +154,22 @@ router.post(
   limitePorCelular(12),
   validateRequest(latidoSchema),
   conDatos((req, res) => registrarLatido(res.locals.celular, req.body)),
+)
+
+/**
+ * POST /tpv/campo/desvincular — `{ porSubir }` con la credencial del celular. Si el celular aún tiene algo por subir
+ * → 409 TIENE_POR_SUBIR («Primero sube lo pendiente»); con 0 se desvincula con motivo CELULAR. Idempotente (`yaEstaba`).
+ */
+router.post(
+  '/desvincular',
+  autenticarCelular,
+  porCelular,
+  validateRequest(desvincularSchema),
+  conDatos(async (req, res) => {
+    if (req.body.porSubir !== 0) throw new ConflictError('Primero sube lo pendiente.', 'TIENE_POR_SUBIR')
+    const c = res.locals.celular
+    return desvincularCelular({ celularId: c.id, organizationId: c.organizationId, motivo: 'CELULAR', porStaffId: c.staffId })
+  }),
 )
 
 /**

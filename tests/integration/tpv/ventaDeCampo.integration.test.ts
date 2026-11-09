@@ -448,14 +448,25 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     expect((await prisma.order.findUniqueOrThrow({ where: { id: cancelada } })).status).toBe('CANCELLED')
   })
 
-  it('una persona sin StaffVenue activo en la sucursal de la dirección → 403 del middleware, aunque su token sea de otra', async () => {
+  it('una persona dada de baja en la sucursal de su sesión, con su token vivo → 403 SIN_ACCESO_A_LA_SUCURSAL y nada se escribe', async () => {
     const sim = await nuevaSim(categoriaDeCaja)
     const cuerpo = ventaDe(sim.serialNumber)
+    // La sesión nace en la otra sucursal con el StaffVenue activo y luego la dan de baja ahí: el token sigue vivo.
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: true } })
+    const deLaOtra = await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId: otraSucursalId, role: 'CASHIER' })
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: false } })
+    try {
+      const res = await vender(cuerpo, otraSucursalId, deLaOtra.token)
 
-    const res = await vender(cuerpo, otraSucursalId)
-
-    expect(res.status).toBe(403)
-    expect(await prisma.ventaDeCampo.count({ where: { llave: cuerpo.llave } })).toBe(0)
+      expect(res.status).toBe(403)
+      expect(res.body.code).toBe('SIN_ACCESO_A_LA_SUCURSAL')
+      expect(await prisma.ventaDeCampo.count({ where: { llave: cuerpo.llave } })).toBe(0)
+    } finally {
+      // El celular de la prueba reemplazó al de siempre: se vuelve a dejar uno vivo en la sucursal de las demás.
+      const vigente = await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId, role: 'CASHIER' })
+      sesionDelCelular = vigente.token
+      celularId = vigente.celular.id
+    }
   })
 })
 
