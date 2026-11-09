@@ -8,6 +8,8 @@
  * El retenido es una máquina de estados con CAS (`updateMany` condicionado por estado):
  *   PENDIENTE → APLICANDO → APLICADO, o PENDIENTE → DESCARTADO. Desde APLICANDO ya no se descarta: «Aplicar» pudo dejar
  *   efecto y se termina tocando «Aplicar» otra vez (los servicios son idempotentes por su llave o por estado).
+ * Lo que la gracia aplica sola también deja su fila ANTES del efecto (APLICANDO, motivo APLICADO_EN_GRACIA, S1): si el
+ * proceso cae, el reintento de la misma huella la termina en vez de retenerla como algo nuevo.
  */
 import { CelularDeCampo, EnvioRetenidoDeCampo, Prisma } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -15,7 +17,7 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, Validati
 import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
-import { aplicarEnvio, huellaDelEnvio, permisosDelEnvio, Rechazo, ResultadoDelEnvio, TipoDeEnvio } from './envioDeCampo'
+import { aplicarEnvio, cuerpoValido, huellaDelEnvio, permisosDelEnvio, ResultadoDelEnvio, TipoDeEnvio } from './envioDeCampo'
 import { sucursalesDeLaPersona } from './personasDeCampo'
 
 const GRACIA_MS = 24 * 60 * 60 * 1000
@@ -27,6 +29,8 @@ export type MotivoDeRetencion =
   | 'PERSONA_DADA_DE_BAJA'
   | 'SIN_PERMISO'
   | 'RECHAZADO'
+  /** El celular se desvinculó como perdido o robado (S8): nada de lo que mande se aplica solo. */
+  | 'CELULAR_PERDIDO'
   /** No se retuvo: la gracia lo aplicó sola. La fila guarda su desenlace por huella (un reintento lo recibe igual). */
   | 'APLICADO_EN_GRACIA'
 export type RetenidoDeCampo = {
@@ -50,6 +54,9 @@ const comoJson = (x: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringif
 // La gracia
 // ------------------------------------------------------------------------------------------------------------------------
 
+/** Tope de envíos por revisar (PENDIENTE o APLICANDO) por celular (S7): el siguiente es 409 y el celular lo conserva. */
+const TOPE_DE_RETENIDOS = 500
+
 /** Lo que contesta la gracia por un retenido que ya existe (sea cual sea el estado del celular hoy). */
 function desenlaceDelRetenido(r: EnvioRetenidoDeCampo): { status: number; body: unknown } {
   if (r.estado === 'APLICADO') return { status: 200, body: { resuelto: 'APLICADO', resultado: r.resultado } }
@@ -57,10 +64,12 @@ function desenlaceDelRetenido(r: EnvioRetenidoDeCampo): { status: number; body: 
   return { status: 202, body: { retenido: true, motivo: r.motivo, repetida: true } }
 }
 
-export async function recibirEnGracia(
-  celular: CelularDeCampo,
-  e: { tipo: TipoDeEnvio; venueId: string; cuerpoJson: string },
-): Promise<{ status: number; body: unknown }> {
+/** Lo que la gracia empezó a aplicar sola y no terminó (APLICANDO): el efecto pudo quedar hecho, se termina (S1). */
+const aMedias = (r: EnvioRetenidoDeCampo) => r.estado === 'APLICANDO' && r.motivo === 'APLICADO_EN_GRACIA'
+
+type Envio = { tipo: TipoDeEnvio; venueId: string; cuerpoJson: string }
+
+export async function recibirEnGracia(celular: CelularDeCampo, e: Envio): Promise<{ status: number; body: unknown }> {
   // 1. Nada de otra organización se retiene (Codex r1 P5).
   const venue = await prisma.venue.findUnique({ where: { id: e.venueId }, select: { organizationId: true } })
   if (venue?.organizationId !== celular.organizationId) {
@@ -72,11 +81,15 @@ export async function recibirEnGracia(
   } catch {
     throw new BadRequestError('Lo que mandó el celular no es JSON.', 'CUERPO_INVALIDO')
   }
+  // S7: lo que su ruta rechazaría tampoco se retiene (nadie podría aplicarlo).
+  if (!cuerpoValido(e.tipo, cuerpo)) {
+    throw new BadRequestError('Lo que mandó el celular no es válido para esta acción.', 'CUERPO_INVALIDO')
+  }
 
-  // 2. Lo ya retenido contesta su desenlace (R2-6).
+  // 2. Lo ya retenido contesta su desenlace (R2-6); lo que la gracia dejó a medias se termina, sin volver a mirar las 24 h.
   const huella = huellaDelEnvio(e.tipo, e.venueId, e.cuerpoJson)
   const previo = await prisma.envioRetenidoDeCampo.findUnique({ where: { celularId_huella: { celularId: celular.id, huella } } })
-  if (previo) return desenlaceDelRetenido(previo)
+  if (previo) return contestarPrevio(celular, e, cuerpo, previo)
 
   // 3. Vinculado y activo: lo suyo va por su sesión.
   const sucursales = await sucursalesDeLaPersona(celular.staffId, celular.organizationId)
@@ -93,25 +106,71 @@ export async function recibirEnGracia(
     dadaDeBaja,
     sucursales.map(s => s.venueId),
   )
-  if (motivo) return retener(celular, e, huella, motivo, null)
+  if (motivo) {
+    // ponytail: contar y crear no son atómicos; dos subidas a la vez pueden pasar el tope por una. Basta como freno.
+    const porRevisar = await prisma.envioRetenidoDeCampo.count({
+      where: { celularId: celular.id, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
+    })
+    if (porRevisar >= TOPE_DE_RETENIDOS) {
+      throw new ConflictError(
+        'Este celular ya tiene demasiados envíos esperando revisión. Se quedan guardados en el celular y se vuelven a mandar cuando tu supervisor los revise.',
+        'RETENIDOS_LLENOS',
+      )
+    }
+    const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo })
+    return nueva ? { status: 202, body: { retenido: true, motivo } } : contestarPrevio(celular, e, cuerpo, fila)
+  }
 
+  // S1: la fila va ANTES que el efecto. Si el proceso cae después de aplicar, el reintento la encuentra APLICANDO y termina
+  // (los servicios son idempotentes): un efecto ya hecho nunca acaba como PENDIENTE descartable.
+  const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo: 'APLICADO_EN_GRACIA', estado: 'APLICANDO' })
+  return nueva ? aplicarEnGracia(celular, e, cuerpo, fila, false) : contestarPrevio(celular, e, cuerpo, fila)
+}
+
+function contestarPrevio(celular: CelularDeCampo, e: Envio, cuerpo: unknown, previo: EnvioRetenidoDeCampo) {
+  return aMedias(previo) ? aplicarEnGracia(celular, e, cuerpo, previo, true) : desenlaceDelRetenido(previo)
+}
+
+/** `reintento`: la fila ya estaba APLICANDO (otro intento pudo dejar efecto). */
+async function aplicarEnGracia(
+  celular: CelularDeCampo,
+  e: Envio,
+  cuerpo: unknown,
+  fila: EnvioRetenidoDeCampo,
+  reintento: boolean,
+): Promise<{ status: number; body: unknown }> {
+  // Lo reintentable se lanza y la fila se queda APLICANDO (no descartable): el siguiente intento la termina.
   const r = await aplicarEnvio(
     { venueId: e.venueId, orgId: celular.organizationId, staffId: celular.staffId, celularId: celular.id },
     e.tipo,
     cuerpo,
   )
   // La custodia aceptada en parte YA tiene efecto: queda APLICADA con las filas fallidas, igual que en «Aplicar».
-  if (r.tipo === 'RECHAZADO' && !aceptadaEnParte(e.tipo, r)) return retener(celular, e, huella, 'RECHAZADO', r.rechazo)
-  const resultado = r.tipo === 'APLICADO' ? r.body : r.rechazo.detalle
+  const conEfecto = r.tipo === 'APLICADO' || aceptadaEnParte(e.tipo, r)
+  const recuperado = !conEfecto && reintento ? await custodiaYaHecha(fila, celular.organizationId) : null
+  const terminar = (data: Prisma.EnvioRetenidoDeCampoUpdateManyMutationInput) =>
+    prisma.envioRetenidoDeCampo.updateMany({ where: { id: fila.id, estado: 'APLICANDO' }, data })
+  const comoQuedo = async () => {
+    const hoy = await prisma.envioRetenidoDeCampo.findUnique({ where: { id: fila.id } })
+    if (!hoy) throw new NotFoundError('No encontramos ese envío.', 'RETENIDO_NO_ENCONTRADO')
+    return desenlaceDelRetenido(hoy)
+  }
+
+  if (!conEfecto && !recuperado) {
+    // Rechazo definitivo sin efecto: queda por revisar con su rechazo.
+    const { count } = await terminar({ estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo: comoJson(r.tipo === 'RECHAZADO' ? r.rechazo : null) })
+    return count === 0 ? comoQuedo() : { status: 202, body: { retenido: true, motivo: 'RECHAZADO' } }
+  }
+
+  const resultado = comoJson(recuperado ?? (r.tipo === 'APLICADO' ? r.body : r.rechazo.detalle))
   // Su desenlace queda guardado por huella: un reintento (aun pasadas las 24 h o tras una baja) recibe lo mismo.
-  const guardado = await guardar(celular, e, huella, {
-    motivo: 'APLICADO_EN_GRACIA',
+  const { count } = await terminar({
     estado: 'APLICADO',
-    resultado: comoJson(resultado),
+    resultado,
     resueltoAt: new Date(),
     ...(r.tipo === 'RECHAZADO' && { rechazo: comoJson(r.rechazo) }),
   })
-  if (guardado) return guardado
+  if (count === 0) return comoQuedo() // un supervisor lo terminó con «Aplicar» mientras tanto
   void logAction({
     staffId: celular.staffId,
     venueId: e.venueId,
@@ -119,15 +178,43 @@ export async function recibirEnGracia(
     action: 'CAMPO_GRACIA_APLICADA',
     entity: 'CelularDeCampo',
     entityId: celular.id,
-    data: { tipo: e.tipo, huella, celularId: celular.id },
+    data: { tipo: e.tipo, huella: fila.huella, celularId: celular.id, ...(recuperado && { recuperado: true }) },
   })
-  if (r.tipo === 'RECHAZADO') return { status: 200, body: { resuelto: 'APLICADO', resultado: comoJson(resultado) } }
+  if (r.tipo === 'RECHAZADO') return { status: 200, body: { resuelto: 'APLICADO', resultado } }
   return { status: r.status, body: { ...(r.body as object), aplicadoEnGracia: true } }
 }
 
 /** Una custodia aceptada en parte: el servicio la rechaza (CUSTODIA_INCOMPLETA), pero algunas SIMs sí quedaron aceptadas. */
 const aceptadaEnParte = (tipo: string, r: ResultadoDelEnvio) =>
   r.tipo === 'RECHAZADO' && tipo === 'CUSTODIA_ACEPTAR' && (r.rechazo.detalle as any)?.summary?.succeeded > 0
+
+/**
+ * S2: un rechazo en un intento que arrancó desde APLICANDO no se cree a ciegas. Venta, checadas y evidencia son
+ * idempotentes por su llave (si el efecto hubiera ocurrido contestarían «repetida»), así que su rechazo sí es confiable. La
+ * custodia no: el estado de HOY de la SIM (vendida, recolectada) no dice lo que pasó. Lo dice su bitácora: si ESTA persona
+ * la aceptó o rechazó desde que nació el retenido, el intento anterior tuvo efecto.
+ */
+async function custodiaYaHecha(r: EnvioRetenidoDeCampo, organizationId: string): Promise<unknown | null> {
+  if (r.tipo !== 'CUSTODIA_ACEPTAR' && r.tipo !== 'CUSTODIA_RECHAZAR') return null
+  const c = leerJson(r.cuerpoJson)
+  const series = (r.tipo === 'CUSTODIA_ACEPTAR' ? (Array.isArray(c?.sims) ? c.sims : []).map((s: any) => s?.serialNumber) : [c?.serialNumber])
+    .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+  if (series.length === 0) return null
+  const eventos = await prisma.serializedItemCustodyEvent.findMany({
+    where: {
+      serialNumber: { in: series, mode: 'insensitive' },
+      eventType: r.tipo === 'CUSTODIA_ACEPTAR' ? 'ACCEPTED_BY_PROMOTER' : 'REJECTED_BY_PROMOTER',
+      actorStaffId: r.staffId,
+      createdAt: { gte: r.createdAt },
+      serializedItem: { OR: [{ organizationId }, { venue: { organizationId } }] },
+    },
+    select: { serialNumber: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+    take: 100,
+  })
+  if (eventos.length === 0) return null
+  return { recuperadoDeLaBitacora: true, eventos: eventos.map(x => ({ serialNumber: x.serialNumber, at: x.createdAt.toISOString() })) }
+}
 
 async function motivoParaRetener(
   celular: CelularDeCampo,
@@ -136,6 +223,7 @@ async function motivoParaRetener(
   dadaDeBaja: boolean,
   sucursales: string[],
 ): Promise<MotivoDeRetencion | null> {
+  if (celular.sinGracia) return 'CELULAR_PERDIDO' // S8: perdido o robado, nada se aplica solo
   if (dadaDeBaja) return 'PERSONA_DADA_DE_BAJA' // A6
   const desde = celular.desvinculadoAt
   if (!desde || Date.now() > desde.getTime() + GRACIA_MS) return 'FUERA_DE_PLAZO'
@@ -149,36 +237,15 @@ async function motivoParaRetener(
   return null
 }
 
-async function retener(
+/** Inserta la fila de esta huella; si otra subida con la misma huella le ganó (P2002), devuelve ésa. */
+async function crearOLeer(
   celular: CelularDeCampo,
-  e: { tipo: TipoDeEnvio; venueId: string; cuerpoJson: string },
+  e: Envio,
   huella: string,
-  motivo: MotivoDeRetencion,
-  rechazo: Rechazo | null,
-): Promise<{ status: number; body: unknown }> {
-  return (
-    (await guardar(celular, e, huella, { motivo, ...(rechazo && { rechazo: comoJson(rechazo) }) })) ?? {
-      status: 202,
-      body: { retenido: true, motivo },
-    }
-  )
-}
-
-/** Inserta la fila de esta huella; si otra subida con la misma huella le ganó (P2002), devuelve el desenlace de ésa. */
-async function guardar(
-  celular: CelularDeCampo,
-  e: { tipo: TipoDeEnvio; venueId: string; cuerpoJson: string },
-  huella: string,
-  datos: {
-    motivo: MotivoDeRetencion
-    rechazo?: Prisma.InputJsonValue
-    estado?: 'APLICADO'
-    resultado?: Prisma.InputJsonValue
-    resueltoAt?: Date
-  },
-): Promise<{ status: number; body: unknown } | null> {
+  datos: { motivo: MotivoDeRetencion; estado?: 'APLICANDO' },
+): Promise<{ fila: EnvioRetenidoDeCampo; nueva: boolean }> {
   try {
-    await prisma.envioRetenidoDeCampo.create({
+    const fila = await prisma.envioRetenidoDeCampo.create({
       data: {
         organizationId: celular.organizationId,
         celularId: celular.id,
@@ -190,14 +257,13 @@ async function guardar(
         ...datos,
       },
     })
+    return { fila, nueva: true }
   } catch (error) {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error
-    // Otra subida con la misma huella le ganó: se contesta lo de ésa.
     const previo = await prisma.envioRetenidoDeCampo.findUnique({ where: { celularId_huella: { celularId: celular.id, huella } } })
     if (!previo) throw error
-    return desenlaceDelRetenido(previo)
+    return { fila: previo, nueva: false }
   }
-  return null
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -366,7 +432,20 @@ export async function resolverRetenido(p: {
   const venue = await prisma.venue.findUnique({ where: { id: r.venueId }, select: { organizationId: true } })
   if (venue?.organizationId !== organizationId) throw noSePudo({ motivo: 'OTRA_ORGANIZACION' })
   const asignada = (await sucursalesDeLaPersona(r.staffId, organizationId)).some(s => s.venueId === r.venueId)
-  if (!asignada) throw noSePudo({ motivo: 'PERSONA_SIN_ASIGNACION' })
+  if (!asignada) {
+    // S10: el porqué queda en la fila, así «Por revisar» lo dice aunque se recargue.
+    const rechazo = {
+      code: 'PERSONA_SIN_ASIGNACION',
+      message: 'La persona ya no tiene asignación activa en esa sucursal: reactívala en esa sucursal o descártalo.',
+    }
+    await prisma.envioRetenidoDeCampo.updateMany({
+      where: { id, organizationId, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
+      data: { rechazo },
+    })
+    throw noSePudo({ motivo: 'PERSONA_SIN_ASIGNACION', rechazo })
+  }
+  // S2: si ya estaba APLICANDO, un intento anterior pudo dejar efecto.
+  const desdeAplicando = r.estado === 'APLICANDO'
 
   const { count } = await prisma.envioRetenidoDeCampo.updateMany({
     where: { id, organizationId, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
@@ -387,8 +466,10 @@ export async function resolverRetenido(p: {
     leerJson(r.cuerpoJson),
   )
 
-  if (res.tipo === 'APLICADO' || aceptadaEnParte(r.tipo, res)) {
-    const resultado = comoJson(res.tipo === 'APLICADO' ? res.body : res.rechazo.detalle)
+  const conEfecto = res.tipo === 'APLICADO' || aceptadaEnParte(r.tipo, res)
+  const recuperado = !conEfecto && desdeAplicando ? await custodiaYaHecha(r, organizationId) : null
+  if (conEfecto || recuperado) {
+    const resultado = comoJson(recuperado ?? (res.tipo === 'APLICADO' ? res.body : res.rechazo.detalle))
     // Lo aplicado gana sobre cualquier otro estado: si otro «Aplicar» simultáneo lo regresó a PENDIENTE (o alguien lo
     // descartó en ese hueco), la fila no puede quedar sin decir que ya tiene efecto.
     await prisma.envioRetenidoDeCampo.updateMany({
@@ -401,12 +482,12 @@ export async function resolverRetenido(p: {
         ...(p.nota !== undefined && { nota: p.nota }),
       },
     })
-    bitacora(r, 'CAMPO_RETENIDO_APLICADO')
+    bitacora(r, 'CAMPO_RETENIDO_APLICADO', recuperado ? { recuperado: true } : {})
     return { estado: 'APLICADO', resultado, repetida: false }
   }
 
   // Rechazo definitivo: no dejó efecto (la venta cancela su cuenta, la checada es una transacción). Vuelve a PENDIENTE.
-  const rechazo = comoJson(res.rechazo)
+  const rechazo = comoJson((res as Extract<ResultadoDelEnvio, { tipo: 'RECHAZADO' }>).rechazo)
   const vuelta = await prisma.envioRetenidoDeCampo.updateMany({
     where: { id, estado: 'APLICANDO' },
     data: { estado: 'PENDIENTE', rechazo },

@@ -178,7 +178,9 @@ router.post(
  * POST /tpv/campo/gracia — `{ tipo, venueId, cuerpoJson }` con la credencial del celular DESVINCULADO (bloque 1, A5). Lo que
  * traía una huella de su último latido, dentro de 24 h, se aplica a nombre de la persona (el status y el body de la ruta
  * normal, con `aplicadoEnGracia: true`); lo demás se retiene → 202 `{ retenido: true, motivo }`. Un retenido que ya existe
- * contesta su desenlace. 403 OTRA_ORGANIZACION, 400, 409 USA_TU_SESION; reintentable: los EN_PROCESO, 429 y 5xx.
+ * contesta su desenlace. 403 OTRA_ORGANIZACION, 400 (CUERPO_INVALIDO: el esquema de su tipo; la evidencia con sus campos
+ * de captura), 409 USA_TU_SESION; reintentables: los EN_PROCESO, 409 RETENIDOS_LLENOS (500 por revisar: el celular lo
+ * conserva hasta que el supervisor despeje), 429 y 5xx.
  */
 router.post(
   '/gracia',
