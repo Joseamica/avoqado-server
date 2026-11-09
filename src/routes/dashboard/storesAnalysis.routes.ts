@@ -103,7 +103,7 @@ router.get('/overview', whiteLabelAccess, async (req: Request, res: Response, ne
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -135,7 +135,7 @@ router.get('/venues', whiteLabelAccess, async (req: Request, res: Response, next
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -165,7 +165,7 @@ router.get('/stock-summary', whiteLabelAccess, async (req: Request, res: Respons
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -193,7 +193,7 @@ router.get('/anomalies', whiteLabelAccess, async (req: Request, res: Response, n
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -223,7 +223,7 @@ router.get('/charts/revenue-vs-target', whiteLabelAccess, async (req: Request, r
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -252,7 +252,7 @@ router.get('/charts/volume-vs-target', whiteLabelAccess, async (req: Request, re
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -281,7 +281,7 @@ router.get('/insights/top-promoter', whiteLabelAccess, async (req: Request, res:
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -309,7 +309,7 @@ router.get('/insights/worst-attendance', whiteLabelAccess, async (req: Request, 
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -337,7 +337,7 @@ router.get('/staff/online', whiteLabelAccess, async (req: Request, res: Response
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -366,7 +366,7 @@ router.get('/activity-feed', whiteLabelAccess, async (req: Request, res: Respons
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -379,7 +379,7 @@ router.get('/activity-feed', whiteLabelAccess, async (req: Request, res: Respons
     const role = req.access?.role || req.authContext?.role
 
     if (!userId || !role) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'No se encontró el contexto de acceso' })
     }
 
     const scopedVenueIds = await resolveStoresAnalysisVenueIds({
@@ -407,7 +407,7 @@ router.get('/sales-export-rows', whiteLabelAccess, async (req: Request, res: Res
   try {
     const venueId = req.params.venueId || req.authContext?.venueId
     if (!venueId) {
-      return res.status(400).json({ success: false, error: 'bad_request', message: 'Venue ID is required' })
+      return res.status(400).json({ success: false, error: 'bad_request', message: 'El ID del negocio es obligatorio' })
     }
     const orgContext = await getOrgExportContextFromVenue(venueId)
 
@@ -415,7 +415,7 @@ router.get('/sales-export-rows', whiteLabelAccess, async (req: Request, res: Res
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
     const { organizationId: orgId, timezone } = orgContext
@@ -423,7 +423,7 @@ router.get('/sales-export-rows', whiteLabelAccess, async (req: Request, res: Res
     const userId = req.access?.userId || req.authContext?.userId
     const role = req.access?.role || req.authContext?.role
     if (!userId || !role) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'No se encontró el contexto de acceso' })
     }
 
     const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : ''
@@ -463,7 +463,7 @@ router.post('/sales-export-audit', whiteLabelAccess, async (req: Request, res: R
   try {
     const venueId = req.params.venueId || req.authContext?.venueId
     if (!venueId) {
-      return res.status(400).json({ success: false, error: 'bad_request', message: 'Venue ID is required' })
+      return res.status(400).json({ success: false, error: 'bad_request', message: 'El ID del negocio es obligatorio' })
     }
     const orgContext = await getOrgExportContextFromVenue(venueId)
 
@@ -471,7 +471,7 @@ router.post('/sales-export-audit', whiteLabelAccess, async (req: Request, res: R
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
     const { organizationId: orgId, timezone } = orgContext
@@ -479,7 +479,7 @@ router.post('/sales-export-audit', whiteLabelAccess, async (req: Request, res: R
     const userId = req.access?.userId || req.authContext?.userId
     const role = req.access?.role || req.authContext?.role
     if (!userId || !role) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'No se encontró el contexto de acceso' })
     }
 
     const { format, startDate, endDate, filterVenueId, rowCount } = req.body ?? {}
@@ -543,7 +543,7 @@ router.get('/store-performance', whiteLabelAccess, async (req: Request, res: Res
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -583,7 +583,7 @@ router.get('/staff-attendance', whiteLabelAccess, async (req: Request, res: Resp
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -631,7 +631,7 @@ router.post(
         return res.status(404).json({
           success: false,
           error: 'not_found',
-          message: 'Organization not found for this venue',
+          message: 'No se encontró la organización de este negocio',
         })
       }
 
@@ -641,7 +641,7 @@ router.post(
         return res.status(400).json({
           success: false,
           error: 'invalid_status',
-          message: 'Status must be APPROVED or REJECTED',
+          message: 'El estado debe ser APPROVED o REJECTED',
         })
       }
 
@@ -684,7 +684,7 @@ router.post(
         return res.status(404).json({
           success: false,
           error: 'not_found',
-          message: 'Organization not found for this venue',
+          message: 'No se encontró la organización de este negocio',
         })
       }
 
@@ -714,7 +714,7 @@ router.get('/closing-report', whiteLabelAccess, async (req: Request, res: Respon
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -748,7 +748,7 @@ router.get('/closing-report/download', whiteLabelAccess, async (req: Request, re
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -780,7 +780,7 @@ router.get('/zones', whiteLabelAccess, async (req: Request, res: Response, next:
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -813,7 +813,7 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -949,7 +949,7 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -1005,7 +1005,7 @@ router.patch(
 
       const orgId = await getOrgIdFromVenue(venueId)
       if (!orgId) {
-        return res.status(404).json({ success: false, error: 'Organization not found' })
+        return res.status(404).json({ success: false, error: 'Organización no encontrada' })
       }
 
       // Get all org venues (to validate the requested venueIds belong to this org)
@@ -1157,7 +1157,7 @@ router.get('/store/:storeId/summary', whiteLabelAccess, async (req: Request, res
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -1171,7 +1171,7 @@ router.get('/store/:storeId/summary', whiteLabelAccess, async (req: Request, res
       return res.status(403).json({
         success: false,
         error: 'forbidden',
-        message: 'Store does not belong to this organization',
+        message: 'Esta sucursal no pertenece a la organización',
       })
     }
 
@@ -1204,7 +1204,7 @@ router.get('/store/:storeId/sales-trend', whiteLabelAccess, async (req: Request,
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -1218,7 +1218,7 @@ router.get('/store/:storeId/sales-trend', whiteLabelAccess, async (req: Request,
       return res.status(403).json({
         success: false,
         error: 'forbidden',
-        message: 'Store does not belong to this organization',
+        message: 'Esta sucursal no pertenece a la organización',
       })
     }
 
@@ -1253,7 +1253,7 @@ router.get('/store/:storeId/inventory-summary', whiteLabelAccess, async (req: Re
       return res.status(404).json({
         success: false,
         error: 'not_found',
-        message: 'Organization not found for this venue',
+        message: 'No se encontró la organización de este negocio',
       })
     }
 
@@ -1267,7 +1267,7 @@ router.get('/store/:storeId/inventory-summary', whiteLabelAccess, async (req: Re
       return res.status(403).json({
         success: false,
         error: 'forbidden',
-        message: 'Store does not belong to this organization',
+        message: 'Esta sucursal no pertenece a la organización',
       })
     }
 
@@ -1374,12 +1374,12 @@ router.get('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: 
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
     if (!storeVenue || storeVenue.organizationId !== orgId) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Esta sucursal no pertenece a la organización' })
     }
 
     const resolvedGoals = await goalResolutionService.getEffectiveGoals(storeId)
@@ -1400,12 +1400,12 @@ router.post('/store/:storeId/goals', whiteLabelAccess, soloSupervisorOMas, async
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
     if (!storeVenue || storeVenue.organizationId !== orgId) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Esta sucursal no pertenece a la organización' })
     }
 
     const { staffId, goal, goalType, period } = req.body
@@ -1440,12 +1440,12 @@ router.patch(
       const orgId = await getOrgIdFromVenue(venueId)
 
       if (!orgId) {
-        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+        return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
       }
 
       const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
       if (!storeVenue || storeVenue.organizationId !== orgId) {
-        return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+        return res.status(403).json({ success: false, error: 'forbidden', message: 'Esta sucursal no pertenece a la organización' })
       }
 
       const { goal, goalType, period, active } = req.body
@@ -1482,16 +1482,16 @@ router.delete(
       const orgId = await getOrgIdFromVenue(venueId)
 
       if (!orgId) {
-        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+        return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
       }
 
       const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
       if (!storeVenue || storeVenue.organizationId !== orgId) {
-        return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+        return res.status(403).json({ success: false, error: 'forbidden', message: 'Esta sucursal no pertenece a la organización' })
       }
 
       await salesGoalService.deleteSalesGoal(storeId, goalId, { staffId: (req as any).authContext?.userId ?? null, organizationId: orgId })
-      res.json({ success: true, data: { message: 'Goal deleted' } })
+      res.json({ success: true, data: { message: 'Meta eliminada' } })
     } catch (error) {
       next(error)
     }
@@ -1569,7 +1569,7 @@ router.delete('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Res
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { goalId } = req.params
     await goalResolutionService.deleteOrgGoal(venueId, goalId)
-    res.json({ success: true, data: { message: 'Org goal deleted' } })
+    res.json({ success: true, data: { message: 'Meta de la organización eliminada' } })
   } catch (error) {
     next(error)
   }
@@ -1584,7 +1584,7 @@ router.delete('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Res
 const requireOwnerPlus = (req: Request, res: Response, next: NextFunction) => {
   const access = req.access
   if (!access || !['OWNER', 'SUPERADMIN'].includes(access.role)) {
-    return res.status(403).json({ message: 'Owner access required' })
+    return res.status(403).json({ message: 'Se requiere acceso de propietario' })
   }
   next()
 }
@@ -1603,7 +1603,7 @@ router.get('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const config = await organizationDashboardService.getOrgAttendanceConfig(orgId)
@@ -1623,7 +1623,7 @@ router.put('/org-attendance-config', orgAttendanceWriteAccess, async (req: Reque
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const {
@@ -1671,11 +1671,11 @@ router.delete('/org-attendance-config', orgAttendanceWriteAccess, async (req: Re
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     await organizationDashboardService.deleteOrgAttendanceConfig(orgId, (req as any).authContext?.userId, venueId)
-    res.json({ success: true, data: { message: 'Org attendance config deleted' } })
+    res.json({ success: true, data: { message: 'Configuración de asistencia de la organización eliminada' } })
   } catch (error) {
     next(error)
   }
@@ -1697,7 +1697,7 @@ router.get('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: R
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const settings = await organizationDashboardService.getOrgTpvDefaults(orgId)
@@ -1725,7 +1725,7 @@ router.put(
       const orgId = await getOrgIdFromVenue(venueId)
 
       if (!orgId) {
-        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+        return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
       }
 
       const { settings } = req.body
@@ -1751,7 +1751,7 @@ router.get('/org-tpv-defaults/stats', orgAttendanceAccess, async (req: Request, 
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const stats = await organizationDashboardService.getOrgTpvStats(orgId)
@@ -1777,7 +1777,7 @@ router.get('/attendance-heatmap', whiteLabelAccess, async (req: Request, res: Re
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const { startDate, endDate, filterVenueId } = req.query
@@ -1815,7 +1815,7 @@ router.get('/sales-heatmap', whiteLabelAccess, async (req: Request, res: Respons
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      return res.status(404).json({ success: false, error: 'not_found', message: 'No se encontró la organización de este negocio' })
     }
 
     const { startDate, endDate, filterVenueId } = req.query

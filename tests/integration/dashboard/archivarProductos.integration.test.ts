@@ -120,7 +120,7 @@ describe('D5 · trigger BEFORE DELETE: un producto con ventas no se borra de ver
         },
         { type: 'SERVICE', servicePrincipalId: 'PLAN5_PRUEBA' },
       ),
-    ).rejects.toMatchObject({ statusCode: 404, message: 'Some ingredients were not found or do not belong to this venue' })
+    ).rejects.toMatchObject({ statusCode: 404, message: 'Algunos ingredientes no existen o no pertenecen a este negocio' })
     expect(await prisma.product.count({ where: { venueId: x.venueId, sku } })).toBe(0)
   })
 

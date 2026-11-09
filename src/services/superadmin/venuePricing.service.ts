@@ -92,11 +92,11 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
   })
 
   if (!venue) {
-    throw new NotFoundError(`Venue ${data.venueId} not found`)
+    throw new NotFoundError(`Negocio ${data.venueId} no encontrado`)
   }
 
   if (venue.paymentConfig) {
-    throw new BadRequestError(`Venue ${data.venueId} already has a payment configuration`)
+    throw new BadRequestError(`El negocio ${data.venueId} ya tiene configuración de pagos`)
   }
   // Codex R12-2: una afiliación en dos slots deja el cargo sin tarifa acreditable.
   const repetidos = mensajeDeSlotsRepetidos(data)
@@ -109,7 +109,7 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
   })
 
   if (!primaryAccount) {
-    throw new NotFoundError(`Primary merchant account ${data.primaryAccountId} not found`)
+    throw new NotFoundError(`Cuenta de comercio principal ${data.primaryAccountId} no encontrada`)
   }
 
   // Validate secondary account if provided
@@ -119,7 +119,7 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
     })
 
     if (!secondaryAccount) {
-      throw new NotFoundError(`Secondary merchant account ${data.secondaryAccountId} not found`)
+      throw new NotFoundError(`Cuenta de comercio secundaria ${data.secondaryAccountId} no encontrada`)
     }
   }
 
@@ -130,7 +130,7 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
     })
 
     if (!tertiaryAccount) {
-      throw new NotFoundError(`Tertiary merchant account ${data.tertiaryAccountId} not found`)
+      throw new NotFoundError(`Cuenta de comercio terciaria ${data.tertiaryAccountId} no encontrada`)
     }
   }
 
@@ -243,7 +243,7 @@ export async function deleteVenuePaymentConfig(venueId: string) {
   })
 
   if (!existingConfig) {
-    throw new NotFoundError(`Venue ${venueId} has no payment configuration`)
+    throw new NotFoundError(`El negocio ${venueId} no tiene configuración de pagos`)
   }
 
   await prisma.venuePaymentConfig.delete({
@@ -274,7 +274,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
   })
 
   if (!existingConfig) {
-    throw new NotFoundError(`Venue ${venueId} has no payment configuration`)
+    throw new NotFoundError(`El negocio ${venueId} no tiene configuración de pagos`)
   }
 
   // Validate accounts if provided
@@ -283,7 +283,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
       where: { id: data.primaryAccountId },
     })
     if (!account) {
-      throw new NotFoundError(`Primary merchant account ${data.primaryAccountId} not found`)
+      throw new NotFoundError(`Cuenta de comercio principal ${data.primaryAccountId} no encontrada`)
     }
   }
 
@@ -292,7 +292,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
       where: { id: data.secondaryAccountId },
     })
     if (!account) {
-      throw new NotFoundError(`Secondary merchant account ${data.secondaryAccountId} not found`)
+      throw new NotFoundError(`Cuenta de comercio secundaria ${data.secondaryAccountId} no encontrada`)
     }
   }
 
@@ -301,7 +301,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
       where: { id: data.tertiaryAccountId },
     })
     if (!account) {
-      throw new NotFoundError(`Tertiary merchant account ${data.tertiaryAccountId} not found`)
+      throw new NotFoundError(`Cuenta de comercio terciaria ${data.tertiaryAccountId} no encontrada`)
     }
   }
 
@@ -545,7 +545,7 @@ export async function getVenuePricingStructure(id: string) {
   })
 
   if (!pricingStructure) {
-    throw new NotFoundError(`Venue pricing structure ${id} not found`)
+    throw new NotFoundError(`Estructura de precios ${id} no encontrada`)
   }
 
   logger.info('Retrieved venue pricing structure', {
@@ -609,7 +609,7 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
   })
 
   if (!venue) {
-    throw new NotFoundError(`Venue ${data.venueId} not found`)
+    throw new NotFoundError(`Negocio ${data.venueId} no encontrado`)
   }
 
   // Validate rates are between 0 and 1 (0% to 100%)
@@ -772,7 +772,7 @@ export async function updateVenuePricingStructure(id: string, data: UpdateVenueP
   })
 
   if (!existingPricingStructure) {
-    throw new NotFoundError(`Venue pricing structure ${id} not found`)
+    throw new NotFoundError(`Estructura de precios ${id} no encontrada`)
   }
 
   // Log incoming update data for debugging
@@ -855,11 +855,11 @@ export async function deactivatePricingStructure(id: string) {
   })
 
   if (!pricingStructure) {
-    throw new NotFoundError(`Venue pricing structure ${id} not found`)
+    throw new NotFoundError(`Estructura de precios ${id} no encontrada`)
   }
 
   if (!pricingStructure.active) {
-    throw new BadRequestError('Pricing structure is already inactive')
+    throw new BadRequestError('La estructura de precios ya está inactiva')
   }
 
   const updated = await prisma.venuePricingStructure.update({
@@ -900,7 +900,7 @@ export async function deleteVenuePricingStructure(id: string) {
   })
 
   if (!pricingStructure) {
-    throw new NotFoundError(`Venue pricing structure ${id} not found`)
+    throw new NotFoundError(`Estructura de precios ${id} no encontrada`)
   }
 
   // Prevent deletion if transaction costs reference this pricing structure

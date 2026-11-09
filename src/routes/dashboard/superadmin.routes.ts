@@ -68,14 +68,14 @@ const changeVenueStatusSchema = z.object({
 // Schema for venue suspension
 const suspendVenueSchema = z.object({
   body: z.object({
-    reason: z.string().min(10, 'Suspension reason must be at least 10 characters'),
+    reason: z.string().min(10, 'El motivo de la suspensión debe tener al menos 10 caracteres'),
   }),
 })
 
 // Schema for granting DB-only trial
 const grantTrialSchema = z.object({
   body: z.object({
-    trialDays: z.number().int().min(1, 'Trial must be at least 1 day').max(365, 'Trial cannot exceed 365 days'),
+    trialDays: z.number().int().min(1, 'La prueba debe ser de al menos 1 día').max(365, 'La prueba no puede exceder los 365 días'),
   }),
 })
 
@@ -124,12 +124,12 @@ const extendPlanTrialSchema = z.object({
 // Schema for feature creation
 const createFeatureSchema = z.object({
   body: z.object({
-    name: z.string().min(3, 'Feature name must be at least 3 characters'),
+    name: z.string().min(3, 'El nombre de la función debe tener al menos 3 caracteres'),
     code: z
       .string()
-      .min(3, 'Feature code must be at least 3 characters')
-      .regex(/^[a-z_]+$/, 'Feature code must contain only lowercase letters and underscores'),
-    description: z.string().min(10, 'Description must be at least 10 characters'),
+      .min(3, 'El código de la función debe tener al menos 3 caracteres')
+      .regex(/^[a-z_]+$/, 'El código de la función sólo admite minúsculas y guiones bajos'),
+    description: z.string().min(10, 'La descripción debe tener al menos 10 caracteres'),
     category: z.enum(['AI', 'ANALYTICS', 'CORE', 'INTEGRATIONS', 'PREMIUM']),
     pricingModel: z.enum(['FREE', 'FIXED', 'USAGE_BASED', 'TIERED']),
     basePrice: z.number().optional(),
@@ -142,8 +142,8 @@ const createFeatureSchema = z.object({
 // Schema for venue creation (superadmin)
 const createVenueSchema = z.object({
   body: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
-    name: z.string().min(1, 'Venue name is required'),
+    organizationId: z.string().cuid('ID de organización inválido'),
+    name: z.string().min(1, 'El nombre del negocio es obligatorio'),
     type: z
       .enum([
         'RESTAURANT',
@@ -199,10 +199,10 @@ const createVenueSchema = z.object({
 // Schema for venue transfer
 const transferVenueSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
+    venueId: z.string().cuid('ID de negocio inválido'),
   }),
   body: z.object({
-    targetOrganizationId: z.string().cuid('Invalid target organization ID'),
+    targetOrganizationId: z.string().cuid('ID de organización destino inválido'),
   }),
 })
 

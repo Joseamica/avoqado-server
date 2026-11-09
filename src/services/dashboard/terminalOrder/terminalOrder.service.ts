@@ -18,17 +18,17 @@ import { buildMagicLinkUrls, buildSerialAssignmentUrls } from './urls'
 
 export function calculateTotals(items: CreateOrderItemInput[]): OrderTotals {
   if (items.length === 0) {
-    throw new Error('At least one item is required')
+    throw new Error('Agrega al menos un producto')
   }
 
   let subtotalCents = 0
   for (const item of items) {
     if (item.quantity < 1) {
-      throw new Error('Item quantity must be >= 1')
+      throw new Error('La cantidad debe ser al menos 1')
     }
     const entry = TPV_CATALOG[item.catalogKey]
     if (!entry) {
-      throw new Error(`Unknown catalog key: ${item.catalogKey}`)
+      throw new Error(`Producto de catálogo desconocido: ${item.catalogKey}`)
     }
     subtotalCents += entry.unitPriceCents * item.quantity
   }
@@ -134,35 +134,35 @@ export async function assignSerials(input: AssignSerialsInput) {
     where: { id: input.orderId },
     include: { items: true },
   })
-  if (!order) throw new Error('Order not found')
+  if (!order) throw new Error('Pedido no encontrado')
   if (order.paymentStatus !== 'PAID') {
-    throw new Error(`Order ${order.orderNumber} is not paid (status: ${order.paymentStatus})`)
+    throw new Error(`El pedido ${order.orderNumber} no está pagado (estado: ${order.paymentStatus})`)
   }
   if (order.fulfillmentStatus === 'SERIALS_ASSIGNED' || order.fulfillmentStatus === 'SHIPPED' || order.fulfillmentStatus === 'DELIVERED') {
-    throw new Error(`Order ${order.orderNumber} already assigned`)
+    throw new Error(`El pedido ${order.orderNumber} ya está asignado`)
   }
 
   // Validate payloads against order items
   const itemsById = Object.fromEntries(order.items.map(i => [i.id, i]))
   for (const payload of input.items) {
     const item = itemsById[payload.orderItemId]
-    if (!item) throw new Error(`Unknown orderItemId: ${payload.orderItemId}`)
+    if (!item) throw new Error(`Renglón del pedido desconocido: ${payload.orderItemId}`)
     if (payload.units.length !== item.quantity) {
-      throw new Error(`For ${item.productName}: expected ${item.quantity} units, got ${payload.units.length}`)
+      throw new Error(`Para ${item.productName} se esperaban ${item.quantity} unidades y llegaron ${payload.units.length}`)
     }
     for (const unit of payload.units) {
       if (!unit.serial || unit.serial.trim() === '') {
-        throw new Error('Each serial is required (cannot be empty)')
+        throw new Error('Cada número de serie es obligatorio')
       }
       if (!unit.name || unit.name.trim() === '') {
-        throw new Error('Each terminal name is required')
+        throw new Error('Cada nombre de terminal es obligatorio')
       }
     }
   }
   // Ensure every order item has a corresponding payload
   for (const item of order.items) {
     if (!input.items.find(p => p.orderItemId === item.id)) {
-      throw new Error(`Missing units for item ${item.productName}`)
+      throw new Error(`Faltan unidades de ${item.productName}`)
     }
   }
 
@@ -172,7 +172,7 @@ export async function assignSerials(input: AssignSerialsInput) {
       where: { serialNumber: { in: allSerials } },
     })
     if (existing) {
-      throw new Error(`Serial number already in use: ${existing.serialNumber}`)
+      throw new Error(`Ese número de serie ya está en uso: ${existing.serialNumber}`)
     }
 
     const terminalsToCreate = input.items.flatMap(payload => {
@@ -229,9 +229,9 @@ interface MarkShippedInput {
 
 export async function markShipped(input: MarkShippedInput) {
   const order = await prisma.terminalOrder.findUnique({ where: { id: input.orderId } })
-  if (!order) throw new Error('Order not found')
+  if (!order) throw new Error('Pedido no encontrado')
   if (order.fulfillmentStatus !== 'SERIALS_ASSIGNED') {
-    throw new Error(`Order must be SERIALS_ASSIGNED before SHIPPED (current: ${order.fulfillmentStatus})`)
+    throw new Error(`El pedido debe tener series asignadas antes de enviarse (estado actual: ${order.fulfillmentStatus})`)
   }
   return prisma.terminalOrder.update({
     where: { id: input.orderId },
@@ -250,9 +250,9 @@ interface MarkDeliveredInput {
 
 export async function markDelivered(input: MarkDeliveredInput) {
   const order = await prisma.terminalOrder.findUnique({ where: { id: input.orderId } })
-  if (!order) throw new Error('Order not found')
+  if (!order) throw new Error('Pedido no encontrado')
   if (order.fulfillmentStatus !== 'SHIPPED') {
-    throw new Error(`Order must be SHIPPED before DELIVERED (current: ${order.fulfillmentStatus})`)
+    throw new Error(`El pedido debe enviarse antes de entregarse (estado actual: ${order.fulfillmentStatus})`)
   }
   return prisma.terminalOrder.update({
     where: { id: input.orderId },
@@ -266,22 +266,22 @@ const ALLOWED_PROOF_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg'
 export async function uploadSpeiProof(input: UploadSpeiProofInput) {
   const order = await prisma.terminalOrder.findUnique({ where: { id: input.orderId } })
   // Same answer for "missing" and "another venue's": no existence oracle across tenants.
-  if (!order || order.venueId !== input.venueId) throw new Error('Order not found')
+  if (!order || order.venueId !== input.venueId) throw new Error('Pedido no encontrado')
   if (order.paymentMethod !== 'SPEI') {
-    throw new Error('This is not a SPEI order')
+    throw new Error('Este pedido no es por SPEI')
   }
   if (order.paymentStatus === 'PAID') {
-    throw new Error('Order is already paid')
+    throw new Error('El pedido ya está pagado')
   }
   if (order.paymentStatus !== 'AWAITING_PROOF' && order.paymentStatus !== 'REJECTED') {
-    throw new Error(`Cannot upload proof in payment status ${order.paymentStatus}`)
+    throw new Error(`No se puede subir el comprobante con el pago en estado ${order.paymentStatus}`)
   }
 
   if (input.file.size > MAX_PROOF_BYTES) {
-    throw new Error('File too large (max 10 MB)')
+    throw new Error('El archivo es muy grande (máximo 10 MB)')
   }
   if (!ALLOWED_PROOF_MIME.has(input.file.mimetype)) {
-    throw new Error(`Unsupported file mimetype: ${input.file.mimetype}`)
+    throw new Error(`Tipo de archivo no permitido: ${input.file.mimetype}`)
   }
 
   const extByMime: Record<string, string> = {
@@ -362,7 +362,7 @@ async function conLigaVigente<T>(orderId: string, escribir: () => Promise<T>): P
     if ((err as { code?: string } | null)?.code !== 'P2025') throw err
     const ahora = await prisma.terminalOrder.findUnique({ where: { id: orderId }, select: { paymentStatus: true } })
     if (ahora && ahora.paymentStatus !== 'PROOF_UPLOADED') {
-      throw new Error(`Order is not in PROOF_UPLOADED state (current: ${ahora.paymentStatus})`)
+      throw new Error(`El pedido no tiene comprobante por revisar (estado actual: ${ahora.paymentStatus})`)
     }
     throw new Error(LIGA_VIEJA)
   }
@@ -373,9 +373,9 @@ export async function approveSpei(input: ApproveSpeiInput) {
     where: { id: input.orderId },
     include: { items: true },
   })
-  if (!order) throw new Error('Order not found')
+  if (!order) throw new Error('Pedido no encontrado')
   if (order.paymentStatus !== 'PROOF_UPLOADED') {
-    throw new Error(`Order is not in PROOF_UPLOADED state (current: ${order.paymentStatus})`)
+    throw new Error(`El pedido no tiene comprobante por revisar (estado actual: ${order.paymentStatus})`)
   }
   exigirLigaVigente(order.speiApprovalToken, input.token)
 
@@ -432,9 +432,9 @@ export async function approveSpei(input: ApproveSpeiInput) {
 
 export async function rejectSpei(input: RejectSpeiInput) {
   const order = await prisma.terminalOrder.findUnique({ where: { id: input.orderId } })
-  if (!order) throw new Error('Order not found')
+  if (!order) throw new Error('Pedido no encontrado')
   if (order.paymentStatus !== 'PROOF_UPLOADED') {
-    throw new Error(`Order is not in PROOF_UPLOADED state (current: ${order.paymentStatus})`)
+    throw new Error(`El pedido no tiene comprobante por revisar (estado actual: ${order.paymentStatus})`)
   }
   exigirLigaVigente(order.speiApprovalToken, input.token)
 

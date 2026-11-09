@@ -124,7 +124,7 @@ export async function getProviderCostStructure(id: string) {
   })
 
   if (!costStructure) {
-    throw new NotFoundError(`Provider cost structure ${id} not found`)
+    throw new NotFoundError(`Estructura de costos ${id} no encontrada`)
   }
 
   logger.info('Retrieved provider cost structure', {
@@ -188,7 +188,7 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
   })
 
   if (!merchantAccount) {
-    throw new NotFoundError(`Merchant account ${data.merchantAccountId} not found`)
+    throw new NotFoundError(`Cuenta de comercio ${data.merchantAccountId} no encontrada`)
   }
 
   // Validate rates are between 0 and 1 (0% to 100%)
@@ -295,7 +295,7 @@ export async function updateProviderCostStructure(id: string, data: UpdateProvid
   })
 
   if (!existingCostStructure) {
-    throw new NotFoundError(`Provider cost structure ${id} not found`)
+    throw new NotFoundError(`Estructura de costos ${id} no encontrada`)
   }
 
   // Validate rates if provided
@@ -365,11 +365,11 @@ export async function deactivateCostStructure(id: string) {
   })
 
   if (!costStructure) {
-    throw new NotFoundError(`Provider cost structure ${id} not found`)
+    throw new NotFoundError(`Estructura de costos ${id} no encontrada`)
   }
 
   if (!costStructure.active) {
-    throw new BadRequestError('Cost structure is already inactive')
+    throw new BadRequestError('La estructura de costos ya está inactiva')
   }
 
   const updated = await prisma.providerCostStructure.update({
@@ -414,7 +414,7 @@ export async function deleteProviderCostStructure(id: string) {
   })
 
   if (!costStructure) {
-    throw new NotFoundError(`Provider cost structure ${id} not found`)
+    throw new NotFoundError(`Estructura de costos ${id} no encontrada`)
   }
 
   // Prevent deletion if transaction costs reference this cost structure

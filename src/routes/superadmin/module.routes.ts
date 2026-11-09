@@ -21,7 +21,7 @@ const moduleScopeSchema = z.enum(['BOTH', 'ORGANIZATION_ONLY', 'VENUE_ONLY'], {
 // Validation schemas
 const moduleCodeSchema = z.object({
   params: z.object({
-    moduleCode: z.string().min(1, 'Module code is required'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
   }),
   query: z
     .object({
@@ -32,13 +32,13 @@ const moduleCodeSchema = z.object({
 
 const venueIdSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
+    venueId: z.string().cuid('ID de negocio inválido'),
   }),
 })
 
 const moduleIdSchema = z.object({
   params: z.object({
-    moduleId: z.string().cuid('Invalid module ID'),
+    moduleId: z.string().cuid('ID de módulo inválido'),
   }),
 })
 
@@ -46,9 +46,9 @@ const createModuleSchema = z.object({
   body: z.object({
     code: z
       .string()
-      .min(1, 'Module code is required')
-      .regex(/^[A-Z_]+$/, 'Module code must be uppercase with underscores only'),
-    name: z.string().min(1, 'Module name is required'),
+      .min(1, 'El código del módulo es obligatorio')
+      .regex(/^[A-Z_]+$/, 'El código del módulo sólo admite mayúsculas y guiones bajos'),
+    name: z.string().min(1, 'El nombre del módulo es obligatorio'),
     description: z.string().optional(),
     defaultConfig: z.record(z.any()).optional(),
     presets: z.record(z.any()).optional(),
@@ -59,7 +59,7 @@ const createModuleSchema = z.object({
 
 const updateModuleSchema = z.object({
   params: z.object({
-    moduleId: z.string().cuid('Invalid module ID'),
+    moduleId: z.string().cuid('ID de módulo inválido'),
   }),
   body: z.object({
     name: z.string().min(1).optional(),
@@ -73,23 +73,23 @@ const updateModuleSchema = z.object({
 
 const enableModuleSchema = z.object({
   body: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    moduleCode: z.string().min(1, 'Module code is required'),
+    venueId: z.string().cuid('ID de negocio inválido'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
     preset: z.string().optional(),
   }),
 })
 
 const disableModuleSchema = z.object({
   body: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    moduleCode: z.string().min(1, 'Module code is required'),
+    venueId: z.string().cuid('ID de negocio inválido'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
   }),
 })
 
 const updateConfigSchema = z.object({
   body: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    moduleCode: z.string().min(1, 'Module code is required'),
+    venueId: z.string().cuid('ID de negocio inválido'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
     config: z.record(z.any()),
   }),
 })

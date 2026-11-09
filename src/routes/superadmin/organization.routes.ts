@@ -20,23 +20,23 @@ const router = Router()
 
 const organizationIdSchema = z.object({
   params: z.object({
-    organizationId: z.string().min(1, 'Organization ID is required'),
+    organizationId: z.string().min(1, 'El ID de la organización es obligatorio'),
   }),
 })
 
 const createOrganizationSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Organization name is required'),
+    name: z.string().min(1, 'El nombre de la organización es obligatorio'),
     slug: z
       .string()
-      .min(1, 'Slug is required')
-      .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase with hyphens only')
+      .min(1, 'El slug es obligatorio')
+      .regex(/^[a-z0-9-]+$/, 'El slug sólo admite minúsculas, números y guiones')
       .refine(slug => !['org', 'organizations', 'admin', 'superadmin', 'auth', 'api'].includes(slug), {
-        message: 'Slug is reserved and cannot be used',
+        message: 'Ese slug está reservado y no se puede usar',
       })
       .optional(),
-    email: z.string().email('Invalid email address'),
-    phone: z.string().min(1, 'Phone number is required'),
+    email: z.string().email('Correo electrónico inválido'),
+    phone: z.string().min(1, 'El teléfono es obligatorio'),
     taxId: z.string().optional(),
     type: z.enum(['RESTAURANT', 'RETAIL', 'SERVICE', 'ENTERTAINMENT', 'HOSPITALITY', 'HEALTHCARE', 'OTHER']).optional(),
   }),
@@ -44,20 +44,20 @@ const createOrganizationSchema = z.object({
 
 const updateOrganizationSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
     name: z.string().min(1).optional(),
     slug: z
       .string()
       .min(1)
-      .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase with hyphens only')
+      .regex(/^[a-z0-9-]+$/, 'El slug sólo admite minúsculas, números y guiones')
       .refine(slug => !['org', 'organizations', 'admin', 'superadmin', 'auth', 'api'].includes(slug), {
-        message: 'Slug is reserved and cannot be used',
+        message: 'Ese slug está reservado y no se puede usar',
       })
       .optional()
       .nullable(),
-    email: z.string().email('Invalid email address').optional(),
+    email: z.string().email('Correo electrónico inválido').optional(),
     phone: z.string().min(1).optional(),
     taxId: z.string().optional().nullable(),
     type: z.enum(['RESTAURANT', 'RETAIL', 'SERVICE', 'ENTERTAINMENT', 'HOSPITALITY', 'HEALTHCARE', 'OTHER']).optional(),
@@ -66,10 +66,10 @@ const updateOrganizationSchema = z.object({
 
 const enableModuleSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
-    moduleCode: z.string().min(1, 'Module code is required'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
     preset: z.string().optional(),
     config: z.record(z.any()).optional(),
   }),
@@ -77,19 +77,19 @@ const enableModuleSchema = z.object({
 
 const disableModuleSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
-    moduleCode: z.string().min(1, 'Module code is required'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
   }),
 })
 
 const updateModuleConfigSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
-    moduleCode: z.string().min(1, 'Module code is required'),
+    moduleCode: z.string().min(1, 'El código del módulo es obligatorio'),
     config: z.record(z.any()),
   }),
 })
@@ -98,12 +98,12 @@ const updateModuleConfigSchema = z.object({
 
 const setPaymentConfigSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
-    primaryAccountId: z.string().cuid('Invalid primary account ID'),
-    secondaryAccountId: z.string().cuid('Invalid secondary account ID').optional().nullable(),
-    tertiaryAccountId: z.string().cuid('Invalid tertiary account ID').optional().nullable(),
+    primaryAccountId: z.string().cuid('ID de cuenta principal inválido'),
+    secondaryAccountId: z.string().cuid('ID de cuenta secundaria inválido').optional().nullable(),
+    tertiaryAccountId: z.string().cuid('ID de cuenta terciaria inválido').optional().nullable(),
     routingRules: z.record(z.any()).optional().nullable(),
     preferredProcessor: z.enum(['LEGACY', 'MENTA', 'CLIP', 'BANK_DIRECT', 'AUTO']).optional(),
   }),
@@ -111,7 +111,7 @@ const setPaymentConfigSchema = z.object({
 
 const setPricingSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
   }),
   body: z.object({
     accountType: z.enum(['PRIMARY', 'SECONDARY', 'TERTIARY']),
@@ -132,8 +132,8 @@ const setPricingSchema = z.object({
 
 const deletePricingSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
-    pricingId: z.string().cuid('Invalid pricing ID'),
+    organizationId: z.string().cuid('ID de organización inválido'),
+    pricingId: z.string().cuid('ID de precios inválido'),
   }),
 })
 

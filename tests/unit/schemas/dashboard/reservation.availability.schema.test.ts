@@ -68,7 +68,7 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
   })
 
   it('localizes the absolute one-minute floor in Spanish', () => {
-    expect(messages({ date, duration: '0', windowSemantics: 'base' })).toContain('La duracion minima es 1 minuto')
+    expect(messages({ date, duration: '0', windowSemantics: 'base' })).toContain('La duración mínima es 1 minuto')
   })
 
   it('localizes every new wrong-type and enum failure in Spanish', () => {
@@ -255,7 +255,7 @@ describe('reservation create window-semantics schemas', () => {
   ])('%s localizes the absolute one-minute floor in Spanish', (_name, parse) => {
     expect(parse({ startsAt, endsAt: new Date(startsAt.getTime() + 60_000), duration: 0, windowSemantics: 'base' })).toMatchObject({
       success: false,
-      error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'La duracion minima es 1 minuto' })]) },
+      error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'La duración mínima es 1 minuto' })]) },
     })
   })
 

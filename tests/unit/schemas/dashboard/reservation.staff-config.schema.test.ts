@@ -101,7 +101,7 @@ describe('staff schedule schemas', () => {
   })
 
   it('localizes missing and wrong-type schedule body fields', () => {
-    expect(messages(replaceStaffScheduleBodySchema.safeParse(undefined) as any)).toContain('La configuracion del horario es requerida')
+    expect(messages(replaceStaffScheduleBodySchema.safeParse(undefined) as any)).toContain('La configuración del horario es requerida')
     expect(messages(replaceStaffScheduleBodySchema.safeParse({ exceptions: [] }) as any)).toContain('El horario semanal es requerido')
     expect(messages(replaceStaffScheduleBodySchema.safeParse({ weekly, exceptions: 'none' }) as any)).toContain(
       'Las excepciones deben ser una lista',
@@ -124,10 +124,10 @@ describe('staff schedule schemas', () => {
 
   it('localizes representative nested weekly paths', () => {
     expect(messages(weeklyScheduleSchema.safeParse({ ...weekly, monday: { ranges: [] } }) as any)).toContain(
-      'El estado del dia es requerido',
+      'El estado del día es requerido',
     )
     expect(messages(weeklyScheduleSchema.safeParse({ ...weekly, monday: { enabled: false, ranges: 'none' } }) as any)).toContain(
-      'Los rangos del dia deben ser una lista',
+      'Los rangos del día deben ser una lista',
     )
     expect(
       messages(
@@ -148,7 +148,7 @@ describe('staff schedule schemas', () => {
   })
 
   it('localizes ProductStaff body and every route identifier failure', () => {
-    expect(messages(replaceProductStaffBodySchema.safeParse(undefined) as any)).toContain('La configuracion de profesionistas es requerida')
+    expect(messages(replaceProductStaffBodySchema.safeParse(undefined) as any)).toContain('La configuración de profesionistas es requerida')
     expect(messages(replaceProductStaffBodySchema.safeParse({ staffVenueIds: 'member' }) as any)).toContain(
       'Los profesionistas deben ser una lista',
     )
@@ -164,7 +164,7 @@ describe('staff schedule schemas', () => {
   })
 
   it.each([
-    [staffScheduleExceptionSchema, undefined, 'La excepcion es requerida'],
+    [staffScheduleExceptionSchema, undefined, 'La excepción es requerida'],
     [staffScheduleExceptionSchema, { startDate: '2026-07-21', endDate: '2026-07-21' }, 'El tipo de excepcion es requerido'],
     [staffScheduleExceptionSchema, { startDate: 1, endDate: '2026-07-21', kind: 'OFF' }, 'La fecha local debe ser texto'],
     [
@@ -172,12 +172,12 @@ describe('staff schedule schemas', () => {
       { startDate: '2026-07-21', endDate: '2026-07-21', kind: 'HOURS', startTime: 9, endTime: '17:00' },
       'La hora debe ser texto',
     ],
-    [weeklyScheduleSchema, { ...weekly, sunday: undefined }, 'La configuracion del dia es requerida'],
-    [weeklyScheduleSchema, { ...weekly, sunday: false }, 'La configuracion del dia debe ser un objeto'],
-    [weeklyScheduleSchema, { ...weekly, monday: { enabled: 'yes', ranges: [] } }, 'El estado del dia debe ser booleano'],
+    [weeklyScheduleSchema, { ...weekly, sunday: undefined }, 'La configuración del día es requerida'],
+    [weeklyScheduleSchema, { ...weekly, sunday: false }, 'La configuración del día debe ser un objeto'],
+    [weeklyScheduleSchema, { ...weekly, monday: { enabled: 'yes', ranges: [] } }, 'El estado del día debe ser booleano'],
     [weeklyScheduleSchema, { ...weekly, monday: { enabled: true, ranges: ['09:00'] } }, 'El rango horario debe ser un objeto'],
     [replaceStaffScheduleBodySchema, { weekly: 'always', exceptions: [] }, 'El horario semanal debe ser un objeto'],
-    [replaceStaffScheduleBodySchema, { weekly, exceptions: [false] }, 'La excepcion debe ser un objeto'],
+    [replaceStaffScheduleBodySchema, { weekly, exceptions: [false] }, 'La excepción debe ser un objeto'],
     [replaceProductStaffBodySchema, {}, 'Los profesionistas son requeridos'],
     [replaceProductStaffBodySchema, { staffVenueIds: [1] }, 'El ID del profesionista debe ser texto'],
     [staffScheduleParamsSchema, undefined, 'Los parametros del horario son requeridos'],
