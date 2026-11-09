@@ -26,7 +26,10 @@ jest.mock('@/communication/sockets/managers/socketManager', () => {
 })
 jest.mock('@/services/dashboard/activity-log.service', () => ({ __esModule: true, logAction: jest.fn(async () => undefined) }))
 // El aviso al pase y el correo del primer sello salen hacia afuera: aquí no aportan.
-jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn(),
+  reintentarAvisosDeTarjeta: jest.fn().mockResolvedValue({ avisados: 0, fallidos: 0, ocupados: 0 }),
+}))
 jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 // El plan del negocio no es lo que se prueba: con LOYALTY_PROGRAM los puntos y los sellos corren de verdad.
 jest.mock('@/services/access/basePlan.service', () => ({

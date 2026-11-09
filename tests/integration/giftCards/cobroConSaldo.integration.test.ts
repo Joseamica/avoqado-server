@@ -13,6 +13,7 @@ jest.mock('@/communication/sockets', () => ({
 }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
+  reintentarAvisosDeTarjeta: jest.fn().mockResolvedValue({ avisados: 0, fallidos: 0, ocupados: 0 }),
 }))
 jest.mock('@/services/shared/cashDrawerPosting', () => ({
   ...jest.requireActual('@/services/shared/cashDrawerPosting'),

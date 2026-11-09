@@ -144,6 +144,7 @@ const MODELS = [
   'staffVenue',
   'stampReward',
   'stampCard',
+  'walletPassOutbox',
   'shift',
 ]
 const WRITES = ['create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany']
@@ -309,6 +310,7 @@ beforeEach(() => {
     loyaltyTransaction: ['create'],
     staffVenue: ['findUnique'],
     stampReward: ['findFirst', 'updateMany', 'update'],
+    walletPassOutbox: ['create'],
   })) {
     for (const op of ops) prismaMock[name][op].mockRejectedValue(new Error(`GLOBAL ${name}.${op}`))
   }
@@ -526,6 +528,16 @@ describe('writer-specific fresh decisions', () => {
       expect.objectContaining({ where: { id: 'rw-od' }, data: expect.objectContaining({ status: 'PENDING' }) }),
     )
     expect(tx.stampReward.update.mock.invocationCallOrder[0]).toBeGreaterThan(lock)
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_DEVUELTO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od' } })
   })
 
@@ -772,6 +784,16 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_CANJEADO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
     expect(tx.stampReward.update).not.toHaveBeenCalled()
     // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).

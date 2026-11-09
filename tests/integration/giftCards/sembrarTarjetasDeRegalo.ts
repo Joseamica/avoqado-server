@@ -65,6 +65,7 @@ export async function crearNegocioDePrueba(prefijo: string): Promise<{ organizat
  */
 export async function limpiarNegocioDePrueba(venueId: string): Promise<void> {
   if (!venueId) return
+  await prisma.walletPassOutbox.deleteMany({ where: { venueId } })
   await prisma.paymentEffect.deleteMany({ where: { venueId } })
   await prisma.paymentAllocation.deleteMany({ where: { order: { venueId } } })
   await prisma.orderItemSelloIva.deleteMany({ where: { orderItem: { order: { venueId } } } })

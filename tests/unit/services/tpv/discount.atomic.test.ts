@@ -115,6 +115,7 @@ function db() {
     couponRedemption: { count: jest.fn(async () => 0) },
     // B2 T7 (P3): quitar desde la terminal pregunta siempre por el premio de la fila; sin premio no escribe nada.
     stampReward: { findFirst: jest.fn(async () => null), update: jest.fn() },
+    walletPassOutbox: { create: jest.fn(async () => ({})) },
   }
 }
 beforeEach(() => {
@@ -444,6 +445,16 @@ describe('B2 — el motor guarda a qué renglones aplicó (spec §4.1, D7)', () 
       where: { id: 'rw' },
       data: { status: 'PENDING', redeemedAt: null, orderDiscountId: null },
     })
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'c1',
+        motivo: 'PREMIO_DEVUELTO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(globalDb.walletPassOutbox.create).not.toHaveBeenCalled()
     expect(tx.loyaltyTransaction.create.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({

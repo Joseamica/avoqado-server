@@ -29,7 +29,10 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
 }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
 jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({ generateDigitalReceipt: jest.fn(async () => null) }))
-jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn(),
+  reintentarAvisosDeTarjeta: jest.fn().mockResolvedValue({ avisados: 0, fallidos: 0, ocupados: 0 }),
+}))
 jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   ...jest.requireActual('@/services/kds/kitchenTicketAuthoring.service'),
@@ -115,6 +118,7 @@ afterAll(async () => {
   await prisma.onlineOrderCharge.deleteMany({ where: { venueId } })
   await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.ecommerceMerchant.deleteMany({ where: { venueId } })
+  await prisma.walletPassOutbox.deleteMany({ where: { venueId } })
   await prisma.stampEvent.deleteMany({ where: { venueId } })
   await prisma.stampCard.deleteMany({ where: { venueId } })
   await prisma.customerOrderMetric.deleteMany({ where: { venueId } })

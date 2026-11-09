@@ -6,6 +6,7 @@ import { withDeadlockRetry, type TxConReintento } from '../../utils/serializable
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
+import { encolarAvisoDeTarjetaEnTx } from './walletPassOutbox.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
@@ -191,6 +192,8 @@ export async function canjearPremioEnTx(
     throw new BadRequestError('Este premio ya fue canjeado.')
   }
 
+  await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'PREMIO_CANJEADO' })
+
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
   await tx.orderDiscount.create({
@@ -326,5 +329,6 @@ export async function refundStampRewardForOrderDiscount(
     await tx.stampCard.update({ where: { id: cartilla.id }, data: { completedAt: null } })
   }
 
+  await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId: reward.customerId, motivo: 'PREMIO_DEVUELTO' })
   return { rewardId: reward.id, customerId: reward.customerId, rewardLabel: reward.rewardLabel }
 }

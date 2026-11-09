@@ -609,6 +609,159 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
 
 // ───────────────────────────── la revisión completa ─────────────────────────────
 
+/** Alias locales de delegado/método; no infiere retornos ni construye otro verificador de tipos. */
+function accesoWallet(e: ts.Expression, vistos = new Set<ts.Node>()): { modelo: string; op?: string; receptor: ts.Expression } | null {
+  e = sinAserciones(e)
+  if (vistos.has(e)) return null
+  vistos.add(e)
+  const modelo = (nombre: string) => (nombre === 'walletPass' ? 'WalletPass' : nombre === 'walletPassOutbox' ? 'WalletPassOutbox' : null)
+  if (ts.isIdentifier(e)) {
+    for (let n: ts.Node | undefined = e.parent; n; n = n.parent) {
+      if (esFuncion(n) && n.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === (e as ts.Identifier).text)) return null
+      if (ts.isBlock(n) || ts.isSourceFile(n) || ts.isModuleBlock(n))
+        for (const st of n.statements)
+          if (ts.isVariableStatement(st))
+            for (const d of st.declarationList.declarations) {
+              if (ts.isIdentifier(d.name) && d.name.text === e.text) return d.initializer ? accesoWallet(d.initializer, vistos) : null
+              if (ts.isObjectBindingPattern(d.name))
+                for (const b of d.name.elements)
+                  if (ts.isIdentifier(b.name) && b.name.text === e.text) {
+                    if (!d.initializer) return null
+                    const nombre = (b.propertyName ?? b.name).getText()
+                    const m = modelo(nombre)
+                    if (m) return { modelo: m, receptor: d.initializer }
+                    const base = accesoWallet(d.initializer, vistos)
+                    return base ? { ...base, op: nombre } : null
+                  }
+            }
+    }
+    return null
+  }
+  if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'bind')
+    return accesoWallet(e.expression.expression, vistos)
+  if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+    const nombre = ts.isPropertyAccessExpression(e)
+      ? e.name.text
+      : e.argumentExpression && ts.isStringLiteralLike(e.argumentExpression)
+        ? e.argumentExpression.text
+        : ''
+    const m = modelo(nombre)
+    if (m) return { modelo: m, receptor: e.expression }
+    const base = accesoWallet(e.expression, vistos)
+    return base ? { ...base, op: ['call', 'apply'].includes(nombre) ? base.op : nombre } : null
+  }
+  return null
+}
+
+/** Wallet reutiliza el AST, cierre de llamadas y detector SQL existentes. */
+function revisarWallet(modulos: Map<string, Modulo>, schema: string): string[] {
+  const out: string[] = []
+  const enviador = 'src/services/wallet/notifyPassUpdated.service.ts'
+  const helper = 'src/services/wallet/walletPassOutbox.service.ts'
+  const emision = new Set(['src/services/wallet/walletPass.service.ts', 'src/services/wallet/googleWalletPass.service.ts'])
+  const cambiosEnEmision = new Set(['update', 'updateMany', 'updateManyAndReturn', 'delete', 'deleteMany'])
+  const cuerpo = schema.match(/^model\s+WalletPassOutbox\s*\{([\s\S]*?)^\}/m)?.[1].replace(/\/\/[^\n]*/g, '')
+  if (cuerpo && /@relation\b|@@?unique\b/.test(cuerpo)) out.push('(Wallet) WalletPassOutbox debe seguir sin relaciones ni índices únicos')
+  const ayudaReal = funcionExportada(modulos, helper, 'encolarAvisoDeTarjetaEnTx')
+  const campo = (e: ts.Expression | undefined, nombre: string) =>
+    e && ts.isObjectLiteralExpression(e)
+      ? e.properties.find(
+          (p): p is ts.PropertyAssignment =>
+            ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)) && p.name.text === nombre,
+        )?.initializer
+      : undefined
+  for (const m of modulos.values()) {
+    const verificar = (n: ts.Node, modelo: string, op: string) => {
+      const puro = m.archivo === helper && ownerOf(n) === 'encolarAvisoDeTarjetaEnTx'
+      if (modelo === 'WalletPass' && m.archivo !== enviador && !emision.has(m.archivo))
+        out.push(`(Wallet) ${m.archivo}:${linea(n)} escribe/bloquea WalletPass fuera del enviador/emisión`)
+      if (
+        modelo === 'WalletPassOutbox' &&
+        m.archivo !== enviador &&
+        !(puro && op === 'create') &&
+        !(emision.has(m.archivo) && cambiosEnEmision.has(op))
+      )
+        out.push(`(Wallet) ${m.archivo}:${linea(n)} ${op} de outbox fuera del helper/enviador/emisión`)
+    }
+    const visitar = (n: ts.Node) => {
+      if (ts.isCallExpression(n)) {
+        const acceso = accesoWallet(n.expression)
+        if (acceso?.op && ESCRITURAS.has(acceso.op)) verificar(n, acceso.modelo, acceso.op)
+        if (m.archivo === helper && !(acceso?.modelo === 'WalletPassOutbox' && acceso.op === 'create'))
+          out.push(`(Wallet) helper insert-only: llamada ${n.expression.getText()}`)
+        if (m.archivo === enviador && acceso?.modelo === 'WalletPassOutbox' && acceso.op?.startsWith('update')) {
+          const data = campo(n.arguments[0], 'data')
+          const reclamado = campo(data, 'reclamadoPor')
+          const where = campo(n.arguments[0], 'where')
+          let hora = false
+          const buscar = (p: ts.Node) => {
+            if (
+              ts.isPropertyAssignment(p) &&
+              (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)) &&
+              p.name.text === 'siguienteIntentoAt' &&
+              campo(p.initializer, 'lte')
+            )
+              hora = true
+            ts.forEachChild(p, buscar)
+          }
+          if (where) buscar(where)
+          if (reclamado && reclamado.kind !== ts.SyntaxKind.NullKeyword && !hora)
+            out.push(`(Wallet) ${m.archivo}:${linea(n)} reclamo Prisma sin filtro de siguienteIntentoAt en where`)
+        }
+      }
+      if (ts.isTemplateExpression(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isStringLiteral(n)) {
+        const sql = n
+          .getText()
+          .replace(/\/\*[\s\S]*?\*\/|--[^\n]*/g, ' ')
+          .replace(/'(?:''|[^'])*'/g, "''")
+        const tablas = tablasDelSql(sql, ['WalletPass', 'WalletPassOutbox'])
+        for (const modelo of tablas)
+          verificar(
+            n,
+            modelo,
+            /INSERT\s+INTO/i.test(sql)
+              ? 'create'
+              : /DELETE\s+FROM/i.test(sql)
+                ? 'delete'
+                : /UPDATE\s+"WalletPass/i.test(sql)
+                  ? 'update'
+                  : 'lock',
+          )
+        if (m.archivo === helper && receptorDelSql(n)) out.push('(Wallet) helper insert-only: no SQL crudo')
+        if (tablas.includes('WalletPassOutbox') && /\bUPDATE\b/i.test(sql)) {
+          const antesDelWhere = sql.split(/\bWHERE\b/i)[0]
+          const where = sql.slice(antesDelWhere.length)
+          const reclama = /"reclamadoPor"\s*=/.test(antesDelWhere) && !/"reclamadoPor"\s*=\s*NULL\b/i.test(antesDelWhere)
+          if (reclama && !/"siguienteIntentoAt"\s*<=/.test(where))
+            out.push(`(Wallet) ${m.archivo}:${linea(n)} reclamo SQL sin filtro de siguienteIntentoAt en WHERE`)
+        }
+      }
+      const nombre = ts.isFunctionDeclaration(n)
+        ? n.name?.text
+        : esFuncion(n) && ts.isVariableDeclaration(n.parent) && ts.isIdentifier(n.parent.name)
+          ? n.parent.name.text
+          : undefined
+      const mutadores = m.archivo.endsWith('/stampLedger.service.ts')
+        ? ['grantStamp', 'revertirDentroDelCandado', 'adjustStamps']
+        : m.archivo.endsWith('/redeemStampReward.service.ts')
+          ? ['canjearPremioEnTx', 'refundStampRewardForOrderDiscount']
+          : []
+      if (nombre && mutadores.includes(nombre)) {
+        let tiene = false
+        const buscar = (a: ts.Node) => {
+          if (ts.isCallExpression(a) && ayudaReal && resolverLlamada(modulos, m, a) === ayudaReal) tiene = true
+          ts.forEachChild(a, buscar)
+        }
+        buscar(n)
+        if (!tiene) out.push(`(Wallet) ${m.archivo}#${nombre} cambia contenido sin encolar su aviso`)
+      }
+      ts.forEachChild(n, visitar)
+    }
+    visitar(m.sf)
+  }
+  return out
+}
+
 export function revisar(fuentes: Map<string, string>, schema: string, rev: Revisado): string[] {
   const out: string[] = []
   const { padres, llaves } = padresDerivados(schema)
@@ -620,6 +773,7 @@ export function revisar(fuentes: Map<string, string>, schema: string, rev: Revis
     )
   const genericos = new Map(Object.entries(rev.openersGenericos).map(([k, v]) => [k.split('#')[1], v.cuerpo]))
   const modulos = indexar(fuentes)
+  out.push(...revisarWallet(modulos, schema))
   const inventario = new Set<string>()
   const aperturas = new Map<string, { cantidad: number; etiquetas: Set<string>; serializable: boolean }>()
   const casts = new Map<string, number>()
@@ -1118,4 +1272,132 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
           `Clasifica lo nuevo en ordenDeCandadosParte2.reviewed.json.\n${h.length} hallazgos:\n${h.join('\n')}`,
       )
   })
+})
+
+describe('Wallet · misma guardia AST real (S5)', () => {
+  const schema = ESQUEMA_DE_JUGUETE + '\nmodel WalletPassOutbox {\n id String @id\n venueId String\n}\n'
+  const wallet = (fuentes: Record<string, string>, modelo = schema) =>
+    revisar(new Map(Object.entries(fuentes)), modelo, juguete()).filter(x => x.startsWith('(Wallet)'))
+  it('walletPass.update fuera del enviador/emisión falla; dentro del enviador pasa', () => {
+    const fuente = 'export async function f(tx: any) { await tx.walletPass.update({where:{id:"p"},data:{}}) }'
+    expect(wallet({ 'src/otro.ts': fuente })).toHaveLength(1)
+    expect(wallet({ 'src/services/wallet/notifyPassUpdated.service.ts': fuente })).toEqual([])
+  })
+  it.each(['@relation(fields: [venueId], references: [id])', '@unique', '@@unique([venueId])'])(
+    'no deja meter candados implícitos en la outbox: %s',
+    restriccion => {
+      const cambio = schema.replace(' venueId String\n}\n', ' venueId String ' + restriccion + '\n}\n')
+      expect(cambio.match(/^model\s+WalletPassOutbox\s*\{([\s\S]*?)^\}/m)?.[1]).toContain(restriccion)
+      expect(cambio.match(/^model\s+Customer\s*\{([\s\S]*?)^\}/m)?.[1]).toBe(schema.match(/^model\s+Customer\s*\{([\s\S]*?)^\}/m)?.[1])
+      expect(wallet({}, cambio)).toHaveLength(1)
+      expect(wallet({})).toEqual([])
+    },
+  )
+  it('create fuera del helper/enviador falla y update de outbox en dinero también', () => {
+    expect(
+      wallet({
+        'src/otro.ts':
+          'async function f(tx:any) { await tx.walletPassOutbox.create({data:{}}); await tx.walletPassOutbox.update({data:{}}) }',
+      }),
+    ).toHaveLength(2)
+  })
+})
+
+it('Wallet: SQL crudo fuera del enviador falla; INSERT puro y reclamo con hora pasan', () => {
+  const sql =
+    'async function f(tx:any) { await tx.$executeRaw`UPDATE "WalletPass" SET revision=1`; await tx.$executeRaw`DELETE FROM "WalletPassOutbox"`; await tx.$executeRaw`INSERT INTO "WalletPassOutbox" (id) VALUES (1)` }'
+  const h = revisar(new Map([['src/otro.ts', sql]]), ESQUEMA_DE_JUGUETE, juguete()).filter(x => x.startsWith('(Wallet)'))
+  expect(h).toHaveLength(3)
+  const claim = (hora: string) =>
+    new Map([
+      [
+        'src/services/wallet/notifyPassUpdated.service.ts',
+        'async function f(tx:any) { await tx.$queryRaw`UPDATE "WalletPassOutbox" SET "reclamadoPor"=1 WHERE ' + hora + '` }',
+      ],
+    ])
+  expect(revisar(claim('id=1'), ESQUEMA_DE_JUGUETE, juguete()).filter(x => x.startsWith('(Wallet)'))).toHaveLength(1)
+  expect(
+    revisar(claim('"siguienteIntentoAt" <= clock_timestamp()'), ESQUEMA_DE_JUGUETE, juguete()).filter(x => x.startsWith('(Wallet)')),
+  ).toEqual([])
+})
+
+it('Wallet: emisión puede actualizar/borrar outbox, pero no crear obligaciones fuera del helper', () => {
+  const emission = (op: string) =>
+    revisar(
+      new Map([['src/services/wallet/walletPass.service.ts', `async function emitir(tx:any) { await tx.walletPassOutbox.${op}({}) }`]]),
+      ESQUEMA_DE_JUGUETE,
+      juguete(),
+    ).filter(x => x.startsWith('(Wallet)'))
+  expect(emission('update')).toEqual([])
+  expect(emission('deleteMany')).toEqual([])
+  expect(emission('create')).toHaveLength(1)
+})
+it('Wallet: un claim que también incrementa intentos sigue necesitando filtro de hora; soltar NULL no es reclamar', () => {
+  const h = (valor: string) =>
+    revisar(
+      new Map([
+        [
+          'src/services/wallet/notifyPassUpdated.service.ts',
+          `async function f(tx:any) { await tx.$queryRaw\`UPDATE "WalletPassOutbox" SET "reclamadoPor" = ${valor}, "intentos" = "intentos" + 1 WHERE id = 1\` }`,
+        ],
+      ]),
+      ESQUEMA_DE_JUGUETE,
+      juguete(),
+    ).filter(x => x.startsWith('(Wallet)'))
+  expect(h("'token'")).toHaveLength(1)
+  expect(h('NULL')).toEqual([])
+})
+
+it.each([
+  'const pases = tx.walletPass; await pases.update({})',
+  'const { walletPass: pases } = tx; await pases.deleteMany({})',
+  'const cambiar = tx.walletPass.update.bind(tx.walletPass); await cambiar({})',
+  'const ejecutar = tx.$executeRaw; await ejecutar`DELETE FROM "WalletPassOutbox"`',
+])('Wallet familia: escritor con alias fuera del enviador se detecta: %s', cuerpo => {
+  const h = revisar(new Map([['src/otro.ts', `async function f(tx:any) { ${cuerpo} }`]]), ESQUEMA_DE_JUGUETE, juguete())
+  expect(h.filter(x => x.startsWith('(Wallet)'))).toHaveLength(1)
+})
+it('Wallet familia: helper importado por namespace se sigue; una función local con el mismo nombre no sirve', () => {
+  const helper = 'src/services/wallet/walletPassOutbox.service.ts'
+  const fuente = 'src/services/wallet/stampLedger.service.ts'
+  const base = new Map([[helper, 'export async function encolarAvisoDeTarjetaEnTx(tx:any) { await tx.walletPassOutbox.create({}) }']])
+  const h = (codigo: string) =>
+    revisar(new Map([...base, [fuente, codigo]]), ESQUEMA_DE_JUGUETE, juguete()).filter(x => x.startsWith('(Wallet)'))
+  expect(
+    h(
+      "import * as bandeja from './walletPassOutbox.service'; export async function grantStamp(tx:any) { await bandeja.encolarAvisoDeTarjetaEnTx(tx) }",
+    ),
+  ).toEqual([])
+  expect(
+    h(
+      "import { encolarAvisoDeTarjetaEnTx } from './walletPassOutbox.service'; export async function grantStamp(tx:any) { async function encolarAvisoDeTarjetaEnTx() {} await encolarAvisoDeTarjetaEnTx() }",
+    ),
+  ).toHaveLength(1)
+})
+it.each([
+  'SET "reclamadoPor" = 1, "siguienteIntentoAt" = CASE WHEN "siguienteIntentoAt" <= clock_timestamp() THEN clock_timestamp() ELSE "siguienteIntentoAt" END WHERE id = 1',
+  'SET "reclamadoPor" = 1 WHERE id = 1 -- "siguienteIntentoAt" <= clock_timestamp()',
+])('Wallet familia: comparar la hora en SET o comentario no filtra el claim: %s', sql => {
+  const codigo = `async function f(tx:any) { await tx.$queryRaw\`UPDATE "WalletPassOutbox" ${sql}\` }`
+  expect(
+    revisar(new Map([['src/services/wallet/notifyPassUpdated.service.ts', codigo]]), ESQUEMA_DE_JUGUETE, juguete()).filter(x =>
+      x.startsWith('(Wallet)'),
+    ),
+  ).toHaveLength(1)
+})
+it('Wallet familia: un claim Prisma exige la hora en where y una liberación NULL sigue siendo válida', () => {
+  const h = (where: string, valor: string) =>
+    revisar(
+      new Map([
+        [
+          'src/services/wallet/notifyPassUpdated.service.ts',
+          `async function f(tx:any) { await tx.walletPassOutbox.updateMany({ where: { ${where} }, data: { reclamadoPor: ${valor}, siguienteIntentoAt: new Date() } }) }`,
+        ],
+      ]),
+      ESQUEMA_DE_JUGUETE,
+      juguete(),
+    ).filter(x => x.startsWith('(Wallet)'))
+  expect(h('id: "x"', '"token"')).toHaveLength(1)
+  expect(h('siguienteIntentoAt: { lte: new Date() }', '"token"')).toEqual([])
+  expect(h('id: "x"', 'null')).toEqual([])
 })

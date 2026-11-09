@@ -15,6 +15,7 @@ import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
  */
 const PRESUPUESTO_DEL_SELLO = { maxWait: 10_000, timeout: 15_000 } as const
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
+import { encolarAvisoDeTarjetaEnTx } from './walletPassOutbox.service'
 import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
 
 /**
@@ -382,6 +383,7 @@ export async function grantStamp(
           select: { stampsEarned: true, stampsRequired: true },
         })
 
+        await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO' })
         const ganados = actualizada.stampsEarned
         const meta = actualizada.stampsRequired ?? card.stampsRequired
         if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
@@ -636,6 +638,7 @@ export async function reverseStampForOrder(
         data: { stampsEarned: { decrement: cantidad }, ...(reabrir ? { completedAt: null } : {}) },
       })
     }
+    if (elegida) await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO_REVERTIDO' })
     return true
   }
   let revertida: boolean
@@ -792,6 +795,7 @@ export async function adjustStamps(venueId: string, customerId: string, input: A
       // El contador en la MISMA transacción que su asiento. Valor absoluto: dentro del candado, todo el que lo mueve está formado.
       await tx.stampCard.update({ where: { id: card.id }, data: { stampsEarned: to } })
 
+      await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'AJUSTE' })
       const base = { stampCardId: card.id, from, to, delta, stampsRequired: card.stampsRequired }
       if (to < card.stampsRequired) return { ...base, completed: false }
       const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
