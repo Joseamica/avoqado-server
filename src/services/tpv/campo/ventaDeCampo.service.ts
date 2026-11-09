@@ -217,8 +217,7 @@ async function tomarOCrearFicha(t: Trabajo): Promise<VentaDeCampo | ResultadoVen
         if (count === 0) throw enProceso()
         continue
       }
-      await revisarLaReanudada(t, tomada)
-      return tomada
+      return await revisarLaReanudada(t, tomada)
     }
 
     let revisada: { serializedItemId: string; precio: Prisma.Decimal }
@@ -281,15 +280,19 @@ async function revisarContraHoy(t: Trabajo): Promise<{ serializedItemId: string;
  * Codex C1: una ficha reanudada SIN dinero se revisa otra vez contra lo de HOY (la SIM, su custodia, el módulo, las ventas y
  * el precio de la ficha): entre la caída y el reintento pudieron cambiar. Un rechazo definitivo usa la misma limpieza del
  * cobro (cancela la cuenta sin cobros y borra la ficha) y sale el rechazo. Con un cobro (en la ficha, con la llave o en la
- * cuenta) no se revisa nada: después del dinero, la recuperación de siempre.
+ * cuenta) no se revisa nada: después del dinero, la recuperación de siempre. Devuelve la ficha con la que se sigue.
  */
-async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<void> {
-  if (ficha.paymentId || (await cobroConLaLlave(t)) || (ficha.orderId && !(await sinCobros(t, ficha.orderId)))) return
+async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<VentaDeCampo> {
+  if (ficha.paymentId || (await cobroConLaLlave(t)) || (ficha.orderId && !(await sinCobros(t, ficha.orderId)))) return ficha
   try {
     if (ficha.orderId) await assertVenueSalesEnabled(t.venueId) // sin orden, `sellSerializedItem` lo revisa
     await revisarLaSimYElPrecio(t, new Prisma.Decimal(ficha.precio))
+    return ficha
   } catch (error) {
-    if (ficha.orderId) throw await limpiarTrasElCobro(t, ficha.id, ficha.orderId, error)
+    if (ficha.orderId) {
+      if (!esAppError4xx(error)) throw await limpiarTrasElCobro(t, ficha.id, ficha.orderId, error)
+      return await antesDeRechazar(t, ficha, ficha.orderId, error)
+    }
     if (!esAppError4xx(error)) {
       await soltar(t, ficha.id)
       throw error
@@ -298,6 +301,47 @@ async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<void
     throw count === 1 ? error : enProceso()
   }
 }
+
+/**
+ * Codex r2 #1: la petición anterior (A), con la ocupación ya vencida, pudo cobrar ESTA orden y marcar la SIM entre nuestra
+ * primera revisión y el escaneo. Antes de dar un rechazo definitivo se vuelve a buscar el cobro de la llave: si es el de esta
+ * venta, se guarda y se sigue con los pasos 7 y 8 (la venta se completa); con cualquier otro dinero en camino (un cobro de la
+ * llave que no cuadra, un cobro en la cuenta o la SIM vendida en un renglón de esta orden) sale VENTA_EN_PROCESO, y el
+ * reintento va por la recuperación de siempre. Sólo sin nada de eso se limpia y sale el rechazo.
+ */
+async function antesDeRechazar(t: Trabajo, ficha: VentaDeCampo, orderId: string, error: AppError): Promise<VentaDeCampo> {
+  const pago = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId: t.venueId, idempotencyKey: t.llave } },
+    select: { id: true, orderId: true, venueId: true, amount: true, status: true },
+  })
+  if (pago && esDeEstaVenta(t, pago, orderId, new Prisma.Decimal(ficha.precio))) {
+    await escribir(t, ficha.id, { paymentId: pago.id })
+    return { ...ficha, paymentId: pago.id }
+  }
+  if (pago || !(await sinCobros(t, orderId)) || (await vendidaEnEstaOrden(ficha, orderId))) {
+    await soltar(t, ficha.id)
+    throw comoReintentable(t, error, 'un rechazo de la revisión con dinero en camino')
+  }
+  throw await limpiarTrasElCobro(t, ficha.id, orderId, error)
+}
+
+/** La SIM quedó vendida en un renglón de ESTA orden: es nuestra venta, nunca un rechazo. */
+async function vendidaEnEstaOrden(ficha: VentaDeCampo, orderId: string): Promise<boolean> {
+  const sim = await prisma.serializedItem.findUnique({
+    where: { id: ficha.serializedItemId! },
+    select: { status: true, orderItemId: true },
+  })
+  if (sim?.status !== 'SOLD' || !sim.orderItemId) return false
+  return !!(await prisma.orderItem.findFirst({ where: { id: sim.orderItemId, orderId }, select: { id: true } }))
+}
+
+/** Paso 6 (Codex r3 #6): el cobro de la llave es el de ESTA venta (su orden, su sucursal, su importe y completado). */
+const esDeEstaVenta = (
+  t: Trabajo,
+  pago: { orderId: string | null; venueId: string; amount: Prisma.Decimal | number; status: string },
+  orderId: string,
+  precio: Prisma.Decimal,
+) => pago.orderId === orderId && pago.venueId === t.venueId && new Prisma.Decimal(pago.amount).equals(precio) && pago.status === 'COMPLETED'
 
 /** La SIM (registrada, sin vender, en custodia de la persona) y el precio contra el de su categoría HOY. */
 async function revisarLaSimYElPrecio(t: Trabajo, precio: Prisma.Decimal): Promise<{ serializedItemId: string; precio: Prisma.Decimal }> {
@@ -332,14 +376,7 @@ async function cobrar(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise
     throw await limpiarTrasElCobro(t, ficha.id, orderId, error)
   }
   // Codex r3 #6: el cobro que devuelve la llave tiene que ser de ESTA venta.
-  if (
-    pago.orderId !== orderId ||
-    pago.venueId !== t.venueId ||
-    !new Prisma.Decimal(pago.amount).equals(precio) ||
-    pago.status !== 'COMPLETED'
-  ) {
-    throw await limpiarTrasElCobro(t, ficha.id, orderId, llaveReusada())
-  }
+  if (!esDeEstaVenta(t, pago, orderId, precio)) throw await limpiarTrasElCobro(t, ficha.id, orderId, llaveReusada())
   await escribir(t, ficha.id, { paymentId: pago.id })
   return pago.id
 }

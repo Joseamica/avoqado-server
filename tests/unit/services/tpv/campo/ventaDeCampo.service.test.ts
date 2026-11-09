@@ -142,6 +142,8 @@ beforeEach(() => {
   db.payment.count = jest.fn().mockResolvedValue(0)
   db.serializedItem.findUniqueOrThrow = jest.fn().mockResolvedValue({ id: 'sim1', serialNumber: SIM, status: 'SOLD', orderItemId: 'oi1' })
   db.orderItem.findFirstOrThrow = jest.fn().mockResolvedValue({ id: 'oi1' })
+  db.serializedItem.findUnique = jest.fn().mockResolvedValue({ status: 'AVAILABLE', orderItemId: null })
+  db.orderItem.findFirst = jest.fn().mockResolvedValue(null)
   db.saleVerification.findUnique = jest.fn().mockResolvedValue(null)
   db.order.findUnique = jest.fn().mockResolvedValue({ status: 'PENDING' })
   scan.mockResolvedValue(simDisponible())
@@ -817,5 +819,69 @@ describe('una ficha reanudada sin dinero se revisa contra lo de HOY (Codex C1)',
     const r = await registrarVentaDeCampo(ctx, venta())
     expect(scan).not.toHaveBeenCalled()
     expect(r).toMatchObject({ orderId: 'o9', paymentId: 'p1' })
+  })
+})
+
+describe('antes de un rechazo de la revisión, el cobro de la llave se busca otra vez (Codex r2 #1)', () => {
+  const conOrden = () => sembrar({ orderId: 'o9', ocupadaHasta: new Date(Date.now() - 1) })
+  const pagoDeA = (extra: Record<string, unknown> = {}) => pagoDe({ id: 'pA', orderId: 'o9', ...extra })
+  /** A (con su ocupación vencida) cobra ESTA orden y marca la SIM entre nuestra primera revisión y el escaneo. */
+  const aCobraDuranteElEscaneo = (pago: Record<string, unknown> | null, resultado: unknown, cobrosEnLaCuenta = pago ? 1 : 0) =>
+    scan.mockImplementation(async () => {
+      if (pago) db.payment.findUnique.mockResolvedValue(pago)
+      db.payment.count.mockResolvedValue(cobrosEnLaCuenta)
+      db.serializedItem.findUnique.mockResolvedValue({ status: 'SOLD', orderItemId: 'oi1' })
+      return resultado
+    })
+  const yaVendida = { status: 'already_sold', found: true, item: { id: 'sim1', category: {} } }
+
+  it.each([
+    ['ya vendida (por la marca de A en esta orden)', yaVendida],
+    ['con otro precio', simDisponible(D(120))],
+  ])(
+    'el cobro de A confirma entre la revisión y el escaneo (%s): se toma, se completa la venta y no se cancela nada',
+    async (_n, resultado) => {
+      conOrden()
+      aCobraDuranteElEscaneo(pagoDeA(), resultado)
+
+      const r = await registrarVentaDeCampo(ctx, venta())
+
+      expect(r).toMatchObject({ orderId: 'o9', paymentId: 'pA', saleVerificationId: 'sv1', repetida: false })
+      expect(ficha()).toMatchObject({ estado: 'COMPLETA', orderId: 'o9', paymentId: 'pA', ocupacion: null })
+      expect(cobrar).not.toHaveBeenCalled()
+      expect(cancelar).not.toHaveBeenCalled()
+      expect(evidencia).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pA' }))
+    },
+  )
+
+  it.each([
+    ['un cobro de la llave que no cuadra (otro importe)', () => aCobraDuranteElEscaneo(pagoDeA({ amount: D(50) }), yaVendida)],
+    ['un cobro en la cuenta sin la llave', () => aCobraDuranteElEscaneo(null, yaVendida, 1)],
+    [
+      'la SIM vendida en un renglón de ESTA orden, sin cobro a la vista',
+      () => {
+        aCobraDuranteElEscaneo(null, yaVendida)
+        db.orderItem.findFirst.mockResolvedValue({ id: 'oi1' })
+      },
+    ],
+  ])('dinero en camino (%s) → VENTA_EN_PROCESO, sin cancelar ni borrar la ficha', async (_n, preparar) => {
+    conOrden()
+    preparar()
+
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(cancelar).not.toHaveBeenCalled()
+    expect(cobrar).not.toHaveBeenCalled()
+    expect(ficha()).toMatchObject({ estado: 'EN_CURSO', orderId: 'o9', paymentId: null, ocupacion: null })
+  })
+
+  it('la SIM vendida en un renglón de OTRA orden (la PAX) y sin dinero en la nuestra → SIM_YA_VENDIDA definitivo, con la limpieza', async () => {
+    conOrden()
+    scan.mockResolvedValue(yaVendida)
+    db.serializedItem.findUnique.mockResolvedValue({ status: 'SOLD', orderItemId: 'oi-pax' })
+
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'SIM_YA_VENDIDA'))
+    expect(db.orderItem.findFirst).toHaveBeenCalledWith({ where: { id: 'oi-pax', orderId: 'o9' }, select: { id: true } })
+    expect(cancelar).toHaveBeenCalledWith(V, 'o9', 'Venta del celular rechazada: SIM_YA_VENDIDA', 'staff1')
+    expect(filas).toHaveLength(0)
   })
 })

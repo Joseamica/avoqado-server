@@ -287,6 +287,50 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     },
   )
 
+  it('Codex r2 #1: la petición vieja cobra ESTA orden con la llave justo antes del escaneo del reintento → el reintento completa la venta, no la rechaza', async () => {
+    const sim = await nuevaSim(categoriaDeCaja)
+    const cuerpo = ventaDe(sim.serialNumber)
+    jest.spyOn(pagos, 'recordOrderPayment').mockRejectedValueOnce(new Error('se cortó la conexión'))
+    expect((await vender(cuerpo)).status).toBe(500)
+    const orderId = (await filas(sim.serialNumber, cuerpo.llave)).ordenes[0].id
+
+    // Entre la primera revisión del reintento (sin cobro) y su escaneo, «A» cobra esa orden con la llave y marca la SIM.
+    const escaneoReal = serializedInventoryService.scan.bind(serializedInventoryService)
+    jest.spyOn(serializedInventoryService, 'scan').mockImplementationOnce(async (...args) => {
+      const cobroDeA = await request(server)
+        .post(`/api/v1/tpv/venues/${venueId}/orders/${orderId}`)
+        .set('Authorization', `Bearer ${token()}`)
+        .send({
+          venueId,
+          amount: 0,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          staffId: promotorId,
+          idempotencyKey: cuerpo.llave,
+          serialNumbers: [sim.serialNumber],
+          isPortabilidad: false,
+        })
+      expect(cobroDeA.status).toBe(201)
+      return escaneoReal(...args)
+    })
+
+    const reintento = await vender(cuerpo)
+
+    expect(reintento.status).toBe(201)
+    expect(reintento.body).toMatchObject({ orderId, repetida: false })
+    const { ordenes, cobros, fichas, evidencias } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(ordenes).toHaveLength(1)
+    expect(ordenes[0].status).not.toBe('CANCELLED')
+    expect(cobros).toHaveLength(1)
+    expect(reintento.body.paymentId).toBe(cobros[0].id)
+    expect(fichas[0]).toMatchObject({ estado: 'COMPLETA', paymentId: cobros[0].id })
+    expect(evidencias).toHaveLength(1)
+    expect((await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).status).toBe('SOLD')
+  })
+
   it('la SIM no se marcó (el cobro se tragó el error): el reintento la marca en su renglón', async () => {
     const sim = await nuevaSim(categoriaDeCaja)
     const cuerpo = ventaDe(sim.serialNumber)
