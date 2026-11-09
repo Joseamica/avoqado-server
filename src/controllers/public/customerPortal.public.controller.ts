@@ -50,9 +50,11 @@ export async function login(req: Request, res: Response, next: NextFunction) {
  */
 export async function getPortal(req: Request, res: Response, next: NextFunction) {
   try {
-    const { customerId, venueId } = (req as any).customerAuth as CustomerAuthContext
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    const { customerId, venueId } = auth
 
-    const result = await customerPortalService.getCustomerPortal(venueId, customerId)
+    // S7: las reservas de invitada dependen de los contactos que probó ESTA sesión.
+    const result = await customerPortalService.getCustomerPortal(venueId, customerId, auth)
 
     const bookingAccess = await computeBookingAccess(venueId, customerId)
     res.json({ ...result, ...withBookingAccess(bookingAccess) })

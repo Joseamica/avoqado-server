@@ -1,16 +1,28 @@
-import { CustomerApprovalStatus, Prisma } from '@prisma/client'
+import { CustomerApprovalStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
-import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ServiceUnavailableError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.service'
-import { canonicalPhoneE164, phonesMatch, phoneLast10, normalizarTelefonoMx, formaLegadaDeTelefonoMx } from '@/utils/phone'
+import { canonicalPhoneE164, normalizarTelefonoMx } from '@/utils/phone'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
-import { ponerNombreSiFalta, splitName } from '@/services/customer/customerName'
+import { ponerNombreSiFalta } from '@/services/customer/customerName'
+import { verifyGoogleIdToken } from '@/services/consumer/auth.consumer.service'
+import type { ContactoProbado } from '@/jwt.service'
+import {
+  consumerDelContacto,
+  crearFichaConConsumer,
+  entrarConContacto,
+  repetirSiChoca,
+  respuestaDeEntrada,
+  verificarPruebaPendiente,
+  type FichaNueva,
+  type SesionEmitida,
+} from '@/services/public/sesionDeCliente.service'
 
 const TTL_MS = 10 * 60 * 1000
 /**
@@ -30,12 +42,18 @@ function destinoDelReto(channel: 'whatsapp' | 'email', destination: string): str
   return telefono
 }
 
-export async function requestOtp(args: {
-  venueId: string
-  channel: 'whatsapp' | 'email'
-  destination: string
-  ip?: string | null
-}): Promise<{ ok: true }> {
+type PedirCodigo = { venueId: string; channel: 'whatsapp' | 'email'; destination: string; ip?: string | null }
+
+export async function requestOtp(args: PedirCodigo): Promise<{ ok: true }> {
+  await pedirCodigo(args)
+  return { ok: true }
+}
+
+/**
+ * El reto y el envío de `requestOtp`. `true` sólo si el proveedor aceptó el mensaje: `requestOtp` lo ignora (como siempre: la página no
+ * dice si se mandó), pero Google lo necesita para no afirmar «te mandamos un código» cuando el correo no salió (codex-s7-r1 #2).
+ */
+async function pedirCodigo(args: PedirCodigo): Promise<boolean> {
   const destination = destinoDelReto(args.channel, args.destination)
   const now = Date.now()
 
@@ -69,23 +87,24 @@ export async function requestOtp(args: {
   })
 
   try {
-    if (args.channel === 'whatsapp') await sendOtpWhatsApp(destination, code)
-    else await emailService.sendOtpCodeEmail(destination, code)
+    return args.channel === 'whatsapp'
+      ? (await sendOtpWhatsApp(destination, code)) !== false
+      : (await emailService.sendOtpCodeEmail(destination, code)) === true
   } catch (err) {
     logger.warn(`[OTP] send failed for ${args.channel}:${destination}: ${(err as Error).message}`)
+    return false
   }
-  return { ok: true }
 }
 
-export async function verifyOtp(args: {
+type VerifyOtpArgs = {
   venueId: string
   channel: 'whatsapp' | 'email'
   destination: string
   code: string
-  purpose?: 'ORDERING'
   /** Spec 2026-10-14 §3.3: nombre del alta. Sólo se usa si el cliente no tiene uno. */
   firstName?: string | null
-}): Promise<{
+}
+type ResultadoDeHoy = {
   token: string
   /**
    * Fase 1: estado de aprobación de la cuenta de reservas. Sin `purpose`, el que resulta de activarla, y el controller lo compone
@@ -93,7 +112,19 @@ export async function verifyOtp(args: {
    */
   approvalStatus: CustomerApprovalStatus
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
-}> {
+}
+/**
+ * S7 (P2-1): la sesión única. Acepta WhatsApp o correo, NO activa reservas (S6 lo hace al reservar o abrir el portal) y responde la
+ * `SesionEmitida` o, sin ficha y con «¿ya eres cliente?» (`alNoEncontrar: 'PREGUNTAR'`), la prueba del contacto sin crear nada.
+ * `vincular` es la `pruebaPendiente` de la PRIMERA prueba: su contacto se liga a la ficha que encuentra ESTA.
+ */
+type VerifyOtpSesion = VerifyOtpArgs & { purpose: 'SESSION'; alNoEncontrar?: 'PREGUNTAR'; vincular?: string }
+
+export async function verifyOtp(args: VerifyOtpSesion): Promise<SesionEmitida | FichaNueva>
+export async function verifyOtp(args: VerifyOtpArgs & { purpose?: 'ORDERING' }): Promise<ResultadoDeHoy>
+export async function verifyOtp(
+  args: VerifyOtpArgs & { purpose?: 'ORDERING' | 'SESSION'; alNoEncontrar?: 'PREGUNTAR'; vincular?: string },
+): Promise<ResultadoDeHoy | SesionEmitida | FichaNueva> {
   const destination = destinoDelReto(args.channel, args.destination)
 
   // H1 (pedidos en línea): verificar para PEDIR prueba un TELÉFONO; un código por correo no lo prueba. Se rechaza antes de tocar
@@ -101,6 +132,8 @@ export async function verifyOtp(args: {
   if (args.purpose === 'ORDERING' && args.channel !== 'whatsapp') {
     throw new BadRequestError('Para pedir, verifica tu teléfono por WhatsApp.', 'ORDERING_REQUIRES_PHONE')
   }
+  // S7: una prueba que no sirve se rechaza también ANTES del reto (400, sin gastar intento).
+  const vinculo = args.purpose === 'SESSION' && args.vincular ? verificarPruebaPendiente(args.vincular, args.venueId) : null
 
   // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
   // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
@@ -125,22 +158,31 @@ export async function verifyOtp(args: {
   if (!apartado) throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
   if (challenge.codeHash !== hashOtpCode(args.code)) throw new BadRequestError('Código incorrecto.')
 
+  if (args.purpose === 'SESSION') {
+    const contacto: ContactoProbado =
+      args.channel === 'whatsapp'
+        ? { tipo: 'PHONE', valor: destination, metodo: 'WHATSAPP', probadoEn: Math.floor(Date.now() / 1000) }
+        : { tipo: 'EMAIL', valor: destination, metodo: 'EMAIL_CODE', probadoEn: Math.floor(Date.now() / 1000) }
+    // R2: si dos entradas escriben el mismo contacto a la vez, la perdedora se repite entera (también el consumo del reto, que su
+    // rollback devolvió) y ya ve a la ganadora.
+    const entrada = await repetirSiChoca(() =>
+      withDeadlockRetry(
+        async tx => {
+          await consumirReto(tx, challenge.id)
+          return entrarConContacto(tx, args.venueId, contacto, { alNoEncontrar: args.alNoEncontrar, vinculo, firstName: args.firstName })
+        },
+        { etiqueta: 'verifyOtp' },
+      ),
+    )
+    return respuestaDeEntrada(args.venueId, contacto, entrada)
+  }
+
   // Fase 1: consumir el reto, resolver la identidad (Consumer + Customer + vínculo) y decidir
   // la aprobación viven en UNA transacción. Antes eran escrituras sueltas: si algo tronaba a
   // medias, el código quedaba quemado y el Consumer huérfano, y el cliente tenía que pedir otro.
   const { customer, approvalStatus } = await withDeadlockRetry(
     async tx => {
-      // 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
-      // simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
-      // token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
-      // exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
-      const consumed = await tx.otpChallenge.updateMany({
-        where: { id: challenge.id, consumedAt: null },
-        data: { consumedAt: new Date() },
-      })
-      if (consumed.count !== 1) {
-        throw new BadRequestError('Ese código ya se usó. Pide uno nuevo.')
-      }
+      await consumirReto(tx, challenge.id)
 
       const customer = await resolveIdentity(
         tx,
@@ -179,61 +221,63 @@ export async function verifyOtp(args: {
   }
 }
 
-// Look up a name from this identity's most recent past guest reservation, so a
-// returning guest who booked without ever registering doesn't land on a blank
-// "Hola" after their first WhatsApp login. Matching is canonical (phonesMatch)
-// for phone; exact for email. Bounded to the venue + a small recent window.
-async function findGuestNameFromPastReservations(
-  tx: Prisma.TransactionClient,
-  venueId: string,
-  key: { phone?: string; email?: string },
-): Promise<{ firstName?: string; lastName?: string }> {
-  if (key.email) {
-    const r = await tx.reservation.findFirst({
-      where: { venueId, guestEmail: key.email, guestName: { not: null } },
-      orderBy: { createdAt: 'desc' },
-      select: { guestName: true },
-    })
-    return splitName(r?.guestName)
+/**
+ * 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
+ * simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
+ * token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
+ * exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
+ */
+async function consumirReto(tx: TxConReintento, challengeId: string): Promise<void> {
+  const consumed = await tx.otpChallenge.updateMany({
+    where: { id: challengeId, consumedAt: null },
+    data: { consumedAt: new Date() },
+  })
+  if (consumed.count !== 1) {
+    throw new BadRequestError('Ese código ya se usó. Pide uno nuevo.')
   }
-  if (key.phone) {
-    const last10 = phoneLast10(key.phone)
-    if (!last10) return {}
-    // Coarse prefilter by trailing 10 digits, normalizing the STORED column in
-    // SQL (strip non-digits, take last 10) so guest-typed formatting
-    // ("55 9999 0001") still matches — a Prisma `endsWith` compares the raw
-    // string and would miss it. phonesMatch below is the canonical verify.
-    const candidates = await tx.$queryRaw<{ guestName: string | null; guestPhone: string | null }[]>`
-      SELECT "guestName", "guestPhone"
-      FROM "Reservation"
-      WHERE "venueId" = ${venueId}
-        AND "guestName" IS NOT NULL
-        AND right(regexp_replace("guestPhone", '[^0-9]', '', 'g'), 10) = ${last10}
-      ORDER BY "createdAt" DESC
-      LIMIT 20
-    `
-    const match = candidates.find(c => phonesMatch(c.guestPhone, key.phone))
-    return splitName(match?.guestName)
-  }
-  return {}
 }
 
-async function resolveIdentity(tx: TxConReintento, venueId: string, key: { phone?: string; email?: string }) {
-  let consumer
-  if (key.phone) {
-    // Un cliente que entró con el OTP viejo tiene su Consumer SIN lada (`+5543453965`). Se busca también esa forma para no
-    // crearle un segundo Consumer; si existen las dos, gana la más antigua (lo mismo que ya pasaba con dos del mismo teléfono).
-    const legado = formaLegadaDeTelefonoMx(key.phone)
-    const matches = await tx.consumer.findMany({
-      where: { phone: legado ? { in: [key.phone, legado] } : key.phone },
-      orderBy: { createdAt: 'asc' },
-      take: 2,
-    })
-    if (matches.length > 1) logger.warn(`[OTP] multiple Consumers share phone ${key.phone}; using oldest ${matches[0].id}`)
-    consumer = matches[0] ?? (await tx.consumer.create({ data: { phone: key.phone } }))
-  } else {
-    consumer = (await tx.consumer.findFirst({ where: { email: key.email } })) ?? (await tx.consumer.create({ data: { email: key.email } }))
+/**
+ * S7 (P2-1): Google, de respaldo. Sólo un correo que Google da por suyo (`emailTrusted`: Gmail o Workspace, el verificador de la app
+ * de clientes, sin otra política) prueba el correo. Con otro correo, el SERVIDOR manda el código por correo (fuera de la Tx) y
+ * responde 409: la clienta lo confirma con `auth/otp/verify`. Nunca se dice «te mandamos» si el envío no se pidió.
+ */
+export async function entrarConGoogle(
+  venueId: string,
+  idToken: string,
+  opciones: { alNoEncontrar?: 'PREGUNTAR'; vincular?: string; firstName?: string | null; ip?: string | null },
+): Promise<SesionEmitida | FichaNueva> {
+  const vinculo = opciones.vincular ? verificarPruebaPendiente(opciones.vincular, venueId) : null
+  const perfil = await verifyGoogleIdToken(idToken)
+  if (!perfil.email) throw new BadRequestError('Google no compartió tu correo. Entra con un código.', 'GOOGLE_EMAIL_MISSING')
+  const email = normalizeEmail(perfil.email)
+  if (!perfil.emailTrusted) {
+    if (!(await pedirCodigo({ venueId, channel: 'email', destination: email, ip: opciones.ip }))) {
+      throw new ServiceUnavailableError(
+        'No pudimos mandarte el código a tu correo. Intenta otra vez o entra con WhatsApp.',
+        'OTP_SEND_FAILED',
+      )
+    }
+    throw new ConflictError('Te mandamos un código a tu correo para confirmarlo', 'GOOGLE_EMAIL_NOT_TRUSTED')
   }
+  const contacto: ContactoProbado = { tipo: 'EMAIL', valor: email, metodo: 'GOOGLE', probadoEn: Math.floor(Date.now() / 1000) }
+  const entrada = await repetirSiChoca(() =>
+    withDeadlockRetry(
+      tx =>
+        entrarConContacto(tx, venueId, contacto, {
+          alNoEncontrar: opciones.alNoEncontrar,
+          vinculo,
+          firstName: opciones.firstName ?? perfil.firstName,
+        }),
+      { etiqueta: 'entrarConGoogle' },
+    ),
+  )
+  return respuestaDeEntrada(venueId, contacto, entrada)
+}
+
+/** El alta de hoy (pedidos y reservas sin `purpose`): sin cambios de comportamiento; la creación vive en `sesionDeCliente`. */
+async function resolveIdentity(tx: TxConReintento, venueId: string, key: { phone?: string; email?: string }) {
+  const consumer = await consumerDelContacto(tx, key)
 
   const where = key.phone ? { venueId_phone: { venueId, phone: key.phone } } : { venueId_email: { venueId, email: key.email! } }
   let customer = await tx.customer.findUnique({ where: where as any })
@@ -248,17 +292,7 @@ async function resolveIdentity(tx: TxConReintento, venueId: string, key: { phone
   }
 
   if (!customer) {
-    const seededName = await findGuestNameFromPastReservations(tx, venueId, key)
-    customer = await tx.customer.create({
-      data: {
-        venueId,
-        consumerId: consumer.id,
-        provider: 'PHONE',
-        ...(key.phone ? { phone: key.phone } : { email: key.email }),
-        ...(seededName.firstName ? { firstName: seededName.firstName } : {}),
-        ...(seededName.lastName ? { lastName: seededName.lastName } : {}),
-      },
-    })
+    customer = await crearFichaConConsumer(tx, venueId, consumer.id, key)
   } else if (!customer.consumerId) {
     customer = await tx.customer.update({ where: { id: customer.id }, data: { consumerId: consumer.id } })
   }

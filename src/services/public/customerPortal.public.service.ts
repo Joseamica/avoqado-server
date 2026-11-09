@@ -14,7 +14,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
-import { generateCustomerToken } from '@/jwt.service'
+import { generateCustomerSession, type ContactoProbado } from '@/jwt.service'
 import { phonesMatch } from '@/utils/phone'
 
 /**
@@ -54,7 +54,9 @@ export async function loginCustomer(venueId: string, email: string, password: st
     throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
   }
 
-  const token = generateCustomerToken(customer.id, venueId)
+  // S7 (P2-1, codex-plan2-r1 #2): la sesión única, SIN contactos probados. La contraseña prueba la ficha, no su correo: el panel
+  // cambia el correo sin probarlo (`customer.dashboard.service.ts` `updateCustomer`) y la contraseña sigue igual.
+  const token = generateCustomerSession({ sub: customer.id, venueId, v: customer.versionDeSesion, contactos: [] })
 
   return {
     token,
@@ -110,8 +112,12 @@ export async function updateProfile(venueId: string, customerId: string, data: {
 
 /**
  * Get all customer portal data (requires authenticated customer)
+ *
+ * S7 (P2-1): las reservas de INVITADA (con su `cancelSecret`) se buscan sólo con los contactos que ESTA sesión probó; antes, con el
+ * teléfono y el correo de la ficha, que el panel puede cambiar sin probar. Sin contactos (token de reservas de hoy, contraseña) sólo
+ * se ven las de la ficha y `invitadaRequiereEntrar` le pide a la tienda «Entra otra vez para ver tus reservas como invitada».
  */
-export async function getCustomerPortal(venueId: string, customerId: string) {
+export async function getCustomerPortal(venueId: string, customerId: string, auth?: { contactos: ContactoProbado[] }) {
   const customer = await prisma.customer.findFirst({
     where: { id: customerId, venueId },
     select: {
@@ -125,18 +131,30 @@ export async function getCustomerPortal(venueId: string, customerId: string) {
     },
   })
 
+  const contactos = auth?.contactos ?? []
+  const invitadaRequiereEntrar = contactos.length === 0
   if (!customer) {
-    return { customer: null, credits: { purchases: [] }, reservations: { upcoming: [], past: [] } }
+    return { customer: null, credits: { purchases: [] }, reservations: { upcoming: [], past: [] }, invitadaRequiereEntrar }
   }
 
   const now = new Date()
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
 
-  // Build contact filter for reservations (customer may have booked with phone/email before account)
+  // Sus reservas, y las de invitada con un contacto probado (en su forma probada y, si es el mismo, en la que guarda la ficha).
   const contactFilter = [
     { customerId: customer.id },
-    ...(customer.phone ? [{ guestPhone: customer.phone }] : []),
-    ...(customer.email ? [{ guestEmail: customer.email }] : []),
+    ...contactos.map(c =>
+      c.tipo === 'PHONE'
+        ? {
+            guestPhone: {
+              in: [
+                c.valor,
+                ...(customer.phone && customer.phone !== c.valor && phonesMatch(c.valor, customer.phone) ? [customer.phone] : []),
+              ],
+            },
+          }
+        : { guestEmail: { equals: c.valor, mode: 'insensitive' as const } },
+    ),
   ]
 
   const [purchases, upcomingReservations, pastReservations] = await Promise.all([
@@ -240,5 +258,6 @@ export async function getCustomerPortal(venueId: string, customerId: string) {
       past: pastReservations,
     },
     stampCard,
+    invitadaRequiereEntrar,
   }
 }

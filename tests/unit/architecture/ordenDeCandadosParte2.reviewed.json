@@ -434,6 +434,22 @@
     "src/services/wallet/stampLedger.service.ts#reverseStampForOrder": {
       "clase": "EN_TX",
       "etiqueta": "reverseStampForOrder"
+    },
+    "src/services/public/sesionDeCliente.service.ts#crearFichaConConsumer": {
+      "clase": "EN_TX",
+      "etiqueta": "crearFichaConConsumer"
+    },
+    "src/services/public/sesionDeCliente.service.ts#ligarContacto": {
+      "clase": "EN_TX",
+      "etiqueta": "ligarContacto"
+    },
+    "src/services/public/sesionDeCliente.service.ts#entrarConContacto": {
+      "clase": "EN_TX",
+      "etiqueta": "entrarConContacto"
+    },
+    "src/services/public/sesionDeCliente.service.ts#bloquearFicha": {
+      "clase": "EN_TX",
+      "etiqueta": "bloquearFicha"
     }
   },
   "aperturas": {
@@ -929,7 +945,7 @@
     },
     "src/services/public/otpAuth.public.service.ts#verifyOtp": {
       "etiqueta": "verifyOtp",
-      "cantidad": 1
+      "cantidad": 2
     },
     "src/services/referrals/referralProgram.service.ts#backfillLegacyReferralCodes": {
       "etiqueta": "backfillLegacyReferralCodes",
@@ -1031,6 +1047,14 @@
     },
     "src/middlewares/customerAuth.middleware.ts#activarReservasSiFalta": {
       "etiqueta": "activarReservasSiFalta",
+      "cantidad": 1
+    },
+    "src/services/public/otpAuth.public.service.ts#entrarConGoogle": {
+      "etiqueta": "entrarConGoogle",
+      "cantidad": 1
+    },
+    "src/services/public/sesionDeCliente.service.ts#crearFichaConPrueba": {
+      "etiqueta": "crearFichaConPrueba",
       "cantidad": 1
     }
   },

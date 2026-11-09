@@ -81,6 +81,8 @@ import {
   customerUpdateProfileSchema,
   otpRequestSchema,
   otpVerifySchema,
+  sessionNuevaFichaSchema,
+  googleSessionSchema,
 } from '../schemas/dashboard/creditPack.schema'
 import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
@@ -428,6 +430,19 @@ router.post(
   authLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
   otpAuthController.verifyOtp,
+)
+// S7 (P2-1): «no, soy nueva» con la prueba del contacto, y Google de respaldo. El slug manda (el controller resuelve el venue).
+router.post(
+  '/venues/:venueSlug/auth/session/nueva-ficha',
+  authLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: sessionNuevaFichaSchema })),
+  otpAuthController.crearFichaNueva,
+)
+router.post(
+  '/venues/:venueSlug/auth/google',
+  authLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: googleSessionSchema })),
+  otpAuthController.entrarConGoogle,
 )
 
 // ---- Public Payment Link Routes (unauthenticated) ----
