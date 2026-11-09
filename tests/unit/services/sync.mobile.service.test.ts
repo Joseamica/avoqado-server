@@ -460,6 +460,22 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
   })
 
+  it.each(['APPLY_DISCOUNT', 'ADD_ITEMS'])('%s pendiente sobre cuenta anulada queda REJECTED, nunca RETRY', async type => {
+    const error = new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
+    if (type === 'APPLY_DISCOUNT') (orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(error)
+    else (orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(error)
+    const payload =
+      type === 'APPLY_DISCOUNT'
+        ? { orderId: 'order-1', discountId: 'disc-1' }
+        : { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1 }] }
+    const [ack] = await processIntents(baseParams([{ id: `cancelled-${type}`, type, payload }]))
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ORDER_CANCELLED_NO_EDIT' })
+    expect(prisma.posSyncIntent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED' }) }),
+    )
+  })
+
   it('VERSION_CONFLICT en ADD_ITEMS → RETRY (no se pierde), corta el batch, no persiste', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
     const conflict: any = new Error('La orden cambió en otro dispositivo')

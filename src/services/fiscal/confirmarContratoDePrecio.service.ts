@@ -1,3 +1,5 @@
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 /**
  * IVA por producto, plan 2: confirmar que una venta VIEJA (contrato DESCONOCIDO) se cobró con IVA
  * incluido. Es la única salida para facturar con IVA mixto una venta anterior al plan (p. ej. los
@@ -158,6 +160,8 @@ export async function confirmarContratoIvaIncluido(p: {
   motivo: string
 }): Promise<{ ok: true } | { ok: false; code: 'NO_ENCONTRADA' | 'NO_CONFIRMABLE' | 'CAMBIO_DESDE_LA_VISTA'; message: string }> {
   return prisma.$transaction(async tx => {
+    if (!(await bloquearCuentaParaEditar(tx, { venueId: p.venueId, orderId: p.orderId })))
+      return { ok: false as const, code: 'NO_ENCONTRADA' as const, message: 'No encontré esa venta en este negocio.' }
     const o = await tx.order.findFirst({ where: { id: p.orderId, venueId: p.venueId }, select: SELECT })
     if (!o) return { ok: false as const, code: 'NO_ENCONTRADA' as const, message: 'No encontré esa venta en este negocio.' }
     const motivo = await motivoNoConfirmable(tx, o)
@@ -222,5 +226,5 @@ export async function confirmarContratoIvaIncluido(p: {
       },
     })
     return { ok: true as const }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }

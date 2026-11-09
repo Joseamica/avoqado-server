@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
@@ -80,7 +81,6 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import {
-  bloquearVentaParaLiga,
   clienteYaLigadoALaVenta,
   esChoqueDeUnico,
   etiquetaDeReintento,
@@ -2339,7 +2339,7 @@ export async function updateOrderDetailsInTransaction(
   input: OrderDetailsInput,
   opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: los comensales mueven los cargos automáticos; un pedido de tarjeta sin cobrar tiene un total fijo.
   if (input.covers != null) await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
@@ -2460,7 +2460,7 @@ export async function applyOrderDiscountInTransaction(
 
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2560,6 +2560,7 @@ export async function removeOrderDiscountInTransaction(
   orderId: string,
   orderDiscountId: string,
   staffId?: string,
+  opciones?: { porAnulacion?: true },
 ) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
@@ -2573,7 +2574,12 @@ export async function removeOrderDiscountInTransaction(
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (
+    !(await (opciones?.porAnulacion
+      ? lockExistingOrderForPayment(tx, { venueId, orderId })
+      : bloquearCuentaParaEditar(tx, { venueId, orderId })))
+  )
+    throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2695,6 +2701,7 @@ export async function splitOrderItemsInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -2892,6 +2899,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -3083,6 +3091,7 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: targetOrderId, additionalOrderIds: [sourceOrderId] })
   // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
@@ -6511,7 +6520,7 @@ export async function attachCustomerToOrder(
       // inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
-      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
       await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: normalizedCustomerId, ...opciones })
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {

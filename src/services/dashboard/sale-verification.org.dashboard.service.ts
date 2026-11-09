@@ -1,3 +1,4 @@
+import { rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import {
   SaleVerificationStatus,
   SaleVerificationRejectionReason,
@@ -1428,6 +1429,7 @@ async function cuentaQueSigueAlCobro(tx: Prisma.TransactionClient, paymentId: st
     where: { id: cobro.orderId, venueId },
     select: {
       id: true,
+      venueId: true,
       version: true,
       status: true,
       paymentStatus: true,
@@ -1490,6 +1492,7 @@ async function moverCuentaAlImporte(
   { orden, articuloId, tipo }: Awaited<ReturnType<typeof cuentaQueSigueAlCobro>>,
   importe: number,
 ) {
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId: orden.venueId, orderId: orden.id })
   const nuevo = new Prisma.Decimal(importe).toDecimalPlaces(2)
   const saldo = computeOrderBalance({ ...orden, subtotal: nuevo }, [{ amount: nuevo, tipAmount: 0, type: tipo }])
   await tx.orderItem.update({ where: { id: articuloId }, data: { unitPrice: nuevo, total: nuevo } })

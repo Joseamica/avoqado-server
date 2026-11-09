@@ -83,7 +83,7 @@ function db() {
       findUniqueOrThrow: jest.fn(async () => order()),
       update: jest.fn(async () => order()),
       updateMany: jest.fn(async () => ({ count: 1 })),
-      count: jest.fn(async () => 1),
+      count: jest.fn(async ({ where }: any) => (where?.status?.in ? (where.status.in.includes(order().status) ? 1 : 0) : 1)),
       create: jest.fn(async () => order()),
     },
     orderItem: {
@@ -840,5 +840,24 @@ describe('S5b — la red por traba (40P01): lo que sale tras el commit es del in
     } finally {
       soltar.mockRestore()
     }
+  })
+})
+
+describe('R10: anular renglones exige una cuenta viva, incluso cuando se anulan todos', () => {
+  it.each([
+    ['CANCELLED', false],
+    ['CANCELLED', true],
+    ['DELETED', false],
+    ['DELETED', true],
+  ] as const)('%s rechaza anular todos=%s antes de modificar filas o devolver canjes', async (status, todos) => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status, items: [line, { ...line, id: 'line-2' }] })
+    tx.order.count.mockResolvedValue(1)
+    const itemIds = todos ? ['line', 'line-2'] : ['line']
+    await expect(voidItems('venue', 'order', { itemIds, reason: 'error', staffId: 'staff', expectedVersion: 1 })).rejects.toMatchObject({
+      code: 'ORDER_CANCELLED_NO_EDIT',
+    })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
   })
 })

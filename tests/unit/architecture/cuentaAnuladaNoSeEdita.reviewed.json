@@ -1,0 +1,511 @@
+{
+  "controllers/dashboard/order.dashboard.controller.ts#deleteOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "controllers/dashboard/order.dashboard.controller.ts#updateOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "No escribe: delega el cuerpo al editor updateOrder, cuya rama ANULACION sólo admite reenvío idéntico. Las otras ediciones tienen wrapper débil o scope y rechazo."
+  },
+  "controllers/mobile/areaTicket.mobile.controller.ts#openAreaTicket": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/mobile/estimate.mobile.controller.ts#convertToOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/mobile/giftCard.mobile.controller.ts#createOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/mobile/order.mobile.controller.ts#createOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/public/paymentLink.public.controller.ts#completeCharge": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/tpv/order.tpv.controller.ts#createOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/tpv/order.tpv.controller.ts#createOrderWithItems": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "controllers/tpv/order.tpv.controller.ts#voidItems": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "No escribe: delega itemIds al editor voidItems, que rechaza cuentas anuladas bajo COBRO antes de borrar/recalcular. Sólo la anulación de una viva llega al writer."
+  },
+  "jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Limpia sólo órdenes vacías abandonadas tras tomar Order y releer la misma regla; devuelve canjes y anula si existían, o borra la vacía sin pagos. Nunca es un editor público."
+  },
+  "services/b4bit/b4bit.service.ts#initiateCryptoPayment": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/cleanup/liveDemoCleanup.service.ts#deleteVenueDataTx": {
+    "clase": "EXCEPCION",
+    "categoria": "ADMIN",
+    "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
+  },
+  "services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/dashboard/customer.dashboard.service.ts#settleCustomerBalance": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
+    "clase": "EDITOR",
+    "candado": "lockDiscountOrder"
+  },
+  "services/dashboard/discountEngine.service.ts#applyDiscountToOrder": {
+    "clase": "EDITOR",
+    "candado": "lockDiscountOrder"
+  },
+  "services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount": {
+    "clase": "AYUDANTE"
+  },
+  "services/dashboard/discountEngine.service.ts#applyManualDiscount": {
+    "clase": "EDITOR",
+    "candado": "lockDiscountOrder"
+  },
+  "services/dashboard/discountEngine.service.ts#lockDiscountOrder": {
+    "clase": "EDITOR"
+  },
+  "services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
+    "clase": "EDITOR",
+    "candado": "lockDiscountOrder"
+  },
+  "services/dashboard/manualPayment.service.ts#createManualPayment": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/dashboard/manualSale.service.ts#createOneManualSale": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/dashboard/order.dashboard.service.ts#deleteOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/dashboard/order.dashboard.service.ts#settleOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/dashboard/order.dashboard.service.ts#updateOrder": {
+    "clase": "EDITOR_TOPOLOGICO",
+    "rama": "ANULACION",
+    "motivo": "R9: scope existente si status/mesa, sólo relectura después; metadatos sin topología usan ATRIBUCION. Única excepción: reintento de la misma anulación con campos normalizados idénticos."
+  },
+  "services/dashboard/paymentLink.service.ts#completeCharge": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification": {
+    "clase": "EXCEPCION",
+    "categoria": "REEMBOLSO",
+    "motivo": "Corrección auditada del cobro por back-office; el cambio del importe de la cuenta pasa por moverCuentaAlImporte y su relectura bajo lock."
+  },
+  "services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte": {
+    "clase": "AYUDANTE"
+  },
+  "services/dashboard/terminalOrder/terminalOrder.service.ts#createOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/dashboard/venue.dashboard.service.ts#deleteVenue": {
+    "clase": "EXCEPCION",
+    "categoria": "ADMIN",
+    "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
+  },
+  "services/dashboard/venueCheckout.service.ts#finalizeVenueCheckout": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "PLATAFORMA",
+    "motivo": "La cuenta la dicta la plataforma externa (marketplace o POS externo), nunca es un folio propio de la tienda."
+  },
+  "services/delivery-channels/core/deliveryReconciliation.service.ts#reprecio": {
+    "clase": "EXCEPCION",
+    "categoria": "PLATAFORMA",
+    "motivo": "Conciliación de un pedido externo: recalcula desde la foto payment del proveedor y registra DELIVERY_ORDER_REPRICED; los importes/estado los dicta la plataforma, no un folio Avoqado."
+  },
+  "services/delivery-channels/core/lineRemoval.service.ts#applyLineRemoval": {
+    "clase": "EXCEPCION",
+    "categoria": "PLATAFORMA",
+    "motivo": "La cuenta la dicta la plataforma externa (marketplace o POS externo), nunca es un folio propio de la tienda."
+  },
+  "services/demo/negociosDemo.service.ts#seedHistory": {
+    "clase": "EXCEPCION",
+    "categoria": "ADMIN",
+    "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
+  },
+  "services/exchanges/exchangeTx.ts#createExchangeSaleInTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido": {
+    "clase": "EDITOR"
+  },
+  "services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/giftCards/giftCardOrder.service.ts#createGiftCardOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets": {
+    "clase": "EXCEPCION",
+    "categoria": "COCINA",
+    "motivo": "Sólo autoría o marcas de cocina sin edición del dinero de una cuenta anulada."
+  },
+  "services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/areaTicket.mobile.service.ts#claimAreaTicket": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/areaTicket.mobile.service.ts#crearEspejosDelVale": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/mobile/areaTicket.mobile.service.ts#openAreaTicket": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/mobile/estimate.mobile.service.ts#convertToOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/order.mobile.service.ts#attachCustomerToOrder": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/order.mobile.service.ts#cancelOrderInTransaction": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/mobile/order.mobile.service.ts#createOrderWithItems": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/mobile/order.mobile.service.ts#mergeOrdersInTransaction": {
+    "clase": "EDITOR_TOPOLOGICO"
+  },
+  "services/mobile/order.mobile.service.ts#registrarAbonoEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction": {
+    "clase": "EDITOR_TOPOLOGICO"
+  },
+  "services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction": {
+    "clase": "EDITOR_TOPOLOGICO"
+  },
+  "services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/order.mobile.service.ts#vincularAlDuenoDelFiado": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/mobile/refund.mobile.service.ts#createRefund": {
+    "clase": "EXCEPCION",
+    "categoria": "REEMBOLSO",
+    "motivo": "Corrige o devuelve dinero del cobro existente, o sus costos/metadatos; conserva alcance y restricciones financieras previas."
+  },
+  "services/mobile/service-charge.mobile.service.ts#applyServiceChargeInTransaction": {
+    "clase": "EDITOR",
+    "candado": "requireOpenOrder"
+  },
+  "services/mobile/service-charge.mobile.service.ts#removeServiceChargeInTransaction": {
+    "clase": "EDITOR",
+    "candado": "requireOpenOrder"
+  },
+  "services/mobile/service-charge.mobile.service.ts#requireOpenOrder": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges": {
+    "clase": "EDITOR"
+  },
+  "services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction": {
+    "clase": "AYUDANTE"
+  },
+  "services/onboarding/demoCleanup.service.ts#cleanDemoData": {
+    "clase": "EXCEPCION",
+    "categoria": "ADMIN",
+    "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
+  },
+  "services/onboarding/demoSeed.service.ts#seedOrders": {
+    "clase": "EXCEPCION",
+    "categoria": "ADMIN",
+    "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
+  },
+  "services/online-ordering/card/capture.service.ts#finishCapture": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/online-ordering/order.service.ts#writeOnlineOrderInTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/online-ordering/transitions.service.ts#casTransitionInTx": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Transiciones operativas y anulación con CAS bajo COBRO; si Order ya está CANCELLED/DELETED retorna STALE antes de cualquier escritura Order. Sólo sincroniza el cierre del pedido ligado."
+  },
+  "services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent": {
+    "clase": "EXCEPCION",
+    "categoria": "PLATAFORMA",
+    "motivo": "La cuenta la dicta la plataforma externa (marketplace o POS externo), nunca es un folio propio de la tienda."
+  },
+  "services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent": {
+    "clase": "EXCEPCION",
+    "categoria": "PLATAFORMA",
+    "motivo": "La cuenta la dicta la plataforma externa (marketplace o POS externo), nunca es un folio propio de la tienda."
+  },
+  "services/promotions/promotion.service.ts#applyPromotionInTransaction": {
+    "clase": "EDITOR"
+  },
+  "services/promotions/promotion.service.ts#removePromotionFromOrder": {
+    "clase": "EDITOR"
+  },
+  "services/reservation/createOrderFromReservation.ts#createOrderFromReservation": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/shared/cuponDeLaVenta.ts#canjearCuponEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/shared/orderCancelGuard.ts#devolverCanjesDeVentaAnuladaEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
+  },
+  "services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/shared/repartoDescuentoTx.ts#conservarDescuentoHistorico": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/shared/repartoDescuentoTx.ts#retirarImpuestoDeRenglones": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/shared/repartoDescuentoTx.ts#revertirDescuentoDelRenglon": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/shared/repartoDescuentoTx.ts#sincronizarRepartos": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/shared/serviceCharges.ts#recalcularCargosPorServicio": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/tpv/discount.tpv.service.ts#applyCouponCode": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#addCustomerToOrder": {
+    "clase": "EDITOR",
+    "candado": "leerVentaBajoCandado"
+  },
+  "services/tpv/order.tpv.service.ts#addItemsToOrder": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#addSerializedItemToOrder": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#applyDiscount": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#compItems": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder": {
+    "clase": "EDITOR",
+    "candado": "leerVentaBajoCandado"
+  },
+  "services/tpv/order.tpv.service.ts#createOrder": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/tpv/order.tpv.service.ts#createOrderWithItems": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/tpv/order.tpv.service.ts#leerVentaBajoCandado": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#ligarClienteBajoCandado": {
+    "clase": "AYUDANTE"
+  },
+  "services/tpv/order.tpv.service.ts#removeCustomerFromOrder": {
+    "clase": "EDITOR",
+    "candado": "leerVentaBajoCandado"
+  },
+  "services/tpv/order.tpv.service.ts#removeOrderItem": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#sellSerializedItem": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "Sólo escribe la cuenta nueva de esta operación en su misma transacción; no edita una cancelada existente."
+  },
+  "services/tpv/order.tpv.service.ts#updateGuestInfo": {
+    "clase": "EDITOR"
+  },
+  "services/tpv/order.tpv.service.ts#voidItems": {
+    "clase": "EDITOR",
+    "motivo": "R10: anular renglones borra y recalcula importes; exige COBRO y rechazo antes de cualquier canje o escritura, incluso al anular todos."
+  },
+  "services/tpv/payment.tpv.service.ts#recordFastPayment": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/tpv/payment.tpv.service.ts#settleStandalonePaymentInTx": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment": {
+    "clase": "EXCEPCION",
+    "categoria": "DINERO_TARDIO",
+    "motivo": "Registro o conciliación del dinero ya capturado; conserva la regla financiera y los rechazos previos del canal."
+  },
+  "services/tpv/table.tpv.service.ts#assignTable": {
+    "clase": "EDITOR_TOPOLOGICO"
+  },
+  "services/tpv/table.tpv.service.ts#moveOrderToTableInTransaction": {
+    "clase": "EDITOR_TOPOLOGICO"
+  },
+  "services/wallet/redeemStampReward.service.ts#canjearPremioEnTx": {
+    "clase": "EDITOR"
+  }
+}

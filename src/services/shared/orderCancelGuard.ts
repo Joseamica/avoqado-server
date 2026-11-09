@@ -243,7 +243,9 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     // Import dinámico: order.mobile.service importa este módulo.
     const { removeOrderDiscountInTransaction } = await import('../mobile/order.mobile.service')
     for (const fila of canjes) {
-      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined)
+      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined, {
+        porAnulacion: true,
+      })
       devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0
       if (r.stampRefund) devuelto.stampRewardsReturned.push(r.stampRefund.rewardId)
       quitadas.push(fila.id)

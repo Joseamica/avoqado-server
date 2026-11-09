@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 /**
  * Loyalty for the mobile POS ("Recompensas" in the check panel).
  *
@@ -19,7 +20,7 @@ import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -120,7 +121,7 @@ export async function redeemPointsToOrderInTransaction(
     throw new BadRequestError('points debe ser un entero positivo')
   }
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({

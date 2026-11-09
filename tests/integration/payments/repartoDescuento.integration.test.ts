@@ -784,7 +784,7 @@ describe('P12: anular TODO no revive el IVA como deuda (Codex r3 V5)', () => {
   })
 
   it.each(['motor', 'móvil'] as const)(
-    '🔴 Codex r5 — V5 con una reducción heredada: anular TODO la cierra; quitar después el descuento por el %s no revive IVA y un cobro de $1.60 registra $0 (la v5: $1.60)',
+    '🔴 Codex r5 — V5 con una reducción heredada: anular TODO la cierra; quitar después el descuento por el %s rechaza sin revivir IVA y un cobro de $1.60 registra $0 (la v5: $1.60)',
     async camino => {
       // Nativa DESCONOCIDO sin IVA propio, con un descuento de $10 del motor de ANTES de D16: restó 1.60 inventado (cabecera −1.60).
       const o = await crearEnTerminal(venueId, {
@@ -807,8 +807,15 @@ describe('P12: anular TODO no revive el IVA como deuda (Codex r3 V5)', () => {
       await voidItems(venueId, o.id, { itemIds: [cafe.id], reason: 'Error de captura', staffId, expectedVersion: version })
       expect(Number((await prisma.orderDiscount.findUniqueOrThrow({ where: { id: vieja.id } })).taxReduction)).toBe(0) // se cerró con la cuenta
 
-      if (camino === 'motor') await removeDiscountFromOrder(o.id, vieja.id, staffId, venueId)
-      else await removeOrderDiscount(venueId, o.id, vieja.id, staffId)
+      const antesDeEditar = await prisma.order.findUniqueOrThrow({ where: { id: o.id }, include: { orderDiscounts: true, items: true } })
+      const intento =
+        camino === 'motor'
+          ? removeDiscountFromOrder(o.id, vieja.id, staffId, venueId)
+          : removeOrderDiscount(venueId, o.id, vieja.id, staffId)
+      await expect(intento).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' })
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: o.id }, include: { orderDiscounts: true, items: true } })).toEqual(
+        antesDeEditar,
+      )
       const escrita = await prisma.order.findUniqueOrThrow({ where: { id: o.id } })
       expect([escrita.status, Number(escrita.taxAmount)]).toEqual(['CANCELLED', 0]) // la v5: 1.60 (lo devolvía la fila)
       expect(Number(computeOrderBalance(escrita, []).remainingBalance)).toBe(0)
@@ -825,7 +832,7 @@ describe('P12: anular TODO no revive el IVA como deuda (Codex r3 V5)', () => {
   // (La cancelada VIEJA y la cancelada con un cobro con tarjeta ya capturado viven desde la v10 en la Tarea 6a: cobrar una
   // cancelada es la regla del founder del 3-oct.)
 
-  it('control — Codex r6 #3: sobre un origen fusionado VIEJO (CANCELLED, subtotal 0, IVA 16) un descuento móvil aplicado y quitado deja total, saldo guardado y saldo reconstruido en 0 (la v6 guardaba $16 y $16 contra $0)', async () => {
+  it('control — Codex r6 #3: sobre un origen fusionado VIEJO (CANCELLED, subtotal 0, IVA 16) aplicar o quitar descuento móvil rechaza y conserva total, saldo guardado y saldo reconstruido en 0 (la v6 guardaba $16 y $16 contra $0)', async () => {
     const o = await crearEnTerminal(venueId, {
       items: [{ productId: cafeId, quantity: 1, unitPrice: 100 }],
       staffId,
@@ -858,11 +865,19 @@ describe('P12: anular TODO no revive el IVA como deuda (Codex r3 V5)', () => {
         reconstruido: Number(computeOrderBalance(x, []).remainingBalance),
       }
     }
-    // `applyOrderDiscount` sólo rechaza PAID/PARTIAL (`order.mobile.service.ts:1454-1458`): topa el descuento a $0, crea la fila y recalcula.
-    const { orderDiscountId } = await applyOrderDiscount(venueId, o.id, diez.id, staffId)
-    expect(await numeros()).toEqual({ total: 0, saldo: 0, reconstruido: 0 })
-    await removeOrderDiscount(venueId, o.id, orderDiscountId, staffId)
-    expect(await numeros()).toEqual({ total: 0, saldo: 0, reconstruido: 0 })
+    // Dato histórico del fixture: ambos editores deben rechazar, sin reparar ni cambiar su precio al pasar.
+    const historica = await prisma.orderDiscount.create({
+      data: { orderId: o.id, discountId: diez.id, name: 'Descuento histórico en cero', type: 'PERCENTAGE', value: 10, amount: 0 },
+    })
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: o.id }, include: { orderDiscounts: true, items: true } })
+    for (const editar of [
+      () => applyOrderDiscount(venueId, o.id, diez.id, staffId),
+      () => removeOrderDiscount(venueId, o.id, historica.id, staffId),
+    ]) {
+      await expect(editar()).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' })
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: o.id }, include: { orderDiscounts: true, items: true } })).toEqual(antes)
+      expect(await numeros()).toEqual({ total: 0, saldo: 0, reconstruido: 0 })
+    }
   })
 })
 

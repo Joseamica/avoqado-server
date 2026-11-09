@@ -6,6 +6,7 @@
  */
 import fs from 'fs'
 import path from 'path'
+import ts from 'typescript'
 
 const SRC = path.join(__dirname, '../../../src')
 const archivos = (dir: string): string[] =>
@@ -124,22 +125,140 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
   'services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': { clase: 'REEMBOLSO', marcadores: [] },
 }
 
-it('🔴 todo `payment.create` de src/ está clasificado ante una cuenta CANCELADA y cada marcador sigue en su sitio', () => {
+// R-P2-S2-5: única clasificación de TODOS los métodos Payment; create conserva sus marcadores previos.
+Object.assign(ESCRITORES, {
+  'jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule': {
+    clase: 'ADMIN: reasigna el cobro al negocio de origen del evento SIM; no cambia importe ni reabre ventas.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#failB4BitPaymentInTx': {
+    clase: 'DINERO_TARDIO: marca fallido el intento B4Bit y su conciliación según evidencia del procesador.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#processWebhook': {
+    clase: 'DINERO_TARDIO: guarda evidencia/metadatos del webhook recibido, no inicia otro cobro.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx': {
+    clase: 'DINERO_TARDIO: confirma y atribuye dinero B4Bit ya capturado; conserva liquidación canónica.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#cancelCryptoPayment': {
+    clase: 'DINERO_TARDIO: cancela un intento B4Bit según el estado del procesador, no edita artículos ni beneficios.',
+    marcadores: [],
+  },
+  'services/cleanup/liveDemoCleanup.service.ts#deleteVenueDataTx': {
+    clase: 'ADMIN: limpieza transaccional acotada al negocio demo bajo su fence; sin edición del POS.',
+    marcadores: [],
+  },
+  'services/dashboard/payment.dashboard.service.ts#updatePayment': {
+    clase: 'REEMBOLSO: corrección del cobro con las restricciones actuales sobre dinero hecho, conservadas por S2.',
+    marcadores: [],
+  },
+  'services/dashboard/payment.dashboard.service.ts#deletePayment': {
+    clase: 'REEMBOLSO: borrado/corrección del registro con las restricciones actuales del cobro hecho, conservadas por S2.',
+    marcadores: [],
+  },
+  'services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': {
+    clase: 'REEMBOLSO: corrección auditada de importe/método del cobro SIM; la cuenta simple se verifica y relee bajo lock.',
+    marcadores: [],
+  },
+  'services/dashboard/testing.dashboard.service.ts#createTestPayment': {
+    clase: 'ADMIN: crea/corrige únicamente el cobro marcado de prueba del negocio de testing.',
+    marcadores: [],
+  },
+  'services/dashboard/testing.dashboard.service.ts#deleteTestPayment': {
+    clase: 'ADMIN: borra únicamente el registro de prueba seleccionado por el operador autorizado.',
+    marcadores: [],
+  },
+  'services/dashboard/venue.dashboard.service.ts#deleteVenue': {
+    clase: 'ADMIN: borrado del negocio entero autorizado; no es edición de una venta desde el POS.',
+    marcadores: [],
+  },
+  'services/onboarding/demoCleanup.service.ts#cleanDemoData': {
+    clase: 'ADMIN: elimina datos demo durante el onboarding, acotados al negocio correspondiente.',
+    marcadores: [],
+  },
+  'services/online-ordering/card/refund.service.ts#reverseRecordedRefund': {
+    clase: 'REEMBOLSO: revierte el registro de devolución fallida según evidencia de la tarjeta en línea.',
+    marcadores: [],
+  },
+  'services/payments/deferredTransactionCost.service.ts#proyectarCostoDelReembolso': {
+    clase: 'REEMBOLSO: proyecta costos de una devolución, sin tocar importe cobrado ni artículos.',
+    marcadores: [],
+  },
+  'services/payments/deferredTransactionCost.service.ts#convergerCostoDeTransaccion': {
+    clase: 'DINERO_TARDIO: concilia costos del procesador, sin iniciar cargo ni modificar artículos.',
+    marcadores: [],
+  },
+  'services/superadmin/rateCorrection/rateCorrectionApply.ts#applyRateCorrection': {
+    clase: 'ADMIN: corrección privilegiada y auditada de tasa/costos del procesador; no cambia dinero cobrado al cliente.',
+    marcadores: [],
+  },
+  'services/superadmin/rateCorrection/rateCorrectionReverse.ts#reverseRateCorrection': {
+    clase: 'ADMIN: revierte la corrección privilegiada de tasa/costos al valor auditado anterior.',
+    marcadores: [],
+  },
+  'services/terminal-payment.service.ts#closeRowFromPaymentTx': {
+    clase: 'DINERO_TARDIO: liga la procedencia de la solicitud al pago ya existente, sin cargo nuevo.',
+    marcadores: [],
+  },
+})
+
+// Siete métodos: create|createMany|update|updateMany|upsert|delete|deleteMany, incluidos callbacks y métodos de clase.
+function esEscrituraDePago(n: ts.Node): boolean {
+  return (
+    ts.isCallExpression(n) &&
+    ts.isPropertyAccessExpression(n.expression) &&
+    /^(create|createMany|update|updateMany|upsert|delete|deleteMany)$/.test(n.expression.name.text) &&
+    ts.isPropertyAccessExpression(n.expression.expression) &&
+    n.expression.expression.name.text === 'payment'
+  )
+}
+it('el detector financiero ve los siete métodos y no confunde lecturas u otro modelo', () => {
+  const sf = ts.createSourceFile(
+    'probe.ts',
+    'async function f(tx){' +
+      ['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany', 'findMany']
+        .map(method => `tx.payment.${method}({})`)
+        .join(';') +
+      ';tx.order.create({})}',
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  let writes = 0
+  function visit(n: ts.Node) {
+    if (esEscrituraDePago(n)) writes++
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  expect(writes).toBe(7)
+})
+
+it('🔴 todo escritor de Payment de src/ está clasificado ante una cuenta CANCELADA y cada marcador sigue en su sitio', () => {
   const vistos = new Set<string>()
   const faltan: string[] = []
   for (const archivo of archivos(SRC)) {
     const lineas = fs.readFileSync(archivo, 'utf8').split('\n')
-    lineas.forEach((linea, i) => {
-      if (!/\.payment\.create\(/.test(linea)) return
-      let j = i
-      while (j >= 0 && !INICIO.test(lineas[j])) j--
-      const clave = `${path.relative(SRC, archivo)}#${j >= 0 ? INICIO.exec(lineas[j])![1] : '(módulo)'}`
-      vistos.add(clave)
-      const escritor = ESCRITORES[clave]
-      if (!escritor) return void faltan.push(`${clave}: sin clasificar`)
-      for (const [funcion, texto] of escritor.marcadores)
-        if (!cuerpo(lineas, funcion)?.includes(texto)) faltan.push(`${clave}: falta «${texto}» en ${funcion}`)
-    })
+    const sf = ts.createSourceFile(archivo, lineas.join('\n'), ts.ScriptTarget.Latest, true)
+    function visit(n: ts.Node) {
+      if (esEscrituraDePago(n)) {
+        let owner = '(módulo)'
+        for (let p: ts.Node | undefined = n; p && !ts.isSourceFile(p); p = p.parent) {
+          if (ts.isFunctionDeclaration(p) && p.name && ts.isSourceFile(p.parent)) owner = p.name.text
+          if (ts.isMethodDeclaration(p)) owner = p.name.getText(sf)
+        }
+        const clave = `${path.relative(SRC, archivo)}#${owner}`
+        vistos.add(clave)
+        const escritor = ESCRITORES[clave]
+        if (!escritor) faltan.push(`${clave}: sin clasificar`)
+        else
+          for (const [funcion, texto] of escritor.marcadores)
+            if (!cuerpo(lineas, funcion)?.includes(texto)) faltan.push(`${clave}: falta «${texto}» en ${funcion}`)
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
   }
   expect(faltan).toEqual([])
   expect([...vistos].sort()).toEqual(Object.keys(ESCRITORES).sort()) // un escritor que se va también se nota

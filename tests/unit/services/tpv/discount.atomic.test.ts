@@ -81,7 +81,7 @@ const order = () => ({
 function db() {
   return {
     $queryRaw: jest.fn(async () => [{ id: 'order' }]),
-    order: { findUnique: jest.fn(async () => order()), update: jest.fn(async () => ({})) },
+    order: { count: jest.fn(async () => 0), findUnique: jest.fn(async () => order()), update: jest.fn(async () => ({})) },
     orderDiscount: {
       findFirst: jest.fn(async () => ({ id: 'od', orderId: 'order', discountId: null, amount: 10, taxReduction: 0 })),
       create: jest.fn(async () => ({ id: 'od' })),

@@ -197,7 +197,7 @@ const NOT_FOUND_MESSAGE: Record<Writer, string> = {
 
 function model() {
   return Object.fromEntries(
-    ['findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
+    ['count', 'findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
   ) as Record<string, jest.Mock>
 }
 function txCallOrders(except: jest.Mock[] = []): number[] {
@@ -299,7 +299,7 @@ beforeEach(() => {
   prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 4000 })
   // Every Order/child/reward read or write on the GLOBAL client is an escape from the lock.
   for (const [name, ops] of Object.entries({
-    order: ['findFirst', 'findUnique', 'update', 'updateMany', 'create'],
+    order: ['count', 'findFirst', 'findUnique', 'update', 'updateMany', 'create'],
     orderItem: ['findMany', 'updateMany', 'createMany', 'deleteMany'],
     orderDiscount: ['findFirst', 'findMany', 'create', 'update', 'delete'],
     orderPromotion: ['findUnique', 'findFirst', 'create', 'delete', 'updateMany'],
@@ -351,7 +351,9 @@ describe('locked mobile writers', () => {
       expect(buscarFiado).toBeLessThan(venueLock)
       expect(venueLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findFirst]), ...lecturasDeLaCuenta))
       expect(orderLock).toBeLessThan(tableLock)
-      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta))
+      expect(orderLock).toBeLessThan(
+        Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta),
+      )
       const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
       const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
       expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(

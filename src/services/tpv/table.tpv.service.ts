@@ -1,3 +1,4 @@
+import { rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import type { HttpEnvelope } from '../mobile/http-operation.mobile.service'
 import { lockTableOrderScope, tableSelect, type LockedTableScope, type TableRow } from '../shared/tableOrderLock'
 import { TableStatus, TableShape, Order, PaymentStatus, Prisma } from '@prisma/client'
@@ -293,6 +294,7 @@ export async function assignTable(
       table.currentOrder.paymentStatus !== 'PAID'
     ) {
       logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)
+      await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: table.currentOrder.id })
       await dentroDeLaTx?.(tx, { orderId: table.currentOrder.id, isNewOrder: false })
 
       return {
@@ -321,6 +323,7 @@ export async function assignTable(
           })
         : null
       if (sibling) {
+        await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: sibling.id })
         await tx.table.update({ where: { id: table.id }, data: { currentOrderId: sibling.id } })
         await dentroDeLaTx?.(tx, { orderId: sibling.id, isNewOrder: false })
         return { order: sibling, isNewOrder: false, table, staffVenue }
@@ -611,6 +614,7 @@ export async function moveOrderToTableInTransaction(tx: Prisma.TransactionClient
     }
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {

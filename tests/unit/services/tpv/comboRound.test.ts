@@ -66,6 +66,7 @@ describe('table combo rounds use one locked fiscal transaction', () => {
     tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]),
       order: {
+        count: jest.fn(async () => 0),
         findUnique: jest.fn().mockResolvedValue(order),
         findUniqueOrThrow: jest.fn().mockResolvedValue({ ...order, items: [comboLine] }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),

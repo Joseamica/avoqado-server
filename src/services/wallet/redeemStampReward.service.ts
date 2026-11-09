@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 import cuid from 'cuid'
 import { Prisma, StampRewardStatus, StampRewardType, type StampReward } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -5,7 +6,7 @@ import { withDeadlockRetry, type TxConReintento } from '../../utils/serializable
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -103,7 +104,7 @@ export async function canjearPremioEnTx(
   orderId: string,
   rewardId: string,
 ): Promise<{ reward: StampRewardCanjeado; discountAmount: number; totals: TotalesDeOrden }> {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({

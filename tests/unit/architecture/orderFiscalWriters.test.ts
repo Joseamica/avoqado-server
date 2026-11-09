@@ -258,6 +258,26 @@ const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
 const CARD = 'tests/integration/online-ordering/card.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
+function marcadorDeCandadoFiscal(body: string, marker: string): boolean {
+  if (marker !== 'lockExistingOrderForPayment(') return body.includes(marker)
+  const sf = ts.createSourceFile('writer.ts', body, ts.ScriptTarget.Latest, true)
+  let fuerte = false
+  function visit(n: ts.Node) {
+    if (ts.isCallExpression(n)) {
+      const name = calleeName(n)
+      const modo = n.arguments[2] && unwrap(n.arguments[2])
+      if (
+        name === 'lockExistingOrderForPayment' ||
+        (name === 'bloquearCuentaParaEditar' && (n.arguments.length === 2 || (modo && ts.isStringLiteral(modo) && modo.text === 'COBRO')))
+      )
+        fuerte = true
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return fuerte
+}
+
 const LOCK = ['lockExistingOrderForPayment(']
 const VENUE_FENCE_THEN_LOCK = ['FOR KEY SHARE', 'lockExistingOrderForPayment(']
 const T2 = (mentions: string) =>
@@ -1028,11 +1048,31 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
     expect(nonFiscal.sort()).toEqual(Object.keys(NON_FISCAL_ORDER_WRITERS).sort())
   })
 
+  it.each([
+    ['lockExistingOrderForPayment(tx, input)', true],
+    ['bloquearCuentaParaEditar(tx, input)', true],
+    ["bloquearCuentaParaEditar(tx, input, 'COBRO')", true],
+    ["bloquearCuentaParaEditar(tx, input, 'ATRIBUCION')", false],
+    ['bloquearCuentaParaEditar(tx, input, modo)', false],
+    ['rechazarSiCuentaAnuladaEnTx(tx, input)', false],
+    ['bloquearVentaParaLiga(tx, input)', false],
+    ['/* lockExistingOrderForPayment(tx, input) */', false],
+  ])('el bloqueo fiscal conserva la fuerza COBRO: %s', (call, expected) => {
+    expect(marcadorDeCandadoFiscal(`async function editor(tx) { ${call} }`, 'lockExistingOrderForPayment(')).toBe(expected)
+  })
+
+  it('el modo omitido del wrapper sigue siendo COBRO y delega al candado financiero íntegro', () => {
+    const body = fs.readFileSync(path.join(SRC, 'services/shared/cuentaCancelada.ts'), 'utf8')
+    expect(body).toMatch(/modo[^=]*= 'COBRO'/)
+    expect(body).toContain('existe = await lockExistingOrderForPayment(tx, input)')
+  })
+
   it.each(Object.entries(WRITERS))('%s satisfies its class', (key, writer) => {
     const body = codeOf(key)
     expect(body.length).toBeGreaterThan(0)
     if (writer.class === 'LOCKED')
-      for (const marker of writer.lock) expect({ key, marker, present: body.includes(marker) }).toMatchObject({ present: true })
+      for (const marker of writer.lock)
+        expect({ key, marker, present: marcadorDeCandadoFiscal(body, marker) }).toMatchObject({ present: true })
     if (writer.class === 'PRIVATE_CREATION')
       for (const marker of writer.creates) expect({ key, marker, present: body.includes(marker) }).toMatchObject({ present: true })
     if (writer.class === 'METADATA') expect({ key, moneyToken: body.match(moneyToken)?.[0] ?? null }).toEqual({ key, moneyToken: null })
@@ -1049,7 +1089,10 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       for (const caller of callers) {
         const holder = LOCK_HOLDERS[caller]
         const cls = WRITERS[caller]?.class
-        expect({ caller, holdsLock: (!!cls && LOCKING.has(cls)) || (!!holder && holder.every(m => codeOf(caller).includes(m))) }).toEqual({
+        expect({
+          caller,
+          holdsLock: (!!cls && LOCKING.has(cls)) || (!!holder && holder.every(m => marcadorDeCandadoFiscal(codeOf(caller), m))),
+        }).toEqual({
           caller,
           holdsLock: true,
         })
@@ -1065,7 +1108,8 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       ].sort()
       expect(withTx).toEqual([...lockedCallers].sort())
       for (const caller of lockedCallers) {
-        const holdsLock = LOCKING.has(WRITERS[caller]?.class ?? '') || codeOf(caller).includes('lockExistingOrderForPayment(')
+        const holdsLock =
+          LOCKING.has(WRITERS[caller]?.class ?? '') || marcadorDeCandadoFiscal(codeOf(caller), 'lockExistingOrderForPayment(')
         expect({ caller, holdsLock }).toEqual({ caller, holdsLock: true })
       }
     },
@@ -1245,6 +1289,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/order.tpv.service.ts#updateGuestInfo': 1,
   'src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder': 1,
   // Already on the budget before the final wave
+  'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': 1,
+  'src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido': 1,
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,
   'src/services/tpv/order.tpv.service.ts#compItems': 1,

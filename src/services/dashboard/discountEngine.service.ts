@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 /**
  * Discount Engine Service
  *
@@ -31,7 +32,7 @@ import {
 } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { repartirProporcional } from '../fiscal/ivaMath'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
@@ -873,7 +874,7 @@ async function evaluateOrderDiscounts(
 async function lockDiscountOrder(tx: Prisma.TransactionClient, orderId: string, venueId?: string): Promise<string | null> {
   const tenant = venueId ?? (await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true } }))?.venueId
   if (!tenant) return null
-  if (!(await lockExistingOrderForPayment(tx, { venueId: tenant, orderId }))) return null
+  if (!(await bloquearCuentaParaEditar(tx, { venueId: tenant, orderId }))) return null
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo; ningún descuento lo toca.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId: tenant, orderId })
   return tenant
@@ -973,6 +974,7 @@ async function applyEvaluatedDiscount(
   deferredUses?: string[],
 ): Promise<ApplyDiscountResult> {
   const orderId = order.id
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId: order.venueId, orderId })
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. (`order` ya viene releída bajo el candado del llamador.)
   rechazarSiEsImportada(order)

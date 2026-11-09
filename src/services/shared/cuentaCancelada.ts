@@ -12,9 +12,39 @@ import logger from '@/config/logger'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES } from '@/services/online-ordering/constants'
 import { claseDeEstado, estadoAlRecibirDinero, impuestoQueSeCobraAparte } from './orderBalance'
+import { lockExistingOrderForPayment } from './paymentShiftClaim'
+import { bloquearVentaParaLiga } from './ligaDeClienteEnVenta'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
 export const MENSAJE_CUENTA_CANCELADA = 'Esta cuenta está cancelada, abre una nueva.'
+
+type CuentaParaEditar = { venueId: string; orderId: string; additionalOrderIds?: string[] }
+
+/** Quien llama ya posee el candado: esta relectura no toma otro ni amplía su alcance. */
+export async function rechazarSiCuentaAnuladaEnTx(tx: Prisma.TransactionClient, input: CuentaParaEditar): Promise<void> {
+  const ids = [...new Set([input.orderId, ...(input.additionalOrderIds ?? [])])]
+  const anuladas = await tx.order.count({
+    where: { venueId: input.venueId, id: { in: ids }, status: { in: ['CANCELLED', 'DELETED'] } },
+  })
+  if (anuladas > 0) throw new BadRequestError(MENSAJE_CUENTA_CANCELADA, 'ORDER_CANCELLED_NO_EDIT')
+}
+
+/** Conserva el candado financiero completo o el de atribución, que no interbloquea las métricas del cliente. */
+export async function bloquearCuentaParaEditar(
+  tx: Prisma.TransactionClient,
+  input: CuentaParaEditar,
+  modo: 'COBRO' | 'ATRIBUCION' = 'COBRO',
+): Promise<boolean> {
+  let existe: boolean
+  if (modo === 'ATRIBUCION') {
+    existe = await bloquearVentaParaLiga(tx, input)
+  } else {
+    existe = await lockExistingOrderForPayment(tx, input)
+  }
+  if (!existe) return false
+  await rechazarSiCuentaAnuladaEnTx(tx, input)
+  return true
+}
 
 /**
  * Codex r10 #2 (regla del controlador, 3-oct): se clasifica por lo que HACE la operación, no por cómo viaja. Sólo es cobro NUEVO

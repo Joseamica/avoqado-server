@@ -87,7 +87,7 @@ const INVENTARIO: Record<string, Clase> = {
   // Anular: candado + relectura con CAS de versión + G2 (cualquier anulación con cobro vivo).
   'services/tpv/order.tpv.service.ts#voidItems': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockExistingOrderForPayment', 'tx.order.findUnique', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
+    marcadores: ['bloquearCuentaParaEditar', 'tx.order.findUnique', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
   },
   // hz:a8104ac8:D1 (Codex r2 #2): una venta vacía y abandonada que traía canjes no se borra: se devuelven y se ANULA (borrada, un
   // reintento de su creación la volvería a crear y quemaría otra vez el premio). Bajo el candado de la orden y con la MISMA regla

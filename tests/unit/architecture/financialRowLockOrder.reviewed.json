@@ -116,9 +116,9 @@
       "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
     },
     "src/services/shared/ligaDeClienteEnVenta.ts#bloquearVentaParaLiga": {
-      "count": 1,
+      "count": 2,
       "loops": 0,
-      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída. S2 extras: unión explícita deduplicada ordenada createdAt DESC/id DESC en UNA SELECT FOR NO KEY UPDATE; single-id intacto."
     },
     "src/services/shared/paymentShiftClaim.ts#lockExistingOrderForPayment": {
       "count": 1,
@@ -337,11 +337,6 @@
       "loops": 1,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     },
-    "src/services/dashboard/discountEngine.service.ts#lockDiscountOrder#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
     "src/services/dashboard/manualPayment.service.ts#createManualPayment#lockAreaTicketCheckoutHierarchy": {
       "count": 1,
       "loops": 0,
@@ -356,11 +351,6 @@
       "count": 1,
       "loops": 0,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
-    },
-    "src/services/dashboard/order.dashboard.service.ts#updateOrder#bloquearVentaParaLiga": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
     },
     "src/services/dashboard/order.dashboard.service.ts#updateOrder#lockTableOrderScope": {
       "count": 1,
@@ -612,11 +602,6 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
-    "src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
     "src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas#lockOrdersForUpdate": {
       "count": 1,
       "loops": 0,
@@ -637,22 +622,7 @@
       "loops": 0,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     },
-    "src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
     "src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
@@ -661,16 +631,6 @@
       "count": 1,
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
-    },
-    "src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
     "src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction#lockExistingOrderForPayment": {
       "count": 1,
@@ -737,11 +697,6 @@
       "loops": 0,
       "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
     },
-    "src/services/mobile/order.mobile.service.ts#attachCustomerToOrder#bloquearVentaParaLiga": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
-    },
     "src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction#lockTableOrderScope": {
       "count": 1,
       "loops": 0,
@@ -751,16 +706,6 @@
       "count": 1,
       "loops": 0,
       "reason": "Saldo a favor (S6): la devolución sin venta lo toma SIEMPRE como PRIMERA sentencia de su transacción, antes del turno, de Orders y de Payments («primer-sobre» → filas → turno), y repite la comprobación de sobres activados ya con él. Sin FOR UPDATE de Orders/Payments/sobres; la Order testigo es nueva, nunca en bucle."
-    },
-    "src/services/mobile/service-charge.mobile.service.ts#requireOpenOrder#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
     "src/services/online-ordering/transitions.service.ts#casTransitionInTx#lockExistingOrderForPayment": {
       "count": 1,
@@ -803,16 +748,6 @@
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
     "src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/promotions/promotion.service.ts#applyPromotionInTransaction#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/promotions/promotion.service.ts#removePromotionFromOrder#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
@@ -922,16 +857,6 @@
       "loops": 0,
       "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
     },
-    "src/services/tpv/discount.tpv.service.ts#applyCouponCode#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder#bloquearVentaParaLiga": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
-    },
     "src/services/tpv/order.tpv.service.ts#createOrder#lockTableOrderScope": {
       "count": 1,
       "loops": 0,
@@ -941,46 +866,6 @@
       "count": 1,
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
-    },
-    "src/services/tpv/order.tpv.service.ts#addItemsToOrder#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/order.tpv.service.ts#updateGuestInfo#bloquearVentaParaLiga": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
-    },
-    "src/services/tpv/order.tpv.service.ts#removeOrderItem#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/order.tpv.service.ts#compItems#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/order.tpv.service.ts#voidItems#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/order.tpv.service.ts#applyDiscount#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
-    },
-    "src/services/tpv/order.tpv.service.ts#leerVentaBajoCandado#bloquearVentaParaLiga": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
-    },
-    "src/services/tpv/order.tpv.service.ts#addSerializedItemToOrder#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
     "src/services/tpv/payment.tpv.service.ts#resolverPorReferencia#consolidarRegistroRepetidoDetallado": {
       "count": 1,
@@ -1157,11 +1042,6 @@
       "loops": 0,
       "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
     },
-    "src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
-    },
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
@@ -1296,6 +1176,151 @@
       "count": 1,
       "loops": 1,
       "reason": "El bucle recorre devoluciones, no Orders: cada vuelta pide la MISMA Order del EARN (FOR KEY SHARE), que la transacción de earnPoints ya liga por la llave foránea del EARN. Nunca aparta una Order nueva."
+    },
+    "src/services/dashboard/discountEngine.service.ts#lockDiscountOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "S2: candado de la cuenta por su entrada única antes de editar; relectura de CANCELLED/DELETED bajo ese mismo candado. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "S2: candado de la cuenta por su entrada única antes de editar; relectura de CANCELLED/DELETED bajo ese mismo candado. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/order.mobile.service.ts#attachCustomerToOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/service-charge.mobile.service.ts#requireOpenOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/promotions/promotion.service.ts#applyPromotionInTransaction#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/promotions/promotion.service.ts#removePromotionFromOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/shared/cuentaCancelada.ts#bloquearCuentaParaEditar#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "S2: el wrapper toma exactamente uno de los modos mutuamente excluyentes; COBRO conserva fence/ancestros y ATRIBUCION el modo débil. Relectura posterior, sin otro lock."
+    },
+    "src/services/shared/cuentaCancelada.ts#bloquearCuentaParaEditar#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "S2: el wrapper toma exactamente uno de los modos mutuamente excluyentes; COBRO conserva fence/ancestros y ATRIBUCION el modo débil. Relectura posterior, sin otro lock."
+    },
+    "src/services/tpv/discount.tpv.service.ts#applyCouponCode#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#addItemsToOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#updateGuestInfo#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#removeOrderItem#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#compItems#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#applyDiscount#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#leerVentaBajoCandado#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#addSerializedItemToOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño). S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#updateOrder#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
+    },
+    "src/services/tpv/order.tpv.service.ts#voidItems#bloquearCuentaParaEditar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S2 conserva COBRO (fence y ancestros) o ATRIBUCION (FOR NO KEY UPDATE); no amplía el conjunto después de topología."
     }
   }
 }
