@@ -5,7 +5,7 @@
  * credencial nueva de un reintento de activación viaja en el MISMO CAS (R3-4).
  */
 import { CelularDeCampo, StaffRole } from '@prisma/client'
-import { pbkdf2, randomUUID } from 'crypto'
+import { createHash, pbkdf2, randomUUID } from 'crypto'
 import { promisify } from 'util'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { ConflictError, UnauthorizedError } from '@/errors/AppError'
@@ -15,7 +15,7 @@ import { invalidateSession } from '@/services/auth/sessionCache'
 import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import prisma from '@/utils/prismaClient'
 import { deviceIdDelCelular } from './credencial'
-import { sucursalesDeLaPersona } from './personasDeCampo'
+import { sucursalesDeCampoDeLaPersona } from './personasDeCampo'
 import { firmarAccesoDeCampo, nuevoRefreshDeCampo } from './tokenDeCampo'
 
 export type SesionDeCelular = { accessToken: string; refreshToken: string; venueId: string; expiraEn: 86400 }
@@ -83,15 +83,32 @@ export async function revocarSesionesDelCelular(celularId: string, motivo: strin
   return count
 }
 
+/**
+ * Memo del verificador (S11): cada latido lo pide por sucursal y 100 000 vueltas cuestan. La llave es la sal y el sha256
+ * del PIN, nunca el PIN en claro. Un PIN o una sal nuevos son otra llave, así que nada viejo se sirve.
+ * ponytail: se vacía entero al llegar al tope; un LRU si alguna vez hay más de 5 000 PINes vivos por proceso.
+ */
+const TOPE_DEL_MEMO = 5000
+const memoDelVerificador = new Map<string, VerificadorDePin>()
+
 /** Lo que el celular guarda para revisar el PIN sin señal. Asíncrono a propósito: 100 000 vueltas no bloquean el hilo. */
 export async function verificadorDelPin(pin: string, salBase64: string): Promise<VerificadorDePin> {
+  const llave = `${salBase64}:${createHash('sha256').update(pin).digest('hex')}`
+  const guardado = memoDelVerificador.get(llave)
+  if (guardado) return guardado
   const hash = await pbkdf2Async(pin, Buffer.from(salBase64, 'base64'), 100000, 32, 'sha256')
-  return { algoritmo: 'PBKDF2-SHA256', iteraciones: 100000, sal: salBase64, hash: hash.toString('base64') }
+  const verificador: VerificadorDePin = { algoritmo: 'PBKDF2-SHA256', iteraciones: 100000, sal: salBase64, hash: hash.toString('base64') }
+  if (memoDelVerificador.size >= TOPE_DEL_MEMO) memoDelVerificador.clear()
+  memoDelVerificador.set(llave, verificador)
+  return verificador
 }
 
-/** Sólo se entrega a quien ya demostró el PIN (activar, entrar) o tiene la credencial del celular vinculado (latido). */
+/**
+ * Sólo se entrega a quien ya demostró el PIN (activar, entrar) o tiene la credencial del celular vinculado (latido). Sólo
+ * sus sucursales de promotora (S13): las mismas donde puede entrar.
+ */
 export async function sucursalesParaElCelular(celular: Pick<CelularDeCampo, 'staffId' | 'organizationId' | 'pinSal'>) {
-  const sucursales = await sucursalesDeLaPersona(celular.staffId, celular.organizationId)
+  const sucursales = await sucursalesDeCampoDeLaPersona(celular.staffId, celular.organizationId)
   return Promise.all(
     sucursales.map(async s => ({
       venueId: s.venueId,

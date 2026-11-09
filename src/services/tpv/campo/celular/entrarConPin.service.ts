@@ -11,7 +11,7 @@ import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import prisma from '@/utils/prismaClient'
 import { pinCoincide } from './credencial'
-import { sucursalesDeLaPersona } from './personasDeCampo'
+import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from './personasDeCampo'
 import { crearSesionDeCelular, sucursalesParaElCelular } from './sesionDeCelular'
 import { firmarAccesoDeCampo, nuevoRefreshDeCampo } from './tokenDeCampo'
 
@@ -79,7 +79,8 @@ export async function entrarConPin(celular: CelularDeCampo, e: { pin: string; ve
   if (!celular.staffIdVinculado) throw desvinculado()
   if (celular.pinBloqueadoHasta && celular.pinBloqueadoHasta > ahora) throw pinBloqueado(celular.pinBloqueadoHasta, ahora)
 
-  const sucursales = await sucursalesDeLaPersona(celular.staffId, celular.organizationId)
+  // Sólo sus sucursales de promotora (S13, A8): donde es gerente, o sin el módulo, no se entra.
+  const sucursales = await sucursalesDeCampoDeLaPersona(celular.staffId, celular.organizationId)
   if (sucursales.length === 0)
     throw new ForbiddenError('No tienes una sucursal activa. Pídele a tu supervisor que te asigne una.', 'SIN_SUCURSAL')
   let sucursal = sucursales[0]

@@ -11,7 +11,7 @@ import { newCommandCredential } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
 import { INTENTOS_DEL_CODIGO } from './codigoDeCelular.service'
 import { pinCoincide } from './credencial'
-import { sucursalesDeLaPersona } from './personasDeCampo'
+import { sucursalesDeCampoDeLaPersona } from './personasDeCampo'
 import { crearSesionDeCelular, revocarSesionesDelCelular, SesionDeCelular, sucursalesParaElCelular } from './sesionDeCelular'
 
 export type AparatoDelCelular = { aparatoId: string; marca?: string; modelo?: string; versionAndroid?: string; versionApp?: string }
@@ -24,9 +24,12 @@ class CodigoCambio extends Error {}
 
 const codigoUsado = () => new ConflictError('Ese código ya se usó. Pide uno nuevo a tu supervisor.', 'CODIGO_USADO')
 
-/** Sin sucursales → 403; ninguna con PIN → 409. No compara ningún PIN: eso va después de reservar el intento. */
+/**
+ * Sólo sus sucursales de promotora (S13, A8). Sin ninguna → 403; ninguna con PIN → 409. No compara ningún PIN: eso va
+ * después de reservar el intento.
+ */
 async function sucursalesConPin(codigo: CodigoDeCelular) {
-  const sucursales = await sucursalesDeLaPersona(codigo.staffId, codigo.organizationId)
+  const sucursales = await sucursalesDeCampoDeLaPersona(codigo.staffId, codigo.organizationId)
   if (sucursales.length === 0)
     throw new ForbiddenError('No tienes una sucursal activa. Pídele a tu supervisor que te asigne una.', 'SIN_SUCURSAL')
   if (!sucursales.some(s => s.pin)) throw new ConflictError('Todavía no tienes PIN: pídele a tu supervisor que te ponga uno.', 'SIN_PIN')
@@ -121,7 +124,7 @@ async function reintentar(codigo: CodigoDeCelular, e: { pin: string; aparato: Ap
     data: { intentos: { increment: 1 } },
   })
   if (count === 0) throw codigoUsado()
-  const sucursales = await sucursalesDeLaPersona(codigo.staffId, codigo.organizationId)
+  const sucursales = await sucursalesDeCampoDeLaPersona(codigo.staffId, codigo.organizationId)
   const sucursal = sucursales.find(s => pinCoincide(s.pin, e.pin))
   if (!sucursal) throw codigoUsado()
   const { token, hash } = newCommandCredential()

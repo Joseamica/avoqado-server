@@ -19,11 +19,11 @@ export const filtroDePromotor = (venueIds: string[]) => ({
   venue: { status: { in: OPERATIONAL_VENUE_STATUSES } },
 })
 
-/** Sucursales de la organización con inventario serializado. */
+/** Sucursales de la organización con inventario serializado (una consulta de módulo para todas, no una por sucursal). */
 export async function sucursalesConCampo(organizationId: string): Promise<string[]> {
-  const venues = await prisma.venue.findMany({ where: { organizationId }, select: { id: true } })
-  const prendidas = await Promise.all(venues.map(v => moduleService.isModuleEnabled(v.id, MODULE_CODES.SERIALIZED_INVENTORY)))
-  return venues.filter((_, i) => prendidas[i]).map(v => v.id)
+  const ids = (await prisma.venue.findMany({ where: { organizationId }, select: { id: true } })).map(v => v.id)
+  const prendidas = await moduleService.venuesWithModule(ids, MODULE_CODES.SERIALIZED_INVENTORY)
+  return ids.filter(id => prendidas.has(id))
 }
 
 /** Sucursales operativas de la organización donde la persona (activa) tiene un `StaffVenue` activo. */
@@ -39,6 +39,20 @@ export async function sucursalesDeLaPersona(staffId: string, organizationId: str
     orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
   })
   return filas.map(f => ({ staffVenueId: f.id, venueId: f.venueId, nombre: f.venue.name, role: f.role, pin: f.pin }))
+}
+
+/**
+ * Las sucursales donde la persona trabaja COMO PROMOTORA de campo (A8: rol de promotor y sucursal con el módulo). Es lo único
+ * que usan activar, entrar y la lista de sucursales que recibe el celular: una sucursal donde es gerente, o sin el módulo, no.
+ */
+export async function sucursalesDeCampoDeLaPersona(staffId: string, organizationId: string): Promise<SucursalDeLaPersona[]> {
+  const deCampo = (await sucursalesDeLaPersona(staffId, organizationId)).filter(s => ROLES_DE_CAMPO.includes(s.role))
+  if (deCampo.length === 0) return []
+  const conModulo = await moduleService.venuesWithModule(
+    deCampo.map(s => s.venueId),
+    MODULE_CODES.SERIALIZED_INVENTORY,
+  )
+  return deCampo.filter(s => conModulo.has(s.venueId))
 }
 
 /** `conCampo` opcional: quien llama en bucle lo calcula UNA vez y lo pasa. */

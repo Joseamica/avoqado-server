@@ -12,7 +12,7 @@ import { invalidateSession } from '@/services/auth/sessionCache'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { issueGrant } from '@/services/auth/refreshGrant.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
+import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { esTokenDeLaApi } from '@/utils/tokenDeLaApi'
 import { activarCelular, AparatoDelCelular } from '@/services/tpv/campo/celular/activarCelular.service'
 import { autenticarCelular, CABECERA_CREDENCIAL, deviceIdDelCelular, hashDeCredencial } from '@/services/tpv/campo/celular/credencial'
@@ -41,7 +41,10 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({ __esModule:
 jest.mock('@/services/auth/refreshGrant.service', () => ({ issueGrant: jest.fn() }))
 jest.mock('@/services/mobile/auth.mobile.service', () => ({ refreshGrantExpiry: () => new Date('2026-11-16T12:00:00.000Z') }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
-jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({ sucursalesDeLaPersona: jest.fn() }))
+jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({
+  sucursalesDeLaPersona: jest.fn(),
+  sucursalesDeCampoDeLaPersona: jest.fn(),
+}))
 
 const db = prisma as any
 const AHORA = new Date('2026-11-09T12:00:00.000Z')
@@ -109,6 +112,10 @@ beforeEach(() => {
     { staffVenueId: 'sv2', venueId: 'v2', nombre: 'Tienda Dos', role: 'CASHIER', pin: '4321' },
   ]
   ;(sucursalesDeLaPersona as jest.Mock).mockImplementation(() => Promise.resolve(sucursales.map(s => ({ ...s }))))
+  // Lo que hace la real (A8): sólo rol de promotor; el módulo lo prueba personasDeCampo.test.ts.
+  ;(sucursalesDeCampoDeLaPersona as jest.Mock).mockImplementation(() =>
+    Promise.resolve(sucursales.filter(s => ['WAITER', 'CASHIER'].includes(s.role)).map(s => ({ ...s }))),
+  )
   ;(logAction as jest.Mock).mockResolvedValue(undefined)
   ;(issueGrant as jest.Mock).mockResolvedValue({})
   ;(createSession as jest.Mock).mockImplementation((d: any) => {
@@ -248,12 +255,34 @@ describe('verificadorDelPin y sucursalesParaElCelular', () => {
   it('cada sucursal lleva su verificador; sin PIN → null', async () => {
     sucursales[0].pin = null
     const sal = Buffer.alloc(16, 7).toString('base64')
+    sucursales.push({ staffVenueId: 'sv3', venueId: 'v3', nombre: 'Donde es gerente', role: 'MANAGER', pin: '7777' })
     const r = await sucursalesParaElCelular({ staffId: 'staff1', organizationId: 'org1', pinSal: sal } as any)
-    expect(sucursalesDeLaPersona).toHaveBeenCalledWith('staff1', 'org1')
+    // S13: sólo las sucursales de campo (la de gerente no viaja al celular).
+    expect(sucursalesDeCampoDeLaPersona).toHaveBeenCalledWith('staff1', 'org1')
     expect(r).toEqual([
       { venueId: 'v1', nombre: 'Tienda Uno', verificadorPin: null },
       { venueId: 'v2', nombre: 'Tienda Dos', verificadorPin: await verificadorDelPin('4321', sal) },
     ])
+  })
+})
+
+describe('verificadorDelPin: memo (S11)', () => {
+  it('el mismo PIN con la misma sal no vuelve a correr PBKDF2; otro PIN u otra sal sí', async () => {
+    const real = jest.requireActual('crypto')
+    const pbkdf2Espia = jest.fn(real.pbkdf2)
+    let verificar!: typeof verificadorDelPin
+    jest.isolateModules(() => {
+      jest.doMock('crypto', () => ({ ...real, pbkdf2: pbkdf2Espia }))
+      verificar = require('@/services/tpv/campo/celular/sesionDeCelular').verificadorDelPin
+    })
+    jest.dontMock('crypto')
+    const sal = Buffer.alloc(16, 3).toString('base64')
+    const primero = await verificar('2468', sal)
+    expect(await verificar('2468', sal)).toEqual(primero)
+    expect(pbkdf2Espia).toHaveBeenCalledTimes(1)
+    await verificar('1357', sal)
+    await verificar('2468', Buffer.alloc(16, 4).toString('base64'))
+    expect(pbkdf2Espia).toHaveBeenCalledTimes(3)
   })
 })
 
@@ -367,6 +396,15 @@ describe('activarCelular', () => {
     sucursales = [{ staffVenueId: 'sv1', venueId: 'v1', nombre: 'T', role: 'WAITER', pin: null }]
     expect(await falla(activar())).toMatchObject({ statusCode: 409, code: 'SIN_PIN' })
     expect(db.codigoDeCelular.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('S13 · el PIN de una sucursal donde NO es promotora (gerente) no activa: 401 PIN_INCORRECTO', async () => {
+    sucursales.push({ staffVenueId: 'sv3', venueId: 'v3', nombre: 'Donde es gerente', role: 'MANAGER', pin: '7777' })
+    expect(await falla(activar('7777'))).toMatchObject({ statusCode: 401, code: 'PIN_INCORRECTO' })
+    expect(celulares).toHaveLength(0)
+    // Sólo con sucursales de gerente es como no tener sucursal de campo.
+    sucursales = [{ staffVenueId: 'sv3', venueId: 'v3', nombre: 'Donde es gerente', role: 'MANAGER', pin: '7777' }]
+    expect(await falla(activar('7777'))).toMatchObject({ statusCode: 403, code: 'SIN_SUCURSAL' })
   })
 
   it('5 · 4 PINes malos: 4, 3, 2, 1; el 5.º anula; luego el bueno → 410 CODIGO_ANULADO', async () => {

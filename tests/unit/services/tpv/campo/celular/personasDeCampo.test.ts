@@ -1,6 +1,11 @@
 import prisma from '@/utils/prismaClient'
 import { moduleService } from '@/services/modules/module.service'
-import { esPromotorDeCampo, sucursalesConCampo, sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
+import {
+  esPromotorDeCampo,
+  sucursalesConCampo,
+  sucursalesDeCampoDeLaPersona,
+  sucursalesDeLaPersona,
+} from '@/services/tpv/campo/celular/personasDeCampo'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -8,7 +13,7 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/modules/module.service', () => ({
   MODULE_CODES: { SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY' },
-  moduleService: { isModuleEnabled: jest.fn() },
+  moduleService: { isModuleEnabled: jest.fn(), venuesWithModule: jest.fn() },
 }))
 const db = prisma as any
 const fila = (venueId: string, role: string) => ({ id: `sv-${venueId}`, venueId, role, pin: '1', venue: { name: venueId } })
@@ -17,10 +22,29 @@ beforeEach(() => {
   jest.resetAllMocks()
   db.venue.findMany.mockResolvedValue([{ id: 'v1' }, { id: 'v2' }])
   ;(moduleService.isModuleEnabled as jest.Mock).mockImplementation((id: string) => Promise.resolve(id === 'v1'))
+  ;(moduleService.venuesWithModule as jest.Mock).mockImplementation(async (ids: string[]) => new Set(ids.filter(id => id === 'v1')))
 })
 
-it('sucursalesConCampo: sólo las que tienen el módulo', async () => {
+it('sucursalesConCampo: sólo las que tienen el módulo, con UNA consulta de módulo para todas (S6)', async () => {
   expect(await sucursalesConCampo('o')).toEqual(['v1'])
+  expect(moduleService.venuesWithModule).toHaveBeenCalledTimes(1)
+  expect(moduleService.venuesWithModule).toHaveBeenCalledWith(['v1', 'v2'], 'SERIALIZED_INVENTORY')
+  expect(moduleService.isModuleEnabled).not.toHaveBeenCalled()
+})
+
+describe('sucursalesDeCampoDeLaPersona (S13: activar y entrar)', () => {
+  it('sólo las de rol de promotor y con el módulo', async () => {
+    db.staffVenue.findMany.mockResolvedValue([fila('v1', 'CASHIER'), fila('v1b', 'MANAGER'), fila('v2', 'WAITER')])
+    ;(moduleService.venuesWithModule as jest.Mock).mockImplementation(async (ids: string[]) => new Set(ids.filter(id => id !== 'v2')))
+    const r = await sucursalesDeCampoDeLaPersona('s', 'o')
+    expect(r.map(x => x.venueId)).toEqual(['v1'])
+    expect(moduleService.venuesWithModule).toHaveBeenCalledWith(['v1', 'v2'], 'SERIALIZED_INVENTORY')
+  })
+  it('sin ninguna de promotor no consulta el módulo', async () => {
+    db.staffVenue.findMany.mockResolvedValue([fila('v1', 'MANAGER')])
+    expect(await sucursalesDeCampoDeLaPersona('s', 'o')).toEqual([])
+    expect(moduleService.venuesWithModule).not.toHaveBeenCalled()
+  })
 })
 
 it('sucursalesDeLaPersona filtra por persona activa, StaffVenue activo y sucursal operativa de la org', async () => {
@@ -54,5 +78,6 @@ describe('esPromotorDeCampo (A8)', () => {
     db.staffVenue.findMany.mockResolvedValue([fila('v9', 'WAITER')])
     expect(await esPromotorDeCampo('s', 'o', new Set(['v9']))).toBe(true)
     expect(moduleService.isModuleEnabled).not.toHaveBeenCalled()
+    expect(moduleService.venuesWithModule).not.toHaveBeenCalled()
   })
 })

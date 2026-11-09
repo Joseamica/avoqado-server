@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { hashToken, rotateGrant } from '@/services/auth/refreshGrant.service'
-import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
+import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { crearSesionDeCelular, sucursalesParaElCelular } from '@/services/tpv/campo/celular/sesionDeCelular'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
@@ -28,7 +28,10 @@ jest.mock('@/services/auth/refreshGrant.service', () => ({
 }))
 jest.mock('@/services/mobile/auth.mobile.service', () => ({ refreshGrantExpiry: () => new Date('2026-11-16T12:00:00.000Z') }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
-jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({ sucursalesDeLaPersona: jest.fn() }))
+jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({
+  sucursalesDeLaPersona: jest.fn(),
+  sucursalesDeCampoDeLaPersona: jest.fn(),
+}))
 jest.mock('@/services/tpv/campo/celular/sesionDeCelular', () => ({ crearSesionDeCelular: jest.fn(), sucursalesParaElCelular: jest.fn() }))
 jest.mock('@/utils/passwordChangeGuard', () => ({
   motivoDeSesionInvalidada: jest.fn(),
@@ -96,6 +99,10 @@ beforeEach(() => {
   grants = []
   ;(sucursalesDeLaPersona as jest.Mock).mockImplementation((staffId: string) =>
     Promise.resolve((sucursales[staffId] ?? []).map(s => ({ ...s }))),
+  )
+  // Lo que hace la real (A8): sólo rol de promotor; el módulo lo prueba personasDeCampo.test.ts.
+  ;(sucursalesDeCampoDeLaPersona as jest.Mock).mockImplementation((staffId: string) =>
+    Promise.resolve((sucursales[staffId] ?? []).filter(s => ['WAITER', 'CASHIER'].includes(s.role)).map(s => ({ ...s }))),
   )
   ;(sucursalesParaElCelular as jest.Mock).mockResolvedValue([{ venueId: 'v1', nombre: 'Tienda Uno', verificadorPin: null }])
   ;(crearSesionDeCelular as jest.Mock).mockImplementation((c: any, s: any) =>
@@ -181,6 +188,18 @@ describe('entrarConPin', () => {
 
   it('sin sucursales → 403 SIN_SUCURSAL', async () => {
     sucursales.staffA = []
+    expect(await falla(entrar())).toMatchObject({ statusCode: 403, code: 'SIN_SUCURSAL' })
+  })
+
+  it('S13 · sólo cuentan sus sucursales de promotora: donde es gerente no se entra ni se ofrece', async () => {
+    sucursales.staffA.push({ staffVenueId: 'svM', venueId: 'vM', nombre: 'Donde es gerente', role: 'MANAGER', pin: PIN })
+    // Con una sola de campo no pide elegir (la de gerente no cuenta) …
+    expect((await entrar()).sesion.venueId).toBe('v1')
+    // … y elegir la de gerente es como elegir una ajena, sin contar intento.
+    celulares[0].pinFallos = 0
+    expect(await falla(entrar(PIN, 'vM'))).toMatchObject({ statusCode: 403, code: 'SIN_ACCESO_A_LA_SUCURSAL' })
+    expect(celulares[0].pinFallos).toBe(0)
+    sucursales.staffA = [{ staffVenueId: 'svM', venueId: 'vM', nombre: 'Donde es gerente', role: 'MANAGER', pin: PIN }]
     expect(await falla(entrar())).toMatchObject({ statusCode: 403, code: 'SIN_SUCURSAL' })
   })
 
