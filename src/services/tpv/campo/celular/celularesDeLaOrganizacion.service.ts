@@ -2,8 +2,10 @@
  * La lista de la organización (App de campo, bloque 1): cada promotor con el estado de su celular. El filtro por estado, la
  * búsqueda, el orden y la paginación son del servidor. Nunca devuelve el PIN (sólo si la sucursal ya tiene uno).
  */
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { personSearchWhere } from '@/mcp/personSearch'
 import { filtroDePromotor, sucursalesConCampo } from './personasDeCampo'
 
@@ -146,21 +148,18 @@ export async function listarCelularesDeCampo(organizationId: string, f: FiltrosD
             porSubir: true,
           },
         }),
-        // Sólo las sucursales de la lista (S4): la checada de otra organización (u otra sucursal) no se ve aquí.
-        prisma.timeEntry.findMany({
-          where: {
-            staffId: { in: paginaIds },
-            venueId: { in: alcance },
-            clockInTime: { gte: new Date(ahora.getTime() - HORAS_DE_LA_ULTIMA_CHECADA * 3600_000) },
-          },
-          select: { staffId: true, venueId: true, clockInTime: true, clockInLatitude: true },
-          orderBy: { clockInTime: 'desc' },
-        }),
+        // Sólo las sucursales de la lista (S4), y sólo la ÚLTIMA de cada persona desde la base (T6): nunca todas sus checadas.
+        prisma.$queryRaw<{ staffId: string; venueId: string; clockInTime: Date; clockInLatitude: number | null }[]>(Prisma.sql`
+          SELECT DISTINCT ON ("staffId") "staffId", "venueId", "clockInTime", "clockInLatitude"
+            FROM "time_entries"
+           WHERE "staffId" = ANY(${paginaIds}::text[])
+             AND "venueId" = ANY(${alcance}::text[])
+             AND "clockInTime" >= ${utcTs(new Date(ahora.getTime() - HORAS_DE_LA_ULTIMA_CHECADA * 3600_000))}
+           ORDER BY "staffId", "clockInTime" DESC`),
       ])
     : [[], []]
   const celularDe = new Map(celulares.map(c => [c.staffIdVinculado, c]))
-  const checadaDe = new Map<string, (typeof checadas)[number]>()
-  for (const t of checadas) if (!checadaDe.has(t.staffId)) checadaDe.set(t.staffId, t) // la más reciente va primero
+  const checadaDe = new Map(checadas.map(t => [t.staffId, t]))
 
   const items: FilaDePromotor[] = personas.map(p => {
     const cel = celularDe.get(p.id)

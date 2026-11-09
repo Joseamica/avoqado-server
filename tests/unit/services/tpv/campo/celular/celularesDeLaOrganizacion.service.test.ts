@@ -13,6 +13,7 @@ jest.mock('@/utils/prismaClient', () => ({
     celularDeCampo: { findMany: jest.fn() },
     codigoDeCelular: { findMany: jest.fn() },
     timeEntry: { findMany: jest.fn() },
+    $queryRaw: jest.fn(),
     envioRetenidoDeCampo: { groupBy: jest.fn(), count: jest.fn() },
   },
 }))
@@ -134,14 +135,17 @@ beforeEach(() => {
       ),
     ),
   )
-  db.timeEntry.findMany.mockImplementation(({ where }: any) =>
-    Promise.resolve(
-      checadas
-        .filter(t => where.staffId.in.includes(t.staffId) && t.clockInTime >= where.clockInTime.gte)
-        .filter(t => !where.venueId?.in || where.venueId.in.includes(t.venueId))
-        .sort((x, y) => y.clockInTime.getTime() - x.clockInTime.getTime()),
-    ),
-  )
+  // La última checada por persona sale de UNA consulta (T6): `DISTINCT ON ("staffId")` con sus parámetros en orden
+  // (personas, sucursales, desde). Aquí se resuelve en memoria con la misma regla.
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    const [ids, venues, desde] = q.values
+    const ultima = new Map<string, any>()
+    for (const t of [...checadas].sort((x, y) => y.clockInTime.getTime() - x.clockInTime.getTime())) {
+      if (ids.includes(t.staffId) && venues.includes(t.venueId) && t.clockInTime >= desde && !ultima.has(t.staffId))
+        ultima.set(t.staffId, t)
+    }
+    return [...ultima.values()]
+  })
   const delRetenido = (r: any, where: any) =>
     r.organizationId === where.organizationId &&
     where.estado.in.includes(r.estado) &&
@@ -265,10 +269,10 @@ describe('listarCelularesDeCampo', () => {
 
   it('sin N+1: una consulta de checadas y una de retenidos por página, acotadas a la página y a 48 h', async () => {
     await listarCelularesDeCampo(ORG, { page: 1, pageSize: 2 })
-    expect(db.timeEntry.findMany).toHaveBeenCalledTimes(1)
-    const w = db.timeEntry.findMany.mock.calls[0][0].where
-    expect(w.staffId.in).toEqual(['a', 'b'])
-    expect(w.clockInTime.gte).toEqual(hora(-48))
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1)
+    const [ids, , desde] = db.$queryRaw.mock.calls[0][0].values
+    expect(ids).toEqual(['a', 'b'])
+    expect(desde).toEqual(hora(-48))
     expect(db.envioRetenidoDeCampo.groupBy).toHaveBeenCalledTimes(1)
   })
 })
@@ -290,7 +294,7 @@ describe('arreglo final (S3, S4, S5, S6)', () => {
   it('S4 · la última checada sólo de las sucursales de la lista (la de otra organización, más reciente, no sale)', async () => {
     const r = await listarCelularesDeCampo(ORG, base)
     expect(r.items.find(i => i.staffId === 'a')!.ultimaChecada).toEqual({ at: hora(-3).toISOString(), conUbicacion: true, venueId: 'v1' })
-    expect(db.timeEntry.findMany.mock.calls[0][0].where.venueId).toEqual({ in: ['v1', 'v2'] })
+    expect(db.$queryRaw.mock.calls[0][0].values[1]).toEqual(['v1', 'v2'])
   })
 
   it('S5 · lo por revisar de una persona dada de baja (ya no es promotora) cuenta arriba', async () => {
@@ -308,5 +312,17 @@ describe('arreglo final (S3, S4, S5, S6)', () => {
     expect(deIds.take).toBe(10_000)
     expect(db.celularDeCampo.findMany.mock.calls[0][0].take).toBe(10_000)
     expect(db.codigoDeCelular.findMany.mock.calls[0][0].take).toBe(10_000)
+  })
+})
+
+describe('arreglo final 2 (T6)', () => {
+  it('la última checada sale de la base, UNA fila por persona (DISTINCT ON), acotada a sus sucursales y a 48 h; nada se descarga de más', async () => {
+    for (let i = 0; i < 50; i++) checadas.push({ staffId: 'a', venueId: 'v1', clockInTime: hora(-4 - i / 10), clockInLatitude: null })
+    const r = await listarCelularesDeCampo(ORG, base)
+    expect(db.timeEntry.findMany).not.toHaveBeenCalled()
+    const q = db.$queryRaw.mock.calls[0][0]
+    expect(q.sql).toMatch(/DISTINCT ON \("staffId"\)/)
+    expect(q.sql).toMatch(/ORDER BY "staffId", "clockInTime" DESC/)
+    expect(r.items.find(i => i.staffId === 'a')!.ultimaChecada).toEqual({ at: hora(-3).toISOString(), conUbicacion: true, venueId: 'v1' })
   })
 })
