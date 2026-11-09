@@ -2112,7 +2112,7 @@ describe('cancelOrder y la admisión de un cobro comparten el lock de la orden',
       (e: unknown) => e,
     )
     expect(estable).toBeInstanceOf(BadRequestError)
-    expect(estable).toMatchObject({ statusCode: 400, message: 'Cannot cancel a paid order' })
+    expect(estable).toMatchObject({ statusCode: 400, message: 'Esta cuenta ya está pagada. Reembólsala antes de cancelarla.' })
     expect(await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })).toEqual(final)
     await assertNoCancellationEffects()
   })

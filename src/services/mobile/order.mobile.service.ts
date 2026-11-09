@@ -6700,7 +6700,7 @@ export async function cancelOrderInTransaction(
   await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
-    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
+    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
     select: { tableId: true },
   })
   // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.

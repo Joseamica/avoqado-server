@@ -114,6 +114,9 @@ export async function assertNoLiveTerminalCharge(
 
 export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).'
 
+/** 🔴 `cancelExchange` reconoce este rechazo por su texto exacto: usa la constante, no copies la frase. */
+export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada. Reembólsala antes de cancelarla.'
+
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
   mensajeConDinero?: string
@@ -165,7 +168,7 @@ export async function assertOrderCancellableUnderLock(
     throw new BadRequestError(
       opciones.mensajeConDinero ??
         (order.paymentStatus === 'PAID'
-          ? 'Cannot cancel a paid order'
+          ? MENSAJE_CUENTA_PAGADA
           : 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'),
     )
   }
