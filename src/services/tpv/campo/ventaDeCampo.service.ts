@@ -21,6 +21,7 @@ import { cancelarCuentaSinCobrar } from '@/services/dashboard/order.dashboard.se
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { sellSerializedItem } from '@/services/tpv/order.tpv.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { claseDeEstado } from '@/services/shared/orderBalance'
 import { createPendingSaleVerification } from '@/services/tpv/sale-verification.service'
 import prisma from '@/utils/prismaClient'
 import { OrigenHora, resolverHoraDelCelular } from './horaDelCelular'
@@ -129,7 +130,7 @@ export async function registrarVentaDeCampo(
     await marcarLaSim(t, ficha, orderId) // Paso 7
     // Paso 8
     const evidencia =
-      (await prisma.saleVerification.findUnique({ where: { paymentId }, select: { id: true } })) ??
+      (await buscarEvidencia(paymentId)) ??
       (await createPendingSaleVerification({
         venueId: t.venueId,
         paymentId,
@@ -138,21 +139,60 @@ export async function registrarVentaDeCampo(
         serialNumbers: [t.serial],
         scannedProducts: [],
         createdAt: ficha.ocurrioAt, // la hora de la venta, no la de subida: Cash Out paga por el día de `createdAt`
+      }).catch(async error => {
+        // Otra petición la creó entre la lectura y la creación (400 «Verification already exists»): se toma ésa.
+        const yaCreada = await buscarEvidencia(paymentId)
+        if (!yaCreada) throw error
+        return yaCreada
       }))
-    await escribir(t, ficha.id, { saleVerificationId: evidencia.id, estado: 'COMPLETA', ocupacion: null, ocupadaHasta: null })
+    // Al completarse la SIM ya está vendida (el escaneo frena otra venta): se suelta su reclamo, para que si regresa (RETURNED)
+    // se pueda volver a vender desde el celular.
+    await escribir(t, ficha.id, {
+      saleVerificationId: evidencia.id,
+      estado: 'COMPLETA',
+      serializedItemId: null,
+      ocupacion: null,
+      ocupadaHasta: null,
+    })
     logger.info('📱 [VENTA DE CAMPO] Venta completa', { venueId: t.venueId, staffId: t.staffId, fichaId: ficha.id, orderId, paymentId })
     return resultado({ ...ficha, orderId, paymentId, saleVerificationId: evidencia.id }, false)
   } catch (error) {
     await soltar(t, ficha.id) // el reintento sigue desde aquí
+    // Después del dinero nada es definitivo: un 4xx de los pasos 7 u 8 se vuelve reintentable.
+    if (error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500) throw enProceso()
     throw error
   }
+}
+
+const buscarEvidencia = (paymentId: string) => prisma.saleVerification.findUnique({ where: { paymentId }, select: { id: true } })
+
+/** Un cobro con esta llave sobre ESTA orden también cuenta aquí. */
+const sinCobros = async (t: Trabajo, orderId: string) => (await prisma.payment.count({ where: { venueId: t.venueId, orderId } })) === 0
+
+/**
+ * La cuenta de la ficha ya no está (cancelada, borrada o no existe) y no tiene ningún cobro: la ficha ya no sirve. Sin borrarla,
+ * su reintento cobraría la cuenta cancelada (el efectivo ya capturado la reabre, `cuentaCancelada.ts`) y la SIM quedaría
+ * reclamada para siempre.
+ */
+async function cuentaCanceladaSinCobro(t: Trabajo, orderId: string): Promise<boolean> {
+  const orden = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } })
+  return (!orden || claseDeEstado(orden.status) === 'CANCELADA') && (await sinCobros(t, orderId))
 }
 
 /** Pasos 2 a 4: la ficha de esta llave, ocupada por esta petición, o el resultado si ya está completa. */
 async function tomarOCrearFicha(t: Trabajo): Promise<VentaDeCampo | ResultadoVentaDeCampo> {
   for (let vuelta = 0; vuelta < 3; vuelta++) {
     const existente = await leerFicha(t)
-    if (existente) return ocuparFicha(t, existente)
+    if (existente) {
+      const tomada = await ocuparFicha(t, existente)
+      if ('repetida' in tomada || !tomada.orderId || tomada.paymentId || !(await cuentaCanceladaSinCobro(t, tomada.orderId))) {
+        return tomada
+      }
+      // Un rechazo canceló su cuenta pero no alcanzó a borrar la ficha: se borra y la venta se revisa contra lo de HOY.
+      const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: tomada.id, ocupacion: t.ocupacion } })
+      if (count === 0) throw enProceso()
+      continue
+    }
 
     let revisada: { serializedItemId: string; precio: Prisma.Decimal }
     try {
@@ -235,26 +275,9 @@ async function revisarContraHoy(t: Trabajo): Promise<{ serializedItemId: string;
 /** Paso 6: el cobro de la terminal, con la llave. Devuelve el paymentId ya guardado en la ficha. */
 async function cobrar(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise<string> {
   const precio = new Prisma.Decimal(ficha.precio)
-  // Por el esquema del cobro de la terminal, para heredar sus defaults (importes en centavos enteros).
-  const { body } = recordPaymentBodySchema.parse({
-    body: {
-      venueId: t.venueId,
-      amount: precio.mul(100).toNumber(),
-      tip: 0,
-      status: 'COMPLETED',
-      method: 'CASH',
-      splitType: 'FULLPAYMENT',
-      staffId: t.staffId,
-      idempotencyKey: t.llave,
-      serialNumbers: [t.serial],
-      isPortabilidad: t.v.isPortabilidad,
-    },
-  })
-  const datos = { ...body, authenticatedTerminalSerial: null } as unknown as Parameters<typeof recordOrderPayment>[2]
-
   let pago: Awaited<ReturnType<typeof recordOrderPayment>>
   try {
-    pago = await recordOrderPayment(t.venueId, orderId, datos, t.staffId, t.orgId)
+    pago = await recordOrderPayment(t.venueId, orderId, datosDelCobro(t, precio), t.staffId, t.orgId)
   } catch (error) {
     throw await limpiarTrasElCobro(t, ficha.id, orderId, error)
   }
@@ -272,28 +295,69 @@ async function cobrar(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise
 }
 
 /**
- * Paso 9 (Codex r3 #3). Un rechazo definitivo (4xx) sobre una cuenta sin ningún cobro la cancela y borra la ficha; lo demás
- * (5xx, desconocido, la cancelación falla o la cuenta ya tiene un cobro) sólo desocupa. Devuelve el error para lanzarlo.
+ * El cobro de la terminal, por su esquema para heredar sus defaults (importes en centavos enteros). Si no lo pasa es determinista
+ * (p. ej. un venueId que no es cuid): sale como rechazo claro y se limpia, nunca como un 500 con la ficha ocupada.
+ */
+function datosDelCobro(t: Trabajo, precio: Prisma.Decimal): Parameters<typeof recordOrderPayment>[2] {
+  const r = recordPaymentBodySchema.safeParse({
+    body: {
+      venueId: t.venueId,
+      amount: precio.mul(100).toNumber(),
+      tip: 0,
+      status: 'COMPLETED',
+      method: 'CASH',
+      splitType: 'FULLPAYMENT',
+      staffId: t.staffId,
+      idempotencyKey: t.llave,
+      serialNumbers: [t.serial],
+      isPortabilidad: t.v.isPortabilidad,
+    },
+  })
+  if (!r.success) {
+    throw new BadRequestError(
+      `El cobro no pasa el esquema de la terminal: ${r.error.issues.map(i => i.message).join('; ')}`,
+      'COBRO_INVALIDO',
+    )
+  }
+  return { ...r.data.body, authenticatedTerminalSerial: null } as unknown as Parameters<typeof recordOrderPayment>[2]
+}
+
+/** Los 409 del cobro que dicen «vuelve a intentar»: no son un rechazo de la venta. */
+const COBRO_TRANSITORIO = new Set(['ORDER_PAYMENT_CONFLICT'])
+
+/**
+ * Paso 9 (Codex r3 #3). Un rechazo definitivo (4xx) sobre una cuenta sin ningún cobro la cancela y borra la ficha, y sale el
+ * rechazo. Si esa limpieza falla, sale VENTA_EN_PROCESO para que el celular reintente hasta que se pueda. Un 5xx, un desconocido
+ * o un 409 transitorio del cobro sólo desocupan. Devuelve el error para lanzarlo.
  */
 async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, error: unknown): Promise<unknown> {
-  if (error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500) {
-    try {
-      // Un cobro con esta llave sobre ESTA orden también cuenta aquí; `cancelarCuentaSinCobrar` además se niega si hay cobros.
-      if ((await prisma.payment.count({ where: { venueId: t.venueId, orderId } })) === 0) {
-        await cancelarCuentaSinCobrar(t.venueId, orderId, `Venta del celular rechazada: ${error.code ?? error.statusCode}`, t.staffId)
-        await prisma.ventaDeCampo.deleteMany({ where: { id: fichaId, ocupacion: t.ocupacion } })
-        return error
-      }
-    } catch (fallo) {
-      logger.warn('📱 [VENTA DE CAMPO] No se pudo cancelar la cuenta del cobro rechazado; queda para el reintento', {
-        venueId: t.venueId,
-        orderId,
-        error: fallo instanceof Error ? fallo.message : String(fallo),
-      })
-    }
+  const esAppError4xx = error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500
+  if (!esAppError4xx || COBRO_TRANSITORIO.has(error.code ?? '')) {
+    await soltar(t, fichaId)
+    return esAppError4xx ? enProceso() : error
   }
-  await soltar(t, fichaId)
-  return error
+  try {
+    if (!(await sinCobros(t, orderId))) {
+      await soltar(t, fichaId) // con dinero en la cuenta no se cancela nada: el rechazo queda tal cual
+      return error
+    }
+    await cancelarCuentaSinCobrar(t.venueId, orderId, `Venta del celular rechazada: ${error.code ?? error.statusCode}`, t.staffId).catch(
+      async fallo => {
+        // Otra petición ya la canceló (`rechazarYaCancelada`): para la ficha es lo mismo.
+        if (!(await cuentaCanceladaSinCobro(t, orderId))) throw fallo
+      },
+    )
+    const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: fichaId, ocupacion: t.ocupacion } })
+    return count === 1 ? error : enProceso() // perdió la ficha: quien la tiene verá la cuenta cancelada y la borrará
+  } catch (fallo) {
+    logger.warn('📱 [VENTA DE CAMPO] No se pudo limpiar la venta del cobro rechazado; queda para el reintento', {
+      venueId: t.venueId,
+      orderId,
+      error: fallo instanceof Error ? fallo.message : String(fallo),
+    })
+    await soltar(t, fichaId)
+    return enProceso()
+  }
 }
 
 /**

@@ -174,7 +174,8 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     })
     expect(evidencias[0].createdAt.toISOString()).toBe(hora.toISOString())
     expect(fichas).toHaveLength(1)
-    expect(fichas[0]).toMatchObject({ estado: 'COMPLETA', serializedItemId: sim.id, origenHora: 'RELOJ_ANCLADO', ocupacion: null })
+    // Completa: la SIM ya está vendida y la ficha suelta su reclamo (si regresa, se puede volver a vender).
+    expect(fichas[0]).toMatchObject({ estado: 'COMPLETA', serializedItemId: null, origenHora: 'RELOJ_ANCLADO', ocupacion: null })
 
     const otra = await vender(cuerpo)
     expect(otra.status).toBe(200)
@@ -199,6 +200,28 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     const { ordenes, cobros, fichas, evidencias } = await filas(sim.serialNumber, cuerpo.llave)
     expect([ordenes.length, cobros.length, fichas.length, evidencias.length]).toEqual([1, 1, 1, 1])
     expect(reintento.body.orderId).toBe(ordenes[0].id)
+  })
+
+  it('dos llaves distintas con la misma SIM a la vez: una vende y la otra se rechaza sin dejar nada', async () => {
+    const sim = await nuevaSim(categoriaDeCaja)
+    const [cuerpoA, cuerpoB] = [ventaDe(sim.serialNumber), ventaDe(sim.serialNumber)]
+
+    const [a, b] = await Promise.all([vender(cuerpoA), vender(cuerpoB)])
+
+    const [ganadora, otra] = a.status === 201 ? [a, b] : [b, a]
+    expect(ganadora.status).toBe(201)
+    // Lo normal: la otra choca con el reclamo de la SIM. Si la primera ya terminó: el escaneo de hoy la ve vendida. Y si la
+    // escaneó disponible justo antes de que la primera terminara, el 400 «ya fue vendido» sale de `sellSerializedItem` tal cual.
+    expect([
+      [409, 'SIM_EN_OTRA_VENTA'],
+      [409, 'SIM_YA_VENDIDA'],
+      [400, undefined],
+    ]).toContainEqual([otra.status, otra.body.code])
+    const [deA, deB] = await Promise.all([filas(sim.serialNumber, cuerpoA.llave), filas(sim.serialNumber, cuerpoB.llave)])
+    expect(deA.ordenes).toHaveLength(1) // por la SIM: la misma lista en las dos
+    expect(deA.cobros.length + deB.cobros.length).toBe(1)
+    expect(deA.fichas.length + deB.fichas.length).toBe(1)
+    expect((await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).status).toBe('SOLD')
   })
 
   it('el cobro se cae una vez tras crear la venta: el reintento cobra ESA orden', async () => {

@@ -18,7 +18,7 @@ import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { ventaDeCampo: {}, payment: {}, serializedItem: {}, orderItem: {}, saleVerification: {} },
+  default: { ventaDeCampo: {}, payment: {}, serializedItem: {}, orderItem: {}, saleVerification: {}, order: {} },
 }))
 jest.mock('@/services/serialized-inventory/serializedInventory.service', () => ({
   serializedInventoryService: { scan: jest.fn(), ensureSellable: jest.fn(), markAsSold: jest.fn() },
@@ -138,6 +138,7 @@ beforeEach(() => {
   db.serializedItem.findUniqueOrThrow = jest.fn().mockResolvedValue({ id: 'sim1', serialNumber: SIM, status: 'SOLD', orderItemId: 'oi1' })
   db.orderItem.findFirstOrThrow = jest.fn().mockResolvedValue({ id: 'oi1' })
   db.saleVerification.findUnique = jest.fn().mockResolvedValue(null)
+  db.order.findUnique = jest.fn().mockResolvedValue({ status: 'PENDING' })
   scan.mockResolvedValue(simDisponible())
   ensureSellable.mockResolvedValue({ deprecationWarning: null })
   markAsSold.mockResolvedValue({})
@@ -180,7 +181,7 @@ describe('venta nueva', () => {
       orderId: 'o1',
       paymentId: 'p1',
       saleVerificationId: 'sv1',
-      serializedItemId: 'sim1',
+      serializedItemId: null, // completa: la SIM ya está vendida y se suelta su reclamo
       ocurrioAt: hora,
       origenHora: 'RELOJ_ANCLADO',
       ocupacion: null,
@@ -490,16 +491,67 @@ describe('mapa de caídas y cruces', () => {
     expect(ficha()).toMatchObject({ orderId: 'o1', ocupacion: null, ocupadaHasta: null })
   })
 
-  it('si la cancelación falla, sólo desocupa y propaga el rechazo; el reintento sigue desde ahí', async () => {
+  it('si la cancelación falla de verdad, desocupa y responde VENTA_EN_PROCESO (reintentable); el reintento sigue desde ahí', async () => {
     const apagadas = new AppError('no', 403, true, 'VENUE_SALES_DISABLED')
     cobrar.mockRejectedValueOnce(apagadas)
     cancelar.mockRejectedValue(new Error('candado'))
-    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toBe(apagadas)
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
     expect(ficha()).toMatchObject({ orderId: 'o1', ocupacion: null })
 
     const r = await registrarVentaDeCampo(ctx, venta())
     expect(r).toMatchObject({ orderId: 'o1', paymentId: 'p1', repetida: false })
     expect(vender).toHaveBeenCalledTimes(1)
+  })
+
+  it('si la cancelación dice «ya cancelada» (otra petición la canceló) y no hay cobro: borra la ficha y sale el rechazo', async () => {
+    const apagadas = new AppError('no', 403, true, 'VENUE_SALES_DISABLED')
+    cobrar.mockRejectedValue(apagadas)
+    cancelar.mockImplementation(async () => {
+      db.order.findUnique.mockResolvedValue({ status: 'CANCELLED' }) // la canceló la otra petición
+      throw new AppError('Esta cuenta ya está cancelada.', 409, true, 'ORDER_ALREADY_CANCELLED')
+    })
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toBe(apagadas)
+    expect(db.order.findUnique).toHaveBeenCalledWith({ where: { id: 'o1' }, select: { status: true } })
+    expect(filas).toHaveLength(0)
+  })
+
+  it('reanuda una ficha cuya cuenta quedó cancelada sin cobro: la borra y revisa contra lo de HOY (venta nueva, no reabre la vieja)', async () => {
+    sembrar({ orderId: 'o-cancelada', ocupadaHasta: new Date(Date.now() - 1) })
+    db.order.findUnique.mockImplementation(async ({ where }: any) => ({ status: where.id === 'o-cancelada' ? 'CANCELLED' : 'PENDING' }))
+    const r = await registrarVentaDeCampo(ctx, venta())
+    expect(scan).toHaveBeenCalledTimes(1) // paso 3 otra vez
+    expect(vender).toHaveBeenCalledTimes(1)
+    expect(cobrar.mock.calls.map(c => c[1])).toEqual(['o1'])
+    expect(r).toMatchObject({ orderId: 'o1', repetida: false })
+    expect(filas).toHaveLength(1)
+    expect(ficha()).toMatchObject({ estado: 'COMPLETA', orderId: 'o1' })
+  })
+
+  it('reanuda una ficha con la cuenta cancelada pero con un cobro: no la borra, sigue al cobro de ESA orden', async () => {
+    sembrar({ orderId: 'o-cancelada', ocupadaHasta: new Date(Date.now() - 1) })
+    db.order.findUnique.mockResolvedValue({ status: 'CANCELLED' })
+    db.payment.count.mockResolvedValue(1)
+    cobrar.mockResolvedValue(pagoDe({ orderId: 'o-cancelada' }))
+    await registrarVentaDeCampo(ctx, venta())
+    expect(scan).not.toHaveBeenCalled()
+    expect(cobrar.mock.calls[0][1]).toBe('o-cancelada')
+  })
+
+  it('un 409 ORDER_PAYMENT_CONFLICT («vuelve a intentar») del cobro es transitorio: desocupa, no cancela y sale VENTA_EN_PROCESO', async () => {
+    cobrar.mockRejectedValueOnce(
+      new AppError('No se pudo confirmar el cobro con esta llave. Vuelve a intentar.', 409, true, 'ORDER_PAYMENT_CONFLICT'),
+    )
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(cancelar).not.toHaveBeenCalled()
+    expect(ficha()).toMatchObject({ orderId: 'o1', paymentId: null, ocupacion: null })
+  })
+
+  it('un cobro que no pasa el esquema de la terminal sale 400 COBRO_INVALIDO, con la cuenta cancelada y sin ficha ocupada', async () => {
+    const error = await registrarVentaDeCampo({ ...ctx, venueId: 'no-es-un-cuid' }, venta()).catch(e => e)
+    expect(error).toEqual(rechazo(400, 'COBRO_INVALIDO'))
+    expect(cobrar).not.toHaveBeenCalled()
+    expect(cancelar).toHaveBeenCalledWith('no-es-un-cuid', 'o1', 'Venta del celular rechazada: COBRO_INVALIDO', 'staff1')
+    expect(filas).toHaveLength(0)
   })
 
   it('un 5xx del cobro sólo desocupa (sin cancelar) y el reintento cobra ESA orden', async () => {
@@ -554,5 +606,34 @@ describe('mapa de caídas y cruces', () => {
     await expect(registrarVentaDeCampo(ctx, venta())).rejects.toThrow(/falló el paso/)
     expect(ficha()).toMatchObject({ estado: 'EN_CURSO', orderId: 'o1', paymentId: 'p1', ocupacion: null })
     expect(cancelar).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['el paso 7', () => markAsSold.mockRejectedValue(new AppError('no', 404, true, 'NOT_FOUND'))],
+    ['el paso 8', () => evidencia.mockRejectedValue(new AppError('no', 403, true, 'FORBIDDEN'))],
+  ])('después del dinero nada es definitivo: un 4xx en %s sale VENTA_EN_PROCESO y desocupa', async (_n, romper) => {
+    db.serializedItem.findUniqueOrThrow.mockResolvedValue({ id: 'sim1', serialNumber: SIM, status: 'AVAILABLE', orderItemId: null })
+    romper()
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(ficha()).toMatchObject({ estado: 'EN_CURSO', paymentId: 'p1', ocupacion: null })
+    expect(cancelar).not.toHaveBeenCalled()
+  })
+
+  it('dos peticiones llegan al paso 8: la que pierde la creación («Verification already exists») toma la evidencia de la otra', async () => {
+    db.saleVerification.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'sv-otra' })
+    evidencia.mockRejectedValue(new AppError('Verification already exists for payment p1', 400))
+    const r = await registrarVentaDeCampo(ctx, venta())
+    expect(r.saleVerificationId).toBe('sv-otra')
+    expect(ficha()).toMatchObject({ estado: 'COMPLETA', saleVerificationId: 'sv-otra' })
+  })
+
+  it('una venta completa suelta el reclamo de la SIM: si regresa (RETURNED), otra llave la vuelve a vender', async () => {
+    await registrarVentaDeCampo(ctx, venta())
+    expect(ficha()!.serializedItemId).toBeNull()
+    const OTRA_LLAVE = '0b9e5d2a-3c4f-4a1b-8d7e-6f5a4b3c2d1e'
+    const r = await registrarVentaDeCampo(ctx, venta({ llave: OTRA_LLAVE })) // el escaneo de hoy la ve disponible otra vez
+    expect(r.repetida).toBe(false)
+    expect(filas).toHaveLength(2)
+    expect(vender).toHaveBeenCalledTimes(2)
   })
 })
