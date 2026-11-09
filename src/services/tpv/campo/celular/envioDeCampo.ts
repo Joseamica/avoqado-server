@@ -26,6 +26,7 @@ import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/
 import { aceptarCustodiaDeCampo, FilaDeCustodia, rechazarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import { createOrUpdateProofOfSale, TerminalCapture } from '@/services/tpv/sale-verification.service'
+import { AppliedCaptureSeqs, CaptureDestination, isNewerCapture } from '@/services/playtelecom/linkingNumber.rules'
 import prisma from '@/utils/prismaClient'
 
 export type TipoDeEnvio = (typeof TIPOS_DE_ENVIO)[number]
@@ -112,15 +113,23 @@ const ESQUEMAS: Record<Exclude<TipoDeEnvio, 'EVIDENCIA'>, ZodTypeAny> = {
 
 /**
  * La evidencia: su llave de venta y el resto validado con el esquema de la ruta (el id de prueba sólo llena `paymentId`).
- * Fuera de su ruta exige los campos de captura (S9): son la llave de idempotencia de la foto, y sin ellos repetir
- * «Aplicar» la agregaría otra vez.
+ * Fuera de su ruta exige los campos de captura (S9) y un destino estable, `photoLabel` o `replaceIndex` (T3): la captura es
+ * la llave de idempotencia de la foto, pero sólo en una ranura fija; agregada al final, repetir la pondría otra vez.
  */
-function evidenciaValida(cuerpo: unknown): { ventaLlave: string; resto: Record<string, unknown> } | null {
+function evidenciaValida(cuerpo: unknown): { ventaLlave: string; resto: Record<string, unknown>; b: any } | null {
   const conLlave = validar<{ ventaLlave: string; paymentId?: unknown }>(evidenciaDeCampoLlaveSchema, cuerpo)
   if (!conLlave) return null
   const { ventaLlave, paymentId: _ignorado, ...resto } = conLlave
   const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: cuid() })
-  return b && capturaDe(b) ? { ventaLlave, resto } : null
+  const conDestino = b && (b.photoLabel !== undefined || b.replaceIndex !== undefined)
+  return conDestino && capturaDe(b) ? { ventaLlave, resto, b } : null
+}
+
+/** La venta de la evidencia: COMPLETA, de esta persona y de ESTE celular (el nuevo de la persona no la nombra). */
+async function fichaDeLaEvidencia(ctx: { venueId: string; staffId: string; celularId: string }, ventaLlave: string) {
+  const ficha = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: ventaLlave } } })
+  const suya = ficha?.estado === 'COMPLETA' && !!ficha.paymentId && ficha.staffId === ctx.staffId && ficha.celularId === ctx.celularId
+  return suya ? (ficha as typeof ficha & { paymentId: string }) : null
 }
 
 /** ¿El cuerpo pasa el esquema de su tipo? Sin tocar la base: la gracia lo revisa antes de retener nada (S7). */
@@ -168,10 +177,8 @@ export async function aplicarEnvio(
         if (!valida) return cuerpoInvalido()
         const { ventaLlave, resto } = valida
 
-        const ficha = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId, llave: ventaLlave } } })
-        if (!ficha || ficha.estado !== 'COMPLETA' || !ficha.paymentId || ficha.staffId !== staffId || ficha.celularId !== celularId) {
-          return rechazado('VENTA_PENDIENTE', 'La venta de esta evidencia todavía no está completa.')
-        }
+        const ficha = await fichaDeLaEvidencia(ctx, ventaLlave)
+        if (!ficha) return rechazado('VENTA_PENDIENTE', 'La venta de esta evidencia todavía no está completa.')
         const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: ficha.paymentId })!
         // El mismo acomodo que `createProofOfSale` (sale-verification.tpv.controller.ts).
         const result = await createOrUpdateProofOfSale(
@@ -190,4 +197,131 @@ export async function aplicarEnvio(
   } catch (error) {
     return comoRechazo(error)
   }
+}
+
+// ------------------------------------------------------------------------------------------------------------------------
+// ¿El efecto ya ocurrió? (T1)
+// ------------------------------------------------------------------------------------------------------------------------
+
+export type EfectoDelEnvio = { hecho: true; resultado: unknown } | { hecho: false }
+const NO_HECHO: EfectoDelEnvio = { hecho: false }
+
+/** Las asignaciones que dan a una persona la versión que ve su celular (las dos escriben ASSIGNED_TO_PROMOTER o el traslado). */
+const ASIGNACIONES_A_LA_PERSONA = ['ASSIGNED_TO_PROMOTER', 'REASSIGNED_PROMOTER_TO_PROMOTER'] as const
+const TOPE_DE_EVENTOS = 1000 // ≤ 50 SIMs por cuerpo; cada una con pocas asignaciones y decisiones de la misma persona
+
+/**
+ * UNA verdad por tipo, mirando la base: ¿lo que pide ESTE cuerpo ya quedó hecho? La usan la gracia y «Aplicar» antes de
+ * reanudar un APLICANDO y antes de regresar cualquier fila a PENDIENTE: un efecto que ya ocurrió (aun por la ruta normal con
+ * la respuesta perdida, o por otro «Aplicar» simultáneo) nunca queda descartable.
+ *
+ * `limite`: cuándo nació el retenido. La asignación que vio el celular es anterior a esa fecha.
+ */
+export async function efectoYaHecho(
+  tipo: TipoDeEnvio,
+  ctx: { venueId: string; orgId: string; staffId: string; celularId: string },
+  cuerpo: unknown,
+  limite: Date,
+): Promise<EfectoDelEnvio> {
+  switch (tipo) {
+    case 'VENTA': {
+      const b = validar<{ llave: string; serialNumber: string }>(ESQUEMAS.VENTA, cuerpo)
+      if (!b) return NO_HECHO
+      const f = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: b.llave } } })
+      // EN_CURSO no es hecho: el servicio la retoma por su llave.
+      if (f?.estado !== 'COMPLETA' || f.staffId !== ctx.staffId || f.serialNumber !== b.serialNumber) return NO_HECHO
+      return {
+        hecho: true,
+        resultado: { orderId: f.orderId, paymentId: f.paymentId, saleVerificationId: f.saleVerificationId, recuperado: true },
+      }
+    }
+    case 'ENTRADA':
+    case 'SALIDA': {
+      const b = validar<{ llave: string }>(ESQUEMAS[tipo], cuerpo)
+      if (!b) return NO_HECHO
+      const where =
+        tipo === 'ENTRADA'
+          ? { staffId_llaveEntrada: { staffId: ctx.staffId, llaveEntrada: b.llave } }
+          : { staffId_llaveSalida: { staffId: ctx.staffId, llaveSalida: b.llave } }
+      const t = await prisma.timeEntry.findUnique({ where, select: { id: true, venueId: true } })
+      // La misma llave en otra sucursal es otra checada (LLAVE_REUSADA), no ésta.
+      return t && t.venueId === ctx.venueId ? { hecho: true, resultado: { timeEntryId: t.id, recuperado: true } } : NO_HECHO
+    }
+    case 'CUSTODIA_ACEPTAR':
+    case 'CUSTODIA_RECHAZAR':
+      return custodiaHecha(tipo, ctx, cuerpo, limite)
+    case 'EVIDENCIA': {
+      const valida = evidenciaValida(cuerpo)
+      if (!valida) return NO_HECHO
+      const ficha = await fichaDeLaEvidencia(ctx, valida.ventaLlave)
+      if (!ficha) return NO_HECHO
+      const sv = await prisma.saleVerification.findUnique({
+        where: { paymentId: ficha.paymentId },
+        select: { id: true, appliedCaptureSeqs: true },
+      })
+      if (!sv) return NO_HECHO
+      const { seq, deviceId } = capturaDe(valida.b)!
+      const aplicadas = (sv.appliedCaptureSeqs ?? {}) as AppliedCaptureSeqs
+      const { photoLabel, replaceIndex } = valida.b
+      const ranura: CaptureDestination =
+        photoLabel === 'Vinculacion' || (!photoLabel && replaceIndex === 0) ? 'PHOTO_VINCULACION' : 'PHOTO_PORTABILIDAD'
+      // En su ranura: ésta o una más nueva del mismo aparato. En cualquier ranura: ESTA misma captura (replaceIndex 1 sobre
+      // una verificación vacía cae en la 0). Una más nueva en la OTRA ranura no dice nada de ésta.
+      const exacta = (['PHOTO_VINCULACION', 'PHOTO_PORTABILIDAD'] as const).some(d => aplicadas[d]?.[deviceId] === seq)
+      if (!exacta && isNewerCapture(aplicadas, ranura, deviceId, seq)) return NO_HECHO
+      return { hecho: true, resultado: { verificationId: sv.id, paymentId: ficha.paymentId, recuperado: true } }
+    }
+  }
+}
+
+/**
+ * La custodia por SIM, en su bitácora (`SerializedItemCustodyEvent`, la que escribe el servicio de custodia). La bitácora no
+ * guarda la versión, así que el límite inferior es la ASIGNACIÓN a esta persona más reciente antes de que naciera el retenido
+ * (la que dio la versión que vio el celular); sin asignación en la bitácora (alta directa a la persona), no hay límite. Cuenta
+ * la aceptación (o el rechazo) de ESTA persona desde ahí: la de una entrega anterior no.
+ * ponytail: si a la persona se la recolectaron y volvieron a asignar ENTRE su decisión y el retenido, esa decisión ya no
+ * cuenta (queda PENDIENTE con ASIGNACION_CAMBIO); para afinarlo habría que guardar la versión en la bitácora.
+ */
+async function custodiaHecha(
+  tipo: 'CUSTODIA_ACEPTAR' | 'CUSTODIA_RECHAZAR',
+  ctx: { orgId: string; staffId: string },
+  cuerpo: unknown,
+  limite: Date,
+): Promise<EfectoDelEnvio> {
+  const b = validar<any>(ESQUEMAS[tipo], cuerpo)
+  if (!b) return NO_HECHO
+  const series: string[] = (tipo === 'CUSTODIA_ACEPTAR' ? b.sims : [b]).map((s: { serialNumber: string }) => s.serialNumber)
+  const base = {
+    serialNumber: { in: series, mode: 'insensitive' as const },
+    serializedItem: { OR: [{ organizationId: ctx.orgId }, { venue: { organizationId: ctx.orgId } }] },
+  }
+  const select = { serialNumber: true, createdAt: true }
+  const [asignaciones, decisiones] = await Promise.all([
+    prisma.serializedItemCustodyEvent.findMany({
+      where: { ...base, eventType: { in: [...ASIGNACIONES_A_LA_PERSONA] }, toStaffId: ctx.staffId, createdAt: { lte: limite } },
+      select,
+      orderBy: { createdAt: 'desc' },
+      take: TOPE_DE_EVENTOS,
+    }),
+    prisma.serializedItemCustodyEvent.findMany({
+      where: { ...base, eventType: tipo === 'CUSTODIA_ACEPTAR' ? 'ACCEPTED_BY_PROMOTER' : 'REJECTED_BY_PROMOTER', actorStaffId: ctx.staffId },
+      select,
+      orderBy: { createdAt: 'desc' },
+      take: TOPE_DE_EVENTOS,
+    }),
+  ])
+  const clave = (s: string) => s.toLowerCase()
+  const desde = new Map<string, Date>()
+  for (const a of asignaciones) if (!desde.has(clave(a.serialNumber))) desde.set(clave(a.serialNumber), a.createdAt) // la más reciente
+
+  const eventos: { serialNumber: string; at: string }[] = []
+  const faltan: string[] = []
+  for (const serie of series) {
+    const d0 = desde.get(clave(serie))
+    const e = decisiones.find(d => clave(d.serialNumber) === clave(serie) && (!d0 || d.createdAt >= d0))
+    if (e) eventos.push({ serialNumber: serie, at: e.createdAt.toISOString() })
+    else faltan.push(serie)
+  }
+  if (eventos.length === 0) return NO_HECHO
+  return { hecho: true, resultado: { recuperadoDeLaBitacora: true, eventos, ...(faltan.length > 0 && { faltan }) } }
 }

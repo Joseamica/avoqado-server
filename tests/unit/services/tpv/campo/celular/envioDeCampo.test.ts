@@ -11,9 +11,23 @@ import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { aceptarCustodiaDeCampo, rechazarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { createOrUpdateProofOfSale } from '@/services/tpv/sale-verification.service'
-import { aplicarEnvio, cuerpoValido, huellaDelEnvio, permisosDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
+import {
+  aplicarEnvio,
+  cuerpoValido,
+  efectoYaHecho,
+  huellaDelEnvio,
+  permisosDelEnvio,
+} from '@/services/tpv/campo/celular/envioDeCampo'
 
-jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { ventaDeCampo: { findUnique: jest.fn() } } }))
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    ventaDeCampo: { findUnique: jest.fn() },
+    timeEntry: { findUnique: jest.fn() },
+    serializedItemCustodyEvent: { findMany: jest.fn() },
+    saleVerification: { findUnique: jest.fn() },
+  },
+}))
 jest.mock('@/middlewares/checkPermission.middleware', () => ({ resolveUserRoleForVenue: jest.fn() }))
 jest.mock('@/services/tpv/campo/ventaDeCampo.service', () => ({ registrarVentaDeCampo: jest.fn() }))
 jest.mock('@/services/tpv/campo/checadaDeCampo.service', () => ({ registrarEntradaDeCampo: jest.fn(), registrarSalidaDeCampo: jest.fn() }))
@@ -237,6 +251,18 @@ describe('aplicarEnvio', () => {
       expect(evidencia).not.toHaveBeenCalled()
     })
 
+    it('T3 · sin destino estable (ni photoLabel ni replaceIndex) → CUERPO_INVALIDO: repetir la agregaría al final otra vez', async () => {
+      const { photoLabel: _sinDestino, ...alFinal } = fotos
+      expect(await aplicarEnvio(ctx, 'EVIDENCIA', alFinal)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
+      expect(cuerpoValido('EVIDENCIA', alFinal)).toBe(false)
+      expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
+      expect(evidencia).not.toHaveBeenCalled()
+      // Con replaceIndex también hay destino.
+      db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
+      evidencia.mockResolvedValue({ verificationId: 'sv' })
+      expect(await aplicarEnvio(ctx, 'EVIDENCIA', { ...alFinal, replaceIndex: 1 })).toMatchObject({ tipo: 'APLICADO' })
+    })
+
     it('VERIFICATION_MOVED (la venta cambió de tienda, «vuelve a intentarlo») se lanza: es reintentable', async () => {
       db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
       const movida = new ConflictError('La venta cambió de tienda mientras se guardaba; vuelve a intentarlo', 'VERIFICATION_MOVED')
@@ -267,9 +293,179 @@ describe('cuerpoValido (S7, S9): el mismo esquema que aplicarEnvio, sin tocar la
     expect(cuerpoValido('CUSTODIA_ACEPTAR', { sims: [] })).toBe(false)
     expect(cuerpoValido('CUSTODIA_RECHAZAR', { serialNumber: 'A', custodyVersion: 1 })).toBe(true)
     expect(cuerpoValido('CUSTODIA_RECHAZAR', { serialNumber: 'A' })).toBe(false)
-    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], ...captura })).toBe(true)
-    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'] })).toBe(false)
+    const foto = { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], ...captura }
+    expect(cuerpoValido('EVIDENCIA', { ...foto, photoLabel: 'Vinculacion' })).toBe(true)
+    expect(cuerpoValido('EVIDENCIA', { ...foto, replaceIndex: 0 })).toBe(true)
+    expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion' })).toBe(false)
     expect(cuerpoValido('VENTA', null)).toBe(false)
     expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', () => {
+  const H = 3600_000
+  const LIMITE = new Date('2026-11-09T12:00:00.000Z')
+  const antes = (h: number) => new Date(LIMITE.getTime() - h * H)
+
+  describe('VENTA', () => {
+    const ficha = { estado: 'COMPLETA', staffId: 's1', serialNumber: '89520001', orderId: 'o', paymentId: 'p', saleVerificationId: 'sv' }
+    it('ficha COMPLETA de la misma persona y la misma SIM → hecho con orderId, paymentId y saleVerificationId', async () => {
+      db.ventaDeCampo.findUnique.mockResolvedValue(ficha)
+      expect(await efectoYaHecho('VENTA', ctx, cuerpoVenta, LIMITE)).toEqual({
+        hecho: true,
+        resultado: { orderId: 'o', paymentId: 'p', saleVerificationId: 'sv', recuperado: true },
+      })
+      expect(db.ventaDeCampo.findUnique).toHaveBeenCalledWith({ where: { venueId_llave: { venueId: 'v1', llave } } })
+    })
+    it('EN_CURSO (el servicio la retoma por llave), de otra persona, de otra SIM o sin ficha → no hecho', async () => {
+      for (const f of [{ ...ficha, estado: 'EN_CURSO' }, { ...ficha, staffId: 'otra' }, { ...ficha, serialNumber: '1' }, null]) {
+        db.ventaDeCampo.findUnique.mockResolvedValue(f)
+        expect(await efectoYaHecho('VENTA', ctx, cuerpoVenta, LIMITE)).toEqual({ hecho: false })
+      }
+      expect(await efectoYaHecho('VENTA', ctx, { llave: 'no' }, LIMITE)).toEqual({ hecho: false })
+    })
+  })
+
+  describe('ENTRADA / SALIDA', () => {
+    it('la checada de la persona con esa llave, en esa sucursal → hecho con su timeEntryId; en otra sucursal o sin checada → no', async () => {
+      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'v1' })
+      expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: true, resultado: { timeEntryId: 't1', recuperado: true } })
+      expect(db.timeEntry.findUnique).toHaveBeenLastCalledWith({
+        where: { staffId_llaveEntrada: { staffId: 's1', llaveEntrada: llave } },
+        select: { id: true, venueId: true },
+      })
+      expect(await efectoYaHecho('SALIDA', ctx, { llave, llaveEntrada: randomUUID() }, LIMITE)).toMatchObject({ hecho: true })
+      expect(db.timeEntry.findUnique).toHaveBeenLastCalledWith({
+        where: { staffId_llaveSalida: { staffId: 's1', llaveSalida: llave } },
+        select: { id: true, venueId: true },
+      })
+      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'otra' })
+      expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: false })
+      db.timeEntry.findUnique.mockResolvedValue(null)
+      expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: false })
+    })
+  })
+
+  describe('CUSTODIA: por SIM, en la bitácora de custodia, desde la asignación que dio la versión', () => {
+    /** La bitácora en memoria, filtrada como la consulta: tipo, persona, fecha, serie (sin mayúsculas). */
+    let eventos: any[]
+    beforeEach(() => {
+      eventos = []
+      db.serializedItemCustodyEvent.findMany.mockImplementation(async ({ where }: any) => {
+        const tipos = typeof where.eventType === 'string' ? [where.eventType] : where.eventType.in
+        const series = where.serialNumber.in.map((x: string) => x.toLowerCase())
+        return eventos
+          .filter(e => tipos.includes(e.eventType) && series.includes(e.serialNumber.toLowerCase()))
+          .filter(e => !where.actorStaffId || e.actorStaffId === where.actorStaffId)
+          .filter(e => !where.toStaffId || e.toStaffId === where.toStaffId)
+          .filter(e => !where.createdAt?.lte || e.createdAt <= where.createdAt.lte)
+          .sort((a, b) => b.createdAt - a.createdAt)
+      })
+    })
+    const asignada = (serialNumber: string, h: number, toStaffId = 's1') =>
+      eventos.push({ serialNumber, eventType: 'ASSIGNED_TO_PROMOTER', toStaffId, actorStaffId: 'sup', createdAt: antes(h) })
+    const decidio = (serialNumber: string, h: number, eventType = 'ACCEPTED_BY_PROMOTER', actorStaffId = 's1') =>
+      eventos.push({ serialNumber, eventType, toStaffId: actorStaffId, actorStaffId, createdAt: antes(h) })
+    const aceptar1 = (serialNumber = 'SIM-A') => ({ sims: [{ serialNumber, custodyVersion: 2 }] })
+
+    it('R2-1 · aceptada por la ruta normal ANTES de que naciera el retenido (respuesta perdida) → hecho', async () => {
+      asignada('SIM-A', 10)
+      decidio('SIM-A', 5) // antes del límite (el retenido nació después)
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, aceptar1(), LIMITE)).toEqual({
+        hecho: true,
+        resultado: { recuperadoDeLaBitacora: true, eventos: [{ serialNumber: 'SIM-A', at: antes(5).toISOString() }] },
+      })
+      // Sólo de la organización de la sucursal.
+      expect(db.serializedItemCustodyEvent.findMany.mock.calls[0][0].where.serializedItem).toEqual({
+        OR: [{ organizationId: 'o1' }, { venue: { organizationId: 'o1' } }],
+      })
+    })
+
+    it('la aceptación de una entrega ANTERIOR (antes de la asignación que vio el celular) no cuenta', async () => {
+      asignada('SIM-A', 20)
+      decidio('SIM-A', 15) // aceptó la primera entrega
+      asignada('SIM-A', 8) // se la recolectaron y se la volvieron a asignar: ésa es la versión del cuerpo
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, aceptar1(), LIMITE)).toEqual({ hecho: false })
+      // Una asignación DESPUÉS del límite no es la que vio el celular.
+      asignada('SIM-A', -1)
+      decidio('SIM-A', 4)
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, aceptar1(), LIMITE)).toMatchObject({ hecho: true })
+    })
+
+    it('la decisión de OTRA persona no cuenta; sin asignación en la bitácora (alta directa), cualquier decisión suya cuenta', async () => {
+      decidio('SIM-A', 3, 'ACCEPTED_BY_PROMOTER', 'otra')
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, aceptar1(), LIMITE)).toEqual({ hecho: false })
+      decidio('sim-a', 2) // la serie sin distinguir mayúsculas
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, aceptar1(), LIMITE)).toMatchObject({ hecho: true })
+    })
+
+    it('algunas sí y otras no → hecho parcial, con las que faltan en el resultado; ninguna → no hecho', async () => {
+      asignada('A', 10)
+      asignada('B', 10)
+      decidio('A', 1)
+      const dos = { sims: [{ serialNumber: 'A', custodyVersion: 1 }, { serialNumber: 'B', custodyVersion: 1 }] }
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, dos, LIMITE)).toEqual({
+        hecho: true,
+        resultado: { recuperadoDeLaBitacora: true, eventos: [{ serialNumber: 'A', at: antes(1).toISOString() }], faltan: ['B'] },
+      })
+      expect(await efectoYaHecho('CUSTODIA_ACEPTAR', ctx, { sims: [{ serialNumber: 'B', custodyVersion: 1 }] }, LIMITE)).toEqual({
+        hecho: false,
+      })
+    })
+
+    it('RECHAZAR busca el rechazo de esa persona (no la aceptación)', async () => {
+      asignada('SIM-C', 10)
+      decidio('SIM-C', 2, 'ACCEPTED_BY_PROMOTER')
+      expect(await efectoYaHecho('CUSTODIA_RECHAZAR', ctx, { serialNumber: 'SIM-C', custodyVersion: 1 }, LIMITE)).toEqual({ hecho: false })
+      decidio('SIM-C', 1, 'REJECTED_BY_PROMOTER')
+      expect(await efectoYaHecho('CUSTODIA_RECHAZAR', ctx, { serialNumber: 'SIM-C', custodyVersion: 1 }, LIMITE)).toMatchObject({
+        hecho: true,
+      })
+    })
+  })
+
+  describe('EVIDENCIA: la foto de esa captura ya está en la verificación', () => {
+    const fichaCompleta = { estado: 'COMPLETA', staffId: 's1', celularId: 'cel1', paymentId: 'ckpago000000000000000000a' }
+    const foto = (extra: object) => ({
+      ventaLlave: llave,
+      photoUrls: ['https://example.test/a.jpg'],
+      captureSeq: 5,
+      captureDeviceId: 'cel',
+      idempotencyKey: 'k',
+      capturedAt: '2026-11-09T10:00:00.000Z',
+      ...extra,
+    })
+    beforeEach(() => db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta))
+    const conSeqs = (appliedCaptureSeqs: object) => db.saleVerification.findUnique.mockResolvedValue({ id: 'sv1', appliedCaptureSeqs })
+
+    it('su captura aplicada en su ranura → hecho; una más nueva del mismo aparato en su ranura también (la reemplazó)', async () => {
+      conSeqs({ PHOTO_VINCULACION: { cel: 5 } })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Vinculacion' }), LIMITE)).toEqual({
+        hecho: true,
+        resultado: { verificationId: 'sv1', paymentId: 'ckpago000000000000000000a', recuperado: true },
+      })
+      expect(db.saleVerification.findUnique).toHaveBeenCalledWith({
+        where: { paymentId: 'ckpago000000000000000000a' },
+        select: { id: true, appliedCaptureSeqs: true },
+      })
+      conSeqs({ PHOTO_VINCULACION: { cel: 9 } })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 0 }), LIMITE)).toMatchObject({ hecho: true })
+    })
+
+    it('replaceIndex 1 sobre una verificación vacía cae en la ranura 0: esa misma captura ahí también es hecho', async () => {
+      conSeqs({ PHOTO_VINCULACION: { cel: 5 } })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 1 }), LIMITE)).toMatchObject({ hecho: true })
+    })
+
+    it('una captura anterior, otro aparato, una más nueva en la OTRA ranura, sin verificación o sin ficha → no hecho', async () => {
+      for (const seqs of [{ PHOTO_VINCULACION: { cel: 4 } }, { PHOTO_VINCULACION: { otro: 5 } }, { PHOTO_PORTABILIDAD: { cel: 6 } }, {}]) {
+        conSeqs(seqs)
+        expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Vinculacion' }), LIMITE)).toEqual({ hecho: false })
+      }
+      db.saleVerification.findUnique.mockResolvedValue(null)
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Vinculacion' }), LIMITE)).toEqual({ hecho: false })
+      db.ventaDeCampo.findUnique.mockResolvedValue({ ...fichaCompleta, celularId: 'otro' })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Vinculacion' }), LIMITE)).toEqual({ hecho: false })
+    })
   })
 })
