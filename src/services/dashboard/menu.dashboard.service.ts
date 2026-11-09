@@ -1000,7 +1000,7 @@ export async function getModifierGroups(venueId: string, query: ModifierGroupQue
   const where: Prisma.ModifierGroupWhereInput = {
     venueId,
     ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
-    ...(active !== undefined ? { active } : {}),
+    active: active ?? true, // D16: un grupo borrado queda archivado; sólo sale si se pide `active=false` a propósito
   }
 
   const order: Record<string, 'asc' | 'desc'> = {}
@@ -1067,7 +1067,7 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
 
 export async function getModifierGroupById(venueId: string, modifierGroupId: string): Promise<ModifierGroup & { modifiers: Modifier[] }> {
   const group = await prisma.modifierGroup.findFirst({
-    where: { id: modifierGroupId, venueId },
+    where: { id: modifierGroupId, venueId, active: true },
     include: {
       modifiers: {
         include: {
@@ -1090,7 +1090,7 @@ export async function updateModifierGroup(
   modifierGroupId: string,
   data: UpdateModifierGroupDto,
 ): Promise<ModifierGroup & { modifiers: Modifier[] }> {
-  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!existing) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1107,11 +1107,14 @@ export async function updateModifierGroup(
 
   // Note: Modifiers should be managed via dedicated endpoints (create/update/delete modifier)
 
-  const updated = await prisma.modifierGroup.update({
-    where: { id: modifierGroupId },
-    data: updateData,
-    include: { modifiers: true },
-  })
+  // D16: `active: true` también aquí, para que un PATCH que llegó justo tras un DELETE no resucite el grupo.
+  const updated = await prisma.modifierGroup
+    .update({ where: { id: modifierGroupId, active: true }, data: updateData, include: { modifiers: true } })
+    .catch((e: unknown) => {
+      if ((e as { code?: string }).code === 'P2025')
+        throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+      throw e
+    })
 
   logAction({ venueId, action: 'MODIFIER_GROUP_UPDATED', entity: 'ModifierGroup', entityId: updated.id, data: { name: updated.name } })
 
@@ -1119,17 +1122,23 @@ export async function updateModifierGroup(
 }
 
 export async function deleteModifierGroup(venueId: string, modifierGroupId: string): Promise<void> {
-  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!existing) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
-  // Codex #3: el negocio primero, como los escritores de extras (el motor de variantes toma su cerco antes de rehacer los
-  // enlaces de una familia). Sin él, el borrado bloqueaba el grupo y esperaba esos enlaces mientras la edición, al
-  // recrearlos, esperaba al grupo: deadlock.
+  // D16 (founder, 9-nov, A): se ARCHIVA. Borrarlo de verdad arrastraba sus extras: cambiaba el precio de una liga ya enviada
+  // (PaymentLinkItemModifier en CASCADE), se los quitaba al reporte (OrderItemModifier en SET NULL), borraba su historial de
+  // precios y hacía rechazar una venta sin red que los trajera. Sus enlaces a productos sí se van: sin ellos nadie lo ofrece,
+  // y un grupo obligatorio sin opciones trabaría la venta.
+  // Codex #3 y D16: el negocio primero y `NO KEY UPDATE`, para esperar a todo escritor de extras (toman `FOR SHARE`) sin frenar las
+  // ventas (su FK sólo pide `KEY SHARE`). Si no, un enlace que una edición recrea a media operación se quedaría en un grupo archivado.
   await prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
-    await tx.modifierGroup.delete({ where: { id: modifierGroupId } })
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR NO KEY UPDATE`
+    await tx.productGroupModifierGroup.deleteMany({ where: { modifierGroupId } })
+    await tx.productModifierGroup.deleteMany({ where: { groupId: modifierGroupId } })
+    await tx.modifier.updateMany({ where: { groupId: modifierGroupId }, data: { active: false } })
+    await tx.modifierGroup.update({ where: { id: modifierGroupId }, data: { active: false } })
   })
 
   logAction({ venueId, action: 'MODIFIER_GROUP_DELETED', entity: 'ModifierGroup', entityId: existing.id, data: { name: existing.name } })
@@ -1154,7 +1163,7 @@ function modifierCost(
 }
 
 export async function createModifier(venueId: string, modifierGroupId: string, data: CreateModifierDto): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1187,7 +1196,7 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
 }
 
 export async function getModifierById(venueId: string, modifierGroupId: string, modifierId: string): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1212,7 +1221,7 @@ export async function updateModifier(
   modifierId: string,
   data: UpdateModifierDto,
 ): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1295,7 +1304,7 @@ export async function updateModifier(
 }
 
 export async function deleteModifier(venueId: string, modifierGroupId: string, modifierId: string): Promise<void> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1320,7 +1329,7 @@ export async function assignModifierGroupToProduct(
     await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}.`)
 
     // Verify group belongs to venue
-    const group = await tx.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId } })
+    const group = await tx.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId, active: true } })
     if (!group) {
       throw new NotFoundError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}.`)
     }
@@ -1844,6 +1853,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let productsUpdated = 0
   let modifierGroupsCreated = 0
   let modifiersCreated = 0
+  const gruposRevividos = new Set<string>()
   let productsArchived = 0
   let productsRestored = 0
   let productsKeptOnRecipe = 0
@@ -1975,8 +1985,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // reject a row created while waiting or leave a partially replaced menu.
       // REPLACE MODE (plan 5, D2): the old menu goes, but NO product is ever hard-deleted — the ones the file does not bring are
       // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
-      // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers too, except the ones
-      // something alive still uses (P5-R15).
+      // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers are never deleted either
+      // (D16): they are turned off, and a file that brings the name back reuses the same row.
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -1997,28 +2007,19 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         // 1. Remove product-modifier links first — only LOOSE products' (variants keep their parent's; rondas 2-3, N1)
         await tx.productModifierGroup.deleteMany({ where: { product: { venueId, productGroupId: null } } })
 
-        // 2-3. Modifiers and groups (plan 5, P5-R15): a group a live payment link (one of its extras) or a variable recipe still
-        //      uses is KEPT, turned OFF with all its extras — deleting it would cascade the link's paid extra away (the link would
-        //      charge less) and unlink the recipe. The rest are deleted as before (OrderItemModifier keeps its denormalized name).
-        //      Codex C5-1: lock the venue's groups and extras FIRST (after the Venue fence; nothing new Order → Venue). A link or
-        //      recipe being saved holds its extra/group until it commits, so this waits for it, and the deletes below — SEPARATE
-        //      statements, so in READ COMMITTED they see what committed meanwhile — keep what it uses. One that arrives after the
-        //      lock waits for this transaction and, if its extra was deleted, fails on the foreign key instead of losing it silently.
+        // 2-3. Modifiers and groups (plan 5, P5-R15; D16, founder 9-nov, A): none is deleted. They are turned OFF with all their
+        //      extras: deleting would cascade a live payment link's paid extra away, unlink a recipe, drop price history and reject
+        //      an offline sale that still carries the extra. Lock the venue's groups and extras FIRST (after the Venue fence), so a
+        //      link or recipe being saved finishes before this runs. A group ANY family uses — live or archived, through the parent
+        //      or its variants' links — is the family's, not the file's: not turned off, its extras too (Variantes, Codex #1, ronda 2).
         await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
         await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
-        // Variantes (Codex #1, ronda 2): a group ANY family uses — live or archived, through the parent or its variants' links —
-        // is the family's, not the file's: neither deleted nor turned off, its extras too. An archived family that a later
-        // import revives comes back with its extras exactly as they were, and one turned off by hand stays off.
         const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
           OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
         }
-        const extrasEnUso: Prisma.ModifierGroupWhereInput = {
-          OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }, usadoPorFamilia],
-        }
-        await tx.modifier.deleteMany({ where: { group: { venueId, NOT: extrasEnUso } } })
-        await tx.modifierGroup.deleteMany({ where: { venueId, NOT: extrasEnUso } })
         await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
-        await tx.modifierGroup.updateMany({ where: { venueId, NOT: usadoPorFamilia }, data: { active: false } })
+        // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
+        await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
         // 4. Archive (never delete) the products the file does not bring
         productsArchived = await archivarProductos(
@@ -2242,9 +2243,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
             for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
               // Check if modifier group exists by name
+              // D16: un archivado puede compartir nombre con uno vivo; gana el vivo o, en reemplazar (ya apagó a todos), el último que lo estuvo.
               let modifierGroup = await tx.modifierGroup.findFirst({
                 where: { venueId, name: groupData.name },
+                orderBy: [{ active: 'desc' }, { updatedAt: 'desc' }],
               })
+              // D16 (Codex r1): traer un archivado equivale a crearlo: toma las reglas y el precio del archivo, también en «combinar».
+              const comoNuevo = data.mode === 'replace' || !modifierGroup?.active || gruposRevividos.has(modifierGroup.id)
 
               if (!modifierGroup) {
                 // Create new modifier group
@@ -2259,9 +2264,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                   },
                 })
                 modifierGroupsCreated++
-              } else if (data.mode === 'replace') {
-                // Plan 5 (P5-R15): in replace the file is the truth. A reused group (replace kept it because a live link or a
-                // recipe uses it) keeps its id and references, and takes the file's selection rules and comes back ON.
+              } else if (comoNuevo) {
+                // Plan 5 (P5-R15): the file is the truth for an archived group, and always in replace. It keeps its id and references,
+                // and takes the file's selection rules and comes back ON. It counts as created, as when it was deleted.
+                if (!modifierGroup.active) {
+                  modifierGroupsCreated++
+                  gruposRevividos.add(modifierGroup.id)
+                }
                 await tx.modifierGroup.update({
                   where: { id: modifierGroup.id },
                   data: {
@@ -2308,9 +2317,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                     },
                   })
                   modifiersCreated++
-                } else if (data.mode === 'replace') {
-                  // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
+                } else if (comoNuevo) {
+                  // Plan 5 (P5-R15): applies the file's price to the reused extra of an archived group (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
+                  if (!existingModifier.active) modifiersCreated++
                   await tx.modifier.update({
                     where: { id: existingModifier.id },
                     data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },

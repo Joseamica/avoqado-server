@@ -722,7 +722,7 @@ describe('importMenu en modo reemplazo con variantes', () => {
     const mg = await prisma.modifierGroup.create({ data: { venueId: n.venueId, name: `Bordado ${s}` } as any })
     const prendido = await prisma.modifier.create({ data: { groupId: mg.id, name: 'Nombre', price: 30 } as any })
     const apagado = await prisma.modifier.create({ data: { groupId: mg.id, name: 'Logo', price: 40, active: false } as any })
-    const mgApagado = await prisma.modifierGroup.create({ data: { venueId: n.venueId, name: `Empaque ${s}`, active: false } as any })
+    const mgApagado = await prisma.modifierGroup.create({ data: { venueId: n.venueId, name: `Empaque ${s}` } as any })
     const r = await createProductWithVariants(
       n.venueId,
       {
@@ -734,6 +734,7 @@ describe('importMenu en modo reemplazo con variantes', () => {
       },
       n.actor,
     )
+    await prisma.modifierGroup.update({ where: { id: mgApagado.id }, data: { active: false } }) // D16: un grupo ya apagado no se puede enlazar
     await archiveProductGroup(n.venueId, r.groupId, n.staffId)
     for (const sku of [`SUE-C-${s}`, `GOR2-U-${s}`]) {
       await importMenu(
@@ -911,7 +912,7 @@ describe('Codex #3/#4: borrar una estación o un grupo de extras toma el negocio
     const [a, b] = await Promise.allSettled([edicion, borrado])
     await barrera.fin
     expect([a, b].map(x => (x.status === 'rejected' ? String((x.reason as Error)?.message ?? x.reason) : 'ok'))).toEqual(['ok', 'ok'])
-    expect(await prisma.modifierGroup.findUnique({ where: { id: salsa.id } })).toBeNull()
+    expect(await prisma.modifierGroup.findUniqueOrThrow({ where: { id: salsa.id }, select: { active: true } })).toEqual({ active: false })
     const enlaces = await prisma.productGroupModifierGroup.findMany({ where: { groupId: r.groupId }, take: 5 })
     expect(enlaces.map(e => e.modifierGroupId)).toEqual([queso.id])
   })
