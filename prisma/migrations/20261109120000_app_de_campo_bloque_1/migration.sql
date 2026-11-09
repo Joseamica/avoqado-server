@@ -39,6 +39,7 @@ CREATE TABLE "celulares_de_campo" (
     "desvinculadoAt" TIMESTAMP(3),
     "desvinculadoPor" TEXT,
     "motivoDesvinculo" TEXT,
+    "sinGracia" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

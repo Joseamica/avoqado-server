@@ -127,7 +127,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CheckoutSession` → `schema.prisma:L6827`
 - `ClassSession` → `schema.prisma:L15119`
 - `ClassSessionPayState` → `schema.prisma:L20185`
-- `CodigoDeCelular` → `schema.prisma:L21637`
+- `CodigoDeCelular` → `schema.prisma:L21639`
 - `CommissionCalculation` → `schema.prisma:L13855`
 - `CommissionClawback` → `schema.prisma:L14032`
 - `CommissionConfig` → `schema.prisma:L13614`
@@ -202,7 +202,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `EmailSuppression` → `schema.prisma:L8400`
 - `EmailTemplate` → `schema.prisma:L14375`
 - `Employee` → `schema.prisma:L18662`
-- `EnvioRetenidoDeCampo` → `schema.prisma:L21657`
+- `EnvioRetenidoDeCampo` → `schema.prisma:L21659`
 - `Estimate` → `schema.prisma:L16362`
 - `EstimateItem` → `schema.prisma:L16391`
 - `Exchange` → `schema.prisma:L19810`
