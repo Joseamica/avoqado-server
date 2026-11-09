@@ -3,7 +3,7 @@ import { z } from 'zod'
 export const generarCodigosSchema = z.object({
   body: z.union([
     z.object({ staffIds: z.array(z.string().min(1)).min(1).max(100) }).strict(),
-    z.object({ todosLosSinCelular: z.literal(true) }).strict(),
+    z.object({ todosLosSinCelular: z.literal(true), venueId: z.string().min(1).max(50).optional() }).strict(),
   ]),
 })
 
@@ -29,4 +29,19 @@ export const listarRetenidosSchema = z.object({
 /** POST …/retenidos/:retenidoId/resolver */
 export const resolverRetenidoSchema = z.object({
   body: z.object({ accion: z.enum(['APLICAR', 'DESCARTAR']), nota: z.string().max(500).optional() }).strict(),
+})
+
+export const ESTADOS_DEL_PROMOTOR = ['SIN_CELULAR', 'CODIGO_SIN_USAR', 'ACTIVO'] as const
+
+/** GET … — la lista de la organización. */
+export const listarCelularesSchema = z.object({
+  query: z
+    .object({
+      q: z.string().max(100).optional(),
+      venueId: z.string().min(1).max(50).optional(),
+      estado: z.enum(ESTADOS_DEL_PROMOTOR).optional(),
+      page: z.coerce.number().int().min(1).default(1),
+      pageSize: z.coerce.number().int().min(1).max(100).default(50),
+    })
+    .strict(),
 })

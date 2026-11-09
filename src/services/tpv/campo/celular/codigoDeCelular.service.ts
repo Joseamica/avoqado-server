@@ -14,7 +14,13 @@ const TOPE_POR_LLAMADA = 200
 const REINTENTOS_POR_CHOQUE = 3
 
 export type CodigoGenerado = { staffId: string; nombre: string; telefono: string | null; codigo: string; expiraAt: string }
-export type GenerarCodigosParams = { organizationId: string; generadoPor: string; staffIds?: string[]; todosLosSinCelular?: boolean }
+export type GenerarCodigosParams = {
+  organizationId: string
+  generadoPor: string
+  staffIds?: string[]
+  todosLosSinCelular?: boolean
+  venueId?: string
+}
 type Persona = { id: string; firstName: string; lastName: string; phone: string | null }
 
 async function generarUno(organizationId: string, generadoPor: string, persona: Persona): Promise<CodigoGenerado> {
@@ -54,9 +60,9 @@ async function generarUno(organizationId: string, generadoPor: string, persona: 
   }
 }
 
-/** Promotores de la org sin celular vinculado y sin código vivo. */
-async function promotoresSinCelular(organizationId: string): Promise<Persona[]> {
-  const venueIds = await sucursalesConCampo(organizationId)
+/** Promotores de la org (o sólo de `venueId`, si es de campo) sin celular vinculado y sin código vivo. */
+async function promotoresSinCelular(organizationId: string, venueId?: string): Promise<Persona[]> {
+  const venueIds = (await sucursalesConCampo(organizationId)).filter(v => !venueId || v === venueId)
   if (venueIds.length === 0) return []
   const [personas, vinculados, conCodigoVivo] = await Promise.all([
     prisma.staff.findMany({
@@ -80,7 +86,7 @@ export async function generarCodigos(p: GenerarCodigosParams) {
   let restantes = 0
 
   if (p.todosLosSinCelular) {
-    const todos = await promotoresSinCelular(p.organizationId)
+    const todos = await promotoresSinCelular(p.organizationId, p.venueId)
     for (const persona of todos.slice(0, TOPE_POR_LLAMADA)) generados.push(await generarUno(p.organizationId, p.generadoPor, persona))
     restantes = Math.max(0, todos.length - TOPE_POR_LLAMADA)
   } else {

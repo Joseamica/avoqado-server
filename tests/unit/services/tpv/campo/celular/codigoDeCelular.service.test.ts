@@ -28,7 +28,11 @@ const ORG = 'org1'
 const AHORA = new Date('2026-11-09T12:00:00.000Z')
 const persona = (id: string) => ({ id, firstName: `N${id}`, lastName: 'Apellido', phone: `+52${id}`, active: true })
 const p2002 = () =>
-  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta: { target: ['codigo'] } })
+  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'test',
+    meta: { target: ['codigo'] },
+  })
 
 beforeEach(() => {
   jest.resetAllMocks()
@@ -36,7 +40,9 @@ beforeEach(() => {
   ;(logAction as jest.Mock).mockResolvedValue(undefined)
   ;(esPromotorDeCampo as jest.Mock).mockResolvedValue(true)
   ;(sucursalesConCampo as jest.Mock).mockResolvedValue(['v1'])
-  ;(sucursalesDeLaPersona as jest.Mock).mockResolvedValue([{ staffVenueId: 'sv', venueId: 'v1', nombre: 'Tienda', role: 'WAITER', pin: '1234' }])
+  ;(sucursalesDeLaPersona as jest.Mock).mockResolvedValue([
+    { staffVenueId: 'sv', venueId: 'v1', nombre: 'Tienda', role: 'WAITER', pin: '1234' },
+  ])
   db.staff.findUnique.mockImplementation(({ where }: any) => Promise.resolve(persona(where.id)))
   db.codigoDeCelular.upsert.mockImplementation(({ create }: any) => Promise.resolve(create))
 })
@@ -123,6 +129,19 @@ describe('generarCodigos · todosLosSinCelular', () => {
     expect(some).toMatchObject({ active: true, role: { in: ['WAITER', 'CASHIER'] }, venueId: { in: ['v1'] } })
     const filtro = db.codigoDeCelular.findMany.mock.calls[0][0].where
     expect(filtro).toMatchObject({ organizationId: ORG, usadoAt: null, anuladoAt: null, expiraAt: { gt: AHORA } })
+  })
+
+  it('con venueId: sólo promotores de esa sucursal de campo; si no es de campo, 0', async () => {
+    ;(sucursalesConCampo as jest.Mock).mockResolvedValue(['v1', 'v2'])
+    await generarCodigos({ organizationId: ORG, generadoPor: 'admin', todosLosSinCelular: true, venueId: 'v2' })
+    expect(db.staff.findMany.mock.calls[0][0].where.venues.some.venueId).toEqual({ in: ['v2'] })
+
+    db.staff.findMany.mockClear()
+    db.codigoDeCelular.upsert.mockClear()
+    const r = await generarCodigos({ organizationId: ORG, generadoPor: 'admin', todosLosSinCelular: true, venueId: 'otra' })
+    expect(r.generados).toEqual([])
+    expect(db.staff.findMany).not.toHaveBeenCalled()
+    expect(db.codigoDeCelular.upsert).not.toHaveBeenCalled()
   })
 
   it('hasta 200 por llamada y dice cuántos restan', async () => {

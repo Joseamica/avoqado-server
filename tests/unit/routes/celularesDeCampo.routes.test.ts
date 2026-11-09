@@ -12,6 +12,10 @@ const desvincularMock = jest.fn()
 jest.mock('@/services/tpv/campo/celular/desvincularCelular.service', () => ({
   desvincularCelular: (...a: unknown[]) => desvincularMock(...a),
 }))
+const listarCelularesMock = jest.fn()
+jest.mock('@/services/tpv/campo/celular/celularesDeLaOrganizacion.service', () => ({
+  listarCelularesDeCampo: (...a: unknown[]) => listarCelularesMock(...a),
+}))
 const listarMock = jest.fn()
 const resolverMock = jest.fn()
 jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({
@@ -102,6 +106,58 @@ describe('POST .../celulares-de-campo/codigos', () => {
     const res = await request(makeApp()).post(URL).set(como('gerente', 'MANAGER')).send({ todosLosSinCelular: true })
     expect(res.status).toBe(200)
     expect(generarCodigosMock).toHaveBeenCalledWith({ organizationId: ORG, generadoPor: 'gerente', todosLosSinCelular: true })
+  })
+})
+
+describe('POST .../celulares-de-campo/codigos · venueId (Tarea 8)', () => {
+  it('todosLosSinCelular con venueId pasa los dos', async () => {
+    const res = await request(makeApp()).post(URL).set(como('gerente', 'MANAGER')).send({ todosLosSinCelular: true, venueId: 'v1' })
+    expect(res.status).toBe(200)
+    expect(generarCodigosMock).toHaveBeenCalledWith({
+      organizationId: ORG,
+      generadoPor: 'gerente',
+      todosLosSinCelular: true,
+      venueId: 'v1',
+    })
+  })
+
+  it('venueId con staffIds → 400 (sólo va con todosLosSinCelular)', async () => {
+    const res = await request(makeApp())
+      .post(URL)
+      .set(como('gerente', 'MANAGER'))
+      .send({ staffIds: ['a'], venueId: 'v1' })
+    expect(res.status).toBe(400)
+  })
+})
+
+describe('GET .../celulares-de-campo (la lista, Tarea 8)', () => {
+  const LISTA = `/dashboard/organizations/${ORG}/celulares-de-campo`
+  const salida = { disponible: true, items: [], total: 0, conteos: { SIN_CELULAR: 0, CODIGO_SIN_USAR: 0, ACTIVO: 0 }, porRevisar: 0 }
+
+  it('un WAITER recibe 403', async () => {
+    expect((await request(makeApp()).get(LISTA).set(como('promotor', 'WAITER'))).status).toBe(403)
+    expect(listarCelularesMock).not.toHaveBeenCalled()
+  })
+
+  it('sin parámetros: página 1 de 50 y la organización de la ruta → { success, data }', async () => {
+    listarCelularesMock.mockResolvedValue(salida)
+    const res = await request(makeApp()).get(LISTA).set(como('gerente', 'MANAGER'))
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: salida })
+    expect(listarCelularesMock).toHaveBeenCalledWith(ORG, { page: 1, pageSize: 50 })
+  })
+
+  it('pasa q, venueId, estado y la paginación', async () => {
+    listarCelularesMock.mockResolvedValue(salida)
+    const res = await request(makeApp()).get(`${LISTA}?q=ana&venueId=v1&estado=ACTIVO&page=2&pageSize=20`).set(como('gerente', 'MANAGER'))
+    expect(res.status).toBe(200)
+    expect(listarCelularesMock).toHaveBeenCalledWith(ORG, { q: 'ana', venueId: 'v1', estado: 'ACTIVO', page: 2, pageSize: 20 })
+  })
+
+  it('pageSize 101 o estado desconocido → 400', async () => {
+    expect((await request(makeApp()).get(`${LISTA}?pageSize=101`).set(como('gerente', 'MANAGER'))).status).toBe(400)
+    expect((await request(makeApp()).get(`${LISTA}?estado=XX`).set(como('gerente', 'MANAGER'))).status).toBe(400)
+    expect(listarCelularesMock).not.toHaveBeenCalled()
   })
 })
 

@@ -1,13 +1,30 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import AppError from '../../errors/AppError'
-import { generarCodigosSchema, listarRetenidosSchema, resolverRetenidoSchema } from '../../schemas/dashboard/celularesDeCampo.schema'
+import {
+  generarCodigosSchema,
+  listarCelularesSchema,
+  listarRetenidosSchema,
+  resolverRetenidoSchema,
+} from '../../schemas/dashboard/celularesDeCampo.schema'
+import { listarCelularesDeCampo } from '../../services/tpv/campo/celular/celularesDeLaOrganizacion.service'
 import { generarCodigos } from '../../services/tpv/campo/celular/codigoDeCelular.service'
 import { desvincularCelular } from '../../services/tpv/campo/celular/desvincularCelular.service'
 import { listarRetenidos, resolverRetenido } from '../../services/tpv/campo/celular/graciaDelCelular.service'
 
 // Se monta en organizationDashboard.routes.ts detrás de authenticate + checkOrgAccess + requireOrgManager.
 const router = Router({ mergeParams: true })
+
+/** La lista de la organización: cada promotor con el estado de su celular. */
+router.get('/', validateRequest(listarCelularesSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { q, venueId, estado, page, pageSize } = req.query as any
+    const data = await listarCelularesDeCampo(req.params.orgId, { q, venueId, estado, page, pageSize })
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
 
 router.post('/codigos', validateRequest(generarCodigosSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
