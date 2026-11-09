@@ -105,3 +105,31 @@ export const entrarConPinSchema = z.object({
 export const renovarSesionSchema = z.object({
   body: z.object({ refreshToken: z.string().regex(/^[a-f0-9]{64}$/, { message: 'El refresh no es válido.' }) }).strict(),
 })
+
+/**
+ * El latido (bloque 1, A5): cuánto tiene por subir y la HUELLA de cada pieza (sha256 hex de `tipo\nvenueId\ncuerpoJson`),
+ * hasta 500. El aparato va sin `aparatoId` (ése no cambia).
+ */
+const cuantos = z.number().int().nonnegative()
+export const latidoSchema = z.object({
+  body: z
+    .object({
+      porSubir: z
+        .object({
+          total: cuantos,
+          ventas: cuantos.optional(),
+          fotos: cuantos.optional(),
+          checadas: cuantos.optional(),
+          custodia: cuantos.optional(),
+        })
+        .strict(),
+      huellas: z
+        .array(z.string().regex(/^[a-f0-9]{64}$/, { message: 'Cada huella son 64 hex.' }))
+        .max(500, { message: 'Hasta 500 huellas.' }),
+      aparato: z
+        .object({ marca: textoDelAparato, modelo: textoDelAparato, versionAndroid: textoDelAparato, versionApp: textoDelAparato })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+})

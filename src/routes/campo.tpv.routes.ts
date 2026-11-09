@@ -1,20 +1,26 @@
 /**
- * App de campo (bloque 0): lo que sube el celular del promotor. Se monta en `/tpv/campo`. La sucursal va en la dirección
+ * App de campo: lo que sube el celular del promotor. Se monta en `/tpv/campo`. La sucursal va en la dirección
  * (`:venueId`), así que `checkPermission` evalúa el rol en ESA sucursal contra la base, no la del token (plan H4).
+ * Bloque 1: las rutas `/venues/:venueId/*` entran SÓLO con la sesión del celular (`autenticarSesionDeCampo`), nunca con un
+ * token de PAX, POS o dashboard.
  */
 import { NextFunction, Request, Response, Router } from 'express'
 import rateLimit from 'express-rate-limit'
-import AppError, { NotFoundError } from '@/errors/AppError'
-import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
+import AppError, { ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { autenticarSesionDeCampo } from '@/middlewares/autenticarSesionDeCampo.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { requireVenueMembership } from '@/middlewares/validateVenueAccess.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { aceptarCustodia, rechazarCustodia } from '@/controllers/tpv/campo/custodiaDeCampo.controller'
+import { createProofOfSale } from '@/controllers/tpv/sale-verification.tpv.controller'
+import { listMySims } from '@/controllers/tpv/simCustody.tpv.controller'
+import { createProofOfSaleSchema } from '@/schemas/tpv.schema'
 import {
   aceptarCustodiaSchema,
   activarCelularSchema,
   entradaDeCampoSchema,
   entrarConPinSchema,
+  latidoSchema,
   rechazarCustodiaSchema,
   renovarSesionSchema,
   salidaDeCampoSchema,
@@ -23,6 +29,7 @@ import {
 import { activarCelular } from '@/services/tpv/campo/celular/activarCelular.service'
 import { autenticarCelular } from '@/services/tpv/campo/celular/credencial'
 import { entrarConPin, renovarSesionDeCelular } from '@/services/tpv/campo/celular/entrarConPin.service'
+import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import prisma from '@/utils/prismaClient'
@@ -85,14 +92,16 @@ router.post(
  * Entrar y renovar llevan la credencial del celular (`X-Celular-Credencial`) y UN tope de 30 por minuto por celular
  * (compartido entre las dos), nunca por IP. Va después de la credencial: la llave es el celular.
  */
-const porCelular = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (_req: Request, res: Response) => `celular:${res.locals.celular.id}`,
-  message: { error: 'RATE_LIMIT', code: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
-})
+const limitePorCelular = (max: number) =>
+  rateLimit({
+    windowMs: 60 * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (_req: Request, res: Response) => `celular:${res.locals.celular.id}`,
+    message: { error: 'RATE_LIMIT', code: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+  })
+const porCelular = limitePorCelular(30)
 
 /** Rechazos con datos al nivel de `code`; PIN_BLOQUEADO además dice en `Retry-After` cuántos segundos esperar. */
 const conDatos =
@@ -134,12 +143,24 @@ router.post(
 )
 
 /**
+ * POST /tpv/campo/latido — la credencial del celular (cualquier estado) y `{ porSubir, huellas, aparato? }` → 200
+ * `{ estado, graciaHasta, persona, sucursales, horaDelServidor }`. Tope propio de 12 por minuto por celular.
+ */
+router.post(
+  '/latido',
+  autenticarCelular,
+  limitePorCelular(12),
+  validateRequest(latidoSchema),
+  conDatos((req, res) => registrarLatido(res.locals.celular, req.body)),
+)
+
+/**
  * POST /tpv/campo/venues/:venueId/ventas — la venta de una SIM. 201 nueva, 200 repetida (misma llave).
  * Reintentables: 409 VENTA_EN_PROCESO y cualquier 5xx. Lo demás es definitivo; 422 PRECIO_CAMBIO trae `precioActual`.
  */
 router.post(
   '/venues/:venueId/ventas',
-  authenticateTokenMiddleware,
+  autenticarSesionDeCampo,
   porPersona(),
   checkPermission('serialized-inventory:sell'),
   checkPermission('payments:create'),
@@ -149,7 +170,10 @@ router.post(
       const { venueId } = req.params
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
       if (!venue) throw new NotFoundError('Sucursal no encontrada')
-      const r = await registrarVentaDeCampo({ venueId, orgId: venue.organizationId, staffId: req.authContext!.userId }, req.body)
+      const r = await registrarVentaDeCampo(
+        { venueId, orgId: venue.organizationId, staffId: req.authContext!.userId, celularId: res.locals.celular.id },
+        req.body,
+      )
       res.status(r.repetida ? 200 : 201).json(r)
     } catch (error) {
       if (error instanceof AppError && error.code === 'PRECIO_CAMBIO' && esObjeto(error.details)) {
@@ -163,7 +187,7 @@ router.post(
 /** Custodia del celular: sin `simCustodyIdempotency`; «ya estaba hecho» (misma persona) es éxito con `repetida: true`. */
 router.post(
   '/venues/:venueId/custodia/aceptar',
-  authenticateTokenMiddleware,
+  autenticarSesionDeCampo,
   porPersona(),
   checkPermission('tpv-sim-custody:accept'),
   validateRequest(aceptarCustodiaSchema),
@@ -171,7 +195,7 @@ router.post(
 )
 router.post(
   '/venues/:venueId/custodia/rechazar',
-  authenticateTokenMiddleware,
+  autenticarSesionDeCampo,
   porPersona(),
   checkPermission('tpv-sim-custody:reject'),
   validateRequest(rechazarCustodiaSchema),
@@ -201,7 +225,7 @@ const checada =
   }
 router.post(
   '/venues/:venueId/checadas/entrada',
-  authenticateTokenMiddleware,
+  autenticarSesionDeCampo,
   porPersona(),
   requireVenueMembership,
   validateRequest(entradaDeCampoSchema),
@@ -209,11 +233,49 @@ router.post(
 )
 router.post(
   '/venues/:venueId/checadas/salida',
-  authenticateTokenMiddleware,
+  autenticarSesionDeCampo,
   porPersona(),
   requireVenueMembership,
   validateRequest(salidaDeCampoSchema),
   checada(registrarSalidaDeCampo, 200),
 )
+
+/**
+ * Las dos rutas espejo de la TPV, con sus MISMOS controladores, permisos y esquemas:
+ * `POST /venues/:venueId/evidencia` = `POST /tpv/verification/proof-of-sale` y `GET /venues/:venueId/mis-sims` =
+ * `GET /tpv/sim-custody/my-sims`. La evidencia tiene un paso propio antes del controlador: su servicio busca el pago en
+ * toda la organización (a propósito, para la TPV, R3-1), y el celular sólo puede tocar ventas de la sucursal de su sesión.
+ * Un pago (o verificación) que no existe en la organización sigue al controlador, que contesta lo mismo que hoy.
+ */
+const otraSucursal = () => new ForbiddenError('Esa venta es de otra sucursal.', 'OTRA_SUCURSAL')
+async function evidenciaDeEstaSucursal(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const enLaOrganizacion = { venue: { organizationId: req.authContext!.orgId } }
+    const { paymentId, verificationId } = req.body
+    const pago = await prisma.payment.findFirst({ where: { id: paymentId, ...enLaOrganizacion }, select: { venueId: true } })
+    if (pago && pago.venueId !== venueId) throw otraSucursal()
+    if (verificationId) {
+      const v = await prisma.saleVerification.findFirst({ where: { id: verificationId, ...enLaOrganizacion }, select: { venueId: true } })
+      if (v && v.venueId !== venueId) throw otraSucursal()
+    }
+    next()
+  } catch (error) {
+    if (error instanceof AppError && error.code === 'OTRA_SUCURSAL') {
+      return res.status(error.statusCode).json({ code: error.code, message: error.message })
+    }
+    next(error)
+  }
+}
+router.post(
+  '/venues/:venueId/evidencia',
+  autenticarSesionDeCampo,
+  porPersona(),
+  checkPermission('payments:create'),
+  validateRequest(createProofOfSaleSchema),
+  evidenciaDeEstaSucursal,
+  createProofOfSale,
+)
+router.get('/venues/:venueId/mis-sims', autenticarSesionDeCampo, porPersona(), listMySims)
 
 export default router

@@ -11,11 +11,11 @@
  */
 import type { Server } from 'http'
 import { randomUUID } from 'crypto'
-import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
+import { crearCelularConSesion } from '../../helpers/celularDeCampo'
 
 jest.setTimeout(120000)
 
@@ -31,11 +31,11 @@ const H = 60 * 60 * 1000
 const base = new Date(Math.floor((Date.now() - 30 * H) / H) * H)
 const a = (horas: number) => new Date(base.getTime() + horas * H)
 
-const token = () =>
-  jwt.sign({ sub: promotorId, orgId, venueId, role: 'CASHIER' }, process.env.ACCESS_TOKEN_SECRET as string, { expiresIn: '15m' })
+/** La sesión del celular (bloque 1), en la sucursal principal. */
+let token: string
 
 const checar = (cual: 'entrada' | 'salida', body: Record<string, unknown>, sucursal = venueId) =>
-  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/checadas/${cual}`).set('Authorization', `Bearer ${token()}`).send(body)
+  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/checadas/${cual}`).set('Authorization', `Bearer ${token}`).send(body)
 
 beforeAll(async () => {
   orgId = (
@@ -62,6 +62,7 @@ beforeAll(async () => {
       },
     })
   ).id
+  token = (await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId, role: 'CASHIER' })).token
   server = app.listen(0, '127.0.0.1')
   await new Promise<void>(listo => server.once('listening', () => listo()))
 })
@@ -72,6 +73,9 @@ afterAll(async () => {
   await new Promise<void>(listo => server.close(() => listo()))
   const sucursales = [venueId, otraSucursalId]
   await prisma.timeEntry.deleteMany({ where: { staffId: promotorId } })
+  await prisma.celularDeCampo.deleteMany({ where: { organizationId: orgId } })
+  await prisma.refreshGrant.deleteMany({ where: { session: { staffId: promotorId } } })
+  await prisma.session.deleteMany({ where: { staffId: promotorId } })
   await prisma.staffVenue.deleteMany({ where: { venueId: { in: sucursales } } })
   await prisma.staffOrganization.deleteMany({ where: { organizationId: orgId } })
   await prisma.staff.deleteMany({ where: { id: promotorId } })

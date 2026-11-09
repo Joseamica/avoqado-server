@@ -388,3 +388,82 @@ describe('POST /tpv/campo/entrar y /renovar', () => {
     expect((await renovar(c.credencial, 'no-es-hex')).status).toBe(400)
   })
 })
+
+describe('Tarea 5: el latido y el candado por la ruta real', () => {
+  const huella = (n: string) => n.repeat(64)
+  const latir = (credencial: string, body: Record<string, unknown>) =>
+    request(server).post('/api/v1/tpv/campo/latido').set(CABECERA_CREDENCIAL, credencial).send(body)
+  const misSims = (token: string) =>
+    request(server).get(`/api/v1/tpv/campo/venues/${venueId}/mis-sims`).set('Authorization', `Bearer ${token}`)
+
+  it('latido vinculado guarda la foto y contesta VINCULADO; desvinculado no la toca y trae graciaHasta = desvinculadoAt + 24 h', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    const r = await latir(c.credencial, {
+      porSubir: { total: 2, ventas: 1, fotos: 1 },
+      huellas: [huella('a'), huella('b')],
+      aparato: { versionApp: '1.2.0' },
+    })
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ estado: 'VINCULADO', graciaHasta: null, persona: { staffId: promotorId, nombre: 'Ana Campo' } })
+    expect(r.body.sucursales).toEqual([expect.objectContaining({ venueId })])
+    const foto = await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })
+    expect(foto).toMatchObject({
+      porSubir: 2,
+      porSubirDetalle: { ventas: 1, fotos: 1 },
+      huellasPorSubir: [huella('a'), huella('b')],
+      versionApp: '1.2.0',
+    })
+
+    const desvinculadoAt = new Date('2026-11-09T02:00:00.000Z')
+    await prisma.celularDeCampo.update({ where: { id: c.celularId }, data: { staffIdVinculado: null, desvinculadoAt } })
+    const d = await latir(c.credencial, { porSubir: { total: 0 }, huellas: [] })
+    expect(d.status).toBe(200)
+    expect(d.body).toMatchObject({ estado: 'DESVINCULADO', graciaHasta: '2026-11-10T02:00:00.000Z', sucursales: [] })
+    const congelada = await prisma.celularDeCampo.findUniqueOrThrow({ where: { id: c.celularId } })
+    expect(congelada).toMatchObject({ porSubir: 2, huellasPorSubir: [huella('a'), huella('b')] })
+    expect(congelada.vistoAt!.getTime()).toBeGreaterThan(foto.vistoAt!.getTime())
+  })
+
+  it('latido con 501 huellas → 400 y sin credencial → 401 CELULAR_DESCONOCIDO', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    expect((await latir(c.credencial, { porSubir: { total: 501 }, huellas: Array.from({ length: 501 }, () => huella('c')) })).status).toBe(
+      400,
+    )
+    const sin = await request(server)
+      .post('/api/v1/tpv/campo/latido')
+      .send({ porSubir: { total: 0 }, huellas: [] })
+    expect(sin.status).toBe(401)
+    expect(sin.body.code).toBe('CELULAR_DESCONOCIDO')
+  })
+
+  it('el token de activar entra a una ruta del bloque 0; al entrar otra vez con PIN, el viejo da 401 en la siguiente petición', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    expect((await misSims(c.sesion.accessToken)).status).toBe(200)
+
+    const nueva = await request(server).post('/api/v1/tpv/campo/entrar').set(CABECERA_CREDENCIAL, c.credencial).send({ pin: PIN })
+    expect(nueva.status).toBe(200)
+
+    const vieja = await misSims(c.sesion.accessToken)
+    expect(vieja.status).toBe(401)
+    expect(vieja.body.code).toBe('SESION_CERRADA')
+    expect((await misSims(nueva.body.sesion.accessToken)).status).toBe(200)
+  })
+
+  it('un token móvil de la persona con una sesión `celular:<id>` → 401 SESION_INVALIDA en la ruta del bloque 0', async () => {
+    const c = (await activar(await nuevoCodigo())).body
+    const sesion = await createSession({ staffId: promotorId, venueId, deviceId: `celular:${c.celularId}`, authMethod: 'PIN' })
+    const movil = jwt.sign(
+      { sub: promotorId, orgId, venueId, role: 'CASHIER', sid: sesion.id },
+      process.env.ACCESS_TOKEN_SECRET as string,
+      {
+        expiresIn: '15m',
+      },
+    )
+    const r = await request(server)
+      .get(`/api/v1/tpv/campo/venues/${venueId}/mis-sims`)
+      .set('Authorization', `Bearer ${movil}`)
+      .set('X-Device-Id', `celular:${c.celularId}`)
+    expect(r.status).toBe(401)
+    expect(r.body.code).toBe('SESION_INVALIDA')
+  })
+})

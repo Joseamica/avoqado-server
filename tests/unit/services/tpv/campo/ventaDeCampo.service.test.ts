@@ -254,6 +254,12 @@ describe('venta nueva', () => {
     expect(new Date(r.hora).getTime()).toBeGreaterThanOrEqual(antes)
     expect(ficha()!.origenHora).toBe('SERVIDOR')
   })
+
+  it('bloque 1: la ficha guarda el celular que mandó la venta; sin celular queda nula, como antes', async () => {
+    await registrarVentaDeCampo({ ...ctx, celularId: 'cel1' }, venta())
+    expect(tabla.create).toHaveBeenLastCalledWith({ data: expect.objectContaining({ celularId: 'cel1' }) })
+    expect(ficha()!.celularId).toBe('cel1')
+  })
 })
 
 describe('rechazos definitivos', () => {
