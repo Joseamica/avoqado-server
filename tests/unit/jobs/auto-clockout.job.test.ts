@@ -90,7 +90,7 @@ describe('AutoClockOutJob', () => {
         .mockResolvedValueOnce([]) // Max duration query - empty
 
       prismaMock.timeEntry.findMany.mockResolvedValue(mockOpenEntries)
-      prismaMock.timeEntry.update.mockResolvedValue({})
+      prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
       prismaMock.timeEntryBreak.update.mockResolvedValue({})
 
       // Mock the time window check by making it always return true for this test
@@ -100,12 +100,12 @@ describe('AutoClockOutJob', () => {
       await job.runNow()
 
       // Verify entries were clocked out (2 entries)
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledTimes(2)
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledTimes(2)
 
       // First entry should be clocked out with auto clock-out flag
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'entry-1' },
+          where: { id: 'entry-1', clockOutTime: null },
           data: expect.objectContaining({
             status: TimeEntryStatus.CLOCKED_OUT,
             autoClockOut: true,
@@ -152,7 +152,7 @@ describe('AutoClockOutJob', () => {
 
       // Should not update any entries since we're outside the time window
       // (findMany may still be called for max-duration check, but update shouldn't be called)
-      expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
+      expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
     })
 
     it('should skip venues without auto clock-out enabled', async () => {
@@ -162,7 +162,7 @@ describe('AutoClockOutJob', () => {
       await job.runNow()
 
       // Should not proceed to update any entries
-      expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
+      expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
     })
   })
 
@@ -208,14 +208,14 @@ describe('AutoClockOutJob', () => {
         .mockResolvedValueOnce(mockVenueSettings) // Max duration query
 
       prismaMock.timeEntry.findMany.mockResolvedValue(mockOverdueEntries)
-      prismaMock.timeEntry.update.mockResolvedValue({})
+      prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
 
       await job.runNow()
 
       // Verify entry was clocked out
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'entry-1' },
+          where: { id: 'entry-1', clockOutTime: null },
           data: expect.objectContaining({
             status: TimeEntryStatus.CLOCKED_OUT,
             autoClockOut: true,
@@ -253,7 +253,7 @@ describe('AutoClockOutJob', () => {
       await job.runNow()
 
       // Should not update any entries
-      expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
+      expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
     })
   })
 
@@ -304,13 +304,13 @@ describe('AutoClockOutJob', () => {
 
       prismaMock.venueSettings.findMany.mockResolvedValue(mockVenueSettings)
       prismaMock.timeEntry.findMany.mockResolvedValue([mockEntry])
-      prismaMock.timeEntry.update.mockResolvedValue({})
+      prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
       ;(job as any).isWithinClockOutWindow = jest.fn().mockReturnValue(true)
 
       await job.runNow()
 
       // Verify that breakMinutes was calculated (30 minutes)
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             breakMinutes: 30,
@@ -439,16 +439,16 @@ describe('AutoClockOutJob', () => {
         },
       ])
 
-      prismaMock.timeEntry.update.mockResolvedValue({})
+      prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
       ;(job as any).isWithinClockOutWindow = jest.fn().mockReturnValue(true)
 
       await job.runNow()
 
       // Second venue should still be processed (only 1 update for venue-2)
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledTimes(1)
-      expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'entry-2' },
+          where: { id: 'entry-2', clockOutTime: null },
         }),
       )
     })
