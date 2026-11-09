@@ -57,8 +57,10 @@ export const salidaDeCampoSchema = z.object({ body: salidaDeCampoBodySchema })
 export type EntradaDeCampoBody = z.infer<typeof entradaDeCampoBodySchema>
 export type SalidaDeCampoBody = z.infer<typeof salidaDeCampoBodySchema>
 
-/** Custodia del celular: aceptar varias SIMs (tope 50) o rechazar UNA. */
-export const aceptarCustodiaSchema = z.object({
-  body: z.object({ serialNumbers: z.array(z.string().min(1)).min(1).max(50) }),
-})
-export const rechazarCustodiaSchema = z.object({ body: z.object({ serialNumber: z.string().min(1) }) })
+/**
+ * Custodia del celular: aceptar varias SIMs (tope 50) o rechazar UNA. Cada SIM lleva la `custodyVersion` de la asignación que
+ * vio el celular (Codex C3): una decisión vieja no vale para una entrega nueva de la misma SIM.
+ */
+const simConVersion = z.object({ serialNumber: z.string().min(1), custodyVersion: z.number().int().nonnegative() })
+export const aceptarCustodiaSchema = z.object({ body: z.object({ sims: z.array(simConVersion).min(1).max(50) }) })
+export const rechazarCustodiaSchema = z.object({ body: simConVersion })

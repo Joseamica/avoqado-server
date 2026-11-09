@@ -20,7 +20,7 @@ const RejectBody = z.object({
   serialNumber: z.string().min(1, 'El ICCID es requerido'),
 })
 
-export function respondSimCustodyError(res: Response, err: unknown): boolean {
+function respondSimCustodyError(res: Response, err: unknown): boolean {
   if (err instanceof SimCustodyError) {
     res.status(err.httpStatus).json({ error: err.code, message: err.message })
     return true
