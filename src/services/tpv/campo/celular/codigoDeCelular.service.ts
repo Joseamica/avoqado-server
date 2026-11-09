@@ -6,7 +6,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { generateSecureCode } from '@/services/dashboard/terminal-activation.service'
-import { esPromotorDeCampo, sucursalesConCampo, sucursalesDeLaPersona } from './personasDeCampo'
+import { esPromotorDeCampo, filtroDePromotor, sucursalesConCampo, sucursalesDeLaPersona } from './personasDeCampo'
 
 export const VIGENCIA_DEL_CODIGO_MS = 7 * 24 * 60 * 60 * 1000
 export const INTENTOS_DEL_CODIGO = 5
@@ -60,7 +60,7 @@ async function promotoresSinCelular(organizationId: string): Promise<Persona[]> 
   if (venueIds.length === 0) return []
   const [personas, vinculados, conCodigoVivo] = await Promise.all([
     prisma.staff.findMany({
-      where: { active: true, venues: { some: { active: true, role: { in: ['WAITER', 'CASHIER'] }, venueId: { in: venueIds } } } },
+      where: { active: true, venues: { some: filtroDePromotor(venueIds) } },
       select: { id: true, firstName: true, lastName: true, phone: true },
       orderBy: { id: 'asc' },
     }),
@@ -84,8 +84,9 @@ export async function generarCodigos(p: GenerarCodigosParams) {
     for (const persona of todos.slice(0, TOPE_POR_LLAMADA)) generados.push(await generarUno(p.organizationId, p.generadoPor, persona))
     restantes = Math.max(0, todos.length - TOPE_POR_LLAMADA)
   } else {
-    for (const staffId of p.staffIds ?? []) {
-      const persona = (await esPromotorDeCampo(staffId, p.organizationId))
+    const conCampo = new Set(await sucursalesConCampo(p.organizationId)) // una vez por llamada
+    for (const staffId of [...new Set(p.staffIds ?? [])]) {
+      const persona = (await esPromotorDeCampo(staffId, p.organizationId, conCampo))
         ? await prisma.staff.findUnique({ where: { id: staffId }, select: { id: true, firstName: true, lastName: true, phone: true } })
         : null
       if (!persona) omitidos.push({ staffId, motivo: 'NO_ES_PROMOTOR' })

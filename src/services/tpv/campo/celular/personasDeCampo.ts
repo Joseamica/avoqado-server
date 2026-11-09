@@ -9,7 +9,15 @@ import { MODULE_CODES, moduleService } from '@/services/modules/module.service'
 
 export type SucursalDeLaPersona = { staffVenueId: string; venueId: string; nombre: string; role: StaffRole; pin: string | null }
 
-const ROLES_DE_CAMPO: StaffRole[] = [StaffRole.WAITER, StaffRole.CASHIER]
+export const ROLES_DE_CAMPO: StaffRole[] = [StaffRole.WAITER, StaffRole.CASHIER]
+
+/** UNA sola definición de «promotor» (A8) para las dos rutas: `esPromotorDeCampo` y la búsqueda de todos los sin celular. */
+export const filtroDePromotor = (venueIds: string[]) => ({
+  active: true,
+  role: { in: ROLES_DE_CAMPO },
+  venueId: { in: venueIds },
+  venue: { status: { in: OPERATIONAL_VENUE_STATUSES } },
+})
 
 /** Sucursales de la organización con inventario serializado. */
 export async function sucursalesConCampo(organizationId: string): Promise<string[]> {
@@ -33,9 +41,10 @@ export async function sucursalesDeLaPersona(staffId: string, organizationId: str
   return filas.map(f => ({ staffVenueId: f.id, venueId: f.venueId, nombre: f.venue.name, role: f.role, pin: f.pin }))
 }
 
-export async function esPromotorDeCampo(staffId: string, organizationId: string): Promise<boolean> {
+/** `conCampo` opcional: quien llama en bucle lo calcula UNA vez y lo pasa. */
+export async function esPromotorDeCampo(staffId: string, organizationId: string, conCampo?: Set<string>): Promise<boolean> {
   const deCampo = (await sucursalesDeLaPersona(staffId, organizationId)).filter(s => ROLES_DE_CAMPO.includes(s.role))
   if (deCampo.length === 0) return false
-  const conCampo = new Set(await sucursalesConCampo(organizationId))
-  return deCampo.some(s => conCampo.has(s.venueId))
+  const campo = conCampo ?? new Set(await sucursalesConCampo(organizationId))
+  return deCampo.some(s => campo.has(s.venueId))
 }

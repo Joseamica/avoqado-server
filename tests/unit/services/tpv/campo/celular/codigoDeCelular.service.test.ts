@@ -17,6 +17,7 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({
+  filtroDePromotor: jest.requireActual('@/services/tpv/campo/celular/personasDeCampo').filtroDePromotor,
   esPromotorDeCampo: jest.fn(),
   sucursalesConCampo: jest.fn(),
   sucursalesDeLaPersona: jest.fn(),
@@ -69,6 +70,13 @@ describe('generarCodigos · staffIds', () => {
     expect(db.codigoDeCelular.upsert).toHaveBeenCalledTimes(1)
   })
 
+  it('ids repetidos: un solo código y se calcula el módulo una vez', async () => {
+    const r = await generarCodigos({ organizationId: ORG, generadoPor: 'admin', staffIds: ['a', 'a', 'b'] })
+    expect(r.generados.map(g => g.staffId)).toEqual(['a', 'b'])
+    expect(db.codigoDeCelular.upsert).toHaveBeenCalledTimes(2)
+    expect(sucursalesConCampo).toHaveBeenCalledTimes(1)
+  })
+
   it('un choque del único de codigo (P2002) se reintenta y luego sale bien', async () => {
     db.codigoDeCelular.upsert.mockRejectedValueOnce(p2002()).mockRejectedValueOnce(p2002())
     const r = await generarCodigos({ organizationId: ORG, generadoPor: 'admin', staffIds: ['a'] })
@@ -110,6 +118,9 @@ describe('generarCodigos · todosLosSinCelular', () => {
     const r = await generarCodigos({ organizationId: ORG, generadoPor: 'admin', todosLosSinCelular: true })
     expect(r.generados.map(g => g.staffId)).toEqual(['c', 'd'])
     expect(r.restantes).toBe(0)
+    const some = db.staff.findMany.mock.calls[0][0].where.venues.some
+    expect(some.venue).toEqual({ status: { in: expect.arrayContaining(['ACTIVE']) } })
+    expect(some).toMatchObject({ active: true, role: { in: ['WAITER', 'CASHIER'] }, venueId: { in: ['v1'] } })
     const filtro = db.codigoDeCelular.findMany.mock.calls[0][0].where
     expect(filtro).toMatchObject({ organizationId: ORG, usadoAt: null, anuladoAt: null, expiraAt: { gt: AHORA } })
   })
