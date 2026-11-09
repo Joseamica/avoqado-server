@@ -21666,6 +21666,8 @@ model EnvioRetenidoDeCampo {
   /// NO_REPORTADA | FUERA_DE_PLAZO | PERSONA_DADA_DE_BAJA | SIN_PERMISO | RECHAZADO
   motivo         String
   rechazo        Json?
+  /// Quién lo está resolviendo: toda escritura posterior lo lleva en el where.
+  ocupacion      String?
   enProcesoHasta DateTime?
   resueltoAt     DateTime?
   resueltoPor    String?

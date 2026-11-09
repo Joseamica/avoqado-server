@@ -67,6 +67,7 @@ CREATE TABLE "envios_retenidos_de_campo" (
     "cuerpoJson" TEXT NOT NULL,
     "motivo" TEXT NOT NULL,
     "rechazo" JSONB,
+    "ocupacion" TEXT,
     "enProcesoHasta" TIMESTAMP(3),
     "resueltoAt" TIMESTAMP(3),
     "resueltoPor" TEXT,
