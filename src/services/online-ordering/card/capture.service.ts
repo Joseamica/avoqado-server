@@ -252,7 +252,12 @@ export async function finishCapture(
 
         const order = await tx.order.findUniqueOrThrow({
           where: { id: orderId },
-          select: { total: true, paidAmount: true, items: { include: { modifiers: { include: { modifier: true } } } } },
+          select: {
+            total: true,
+            paidAmount: true,
+            paymentStatus: true,
+            items: { include: { modifiers: { include: { modifier: true } } } },
+          },
         })
         // Fix r1 I2: bajo el candado, la cuenta debe valer lo cobrado; si cambió desde la primera transacción, se revierte todo.
         if (!new Prisma.Decimal(order.total).equals(capturedAmount)) throw new CaptureNotAccepted('TOTAL_CHANGED')
@@ -267,7 +272,12 @@ export async function finishCapture(
         })
         await tx.order.update({
           where: { id: orderId },
-          data: { paymentStatus: PaymentStatus.PAID, paidAmount: yaCobrado.plus(capturedAmount), remainingBalance: 0 },
+          data: {
+            paymentStatus: PaymentStatus.PAID,
+            paidAmount: yaCobrado.plus(capturedAmount),
+            remainingBalance: 0,
+            ...(order.paymentStatus !== PaymentStatus.PAID ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: meta.staffId } : {}),
+          },
         })
         const posting = await createSalePostingInTx(tx, { venueId, orderId, items: order.items as any, staffId: meta.staffId })
         // R8: como cada vale de una venta saldada (la tienda en línea hoy no vende tarjetas de regalo: no encuentra sobres).

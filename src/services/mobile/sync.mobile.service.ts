@@ -1508,6 +1508,7 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    createdAtLocal: clampSoldAt(intent.createdAtLocal, new Date()).getTime(),
     // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
     ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
     ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),

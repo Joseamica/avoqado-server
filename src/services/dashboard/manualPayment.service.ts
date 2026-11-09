@@ -6,6 +6,7 @@ import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { avisarEfectivoConTarjetaEnDuda } from '@/services/shared/avisoDeEfectivoConTarjetaEnDuda'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
@@ -143,20 +144,7 @@ export async function createManualPayment(
   // we can fire them AFTER the tx commits — keeps downstream failures from
   // rolling back the payment (matches the TPV pattern).
   //
-  // - `loyaltyCustomerId` is the SINGLE customer who earns loyalty points
-  //   (resolution: input.customerId override > primary OrderCustomer > legacy
-  //   Order.customerId). TPV semantics: only ONE customer earns per order.
-  // - `metricsCustomerIds` is the FULL set of customers whose visit metrics
-  //   (totalVisits, totalSpent, lastVisitAt) must increment. TPV iterates ALL
-  //   OrderCustomer rows for this. Without including secondaries, multi-customer
-  //   orders silently undercount visits in customer dashboards.
-  // Independent of loyalty resolution: metrics fire for every queued customer
-  // even when no primary customer can earn loyalty points (orderCustomers all
-  // isPrimary=false, no input.customerId, no legacy order.customerId).
-  // Stored in a holder object so TypeScript doesn't narrow the closure
-  // assignment to `never` after the async transaction callback.
-  // Mismo motivo que metricsState: un holder evita que TS estreche la
-  // asignación dentro del callback async de la transacción a `never`.
+  // Modo1 delega a la regla común; las sombras conservan sus métricas y earnPoints propios.
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
   const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
@@ -169,6 +157,7 @@ export async function createManualPayment(
   const bundle = await withDeadlockRetry(
     async tx => {
       let loyaltyCustomerId: string | null = null
+      let legacyCustomer: { id: string; firstName: string | null; lastName: string | null } | null = null
       let loyaltyOrderTotal: Prisma.Decimal = new Prisma.Decimal(0)
       let loyaltyOrderId: string = ''
       let loyaltyShouldEarn = false
@@ -269,6 +258,7 @@ export async function createManualPayment(
           where: { id: input.orderId, venueId },
           include: {
             payments: { where: { status: TransactionStatus.COMPLETED } },
+            customer: { select: { id: true, firstName: true, lastName: true } },
             orderCustomers: { select: { customerId: true, isPrimary: true } },
             // Sin los renglones el vale nacería vacío y la venta seguiría sin
             // descontar del almacén — que es justo el hueco que este include cierra.
@@ -310,35 +300,13 @@ export async function createManualPayment(
           throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${saldoAntes.remainingBalance.toFixed(2)}`)
         }
 
-        // Customer metrics + loyalty are only queued on FULL SETTLEMENT, matching
-        // TPV's `if (isFullyPaid)` guard. Per-payment metric increments would
-        // inflate totalVisits (4 partials of a $100 order = 4 visits instead of 1)
-        // and disconnect from TPV semantics. Both metrics and loyalty fire ONCE
-        // per order, with the FINAL order total — not per-payment amounts.
+        // La regla común lee las ligas persistidas tras el commit; el respaldo es sólo el cliente heredado de ESTA orden.
         if (saldoCanonico.isFullyPaid) {
-          // Final order total drives BOTH loyalty (when there's a customer to
-          // earn) and metrics (for every customer on the order, regardless of
-          // primary). Set unconditionally on full settlement so metrics never
-          // run with 0.
-          metricsState.orderTotal = anchorOrderTotal
           loyaltyOrderId = order.id
-          // Resolution: explicit input override > primary OrderCustomer > legacy column
-          const primaryCustomer = order.orderCustomers.find(oc => oc.isPrimary)
-          const resolvedCustomerId = input.customerId ?? primaryCustomer?.customerId ?? order.customerId ?? null
-          if (resolvedCustomerId) {
-            loyaltyCustomerId = resolvedCustomerId
-            loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(aggregatedTipAmount))
-            loyaltyShouldEarn = true
-          }
-          // Customer metrics: queue updates for ALL customers on the order
-          // (primary + secondaries + override + legacy column). Visits/spend
-          // increments ONCE per customer at settlement, using the final order
-          // total — not per-payment amounts.
-          for (const oc of order.orderCustomers) {
-            metricsCustomerIds.add(oc.customerId)
-          }
-          if (input.customerId) metricsCustomerIds.add(input.customerId)
-          if (order.customerId) metricsCustomerIds.add(order.customerId)
+          legacyCustomer = order.customerId
+            ? { id: order.customerId, firstName: order.customer?.firstName ?? null, lastName: order.customer?.lastName ?? null }
+            : null
+          loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(aggregatedTipAmount))
         }
 
         // If admin attached a customer and the order didn't have one (no
@@ -534,6 +502,7 @@ export async function createManualPayment(
             // matches the TPV path. Without this, "orders by status" reports
             // count fully-paid orders as still pending.
             ...(fullyPaid ? { status: 'COMPLETED', completedAt: new Date() } : {}),
+            ...(fullyPaid && !yaEstabaPagada ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId } : {}),
           },
         })
 
@@ -582,6 +551,7 @@ export async function createManualPayment(
       return {
         result: payment,
         loyaltyCustomerId,
+        legacyCustomer,
         loyaltyOrderTotal,
         loyaltyOrderId,
         loyaltyShouldEarn,
@@ -614,6 +584,7 @@ export async function createManualPayment(
   const {
     result,
     loyaltyCustomerId,
+    legacyCustomer,
     loyaltyOrderTotal,
     loyaltyOrderId,
     loyaltyShouldEarn,
@@ -677,28 +648,6 @@ export async function createManualPayment(
     orderId: result.orderId,
   })
 
-  // Customer metrics + loyalty side-effects run OUTSIDE the tx so any failure
-  // (config missing, downstream service down) does NOT roll back the payment
-  // that was just persisted. Same pattern as `payment.tpv.service.ts`.
-  // updateCustomerMetrics is idempotent enough (totalVisits++, totalSpent+=,
-  // lastVisitAt=now) and earnPoints dedupes by (customerId, orderId).
-  //
-  // Two-step contract:
-  //   1. Increment metrics for ALL customers attached to the order (primary +
-  //      secondaries + input override + legacy column). Multi-customer orders
-  //      mean every customer at the table gets credit for the visit.
-  //   2. Award loyalty points to the SINGLE primary customer only (matches TPV).
-  //
-  // Both steps are independent: a metrics failure for one customer does NOT
-  // skip metrics for the others, and does NOT skip loyalty.
-
-  // Step 1 — metrics for every queued customer. metricsCustomerIds is only
-  // populated when the order is fully settled (Mode 1 fully-paid OR Mode 2
-  // shadow with attached customer). metricsOrderTotal is set in lockstep so
-  // the amount is always the FINAL order total — independent of whether
-  // loyalty resolved a primary customer (orderCustomers all isPrimary=false +
-  // no input.customerId + no legacy order.customerId would otherwise leave
-  // loyaltyOrderTotal at 0 while metrics still fire).
   // Aplicar el vale de inventario YA COMMITEADO el cobro. Nunca puede tumbar un
   // pago registrado: si truena, el posting queda pendiente y el sweeper lo
   // retoma — el dinero es un hecho, la deducción es reintentable.
@@ -714,7 +663,7 @@ export async function createManualPayment(
     }
   }
 
-  if (metricsCustomerIds.size > 0 && metricsState.orderTotal) {
+  if (!input.orderId && metricsCustomerIds.size > 0 && metricsState.orderTotal) {
     const metricsAmount = Number(metricsState.orderTotal.toString())
     for (const customerId of metricsCustomerIds) {
       try {
@@ -736,7 +685,19 @@ export async function createManualPayment(
   }
 
   // Step 2 — loyalty for the resolved primary customer only.
-  if (loyaltyShouldEarn && loyaltyCustomerId) {
+  if (input.orderId && loyaltyOrderId) {
+    try {
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId: loyaltyOrderId,
+        orderTotal: loyaltyOrderTotal.toNumber(),
+        staffId,
+        legacyCustomer,
+      })
+    } catch (error) {
+      logger.error('⚠️ Failed to award manual payment loyalty; reconciler will retry', { orderId: loyaltyOrderId, venueId, error })
+    }
+  } else if (loyaltyShouldEarn && loyaltyCustomerId) {
     const totalAsNumber = Number(loyaltyOrderTotal.toString())
 
     // Resolve StaffVenue.id for proper FK on LoyaltyTransaction.createdById.

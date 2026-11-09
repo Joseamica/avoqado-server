@@ -3879,6 +3879,7 @@ export interface AbonoEnTxEntrada {
   method: NonNullable<CashPaymentInput['method']>
   idempotencyKey?: string
   isOfflineReplay?: boolean
+  createdAtLocal?: CashPaymentInput['createdAtLocal']
   externalSource?: string
   /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
   tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
@@ -4322,6 +4323,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+      ...(saldaAqui && entrada.isOfflineReplay ? { loyaltySaleAt: horaDeLaVenta(entrada, new Date()) } : {}),
       ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,
@@ -4872,6 +4874,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               method: paymentMethod,
               idempotencyKey: input.idempotencyKey,
               isOfflineReplay: input.isOfflineReplay,
+              createdAtLocal: input.createdAtLocal,
               externalSource: input.externalSource,
               tender: tenderRef,
               dentroDeLaTx: input.dentroDeLaTx,

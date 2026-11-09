@@ -321,6 +321,12 @@ export async function grantStamp(
         })
         if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
 
+        const venta = await tx.order.findFirst({
+          where: { id: orderId, venueId },
+          select: { loyaltySaleAt: true, loyaltyEligibleAt: true },
+        })
+        const soldAt = venta?.loyaltySaleAt ?? venta?.loyaltyEligibleAt ?? new Date()
+
         // 🔴 D3 (24-oct): una venta ya devuelta no da sello, la misma regla que la lealtad tardía (`ventaTieneReembolso`). Se lee
         // bajo el candado de la venta: si la devolución entra DESPUÉS de esta lectura, su reversa espera ese mismo candado (ver
         // `reverseStampForOrder`) y quita el sello que esta transacción deje.
@@ -340,7 +346,7 @@ export async function grantStamp(
               venueId,
               type: StampEventType.EARN,
               stampCard: { customerId },
-              createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+              createdAt: { gte: venueStartOfDay(tz, soldAt), lte: venueEndOfDay(tz, soldAt) },
             },
           })
           if (hoy >= config.maxStampsPerDay) return { otorgado: false, reason: 'DAILY_LIMIT_REACHED' }
@@ -365,6 +371,7 @@ export async function grantStamp(
             quantity: 1,
             createdById: options.staffVenueId,
             terminalId: options.terminalId,
+            createdAt: soldAt,
           },
         })
         // El contador se mueve en la MISMA transacción que su evento: si viven
