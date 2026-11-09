@@ -52,12 +52,8 @@ describe.each([
   ['la terminal (recordRefund)', 'src/services/tpv/refund.tpv.service.ts', 'enqueueRefundPaymentEffectsInTx(tx,'],
   ['el POS, el panel y el MCP (issueRefund)', 'src/services/dashboard/refund.dashboard.service.ts', 'enqueueRefundPaymentEffectsInTx(tx,'],
   ['la diferencia de un cambio', 'src/services/exchanges/exchangeTx.ts', 'enqueueRefundPaymentEffectsInTx(tx,'],
-  ['la devolución de Uber', 'src/services/delivery-channels/core/applyDeliveryRefund.service.ts', 'enqueueLoyaltyPointsReversalInTx(tx,'],
-  [
-    'la compensación de Uber',
-    'src/services/delivery-channels/core/deliveryReconciliation.service.ts',
-    'enqueueLoyaltyPointsReversalInTx(tx,',
-  ],
+  ['la devolución de Uber', 'src/services/delivery-channels/core/applyDeliveryRefund.service.ts', 'enqueueLoyaltyReversalsInTx(tx,'],
+  ['la compensación de Uber', 'src/services/delivery-channels/core/deliveryReconciliation.service.ts', 'enqueueLoyaltyReversalsInTx(tx,'],
 ])('%s', (_quien, ruta, llamada) => {
   it('encola la reversa de puntos', () => {
     expect(readFileSync(join(__dirname, '../../../../', ruta), 'utf8')).toContain(llamada)
@@ -67,5 +63,5 @@ describe.each([
 it('el gancho común encola la reversa de puntos', () => {
   const fuente = readFileSync(join(__dirname, '../../../../src/services/tpv/paymentEffects.service.ts'), 'utf8')
   const gancho = fuente.slice(fuente.indexOf('export async function enqueueRefundPaymentEffectsInTx'))
-  expect(gancho).toContain('enqueueLoyaltyPointsReversalInTx(tx,')
+  expect(gancho).toContain('enqueueLoyaltyReversalsInTx(tx,')
 })
