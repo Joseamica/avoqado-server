@@ -210,12 +210,12 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
 
     const [ganadora, otra] = a.status === 201 ? [a, b] : [b, a]
     expect(ganadora.status).toBe(201)
-    // Lo normal: la otra choca con el reclamo de la SIM. Si la primera ya terminó: el escaneo de hoy la ve vendida. Y si la
-    // escaneó disponible justo antes de que la primera terminara, el 400 «ya fue vendido» sale de `sellSerializedItem` tal cual.
+    // Lo normal: la otra choca con el reclamo de la SIM. Si la primera ya terminó (o la cerró entre los dos escaneos): SIM vendida.
+    // Y con la custodia en ENFORCE, si la escaneó disponible y revisó la custodia después de que la primera la marcó: la custodia.
     expect([
       [409, 'SIM_EN_OTRA_VENTA'],
       [409, 'SIM_YA_VENDIDA'],
-      [400, undefined],
+      [409, 'SIM_NOT_ACCEPTED'],
     ]).toContainEqual([otra.status, otra.body.code])
     const [deA, deB] = await Promise.all([filas(sim.serialNumber, cuerpoA.llave), filas(sim.serialNumber, cuerpoB.llave)])
     expect(deA.ordenes).toHaveLength(1) // por la SIM: la misma lista en las dos
@@ -317,6 +317,35 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     expect(cobros).toHaveLength(0)
     expect(fichas).toHaveLength(0)
     expect((await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).status).toBe('AVAILABLE')
+  })
+
+  it('alguien cancela la cuenta entre la venta y el cobro: el efectivo NO la reabre; sale VENTA_EN_PROCESO y el reintento vende de nuevo', async () => {
+    const sim = await nuevaSim(categoriaDeCaja)
+    const cuerpo = ventaDe(sim.serialNumber)
+    const real = pagos.recordOrderPayment
+    let cancelada = ''
+    jest.spyOn(pagos, 'recordOrderPayment').mockImplementationOnce(async (...args) => {
+      cancelada = args[1] // el panel (o un trabajador viejo) la cancela justo antes del cobro
+      await prisma.order.update({ where: { id: cancelada }, data: { status: 'CANCELLED' } })
+      return real(...args)
+    })
+
+    const res = await vender(cuerpo)
+
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('VENTA_EN_PROCESO')
+    expect(await prisma.payment.count({ where: { orderId: cancelada } })).toBe(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: cancelada } })).status).toBe('CANCELLED')
+    expect(await prisma.ventaDeCampo.count({ where: { llave: cuerpo.llave } })).toBe(0)
+
+    const reintento = await vender(cuerpo)
+    expect(reintento.status).toBe(201)
+    expect(reintento.body.orderId).not.toBe(cancelada)
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(cobros).toHaveLength(1)
+    expect(cobros[0].orderId).toBe(reintento.body.orderId)
+    expect(await prisma.payment.count({ where: { orderId: cancelada } })).toBe(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: cancelada } })).status).toBe('CANCELLED')
   })
 
   it('una persona sin StaffVenue activo en la sucursal de la dirección → 403 del middleware, aunque su token sea de otra', async () => {

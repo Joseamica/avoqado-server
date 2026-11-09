@@ -131,6 +131,8 @@ const rechazo = (statusCode: number, code: string) => expect.objectContaining({ 
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // `clearAllMocks` conserva las colas de `mock…Once`: una que una prueba no consumió no debe caerle a la siguiente.
+  for (const m of [scan, ensureSellable, markAsSold, vender, cobrar, evidencia, cancelar]) m.mockReset()
   filas = []
   Object.assign(db.ventaDeCampo, tabla)
   db.payment.findUnique = jest.fn().mockResolvedValue(null)
@@ -210,6 +212,7 @@ describe('venta nueva', () => {
       currency: 'MXN',
       isInternational: false,
       paidProductsId: [],
+      cobroNuevo: true, // el efectivo sigue en la mano del promotor: sobre una cuenta cancelada el cobro se niega, no la reabre
       authenticatedTerminalSerial: null,
     })
   })
@@ -326,6 +329,13 @@ describe('rechazos definitivos', () => {
     await expect(registrarVentaDeCampo(ctx, venta())).rejects.toBe(apagadas)
     expect(filas).toHaveLength(0)
     expect(cobrar).not.toHaveBeenCalled()
+  })
+
+  it('otra venta cerró la SIM entre nuestro escaneo y el de sellSerializedItem: su 400 sin código sale como 409 SIM_YA_VENDIDA', async () => {
+    scan.mockResolvedValueOnce(simDisponible()).mockResolvedValueOnce({ status: 'already_sold', found: true, item: null })
+    vender.mockRejectedValue(new AppError(`Item ${SIM} ya fue vendido`, 400))
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'SIM_YA_VENDIDA'))
+    expect(filas).toHaveLength(0)
   })
 })
 
@@ -544,6 +554,48 @@ describe('mapa de caídas y cruces', () => {
     await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
     expect(cancelar).not.toHaveBeenCalled()
     expect(ficha()).toMatchObject({ orderId: 'o1', paymentId: null, ocupacion: null })
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('VENTA_EN_PROCESO'),
+      expect.objectContaining({ code: 'ORDER_PAYMENT_CONFLICT', statusCode: 409, message: expect.stringContaining('Vuelve a intentar') }),
+    )
+  })
+
+  // El cobro va con `cobroNuevo: true`: sobre una cuenta cancelada lo niega bajo el candado de la orden (ORDER_CANCELLED_NO_NEW_CHARGE)
+  // antes de crear nada, en vez de reabrirla con un efectivo que nadie rastrea.
+  const cuentaYaCancelada = () => new AppError('Esta cuenta está cancelada, abre una nueva.', 400, true, 'ORDER_CANCELLED_NO_NEW_CHARGE')
+  const yaCancelada = () => new AppError('Esta cuenta ya está cancelada.', 409, true, 'ORDER_ALREADY_CANCELLED')
+
+  it('quien tiene la ficha cobra una cuenta que otra petición canceló: borra la ficha, sale VENTA_EN_PROCESO y el reintento vende contra lo de HOY', async () => {
+    cobrar.mockImplementationOnce(async () => {
+      db.order.findUnique.mockResolvedValue({ status: 'CANCELLED' }) // un trabajador viejo (o el panel) la canceló
+      throw cuentaYaCancelada()
+    })
+    cancelar.mockRejectedValue(yaCancelada())
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(filas).toHaveLength(0)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('VENTA_EN_PROCESO'),
+      expect.objectContaining({ code: 'ORDER_CANCELLED_NO_NEW_CHARGE' }),
+    )
+
+    ventaReal('o2')
+    cobrar.mockResolvedValue(pagoDe({ orderId: 'o2' }))
+    const r = await registrarVentaDeCampo(ctx, venta())
+    expect(r).toMatchObject({ orderId: 'o2', repetida: false })
+    expect(scan).toHaveBeenCalledTimes(2) // se revisó otra vez contra lo de hoy
+    expect(cobrar.mock.calls.map(c => c[1])).toEqual(['o1', 'o2'])
+  })
+
+  it('un trabajador viejo (perdió la ficha) cobra una cuenta cancelada: el cobro se niega, no escribe nada y sale VENTA_EN_PROCESO', async () => {
+    cobrar.mockImplementationOnce(async () => {
+      Object.assign(ficha()!, { ocupacion: 'B', ocupadaHasta: new Date(Date.now() + 60_000) }) // B la tomó mientras A dormía
+      db.order.findUnique.mockResolvedValue({ status: 'CANCELLED' })
+      throw cuentaYaCancelada()
+    })
+    cancelar.mockRejectedValue(yaCancelada())
+    await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
+    expect(cobrar.mock.calls[0][2].cobroNuevo).toBe(true)
+    expect(ficha()).toMatchObject({ ocupacion: 'B', orderId: 'o1', paymentId: null }) // la de B queda intacta: B decide
   })
 
   it('un cobro que no pasa el esquema de la terminal sale 400 COBRO_INVALIDO, con la cuenta cancelada y sin ficha ocupada', async () => {
@@ -617,6 +669,11 @@ describe('mapa de caídas y cruces', () => {
     await expect(registrarVentaDeCampo(ctx, venta())).rejects.toEqual(rechazo(409, 'VENTA_EN_PROCESO'))
     expect(ficha()).toMatchObject({ estado: 'EN_CURSO', paymentId: 'p1', ocupacion: null })
     expect(cancelar).not.toHaveBeenCalled()
+    // Queda en el log con su código original: un bucle que no se resuelve se ve.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('VENTA_EN_PROCESO'),
+      expect.objectContaining({ code: expect.stringMatching(/^(NOT_FOUND|FORBIDDEN)$/), message: 'no' }),
+    )
   })
 
   it('dos peticiones llegan al paso 8: la que pierde la creación («Verification already exists») toma la evidencia de la otra', async () => {

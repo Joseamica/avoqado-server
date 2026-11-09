@@ -52,6 +52,22 @@ interface Trabajo {
 
 const enProceso = () => new ConflictError('Esta venta se está procesando. Reintenta en un momento.', 'VENTA_EN_PROCESO')
 const llaveReusada = () => new ConflictError('Esta llave ya se usó en otra venta.', 'LLAVE_REUSADA')
+const simYaVendida = () => new ConflictError('Esta SIM ya se vendió.', 'SIM_YA_VENDIDA')
+
+const esAppError4xx = (error: unknown): error is AppError => error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500
+
+/** Un 4xx que el celular debe reintentar: queda en el log con su código, para que un bucle que no se resuelve se vea. */
+function comoReintentable(t: Trabajo, error: AppError, cual: string): ConflictError {
+  logger.warn(`📱 [VENTA DE CAMPO] ${cual} sale como VENTA_EN_PROCESO (reintentable)`, {
+    venueId: t.venueId,
+    staffId: t.staffId,
+    llave: t.llave,
+    code: error.code ?? null,
+    statusCode: error.statusCode,
+    message: error.message,
+  })
+  return enProceso()
+}
 
 const leerFicha = (t: Trabajo) => prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: t.venueId, llave: t.llave } } })
 
@@ -119,6 +135,10 @@ export async function registrarVentaDeCampo(
       // Sin orden confirmada la ficha se borra (y suelta la SIM); con orden (falló después del commit) sólo se suelta.
       const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: ficha.id, ocupacion: t.ocupacion, orderId: null } })
       if (count === 0) await soltar(t, ficha.id)
+      // Otra venta la cerró entre nuestro escaneo y el de `sellSerializedItem` (su 400 «ya fue vendido» no trae código).
+      if (count === 1 && esAppError4xx(error) && (await serializedInventoryService.scan(t.venueId, t.serial)).status === 'already_sold') {
+        throw simYaVendida()
+      }
       throw error
     }
   }
@@ -159,7 +179,7 @@ export async function registrarVentaDeCampo(
   } catch (error) {
     await soltar(t, ficha.id) // el reintento sigue desde aquí
     // Después del dinero nada es definitivo: un 4xx de los pasos 7 u 8 se vuelve reintentable.
-    if (error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500) throw enProceso()
+    if (esAppError4xx(error)) throw comoReintentable(t, error, 'un 4xx después del cobro')
     throw error
   }
 }
@@ -252,7 +272,7 @@ async function revisarContraHoy(t: Trabajo): Promise<{ serializedItemId: string;
 
   const scan = await serializedInventoryService.scan(t.venueId, t.serial)
   if (scan.status === 'module_disabled') throw new BadRequestError('Serialized inventory module is not enabled for this venue') // el de sellSerializedItem
-  if (scan.status === 'already_sold') throw new ConflictError('Esta SIM ya se vendió.', 'SIM_YA_VENDIDA')
+  if (scan.status === 'already_sold') throw simYaVendida()
   if (scan.status === 'not_registered' || !scan.item)
     throw new ConflictError('Esta SIM no está registrada en el inventario.', 'SIM_NO_REGISTRADA')
 
@@ -311,6 +331,10 @@ function datosDelCobro(t: Trabajo, precio: Prisma.Decimal): Parameters<typeof re
       idempotencyKey: t.llave,
       serialNumbers: [t.serial],
       isPortabilidad: t.v.isPortabilidad,
+      // El promotor todavía tiene el efectivo en la mano: es un cobro NUEVO. Sobre una cuenta que alguien canceló, el cobro la
+      // rechaza bajo el candado de la orden (`ORDER_CANCELLED_NO_NEW_CHARGE`) en vez de reabrirla con dinero que nadie rastrea;
+      // una llave que ya tiene su Payment lo sigue devolviendo antes. Su otro efecto (sesiones de vales) no aplica a estas ventas.
+      cobroNuevo: true,
     },
   })
   if (!r.success) {
@@ -331,10 +355,13 @@ const COBRO_TRANSITORIO = new Set(['ORDER_PAYMENT_CONFLICT'])
  * o un 409 transitorio del cobro sólo desocupan. Devuelve el error para lanzarlo.
  */
 async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, error: unknown): Promise<unknown> {
-  const esAppError4xx = error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500
-  if (!esAppError4xx || COBRO_TRANSITORIO.has(error.code ?? '')) {
+  if (!esAppError4xx(error)) {
     await soltar(t, fichaId)
-    return esAppError4xx ? enProceso() : error
+    return error
+  }
+  if (COBRO_TRANSITORIO.has(error.code ?? '')) {
+    await soltar(t, fichaId)
+    return comoReintentable(t, error, 'un 409 transitorio del cobro')
   }
   try {
     if (!(await sinCobros(t, orderId))) {
@@ -348,7 +375,9 @@ async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, 
       },
     )
     const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: fichaId, ocupacion: t.ocupacion } })
-    return count === 1 ? error : enProceso() // perdió la ficha: quien la tiene verá la cuenta cancelada y la borrará
+    if (count === 0) return enProceso() // perdió la ficha: quien la tiene verá la cuenta cancelada y la borrará
+    // El cobro se negó porque alguien canceló la cuenta: la venta no está rechazada, el reintento la revisa contra lo de HOY.
+    return error.code === 'ORDER_CANCELLED_NO_NEW_CHARGE' ? comoReintentable(t, error, 'el cobro sobre una cuenta cancelada') : error
   } catch (fallo) {
     logger.warn('📱 [VENTA DE CAMPO] No se pudo limpiar la venta del cobro rechazado; queda para el reintento', {
       venueId: t.venueId,
