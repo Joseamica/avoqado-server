@@ -46,9 +46,12 @@ export const salidaDeCampoBodySchema = z
     timeEntryId: z.string().min(1).max(64).optional(),
     llaveEntrada: z.string().uuid({ message: 'La llave de la entrada debe ser un UUID.' }).optional(),
     checkOutPhotoUrl: foto,
+    depositPhotoUrl: foto, // la ficha del depósito, como en la salida de la PAX
+    skipReason: z.string().max(500).optional(), // por qué no hay fotos, como en la salida de la PAX
   })
   .refine(b => (b.timeEntryId === undefined) !== (b.llaveEntrada === undefined), {
     message: 'La salida nombra su entrada: manda timeEntryId o llaveEntrada, sólo uno.',
+    params: { code: 'SALIDA_SIN_ENTRADA' }, // `validateRequest` responde el 400 con este código
   })
 
 export const entradaDeCampoSchema = z.object({ body: entradaDeCampoBodySchema })

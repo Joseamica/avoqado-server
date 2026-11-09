@@ -3,6 +3,9 @@
  * en una tabla falsa en memoria que respeta los `where` condicionados, y un candado de verdad (mutex) en el
  * `pg_advisory_xact_lock` para que dos entradas a la vez se prueben de verdad.
  */
+import logger from '@/config/logger'
+import { validateRequest } from '@/middlewares/validation'
+import { salidaDeCampoSchema } from '@/schemas/tpv/campo.schema'
 import { AttendanceDisabledError, assertAttendanceEnabled } from '@/services/dashboard/attendanceGate'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
@@ -99,7 +102,7 @@ function armarBase() {
         return { count: cuales.length }
       }),
     },
-    venue: { findUnique: jest.fn(async () => (await tiempo(), { timezone: zona })) },
+    venue: { findUnique: jest.fn(async ({ where }) => (await tiempo(), { timezone: zona, name: `Sucursal ${where.id}` })) },
     timeEntryBreak: {
       update: jest.fn(async ({ where, data }) => {
         await tiempo()
@@ -266,6 +269,31 @@ describe('registrarEntradaDeCampo', () => {
     expect(entradas).toHaveLength(1)
   })
 
+  it.each([
+    ['empezó antes de esta hora', '08:55'],
+    ['empieza después de esta hora', '06:00'],
+  ])(
+    'el mensaje de ENTRADA_SE_ENCIMA es cierto también cuando el turno %s: horas en la zona del negocio y la sucursal',
+    async (_n, hhmm) => {
+      entrada({ venueId: 'venue-B', clockInTime: t('09:00'), clockOutTime: t('17:00'), status: 'CLOCKED_OUT', totalHours: 8 })
+
+      const error = await registrarEntradaDeCampo(q, { llave: LLAVE, ocurrioAt: t(hhmm).toISOString() }, t('18:00')).catch(e => e)
+
+      expect(error.message).toBe(
+        'Ya hay un turno registrado después de esta hora (de 09:00 del 3-nov a 17:00 del 3-nov, Sucursal venue-B). Revísalo con tu supervisor.',
+      )
+    },
+  )
+
+  it('la misma llave de entrada usada en OTRA sucursal → 409 LLAVE_REUSADA (Codex C5), sin crear nada', async () => {
+    entrada({ venueId: 'venue-B', llaveEntrada: LLAVE })
+
+    const error = await registrarEntradaDeCampo(q, { llave: LLAVE }, t('12:00')).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 409, code: 'LLAVE_REUSADA' })
+    expect(entradas).toHaveLength(1)
+  })
+
   it('ENTRADA_SE_ENCIMA nombra el turno cerrado que termina más tarde', async () => {
     entrada({ clockInTime: t('07:00'), clockOutTime: t('08:00'), status: 'CLOCKED_OUT' })
     const ultimo = entrada({ clockInTime: t('09:00'), clockOutTime: t('17:00'), status: 'CLOCKED_OUT' })
@@ -388,6 +416,74 @@ describe('registrarSalidaDeCampo', () => {
 
     expect(r).toEqual({ timeEntryId: e.id, repetida: true, hora: t('17:00').toISOString(), totalHours: 8 })
     expect((prisma as any).timeEntry.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['en OTRA sucursal', () => entrada({ venueId: 'venue-B', clockOutTime: t('17:00'), status: 'CLOCKED_OUT', llaveSalida: LLAVE }).id, {}],
+    [
+      'de OTRA entrada (timeEntryId distinto)',
+      () => (entrada({ clockOutTime: t('17:00'), status: 'CLOCKED_OUT', llaveSalida: LLAVE }), entrada({ clockInTime: t('18:00') }).id),
+      {},
+    ],
+    [
+      'de OTRA entrada (llaveEntrada distinta)',
+      () => (entrada({ llaveEntrada: LLAVE_2, clockOutTime: t('17:00'), status: 'CLOCKED_OUT', llaveSalida: LLAVE }), undefined),
+      { llaveEntrada: LLAVE_ENTRADA },
+    ],
+  ])('la misma llave de salida ya usada %s → 409 LLAVE_REUSADA (Codex C5), sin tocar nada', async (_n, preparar, extra) => {
+    const timeEntryId = preparar()
+
+    const error = await registrarSalidaDeCampo(q, { llave: LLAVE, ...(timeEntryId ? { timeEntryId } : {}), ...extra }, t('19:00')).catch(
+      e => e,
+    )
+
+    expect(error).toMatchObject({ statusCode: 409, code: 'LLAVE_REUSADA' })
+    expect((prisma as any).timeEntry.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave de salida por llaveEntrada de la MISMA entrada → repetida', async () => {
+    const e = entrada({ llaveEntrada: LLAVE_ENTRADA, clockOutTime: t('17:00'), status: 'CLOCKED_OUT', totalHours: 8, llaveSalida: LLAVE })
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, llaveEntrada: LLAVE_ENTRADA }, t('18:00'))
+
+    expect(r).toEqual({ timeEntryId: e.id, repetida: true, hora: t('17:00').toISOString(), totalHours: 8 })
+  })
+
+  it('guarda la foto del depósito y el motivo de no tomar fotos, como la salida de la PAX (O2)', async () => {
+    const e = entrada()
+
+    await registrarSalidaDeCampo(
+      q,
+      { llave: LLAVE, timeEntryId: e.id, depositPhotoUrl: 'https://fotos.test/deposito.jpg', skipReason: 'No hubo ventas' },
+      t('17:00'),
+    )
+
+    expect(entradas[0]).toMatchObject({ depositPhotoUrl: 'https://fotos.test/deposito.jpg', checkoutSkipReason: 'No hubo ventas' })
+  })
+
+  it('si la entrada cambia en los 3 intentos → 409 CHECADA_EN_PROCESO y queda un logger.warn', async () => {
+    const e = entrada()
+    ;(prisma as any).timeEntry.updateMany.mockResolvedValue({ count: 0 })
+
+    const error = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id }, t('17:00')).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 409, code: 'CHECADA_EN_PROCESO' })
+    expect((prisma as any).timeEntry.updateMany).toHaveBeenCalledTimes(3)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('CHECADA_EN_PROCESO'),
+      expect.objectContaining({ staffId: STAFF, timeEntryId: e.id, intentos: 3 }),
+    )
+  })
+
+  it.each([
+    ['ninguna', {}],
+    ['las dos', { timeEntryId: 'te-1', llaveEntrada: LLAVE_ENTRADA }],
+  ])('el esquema: %s de timeEntryId/llaveEntrada → 400 SALIDA_SIN_ENTRADA por validateRequest', async (_n, extra) => {
+    const next = jest.fn()
+
+    await validateRequest(salidaDeCampoSchema)({ body: { llave: LLAVE, ...extra } } as any, {} as any, next)
+
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 400, code: 'SALIDA_SIN_ENTRADA' })
   })
 
   it.each([

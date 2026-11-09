@@ -9,6 +9,7 @@
  */
 import { Prisma, TimeEntryStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
+import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
 import type { EntradaDeCampoBody, SalidaDeCampoBody } from '@/schemas/tpv/campo.schema'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -32,15 +33,23 @@ const horaDe = (v: { ocurrioAt?: string; origenHora?: 'RELOJ_ANCLADO' | 'RELOJ_D
   resolverHoraDelCelular({ ocurrioAt: v.ocurrioAt ? new Date(v.ocurrioAt) : undefined, origen: v.origenHora }, ahora)
 
 const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
-/** «03:00 del 4-nov (America/Mexico_City)»; con una zona que no existe, la hora en ISO (la salida no se pierde por la nota). */
-function enLaZona(d: Date, zona: string) {
+/** «03:00 del 4-nov» en la zona; `null` si la zona no existe. */
+function horaLocal(d: Date, zona: string): string | null {
   try {
     const [hhmm, dia, mes] = formatInTimeZone(d, zona, 'HH:mm|d|M').split('|')
-    return `${hhmm} del ${dia}-${MESES[Number(mes) - 1]} (${zona})`
+    return `${hhmm} del ${dia}-${MESES[Number(mes) - 1]}`
   } catch {
-    return d.toISOString()
+    return null
   }
 }
+/** «03:00 del 4-nov (America/Mexico_City)»; con una zona que no existe, la hora en ISO (la salida no se pierde por la nota). */
+function enLaZona(d: Date, zona: string) {
+  const h = horaLocal(d, zona)
+  return h ? `${h} (${zona})` : d.toISOString()
+}
+
+/** Codex C5: la misma llave sólo devuelve lo hecho si es la MISMA checada (sucursal y, en la salida, la entrada nombrada). */
+const llaveReusada = () => new ConflictError('Esta llave ya se usó en otra checada.', 'LLAVE_REUSADA')
 
 /** POST …/checadas/entrada. */
 export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, ahora = new Date()) {
@@ -50,9 +59,12 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
 
     const misma = await tx.timeEntry.findUnique({
       where: { staffId_llaveEntrada: { staffId: q.staffId, llaveEntrada: v.llave } },
-      select: { id: true, clockInTime: true },
+      select: { id: true, venueId: true, clockInTime: true },
     })
-    if (misma) return { timeEntryId: misma.id, repetida: true, hora: misma.clockInTime.toISOString() }
+    if (misma) {
+      if (misma.venueId !== q.venueId) throw llaveReusada()
+      return { timeEntryId: misma.id, repetida: true, hora: misma.clockInTime.toISOString() }
+    }
 
     // De cualquier escritor (PAX, POS, celular) y en cualquier sucursal: una persona no está en dos lados a la vez.
     const abierta = await tx.timeEntry.findFirst({
@@ -75,12 +87,21 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
       orderBy: { clockOutTime: 'desc' },
     })
     if (encimada) {
-      throw new ConflictError('Esta entrada cae dentro de un turno que ya registraste.', 'ENTRADA_SE_ENCIMA', {
-        timeEntryId: encimada.id,
-        venueId: encimada.venueId,
-        clockInTime: encimada.clockInTime.toISOString(),
-        clockOutTime: encimada.clockOutTime!.toISOString(),
-      })
+      // Conservador: también cuenta un turno que empieza DESPUÉS de esta hora (O5), así que el mensaje dice sólo lo cierto.
+      const sucursal = await tx.venue.findUnique({ where: { id: encimada.venueId }, select: { name: true, timezone: true } })
+      const zona = sucursal?.timezone ?? 'America/Mexico_City'
+      const hora = (d: Date) => horaLocal(d, zona) ?? d.toISOString()
+      const turno = `de ${hora(encimada.clockInTime)} a ${hora(encimada.clockOutTime!)}, ${sucursal?.name ?? 'otra sucursal'}`
+      throw new ConflictError(
+        `Ya hay un turno registrado después de esta hora (${turno}). Revísalo con tu supervisor.`,
+        'ENTRADA_SE_ENCIMA',
+        {
+          timeEntryId: encimada.id,
+          venueId: encimada.venueId,
+          clockInTime: encimada.clockInTime.toISOString(),
+          clockOutTime: encimada.clockOutTime!.toISOString(),
+        },
+      )
     }
 
     await assertAttendanceEnabled(q.venueId)
@@ -119,9 +140,11 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
 
     const misma = await tx.timeEntry.findUnique({
       where: { staffId_llaveSalida: { staffId: q.staffId, llaveSalida: v.llave } },
-      select: { id: true, clockOutTime: true, totalHours: true },
+      select: { id: true, venueId: true, llaveEntrada: true, clockOutTime: true, totalHours: true },
     })
     if (misma) {
+      const esLaNombrada = v.timeEntryId ? misma.id === v.timeEntryId : misma.llaveEntrada === v.llaveEntrada
+      if (misma.venueId !== q.venueId || !esLaNombrada) throw llaveReusada()
       const resultado = {
         timeEntryId: misma.id,
         repetida: true,
@@ -203,6 +226,8 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           clockOutLongitude: v.longitude,
           clockOutAccuracy: v.accuracy,
           checkOutPhotoUrl: v.checkOutPhotoUrl,
+          depositPhotoUrl: v.depositPhotoUrl, // como la salida de la PAX (O2)
+          checkoutSkipReason: v.skipReason,
           ...(nota && { autoClockOut: false, notes: e.notes ? `${e.notes}\n${nota}` : nota }),
         },
       })
@@ -223,6 +248,14 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
         },
       }
     }
+    logger.warn('📱 [CHECADA DE CAMPO] La entrada cambió en cada intento; sale CHECADA_EN_PROCESO (reintentable)', {
+      venueId: q.venueId,
+      staffId: q.staffId,
+      llave: v.llave,
+      timeEntryId: v.timeEntryId ?? null,
+      llaveEntrada: v.llaveEntrada ?? null,
+      intentos: INTENTOS,
+    })
     throw new ConflictError('La entrada cambió mientras se guardaba la salida. Reintenta.', 'CHECADA_EN_PROCESO')
   })
 

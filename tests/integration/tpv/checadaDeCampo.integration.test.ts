@@ -168,6 +168,46 @@ describe('POST /tpv/campo/venues/:venueId/checadas/*', () => {
     expect((await checar('entrada', { llave: randomUUID(), ocurrioAt: a(8).toISOString() })).status).toBe(201)
   })
 
+  it('la misma llave en otra sucursal o para otra entrada → 409 LLAVE_REUSADA (Codex C5); la salida guarda depósito y motivo (O2)', async () => {
+    // Una entrada de OTRA sucursal con esta llave (de una PAX o de una subida anterior): no es esta checada.
+    const llaveAjena = randomUUID()
+    await prisma.timeEntry.create({
+      data: {
+        staffId: promotorId,
+        venueId: otraSucursalId,
+        clockInTime: a(-20),
+        clockOutTime: a(-19),
+        status: 'CLOCKED_OUT',
+        llaveEntrada: llaveAjena,
+      },
+    })
+    const ajena = await checar('entrada', { llave: llaveAjena, ocurrioAt: a(0).toISOString() })
+    expect(ajena.status).toBe(409)
+    expect(ajena.body.code).toBe('LLAVE_REUSADA')
+
+    const e1 = await checar('entrada', { llave: randomUUID(), ocurrioAt: a(0).toISOString() })
+    const llaveSalida = randomUUID()
+    const s1 = await checar('salida', {
+      llave: llaveSalida,
+      timeEntryId: e1.body.timeEntryId,
+      ocurrioAt: a(8).toISOString(),
+      depositPhotoUrl: 'https://fotos.test/deposito.jpg',
+      skipReason: 'No hubo ventas',
+    })
+    expect(s1.status).toBe(200)
+    expect(await prisma.timeEntry.findUniqueOrThrow({ where: { id: e1.body.timeEntryId } })).toMatchObject({
+      depositPhotoUrl: 'https://fotos.test/deposito.jpg',
+      checkoutSkipReason: 'No hubo ventas',
+    })
+
+    // La misma llave de salida, pero nombrando OTRA entrada: no es la salida que se hizo.
+    const e2 = await checar('entrada', { llave: randomUUID(), ocurrioAt: a(9).toISOString() })
+    const otra = await checar('salida', { llave: llaveSalida, timeEntryId: e2.body.timeEntryId, ocurrioAt: a(10).toISOString() })
+    expect(otra.status).toBe(409)
+    expect(otra.body.code).toBe('LLAVE_REUSADA')
+    expect((await prisma.timeEntry.findUniqueOrThrow({ where: { id: e2.body.timeEntryId } })).clockOutTime).toBeNull()
+  })
+
   it('una persona dada de baja en la sucursal de la dirección, con su token vivo → 403 en entrada y salida, y nada se escribe', async () => {
     const entrada = await checar('entrada', { llave: randomUUID() }, otraSucursalId)
     const salida = await checar('salida', { llave: randomUUID(), llaveEntrada: randomUUID() }, otraSucursalId)
