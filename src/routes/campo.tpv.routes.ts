@@ -3,6 +3,7 @@
  * (`:venueId`), así que `checkPermission` evalúa el rol en ESA sucursal contra la base, no la del token (plan H4).
  */
 import { NextFunction, Request, Response, Router } from 'express'
+import rateLimit from 'express-rate-limit'
 import AppError, { NotFoundError } from '@/errors/AppError'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
@@ -23,12 +24,30 @@ import prisma from '@/utils/prismaClient'
 const router = Router()
 
 /**
+ * Tope por persona y por ruta, como `/tpv/sim-custody/*` (O10): un celular en bucle no satura al servidor. Va después del
+ * token (la llave es la persona) y antes de los permisos (que leen la base). Un 429 es reintentable para el celular.
+ */
+const porPersona = () =>
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: any) => req.authContext?.userId ?? req.ip,
+    message: { error: 'RATE_LIMIT', code: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+  })
+
+/** Los datos de un rechazo van al mismo nivel que `code` sólo si son un objeto (un arreglo saldría como «0», «1»…). */
+const esObjeto = (d: unknown): d is Record<string, unknown> => !!d && typeof d === 'object' && !Array.isArray(d)
+
+/**
  * POST /tpv/campo/venues/:venueId/ventas — la venta de una SIM. 201 nueva, 200 repetida (misma llave).
  * Reintentables: 409 VENTA_EN_PROCESO y cualquier 5xx. Lo demás es definitivo; 422 PRECIO_CAMBIO trae `precioActual`.
  */
 router.post(
   '/venues/:venueId/ventas',
   authenticateTokenMiddleware,
+  porPersona(),
   checkPermission('serialized-inventory:sell'),
   checkPermission('payments:create'),
   validateRequest(ventaDeCampoSchema),
@@ -40,8 +59,8 @@ router.post(
       const r = await registrarVentaDeCampo({ venueId, orgId: venue.organizationId, staffId: req.authContext!.userId }, req.body)
       res.status(r.repetida ? 200 : 201).json(r)
     } catch (error) {
-      if (error instanceof AppError && error.code === 'PRECIO_CAMBIO') {
-        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...(error.details as object) })
+      if (error instanceof AppError && error.code === 'PRECIO_CAMBIO' && esObjeto(error.details)) {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...error.details })
       }
       next(error)
     }
@@ -52,6 +71,7 @@ router.post(
 router.post(
   '/venues/:venueId/custodia/aceptar',
   authenticateTokenMiddleware,
+  porPersona(),
   checkPermission('tpv-sim-custody:accept'),
   validateRequest(aceptarCustodiaSchema),
   aceptarCustodia,
@@ -59,6 +79,7 @@ router.post(
 router.post(
   '/venues/:venueId/custodia/rechazar',
   authenticateTokenMiddleware,
+  porPersona(),
   checkPermission('tpv-sim-custody:reject'),
   validateRequest(rechazarCustodiaSchema),
   rechazarCustodia,
@@ -79,8 +100,8 @@ const checada =
       res.status(r.repetida ? 200 : nueva).json(r)
     } catch (error) {
       // Los rechazos con datos (YA_TIENE_ENTRADA, ENTRADA_SE_ENCIMA, SALIDA_SE_ENCIMA) los llevan al mismo nivel que `code`.
-      if (error instanceof AppError && error.details && typeof error.details === 'object') {
-        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...(error.details as object) })
+      if (error instanceof AppError && esObjeto(error.details)) {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...error.details })
       }
       next(error)
     }
@@ -88,6 +109,7 @@ const checada =
 router.post(
   '/venues/:venueId/checadas/entrada',
   authenticateTokenMiddleware,
+  porPersona(),
   requireVenueMembership,
   validateRequest(entradaDeCampoSchema),
   checada(registrarEntradaDeCampo, 201),
@@ -95,6 +117,7 @@ router.post(
 router.post(
   '/venues/:venueId/checadas/salida',
   authenticateTokenMiddleware,
+  porPersona(),
   requireVenueMembership,
   validateRequest(salidaDeCampoSchema),
   checada(registrarSalidaDeCampo, 200),
