@@ -2560,6 +2560,11 @@ export async function removeOrderDiscountInTransaction(
   orderId: string,
   orderDiscountId: string,
   staffId?: string,
+  /**
+   * Sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA transacción, así que un canje de una
+   * cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
+   */
+  opciones: { abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
 ) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
@@ -2578,14 +2583,14 @@ export async function removeOrderDiscountInTransaction(
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
+    select: { id: true, paymentStatus: true, paidAmount: true, tipAmount: true, discountAmount: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Order not found')
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+  if (order.paymentStatus === 'PAID' || (order.paymentStatus === 'PARTIAL' && !opciones.abonosDeSaldoSeRegresanEnEstaTx)) {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
 
@@ -2605,7 +2610,8 @@ export async function removeOrderDiscountInTransaction(
   const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
   if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
   await tx.orderDiscount.delete({ where: { id: row.id } })
-  const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  const propinaYaCobrada = opciones.abonosDeSaldoSeRegresanEnEstaTx ? Number(order.tipAmount || 0) : 0
+  const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx, propinaYaCobrada)
   return { row, refund: refunded, stampRefund: stamp, totals: t }
 }
 
@@ -6254,6 +6260,17 @@ export async function returnGiftBalanceAndCancelOrder(
           { motivo: 'DEMASIADOS_COBROS', maximo: MAX_SOBRES_POR_CUENTA },
         )
       }
+
+      // 🔴 LEALTAD (deuda P1, 31-oct): el premio de sellos y los puntos vuelven al cliente, igual que al anular. Antes de los abonos: el
+      // reembolso reclama el turno y Customer/StampReward van antes que él (Order → Customer/StampReward; premio → cobro → turno al
+      // crear la venta). Si algo falla después, la transacción revierte también esto.
+      await devolverCanjesDeVentaAnuladaEnTx(tx, {
+        venueId,
+        orderId,
+        staffId,
+        camino: 'returnGiftBalance',
+        abonosDeSaldoSeRegresanEnEstaTx: true,
+      })
 
       // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
       // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría

@@ -236,8 +236,17 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
  * could never make the caller's earlier child writes atomic with these totals.
  * Zero fallback deliberately drops an inline discount; comp and promotions pass the
  * inherited one.
+ *
+ * `propinaYaCobrada`: sólo para una cuenta con abonos cuyo `paidAmount` ya trae propina (quitar un canje al regresar saldo, Codex r1).
+ * El `Order.total` que escribe un cobro la incluye (`computeOrderBalance`); sin esto, el total perdería la propina y el saldo quedaría corto.
  */
-export async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number, db: Prisma.TransactionClient) {
+export async function recalculateOrderTotals(
+  orderId: string,
+  fallbackDiscount: number,
+  paidAmount: number,
+  db: Prisma.TransactionClient,
+  propinaYaCobrada = 0,
+) {
   const items = await db.orderItem.findMany({ where: { orderId }, select: RENGLON_PARA_REPARTO_SELECT })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
   const orderDiscounts = await db.orderDiscount.findMany({ where: { orderId } })
@@ -279,7 +288,7 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
     taxAmount: orden?.taxAmount,
     status: orden?.status,
   }).toNumber()
-  const newTotal = Math.round((base + impuestoAparte + newServiceChargeAmount) * 100) / 100
+  const newTotal = Math.round((base + impuestoAparte + newServiceChargeAmount + propinaYaCobrada) * 100) / 100
   const updated = await db.order.update({
     where: { id: orderId },
     data: {

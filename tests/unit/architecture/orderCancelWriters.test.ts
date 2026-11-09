@@ -68,7 +68,7 @@ const INVENTARIO: Record<string, Clase> = {
   // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
   'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
   },
   // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela en la MISMA
   // tx del reembolso, que ya tiene el candado de la Order (issueRefund / recordRefund → lockExistingOrderForPayment). Con un cobro de

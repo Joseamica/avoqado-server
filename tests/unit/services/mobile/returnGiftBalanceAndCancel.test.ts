@@ -8,9 +8,11 @@ jest.mock('@/services/shared/tableOrderLock', () => ({
   ...jest.requireActual('@/services/shared/tableOrderLock'),
   lockTableOrderScope: jest.fn().mockResolvedValue({ tables: [] }),
 }))
+const devolverCanjesMock = jest.fn()
 jest.mock('@/services/shared/orderCancelGuard', () => ({
   ...jest.requireActual('@/services/shared/orderCancelGuard'),
   assertNoLiveTerminalCharge: jest.fn().mockResolvedValue(undefined),
+  devolverCanjesDeVentaAnuladaEnTx: (...a: unknown[]) => devolverCanjesMock(...a),
 }))
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   ...jest.requireActual('@/services/kds/kitchenTicketAuthoring.service'),
@@ -76,6 +78,7 @@ beforeEach(() => {
     refundPaymentId: `ref-${p.originalPaymentId}`,
   }))
   revertirMock.mockResolvedValue([])
+  devolverCanjesMock.mockResolvedValue({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 })
 })
 
 describe('returnGiftBalanceAndCancelOrder', () => {
@@ -113,6 +116,33 @@ describe('returnGiftBalanceAndCancelOrder', () => {
     expect(bloquearMock).not.toHaveBeenCalled()
     expect(reembolsoMock).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+    expect(devolverCanjesMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 lealtad (deuda P1, 31-oct): devuelve los canjes con su opción, ANTES de bloquear los cobros y de reclamar el turno', async () => {
+    await returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
+
+    expect(devolverCanjesMock).toHaveBeenCalledTimes(1)
+    expect(devolverCanjesMock).toHaveBeenCalledWith(prismaMock, {
+      venueId: 'venue-1',
+      orderId: 'order-1',
+      staffId: 'staff-1',
+      camino: 'returnGiftBalance',
+      abonosDeSaldoSeRegresanEnEstaTx: true,
+    })
+    const canjes = devolverCanjesMock.mock.invocationCallOrder[0]
+    expect(canjes).toBeLessThan(Math.min(...bloquearMock.mock.invocationCallOrder))
+    expect(canjes).toBeLessThan(Math.min(...reembolsoMock.mock.invocationCallOrder))
+  })
+
+  it('un cobro que no es de saldo se rechaza antes de tocar los canjes', async () => {
+    prismaMock.payment.findMany.mockResolvedValue([{ id: 'pay-1', tenderTypeId: 'tt-efectivo' }])
+
+    await expect(returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })).rejects.toMatchObject({
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+    })
+
+    expect(devolverCanjesMock).not.toHaveBeenCalled()
   })
 })
 
