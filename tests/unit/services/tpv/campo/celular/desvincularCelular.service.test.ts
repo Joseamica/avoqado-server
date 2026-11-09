@@ -56,6 +56,7 @@ describe('desvincularCelular', () => {
       huellasReportadas: 2,
       yaEstaba: false,
       perdidoORobado: false,
+      sinGracia: false,
     })
   })
 
@@ -88,6 +89,7 @@ describe('desvincularCelular', () => {
       huellasReportadas: 2,
       yaEstaba: true,
       perdidoORobado: false,
+      sinGracia: false,
     })
     expect(revocarSesionesDelCelular).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
@@ -129,6 +131,41 @@ describe('desvincularCelular · arreglo final (S8, S3)', () => {
     expect(db.celularDeCampo.updateMany).not.toHaveBeenCalled()
     expect(sucursalesDeLaPersona).toHaveBeenCalledWith('staff1', 'org1')
     await desvincularCelular({ ...p, venueIds: ['vA', 'vB'] })
+    expect(db.celularDeCampo.updateMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('desvincularCelular · arreglo final 2 (T4)', () => {
+  it('perdido o robado sobre un celular YA desvinculado: un UPDATE aparte pone sinGracia sin tocar fechas ni motivo, y queda en la bitácora', async () => {
+    db.celularDeCampo.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 })
+    const antes = new Date('2026-11-09T02:00:00.000Z')
+    db.celularDeCampo.findFirst.mockResolvedValue(fila({ desvinculadoAt: antes, sinGracia: true }))
+
+    const r = await desvincularCelular({ ...p, perdidoORobado: true })
+
+    expect(db.celularDeCampo.updateMany).toHaveBeenCalledTimes(2)
+    expect(db.celularDeCampo.updateMany.mock.calls[1][0]).toEqual({
+      where: { id: 'cel1', organizationId: 'org1', staffIdVinculado: null, sinGracia: false },
+      data: { sinGracia: true },
+    })
+    expect(r).toMatchObject({ yaEstaba: true, sinGracia: true, perdidoORobado: true, desvinculadoAt: antes.toISOString() })
+    expect(revocarSesionesDelCelular).not.toHaveBeenCalled()
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect((logAction as jest.Mock).mock.calls[0][0]).toMatchObject({
+      action: 'CAMPO_CELULAR_REPORTADO_PERDIDO',
+      staffId: 'admin1',
+      organizationId: 'org1',
+      entityId: 'cel1',
+    })
+  })
+
+  it('ya estaba marcado (o sin perdidoORobado): no escribe otra vez ni asienta', async () => {
+    db.celularDeCampo.updateMany.mockResolvedValue({ count: 0 })
+    db.celularDeCampo.findFirst.mockResolvedValue(fila({ sinGracia: true }))
+    expect(await desvincularCelular({ ...p, perdidoORobado: true })).toMatchObject({ yaEstaba: true, sinGracia: true })
+    expect(logAction).not.toHaveBeenCalled()
+    ;(db.celularDeCampo.updateMany as jest.Mock).mockClear()
+    await desvincularCelular(p)
     expect(db.celularDeCampo.updateMany).toHaveBeenCalledTimes(1)
   })
 })

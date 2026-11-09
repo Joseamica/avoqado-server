@@ -27,6 +27,7 @@ export async function desvincularCelular(p: {
   huellasReportadas: number
   yaEstaba: boolean
   perdidoORobado: boolean
+  sinGracia: boolean
 }> {
   const ahora = new Date()
   const noEncontrado = () => new NotFoundError('Celular no encontrado.', 'CELULAR_NO_ENCONTRADO')
@@ -51,6 +52,17 @@ export async function desvincularCelular(p: {
       ...(p.perdidoORobado && { sinGracia: true }),
     },
   })
+  // T4: perdido o robado sobre uno YA desvinculado (normal, por un celular nuevo, u otro operador ganó): un UPDATE aparte
+  // corta su gracia, sin tocar fechas ni motivo (el plazo no se reinicia).
+  const marcadoPerdido =
+    count === 0 && p.perdidoORobado
+      ? (
+          await prisma.celularDeCampo.updateMany({
+            where: { id: p.celularId, organizationId: p.organizationId, staffIdVinculado: null, sinGracia: false },
+            data: { sinGracia: true },
+          })
+        ).count > 0
+      : false
   const fila = await prisma.celularDeCampo.findFirst({ where: { id: p.celularId, organizationId: p.organizationId } })
   if (!fila) throw noEncontrado()
 
@@ -62,6 +74,18 @@ export async function desvincularCelular(p: {
     huellasReportadas: fila.huellasPorSubir.length,
     yaEstaba: count === 0,
     perdidoORobado: fila.sinGracia,
+    sinGracia: fila.sinGracia,
+  }
+  if (marcadoPerdido) {
+    void logAction({
+      staffId: p.porStaffId,
+      venueId: null,
+      organizationId: p.organizationId,
+      action: 'CAMPO_CELULAR_REPORTADO_PERDIDO',
+      entity: 'CelularDeCampo',
+      entityId: fila.id,
+      data: { motivo: p.motivo },
+    })
   }
   if (count === 0) return resultado
 
