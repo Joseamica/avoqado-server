@@ -13,9 +13,10 @@ jest.mock('@/utils/prismaClient', () => ({
     celularDeCampo: { findMany: jest.fn() },
     codigoDeCelular: { findMany: jest.fn() },
     timeEntry: { findMany: jest.fn() },
-    envioRetenidoDeCampo: { groupBy: jest.fn() },
+    envioRetenidoDeCampo: { groupBy: jest.fn(), count: jest.fn() },
   },
 }))
+jest.mock('@/config/logger', () => ({ __esModule: true, default: { warn: jest.fn(), info: jest.fn(), error: jest.fn() } }))
 jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({
   filtroDePromotor: jest.requireActual('@/services/tpv/campo/celular/personasDeCampo').filtroDePromotor,
   sucursalesConCampo: jest.fn(),
@@ -89,27 +90,30 @@ beforeEach(() => {
     { organizationId: ORG, staffId: 'd', codigo: 'USADO2', expiraAt: hora(24), usadoAt: hora(-2), anuladoAt: null },
   ]
   checadas = [
+    // De OTRA organización y más reciente: no debe salir (S4).
+    { staffId: 'a', venueId: 'vOtraOrg', clockInTime: hora(-1), clockInLatitude: 1 },
     { staffId: 'a', venueId: 'v1', clockInTime: hora(-3), clockInLatitude: 19.4 },
     { staffId: 'a', venueId: 'v2', clockInTime: hora(-30), clockInLatitude: null },
     { staffId: 'b', venueId: 'v1', clockInTime: hora(-10), clockInLatitude: null },
   ]
   retenidos = [
-    { staffId: 'a', estado: 'PENDIENTE' },
-    { staffId: 'a', estado: 'APLICANDO' },
-    { staffId: 'a', estado: 'APLICADO' },
-    { staffId: 'b', estado: 'DESCARTADO' },
+    { organizationId: ORG, staffId: 'a', venueId: 'v1', estado: 'PENDIENTE' },
+    { organizationId: ORG, staffId: 'a', venueId: 'v2', estado: 'APLICANDO' },
+    { organizationId: ORG, staffId: 'a', venueId: 'v1', estado: 'APLICADO' },
+    { organizationId: ORG, staffId: 'b', venueId: 'v1', estado: 'DESCARTADO' },
   ]
   ;(sucursalesConCampo as jest.Mock).mockResolvedValue(['v1', 'v2'])
 
   const palabras = (where: any): string[] =>
     (where?.AND ?? []).flatMap((x: any) => (x.AND ?? []).map((w: any) => w.OR[0].firstName.contains.toLowerCase()))
-  db.staff.findMany.mockImplementation(({ where, skip, take }: any) => {
+  db.staff.findMany.mockImplementation((a: any) => {
+    const { where, skip, take } = a
     const sucs: string[] = where.venues.some.venueId.in
     let r = personas.filter(p => p.venues.some((v: any) => sucs.includes(v.venueId)))
     if (where.id?.in) r = r.filter(p => where.id.in.includes(p.id))
     for (const w of palabras(where)) r = r.filter(p => `${p.firstName} ${p.lastName}`.toLowerCase().includes(w))
     r = [...r].sort((x, y) => x.firstName.localeCompare(y.firstName) || x.id.localeCompare(y.id))
-    if (take === undefined) return Promise.resolve(r.map(p => ({ id: p.id })))
+    if (!a.select?.venues) return Promise.resolve(r.slice(0, take).map(p => ({ id: p.id }))) // sólo ids
     return Promise.resolve(r.slice(skip, skip + take).map(p => ({ ...p, venues: p.venues.filter((v: any) => sucs.includes(v.venueId)) })))
   })
   db.staff.count.mockImplementation(async (a: any) => (await db.staff.findMany({ where: a.where })).length)
@@ -134,17 +138,21 @@ beforeEach(() => {
     Promise.resolve(
       checadas
         .filter(t => where.staffId.in.includes(t.staffId) && t.clockInTime >= where.clockInTime.gte)
+        .filter(t => !where.venueId?.in || where.venueId.in.includes(t.venueId))
         .sort((x, y) => y.clockInTime.getTime() - x.clockInTime.getTime()),
     ),
   )
+  const delRetenido = (r: any, where: any) =>
+    r.organizationId === where.organizationId &&
+    where.estado.in.includes(r.estado) &&
+    (!where.staffId?.in || where.staffId.in.includes(r.staffId)) &&
+    (!where.venueId?.in || where.venueId.in.includes(r.venueId))
   db.envioRetenidoDeCampo.groupBy.mockImplementation(({ where }: any) => {
     const cuenta = new Map<string, number>()
-    for (const r of retenidos) {
-      if (where.staffId.in.includes(r.staffId) && where.estado.in.includes(r.estado))
-        cuenta.set(r.staffId, (cuenta.get(r.staffId) ?? 0) + 1)
-    }
+    for (const r of retenidos) if (delRetenido(r, where)) cuenta.set(r.staffId, (cuenta.get(r.staffId) ?? 0) + 1)
     return Promise.resolve([...cuenta].map(([staffId, n]) => ({ staffId, _count: { _all: n } })))
   })
+  db.envioRetenidoDeCampo.count.mockImplementation(({ where }: any) => Promise.resolve(retenidos.filter(r => delRetenido(r, where)).length))
 })
 afterEach(() => jest.useRealTimers())
 
@@ -223,7 +231,9 @@ describe('listarCelularesDeCampo', () => {
     expect(r.items.map(i => i.staffId)).toEqual(['a'])
     expect(r.items[0].sucursales.map(s => s.venueId)).toEqual(['v2'])
     expect(r.conteos).toEqual({ ACTIVO: 1, CODIGO_SIN_USAR: 0, SIN_CELULAR: 1 })
-    expect(r.porRevisar).toBe(2)
+    // S5: lo por revisar de ESA sucursal (el APLICANDO de v2), arriba y en la fila.
+    expect(r.porRevisar).toBe(1)
+    expect(r.items[0].porRevisar).toBe(1)
     const sinA = await listarCelularesDeCampo(ORG, { ...base, venueId: 'v1' })
     expect(sinA.conteos).toEqual({ ACTIVO: 1, CODIGO_SIN_USAR: 1, SIN_CELULAR: 1 })
   })
@@ -260,5 +270,43 @@ describe('listarCelularesDeCampo', () => {
     expect(w.staffId.in).toEqual(['a', 'b'])
     expect(w.clockInTime.gte).toEqual(hora(-48))
     expect(db.envioRetenidoDeCampo.groupBy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('arreglo final (S3, S4, S5, S6)', () => {
+  it('S3 · con el alcance de quien pregunta (MCP: sólo v1) no sale nada de v2: ni personas, ni sucursales, ni checadas, ni por revisar', async () => {
+    const r = await listarCelularesDeCampo(ORG, base, ['v1'])
+    expect(r.items.map(i => i.staffId)).toEqual(['a', 'b', 'c'])
+    expect(r.items.flatMap(i => i.sucursales.map(s => s.venueId))).toEqual(['v1', 'v1', 'v1'])
+    expect(r.conteos).toEqual({ ACTIVO: 1, CODIGO_SIN_USAR: 1, SIN_CELULAR: 1 })
+    expect(r.porRevisar).toBe(1)
+    expect(r.items.find(i => i.staffId === 'a')!.porRevisar).toBe(1)
+    // Pedir v2 con un alcance de sólo v1: nada.
+    const fuera = await listarCelularesDeCampo(ORG, { ...base, venueId: 'v2' }, ['v1'])
+    expect(fuera.items).toEqual([])
+    expect(fuera.porRevisar).toBe(0)
+  })
+
+  it('S4 · la última checada sólo de las sucursales de la lista (la de otra organización, más reciente, no sale)', async () => {
+    const r = await listarCelularesDeCampo(ORG, base)
+    expect(r.items.find(i => i.staffId === 'a')!.ultimaChecada).toEqual({ at: hora(-3).toISOString(), conUbicacion: true, venueId: 'v1' })
+    expect(db.timeEntry.findMany.mock.calls[0][0].where.venueId).toEqual({ in: ['v1', 'v2'] })
+  })
+
+  it('S5 · lo por revisar de una persona dada de baja (ya no es promotora) cuenta arriba', async () => {
+    retenidos.push({ organizationId: ORG, staffId: 'baja', venueId: 'v1', estado: 'PENDIENTE' })
+    retenidos.push({ organizationId: 'otra', staffId: 'x', venueId: 'vx', estado: 'PENDIENTE' })
+    const r = await listarCelularesDeCampo(ORG, base)
+    expect(r.porRevisar).toBe(3) // a: 2, baja: 1; el de otra organización no
+    expect(r.items.every(i => i.staffId !== 'baja')).toBe(true)
+    expect((await listarCelularesDeCampo(ORG, { ...base, venueId: 'v1' })).porRevisar).toBe(2)
+  })
+
+  it('S6 · las consultas de ids tienen tope (10 000)', async () => {
+    await listarCelularesDeCampo(ORG, base)
+    const deIds = db.staff.findMany.mock.calls.map((c: any) => c[0]).find((a: any) => !a.select?.venues)
+    expect(deIds.take).toBe(10_000)
+    expect(db.celularDeCampo.findMany.mock.calls[0][0].take).toBe(10_000)
+    expect(db.codigoDeCelular.findMany.mock.calls[0][0].take).toBe(10_000)
   })
 })

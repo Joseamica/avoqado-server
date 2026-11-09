@@ -153,3 +153,34 @@ describe('generarCodigos · todosLosSinCelular', () => {
     expect(r.restantes).toBe(50)
   })
 })
+
+describe('generarCodigos · alcance y tope (S3, S6)', () => {
+  it('S3 · staffIds con alcance: el promotor se mide sólo contra las sucursales de campo del alcance', async () => {
+    ;(sucursalesConCampo as jest.Mock).mockResolvedValue(['v1', 'v2'])
+    await generarCodigos({ organizationId: ORG, generadoPor: 'sup', staffIds: ['a'], venueIds: ['v2', 'vFuera'] })
+    expect((esPromotorDeCampo as jest.Mock).mock.calls[0][2]).toEqual(new Set(['v2']))
+  })
+
+  it('S3 · todosLosSinCelular con alcance: sólo sus sucursales; fuera del alcance, nada', async () => {
+    ;(sucursalesConCampo as jest.Mock).mockResolvedValue(['v1', 'v2'])
+    db.staff.findMany.mockResolvedValue([])
+    db.celularDeCampo.findMany.mockResolvedValue([])
+    db.codigoDeCelular.findMany.mockResolvedValue([])
+    await generarCodigos({ organizationId: ORG, generadoPor: 'sup', todosLosSinCelular: true, venueIds: ['v1'] })
+    expect(db.staff.findMany.mock.calls[0][0].where.venues.some.venueId).toEqual({ in: ['v1'] })
+    db.staff.findMany.mockClear()
+    const r = await generarCodigos({ organizationId: ORG, generadoPor: 'sup', todosLosSinCelular: true, venueId: 'v2', venueIds: ['v1'] })
+    expect(r.generados).toEqual([])
+    expect(db.staff.findMany).not.toHaveBeenCalled()
+  })
+
+  it('S6 · las tres consultas de candidatos tienen tope (10 000)', async () => {
+    db.staff.findMany.mockResolvedValue([])
+    db.celularDeCampo.findMany.mockResolvedValue([])
+    db.codigoDeCelular.findMany.mockResolvedValue([])
+    await generarCodigos({ organizationId: ORG, generadoPor: 'sup', todosLosSinCelular: true })
+    expect(db.staff.findMany.mock.calls[0][0].take).toBe(10_000)
+    expect(db.celularDeCampo.findMany.mock.calls[0][0].take).toBe(10_000)
+    expect(db.codigoDeCelular.findMany.mock.calls[0][0].take).toBe(10_000)
+  })
+})

@@ -6,6 +6,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { generateSecureCode } from '@/services/dashboard/terminal-activation.service'
+import { conTope, TOPE_DE_IDS } from './celularesDeLaOrganizacion.service'
 import { esPromotorDeCampo, filtroDePromotor, sucursalesConCampo, sucursalesDeLaPersona } from './personasDeCampo'
 
 export const VIGENCIA_DEL_CODIGO_MS = 7 * 24 * 60 * 60 * 1000
@@ -20,6 +21,8 @@ export type GenerarCodigosParams = {
   staffIds?: string[]
   todosLosSinCelular?: boolean
   venueId?: string
+  /** El alcance de quien pide (el MCP, S3): sólo promotores con una sucursal de campo dentro. El panel no lo pasa. */
+  venueIds?: string[]
 }
 type Persona = { id: string; firstName: string; lastName: string; phone: string | null }
 
@@ -60,22 +63,38 @@ async function generarUno(organizationId: string, generadoPor: string, persona: 
   }
 }
 
+/** Las sucursales de campo de la org, y del alcance si lo hay. */
+async function deCampoEnElAlcance(organizationId: string, alcance?: string[]): Promise<string[]> {
+  return (await sucursalesConCampo(organizationId)).filter(v => !alcance || alcance.includes(v))
+}
+
 /** Promotores de la org (o sólo de `venueId`, si es de campo) sin celular vinculado y sin código vivo. */
-async function promotoresSinCelular(organizationId: string, venueId?: string): Promise<Persona[]> {
-  const venueIds = (await sucursalesConCampo(organizationId)).filter(v => !venueId || v === venueId)
+async function promotoresSinCelular(organizationId: string, venueId?: string, alcance?: string[]): Promise<Persona[]> {
+  const venueIds = (await deCampoEnElAlcance(organizationId, alcance)).filter(v => !venueId || v === venueId)
   if (venueIds.length === 0) return []
   const [personas, vinculados, conCodigoVivo] = await Promise.all([
     prisma.staff.findMany({
       where: { active: true, venues: { some: filtroDePromotor(venueIds) } },
       select: { id: true, firstName: true, lastName: true, phone: true },
       orderBy: { id: 'asc' },
+      take: TOPE_DE_IDS,
     }),
-    prisma.celularDeCampo.findMany({ where: { organizationId, staffIdVinculado: { not: null } }, select: { staffId: true } }),
+    prisma.celularDeCampo.findMany({
+      where: { organizationId, staffIdVinculado: { not: null } },
+      select: { staffId: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_IDS,
+    }),
     prisma.codigoDeCelular.findMany({
       where: { organizationId, usadoAt: null, anuladoAt: null, expiraAt: { gt: new Date() } },
       select: { staffId: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_IDS,
     }),
   ])
+  conTope(personas, 'promotores sin celular', organizationId)
+  conTope(vinculados, 'celulares vinculados', organizationId)
+  conTope(conCodigoVivo, 'códigos vivos', organizationId)
   const fuera = new Set([...vinculados, ...conCodigoVivo].map(f => f.staffId))
   return personas.filter(p => !fuera.has(p.id))
 }
@@ -86,11 +105,11 @@ export async function generarCodigos(p: GenerarCodigosParams) {
   let restantes = 0
 
   if (p.todosLosSinCelular) {
-    const todos = await promotoresSinCelular(p.organizationId, p.venueId)
+    const todos = await promotoresSinCelular(p.organizationId, p.venueId, p.venueIds)
     for (const persona of todos.slice(0, TOPE_POR_LLAMADA)) generados.push(await generarUno(p.organizationId, p.generadoPor, persona))
     restantes = Math.max(0, todos.length - TOPE_POR_LLAMADA)
   } else {
-    const conCampo = new Set(await sucursalesConCampo(p.organizationId)) // una vez por llamada
+    const conCampo = new Set(await deCampoEnElAlcance(p.organizationId, p.venueIds)) // una vez por llamada
     for (const staffId of [...new Set(p.staffIds ?? [])]) {
       const persona = (await esPromotorDeCampo(staffId, p.organizationId, conCampo))
         ? await prisma.staff.findUnique({ where: { id: staffId }, select: { id: true, firstName: true, lastName: true, phone: true } })
