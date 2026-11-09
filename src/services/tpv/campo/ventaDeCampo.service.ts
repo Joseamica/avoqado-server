@@ -23,6 +23,7 @@ import { sellSerializedItem } from '@/services/tpv/order.tpv.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { claseDeEstado } from '@/services/shared/orderBalance'
 import { createPendingSaleVerification } from '@/services/tpv/sale-verification.service'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import prisma from '@/utils/prismaClient'
 import { OrigenHora, resolverHoraDelCelular } from './horaDelCelular'
 
@@ -136,7 +137,10 @@ export async function registrarVentaDeCampo(
       const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: ficha.id, ocupacion: t.ocupacion, orderId: null } })
       if (count === 0) await soltar(t, ficha.id)
       // Otra venta la cerró entre nuestro escaneo y el de `sellSerializedItem` (su 400 «ya fue vendido» no trae código).
-      if (count === 1 && esAppError4xx(error) && (await serializedInventoryService.scan(t.venueId, t.serial)).status === 'already_sold') {
+      // Si este escaneo falla, sale el error original, no el del escaneo.
+      const otraVez =
+        count === 1 && esAppError4xx(error) ? await serializedInventoryService.scan(t.venueId, t.serial).catch(() => null) : null
+      if (otraVez?.status === 'already_sold') {
         throw simYaVendida()
       }
       throw error
@@ -147,7 +151,7 @@ export async function registrarVentaDeCampo(
   const paymentId = ficha.paymentId ?? (await cobrar(t, ficha, orderId))
 
   try {
-    await marcarLaSim(t, ficha, orderId) // Paso 7
+    const vendidaEnOtra = await marcarLaSim(t, ficha, orderId) // Paso 7
     // Paso 8
     const evidencia =
       (await buscarEvidencia(paymentId)) ??
@@ -175,6 +179,7 @@ export async function registrarVentaDeCampo(
       ocupadaHasta: null,
     })
     logger.info('📱 [VENTA DE CAMPO] Venta completa', { venueId: t.venueId, staffId: t.staffId, fichaId: ficha.id, orderId, paymentId })
+    if (vendidaEnOtra) await avisarVendidaEnOtra(t, vendidaEnOtra) // una vez por ficha: sólo la petición que la completa
     return resultado({ ...ficha, orderId, paymentId, saleVerificationId: evidencia.id }, false)
   } catch (error) {
     await soltar(t, ficha.id) // el reintento sigue desde aquí
@@ -205,13 +210,15 @@ async function tomarOCrearFicha(t: Trabajo): Promise<VentaDeCampo | ResultadoVen
     const existente = await leerFicha(t)
     if (existente) {
       const tomada = await ocuparFicha(t, existente)
-      if ('repetida' in tomada || !tomada.orderId || tomada.paymentId || !(await cuentaCanceladaSinCobro(t, tomada.orderId))) {
-        return tomada
+      if ('repetida' in tomada) return tomada
+      if (tomada.orderId && !tomada.paymentId && (await cuentaCanceladaSinCobro(t, tomada.orderId))) {
+        // Un rechazo canceló su cuenta pero no alcanzó a borrar la ficha: se borra y la venta se revisa contra lo de HOY.
+        const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: tomada.id, ocupacion: t.ocupacion } })
+        if (count === 0) throw enProceso()
+        continue
       }
-      // Un rechazo canceló su cuenta pero no alcanzó a borrar la ficha: se borra y la venta se revisa contra lo de HOY.
-      const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: tomada.id, ocupacion: t.ocupacion } })
-      if (count === 0) throw enProceso()
-      continue
+      await revisarLaReanudada(t, tomada)
+      return tomada
     }
 
     let revisada: { serializedItemId: string; precio: Prisma.Decimal }
@@ -261,15 +268,39 @@ async function ocuparFicha(t: Trabajo, f: VentaDeCampo): Promise<VentaDeCampo | 
   return prisma.ventaDeCampo.findUniqueOrThrow({ where: { id: f.id } })
 }
 
+const cobroConLaLlave = (t: Trabajo) =>
+  prisma.payment.findUnique({ where: { venueId_idempotencyKey: { venueId: t.venueId, idempotencyKey: t.llave } }, select: { id: true } })
+
 /** Paso 3: sin ficha, todo se revisa contra lo de HOY. */
 async function revisarContraHoy(t: Trabajo): Promise<{ serializedItemId: string; precio: Prisma.Decimal }> {
-  // Codex r3 #6: la llave ya la usó un cobro de otra ruta.
-  const conLaLlave = await prisma.payment.findUnique({
-    where: { venueId_idempotencyKey: { venueId: t.venueId, idempotencyKey: t.llave } },
-    select: { id: true },
-  })
-  if (conLaLlave) throw llaveReusada()
+  if (await cobroConLaLlave(t)) throw llaveReusada() // Codex r3 #6: la llave ya la usó un cobro de otra ruta
+  return revisarLaSimYElPrecio(t, new Prisma.Decimal(t.v.precioVisto))
+}
 
+/**
+ * Codex C1: una ficha reanudada SIN dinero se revisa otra vez contra lo de HOY (la SIM, su custodia, el módulo, las ventas y
+ * el precio de la ficha): entre la caída y el reintento pudieron cambiar. Un rechazo definitivo usa la misma limpieza del
+ * cobro (cancela la cuenta sin cobros y borra la ficha) y sale el rechazo. Con un cobro (en la ficha, con la llave o en la
+ * cuenta) no se revisa nada: después del dinero, la recuperación de siempre.
+ */
+async function revisarLaReanudada(t: Trabajo, ficha: VentaDeCampo): Promise<void> {
+  if (ficha.paymentId || (await cobroConLaLlave(t)) || (ficha.orderId && !(await sinCobros(t, ficha.orderId)))) return
+  try {
+    if (ficha.orderId) await assertVenueSalesEnabled(t.venueId) // sin orden, `sellSerializedItem` lo revisa
+    await revisarLaSimYElPrecio(t, new Prisma.Decimal(ficha.precio))
+  } catch (error) {
+    if (ficha.orderId) throw await limpiarTrasElCobro(t, ficha.id, ficha.orderId, error)
+    if (!esAppError4xx(error)) {
+      await soltar(t, ficha.id)
+      throw error
+    }
+    const { count } = await prisma.ventaDeCampo.deleteMany({ where: { id: ficha.id, ocupacion: t.ocupacion, orderId: null } })
+    throw count === 1 ? error : enProceso()
+  }
+}
+
+/** La SIM (registrada, sin vender, en custodia de la persona) y el precio contra el de su categoría HOY. */
+async function revisarLaSimYElPrecio(t: Trabajo, precio: Prisma.Decimal): Promise<{ serializedItemId: string; precio: Prisma.Decimal }> {
   const scan = await serializedInventoryService.scan(t.venueId, t.serial)
   if (scan.status === 'module_disabled') throw new BadRequestError('Serialized inventory module is not enabled for this venue') // el de sellSerializedItem
   if (scan.status === 'already_sold') throw simYaVendida()
@@ -283,7 +314,6 @@ async function revisarContraHoy(t: Trabajo): Promise<{ serializedItemId: string;
     throw error
   }
 
-  const precio = new Prisma.Decimal(t.v.precioVisto)
   const actual = scan.item.category.suggestedPrice
   if (actual != null && !precio.equals(actual)) {
     const precioActual = new Prisma.Decimal(actual).toFixed(2)
@@ -389,11 +419,21 @@ async function limpiarTrasElCobro(t: Trabajo, fichaId: string, orderId: string, 
   }
 }
 
+/** Lo que queda en la bitácora cuando otro renglón ya vendió la SIM. */
+type VendidaEnOtra = {
+  fichaId: string
+  orderId: string
+  orderItemId: string
+  otroOrderItemId: string | null
+  serialNumber: string
+}
+
 /**
  * Paso 7 (Codex r3 #1): el cobro marca la SIM después de su commit y se traga el error (`payment.tpv.service.ts:2231`).
  * Aquí se comprueba. La custodia ya se revisó en el paso 3: revisarla otra vez tras cobrar sólo dejaría la venta trabada.
+ * Devuelve la carrera ajena (otro renglón la vendió) para avisarla al completar la ficha, no en cada reintento.
  */
-async function marcarLaSim(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise<void> {
+async function marcarLaSim(t: Trabajo, ficha: VentaDeCampo, orderId: string): Promise<VendidaEnOtra | null> {
   const sim = await prisma.serializedItem.findUniqueOrThrow({ where: { id: ficha.serializedItemId! } })
   const renglon = await prisma.orderItem.findFirstOrThrow({ where: { orderId }, select: { id: true } })
   if (sim.status !== 'SOLD') {
@@ -401,11 +441,14 @@ async function marcarLaSim(t: Trabajo, ficha: VentaDeCampo, orderId: string): Pr
       staffId: t.staffId,
       skipCustodyCheck: true,
     })
-    return
+    return null
   }
-  if (sim.orderItemId === renglon.id) return
+  if (sim.orderItemId === renglon.id) return null
   // La carrera AJENA con la PAX: la vendió otro renglón. El dinero ya entró; no se toca y queda en la bitácora.
-  const datos = { fichaId: ficha.id, orderId, orderItemId: renglon.id, otroOrderItemId: sim.orderItemId, serialNumber: sim.serialNumber }
+  return { fichaId: ficha.id, orderId, orderItemId: renglon.id, otroOrderItemId: sim.orderItemId, serialNumber: sim.serialNumber }
+}
+
+async function avisarVendidaEnOtra(t: Trabajo, datos: VendidaEnOtra): Promise<void> {
   logger.error('🚨 [VENTA DE CAMPO] La SIM ya estaba vendida por otro renglón; la venta del celular queda cobrada', {
     venueId: t.venueId,
     ...datos,
@@ -415,7 +458,7 @@ async function marcarLaSim(t: Trabajo, ficha: VentaDeCampo, orderId: string): Pr
     venueId: t.venueId,
     action: 'VENTA_DE_CAMPO_SIM_VENDIDA_EN_OTRA_VENTA',
     entity: 'VentaDeCampo',
-    entityId: ficha.id,
+    entityId: datos.fichaId,
     data: datos,
   })
 }

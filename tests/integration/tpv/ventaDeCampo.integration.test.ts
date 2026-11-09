@@ -245,6 +245,48 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     expect(cobros[0].orderId).toBe(ordenes[0].id)
   })
 
+  // Codex C1: entre la caída y el reintento cambió lo de HOY; sin dinero, el reintento lo revisa otra vez y limpia.
+  it.each([
+    [
+      'el precio de su categoría',
+      async (sim: { id: string; categoryId: string }) => {
+        await prisma.itemCategory.update({ where: { id: sim.categoryId }, data: { suggestedPrice: 50 } })
+      },
+      422,
+      'PRECIO_CAMBIO',
+    ],
+    [
+      'la custodia de la SIM',
+      async (sim: { id: string }) => {
+        await prisma.serializedItem.update({ where: { id: sim.id }, data: { assignedPromoterId: otroPromotorId } })
+      },
+      409,
+      'SIM_NOT_ACCEPTED',
+    ],
+  ])(
+    'el cobro se cae y luego cambia %s: el reintento sale con el rechazo, la orden cancelada y sin ficha',
+    async (_n, cambiar, status, code) => {
+      const categoria = await prisma.itemCategory.create({ data: { venueId, name: `Chip que cambia ${randomUUID()}`, suggestedPrice: 0 } })
+      const sim = await nuevaSim(categoria.id)
+      const cuerpo = ventaDe(sim.serialNumber)
+      jest.spyOn(pagos, 'recordOrderPayment').mockRejectedValueOnce(new Error('se cortó la conexión'))
+      expect((await vender(cuerpo)).status).toBe(500)
+      const aMedias = await filas(sim.serialNumber, cuerpo.llave)
+      expect(aMedias.fichas[0]).toMatchObject({ estado: 'EN_CURSO', orderId: aMedias.ordenes[0].id, paymentId: null })
+
+      await cambiar(sim)
+      const reintento = await vender(cuerpo)
+
+      expect(reintento.status).toBe(status)
+      expect(reintento.body.code).toBe(code)
+      const { ordenes, cobros, fichas } = await filas(sim.serialNumber, cuerpo.llave)
+      expect(ordenes).toHaveLength(1)
+      expect(ordenes[0].status).toBe('CANCELLED')
+      expect([cobros.length, fichas.length]).toEqual([0, 0])
+      expect((await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).status).toBe('AVAILABLE')
+    },
+  )
+
   it('la SIM no se marcó (el cobro se tragó el error): el reintento la marca en su renglón', async () => {
     const sim = await nuevaSim(categoriaDeCaja)
     const cuerpo = ventaDe(sim.serialNumber)
