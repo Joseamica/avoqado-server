@@ -14,33 +14,33 @@ export const createCheckoutSessionSchema = z.object({
   // Amount (required, positive number)
   amount: z
     .number({
-      required_error: 'Amount is required',
-      invalid_type_error: 'Amount must be a number',
+      required_error: 'El monto es obligatorio',
+      invalid_type_error: 'El monto debe ser un número',
     })
-    .positive('Amount must be greater than 0')
-    .finite('Amount must be a finite number'),
+    .positive('El monto debe ser mayor a cero')
+    .finite('El monto debe ser un número finito'),
 
   // Currency (optional, defaults to "MXN")
   currency: z.string().optional().default('MXN'),
 
   // URLs (required, must be valid HTTP/HTTPS URLs)
   successUrl: z
-    .string({ required_error: 'successUrl is required' })
-    .url('successUrl must be a valid URL')
+    .string({ required_error: 'La dirección web de éxito es obligatoria' })
+    .url('La dirección web de éxito no es válida')
     .refine(url => url.startsWith('http://') || url.startsWith('https://'), {
-      message: 'successUrl must start with http:// or https://',
+      message: 'La dirección web de éxito debe empezar con http:// o https://',
     }),
 
   cancelUrl: z
-    .string({ required_error: 'cancelUrl is required' })
-    .url('cancelUrl must be a valid URL')
+    .string({ required_error: 'La dirección web de cancelación es obligatoria' })
+    .url('La dirección web de cancelación no es válida')
     .refine(url => url.startsWith('http://') || url.startsWith('https://'), {
-      message: 'cancelUrl must start with http:// or https://',
+      message: 'La dirección web de cancelación debe empezar con http:// o https://',
     }),
 
   // Optional fields
   description: z.string().optional(),
-  customerEmail: z.string().email('Invalid email address').optional(),
+  customerEmail: z.string().email('El correo no es válido').optional(),
   customerPhone: z.string().optional(),
   customerName: z.string().optional(),
   externalOrderId: z.string().optional(),
@@ -56,7 +56,7 @@ export const createCheckoutSessionSchema = z.object({
         return size <= 16 * 1024 // 16KB limit (Stripe pattern)
       },
       {
-        message: 'Metadata exceeds maximum size of 16KB',
+        message: 'Los metadatos pasan del tamaño máximo de 16 KB',
       },
     ),
 })

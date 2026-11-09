@@ -61,24 +61,24 @@ const recipeLineQuantity = () =>
 export const CreateRawMaterialSchema = z.object({
   body: z
     .object({
-      name: z.string().min(1, 'Name is required'),
+      name: z.string().min(1, 'El nombre de la materia prima es obligatorio'),
       description: z.string().optional(),
-      sku: z.string().min(1, 'SKU is required'),
+      sku: z.string().min(1, 'El SKU de la materia prima es obligatorio'),
       gtin: z.string().optional(),
       category: z.nativeEnum(RawMaterialCategory),
-      currentStock: z.number().min(0, 'Stock must be non-negative'),
-      unit: z.nativeEnum(Unit, { errorMap: () => ({ message: 'Invalid unit type' }) }),
-      minimumStock: z.number().min(0, 'Minimum stock must be non-negative'),
-      reorderPoint: z.number().min(0, 'Reorder point must be non-negative'),
+      currentStock: z.number().min(0, 'El stock actual no puede ser negativo'),
+      unit: z.nativeEnum(Unit, { errorMap: () => ({ message: 'La unidad de medida no es válida' }) }),
+      minimumStock: z.number().min(0, 'El stock mínimo no puede ser negativo'),
+      reorderPoint: z.number().min(0, 'El punto de reorden no puede ser negativo'),
       maximumStock: z.number().min(0).nullish(), // Accept null, undefined, or number
-      costPerUnit: z.number().positive('Cost per unit must be positive'),
+      costPerUnit: z.number().positive('El costo por unidad debe ser mayor a cero'),
       avgCostPerUnit: z.number().positive().nullish(), // Accept null, undefined, or number
       perishable: z.boolean().default(false),
       shelfLifeDays: z.number().int().positive().nullish(), // Accept null, undefined, or number
       notifyOnLowStock: z.boolean().optional(),
     })
     .refine(data => data.minimumStock <= data.reorderPoint, {
-      message: 'Minimum stock must be less than or equal to reorder point',
+      message: 'El stock mínimo debe ser menor o igual al punto de reorden',
       path: ['minimumStock'],
     })
     .refine(
@@ -90,7 +90,7 @@ export const CreateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Reorder point must be less than or equal to maximum stock',
+        message: 'El punto de reorden debe ser menor o igual al stock máximo',
         path: ['reorderPoint'],
       },
     )
@@ -103,7 +103,7 @@ export const CreateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Minimum stock must be less than or equal to maximum stock',
+        message: 'El stock mínimo debe ser menor o igual al stock máximo',
         path: ['minimumStock'],
       },
     )
@@ -116,7 +116,7 @@ export const CreateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Perishable items must have shelf life days',
+        message: 'Las materias primas perecederas necesitan los días de vida útil',
         path: ['shelfLifeDays'],
       },
     ),
@@ -135,11 +135,11 @@ export const UpdateRawMaterialSchema = z.object({
       gtin: z.string().nullish(),
       category: z.nativeEnum(RawMaterialCategory).optional(),
       currentStock: z.number().min(0).optional(),
-      unit: z.nativeEnum(Unit, { errorMap: () => ({ message: 'Invalid unit type' }) }).optional(),
+      unit: z.nativeEnum(Unit, { errorMap: () => ({ message: 'La unidad de medida no es válida' }) }).optional(),
       minimumStock: z.number().min(0).optional(),
       reorderPoint: z.number().min(0).optional(),
       maximumStock: z.number().min(0).nullish(), // Accept null, undefined, or number
-      costPerUnit: z.number().positive('Cost per unit must be positive').optional(),
+      costPerUnit: z.number().positive('El costo por unidad debe ser mayor a cero').optional(),
       perishable: z.boolean().optional(),
       shelfLifeDays: z.number().int().positive().nullish(), // Accept null, undefined, or number
       active: z.boolean().optional(),
@@ -154,7 +154,7 @@ export const UpdateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Minimum stock must be less than or equal to reorder point',
+        message: 'El stock mínimo debe ser menor o igual al punto de reorden',
         path: ['minimumStock'],
       },
     )
@@ -167,7 +167,7 @@ export const UpdateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Reorder point must be less than or equal to maximum stock',
+        message: 'El punto de reorden debe ser menor o igual al stock máximo',
         path: ['reorderPoint'],
       },
     )
@@ -180,7 +180,7 @@ export const UpdateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Minimum stock must be less than or equal to maximum stock',
+        message: 'El stock mínimo debe ser menor o igual al stock máximo',
         path: ['minimumStock'],
       },
     )
@@ -193,7 +193,7 @@ export const UpdateRawMaterialSchema = z.object({
         return true
       },
       {
-        message: 'Perishable items must have shelf life days',
+        message: 'Las materias primas perecederas necesitan los días de vida útil',
         path: ['shelfLifeDays'],
       },
     ),
@@ -311,7 +311,7 @@ export const UpdateRecipeLineSchema = z.object({
       isOptional: z.boolean().optional(),
       substituteNotes: z.string().nullish().optional(),
     })
-    .refine(d => Object.keys(d).length > 0, { message: 'At least one field is required' }),
+    .refine(d => Object.keys(d).length > 0, { message: 'Cambia al menos un dato de la línea de la receta' }),
 })
 
 // ==========================================
@@ -320,7 +320,7 @@ export const UpdateRecipeLineSchema = z.object({
 
 export const CreateSupplierSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().min(1, 'El nombre del proveedor es obligatorio'),
     contactName: z.string().optional(),
     email: z.string().email().optional(),
     phone: z.string().optional(),
@@ -387,7 +387,7 @@ export const CreateSupplierPricingSchema = z.object({
         return true
       },
       {
-        message: 'Effective end date must be after effective start date',
+        message: 'La fecha final de vigencia debe ser posterior a la fecha inicial',
         path: ['effectiveTo'],
       },
     ),
@@ -695,7 +695,7 @@ export const GetPMIXReportSchema = z.object({
         return new Date(data.endDate) > new Date(data.startDate)
       },
       {
-        message: 'End date must be after start date',
+        message: 'La fecha final debe ser posterior a la fecha inicial',
         path: ['endDate'],
       },
     ),
@@ -725,7 +725,7 @@ export const GetIngredientUsageReportSchema = z.object({
         return new Date(data.endDate) > new Date(data.startDate)
       },
       {
-        message: 'End date must be after start date',
+        message: 'La fecha final debe ser posterior a la fecha inicial',
         path: ['endDate'],
       },
     ),
@@ -839,9 +839,9 @@ export const ProductWizardStep1Schema = z.object({
     venueId: z.string().cuid(),
   }),
   body: z.object({
-    name: z.string().min(1, 'Product name is required'),
+    name: z.string().min(1, 'El nombre del producto es obligatorio'),
     description: z.string().optional(),
-    price: z.number().positive('Price must be positive'),
+    price: z.number().positive('El precio debe ser mayor a cero'),
     categoryId: existingId('El ID de la categoría no es válido'),
     imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
     // SKU optional — if omitted/empty, backend auto-generates.
@@ -874,7 +874,7 @@ export const ProductWizardStep2Schema = z.object({
         return true
       },
       {
-        message: 'Inventory method is required when useInventory is true',
+        message: 'Elige el método de inventario cuando el producto usa inventario',
         path: ['inventoryMethod'],
       },
     ),
@@ -904,7 +904,7 @@ export const ProductWizardStep3RecipeSchema = z.object({
     productId: cuidLikeId(),
   }),
   body: z.object({
-    portionYield: z.number().int().positive('Portion yield must be positive'),
+    portionYield: z.number().int().positive('Las porciones por receta deben ser mayores a cero'),
     prepTime: z.number().int().positive().nullish(), // Accept null or undefined
     cookTime: z.number().int().positive().nullish(), // Accept null or undefined
     notes: z.string().optional(),
@@ -912,13 +912,13 @@ export const ProductWizardStep3RecipeSchema = z.object({
       .array(
         z.object({
           rawMaterialId: cuidLikeId(),
-          quantity: z.number().positive('Quantity must be positive'),
+          quantity: z.number().positive('La cantidad debe ser mayor a cero'),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
           substituteNotes: z.string().nullish(), // Accept null, undefined, or string
         }),
       )
-      .min(1, 'At least one ingredient is required'),
+      .min(1, 'Agrega al menos un ingrediente'),
   }),
 })
 
@@ -1106,9 +1106,9 @@ export const GenerateLabelsSchema = z.object({
     purchaseOrderId: z.string().cuid(),
   }),
   body: z.object({
-    labelType: z.string().min(1, 'Label type is required'),
+    labelType: z.string().min(1, 'El tipo de etiqueta es obligatorio'),
     barcodeFormat: z.enum(['SKU', 'GTIN'], {
-      errorMap: () => ({ message: 'Barcode format must be SKU or GTIN' }),
+      errorMap: () => ({ message: 'El formato del código de barras debe ser SKU o GTIN' }),
     }),
     details: z.object({
       sku: z.boolean(),
@@ -1122,10 +1122,10 @@ export const GenerateLabelsSchema = z.object({
       .array(
         z.object({
           itemId: z.string().cuid(),
-          quantity: z.number().int().min(1, 'Quantity must be at least 1'),
+          quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1'),
         }),
       )
-      .min(1, 'At least one item is required'),
+      .min(1, 'Agrega al menos un artículo'),
   }),
 })
 

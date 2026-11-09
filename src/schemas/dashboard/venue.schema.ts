@@ -207,9 +207,9 @@ export type AddVenueFeaturesDto = z.infer<typeof addVenueFeaturesSchema.shape.bo
 export const updatePaymentMethodSchema = z.object({
   body: z.object({
     paymentMethodId: z
-      .string({ required_error: 'Payment method ID is required' })
-      .min(1, { message: 'Payment method ID cannot be empty' })
-      .startsWith('pm_', { message: 'Invalid Stripe payment method ID format' }),
+      .string({ required_error: 'Falta el método de pago' })
+      .min(1, { message: 'El método de pago no puede estar vacío' })
+      .startsWith('pm_', { message: 'El método de pago de Stripe no es válido' }),
   }),
 })
 
@@ -218,7 +218,9 @@ export type UpdatePaymentMethodDto = z.infer<typeof updatePaymentMethodSchema.sh
 // Schema for creating Stripe Customer Portal session
 export const createBillingPortalSessionSchema = z.object({
   body: z.object({
-    returnUrl: z.string({ required_error: 'Return URL is required' }).url({ message: 'Invalid URL format' }),
+    returnUrl: z
+      .string({ required_error: 'Falta la dirección web de regreso' })
+      .url({ message: 'La dirección web de regreso no es válida' }),
   }),
 })
 

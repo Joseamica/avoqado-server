@@ -21,11 +21,11 @@ export const incidentListQuerySchema = z.object({
 export const confirmIncidentSchema = z.object({
   body: z.object({
     settlementArrived: z.boolean({
-      required_error: 'settlementArrived is required',
-      invalid_type_error: 'settlementArrived must be a boolean',
+      required_error: 'Indica si la liquidación ya llegó',
+      invalid_type_error: 'Indica con sí o no si la liquidación ya llegó',
     }),
-    actualDate: z.string().datetime({ message: 'actualDate must be a valid ISO 8601 datetime' }).optional(),
-    notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
+    actualDate: z.string().datetime({ message: 'La fecha real de llegada no es válida' }).optional(),
+    notes: z.string().max(1000, 'Las notas admiten hasta 1000 caracteres').optional(),
   }),
 })
 
@@ -34,7 +34,7 @@ export const confirmIncidentSchema = z.object({
  */
 export const escalateIncidentSchema = z.object({
   body: z.object({
-    notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
+    notes: z.string().max(1000, 'Las notas admiten hasta 1000 caracteres').optional(),
   }),
 })
 
@@ -48,10 +48,10 @@ export const bulkConfirmIncidentSchema = z.object({
       .min(1, 'Se requiere al menos un incidente para confirmar')
       .max(2000, 'No se pueden confirmar más de 2000 liquidaciones a la vez'),
     settlementArrived: z.boolean({
-      required_error: 'settlementArrived is required',
-      invalid_type_error: 'settlementArrived must be a boolean',
+      required_error: 'Indica si la liquidación ya llegó',
+      invalid_type_error: 'Indica con sí o no si la liquidación ya llegó',
     }),
-    actualDate: z.string().datetime({ message: 'actualDate must be a valid ISO 8601 datetime' }).optional(),
-    notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
+    actualDate: z.string().datetime({ message: 'La fecha real de llegada no es válida' }).optional(),
+    notes: z.string().max(1000, 'Las notas admiten hasta 1000 caracteres').optional(),
   }),
 })

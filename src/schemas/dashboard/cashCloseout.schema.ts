@@ -11,16 +11,16 @@ export const createCloseoutSchema = z.object({
   body: z.object({
     actualAmount: z
       .number({
-        required_error: 'actualAmount is required',
-        invalid_type_error: 'actualAmount must be a number',
+        required_error: 'El efectivo contado es obligatorio',
+        invalid_type_error: 'El efectivo contado debe ser un número',
       })
-      .min(0, 'actualAmount cannot be negative'),
+      .min(0, 'El efectivo contado no puede ser negativo'),
     depositMethod: z.enum(['BANK_DEPOSIT', 'SAFE', 'OWNER_WITHDRAWAL', 'NEXT_SHIFT'], {
-      required_error: 'depositMethod is required',
-      invalid_type_error: 'depositMethod must be one of: BANK_DEPOSIT, SAFE, OWNER_WITHDRAWAL, NEXT_SHIFT',
+      required_error: 'El método de depósito es obligatorio',
+      invalid_type_error: 'El método de depósito debe ser depósito bancario, caja fuerte, retiro del dueño o siguiente turno',
     }),
-    bankReference: z.string().max(100, 'bankReference cannot exceed 100 characters').optional(),
-    notes: z.string().max(1000, 'notes cannot exceed 1000 characters').optional(),
+    bankReference: z.string().max(100, 'La referencia bancaria admite hasta 100 caracteres').optional(),
+    notes: z.string().max(1000, 'Las notas admiten hasta 1000 caracteres').optional(),
   }),
 })
 

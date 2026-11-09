@@ -25,12 +25,12 @@ const StaffRoleEnum = z.enum(['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER', 'CASHIE
  */
 const RoleConfigItemSchema = z.object({
   role: StaffRoleEnum,
-  displayName: z.string().min(1, 'Display name is required').max(50, 'Display name must be 50 characters or less').trim(),
-  description: z.string().max(200, 'Description must be 200 characters or less').trim().optional(),
-  icon: z.string().max(50, 'Icon name must be 50 characters or less').trim().optional(),
+  displayName: z.string().min(1, 'El nombre del rol es obligatorio').max(50, 'El nombre del rol admite hasta 50 caracteres').trim(),
+  description: z.string().max(200, 'La descripción del rol admite hasta 200 caracteres').trim().optional(),
+  icon: z.string().max(50, 'El nombre del ícono admite hasta 50 caracteres').trim().optional(),
   color: z
     .string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, 'Color must be a valid hex color (e.g., #7C3AED)')
+    .regex(/^#[0-9A-Fa-f]{6}$/, 'El color debe ser un código hexadecimal válido, por ejemplo #7C3AED')
     .optional(),
   isActive: z.boolean().optional(),
   sortOrder: z.number().int().min(0).max(100).optional(),
@@ -46,10 +46,7 @@ const RoleConfigItemSchema = z.object({
  */
 export const UpdateRoleConfigsSchema = z.object({
   body: z.object({
-    configs: z
-      .array(RoleConfigItemSchema)
-      .min(1, 'At least one role config is required')
-      .max(9, 'Cannot update more than 9 role configs at once'), // There are only 9 roles
+    configs: z.array(RoleConfigItemSchema).min(1, 'Indica al menos un rol').max(9, 'No puedes actualizar más de 9 roles a la vez'), // There are only 9 roles
   }),
 })
 
@@ -58,7 +55,7 @@ export const UpdateRoleConfigsSchema = z.object({
  */
 export const RoleConfigParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 

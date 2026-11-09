@@ -105,7 +105,7 @@ export const updateConfigPayloadSchema = z.object({
  * Update merchant payload
  */
 export const updateMerchantPayloadSchema = z.object({
-  merchantAccountId: z.string().min(1, 'Merchant account ID required'),
+  merchantAccountId: z.string().min(1, 'La cuenta de comercio es obligatoria'),
 })
 
 /**
@@ -138,13 +138,13 @@ export const forceUpdatePayloadSchema = z.object({
 
 export const sendCommandBodySchema = z
   .object({
-    terminalId: z.string().min(1, 'Terminal ID is required'),
+    terminalId: z.string().min(1, 'La terminal es obligatoria'),
     commandType: TpvCommandTypeSchema,
     priority: TpvCommandPrioritySchema.optional(),
     payload: z.record(z.any()).optional(),
 
     // Security
-    confirmationPin: z.string().length(4, 'PIN must be 4 digits').optional(),
+    confirmationPin: z.string().length(4, 'El PIN debe tener 4 dígitos').optional(),
     doubleConfirmToken: z.string().optional(),
 
     // Scheduling
@@ -162,7 +162,7 @@ export const sendCommandBodySchema = z
       }
       return true
     },
-    { message: 'Factory reset requires PIN confirmation', path: ['confirmationPin'] },
+    { message: 'Restablecer de fábrica requiere confirmar con tu PIN', path: ['confirmationPin'] },
   )
   .refine(
     data => {
@@ -173,7 +173,7 @@ export const sendCommandBodySchema = z
       }
       return true
     },
-    { message: 'This command type requires PIN confirmation', path: ['confirmationPin'] },
+    { message: 'Este tipo de comando requiere confirmar con tu PIN', path: ['confirmationPin'] },
   )
   .refine(
     data => {
@@ -183,7 +183,7 @@ export const sendCommandBodySchema = z
       }
       return true
     },
-    { message: 'Scheduled time must be in the future', path: ['scheduledFor'] },
+    { message: 'La hora programada debe ser en el futuro', path: ['scheduledFor'] },
   )
   .refine(
     data => {
@@ -193,7 +193,7 @@ export const sendCommandBodySchema = z
       }
       return true
     },
-    { message: 'Expiration time must be after scheduled time', path: ['expiresAt'] },
+    { message: 'La hora de vencimiento debe ser posterior a la hora programada', path: ['expiresAt'] },
   )
 
 // ==========================================
@@ -202,13 +202,16 @@ export const sendCommandBodySchema = z
 
 export const bulkCommandBodySchema = z
   .object({
-    terminalIds: z.array(z.string().min(1)).min(1, 'At least one terminal required').max(100, 'Maximum 100 terminals per operation'),
+    terminalIds: z
+      .array(z.string().min(1))
+      .min(1, 'Elige al menos una terminal')
+      .max(100, 'Puedes elegir hasta 100 terminales por operación'),
     commandType: TpvCommandTypeSchema,
     priority: TpvCommandPrioritySchema.optional(),
     payload: z.record(z.any()).optional(),
 
     // Security
-    confirmationPin: z.string().length(4, 'PIN must be 4 digits').optional(),
+    confirmationPin: z.string().length(4, 'El PIN debe tener 4 dígitos').optional(),
 
     // Execution options
     stopOnFirstError: z.boolean().default(false),
@@ -226,7 +229,7 @@ export const bulkCommandBodySchema = z
       }
       return true
     },
-    { message: 'Factory reset cannot be executed in bulk for safety reasons', path: ['commandType'] },
+    { message: 'Por seguridad, restablecer de fábrica no se puede hacer en lote', path: ['commandType'] },
   )
   .refine(
     data => {
@@ -237,7 +240,7 @@ export const bulkCommandBodySchema = z
       }
       return true
     },
-    { message: 'This command type requires PIN confirmation', path: ['confirmationPin'] },
+    { message: 'Este tipo de comando requiere confirmar con tu PIN', path: ['confirmationPin'] },
   )
 
 // ==========================================
@@ -261,7 +264,7 @@ export const createScheduledCommandBodySchema = z
     recurrenceEndDate: z.coerce.date().optional(),
 
     // Security
-    confirmationPin: z.string().length(4, 'PIN must be 4 digits').optional(),
+    confirmationPin: z.string().length(4, 'El PIN debe tener 4 dígitos').optional(),
   })
   .refine(
     data => {
@@ -270,7 +273,7 @@ export const createScheduledCommandBodySchema = z
       }
       return true
     },
-    { message: 'Recurring schedules require a cron expression', path: ['cronExpression'] },
+    { message: 'Las programaciones recurrentes necesitan una expresión cron', path: ['cronExpression'] },
   )
   .refine(
     data => {
@@ -279,7 +282,7 @@ export const createScheduledCommandBodySchema = z
       }
       return true
     },
-    { message: 'Scheduled time must be in the future', path: ['scheduledFor'] },
+    { message: 'La hora programada debe ser en el futuro', path: ['scheduledFor'] },
   )
   .refine(
     data => {
@@ -289,7 +292,7 @@ export const createScheduledCommandBodySchema = z
       }
       return true
     },
-    { message: 'Factory reset cannot be scheduled for safety reasons', path: ['commandType'] },
+    { message: 'Por seguridad, restablecer de fábrica no se puede programar', path: ['commandType'] },
   )
 
 export const updateScheduledCommandBodySchema = z.object({
@@ -328,11 +331,11 @@ export const createGeofenceRuleBodySchema = z
     // Schedule (optional time restrictions)
     activeFrom: z
       .string()
-      .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+      .regex(/^\d{2}:\d{2}$/, 'El formato de hora debe ser HH:MM')
       .optional(),
     activeUntil: z
       .string()
-      .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+      .regex(/^\d{2}:\d{2}$/, 'El formato de hora debe ser HH:MM')
       .optional(),
     activeDaysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
 
@@ -345,7 +348,7 @@ export const createGeofenceRuleBodySchema = z
       }
       return true
     },
-    { message: 'Both activeFrom and activeUntil must be provided together', path: ['activeFrom'] },
+    { message: 'Indica la hora de inicio y la de fin, o ninguna de las dos', path: ['activeFrom'] },
   )
 
 export const updateGeofenceRuleBodySchema = z.object({
@@ -360,12 +363,12 @@ export const updateGeofenceRuleBodySchema = z.object({
   payload: z.record(z.any()).optional().nullable(),
   activeFrom: z
     .string()
-    .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+    .regex(/^\d{2}:\d{2}$/, 'El formato de hora debe ser HH:MM')
     .optional()
     .nullable(),
   activeUntil: z
     .string()
-    .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+    .regex(/^\d{2}:\d{2}$/, 'El formato de hora debe ser HH:MM')
     .optional()
     .nullable(),
   activeDaysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
@@ -448,27 +451,27 @@ export const retryCommandBodySchema = z.object({
 // ==========================================
 
 export const venueParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
+  venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
 })
 
 export const commandParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  commandId: z.string().min(1, 'Command ID is required'),
+  venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
+  commandId: z.string().min(1, 'El ID del comando es obligatorio'),
 })
 
 export const bulkOperationParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  operationId: z.string().min(1, 'Operation ID is required'),
+  venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
+  operationId: z.string().min(1, 'El ID de la operación es obligatorio'),
 })
 
 export const scheduledCommandParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  scheduleId: z.string().min(1, 'Schedule ID is required'),
+  venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
+  scheduleId: z.string().min(1, 'El ID de la programación es obligatorio'),
 })
 
 export const geofenceRuleParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  ruleId: z.string().min(1, 'Rule ID is required'),
+  venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
+  ruleId: z.string().min(1, 'El ID de la regla es obligatorio'),
 })
 
 // ==========================================
@@ -560,13 +563,13 @@ export const geofenceRulesQuerySchema = z.object({
 
 // Terminal acknowledgment schemas (for TPV terminal callbacks)
 export const terminalAckBodySchema = z.object({
-  commandId: z.string().min(1, 'Command ID is required'),
+  commandId: z.string().min(1, 'El ID del comando es obligatorio'),
   correlationId: z.string().optional(),
   timestamp: z.coerce.date().optional(),
 })
 
 export const terminalResultBodySchema = z.object({
-  commandId: z.string().min(1, 'Command ID is required'),
+  commandId: z.string().min(1, 'El ID del comando es obligatorio'),
   correlationId: z.string().optional(),
   status: TpvCommandResultStatusSchema,
   message: z.string().max(1000).optional(),

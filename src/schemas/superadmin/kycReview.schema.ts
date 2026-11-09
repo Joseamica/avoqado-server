@@ -18,7 +18,7 @@ export const ListPendingKycSchema = z.object({
  */
 export const GetKycDetailsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 
@@ -27,53 +27,53 @@ export const GetKycDetailsSchema = z.object({
  */
 export const AssignProcessorSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
   body: z.object({
     // Payment provider assignment
-    providerId: z.string().cuid('Invalid provider ID format'),
-    ecommerceMerchantId: z.string().min(1, 'External merchant ID is required'),
-    displayName: z.string().min(1, 'Display name is required'),
+    providerId: z.string().cuid('El ID del proveedor no es válido'),
+    ecommerceMerchantId: z.string().min(1, 'El ID externo del comercio es obligatorio'),
+    displayName: z.string().min(1, 'El nombre para mostrar es obligatorio'),
     credentials: z.record(z.any()).refine(obj => Object.keys(obj).length > 0, {
-      message: 'Credentials object cannot be empty',
+      message: 'Las credenciales no pueden estar vacías',
     }),
     providerConfig: z.record(z.any()).optional(),
 
     // CLABE information (from onboarding)
     clabeNumber: z
       .string()
-      .regex(/^\d{18}$/, 'CLABE must be exactly 18 digits')
+      .regex(/^\d{18}$/, 'La CLABE debe tener exactamente 18 dígitos')
       .refine(
         clabe => {
           // Basic CLABE validation
           return clabe.length === 18
         },
-        { message: 'Invalid CLABE format' },
+        { message: 'La CLABE no es válida' },
       ),
-    bankName: z.string().min(1, 'Bank name is required'),
-    accountHolder: z.string().min(1, 'Account holder name is required'),
+    bankName: z.string().min(1, 'El nombre del banco es obligatorio'),
+    accountHolder: z.string().min(1, 'El nombre del titular de la cuenta es obligatorio'),
 
     // Provider costs (what processor charges Avoqado)
     providerCosts: z.object({
-      debitRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      creditRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      amexRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      internationalRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
+      debitRate: z.number().min(0).max(1, 'La tasa de débito debe estar entre 0 y 1'),
+      creditRate: z.number().min(0).max(1, 'La tasa de crédito debe estar entre 0 y 1'),
+      amexRate: z.number().min(0).max(1, 'La tasa de American Express debe estar entre 0 y 1'),
+      internationalRate: z.number().min(0).max(1, 'La tasa internacional debe estar entre 0 y 1'),
       // Mismo flag/taxRate del modelo. false = "tasa + IVA" en contrato.
       includesTax: z.boolean().nullable().optional(),
       taxRate: z.number().min(0).max(1).optional(),
-      fixedCostPerTransaction: z.number().min(0, 'Fixed cost must be positive'),
+      fixedCostPerTransaction: z.number().min(0, 'El costo fijo no puede ser negativo'),
     }),
 
     // Venue pricing (what venue pays)
     venuePricing: z.object({
-      debitRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      creditRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      amexRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
-      internationalRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
+      debitRate: z.number().min(0).max(1, 'La tasa de débito debe estar entre 0 y 1'),
+      creditRate: z.number().min(0).max(1, 'La tasa de crédito debe estar entre 0 y 1'),
+      amexRate: z.number().min(0).max(1, 'La tasa de American Express debe estar entre 0 y 1'),
+      internationalRate: z.number().min(0).max(1, 'La tasa internacional debe estar entre 0 y 1'),
       includesTax: z.boolean().nullable().optional(),
       taxRate: z.number().min(0).max(1).optional(),
-      fixedFeePerTransaction: z.number().min(0, 'Fixed fee must be positive'),
+      fixedFeePerTransaction: z.number().min(0, 'La comisión fija no puede ser negativa'),
     }),
   }),
 })
@@ -83,10 +83,13 @@ export const AssignProcessorSchema = z.object({
  */
 export const RejectKycSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
   body: z.object({
-    rejectionReason: z.string().min(10, 'Rejection reason must be at least 10 characters').max(500, 'Rejection reason too long'),
+    rejectionReason: z
+      .string()
+      .min(10, 'El motivo del rechazo debe tener al menos 10 caracteres')
+      .max(500, 'El motivo del rechazo admite hasta 500 caracteres'),
     rejectedDocuments: z.array(z.string()).optional(),
   }),
 })
@@ -96,6 +99,6 @@ export const RejectKycSchema = z.object({
  */
 export const MarkKycInReviewSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })

@@ -41,7 +41,7 @@ export const ListAssessmentsSchema = z.object({
  */
 export const VenueIdSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 
@@ -50,7 +50,7 @@ export const VenueIdSchema = z.object({
  */
 export const OfferIdSchema = z.object({
   params: z.object({
-    offerId: z.string().cuid('Invalid offer ID format'),
+    offerId: z.string().cuid('El ID de la oferta no es válido'),
   }),
 })
 
@@ -59,19 +59,25 @@ export const OfferIdSchema = z.object({
  */
 export const CreateOfferSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
   body: z.object({
-    offerAmount: z.number().min(50000, 'Minimum offer amount is $50,000 MXN').max(2000000, 'Maximum offer amount is $2,000,000 MXN'),
-    factorRate: z.number().min(1.05, 'Factor rate must be at least 1.05 (5% fee)').max(1.3, 'Factor rate cannot exceed 1.30 (30% fee)'),
-    repaymentPercent: z.number().min(0.05, 'Minimum repayment percent is 5%').max(0.2, 'Maximum repayment percent is 20%'),
+    offerAmount: z
+      .number()
+      .min(50000, 'El monto mínimo de la oferta es $50,000 MXN')
+      .max(2000000, 'El monto máximo de la oferta es $2,000,000 MXN'),
+    factorRate: z
+      .number()
+      .min(1.05, 'El factor debe ser de al menos 1.05 (5 % de comisión)')
+      .max(1.3, 'El factor no puede pasar de 1.30 (30 % de comisión)'),
+    repaymentPercent: z.number().min(0.05, 'El porcentaje mínimo de pago es 5 %').max(0.2, 'El porcentaje máximo de pago es 20 %'),
     expiresInDays: z
       .number()
-      .min(7, 'Offer must be valid for at least 7 days')
-      .max(90, 'Offer cannot exceed 90 days validity')
+      .min(7, 'La oferta debe durar al menos 7 días')
+      .max(90, 'La oferta no puede durar más de 90 días')
       .optional()
       .default(30),
-    notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
+    notes: z.string().max(1000, 'Las notas admiten hasta 1000 caracteres').optional(),
   }),
 })
 
@@ -80,13 +86,13 @@ export const CreateOfferSchema = z.object({
  */
 export const RejectOfferSchema = z.object({
   params: z.object({
-    offerId: z.string().cuid('Invalid offer ID format'),
+    offerId: z.string().cuid('El ID de la oferta no es válido'),
   }),
   body: z.object({
     rejectionReason: z
       .string()
-      .min(5, 'Rejection reason must be at least 5 characters')
-      .max(500, 'Rejection reason cannot exceed 500 characters')
+      .min(5, 'El motivo del rechazo debe tener al menos 5 caracteres')
+      .max(500, 'El motivo del rechazo admite hasta 500 caracteres')
       .optional(),
   }),
 })
