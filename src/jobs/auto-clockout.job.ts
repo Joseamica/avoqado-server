@@ -160,7 +160,8 @@ export class AutoClockOutJob {
 
           for (const entry of openEntries) {
             try {
-              await this.clockOutEntry(entry, `Hora de cierre programada (${configuredTime})`, timezone)
+              // Sólo cuenta lo que este job cerró: una salida real que llegó mientras corría no es suya.
+              if (!(await this.clockOutEntry(entry, `Hora de cierre programada (${configuredTime})`, timezone))) continue
               count++
 
               logger.info(`Auto clock-out (fixed time): ${entry.staff.firstName} ${entry.staff.lastName}`, {
@@ -248,7 +249,7 @@ export class AutoClockOutJob {
 
           for (const entry of overdueEntries) {
             try {
-              await this.clockOutEntry(entry, `Turno excedió ${maxHours} horas`, timezone)
+              if (!(await this.clockOutEntry(entry, `Turno excedió ${maxHours} horas`, timezone))) continue
               count++
 
               logger.info(`Auto clock-out (max duration): ${entry.staff.firstName} ${entry.staff.lastName}`, {
@@ -314,7 +315,7 @@ export class AutoClockOutJob {
   }
 
   /**
-   * Clock out a time entry and calculate hours worked
+   * Clock out a time entry and calculate hours worked. Returns whether THIS job closed it (false: another exit already did).
    */
   private async clockOutEntry(
     entry: {
@@ -324,7 +325,7 @@ export class AutoClockOutJob {
     },
     reason: string,
     _timezone?: string, // Reserved for future timezone-aware calculations
-  ): Promise<void> {
+  ): Promise<boolean> {
     const now = new Date()
 
     // Calculate break minutes (only completed breaks)
@@ -369,6 +370,7 @@ export class AutoClockOutJob {
     if (!closed) {
       logger.info(`Auto clock-out skipped: entry ${entry.id} was already closed by another exit`)
     }
+    return closed
   }
 
   /**

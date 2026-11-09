@@ -1,8 +1,9 @@
-// El cierre automático no pisa una salida real que llegó entre su lectura y su escritura.
+// El cierre automático no pisa una salida real que llegó entre su lectura y su escritura, y sólo cuenta lo que él cerró.
 import { prismaMock } from '@tests/__helpers__/setup'
 import { TimeEntryStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { AutoClockOutJob } from '@/jobs/auto-clockout.job'
+import logger from '@/config/logger'
 
 describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
   const job = new AutoClockOutJob()
@@ -22,7 +23,7 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
   it('carrera: otra salida ya cerró la entrada (0 filas) -> no toca la entrada ni sus descansos', async () => {
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 0 })
 
-    await run()
+    expect(await run()).toBe(false)
 
     expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'entry-1', clockOutTime: null } }))
     expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
@@ -33,7 +34,7 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.timeEntryBreak.update.mockResolvedValue({} as any)
 
-    await run()
+    expect(await run()).toBe(true)
 
     const arg = prismaMock.timeEntry.updateMany.mock.calls[0][0] as any
     const now: Date = arg.data.clockOutTime
@@ -52,5 +53,27 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
     const breakArg = prismaMock.timeEntryBreak.update.mock.calls[0][0] as any
     expect(breakArg.where).toEqual({ id: 'b-open' })
     expect(breakArg.data.endTime).toBe(now)
+  })
+
+  it.each([
+    ['fixed time', 'processFixedTimeClockOuts', { autoClockOutEnabled: true, autoClockOutTime: '03:00' }],
+    ['max duration', 'processMaxDurationClockOuts', { maxShiftDurationEnabled: true, maxShiftDurationHours: 12 }],
+  ])('%s: una entrada que otra salida ya cerró no se cuenta ni se reporta como cerrada', async (_n, metodo, ajustes) => {
+    prismaMock.venueSettings.findMany.mockResolvedValue([
+      { id: 's1', venueId: 'venue-1', ...ajustes, venue: { id: 'venue-1', name: 'Tienda', timezone: 'America/Mexico_City' } },
+    ])
+    prismaMock.timeEntry.findMany.mockResolvedValue([
+      { ...entry, id: 'ya-cerrada', staff: { firstName: 'Ana', lastName: 'Ruiz' } },
+      { ...entry, id: 'abierta', staff: { firstName: 'Luis', lastName: 'Paz' } },
+    ])
+    prismaMock.timeEntry.updateMany.mockImplementation(async ({ where }: any) => ({ count: where.id === 'abierta' ? 1 : 0 }))
+    prismaMock.timeEntryBreak.update.mockResolvedValue({} as any)
+    ;(job as any).isWithinClockOutWindow = jest.fn().mockReturnValue(true)
+
+    const r = await (job as any)[metodo]()
+
+    expect(r).toEqual({ count: 1, errors: 0 })
+    const cerradas = (logger.info as jest.Mock).mock.calls.filter(([m]) => /^Auto clock-out \((fixed time|max duration)\)/.test(m))
+    expect(cerradas.map(([, d]) => d.entryId)).toEqual(['abierta'])
   })
 })
