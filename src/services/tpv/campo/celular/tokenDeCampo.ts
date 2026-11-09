@@ -30,8 +30,12 @@ export function firmarAccesoDeCampo(p: { staffId: string; organizationId: string
 export function verificarAccesoDeCampo(token: string): AccesoDeCampo {
   try {
     const d = jwt.verify(token, llave(), { algorithms: ['HS256'], issuer: EMISOR, audience: AUDIENCIA }) as jwt.JwtPayload
-    if (typeof d.sub !== 'string' || typeof d.sid !== 'string' || typeof d.venueId !== 'string') throw new Error('faltan claims')
-    return { sub: d.sub, orgId: d.orgId, venueId: d.venueId, role: d.role, sid: d.sid, iat: d.iat! }
+    const { sub, sid, venueId, orgId, role } = d
+    if (typeof sub !== 'string' || typeof sid !== 'string' || typeof venueId !== 'string' || typeof orgId !== 'string') {
+      throw new Error('claims inválidos')
+    }
+    if (!Object.values(StaffRole).includes(role)) throw new Error('rol inválido')
+    return { sub, orgId, venueId, role, sid, iat: d.iat! }
   } catch {
     throw new UnauthorizedError('Tu sesión del celular no es válida. Entra de nuevo con tu PIN.', 'SESION_INVALIDA')
   }

@@ -5,6 +5,7 @@
 import { createHash, pbkdf2 } from 'crypto'
 import { promisify } from 'util'
 import jwt from 'jsonwebtoken'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createSession, revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
@@ -176,6 +177,17 @@ describe('tokenDeCampo', () => {
       jwt.sign({ sub: 'staff1' }, llave, { issuer: 'otro', audience: 'avoqado-campo', expiresIn: '1h' }),
       jwt.sign({ sub: 'staff1', exp: Math.floor(AHORA.getTime() / 1000) - 1 }, llave, { issuer: 'avoqado-api', audience: 'avoqado-campo' }),
       'no.es.jwt',
+      // Firma y audiencia buenas, pero claims de otro tipo: sin orgId, o con un rol que no existe.
+      jwt.sign({ sub: 'staff1', sid: 'ses1', venueId: 'v1', role: 'WAITER' }, llave, {
+        issuer: 'avoqado-api',
+        audience: 'avoqado-campo',
+        expiresIn: '1h',
+      }),
+      jwt.sign({ sub: 'staff1', sid: 'ses1', venueId: 'v1', orgId: 'org1', role: 'REY' }, llave, {
+        issuer: 'avoqado-api',
+        audience: 'avoqado-campo',
+        expiresIn: '1h',
+      }),
     ]
     for (const t of malos) {
       let error: any
@@ -367,7 +379,11 @@ describe('activarCelular', () => {
     }
     expect(await falla(activar('9999'))).toMatchObject({ statusCode: 401, code: 'CODIGO_ANULADO', details: { intentosRestantes: 0 } })
     expect(codigos[0].anuladoAt).toEqual(AHORA)
-    expect(db.codigoDeCelular.updateMany.mock.calls[0][0].where).toEqual({ id: 'cod1', codigo: 'ABC234', usadoAt: null, anuladoAt: null })
+    // El intento se reserva ANTES de comparar el PIN, en un solo UPDATE con su tope.
+    expect(db.codigoDeCelular.updateMany.mock.calls[0][0]).toEqual({
+      where: { id: 'cod1', codigo: 'ABC234', usadoAt: null, anuladoAt: null, expiraAt: { gt: AHORA }, intentos: { lt: 5 } },
+      data: { intentos: { increment: 1 } },
+    })
     expect(await falla(activar('4321'))).toMatchObject({ statusCode: 410, code: 'CODIGO_ANULADO' })
     expect(celulares).toEqual([])
   })
@@ -375,14 +391,11 @@ describe('activarCelular', () => {
   it('6-7 · PIN bueno → 201: consume el código, crea el celular vinculado, sesión en la sucursal cuyo PIN coincidió', async () => {
     const r = await activar('4321')
     expect(r.status).toBe(201)
-    expect(codigos[0]).toMatchObject({ usadoAt: AHORA, usadoPorAparatoId: 'aparato-0001' })
-    expect(db.codigoDeCelular.updateMany.mock.calls[0][0].where).toEqual({
-      id: 'cod1',
-      codigo: 'ABC234',
-      usadoAt: null,
-      anuladoAt: null,
-      expiraAt: { gt: AHORA },
-      intentos: { lt: 5 },
+    expect(codigos[0]).toMatchObject({ usadoAt: AHORA, usadoPorAparatoId: 'aparato-0001', intentos: 0 })
+    // [0] reserva el intento; [1] consume: ya sin mirar `intentos`, y lo vuelve a 0.
+    expect(db.codigoDeCelular.updateMany.mock.calls[1][0]).toEqual({
+      where: { id: 'cod1', codigo: 'ABC234', usadoAt: null, anuladoAt: null, expiraAt: { gt: AHORA } },
+      data: { usadoAt: AHORA, usadoPorAparatoId: 'aparato-0001', intentos: 0 },
     })
     const cel = celulares[0]
     expect(cel).toMatchObject({
@@ -451,11 +464,53 @@ describe('activarCelular', () => {
     )
   })
 
-  it('6 · la otra activación ganó el código (0 filas al consumir) → 409 CODIGO_USADO y no crea nada', async () => {
-    db.codigoDeCelular.updateMany.mockResolvedValueOnce({ count: 0 })
-    expect(await falla(activar())).toMatchObject({ statusCode: 409, code: 'CODIGO_USADO' })
-    expect(db.celularDeCampo.create).not.toHaveBeenCalled()
+  describe('6 · el PIN bueno pierde el CAS del consumo → se contesta lo que dice la base', () => {
+    /** Justo antes del consumo, el código cambia (otra activación lo usó, se anuló o venció). */
+    const alConsumir = (cambio: (c: any) => void) => {
+      const real = db.codigoDeCelular.updateMany.getMockImplementation()
+      db.codigoDeCelular.updateMany.mockImplementation((args: any) => {
+        if (args.data.usadoAt) cambio(codigos[0])
+        return real(args)
+      })
+    }
+
+    it.each([
+      ['otra activación lo usó', (c: any) => (c.usadoAt = AHORA), { statusCode: 409, code: 'CODIGO_USADO' }],
+      ['se anuló', (c: any) => (c.anuladoAt = AHORA), { statusCode: 401, code: 'CODIGO_ANULADO', details: { intentosRestantes: 0 } }],
+      ['venció', (c: any) => (c.expiraAt = AHORA), { statusCode: 410, code: 'CODIGO_VENCIDO' }],
+    ])('%s', async (_, cambio, esperado) => {
+      alConsumir(cambio)
+      expect(await falla(activar('4321'))).toMatchObject(esperado)
+      expect(celulares).toEqual([])
+      expect(createSession).not.toHaveBeenCalled()
+    })
+  })
+
+  it('6 · otra activación de la persona creó su celular a la vez (P2002) → 409 ENTRADA_EN_PROCESO', async () => {
+    db.celularDeCampo.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['staffIdVinculado'] },
+      }),
+    )
+    expect(await falla(activar('4321'))).toMatchObject({ statusCode: 409, code: 'ENTRADA_EN_PROCESO' })
     expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('ráfaga de 10 PINes distintos en paralelo (uno bueno): máximo 5 comparaciones y el bueno no se delata', async () => {
+    sucursales = [{ staffVenueId: 'sv2', venueId: 'v2', nombre: 'Tienda Dos', role: 'CASHIER', pin: '4321' }]
+    const espia = jest.spyOn(require('crypto'), 'timingSafeEqual')
+    const pines = ['0001', '0002', '0003', '0004', '0005', '0006', '0007', '4321', '0008', '0009']
+    const resultados = await Promise.all(pines.map((pin, i) => falla(activar(pin, { aparatoId: `aparato-rafaga-${i}` }))))
+    const comparaciones = espia.mock.calls.length
+    espia.mockRestore() // antes de afirmar: un espía que queda vivo lo vacía el `resetAllMocks` de la siguiente prueba
+    expect(comparaciones).toBeLessThanOrEqual(5)
+    expect(codigos[0].intentos).toBe(5)
+    expect(celulares).toEqual([])
+    const bueno = resultados[pines.indexOf('4321')]
+    const malos = resultados.filter((_, i) => pines[i] !== '4321')
+    expect(malos.map(m => `${m.statusCode}:${m.code}`)).toContain(`${bueno.statusCode}:${bueno.code}`)
   })
 
   describe('2 · código ya usado', () => {
@@ -514,8 +569,9 @@ describe('activarCelular', () => {
   it('el PIN se compara en tiempo constante', async () => {
     const espia = jest.spyOn(require('crypto'), 'timingSafeEqual')
     await falla(activar('9999'))
-    expect(espia).toHaveBeenCalled()
+    const llamadas = espia.mock.calls.length
     espia.mockRestore()
+    expect(llamadas).toBeGreaterThan(0)
   })
 })
 
