@@ -6,9 +6,17 @@ import { NextFunction, Request, Response, Router } from 'express'
 import AppError, { NotFoundError } from '@/errors/AppError'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
+import { requireVenueMembership } from '@/middlewares/validateVenueAccess.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { aceptarCustodia, rechazarCustodia } from '@/controllers/tpv/campo/custodiaDeCampo.controller'
-import { aceptarCustodiaSchema, rechazarCustodiaSchema, ventaDeCampoSchema } from '@/schemas/tpv/campo.schema'
+import {
+  aceptarCustodiaSchema,
+  entradaDeCampoSchema,
+  rechazarCustodiaSchema,
+  salidaDeCampoSchema,
+  ventaDeCampoSchema,
+} from '@/schemas/tpv/campo.schema'
+import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import prisma from '@/utils/prismaClient'
 
@@ -54,6 +62,40 @@ router.post(
   checkPermission('tpv-sim-custody:reject'),
   validateRequest(rechazarCustodiaSchema),
   rechazarCustodia,
+)
+
+/**
+ * La checada del celular: la persona sale del token (no hay PIN) y `requireVenueMembership` exige que siga activa y con
+ * su rol en la sucursal de la dirección, contra la base. Entrada: 201 nueva, 200 repetida. Salida: 200.
+ * Rechazos: 409 YA_TIENE_ENTRADA (con `timeEntryId`, `venueId` y `clockInTime` al mismo nivel), 404, 422
+ * SALIDA_ANTES_DE_ENTRADA, 409 YA_TIENE_SALIDA; reintentable: 409 CHECADA_EN_PROCESO y cualquier 5xx.
+ */
+const checada =
+  (registrar: typeof registrarEntradaDeCampo | typeof registrarSalidaDeCampo, nueva: number) =>
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const r = await registrar({ venueId: req.params.venueId, staffId: req.authContext!.userId }, req.body)
+      res.status(r.repetida ? 200 : nueva).json(r)
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'YA_TIENE_ENTRADA') {
+        return res.status(error.statusCode).json({ code: error.code, message: error.message, ...(error.details as object) })
+      }
+      next(error)
+    }
+  }
+router.post(
+  '/venues/:venueId/checadas/entrada',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(entradaDeCampoSchema),
+  checada(registrarEntradaDeCampo, 201),
+)
+router.post(
+  '/venues/:venueId/checadas/salida',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(salidaDeCampoSchema),
+  checada(registrarSalidaDeCampo, 200),
 )
 
 export default router
