@@ -4630,6 +4630,8 @@ export async function sellSerializedItem(
   venueId: string,
   input: SellSerializedItemInput,
   staffId: string,
+  // Gancho opcional (venta del celular): corre en la MISMA transacción tras crear la orden; si lanza, todo se revierte.
+  opciones?: { enLaTransaccion?: (tx: Prisma.TransactionClient, order: { id: string }) => Promise<void> },
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`💵 [ORDER SERVICE] Quick sell serialized item ${input.serialNumber}`)
   await assertVenueSalesEnabled(venueId)
@@ -4731,6 +4733,8 @@ export async function sellSerializedItem(
         items: true,
       },
     })
+
+    if (opciones?.enLaTransaccion) await opciones.enLaTransaccion(tx, { id: order.id })
 
     // ⚠️ DO NOT mark as SOLD here - only mark as SOLD when payment completes
     // Item will be marked as SOLD in processPayment() when payment succeeds

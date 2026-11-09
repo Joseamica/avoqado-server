@@ -4015,9 +4015,20 @@ model TimeEntry {
   validatedAt      DateTime?
   validationNote   String? // Reason for rejection
 
+  // Checada desde el celular (app de campo): llaves de idempotencia, hora y ubicación falsa
+  llaveEntrada           String?
+  llaveSalida            String?
+  clockOutRecibidaAt     DateTime?
+  clockInOrigenHora      OrigenDeLaHora?
+  clockOutOrigenHora     OrigenDeLaHora?
+  clockInUbicacionFalsa  Boolean?
+  clockOutUbicacionFalsa Boolean?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([staffId, llaveEntrada])
+  @@unique([staffId, llaveSalida])
   @@index([staffId, venueId])
   @@index([venueId, clockInTime])
   @@index([status])
@@ -21544,4 +21555,40 @@ model CrmWhatsappMessage {
 
   @@index([contactPhone, sentAt])
   @@index([phoneNumberId, sentAt])
+}
+
+enum OrigenDeLaHora {
+  SERVIDOR
+  RELOJ_ANCLADO
+  RELOJ_DEL_CELULAR
+}
+
+enum EstadoVentaDeCampo {
+  EN_CURSO
+  COMPLETA
+}
+
+// Ficha de venta de la app de campo. Sin relaciones Prisma a propósito (ids sueltos).
+model VentaDeCampo {
+  id                 String             @id @default(cuid())
+  venueId            String
+  staffId            String
+  llave              String
+  serialNumber       String
+  serializedItemId   String?            @unique
+  precio             Decimal            @db.Decimal(10, 2)
+  ocurrioAt          DateTime
+  origenHora         OrigenDeLaHora
+  estado             EstadoVentaDeCampo @default(EN_CURSO)
+  orderId            String?            @unique
+  paymentId          String?            @unique
+  saleVerificationId String?
+  ocupacion          String?
+  ocupadaHasta       DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([venueId, llave])
+  @@index([staffId, createdAt])
+  @@map("ventas_de_campo")
 }

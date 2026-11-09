@@ -65,11 +65,18 @@ export interface AcceptInput {
   actor: CustodyActor
   serialNumbers: string[]
   idempotencyRequestId?: string | null
+  /**
+   * Optional (App de campo, Codex C3): the `custodyVersion` the caller saw, by serial as passed in `serialNumbers`. Checked inside
+   * the row's transaction before writing; a different version → ASIGNACION_CAMBIO. Omitted (TPV, dashboard): unchanged behavior.
+   */
+  versionEsperada?: Record<string, number>
 }
 
 export interface RejectInput {
   actor: CustodyActor
   serialNumber: string
+  /** Optional (App de campo, Codex C3): same as `AcceptInput.versionEsperada`, for the one SIM. */
+  versionEsperada?: number
 }
 
 export interface CollectInput {
@@ -410,7 +417,7 @@ export class SimCustodyService {
 
   /** TPV bulk-accept: promoter accepts N pending SIMs. */
   async accept(input: AcceptInput): Promise<BulkResult> {
-    const { actor, serialNumbers, idempotencyRequestId } = input
+    const { actor, serialNumbers, idempotencyRequestId, versionEsperada } = input
     const results: BulkResultRow[] = []
     for (const sn of serialNumbers) {
       results.push(
@@ -423,6 +430,7 @@ export class SimCustodyService {
           if (item.custodyState === 'PROMOTER_HELD') throw new SimCustodyError('ALREADY_ACCEPTED')
           if (item.custodyState === 'PROMOTER_REJECTED') throw new SimCustodyError('ALREADY_REJECTED')
           const newState = applyTransition(item.custodyState, 'ACCEPT')
+          exigirVersion(item, versionEsperada?.[sn])
           const updated = await this.updateWithVersion(tx, item, {
             custodyState: newState,
             promoterAcceptedAt: new Date(),
@@ -455,6 +463,7 @@ export class SimCustodyService {
       }
       if (item.custodyState === 'PROMOTER_REJECTED') throw new SimCustodyError('ALREADY_REJECTED')
       if (item.custodyState !== 'PROMOTER_PENDING') throw new SimCustodyError('INVALID_STATE')
+      exigirVersion(item, input.versionEsperada)
 
       const newState = applyTransition(item.custodyState, 'REJECT')
       const updated = await this.updateWithVersion(tx, item, {
@@ -1250,6 +1259,15 @@ export class SimCustodyService {
       throw err
     }
   }
+}
+
+/**
+ * App de campo (Codex C3): the decision the caller made was about the assignment at `esperada`; after a collect + reassign the
+ * version moved, so it does not apply to the new one. Runs inside the transaction, after the «already done» checks (a repeat of
+ * the caller's own applied decision is still recognized) and before the write (whose CAS pins this same version).
+ */
+function exigirVersion(item: SerializedItem, esperada: number | undefined): void {
+  if (esperada !== undefined && item.custodyVersion !== esperada) throw new SimCustodyError('ASIGNACION_CAMBIO')
 }
 
 function buildSummary(results: BulkResultRow[]): BulkResult {
