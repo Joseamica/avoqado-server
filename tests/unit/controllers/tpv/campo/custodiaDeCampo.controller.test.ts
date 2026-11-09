@@ -50,8 +50,13 @@ describe('custodia de campo: la organización sale de la sucursal de la direcci�
       actor: { staffId: 's1', organizationId: 'oB', role: 'MANAGER' },
       serialNumbers: ['A'],
       idempotencyRequestId: null,
+      versionEsperada: { A: 1 },
     })
-    expect(svc.reject).toHaveBeenCalledWith({ actor: { staffId: 's1', organizationId: 'oB', role: 'WAITER' }, serialNumber: 'A' })
+    expect(svc.reject).toHaveBeenCalledWith({
+      actor: { staffId: 's1', organizationId: 'oB', role: 'WAITER' },
+      serialNumber: 'A',
+      versionEsperada: 1,
+    })
   })
 
   it('una sucursal que no existe → 404 por next, sin llamar al servicio', async () => {
@@ -64,11 +69,14 @@ describe('custodia de campo: la organización sale de la sucursal de la direcci�
 })
 
 describe('aceptar: cada SIM con la versión que vio el celular (Codex C3, C6)', () => {
-  it('ya aceptada → repetida; reasignada (otra versión) → ASIGNACION_CAMBIO; la de su versión → al servicio, y el orden se respeta', async () => {
-    hoy.A = sim('PROMOTER_HELD', 2)
-    hoy.B = sim('PROMOTER_PENDING', 4) // la recolectaron y se la volvieron a asignar
-    hoy.C = sim('PROMOTER_PENDING', 1)
-    svc.accept.mockResolvedValue({ results: [{ serialNumber: 'C', status: 'ok', event: 'PROMOTER_ACCEPTED', eventId: 'e1' }] })
+  it('pasa al servicio la versión de cada SIM (la exige dentro de su transacción) y respeta el orden de sus filas', async () => {
+    svc.accept.mockResolvedValue({
+      results: [
+        { serialNumber: 'A', status: 'error', code: 'ALREADY_ACCEPTED', message: 'x' },
+        { serialNumber: 'B', status: 'error', code: 'ASIGNACION_CAMBIO', message: new SimCustodyError('ASIGNACION_CAMBIO').message },
+        { serialNumber: 'C', status: 'ok', event: 'ACCEPTED_BY_PROMOTER', eventId: 'e1' },
+      ],
+    })
     const res = mkRes()
 
     await aceptarCustodia(
@@ -76,20 +84,26 @@ describe('aceptar: cada SIM con la versión que vio el celular (Codex C3, C6)', 
         sims: [
           { serialNumber: 'A', custodyVersion: 1 },
           { serialNumber: 'B', custodyVersion: 1 },
-          { serialNumber: 'C', custodyVersion: 1 },
+          { serialNumber: 'C', custodyVersion: 7 },
         ],
       }),
       res,
       jest.fn(),
     )
 
-    expect(svc.accept.mock.calls[0][0].serialNumbers).toEqual(['C'])
+    expect(svc.accept.mock.calls[0][0]).toMatchObject({ serialNumbers: ['A', 'B', 'C'], versionEsperada: { A: 1, B: 1, C: 7 } })
+    expect(prismaMock.serializedItem.findFirst).not.toHaveBeenCalled() // sin lectura previa: la versión la decide el servicio
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith({
       summary: { total: 3, succeeded: 2, failed: 1 },
       results: [
         { serialNumber: 'A', status: 'ok', repetida: true },
-        { serialNumber: 'B', status: 'error', code: 'ASIGNACION_CAMBIO', message: expect.stringContaining('volvió a asignar') },
+        {
+          serialNumber: 'B',
+          status: 'error',
+          code: 'ASIGNACION_CAMBIO',
+          message: 'Esta SIM se volvió a asignar; revisa y decide de nuevo.',
+        },
         { serialNumber: 'C', status: 'ok', repetida: false },
       ],
     })
@@ -165,23 +179,14 @@ describe('aceptar: cada SIM con la versión que vio el celular (Codex C3, C6)', 
   })
 })
 
-describe('rechazar: con la versión que vio el celular', () => {
-  it('ya rechazada por ella → 200 repetida sin llamar al servicio', async () => {
-    hoy.A = sim('PROMOTER_REJECTED', 2)
+describe('rechazar: con la versión que vio el celular (Codex C3, C6)', () => {
+  it('pasa la versión al servicio; ASIGNACION_CAMBIO del servicio (reasignada) → 409 { code, message }', async () => {
+    svc.reject.mockRejectedValue(new SimCustodyError('ASIGNACION_CAMBIO'))
     const res = mkRes()
     await rechazarCustodia(req({ serialNumber: 'A', custodyVersion: 1 }), res, jest.fn())
-    expect(svc.reject).not.toHaveBeenCalled()
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ custodyState: 'PROMOTER_REJECTED', repetida: true })
-  })
-
-  it('recolectada y reasignada (otra versión) → 409 ASIGNACION_CAMBIO sin llamar al servicio', async () => {
-    hoy.A = sim('PROMOTER_PENDING', 4)
-    const res = mkRes()
-    await rechazarCustodia(req({ serialNumber: 'A', custodyVersion: 1 }), res, jest.fn())
-    expect(svc.reject).not.toHaveBeenCalled()
+    expect(svc.reject.mock.calls[0][0]).toMatchObject({ serialNumber: 'A', versionEsperada: 1 })
     expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith({ code: 'ASIGNACION_CAMBIO', message: expect.any(String) })
+    expect(res.json).toHaveBeenCalledWith({ code: 'ASIGNACION_CAMBIO', message: 'Esta SIM se volvió a asignar; revisa y decide de nuevo.' })
   })
 
   it('la primera vez: repetida false', async () => {

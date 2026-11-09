@@ -32,6 +32,7 @@ export type SimCustodyErrorCode =
   | 'NOT_IN_PROMOTER_STATE'
   | 'SUPERVISOR_NOT_FOUND'
   | 'NOT_IN_SUPERVISOR_STATE'
+  | 'ASIGNACION_CAMBIO'
 
 export interface SimCustodyErrorEntry {
   /** Canonical code used across backend/dashboard/TPV. */
@@ -206,6 +207,15 @@ export const SIM_CUSTODY_ERROR_CODES: Record<SimCustodyErrorCode, SimCustodyErro
       // different fixes, and the OWNER shouldn't have to guess which one applies.
       es: 'El SIM no está en poder de un supervisor. Si ya lo tiene un promotor, recoléctalo primero; si está en almacén, usa "Asignar a Supervisor".',
       en: 'The SIM is not held by a supervisor. If a promoter already has it, collect it first; if it is in the warehouse, use "Assign to Supervisor".',
+    },
+  },
+  // App de campo (Codex C3): sólo sale cuando quien llama manda la versión que vio (`versionEsperada`); la TPV no la manda.
+  ASIGNACION_CAMBIO: {
+    code: 'ASIGNACION_CAMBIO',
+    httpStatus: 409,
+    messages: {
+      es: 'Esta SIM se volvió a asignar; revisa y decide de nuevo.',
+      en: 'This SIM was reassigned; review it and decide again.',
     },
   },
 }

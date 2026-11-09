@@ -4,8 +4,9 @@
  * El servicio ya revisa la persona (NOT_IN_YOUR_CUSTODY) antes de ALREADY_ACCEPTED / ALREADY_REJECTED.
  *
  * - La organización sale de la sucursal de la dirección, la que autorizó `checkPermission`, nunca del token (Codex C2).
- * - Cada SIM viaja con la `custodyVersion` que vio el celular (Codex C3): si la recolectaron y se la volvieron a asignar, la
- *   decisión vieja no vale para la entrega nueva (`ASIGNACION_CAMBIO`, definitivo: el promotor decide otra vez).
+ * - Cada SIM viaja con la `custodyVersion` que vio el celular y el servicio la exige DENTRO de su transacción
+ *   (`versionEsperada`, Codex C3): si la recolectaron y se la volvieron a asignar, la decisión vieja no vale para la entrega
+ *   nueva (`ASIGNACION_CAMBIO`, definitivo: el promotor decide otra vez). Una decisión ya aplicada sigue saliendo repetida.
  * - `VERSION_CONFLICT` del servicio (otra entrega le ganó la escritura) se relee: si ya quedó como pidió, es éxito; si no,
  *   `409 CUSTODIA_EN_PROCESO`, reintentable (Codex C6). El mapper de las terminales no cambia.
  * Las respuestas de error son `{ code, message }`, como las ventas y las checadas del celular.
@@ -29,10 +30,6 @@ interface Fila {
   repetida?: boolean
 }
 
-const ASIGNACION_CAMBIO = {
-  code: 'ASIGNACION_CAMBIO',
-  message: 'Esta SIM se recolectó y se te volvió a asignar. Revísala otra vez antes de aceptarla o rechazarla.',
-}
 const EN_PROCESO = { code: 'CUSTODIA_EN_PROCESO', message: 'La SIM cambió mientras se guardaba. Reintenta en un momento.' }
 
 async function actorDe(req: Request) {
@@ -53,56 +50,36 @@ async function simDe(organizationId: string, serialNumber: string) {
   )
 }
 
-/**
- * Lo que dice la SIM HOY de lo que pide el celular: ya quedó como pidió (`repetida`), o es otra entrega (`cambio`).
- * `null`: le toca decidir al servicio (que también da NOT_FOUND / NOT_IN_YOUR_CUSTODY / INVALID_STATE).
- * ponytail: se lee antes de llamar al servicio, que relee por su cuenta; una reasignación en esos milisegundos la acepta el
- * servicio. Cerrarlo del todo pide que el servicio reciba la versión esperada.
- */
-async function segunHoy(
-  organizationId: string,
-  staffId: string,
-  sim: SimDelCelular,
-  hecha: SerializedItemCustodyState,
-): Promise<'repetida' | 'cambio' | null> {
-  const hoy = await simDe(organizationId, sim.serialNumber)
-  if (!hoy || hoy.assignedPromoterId !== staffId) return null
-  if (hoy.custodyState === hecha) return 'repetida'
-  if (hoy.custodyState === 'PROMOTER_PENDING' && hoy.custodyVersion !== sim.custodyVersion) return 'cambio'
-  return null
+/** Tras un VERSION_CONFLICT: ¿la SIM ya quedó como pidió esta persona (la otra entrega ganó)? */
+async function quedoComoPidio(organizationId: string, staffId: string, serialNumber: string, hecha: SerializedItemCustodyState) {
+  const hoy = await simDe(organizationId, serialNumber)
+  return hoy?.assignedPromoterId === staffId && hoy.custodyState === hecha
 }
 
 export async function aceptarCustodia(req: Request, res: Response, next: NextFunction) {
   try {
     const actor = await actorDe(req)
     const sims: SimDelCelular[] = req.body.sims
-    const filas: (Fila | null)[] = []
-    for (const sim of sims) {
-      const hoy = await segunHoy(actor.organizationId, actor.staffId, sim, 'PROMOTER_HELD')
-      if (hoy === 'repetida') filas.push({ serialNumber: sim.serialNumber, status: 'ok', repetida: true })
-      else if (hoy === 'cambio') filas.push({ serialNumber: sim.serialNumber, status: 'error', ...ASIGNACION_CAMBIO })
-      else filas.push(null)
-    }
-
-    const porAceptar = sims.flatMap((_, i) => (filas[i] === null ? [i] : [])) // posiciones en la petición
-    const r = porAceptar.length
-      ? await simCustodyService.accept({ actor, serialNumbers: porAceptar.map(i => sims[i].serialNumber), idempotencyRequestId: null })
-      : { results: [] }
-    for (const [k, row] of r.results.entries()) {
-      const sim = sims[porAceptar[k]]
-      let fila: Fila
-      if (row.status === 'ok') fila = { serialNumber: row.serialNumber, status: 'ok', repetida: false }
-      else if (row.code === 'ALREADY_ACCEPTED') fila = { serialNumber: row.serialNumber, status: 'ok', repetida: true }
+    const r = await simCustodyService.accept({
+      actor,
+      serialNumbers: sims.map(s => s.serialNumber),
+      idempotencyRequestId: null,
+      versionEsperada: Object.fromEntries(sims.map(s => [s.serialNumber, s.custodyVersion])),
+    })
+    const results: Fila[] = []
+    for (const row of r.results) {
+      const { serialNumber } = row
+      if (row.status === 'ok') results.push({ serialNumber, status: 'ok', repetida: false })
+      else if (row.code === 'ALREADY_ACCEPTED') results.push({ serialNumber, status: 'ok', repetida: true })
       else if (row.code === 'VERSION_CONFLICT') {
-        fila =
-          (await segunHoy(actor.organizationId, actor.staffId, sim, 'PROMOTER_HELD')) === 'repetida'
-            ? { serialNumber: row.serialNumber, status: 'ok', repetida: true }
-            : { serialNumber: row.serialNumber, status: 'error', ...EN_PROCESO }
-      } else fila = { serialNumber: row.serialNumber, status: 'error', code: row.code, message: row.message }
-      filas[porAceptar[k]] = fila
+        results.push(
+          (await quedoComoPidio(actor.organizationId, actor.staffId, serialNumber, 'PROMOTER_HELD'))
+            ? { serialNumber, status: 'ok', repetida: true }
+            : { serialNumber, status: 'error', ...EN_PROCESO },
+        )
+      } else results.push({ serialNumber, status: 'error', code: row.code, message: row.message })
     }
 
-    const results = filas as Fila[]
     const succeeded = results.filter(x => x.status === 'ok').length
     const summary = { total: results.length, succeeded, failed: results.length - succeeded }
     // Una SIM sin resolver hace reintentable toda la petición: el reintento devuelve las demás como repetidas.
@@ -118,18 +95,14 @@ export async function rechazarCustodia(req: Request, res: Response, next: NextFu
     const actor = await actorDe(req)
     const sim: SimDelCelular = req.body
     const yaRechazada = () => res.status(200).json({ custodyState: 'PROMOTER_REJECTED', repetida: true })
-
-    const hoy = await segunHoy(actor.organizationId, actor.staffId, sim, 'PROMOTER_REJECTED')
-    if (hoy === 'repetida') return yaRechazada()
-    if (hoy === 'cambio') return res.status(409).json(ASIGNACION_CAMBIO)
     try {
-      const r = await simCustodyService.reject({ actor, serialNumber: sim.serialNumber })
+      const r = await simCustodyService.reject({ actor, serialNumber: sim.serialNumber, versionEsperada: sim.custodyVersion })
       return res.status(200).json({ ...r, repetida: false })
     } catch (err) {
       if (!(err instanceof SimCustodyError)) throw err
       if (err.code === 'ALREADY_REJECTED') return yaRechazada()
       if (err.code === 'VERSION_CONFLICT') {
-        if ((await segunHoy(actor.organizationId, actor.staffId, sim, 'PROMOTER_REJECTED')) === 'repetida') return yaRechazada()
+        if (await quedoComoPidio(actor.organizationId, actor.staffId, sim.serialNumber, 'PROMOTER_REJECTED')) return yaRechazada()
         return res.status(409).json(EN_PROCESO)
       }
       return res.status(err.httpStatus).json({ code: err.code, message: err.message })
