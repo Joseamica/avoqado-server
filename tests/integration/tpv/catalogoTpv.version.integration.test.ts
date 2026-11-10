@@ -147,7 +147,7 @@ describe('D20 — catálogo de la TPV contra Postgres', () => {
     const delProducto = (b: any) => b.data.find((p: any) => p.id === productId)
 
     // Primera (arma y guarda) y segunda (reutiliza): las dos como antes, para la query de la TPV y con precio especial.
-    for (const query of [{}, conPolitica, { categoryId: n.categoryId }]) {
+    for (const query of [{}, conPolitica, { categoryId: n.categoryId }] as Record<string, string>[]) {
       await iguales(query)
       await iguales(query)
     }
