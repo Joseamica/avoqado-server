@@ -29,14 +29,15 @@ import {
   generateCustomerSession,
   type ContactoProbado,
   type CustomerSessionPayload,
+  type OtraFichaDeSesion,
   type CustomerTokenPayload,
   type OrderingCustomerTokenPayload,
 } from '../jwt.service'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
-import { phonesMatch } from '../utils/phone'
 import { activateCustomerAccount } from '../services/public/customerBookingAccess.service'
 import { withDeadlockRetry } from '../utils/serializableRetry'
+import { sesionSigueEnLaFicha } from '../services/public/sesionDeCliente.service'
 
 export interface CustomerAuthContext {
   customerId: string
@@ -48,6 +49,8 @@ export interface CustomerAuthContext {
   verifiedPhone?: string
   /** S8: la versión con que se firmó la sesión (sólo `SESION`; los dos tokens de hoy cuentan como 0, igual que arriba). */
   v?: number
+  /** S13 (R7'): el aviso firmado de otra ficha que S7 detectó al entrar. Nunca entra a `contactos`. */
+  otraFicha?: OtraFichaDeSesion
 }
 
 export interface PublicVenueContext {
@@ -151,15 +154,7 @@ async function resolveCustomerAuth(
   const verifiedPhone =
     session?.contactos.find(contacto => contacto.tipo === 'PHONE')?.valor ??
     (payload.type === 'customer_ordering' ? (payload as OrderingCustomerTokenPayload).verifiedPhone : undefined)
-  if (
-    (session?.v ?? 0) < customer.versionDeSesion ||
-    (verifiedPhone !== undefined && !phonesMatch(verifiedPhone, customer.phone)) ||
-    contactos.some(contacto =>
-      contacto.tipo === 'PHONE'
-        ? !phonesMatch(contacto.valor, customer.phone)
-        : contacto.valor.trim().toLowerCase() !== customer.email?.trim().toLowerCase(),
-    )
-  ) {
+  if (!sesionSigueEnLaFicha(customer, { v: session?.v, verifiedPhone, contactos })) {
     return { ok: false, failure: FAIL.CUSTOMER_TOKEN_INVALID }
   }
   if (uso === 'CAMBIO_DE_NUMERO' && payload.type === 'customer') {
@@ -176,6 +171,7 @@ async function resolveCustomerAuth(
       accountActivatedAt: customer.accountActivatedAt,
       ...(verifiedPhone ? { verifiedPhone } : {}),
       ...(session ? { v: session.v } : {}),
+      ...(session?.otraFicha ? { otraFicha: session.otraFicha } : {}),
     },
     ...(session ? { session } : {}),
   }

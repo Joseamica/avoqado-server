@@ -156,6 +156,26 @@ export async function fichaConContacto(
   return elegido ? db.customer.findUnique({ where: { id: elegido.id } }) : null
 }
 
+/**
+ * ¿La sesión sigue valiendo para la ficha leída? La versión no es vieja y cada contacto probado (y el teléfono del token de pedidos)
+ * sigue en la ficha. La usan el middleware (`customerAuth.middleware.ts`) y, bajo el candado de la ficha, lo sensible de S13
+ * (`revalidarSesionEnTx`).
+ */
+export function sesionSigueEnLaFicha(
+  ficha: { versionDeSesion: number; phone: string | null; email: string | null },
+  s: { v?: number; verifiedPhone?: string; contactos: ContactoProbado[] },
+): boolean {
+  return !(
+    (s.v ?? 0) < ficha.versionDeSesion ||
+    (s.verifiedPhone !== undefined && !phonesMatch(s.verifiedPhone, ficha.phone)) ||
+    s.contactos.some(contacto =>
+      contacto.tipo === 'PHONE'
+        ? !phonesMatch(contacto.valor, ficha.phone)
+        : contacto.valor.trim().toLowerCase() !== ficha.email?.trim().toLowerCase(),
+    )
+  )
+}
+
 /** Se tapa el contacto que la clienta PROBÓ (no cómo lo guarda la otra ficha): no se le enseña nada de una ficha ajena. */
 export function tapar(c: ContactoProbado): OtraFicha {
   const enmascarado =
@@ -355,7 +375,14 @@ export function respuestaDeEntrada(venueId: string, c: ContactoProbado, e: Entra
   if (e.nueva) return { fichaNueva: true, pruebaPendiente: firmarPruebaPendiente(venueId, c) }
   const { ficha } = e
   return {
-    token: generateCustomerSession({ sub: ficha.id, venueId, v: ficha.versionDeSesion, contactos: e.contactos }),
+    // S13 (R7'): el aviso viaja firmado en la sesión para que «Mi cuenta» lo siga mostrando al volver.
+    token: generateCustomerSession({
+      sub: ficha.id,
+      venueId,
+      v: ficha.versionDeSesion,
+      contactos: e.contactos,
+      ...(e.otraFicha ? { otraFicha: e.otraFicha } : {}),
+    }),
     customer: { id: ficha.id, firstName: ficha.firstName, lastName: ficha.lastName, email: ficha.email, phone: ficha.phone },
     contactos: e.contactos,
     ...(e.avisos.length ? { avisos: e.avisos } : {}),

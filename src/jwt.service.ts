@@ -328,20 +328,52 @@ export interface ContactoProbado {
   probadoEn: number
 }
 
+/** S13 (R7'): el aviso de otra ficha que S7 detectó al entrar, con el contacto ya tapado. Nunca el contacto en claro. */
+export interface OtraFichaDeSesion {
+  contacto: 'PHONE' | 'EMAIL'
+  enmascarado: string
+}
+
 export interface CustomerSessionPayload extends jwt.JwtPayload {
   sub: string
   venueId: string
   type: 'customer_session'
   v: number
   contactos: ContactoProbado[]
+  /** S13 (R7'): opcional y aditivo; los tokens anteriores no lo traen (y no muestran el aviso). */
+  otraFicha?: OtraFichaDeSesion
 }
+
+/** El largo máximo del enmascarado que viaja en la sesión: un correo con dominio largo se recorta con «…» al emitir. */
+const LARGO_DEL_AVISO = 120
+const recortarAviso = (texto: string) => (texto.length <= LARGO_DEL_AVISO ? texto : `${texto.slice(0, LARGO_DEL_AVISO - 1)}…`)
 
 /** Una visita renueva desde ahora; nunca arrastra el iat/exp de la sesión anterior. */
 export function generateCustomerSession(p: Omit<CustomerSessionPayload, 'type' | 'iat' | 'exp'>): string {
-  return jwt.sign({ sub: p.sub, venueId: p.venueId, type: 'customer_session', v: p.v, contactos: p.contactos }, ACCESS_TOKEN_SECRET!, {
-    expiresIn: 2592000,
-    algorithm: 'HS256',
-  })
+  const aviso = avisoValido(
+    p.otraFicha ? { contacto: p.otraFicha.contacto, enmascarado: recortarAviso(p.otraFicha.enmascarado) } : undefined,
+  )
+  return jwt.sign(
+    { sub: p.sub, venueId: p.venueId, type: 'customer_session', v: p.v, contactos: p.contactos, ...(aviso ? { otraFicha: aviso } : {}) },
+    ACCESS_TOKEN_SECRET!,
+    { expiresIn: 2592000, algorithm: 'HS256' },
+  )
+}
+
+/**
+ * codex-s13-r3 #1: el aviso de otra ficha nunca invalida una sesión. Con la forma correcta se devuelve; con cualquier otra (o más largo
+ * de lo que se emite), se ignora y la sesión sigue sin aviso. La firma la juzga `jwt.verify`, no esto.
+ */
+function avisoValido(o: unknown): OtraFichaDeSesion | undefined {
+  const a = o as Partial<OtraFichaDeSesion> | null | undefined
+  return a &&
+    typeof a === 'object' &&
+    (a.contacto === 'PHONE' || a.contacto === 'EMAIL') &&
+    typeof a.enmascarado === 'string' &&
+    a.enmascarado.length > 0 &&
+    a.enmascarado.length <= LARGO_DEL_AVISO
+    ? { contacto: a.contacto, enmascarado: a.enmascarado }
+    : undefined
 }
 
 export function verifyCustomerSession(token: string): CustomerSessionPayload {
@@ -372,7 +404,9 @@ export function verifyCustomerSession(token: string): CustomerSessionPayload {
   ) {
     throw new jwt.JsonWebTokenError('Sesión de cliente inválida.')
   }
-  return decoded as CustomerSessionPayload
+  const aviso = avisoValido(decoded.otraFicha)
+  const { otraFicha: _ignorado, ...sesion } = decoded
+  return (aviso ? { ...sesion, otraFicha: aviso } : sesion) as CustomerSessionPayload
 }
 
 export interface ConsumerTokenPayload extends jwt.JwtPayload {

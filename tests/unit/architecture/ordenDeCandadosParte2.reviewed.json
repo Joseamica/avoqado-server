@@ -478,6 +478,14 @@
     "src/services/public/customerPortal.public.service.ts#cambiarTelefonoEnTx": {
       "clase": "EN_TX",
       "etiqueta": "cambiarTelefonoEnTx"
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#revalidarSesionEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "revalidarSesionEnTx"
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta": {
+      "clase": "EN_TX",
+      "etiqueta": "guardarTarjetaEnMiCuenta"
     }
   },
   "aperturas": {
@@ -1097,6 +1105,14 @@
     },
     "src/services/public/customerPortal.public.service.ts#confirmarCambioDeTelefono": {
       "etiqueta": "confirmarCambioDeTelefono",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta": {
+      "etiqueta": "guardarTarjetaEnMiCuenta",
+      "cantidad": 1
+    },
+    "src/services/public/customerPortal.public.service.ts#listarMisTarjetas": {
+      "etiqueta": "listarMisTarjetas",
       "cantidad": 1
     }
   },

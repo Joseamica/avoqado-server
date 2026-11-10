@@ -90,7 +90,10 @@ import {
   googleSessionSchema,
   customerPhoneChangeRequestSchema,
   customerPhoneChangeVerifySchema,
+  customerMyListSchema,
+  customerGiftCardClaimSchema,
 } from '../schemas/dashboard/creditPack.schema'
+import { giftCardClaimRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
   publicShortCodeSchema,
@@ -440,6 +443,44 @@ router.post(
   authenticateCustomerParaCambioDeNumero,
   validateRequest(customerPhoneChangeVerifySchema),
   customerPortalController.verifyPhoneChange,
+)
+
+// S13 (P2-6): «Mi cuenta» por páginas (el portal trae la primera de cada una) y «Guardar en mi cuenta». El slug manda, como el portal.
+router.get(
+  '/venues/:venueSlug/customer/orders',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyOrders,
+)
+router.get(
+  '/venues/:venueSlug/customer/gift-cards',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyGiftCards,
+)
+router.get(
+  '/venues/:venueSlug/customer/discounts',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyDiscounts,
+)
+// R2 (codex-s13-r2 #1, r3 #2): sus límites propios reemplazan a `writeLimit` (sólo IP, compartido entre negocios y en inglés). Antes de
+// tocar la base, un cupo de FALLOS por IP real (los slugs inventados se suman ahí); luego negocio + IP y negocio + clienta.
+router.post(
+  '/venues/:venueSlug/customer/gift-cards/claim',
+  giftCardClaimRateLimiters.fallosPorIp,
+  resolveVenueBySlug,
+  giftCardClaimRateLimiters.porIp,
+  authenticateCustomer,
+  giftCardClaimRateLimiters.porClienta,
+  validateRequest(customerGiftCardClaimSchema),
+  customerPortalController.claimGiftCard,
 )
 
 // ---- Passwordless OTP login (WhatsApp / email) ----

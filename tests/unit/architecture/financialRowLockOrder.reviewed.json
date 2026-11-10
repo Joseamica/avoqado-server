@@ -1326,6 +1326,11 @@
       "count": 1,
       "loops": 0,
       "reason": "R13: una Order por transacción, ATRIBUCION explícita FOR NO KEY UPDATE; excluye cambios de estado sin bloquear la FK Order de métricas. No escribe dinero ni Order; guard y duplicado preceden canje y contadores."
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tienda híbrida S13 («Guardar en mi cuenta»): UN sobre en su propia transacción. Antes sólo la ficha de la clienta FOR SHARE (rango 8 de la parte 2, R1); sin Order, Payment ni turno antes ni después: no forma ciclo con los cobros (Order → sobre). Los cruces con el cobro con saldo, con S9 y con un escritor GiftCard → Customer están probados en guardarTarjeta.integration.test.ts (el último con un 40P01 real que withDeadlockRetry repite)."
     }
   }
 }

@@ -251,3 +251,20 @@ export const customerPhoneChangeVerifySchema = z.object({
     })
     .strict(),
 })
+
+/** S13: `?cursor=&limit=` de las listas de «Mi cuenta». El tamaño lo recorta el servidor (1 a 50); el cursor lo valida el servicio. */
+export const customerMyListSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  query: z
+    .object({
+      cursor: z.string().max(80, 'Cursor inválido').optional(),
+      limit: z.coerce.number({ invalid_type_error: 'El límite debe ser un número' }).int('El límite debe ser un entero').optional(),
+    })
+    .passthrough(),
+})
+
+/** S13: «Guardar en mi cuenta». Sólo la forma; el código lo juzga el servicio (mal escrito o ajeno = el mismo 404). */
+export const customerGiftCardClaimSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z.object({ code: z.string().min(1, 'Escribe el código de la tarjeta').max(64, 'Código inválido') }).strict(),
+})
