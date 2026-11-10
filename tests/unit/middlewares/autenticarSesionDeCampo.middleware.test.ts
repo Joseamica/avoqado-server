@@ -220,6 +220,18 @@ describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar e
     expect(gracia.body).toEqual({ crudo: null })
   })
 
+  it('R10-1: el texto se guarda en las mismas rutas que acepta Express (mayúsculas, otro prefijo), nunca en la gracia ni con ?venues en la consulta', () => {
+    const guarda = (url: string) => {
+      const req = { originalUrl: url, url } as any
+      guardarCuerpoDelCelular(req, {} as any, Buffer.from(TEXTO, 'utf8'), 'utf-8')
+      return req.rawBody
+    }
+    expect(guarda('/api/v1/tpv/CAMPO/venues/vA/ventas')).toBe(TEXTO)
+    expect(guarda('/api/v2/tpv/campo/Venues/vA/ventas')).toBe(TEXTO)
+    expect(guarda('/api/v1/tpv/campo/gracia')).toBeUndefined()
+    expect(guarda('/api/v1/tpv/t1/cualquiera?x=/tpv/campo/venues/')).toBeUndefined()
+  })
+
   it('R9-1: otra codificación que el parser acepta (utf-16be, utf-16) no truena ni guarda texto; utf-8 sí lo guarda', () => {
     const req = (url: string) => ({ originalUrl: url, url }) as any
     const enCampo = req('/api/v1/tpv/campo/venues/vA/ventas')

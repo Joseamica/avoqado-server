@@ -41,12 +41,13 @@ const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
  * huella de ese texto, la misma que el celular reporta en su latido. Cualquier otra URL (PAX, Nexgo, el panel, la gracia) no
  * guarda nada: ni memoria ni comportamiento cambian.
  */
-export const RUTAS_CON_CUERPO_CRUDO = '/api/v1/tpv/campo/venues/'
+/** R10-1: igual que el router de Express (sin distinguir mayúsculas) y sin depender de `API_PREFIX`. */
+export const RUTAS_CON_CUERPO_CRUDO = /\/tpv\/campo\/venues\//i
 export function guardarCuerpoDelCelular(req: IncomingMessage, _res: ServerResponse, buf: Buffer, encoding: string) {
-  const url = (req as Request).originalUrl ?? req.url ?? ''
+  const ruta = ((req as Request).originalUrl ?? req.url ?? '').split('?')[0]
   // R9-1: sólo UTF-8 (la huella del celular se calcula sobre UTF-8). Otra codificación que el parser sí acepta (UTF-16BE…)
   // no tiene texto que guardar: la ruta sigue normal y el gancho no la encuentra (mismo límite que «texto distinto»).
-  if (url.startsWith(RUTAS_CON_CUERPO_CRUDO) && /^utf-?8$/i.test(encoding || 'utf-8')) (req as Request).rawBody = buf.toString('utf8')
+  if (RUTAS_CON_CUERPO_CRUDO.test(ruta) && /^utf-?8$/i.test(encoding || 'utf-8')) (req as Request).rawBody = buf.toString('utf8')
 }
 
 /**
