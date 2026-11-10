@@ -43,6 +43,8 @@ interface Trabajo {
   venueId: string
   orgId: string
   staffId: string
+  /** El celular de campo que la manda (bloque 1); se guarda en la ficha al crearla. */
+  celularId?: string
   llave: string
   serial: string
   ocupacion: string
@@ -92,7 +94,7 @@ const resultado = (f: VentaDeCampo, repetida: boolean): ResultadoVentaDeCampo =>
 })
 
 export async function registrarVentaDeCampo(
-  ctx: { venueId: string; orgId: string; staffId: string },
+  ctx: { venueId: string; orgId: string; staffId: string; celularId?: string },
   v: VentaDeCampoBody,
 ): Promise<ResultadoVentaDeCampo> {
   // Paso 1
@@ -233,6 +235,7 @@ async function tomarOCrearFicha(t: Trabajo): Promise<VentaDeCampo | ResultadoVen
         data: {
           venueId: t.venueId,
           staffId: t.staffId,
+          celularId: t.celularId,
           llave: t.llave,
           serialNumber: t.serial,
           serializedItemId: revisada.serializedItemId,

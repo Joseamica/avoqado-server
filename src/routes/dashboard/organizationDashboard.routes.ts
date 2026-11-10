@@ -43,6 +43,7 @@ import {
   orgMigrateDiscardSchema,
 } from '../../schemas/dashboard/orgTerminals.schema'
 import prisma from '../../utils/prismaClient'
+import celularesDeCampoRouter from './celularesDeCampo.routes'
 import { duplicateVenueSchema, venueDuplicationOptionsSchema } from '../../schemas/dashboard/venueDuplication.schema'
 import * as venueDuplicationService from '../../services/organization-dashboard/venueDuplication.service'
 
@@ -1799,5 +1800,8 @@ router.post(
     }
   },
 )
+
+// App de campo (bloque 1): códigos y celulares por persona. Prefijo propio: no tapa ninguna ruta de arriba.
+router.use('/:orgId/celulares-de-campo', authenticateTokenMiddleware, checkOrgAccess, requireOrgManager, celularesDeCampoRouter)
 
 export default router

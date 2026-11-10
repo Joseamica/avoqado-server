@@ -15,6 +15,9 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
+import { generateAccessToken } from '@/security'
+import { revocarSesionesDelCelular } from '@/services/tpv/campo/celular/sesionDeCelular'
+import { crearCelularConSesion } from '../../helpers/celularDeCampo'
 import { moduleService } from '@/services/modules/module.service'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import * as pagos from '@/services/tpv/payment.tpv.service'
@@ -31,11 +34,15 @@ let otroPromotorId: string
 let categoriaDeCaja: string // «de caja»: precio sugerido $0
 let categoria100: string
 
+/** Token de la API (como el de la PAX) para las rutas de la TPV. */
 const token = () =>
   jwt.sign({ sub: promotorId, orgId, venueId, role: 'CASHIER' }, process.env.ACCESS_TOKEN_SECRET as string, { expiresIn: '15m' })
+/** Las rutas del celular entran con la sesión del celular (bloque 1). */
+let sesionDelCelular: string
+let celularId: string
 
-const vender = (body: Record<string, unknown>, sucursal = venueId) =>
-  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/ventas`).set('Authorization', `Bearer ${token()}`).send(body)
+const vender = (body: Record<string, unknown>, sucursal = venueId, conToken = sesionDelCelular) =>
+  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/ventas`).set('Authorization', `Bearer ${conToken}`).send(body)
 
 let consecutivo = 0
 /** Una SIM ya aceptada por el promotor (custodia en ENFORCE), como la tendría en su celular. */
@@ -109,6 +116,9 @@ beforeAll(async () => {
       },
     })
   ).id
+  const conSesion = await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId, role: 'CASHIER' })
+  sesionDelCelular = conSesion.token
+  celularId = conSesion.celular.id
   categoriaDeCaja = (await prisma.itemCategory.create({ data: { venueId, name: 'Chip de caja', suggestedPrice: 0 } })).id
   categoria100 = (await prisma.itemCategory.create({ data: { venueId, name: 'Chip Negra', suggestedPrice: 100 } })).id
   server = app.listen(0, '127.0.0.1')
@@ -122,6 +132,9 @@ afterAll(async () => {
   await new Promise<void>(listo => server.close(() => listo()))
   const sucursales = [venueId, otraSucursalId]
   await prisma.ventaDeCampo.deleteMany({ where: { venueId: { in: sucursales } } })
+  await prisma.celularDeCampo.deleteMany({ where: { organizationId: orgId } })
+  await prisma.refreshGrant.deleteMany({ where: { session: { staffId: { in: [promotorId, otroPromotorId] } } } })
+  await prisma.session.deleteMany({ where: { staffId: { in: [promotorId, otroPromotorId] } } })
   await prisma.activityLog.deleteMany({ where: { venueId: { in: sucursales } } })
   await prisma.saleVerification.deleteMany({ where: { venueId } })
   await prisma.payment.deleteMany({ where: { venueId } })
@@ -176,6 +189,7 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     expect(fichas).toHaveLength(1)
     // Completa: la SIM ya está vendida y la ficha suelta su reclamo (si regresa, se puede volver a vender).
     expect(fichas[0]).toMatchObject({ estado: 'COMPLETA', serializedItemId: null, origenHora: 'RELOJ_ANCLADO', ocupacion: null })
+    expect(fichas[0].celularId).toBe(celularId) // bloque 1: la ficha dice qué celular la mandó
 
     const otra = await vender(cuerpo)
     expect(otra.status).toBe(200)
@@ -434,14 +448,125 @@ describe('POST /tpv/campo/venues/:venueId/ventas', () => {
     expect((await prisma.order.findUniqueOrThrow({ where: { id: cancelada } })).status).toBe('CANCELLED')
   })
 
-  it('una persona sin StaffVenue activo en la sucursal de la dirección → 403 del middleware, aunque su token sea de otra', async () => {
+  it('una persona dada de baja en la sucursal de su sesión, con su token vivo → 403 SIN_ACCESO_A_LA_SUCURSAL y nada se escribe', async () => {
     const sim = await nuevaSim(categoriaDeCaja)
     const cuerpo = ventaDe(sim.serialNumber)
+    // La sesión nace en la otra sucursal con el StaffVenue activo y luego la dan de baja ahí: el token sigue vivo.
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: true } })
+    const deLaOtra = await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId: otraSucursalId, role: 'CASHIER' })
+    await prisma.staffVenue.updateMany({ where: { staffId: promotorId, venueId: otraSucursalId }, data: { active: false } })
+    try {
+      const res = await vender(cuerpo, otraSucursalId, deLaOtra.token)
 
-    const res = await vender(cuerpo, otraSucursalId)
+      expect(res.status).toBe(403)
+      expect(res.body.code).toBe('SIN_ACCESO_A_LA_SUCURSAL')
+      expect(await prisma.ventaDeCampo.count({ where: { llave: cuerpo.llave } })).toBe(0)
+    } finally {
+      // El celular de la prueba reemplazó al de siempre: se vuelve a dejar uno vivo en la sucursal de las demás.
+      const vigente = await crearCelularConSesion({ staffId: promotorId, organizationId: orgId, venueId, role: 'CASHIER' })
+      sesionDelCelular = vigente.token
+      celularId = vigente.celular.id
+    }
+  })
+})
 
-    expect(res.status).toBe(403)
+describe('el candado del bloque 1 en la venta', () => {
+  it('un token de PAX (como los de auth.tpv.service) → 401 SESION_INVALIDA y nada se escribe; con ese mismo token la venta de la PAX sigue igual', async () => {
+    const sim = await nuevaSim(categoriaDeCaja)
+    const cuerpo = ventaDe(sim.serialNumber)
+    const pax = generateAccessToken({
+      userId: promotorId,
+      staffId: promotorId,
+      orgId,
+      venueId,
+      role: 'CASHIER',
+      terminalSerialNumber: `AVQD-${sufijo}`,
+    })
+
+    const res = await vender(cuerpo, venueId, pax)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ code: 'SESION_INVALIDA', message: expect.any(String) })
     expect(await prisma.ventaDeCampo.count({ where: { llave: cuerpo.llave } })).toBe(0)
+
+    const venta = await request(server)
+      .post('/api/v1/tpv/serialized-inventory/sell')
+      .set('Authorization', `Bearer ${pax}`)
+      .send({ serialNumber: sim.serialNumber, price: 0, isPortabilidad: false })
+    expect(venta.status).toBe(201)
+    expect(venta.body).toMatchObject({ venueId, status: 'PENDING', paymentStatus: 'PENDING', createdById: promotorId })
+  })
+
+  it('la sesión del celular revocada → 401 SESION_CERRADA en la siguiente petición (pendiente de la Tarea 3)', async () => {
+    const otra = await crearCelularConSesion({ staffId: otroPromotorId, organizationId: orgId, venueId, role: 'CASHIER' })
+    const sim = await nuevaSim(categoriaDeCaja, { assignedPromoterId: otroPromotorId })
+    await revocarSesionesDelCelular(otra.celular.id, 'prueba_revocada')
+
+    const res = await vender(ventaDe(sim.serialNumber), venueId, otra.token)
+
+    expect(res.status).toBe(401)
+    expect(res.body.code).toBe('SESION_CERRADA')
+    expect(await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).toMatchObject({ status: 'AVAILABLE' })
+  })
+})
+
+describe('las rutas espejo de la TPV (bloque 1)', () => {
+  const foto = (n: string) => `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2F${n}.jpg`
+  const vendida = async () => {
+    const sim = await nuevaSim(categoriaDeCaja)
+    const res = await vender(ventaDe(sim.serialNumber))
+    expect(res.status).toBe(201)
+    return res.body as { paymentId: string; saleVerificationId: string }
+  }
+
+  it('evidencia responde lo mismo que POST /tpv/verification/proof-of-sale (cada una sobre su venta)', async () => {
+    const a = await vendida()
+    const b = await vendida()
+
+    const original = await request(server)
+      .post('/api/v1/tpv/verification/proof-of-sale')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ paymentId: a.paymentId, verificationId: a.saleVerificationId, photoUrls: [foto('a')] })
+    const espejo = await request(server)
+      .post(`/api/v1/tpv/campo/venues/${venueId}/evidencia`)
+      .set('Authorization', `Bearer ${sesionDelCelular}`)
+      .send({ paymentId: b.paymentId, verificationId: b.saleVerificationId, photoUrls: [foto('b')] })
+
+    expect(original.status).toBe(200)
+    expect(espejo.status).toBe(original.status)
+    expect({ ...espejo.body, verificationId: 'x' }).toEqual({ ...original.body, verificationId: 'x' })
+    expect(espejo.body.verificationId).toBe(b.saleVerificationId)
+    expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: b.saleVerificationId } })).photos).toEqual([foto('b')])
+  })
+
+  it('evidencia con el paymentId de una venta de OTRA sucursal → 403 OTRA_SUCURSAL y la evidencia no se toca', async () => {
+    const v = await vendida()
+    await prisma.payment.update({ where: { id: v.paymentId }, data: { venueId: otraSucursalId } })
+    try {
+      const res = await request(server)
+        .post(`/api/v1/tpv/campo/venues/${venueId}/evidencia`)
+        .set('Authorization', `Bearer ${sesionDelCelular}`)
+        .send({ paymentId: v.paymentId, photoUrls: [foto('ajena')] })
+
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ code: 'OTRA_SUCURSAL', message: expect.any(String) })
+      expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: v.saleVerificationId } })).photos).toEqual([])
+    } finally {
+      await prisma.payment.update({ where: { id: v.paymentId }, data: { venueId } })
+    }
+  })
+
+  it('mis-sims responde lo mismo que GET /tpv/sim-custody/my-sims', async () => {
+    await nuevaSim(categoriaDeCaja)
+
+    const original = await request(server).get('/api/v1/tpv/sim-custody/my-sims').set('Authorization', `Bearer ${token()}`)
+    const espejo = await request(server)
+      .get(`/api/v1/tpv/campo/venues/${venueId}/mis-sims`)
+      .set('Authorization', `Bearer ${sesionDelCelular}`)
+
+    expect(original.status).toBe(200)
+    expect(espejo.status).toBe(200)
+    expect(espejo.body).toEqual(original.body)
   })
 })
 

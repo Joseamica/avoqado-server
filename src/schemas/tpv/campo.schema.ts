@@ -67,3 +67,97 @@ export type SalidaDeCampoBody = z.infer<typeof salidaDeCampoBodySchema>
 const simConVersion = z.object({ serialNumber: z.string().min(1), custodyVersion: z.number().int().nonnegative() })
 export const aceptarCustodiaSchema = z.object({ body: z.object({ sims: z.array(simConVersion).min(1).max(50) }) })
 export const rechazarCustodiaSchema = z.object({ body: simConVersion })
+
+/** Activar el celular (bloque 1): el código del supervisor (se pasa a mayúsculas), el PIN de la persona y el aparato. */
+const textoDelAparato = z.string().max(60).optional()
+export const activarCelularSchema = z.object({
+  body: z
+    .object({
+      codigo: z
+        .string()
+        .regex(/^[A-Za-z0-9]{6}$/, { message: 'El código son 6 letras o números.' })
+        .transform(c => c.toUpperCase()),
+      pin: z.string().regex(/^\d{4,10}$/, { message: 'El PIN son de 4 a 10 dígitos.' }),
+      aparato: z
+        .object({
+          aparatoId: z.string().min(8).max(100),
+          marca: textoDelAparato,
+          modelo: textoDelAparato,
+          versionAndroid: textoDelAparato,
+          versionApp: textoDelAparato,
+        })
+        .strict(),
+    })
+    .strict(),
+})
+
+/** Entrar con PIN (bloque 1): la credencial del celular va en la cabecera; aquí sólo el PIN y, si tiene varias, la sucursal. */
+export const entrarConPinSchema = z.object({
+  body: z
+    .object({
+      pin: z.string().regex(/^\d{4,10}$/, { message: 'El PIN son de 4 a 10 dígitos.' }),
+      venueId: z.string().min(1).max(50).optional(),
+    })
+    .strict(),
+})
+
+/** Renovar la sesión del celular: el refresh es opaco (64 hex), no un JWT. */
+export const renovarSesionSchema = z.object({
+  body: z.object({ refreshToken: z.string().regex(/^[a-f0-9]{64}$/, { message: 'El refresh no es válido.' }) }).strict(),
+})
+
+/**
+ * El latido (bloque 1, A5): cuánto tiene por subir y la HUELLA de cada pieza (sha256 hex de `tipo\nvenueId\ncuerpoJson`),
+ * hasta 500. El aparato va sin `aparatoId` (ése no cambia).
+ */
+const cuantos = z.number().int().nonnegative()
+export const latidoSchema = z.object({
+  body: z
+    .object({
+      porSubir: z
+        .object({
+          total: cuantos,
+          ventas: cuantos.optional(),
+          fotos: cuantos.optional(),
+          checadas: cuantos.optional(),
+          custodia: cuantos.optional(),
+        })
+        .strict(),
+      huellas: z
+        .array(z.string().regex(/^[a-f0-9]{64}$/, { message: 'Cada huella son 64 hex.' }))
+        .max(500, { message: 'Hasta 500 huellas.' }),
+      aparato: z
+        .object({ marca: textoDelAparato, modelo: textoDelAparato, versionAndroid: textoDelAparato, versionApp: textoDelAparato })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+})
+
+/** Desvincular desde el celular: dice cuánto le queda por subir (la verdad es la suya; 0 para poder soltar). */
+export const desvincularSchema = z.object({ body: z.object({ porSubir: cuantos }).strict() })
+
+/** Lo que el celular puede mandar por la gracia (bloque 1, Tarea 7): cada tipo es una ruta normal del celular. */
+export const TIPOS_DE_ENVIO = ['VENTA', 'ENTRADA', 'SALIDA', 'CUSTODIA_ACEPTAR', 'CUSTODIA_RECHAZAR', 'EVIDENCIA'] as const
+
+/**
+ * POST /tpv/campo/gracia: el cuerpo viaja como TEXTO, exacto como lo llevaría la ruta normal, porque su huella se calcula
+ * sobre ese texto (`tipo\nvenueId\ncuerpoJson`).
+ */
+export const graciaSchema = z.object({
+  body: z
+    .object({
+      tipo: z.enum(TIPOS_DE_ENVIO),
+      venueId: z.string().min(1).max(50),
+      cuerpoJson: z.string().min(1).max(20_000, { message: 'El cuerpo es demasiado grande.' }),
+    })
+    .strict(),
+})
+
+/**
+ * La evidencia en la gracia y en «Aplicar» nombra su venta con la llave de la venta (`ventaLlave`) en vez del `paymentId`
+ * (el celular desvinculado nunca supo el pago). Lo demás se valida con el `body` de `createProofOfSaleSchema`, el de la ruta.
+ */
+export const evidenciaDeCampoLlaveSchema = z
+  .object({ ventaLlave: z.string().uuid({ message: 'La llave de la venta debe ser un UUID.' }) })
+  .passthrough()

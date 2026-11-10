@@ -8,6 +8,7 @@ import { requestLoggerMiddleware } from '../middlewares/requestLogger' // Assumi
 import logger from './logger'
 import { NODE_ENV, COOKIE_SECRET, BODY_JSON_LIMIT, BODY_URLENCODED_LIMIT } from './env'
 import sessionMiddleware from './session'
+import { guardarCuerpoDelCelular } from '../middlewares/autenticarSesionDeCampo.middleware'
 
 export const configureCoreMiddlewares = (app: Express) => {
   app.set('trust proxy', 1)
@@ -26,7 +27,8 @@ export const configureCoreMiddlewares = (app: Express) => {
 
   // Body parsers with size limits
   logger.info(`Configuring body-parser: JSON limit ${BODY_JSON_LIMIT}, URL-encoded limit ${BODY_URLENCODED_LIMIT}`)
-  app.use(express.json({ limit: BODY_JSON_LIMIT }))
+  // `verify`: una referencia al cuerpo crudo (sin copiarlo); sólo la lee el gancho del celular de campo para su huella.
+  app.use(express.json({ limit: BODY_JSON_LIMIT, verify: guardarCuerpoDelCelular }))
   app.use(express.urlencoded({ extended: true, limit: BODY_URLENCODED_LIMIT }))
 
   // Cookie parser with secret

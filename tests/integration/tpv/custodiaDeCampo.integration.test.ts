@@ -11,10 +11,10 @@
  */
 import type { Server } from 'http'
 import { randomUUID } from 'crypto'
-import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
+import { crearCelularConSesion } from '../../helpers/celularDeCampo'
 
 jest.setTimeout(120000)
 
@@ -27,13 +27,10 @@ let venueB: string
 let promotorId: string
 let categoria: string
 
-/** El token es de la organización A. */
-const token = () =>
-  jwt.sign({ sub: promotorId, orgId: orgA, venueId: venueA, role: 'CASHIER' }, process.env.ACCESS_TOKEN_SECRET as string, {
-    expiresIn: '15m',
-  })
+/** La sesión del celular es de la organización A (sucursal A). */
+let token: string
 const post = (sucursal: string, accion: 'aceptar' | 'rechazar', body: object) =>
-  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/custodia/${accion}`).set('Authorization', `Bearer ${token()}`).send(body)
+  request(server).post(`/api/v1/tpv/campo/venues/${sucursal}/custodia/${accion}`).set('Authorization', `Bearer ${token}`).send(body)
 
 let consecutivo = 0
 /** Una SIM de la organización A entregada al promotor, pendiente de aceptar. */
@@ -91,6 +88,7 @@ beforeAll(async () => {
     })
   ).id
   categoria = (await prisma.itemCategory.create({ data: { venueId: venueA, name: 'Chip', suggestedPrice: 0 } })).id
+  token = (await crearCelularConSesion({ staffId: promotorId, organizationId: orgA, venueId: venueA, role: 'CASHIER' })).token
   server = app.listen(0, '127.0.0.1')
   await new Promise<void>(listo => server.once('listening', () => listo()))
 })
@@ -101,6 +99,9 @@ afterAll(async () => {
   await prisma.serializedItem.deleteMany({ where: { venueId: venueA } })
   await prisma.itemCategory.deleteMany({ where: { venueId: venueA } })
   await prisma.activityLog.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
+  await prisma.celularDeCampo.deleteMany({ where: { staffId: promotorId } })
+  await prisma.refreshGrant.deleteMany({ where: { session: { staffId: promotorId } } })
+  await prisma.session.deleteMany({ where: { staffId: promotorId } })
   await prisma.staffVenue.deleteMany({ where: { staffId: promotorId } })
   await prisma.staffOrganization.deleteMany({ where: { staffId: promotorId } })
   await prisma.staff.deleteMany({ where: { id: promotorId } })
@@ -109,19 +110,17 @@ afterAll(async () => {
 })
 
 describe('POST /tpv/campo/venues/:venueId/custodia/*', () => {
-  it('con un token de A y la dirección de B, una SIM de A no se toca (la organización sale de la sucursal de la dirección)', async () => {
+  it('con la sesión de A y la dirección de B, una SIM de A no se toca (bloque 1: el candado ya no deja pasar otra sucursal)', async () => {
     const sim = await simPendiente()
     const cuerpo = { serialNumber: sim.serialNumber, custodyVersion: 3 }
 
     const aceptar = await post(venueB, 'aceptar', { sims: [cuerpo] })
     const rechazar = await post(venueB, 'rechazar', cuerpo)
 
-    expect(aceptar.status).toBe(200)
-    expect(aceptar.body.results).toEqual([
-      { serialNumber: sim.serialNumber, status: 'error', code: 'NOT_FOUND', message: expect.any(String) },
-    ])
-    expect(rechazar.status).toBe(404)
-    expect(rechazar.body).toEqual({ code: 'NOT_FOUND', message: expect.any(String) })
+    // Antes (bloque 0, token de la API): 200 con NOT_FOUND y 404. Con la sesión del celular, el candado corta antes.
+    expect([aceptar.status, rechazar.status]).toEqual([403, 403])
+    expect(aceptar.body).toEqual({ code: 'OTRA_SUCURSAL', message: expect.any(String), venueIdDeLaSesion: venueA })
+    expect(rechazar.body.code).toBe('OTRA_SUCURSAL')
     expect(await prisma.serializedItem.findUniqueOrThrow({ where: { id: sim.id } })).toMatchObject({
       custodyState: 'PROMOTER_PENDING',
       custodyVersion: 3,
