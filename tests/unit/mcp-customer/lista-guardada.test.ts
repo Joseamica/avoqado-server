@@ -34,7 +34,8 @@ import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from '../../../src/mcp/o
 import { resolveScope, type McpScope } from '../../../src/mcp/scope'
 import { handleDirectoryMcpRequest, handleMcpRequest } from '../../../src/mcp/server'
 import { registerVenueTools } from '../../../src/mcp/tools/venues'
-import { moduleService } from '@/services/modules/module.service'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 import {
   guardarListaMcp,
   listaMcpGuardada,
@@ -168,6 +169,36 @@ describe('D19 — tools/list sale de la copia de la MISMA conexión', () => {
     ['sólo lectura (scopes OAuth)', () => undefined, { ...BASE, scopes: ['mcp:read'] }],
     ['otra app (clientId)', () => undefined, { ...BASE, clientId: 'app-2' }],
     ['un módulo prendido', () => conModulo.mockResolvedValue(true), BASE],
+    // Codex r2: cada bandera por separado y lo que trae cada negocio además del rol y los permisos.
+    [
+      'sólo inventario serializado',
+      () => conModulo.mockImplementation(async (_ids: string[], codigo: string) => codigo === MODULE_CODES.SERIALIZED_INVENTORY),
+      BASE,
+    ],
+    [
+      'sólo marca blanca',
+      () => conModulo.mockImplementation(async (_ids: string[], codigo: string) => codigo === MODULE_CODES.WHITE_LABEL_DASHBOARD),
+      BASE,
+    ],
+    ['acceso al catálogo maestro', () => (resolveMasterCatalogAccess as jest.Mock).mockResolvedValue({ canRead: true }), BASE],
+    [
+      'otra función activa en el negocio',
+      () => {
+        const a = alcance()
+        a.perVenueAccess.set('v1', { ...a.perVenueAccess.get('v1')!, enabledFeatures: ['SERIALIZED_STOCK'] })
+        resolver.mockImplementation(async () => a)
+      },
+      BASE,
+    ],
+    [
+      'otro acceso a una función',
+      () => {
+        const a = alcance()
+        a.perVenueAccess.set('v1', { ...a.perVenueAccess.get('v1')!, featureAccess: { X: { hasAccess: true } } as any })
+        resolver.mockImplementation(async () => a)
+      },
+      BASE,
+    ],
     ['el perfil certificado', () => undefined, { ...BASE, perfil: 'directory' }],
   ]
 
@@ -181,6 +212,16 @@ describe('D19 — tools/list sale de la copia de la MISMA conexión', () => {
     vaciarListasMcp()
     const deCero = await lista(conexion)
     expect(conCambio.result).toEqual(deCero.result)
+  })
+
+  it('el perfil certificado también reutiliza SU copia, sin mezclarla con la del modo libre', async () => {
+    const directorio = { ...BASE, perfil: 'directory' as const }
+    const libre = await lista()
+    const cert1 = await lista(directorio)
+    const cert2 = await lista(directorio)
+    expect(armadas).toHaveBeenCalledTimes(2)
+    expect(cert2.result).toEqual(cert1.result)
+    expect(cert1.result).not.toEqual(libre.result)
   })
 
   it('sólo lectura quita las herramientas de escritura: la copia de quien sí escribe no se le da', async () => {
