@@ -44,7 +44,9 @@ const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
 export const RUTAS_CON_CUERPO_CRUDO = '/api/v1/tpv/campo/venues/'
 export function guardarCuerpoDelCelular(req: IncomingMessage, _res: ServerResponse, buf: Buffer, encoding: string) {
   const url = (req as Request).originalUrl ?? req.url ?? ''
-  if (url.startsWith(RUTAS_CON_CUERPO_CRUDO)) (req as Request).rawBody = buf.toString((encoding || 'utf8') as BufferEncoding)
+  // R9-1: sólo UTF-8 (la huella del celular se calcula sobre UTF-8). Otra codificación que el parser sí acepta (UTF-16BE…)
+  // no tiene texto que guardar: la ruta sigue normal y el gancho no la encuentra (mismo límite que «texto distinto»).
+  if (url.startsWith(RUTAS_CON_CUERPO_CRUDO) && /^utf-?8$/i.test(encoding || 'utf-8')) (req as Request).rawBody = buf.toString('utf8')
 }
 
 /**

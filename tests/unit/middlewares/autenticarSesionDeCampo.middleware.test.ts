@@ -220,6 +220,17 @@ describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar e
     expect(gracia.body).toEqual({ crudo: null })
   })
 
+  it('R9-1: otra codificación que el parser acepta (utf-16be, utf-16) no truena ni guarda texto; utf-8 sí lo guarda', () => {
+    const req = (url: string) => ({ originalUrl: url, url }) as any
+    const enCampo = req('/api/v1/tpv/campo/venues/vA/ventas')
+    for (const enc of ['utf-16be', 'utf-16', 'utf-16le']) {
+      expect(() => guardarCuerpoDelCelular(enCampo, {} as any, Buffer.from(TEXTO, 'utf16le'), enc)).not.toThrow()
+      expect(enCampo.rawBody).toBeUndefined()
+    }
+    guardarCuerpoDelCelular(enCampo, {} as any, Buffer.from(TEXTO, 'utf8'), 'utf-8')
+    expect(enCampo.rawBody).toBe(TEXTO)
+  })
+
   it('un rechazo de la ruta (4xx), un candado que no la deja pasar o el GET de prueba → no se reconcilia nada', async () => {
     respuesta = { status: 409, body: { code: 'VENTA_EN_PROCESO' } }
     expect((await mandar('ventas')).status).toBe(409)
