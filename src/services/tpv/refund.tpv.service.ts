@@ -889,7 +889,8 @@ export async function recordRefund(
             processorData: {
               originalPaymentId: refundData.originalPaymentId,
               // Codex r1 de D2: es la misma tarjeta; si era internacional, la devolución también (el reporte la pone en su renglón).
-              ...(cobroInternacional(originalPayment.processorData) ? { isInternational: true } : {}),
+              // D3 · Codex r1-1: de la fila BLOQUEADA — la foto de entrada puede ser anterior al REST que acreditó el país.
+              ...(cobroInternacional(lockedProcessorData) ? { isInternational: true } : {}),
               refundReason: refundData.reason,
               isPartialRefund: refundData.isPartialRefund,
               currency: refundData.currency,

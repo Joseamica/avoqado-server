@@ -163,6 +163,65 @@ describe('list_payments', () => {
     expect(mockFindMany).toHaveBeenCalledTimes(1)
   })
 
+  // D3 (10-nov-2026) · Codex r1-4: la respuesta dice si la clasificación por país DECIDIÓ la tarifa de ese cobro.
+  it('D3: `authoritativeForMoney` es true sólo desde la versión 2 y con país conocido; lo viejo y lo UNKNOWN siguen siendo observación', async () => {
+    const fila = (id: string, extra: Record<string, unknown>) => ({
+      id,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      method: 'CREDIT_CARD',
+      source: 'TPV',
+      amount: 100,
+      tipAmount: 0,
+      feeAmount: 3,
+      netAmount: 97,
+      cardBrand: 'VISA',
+      processor: 'angelpay',
+      createdAt: new Date('2026-11-10T18:00:00Z'),
+      processedBy: null,
+      terminal: null,
+      order: null,
+      ...extra,
+    })
+    mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockGroupBy.mockResolvedValueOnce([])
+    mockFindMany.mockResolvedValueOnce([
+      fila('decidio', {
+        internationalityStatus: 'INTERNATIONAL',
+        internationalitySource: 'EMV_5F28',
+        issuerCountryCode: '840',
+        internationalityClassificationVersion: 2,
+      }),
+      fila('vieja', {
+        internationalityStatus: 'INTERNATIONAL',
+        internationalitySource: 'EMV_5F28',
+        issuerCountryCode: '840',
+        internationalityClassificationVersion: 1,
+      }),
+      fila('sin-pais', {
+        internationalityStatus: 'UNKNOWN',
+        internationalitySource: 'LEGACY',
+        issuerCountryCode: null,
+        internationalityClassificationVersion: 2,
+      }),
+      fila('solo-procesador', {
+        internationalityStatus: 'INTERNATIONAL',
+        internationalitySource: 'PROCESSOR',
+        issuerCountryCode: 'US',
+        internationalityClassificationVersion: 2,
+      }),
+      fila('bin-verificado', {
+        internationalityStatus: 'DOMESTIC',
+        internationalitySource: 'BIN_REGISTRY',
+        issuerCountryCode: '484',
+        internationalityClassificationVersion: 2,
+      }),
+    ])
+    const out = parse(await call({ venueId: 'v1', status: 'all' }))
+    const porId = Object.fromEntries(out.payments.map((p: any) => [p.id, p.internationalityShadow.authoritativeForMoney]))
+    expect(porId).toEqual({ decidio: true, vieja: false, 'sin-pais': false, 'solo-procesador': false, 'bin-verificado': true })
+  })
+
   it('status=refunded matches both modern and legacy refunds and exposes payment type', async () => {
     mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
     mockGroupBy.mockResolvedValueOnce([])

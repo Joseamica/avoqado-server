@@ -3277,3 +3277,178 @@ describe('Codex R16-2 · la espera del candado del intento se observa ATRIBUIDA 
     })
   })
 })
+
+describe('D3 (10-nov-2026) · la tarifa internacional la decide el PAÍS de la tarjeta, nazca el cobro del REST o del webhook', () => {
+  /** Así registra hoy una Nexgo con AngelPay: nunca marca internacional; sólo adjunta el país del chip (5F28). */
+  const restDeNexgo = (attemptId: string, pais: string, over: Record<string, unknown> = {}, requestId?: string, ref?: string) => ({
+    ...f.registroDeLaTerminal({
+      attemptId,
+      requestId,
+      ref,
+      tarjeta: { cardBrand: 'VISA', maskedPan: '****1234', entryMode: 'CONTACTLESS' },
+    }),
+    isInternational: false,
+    issuerCountryCode: pais,
+    issuerCountrySource: 'EMV_5F28',
+    ...over,
+  })
+  const nacidoDelWebhook = async (orderId?: string) => {
+    const R = `${Date.now()}-${randomUUID().slice(0, 6)}`
+    const solicitud = await f.solicitud(orderId ? { orderId } : undefined)
+    const A = await vincular(solicitud.requestId)
+    expect((await webhook(A, { transactionId: R })).result.action).toBe('CONFIRMED')
+    const nacido = await exigir(prisma.payment.findFirst({ where: { venueId: f.venueId, idempotencyKey: A } }))
+    // El webhook no sabe nada de la tarjeta: sin la llave (un `false` taparía al REST) y clasificado «sin evidencia».
+    expect(nacido.processorData as Record<string, unknown>).not.toHaveProperty('isInternational')
+    expect(nacido).toMatchObject({ internationalityStatus: 'UNKNOWN', internationalitySource: 'NONE', issuerCountryCode: null })
+    return { nacido, A, R, requestId: solicitud.requestId }
+  }
+  const esExtranjeraDecidida = async (paymentId: string) => {
+    const p = await pago(paymentId)
+    expect(p).toMatchObject({
+      internationalityStatus: 'INTERNATIONAL',
+      internationalitySource: 'EMV_5F28',
+      issuerCountryCode: '840',
+      internationalityClassificationVersion: 2,
+    })
+    expect(p.internationalityClassifiedAt).not.toBeNull()
+    expect(p.processorData).toMatchObject({
+      isInternational: true,
+      isInternationalFromTerminal: false,
+      issuerCountryEvidence: { code: '0840', source: 'EMV_5F28' },
+    })
+  }
+
+  it('webhook → REST de una Nexgo con Visa de Estados Unidos (venta rápida): el costo nace INTERNACIONAL (4.5 %) y el pago guarda país, clasificación y lo que dijo la terminal', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    const rest = await recordFastPayment(f.venueId, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    expect(rest.id).toBe(nacido.id)
+    await esExtranjeraDecidida(nacido.id)
+    await comprobarCostoInternacional(nacido.id)
+  })
+
+  it('con orden: el mismo recorrido sobre una cuenta de $100', async () => {
+    const venta = await f.nuevaVenta()
+    const { nacido, A, R, requestId } = await nacidoDelWebhook(venta.id)
+    const rest = await recordOrderPayment(f.venueId, venta.id, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    expect(rest.id).toBe(nacido.id)
+    await esExtranjeraDecidida(nacido.id)
+    await comprobarCostoInternacional(nacido.id)
+  })
+
+  it('el REST llega primero (sin webhook): se decide al crear y el costo síncrono ya es INTERNACIONAL', async () => {
+    const p = await recordFastPayment(f.venueId, restDeNexgo(randomUUID(), '0840'), f.staffId)
+    expect(p.status).toBe('COMPLETED')
+    await esExtranjeraDecidida(p.id)
+    expect(await asegurarCostoSincrono(p.id)).toBe('CUMPLIDA')
+    const costo = await exigir(prisma.transactionCost.findUnique({ where: { paymentId: p.id } }))
+    expect(costo.transactionType).toBe('INTERNATIONAL')
+    expect(Number(costo.venueRate)).toBeCloseTo(0.045, 6)
+  })
+
+  it('🔴 la terminal dice «internacional» y el chip dice México (clase Doña Simona): webhook → REST ⇒ costo de CRÉDITO nacional (8 %), nunca el internacional', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0484', { isInternational: true }, requestId, R), f.staffId)
+    const p = await pago(nacido.id)
+    expect(p).toMatchObject({ internationalityStatus: 'DOMESTIC', internationalitySource: 'EMV_5F28', issuerCountryCode: '484' })
+    expect(p.processorData).toMatchObject({ isInternational: false, isInternationalFromTerminal: true })
+    expect(await cerrar(nacido.id)).toBe(true)
+    const costo = await exigir(prisma.transactionCost.findUnique({ where: { paymentId: nacido.id } }))
+    expect(costo.transactionType).toBe('CREDIT')
+    expect(Number(costo.venueRate)).toBeCloseTo(0.08, 6)
+  })
+
+  it('un país que no existe (0123) no decide: se queda lo que dijo la terminal (nacional) y el costo es de crédito', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0123', {}, requestId, R), f.staffId)
+    const p = await pago(nacido.id)
+    expect(p).toMatchObject({ internationalityStatus: 'UNKNOWN', internationalitySource: 'LEGACY', issuerCountryCode: null })
+    expect((p.processorData as Record<string, unknown>).isInternational).toBe(false)
+    expect(await cerrar(nacido.id)).toBe(true)
+    expect((await exigir(prisma.transactionCost.findUnique({ where: { paymentId: nacido.id } }))).transactionType).toBe('CREDIT')
+  })
+
+  it('un reintento del REST con OTRO país no cambia nada: ni el dato, ni la clasificación, ni el costo', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    await comprobarCostoInternacional(nacido.id)
+    const reintento = await recordFastPayment(f.venueId, restDeNexgo(A, '0484', {}, requestId, R), f.staffId)
+    expect(reintento.id).toBe(nacido.id)
+    await esExtranjeraDecidida(nacido.id)
+    expect(await prisma.transactionCost.count({ where: { paymentId: nacido.id } })).toBe(1)
+    expect((await exigir(prisma.transactionCost.findUnique({ where: { paymentId: nacido.id } }))).transactionType).toBe('INTERNATIONAL')
+  })
+
+  it('un webhook repetido DESPUÉS del REST no borra ni reemplaza la decisión', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    expect(['CONFIRMED', 'MATCHED']).toContain((await webhook(A, { transactionId: R })).result.action)
+    await esExtranjeraDecidida(nacido.id)
+  })
+
+  it('🔴 Codex r1-1 / r3-4 · una devolución hecha ANTES de que la terminal acredite el país queda en el MISMO renglón que su cobro: internacional en el pago (desde que el cobro lo aprende) y en su costo negativo', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    const devolucion = await recordRefund(
+      f.venueId,
+      {
+        venueId: f.venueId,
+        originalPaymentId: nacido.id,
+        originalOrderId: nacido.orderId,
+        amount: 10000,
+        reason: 'CUSTOMER_REQUEST',
+        authorizationNumber: `RF-${randomUUID().slice(0, 6)}`,
+        referenceNumber: randomUUID(),
+        isPartialRefund: false,
+        currency: 'MXN',
+        processor: 'angelpay',
+        idempotencyKey: randomUUID(),
+      } as Parameters<typeof recordRefund>[1],
+      f.staffId,
+    )
+    // Nació sin el dato: el cobro todavía no lo tenía.
+    const antes = await pago(devolucion.id)
+    expect(antes.processorData as Record<string, unknown>).not.toHaveProperty('isInternational')
+
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    // Codex r3-4: la devolución aprende el país EN el registro de la terminal, con su cobro — antes de que el costo converja y
+    // sin depender del worker ni de la configuración de liquidación.
+    expect((await pago(devolucion.id)).processorData).toMatchObject({ isInternational: true, originalPaymentId: nacido.id })
+    expect(await cerrar(nacido.id)).toBe(true)
+
+    expect((await pago(devolucion.id)).processorData).toMatchObject({ isInternational: true, originalPaymentId: nacido.id })
+    const costoNegativo = await exigir(prisma.transactionCost.findUnique({ where: { paymentId: devolucion.id } }))
+    expect(costoNegativo.transactionType).toBe('INTERNATIONAL')
+    // Idempotente: otro cierre no vuelve a escribir nada distinto.
+    expect(await cerrar(nacido.id)).toBe(true)
+    expect((await pago(devolucion.id)).processorData).toMatchObject({ isInternational: true })
+  })
+
+  it('Codex r2-2 · una devolución que volvió por OTRO medio (efectivo) no se marca internacional: la regla es «mismo medio», como en el panel', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    const devolucion = await recordRefund(
+      f.venueId,
+      {
+        venueId: f.venueId,
+        originalPaymentId: nacido.id,
+        originalOrderId: nacido.orderId,
+        amount: 10000,
+        reason: 'CUSTOMER_REQUEST',
+        authorizationNumber: `RF-${randomUUID().slice(0, 6)}`,
+        referenceNumber: randomUUID(),
+        isPartialRefund: false,
+        currency: 'MXN',
+        processor: 'angelpay',
+        idempotencyKey: randomUUID(),
+      } as Parameters<typeof recordRefund>[1],
+      f.staffId,
+    )
+    // La misma devolución, pero entregada en efectivo (lo que hace «Devolver con» del panel): ya no es una fila de tarjeta.
+    await prisma.payment.update({ where: { id: devolucion.id }, data: { method: 'CASH' } })
+
+    await recordFastPayment(f.venueId, restDeNexgo(A, '0840', {}, requestId, R), f.staffId)
+    await cerrar(nacido.id)
+
+    expect((await pago(nacido.id)).processorData).toMatchObject({ isInternational: true })
+    expect((await pago(devolucion.id)).processorData as Record<string, unknown>).not.toHaveProperty('isInternational')
+  })
+})
