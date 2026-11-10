@@ -160,6 +160,19 @@ describe('D6 — catálogo del POS: no se vuelve a armar si no cambió', () => {
     await pedir()
     expect(orden).toEqual(['version', 'productos'])
   })
+
+  it('D8: un POS que pide cada 5 min toda una noche sin cambios lo arma UNA vez (con vida de 30 min lo armaba cada 35)', async () => {
+    // Medido en producción el 9-nov (Better Stack): La Galeterie pide cada 5 min; con vida de 30 min, la 7.ª bajada
+    // volvía a armar todo (420–760 ms con el hilo retenido) aunque nada hubiera cambiado. La versión es la que manda.
+    prismaMock.$queryRaw.mockResolvedValue([{ version: 'ver-1' }])
+    prismaMock.product.findMany.mockResolvedValue([producto('p1', '45')])
+    const inicio = new Date('2026-11-09T02:03:22.000Z').getTime()
+    for (let i = 0; i < 12 * 8; i++) {
+      jest.setSystemTime(new Date(inicio + i * 5 * 60_000))
+      await pedir()
+    }
+    expect(prismaMock.product.findMany).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('D6 — la caché tiene vida y tope', () => {
