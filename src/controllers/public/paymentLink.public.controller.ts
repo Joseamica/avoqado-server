@@ -29,7 +29,8 @@ export async function resolvePaymentLink(req: Request, res: Response) {
 
     res.json({
       success: true,
-      data,
+      // `bancoPrueba`: campo nuevo y opcional; los clientes que no lo conocen lo ignoran.
+      data: { ...data, bancoPrueba: true },
     })
   } catch (error: any) {
     // Una liga pagada, vencida o inexistente es una respuesta normal: aviso sin el detalle (lleva la liga del recibo).
