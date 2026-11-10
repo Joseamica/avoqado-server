@@ -404,15 +404,19 @@ export async function endBreak(params: BreakParams) {
     throw new BadRequestError('No hay descanso activo')
   }
 
-  // End break and update time entry status
-  const [_updatedBreak, updatedTimeEntry] = await prisma.$transaction([
-    prisma.timeEntryBreak.update({
-      where: { id: activeBreak.id },
-      data: { endTime: new Date() },
-    }),
-    prisma.timeEntry.update({
-      where: { id: timeEntryId },
+  // Primero la checada y luego el descanso: el mismo orden que la salida automática y la de campo. Al revés, si caían a la
+  // vez, Postgres abortaba una por interbloqueo y esto devolvía 500 (hz:4c64c58b:D2). Y condicional: si otra salida la
+  // cerró entre la lectura y aquí, no se revive como CLOCKED_IN. La hora se toma ANTES: esperar un candado no es descanso.
+  const fin = new Date()
+  return prisma.$transaction(async tx => {
+    const { count } = await tx.timeEntry.updateMany({
+      where: { id: timeEntryId, status: TimeEntryStatus.ON_BREAK, clockOutTime: null },
       data: { status: TimeEntryStatus.CLOCKED_IN },
+    })
+    if (count !== 1) throw new BadRequestError('Registro no encontrado o no en descanso')
+    await tx.timeEntryBreak.update({ where: { id: activeBreak.id }, data: { endTime: fin } })
+    return tx.timeEntry.findUniqueOrThrow({
+      where: { id: timeEntryId },
       include: {
         staff: {
           select: {
@@ -423,10 +427,8 @@ export async function endBreak(params: BreakParams) {
         },
         breaks: true,
       },
-    }),
-  ])
-
-  return updatedTimeEntry
+    })
+  })
 }
 
 /**
