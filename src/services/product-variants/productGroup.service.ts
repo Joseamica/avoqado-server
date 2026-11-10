@@ -143,7 +143,11 @@ export async function assertNotDemoCategory(tx: Prisma.TransactionClient, catego
 export async function assertModifierGroupsInVenue(tx: Prisma.TransactionClient, venueId: string, ids: string[]): Promise<void> {
   const unicos = [...new Set(ids)]
   if (!unicos.length) return
-  const found = await tx.modifierGroup.findMany({ where: { id: { in: unicos }, venueId }, select: { id: true }, take: unicos.length })
+  const found = await tx.modifierGroup.findMany({
+    where: { id: { in: unicos }, venueId, active: true },
+    select: { id: true },
+    take: unicos.length,
+  })
   if (found.length !== unicos.length) throw new NotFoundError('Algún grupo de extras no existe en esta sucursal.')
 }
 
