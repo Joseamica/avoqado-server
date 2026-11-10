@@ -157,9 +157,9 @@ const writers = [
 const rechazoPorCuentaPagada: Record<(typeof writers)[number][0], string> = {
   add: 'Cannot add items to a paid order',
   serial: 'Cannot add items to a paid order',
-  remove: 'Esta cuenta ya está pagada. Reembólsala antes de quitarle artículos.',
-  comp: 'Esta cuenta ya está pagada. Reembólsala antes de dar cortesías.',
-  void: 'Esta cuenta ya está pagada. Reembólsala antes de anular artículos.',
+  remove: 'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, usa Reembolso.',
+  comp: 'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, usa Reembolso.',
+  void: 'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, usa Reembolso.',
   discount: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
 }
 

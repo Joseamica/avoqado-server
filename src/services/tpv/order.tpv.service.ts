@@ -2629,7 +2629,9 @@ export async function removeOrderItem(
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de quitarle artículos.')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, usa Reembolso.',
+        )
       }
 
       // Verify item exists in order
@@ -2886,7 +2888,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de dar cortesías.')
+        throw new BadRequestError('Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, usa Reembolso.')
       }
 
       // Validate staff exists
@@ -3204,7 +3206,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de anular artículos.')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, usa Reembolso.',
+        )
       }
 
       // Validate staff exists
