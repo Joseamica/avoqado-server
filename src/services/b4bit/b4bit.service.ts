@@ -27,7 +27,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
-import { assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { assertNotCardOnlineOrderInTx, assertNotOnlineOrderInTx } from '../online-ordering/card/guards'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -36,6 +36,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
+import { notarDineroEnFolioCerradoEnTx } from '../shared/cuentaCancelada'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
@@ -373,6 +374,10 @@ export async function initiateCryptoPayment(
         rechazarAccionDeCobroSobreRappiEnEfectivo(targetOrder)
         // Pedidos en línea fase 2: un cobro NUEVO con cripto no cobra un pedido pagado con tarjeta en línea.
         await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: orderIdToUse })
+        // 🔴 S9 (P2-5): ni ningún otro pedido en línea. B4Bit confirma minutos después; si para entonces el folio venció, el dinero
+        // quedaba para conciliar a mano. Sólo un INICIO nuevo: la repetición de una operación ya iniciada salió arriba con su llave, y
+        // la confirmación de un cobro iniciado antes sigue registrando su dinero (no pasa por aquí).
+        await assertNotOnlineOrderInTx(tx, { venueId, orderId: orderIdToUse })
         if (targetOrder.paymentStatus === 'PAID') {
           throw new BadRequestError('La cuenta ya está pagada')
         }
@@ -1236,6 +1241,21 @@ async function completeAndAttributeB4BitPaymentInTx(
   // FT-GRAVES T2: sólo quien GANÓ la transición a COMPLETED (una reentrega no llega aquí) comisiona, con el MISMO gancho que la
   // terminal y en esta transacción. El esquema decide a quién (quien inició el cobro en la terminal); sin persona, nada.
   await enqueuePaymentCommissionInTx(tx, paymentId)
+  // 🔴 S9 v5 (B3, plan B): sólo quien GANÓ la transición (ni la reentrega ni el fuera de orden llegan aquí) deja la nota, con la orden y
+  // el pago ya tomados (vales → Order → Payment → turno → nota). Cubre la cuenta viva, la salida `ORDER_NOT_CHARGEABLE` (la cuenta sigue
+  // cancelada: texto D2) y el rescate. Un intento que pierde el CAS de la orden revierte su nota. La escritura de `OnlineOrder` vive en
+  // `cuentaCancelada.ts`, nunca aquí: este archivo no reabre cuentas (control M-1).
+  if (paymentOrderId) {
+    await notarDineroEnFolioCerradoEnTx(tx, {
+      venueId: paymentVenueId,
+      orderId: paymentOrderId,
+      entra: amountPesos.plus(tipPesos),
+      reabierta: false,
+      canal: 'b4bitWebhook',
+      paymentId,
+      staffId: paymentProcessedById,
+    })
+  }
   return { transitioned: true, ignoredAsOutOfOrder: false, vales }
 }
 

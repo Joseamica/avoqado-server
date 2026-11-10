@@ -40,7 +40,12 @@ import {
 // contradecir al saldo persistido.
 import { summarizeRefunds } from '../shared/orderBalance'
 import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
-import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx, rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
+import {
+  bloquearCuentaParaEditar,
+  notarDineroEnFolioCerradoEnTx,
+  rechazarSiCuentaAnuladaEnTx,
+  rechazarCobroNuevoSobreCancelada,
+} from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
@@ -1144,6 +1149,16 @@ export async function settleOrder(
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           reconciliationEnabled,
+        })
+        // 🔴 S9 v5 (B3): la nota del dinero que entra; «Liquidar» nunca reabre (la cancelada la rechaza arriba).
+        await notarDineroEnFolioCerradoEnTx(tx, {
+          venueId,
+          orderId,
+          entra: new Prisma.Decimal(toSettle),
+          reabierta: false,
+          canal: 'settleOrder',
+          paymentId: settlementPayment.id,
+          staffId: actorStaffId,
         })
 
         // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later

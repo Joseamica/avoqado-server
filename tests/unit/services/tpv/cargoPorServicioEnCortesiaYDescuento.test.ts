@@ -56,6 +56,9 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
   assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
   avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+  // S9: «¿es cuenta de folio?» también lee `onlineOrder`; aquí no lo es (se prueba en cortesiaDeFolio y b4bit.pedidoEnLinea).
+  esCuentaDeFolioEnTx: jest.fn(async () => false),
+  assertNotOnlineOrderInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {

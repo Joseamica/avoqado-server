@@ -42,6 +42,15 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
   revertirCanjeEnTx: (...a: unknown[]) => revertirMock(...a),
 }))
 
+// S9 (P2-5): la conversión de los beneficios de un folio, observada como doble para ver su lugar frente a cobros y sobres.
+const convertirMock = jest.fn()
+const despertarMock = jest.fn()
+jest.mock('@/services/online-ordering/cortesiaDeFolio', () => ({
+  ...jest.requireActual('@/services/online-ordering/cortesiaDeFolio'),
+  convertirBeneficiosEnCortesiaEnTx: (...a: unknown[]) => convertirMock(...a),
+  despertarPasesTrasCommit: (...a: unknown[]) => despertarMock(...a),
+}))
+
 import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -76,6 +85,9 @@ beforeEach(() => {
     refundPaymentId: `ref-${p.originalPaymentId}`,
   }))
   revertirMock.mockResolvedValue([])
+  // Por omisión la cuenta NO es de un folio (sin `OnlineOrder`).
+  prismaMock.onlineOrder.findFirst.mockReset().mockResolvedValue(null)
+  convertirMock.mockResolvedValue({ filas: 0, montoRegresado: D(0), puntos: 0, premios: [], clientasConPremio: [] })
 })
 
 describe('returnGiftBalanceAndCancelOrder', () => {
@@ -276,5 +288,51 @@ describe('returnGiftBalanceAndCancelOrder — ronda 1', () => {
     const error = await llamar().catch(e => e)
     expect(error).toMatchObject({ code: 'GIFT_CARD_TENDER_NOT_ALLOWED' })
     expect(error.message).toContain('únicos pagos son con tarjeta de regalo')
+  })
+})
+
+/** S9 (P2-5, R55 b): «Regresar el saldo y cancelar» un folio regresa sus beneficios; en otra cuenta, como hoy. */
+describe('returnGiftBalanceAndCancelOrder — S9, cuenta de folio', () => {
+  const llamar = () => returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
+
+  it('🔴 en una cuenta de folio convierte ANTES de tomar los cobros y los sobres (beneficios → sobres) y despierta el pase tras el commit', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo-1' })
+    convertirMock.mockResolvedValue({ filas: 1, montoRegresado: D(85), puntos: 0, premios: ['sr-1'], clientasConPremio: ['cust-1'] })
+
+    await expect(llamar()).resolves.toEqual({ replay: false })
+
+    expect(convertirMock).toHaveBeenCalledTimes(1)
+    expect(convertirMock).toHaveBeenCalledWith(
+      prismaMock,
+      expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1', staffId: 'staff-1', camino: 'returnGiftBalanceAndCancelOrder' }),
+    )
+    const conversion = convertirMock.mock.invocationCallOrder[0]
+    expect(conversion).toBeLessThan(Math.min(...bloquearMock.mock.invocationCallOrder))
+    expect(conversion).toBeLessThan(lockMock.mock.invocationCallOrder[0])
+    expect(conversion).toBeLessThan(Math.min(...reembolsoMock.mock.invocationCallOrder))
+    expect(conversion).toBeLessThan(prismaMock.order.update.mock.invocationCallOrder[0])
+    expect(despertarMock).toHaveBeenCalledWith('venue-1', ['cust-1'])
+    expect(despertarMock.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.order.update.mock.invocationCallOrder[0])
+  })
+
+  it('en otra cuenta, como hoy: no convierte ni busca canjes que devolver', async () => {
+    await expect(llamar()).resolves.toEqual({ replay: false })
+
+    expect(convertirMock).not.toHaveBeenCalled()
+    const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(c => [].concat(c[0]).join('?'))
+    expect(sql.some(t => t.includes('"OrderDiscount"'))).toBe(false)
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'CANCELLED', version: { increment: 1 } } }),
+    )
+  })
+
+  it('una validación que rechaza (pagos que no son de saldo) no alcanza a convertir nada', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo-1' })
+    prismaMock.payment.findMany.mockResolvedValue([
+      { id: 'pay-1', tenderTypeId: 'tt-gift' },
+      { id: 'pay-cash', tenderTypeId: null },
+    ])
+    await expect(llamar()).rejects.toMatchObject({ code: 'GIFT_CARD_TENDER_NOT_ALLOWED' })
+    expect(convertirMock).not.toHaveBeenCalled()
   })
 })

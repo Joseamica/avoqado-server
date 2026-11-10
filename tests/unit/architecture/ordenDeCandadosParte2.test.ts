@@ -1401,3 +1401,43 @@ it('Wallet familia: un claim Prisma exige la hora en where y una liberación NUL
   expect(h('siguienteIntentoAt: { lte: new Date() }', '"token"')).toEqual([])
   expect(h('id: "x"', 'null')).toEqual([])
 })
+
+/**
+ * S9 (P2-5): la conversión de los beneficios de un folio en cortesía y su pasada de `Discount` son escritores nuevos EN_TX: corren
+ * dentro de la transacción de quien anula, nunca abren otra, y toda transacción que las alcanza (las de anular, ya en la semilla)
+ * abre con `withDeadlockRetry`. El compilador ya lo exige (piden `TxConReintento`); esto fija el inventario.
+ */
+describe('S9 · conversión de los beneficios de un folio', () => {
+  const CONVERSION = [
+    'src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx',
+    'src/services/dashboard/discountEngine.service.ts#bloquearDescuentosEnOrdenEnTx',
+  ]
+  /** Abren la transacción de una anulación que llega a `devolverCanjesDeVentaAnuladaEnTx` (y con ella a la conversión). */
+  const ANULAN = [
+    'src/controllers/tpv/order-table.tpv.controller.ts#cancelOrder',
+    'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce',
+    'src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar',
+    'src/services/dashboard/order.dashboard.service.ts#deleteOrder',
+    'src/services/dashboard/order.dashboard.service.ts#updateOrder',
+    'src/services/exchanges/exchange.service.ts#cancelExchange',
+    'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout',
+    'src/services/mobile/order.mobile.service.ts#cancelOrder',
+    'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder',
+    'src/services/online-ordering/card/capture.service.ts#finishCapture',
+    'src/services/online-ordering/transitions.service.ts#casTransition',
+    'src/services/tpv/order.tpv.service.ts#voidItems',
+  ]
+
+  it('sus dos escritores están en el inventario como EN_TX y piden un TxConReintento', () => {
+    for (const k of CONVERSION) {
+      expect([k, revisado.escritores[k]?.clase]).toEqual([k, 'EN_TX'])
+      const [archivo, funcion] = k.split('#')
+      const fuente = fs.readFileSync(path.join(RAIZ, archivo), 'utf8')
+      expect([k, new RegExp(`export async function ${funcion}\\(\\s*tx: TxConReintento`).test(fuente)]).toEqual([k, true])
+    }
+  })
+
+  it('las transacciones de anular que la alcanzan abren con withDeadlockRetry (semilla de aperturas)', () => {
+    for (const k of ANULAN) expect([k, (revisado.aperturas[k]?.cantidad ?? 0) > 0]).toEqual([k, true])
+  })
+})

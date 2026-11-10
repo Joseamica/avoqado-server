@@ -3,7 +3,7 @@ import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
-import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
+import { CUENTA_SALDADA, FOLIO_CERRADO, revivirFolioSaldadoEnTx } from '@/services/shared/cuentaCancelada'
 import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/pagadaPeroAbierta'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { BadRequestError } from '@/errors/AppError'
@@ -21,28 +21,24 @@ import { emitOnlineOrderUpdated } from './traySocket'
 import type { ReadCandidates, Reloj } from './types'
 
 /**
- * R18: la cuenta de un folio está SALDADA (`FOLIO_PAID_STATUSES`, el espejo de `esVentaCerrada`) y viva. R5: NO excluye las cuentas
- * con un `Payment` `REFUND` (el `PAID_ORDER` de `paidPickupSync` sí): un reembolso real deja la cuenta PAID, y un folio pagado y
- * reembolsado tiene que salir de «Por pagar» igual (decisión 18: lo saca una persona). Un abono parcial no entra: espera el resto.
+ * R18: `CUENTA_SALDADA` (en `cuentaCancelada.ts`, con el paso que revive un folio cerrado, y su `FOLIO_CERRADO`) = la cuenta de un folio
+ * está SALDADA (`FOLIO_PAID_STATUSES`, el espejo de `esVentaCerrada`) y viva. R5: NO excluye las cuentas con un `Payment` `REFUND`
+ * (el `PAID_ORDER` de `paidPickupSync` sí): un reembolso real deja la cuenta PAID, y un folio pagado y reembolsado tiene que salir de
+ * «Por pagar» igual (decisión 18: lo saca una persona). Un abono parcial no entra: espera el resto.
  */
 const CUENTA_VIVA: Prisma.OrderWhereInput = { status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] } }
-const CUENTA_SALDADA: Prisma.OrderWhereInput = { paymentStatus: { in: FOLIO_PAID_STATUSES }, ...CUENTA_VIVA }
-
-/** Dónde puede estar un folio que el dinero tardío revive: vencido, cancelado o rechazado (tabla 7b del diseño). */
-const FOLIO_CERRADO: OnlineOrderStatus[] = [
-  OnlineOrderStatus.EXPIRED,
-  OnlineOrderStatus.CANCELLED_BY_CUSTOMER,
-  OnlineOrderStatus.CANCELLED_BY_STAFF,
-  OnlineOrderStatus.REJECTED,
-]
 
 /**
  * R4 (regla de capacidad): `syncPaidClosedFolios` sólo mira lo cerrado en esta ventana. La fecha es `updatedAt` (índice
- * `[requiresAcceptance, status, updatedAt]`): el cierre la escribe y nada más toca un folio cerrado; el cierre vive en tres
- * columnas (`expiredAt`, `cancelledAt`, `rejectedAt`) y un solo índice no las cubre.
- * ponytail: dinero que salde un folio cerrado hace más de 7 días no lo revive solo (queda su cuenta abierta y el aviso al gerente).
+ * `[requiresAcceptance, status, updatedAt]`): la escribe el cierre y la renuevan (S9 v5, B2: `renovarRecuperacionDeFolioEnTx`) el
+ * dinero que entra (la nota de los 7 escritores), la reapertura (la conciliación) y el recálculo que deja saldada una cuenta `WEB` sin
+ * dinero nuevo. El cierre vive en tres columnas (`expiredAt`, `cancelledAt`, `rejectedAt`) y un solo índice no las cubre.
+ * ponytail (R13): la ventana cuenta desde el último dinero, reapertura o saldo; para perder una revivida el SERVIDOR tendría que pasar
+ * una semana sin el trabajo de cada 30 s, sin la bandeja y sin la lista de folios. Si hace falta, leer sin ventana con un cursor durable.
  */
 const VENTANA_DE_CERRADOS_MS = 7 * 24 * 3_600_000
+/** R13 (S9 v5): páginas de `SYNC_BATCH_SIZE` que `syncPaidClosedFolios` lee por pasada, con su cursor por `id`. */
+const PAGINAS_DE_CERRADOS = 10
 
 /**
  * Decisión 18: el ÚNICO paso de pagado a «Por entregar». Bajo el candado de la orden (`casTransitionInTx`, `kind: 'ACCEPT'`): CAS
@@ -163,57 +159,74 @@ export async function syncPaidClosedFolios(
   readCandidates: ReadCandidates = read => read(),
 ): Promise<number> {
   const desde = new Date(reloj().getTime() - VENTANA_DE_CERRADOS_MS)
-  const rows = await readCandidates(() =>
-    prisma.onlineOrder.findMany({
-      where: {
-        ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
-        requiresAcceptance: false,
-        status: { in: FOLIO_CERRADO },
-        updatedAt: { gte: desde },
-        order: CUENTA_SALDADA,
-      },
-      select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
-      orderBy: { id: 'asc' },
-      take: SYNC_BATCH_SIZE,
-    }),
-  )
   let won = 0
-  for (const row of rows) {
-    try {
-      const acceptedAt = await prisma.$transaction(async tx => {
-        if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId: row.orderId }))) return null
-        const ahora = reloj() // R52: ya con el candado
-        const cas = await tx.onlineOrder.updateMany({
-          where: { id: row.id, status: row.status, requiresAcceptance: false, order: CUENTA_SALDADA },
-          data: { status: OnlineOrderStatus.ACCEPTED, acceptedAt: ahora },
+  let leidos = 0
+  // R13 (S9 v5): por páginas, con el cursor DENTRO de la pasada (`id > último`, el patrón R50 del trabajo): una fila que nunca revive
+  // (su orden ya no es del negocio, un CAS que siempre pierde) no tapa a las que siguen. Tope: 10 páginas de 100 por pasada.
+  let despues: string | null = null
+  for (let pagina = 0; pagina < PAGINAS_DE_CERRADOS; pagina++) {
+    const after: string | null = despues
+    const rows: Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; order: { orderNumber: string } }> =
+      await readCandidates(() =>
+        prisma.onlineOrder.findMany({
+          where: {
+            ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
+            requiresAcceptance: false,
+            status: { in: FOLIO_CERRADO },
+            updatedAt: { gte: desde },
+            order: CUENTA_SALDADA,
+            ...(after ? { id: { gt: after } } : {}),
+          },
+          select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
+          orderBy: { id: 'asc' },
+          take: SYNC_BATCH_SIZE,
+        }),
+      )
+    leidos += rows.length
+    for (const row of rows) {
+      try {
+        const acceptedAt = await prisma.$transaction(async tx => {
+          if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId: row.orderId }))) return null
+          const ahora = reloj() // R52: ya con el candado
+          // S9 v5: el paso compartido relee el folio y hace el CAS; no avisa (el aviso es de la nota del cobro).
+          const revivido = await revivirFolioSaldadoEnTx(tx, { venueId: row.venueId, orderId: row.orderId, ahora })
+          return revivido ? ahora : null
+        }, ORDER_LOCK_WAIT_BUDGET)
+        if (!acceptedAt) continue
+        won += 1
+        emitOnlineOrderUpdated({
+          venueId: row.venueId,
+          orderId: row.orderId,
+          orderNumber: row.order.orderNumber,
+          onlineStatus: OnlineOrderStatus.ACCEPTED,
+          now: acceptedAt,
         })
-        return cas.count === 1 ? ahora : null
-      }, ORDER_LOCK_WAIT_BUDGET)
-      if (!acceptedAt) continue
-      won += 1
-      emitOnlineOrderUpdated({
-        venueId: row.venueId,
-        orderId: row.orderId,
-        orderNumber: row.order.orderNumber,
-        onlineStatus: OnlineOrderStatus.ACCEPTED,
-        now: acceptedAt,
-      })
-      void notifyOrderEvent(row.orderId, 'ACCEPTED')
-      void logAction({
-        staffId: null,
-        venueId: row.venueId,
-        action: 'ONLINE_ORDER_ACCEPTED',
-        entity: 'OnlineOrder',
-        entityId: row.id,
-        data: { orderNumber: row.order.orderNumber, automatic: true, from: row.status },
-      })
-    } catch (error) {
-      logger.error('[OnlineOrdering] no se pudo pasar a «Por entregar» un folio cerrado ya saldado (la pasada sigue)', {
-        onlineOrderId: row.id,
-        venueId: row.venueId,
-        error: error instanceof Error ? error.message : String(error),
-      })
+        void notifyOrderEvent(row.orderId, 'ACCEPTED')
+        void logAction({
+          staffId: null,
+          venueId: row.venueId,
+          action: 'ONLINE_ORDER_ACCEPTED',
+          entity: 'OnlineOrder',
+          entityId: row.id,
+          data: { orderNumber: row.order.orderNumber, automatic: true, from: row.status },
+        })
+      } catch (error) {
+        logger.error('[OnlineOrdering] no se pudo pasar a «Por entregar» un folio cerrado ya saldado (la pasada sigue)', {
+          onlineOrderId: row.id,
+          venueId: row.venueId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
+    if (rows.length < SYNC_BATCH_SIZE) break
+    despues = rows[rows.length - 1].id
+  }
+  if (leidos > won) {
+    logger.warn('[OnlineOrdering] folios cerrados y saldados que no revivieron en esta pasada (carrera o fila sin candado)', {
+      ...scope,
+      leidos,
+      sinRevivir: leidos - won,
+    })
   }
   if (won > 0) logger.info('[OnlineOrdering] folios cerrados que otro cobro saldó, de vuelta en «Por entregar»', { ...scope, count: won })
   return won

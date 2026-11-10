@@ -412,8 +412,10 @@ import {
   cierreAutomaticoPermitido,
   esCobroNuevo,
   estadoParaCobrar,
+  notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
+  renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
@@ -1478,6 +1480,22 @@ export async function settleStandalonePaymentInTx(
       ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
+  // 🔴 S9 v5 (B2, B3): con dinero que entra, la nota (aviso una vez a un folio «Nadie» anulado y su recuperación); sin dinero (el
+  // origen de una reasignación) y saldada, una cuenta `WEB` sólo renueva la recuperación de su folio cerrado. Fuera de `WEB`, nada.
+  if (entraDinero) {
+    await notarDineroEnFolioCerradoEnTx(tx, {
+      venueId,
+      orderId,
+      entra: new Prisma.Decimal(payment.amount).plus(payment.tipAmount),
+      source: order.source,
+      reabierta: reabiertaDeCancelada,
+      canal: 'recordOrderPayment',
+      paymentId: payment.id ?? null,
+      staffId: staffId ?? null,
+    })
+  } else if (saldada && order.source === 'WEB') {
+    await renovarRecuperacionDeFolioEnTx(tx, { venueId, orderId })
+  }
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
   // R8: la cuenta de tarjetas pagada por terminal activa sus sobres en la MISMA transacción que la salda. A6 r1: en CADA cierre
@@ -2054,6 +2072,23 @@ async function updateOrderTotalsForStandalonePayment(
                 },
               },
             })
+
+            // 🔴 S9 v5 (B2, B3): la nota con dinero que entra; sin dinero (la reconciliación pasa 0) y saldada, una cuenta `WEB` sólo
+            // renueva la recuperación de su folio cerrado.
+            if (entraDinero) {
+              await notarDineroEnFolioCerradoEnTx(tx, {
+                venueId: order.venueId,
+                orderId,
+                entra: new Prisma.Decimal(paymentAmount),
+                source: order.source,
+                reabierta: reabiertaEnEstaPasada,
+                canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
+                paymentId: currentPaymentId ?? null,
+                staffId: staffId ?? null,
+              })
+            } else if (isFullyPaid && order.source === 'WEB') {
+              await renovarRecuperacionDeFolioEnTx(tx, { venueId: order.venueId, orderId })
+            }
 
             // El vale nace aquí dentro: mismo commit que la transición a PAID.
             if (debeRegistrarPosting) {

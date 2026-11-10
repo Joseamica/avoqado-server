@@ -1184,6 +1184,63 @@ describe('Discount Engine Service', () => {
       expect(result).toHaveLength(0)
     })
 
+    /**
+     * S9 · Codex r1 P1 (regresión): la anulación de un folio convierte su descuento limitado en cortesía SIN `discountId` y devuelve su
+     * uso. El motor ya no lo reconocía como aplicado y una cuenta revivida de $219 terminaba con DOS rebajas de $85. Ruling del
+     * controlador: una cuenta con esa cortesía conserva el precio que vio la clienta; sólo entra lo que el personal elige a mano.
+     */
+    describe('S9: una cuenta con la cortesía de un folio anulado conserva su precio', () => {
+      const MOTIVO = 'Beneficio regresado a la clienta al anular el folio'
+      const folioRevivido = (compReason = MOTIVO) => ({
+        id: 'order-123',
+        venueId: 'venue-123',
+        customerId: 'customer-123',
+        subtotal: new Decimal(219),
+        items: [],
+        orderDiscounts: [{ discountId: null, amount: new Decimal(85), isAutomatic: true, isComp: true, compReason }],
+      })
+      const limitado = createMockDbDiscount({ id: 'd-limitado', type: 'FIXED_AMOUNT', value: new Decimal(85), maxTotalUses: 1 })
+      const deLaClienta = {
+        id: 'cd-1',
+        customerId: 'customer-123',
+        discountId: 'd-clienta',
+        active: true,
+        validFrom: null,
+        validUntil: null,
+        maxUses: null,
+        usageCount: 0,
+        discount: createMockDbDiscount({ id: 'd-clienta', isAutomatic: false }),
+      }
+
+      it('no recibe descuentos automáticos ni los asignados a la clienta (el caso de Codex: sigue con UNA rebaja)', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido())
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([deLaClienta])
+
+        await expect(evaluateAutomaticDiscounts('order-123')).resolves.toEqual([])
+      })
+
+      it('el que el personal elige a mano (forceDiscountId) sí se evalúa: es una decisión en caja', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido())
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([deLaClienta])
+
+        const r = await evaluateAutomaticDiscounts('order-123', 'd-limitado')
+
+        expect(r.map(d => d.discountId)).toEqual(['d-limitado'])
+      })
+
+      it('regresión: una cortesía a mano con otro motivo no frena los automáticos (como hoy)', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido('Cortesía de la casa'))
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([])
+
+        const r = await evaluateAutomaticDiscounts('order-123')
+
+        expect(r.map(d => d.discountId)).toEqual(['d-limitado'])
+      })
+    })
+
     it('should respect stacking rules (non-stackable blocks others)', async () => {
       const mockOrder = {
         id: 'order-123',
@@ -1753,7 +1810,17 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
     prismaMock.order.findUnique.mockResolvedValue(orderAt(888, 500) as never)
 
     // hz:e0b12f00:D1: agota lo que queda, así que va con permiso de cortesía (9º argumento).
-    const result = await applyManualDiscount('order-neg', 'FIXED_AMOUNT', 888, 'birthdayexperience', 'staff-1', undefined, undefined, undefined, true)
+    const result = await applyManualDiscount(
+      'order-neg',
+      'FIXED_AMOUNT',
+      888,
+      'birthdayexperience',
+      'staff-1',
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )
 
     expect(result.amount).toBe(388) // no 888
     expect(Number(lastOrderUpdate().total)).toBe(0)

@@ -18,6 +18,7 @@ import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/serv
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
+import { despertarPasesTrasCommit } from './cortesiaDeFolio'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
@@ -99,6 +100,8 @@ export type CasResult =
       orderStatus: OrderStatus | null
       /** Fase 2: esta transición canceló y pasó el cargo AUTHORIZED → RELEASING; el llamador libera la tarjeta tras el commit. */
       releaseChargeId?: string
+      /** S9: clientas con premio regresado; tras el commit se despierta su pase de Wallet (si no, lo manda el barrido). */
+      clientasConPremio?: string[]
     }
   | {
       r: 'STALE'
@@ -231,7 +234,11 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
   // quitar el descuento. Después de ganar el CAS de la fila y antes de escribir la Order: si la Order no se escribe,
   // `OrderNotWritten` revierte también esta devolución (Codex r2).
-  if (cancela) await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
+  // S9 (P2-5): la cuenta es de folio, así que sus beneficios regresan y su fila se queda como cortesía. También con R44 (vence sin
+  // cancelar su cuenta, decisión 15): la clienta no espera a que alguien la anule para recuperar su premio.
+  const canjes = rule.cancels
+    ? await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
+    : null
   const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
   // R44: vencer sin cancelar no escribe la cuenta (queda como la dejó el reembolso).
   const written = venceSinCancelar
@@ -263,6 +270,7 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     orderWritten,
     orderStatus: orderWritten ? rule.order.to : null,
     ...(releaseChargeId ? { releaseChargeId } : {}),
+    ...(canjes?.clientasConPremio.length ? { clientasConPremio: canjes.clientasConPremio } : {}),
   }
 }
 
@@ -313,6 +321,7 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx, alConfirmar?: 
 
   // I-1: lo que cerró la sincronización de R2 se anuncia aquí, ya con la transacción confirmada y sólo si ganó el CAS de la fila.
   if (result.r === 'STALE' && result.cancelledElsewhere) announceCancelledElsewhere(result.cancelledElsewhere, result.now)
+  if (result.r === 'OK') despertarPasesTrasCommit(a.venueId, result.clientasConPremio)
   return result
 }
 

@@ -52,7 +52,11 @@ function escritoresDetectados(): Map<string, string> {
 }
 
 type Clase =
-  | { clase: 'PROTEGIDA'; marcadores: string[] }
+  /**
+   * S9 (P2-5): una PROTEGIDA que puede anular una cuenta con `OnlineOrder` (cuenta de folio) lleva `devolverCanjesDeVentaAnuladaEnTx`,
+   * que ahí convierte los beneficios en cortesía. Si no, `sinCuentaDeFolio` dice por qué nunca anula una (motivo + marcadores).
+   */
+  | { clase: 'PROTEGIDA'; marcadores: string[]; sinCuentaDeFolio?: { motivo: string; marcadores: string[] } }
   | { clase: 'VERDAD_EXTERNA'; marcadores: string[] }
   | { clase: 'EXENTA'; motivo: string; marcadores: string[] }
 
@@ -66,9 +70,10 @@ const INVENTARIO: Record<string, Clase> = {
   'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
   // Tarjetas de regalo (spec § 5.4.4): regresar el saldo y cancelar. Candado de topología (comandas → Order → mesas) +
   // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
+  // S9 (decisión 30 del plan): en una cuenta de folio convierte sus beneficios (`soloSiEsFolio`); en otra, como hoy (no devuelve canjes).
   'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES, 'soloSiEsFolio: true'],
   },
   // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela en la MISMA
   // tx del reembolso, que ya tiene el candado de la Order (issueRefund / recordRefund → lockExistingOrderForPayment). Con un cobro de
@@ -76,6 +81,11 @@ const INVENTARIO: Record<string, Clase> = {
   'services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero': {
     clase: 'PROTEGIDA',
     marcadores: ['findLiveTerminalCharge(tx', 'if (vivo)', "status: { notIn: ['CANCELLED', 'DELETED'] }", 'version: { increment: 1 }'],
+    sinCuentaDeFolio: {
+      motivo:
+        'Sólo cierra una cuenta de tarjetas de regalo (todos sus renglones con giftCardId, que escribe únicamente la venta de tarjetas); un pedido en línea arma sus renglones del menú y nunca la tiene.',
+      marcadores: ['devolverVentaDeTarjetasEnTx'],
+    },
   },
   'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
   'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
@@ -83,11 +93,23 @@ const INVENTARIO: Record<string, Clase> = {
   'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     clase: 'PROTEGIDA',
     marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+    sinCuentaDeFolio: {
+      motivo:
+        'Juntar no anula beneficios: un folio no se junta (R53, assertNotFolioInTx) y una cuenta origen con cualquier descuento o recompensa se rechaza antes de cancelarla, así que nunca cancela una cuenta con beneficios que devolver.',
+      marcadores: ['assertNotFolioInTx(tx', 'Quita los descuentos (o la recompensa) de la cuenta origen'],
+    },
   },
   // Anular: candado + relectura con CAS de versión + G2 (cualquier anulación con cobro vivo).
   'services/tpv/order.tpv.service.ts#voidItems': {
     clase: 'PROTEGIDA',
-    marcadores: ['bloquearCuentaParaEditar', 'tx.order.findUnique', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
+    marcadores: [
+      'bloquearCuentaParaEditar',
+      'tx.order.findUnique',
+      'assertNoLiveTerminalCharge',
+      DEVUELVE_CANJES,
+      // S9: anular TODOS los renglones de un folio se rechaza ANTES de devolver (se cancela como pedido, que conserva su precio).
+      'FOLIO_SE_CANCELA_COMO_PEDIDO',
+    ],
   },
   // hz:a8104ac8:D1 (Codex r2 #2): una venta vacía y abandonada que traía canjes no se borra: se devuelven y se ANULA (borrada, un
   // reintento de su creación la volvería a crear y quemaría otra vez el premio). Bajo el candado de la orden y con la MISMA regla
@@ -129,6 +151,20 @@ describe('Inventario de escritores que cancelan una orden (§C.6)', () => {
     for (const marcador of clase.marcadores) expect({ sitio, tiene: marcador, ok: cuerpo.includes(marcador) }).toMatchObject({ ok: true })
     if (clase.clase === 'EXENTA') expect(clase.motivo.length).toBeGreaterThan(40)
   })
+
+  // S9 (P2-5): «ningún escritor PROTEGIDO que pueda anular una cuenta con OnlineOrder omite la conversión».
+  it.each(Object.entries(INVENTARIO).filter(([, c]) => c.clase === 'PROTEGIDA'))(
+    '%s devuelve los beneficios de una cuenta de folio, o dice por qué nunca anula una',
+    (sitio, clase) => {
+      const c = clase as Extract<Clase, { clase: 'PROTEGIDA' }>
+      if (c.marcadores.includes(DEVUELVE_CANJES)) return expect(c.sinCuentaDeFolio).toBeUndefined()
+      expect({ sitio, motivo: (c.sinCuentaDeFolio?.motivo.length ?? 0) > 60 }).toEqual({ sitio, motivo: true })
+      // Sus marcadores se buscan en el ARCHIVO (la regla vive en la función que la llama o en otra del mismo archivo).
+      const archivo = fs.readFileSync(path.join(SRC, sitio.split('#')[0]), 'utf8')
+      for (const marcador of c.sinCuentaDeFolio!.marcadores)
+        expect({ sitio, tiene: marcador, ok: archivo.includes(marcador) }).toMatchObject({ ok: true })
+    },
+  )
 
   it.each(Object.entries(ESCRITORES_CON_ESTADO_VARIABLE))('%s (estado variable) pasa por la cancelación protegida', (sitio, marcadores) => {
     const [archivo, funcion] = sitio.split('#')

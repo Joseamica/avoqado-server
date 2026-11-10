@@ -715,7 +715,7 @@
     "src/services/online-ordering/folios.service.ts#syncPaidClosedFolios#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Tienda híbrida T9: el bucle (≤ SYNC_BATCH_SIZE folios) abre una transacción POR folio; dentro toma la Order de ese folio y sólo escribe su OnlineOrder (CAS), sin retener ventas previas."
+      "reason": "Tienda híbrida T9 y R13 (S9 v5): el bucle (≤ 10 páginas de SYNC_BATCH_SIZE folios, con cursor por id) abre una transacción POR folio; dentro toma la Order de ese folio y sólo escribe su OnlineOrder (CAS), sin retener ventas previas."
     },
     "src/services/online-ordering/cancelledOrderSync.ts#cerrarCanceladasReleyendo#lockExistingOrderForPayment": {
       "count": 1,

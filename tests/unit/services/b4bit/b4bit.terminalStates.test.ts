@@ -48,6 +48,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    // S9 v5 (U10): la nota del cobro lee el folio de la cuenta; en esta suite no hay folio.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },

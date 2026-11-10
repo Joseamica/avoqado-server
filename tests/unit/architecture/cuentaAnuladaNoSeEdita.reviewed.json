@@ -103,7 +103,7 @@
   "services/dashboard/manualPayment.service.ts#createManualPayment": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "Registro de pago manual: sobre Order existente toma COBRO y rechaza CANCELLED/DELETED antes de confirmar la tx; sin orderId crea sombra nueva y Payment en la misma escritura. Las modificaciones pertenecen al pago, no a un editor libre."
+    "motivo": "Registro de pago manual: sobre Order existente toma COBRO y rechaza CANCELLED/DELETED antes de confirmar la tx, salvo la cuenta anulada de un folio (S9, P2-5), que es dinero ya capturado y se revive con reabrirSiRecibeDinero en la misma tx; sin orderId crea sombra nueva y Payment en la misma escritura. Las modificaciones pertenecen al pago, no a un editor libre."
   },
   "services/dashboard/manualSale.service.ts#createOneManualSale": {
     "clase": "EXCEPCION",
@@ -352,6 +352,11 @@
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
     "motivo": "Sólo el liberador que relee al proveedor y encuentra piStatus succeeded: registra captura ya hecha, Payment y saldo bajo COBRO con CAS RELEASING y MoneyAnomaly. No es una ruta ordinaria sin evidencia de captura."
+  },
+  "services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "ANULACION",
+    "motivo": "S9 (P2-5): parte de la anulación misma de un folio. Sólo la llama devolverCanjesDeVentaAnuladaEnTx, bajo el candado del que anula, y convierte sus filas de beneficio en cortesía del mismo importe, IVA y reparto: tiene que operar sobre la cuenta que se está anulando."
   },
   "services/online-ordering/order.service.ts#writeOnlineOrderInTx": {
     "clase": "EXCEPCION",

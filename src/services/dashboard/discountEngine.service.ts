@@ -34,6 +34,7 @@ import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRe
 import { repartirProporcional } from '../fiscal/ivaMath'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
+import { MOTIVO_BENEFICIO_REGRESADO } from '../online-ordering/cortesiaDeFolio'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -812,15 +813,20 @@ async function evaluateOrderDiscounts(
     })),
   }
 
+  // 🔴 S9 (P2-5; Codex r1 P1, ruling del controlador): la cuenta de un folio anulado y revivido conserva el precio que vio la clienta.
+  // Su beneficio ya regresó y quedó como cortesía SIN `discountId`, así que «ya aplicado» (abajo) no lo reconoce: un automático o el
+  // de la clienta lo volvería a dar (dos rebajas de $85 sobre $219). Ahí sólo entra lo que el personal elige a mano (`forceDiscountId`).
+  const conservaSuPrecio = order.orderDiscounts.some(od => od.isComp && od.compReason === MOTIVO_BENEFICIO_REGRESADO)
+
   // Get eligible automatic discounts
   const eligibleDiscounts = await getEligibleDiscounts(order.venueId, order.customerId ?? undefined, context.subtotal, db)
   // A hand-picked catalog discount is eligible but not automatic — keep it too when
   // the caller named it (see `forceDiscountId` in this function's doc).
-  const automaticDiscounts = eligibleDiscounts.filter(d => d.isAutomatic || d.id === forceDiscountId)
+  const automaticDiscounts = eligibleDiscounts.filter(d => (d.isAutomatic && !conservaSuPrecio) || d.id === forceDiscountId)
 
   // Also get customer-specific discounts if customer is identified
   let customerDiscounts: DiscountCandidate['discount'][] = []
-  if (order.customerId) {
+  if (order.customerId && !conservaSuPrecio) {
     customerDiscounts = await getCustomerDiscounts(order.venueId, order.customerId, db)
   }
 
@@ -1262,6 +1268,25 @@ export async function removeDiscountFromOrder(
   )
   for (const audit of audits) void logAction(audit)
   return result
+}
+
+/**
+ * Tienda híbrida (S9; S10 la reusa): las filas `Discount` que una transacción va a tocar, tomadas en UNA pasada por id ascendente
+ * (rango 6 de «Orden de candados de la parte 2»). `FOR NO KEY UPDATE` es el modo que toma el `UPDATE` de un contador, así que bloquear
+ * antes y escribir después no sube de modo. Devuelve lo leído bajo el candado, en ese orden; un id de otro negocio no sale.
+ */
+export async function bloquearDescuentosEnOrdenEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  discountIds: Iterable<string>,
+): Promise<Array<{ id: string; currentUses: number; maxTotalUses: number | null }>> {
+  const unicos = [...new Set(discountIds)].sort()
+  if (unicos.length === 0) return []
+  return tx.$queryRaw<Array<{ id: string; currentUses: number; maxTotalUses: number | null }>>`
+    SELECT id, "currentUses", "maxTotalUses" FROM "Discount"
+    WHERE "venueId" = ${venueId} AND id = ANY(${unicos}::text[])
+    ORDER BY id
+    FOR NO KEY UPDATE`
 }
 
 /**

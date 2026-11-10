@@ -73,7 +73,13 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
-import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import {
+  FOLIO_SE_CANCELA_COMO_PEDIDO,
+  MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO,
+  assertCardOrderMoneyFrozenInTx,
+  assertNotCardOnlineOrderInTx,
+  esCuentaDeFolioEnTx,
+} from '../online-ordering/card/guards'
 import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 /**
@@ -3220,6 +3226,11 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // vuelven al cliente ANTES de los cálculos de abajo (como al quitar el descuento: la fila del canje se borra y la orden se
       // recalcula), y la orden se relee: esos cálculos y el CAS de versión van con la orden SIN las filas del canje.
       if (order.items.every(item => input.itemIds.includes(item.id))) {
+        // S9 (P2-5): en un folio, anular todo dejaría la cuenta en $0 DESPUÉS de convertir sus beneficios (recorta los descuentos y
+        // borra los renglones), y el dinero tardío llegaría a una cuenta vacía. Se cancela como pedido, que sí conserva su precio.
+        if (await esCuentaDeFolioEnTx(tx, { venueId, orderId })) {
+          throw new ConflictError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
+        }
         await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
         order = await leerOrden()
         if (!order) throw new NotFoundError('Order not found')

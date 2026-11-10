@@ -233,6 +233,16 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     status,
     order: { orderNumber: `F-${id}` },
   })
+  // S9: el paso compartido (`revivirFolioSaldadoEnTx`) relee el folio bajo el candado de la orden; aquí devuelve lo que la lectura vio.
+  beforeEach(() => {
+    prismaMock.onlineOrder.findFirst.mockImplementation((async ({ where }: any) => {
+      const filas = (await (prismaMock.onlineOrder.findMany.getMockImplementation()?.({ where: {} } as any) ?? [])) as any[]
+      const f = filas.find(x => x.orderId === where.orderId)
+      return f ? { id: f.id, status: f.status } : null
+    }) as any)
+    prismaMock.order.findFirst.mockReset()
+    prismaMock.activityLog.count.mockReset()
+  })
 
   it('R4: lee sólo folios cerrados en los últimos 7 días con la cuenta saldada y viva, con tope y orden estable', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([])
@@ -295,6 +305,48 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
     expect(notifyOrderEvent).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('S9 v5 (U8): la revivida NO avisa (el aviso es de la nota del cobro): ni cuenta, ni bitácora del cobro, ni avisos', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.count).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(prismaMock.notification.createMany).not.toHaveBeenCalled()
+  })
+
+  it('R13 (U8): lee por páginas con cursor por id; 100 filas venenosas delante no tapan a la 101, y queda el conteo de las no revividas', async () => {
+    const venenosas = Array.from({ length: 100 }, (_, i) => cerrado(`P${String(i).padStart(3, '0')}`))
+    const buena = cerrado('Z')
+    prismaMock.onlineOrder.findMany.mockImplementation((async ({ where }: any) =>
+      where.id?.gt ? [buena].filter(r => r.id > where.id.gt) : venenosas) as any)
+    // El candado de la orden falla para las venenosas (su Order es de otro negocio): no revive y la pasada sigue.
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) =>
+      orderId === buena.orderId ? [{ id: orderId }] : [],
+    )
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: buena.id, status: 'EXPIRED' } as any)
+
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+
+    const lecturas = prismaMock.onlineOrder.findMany.mock.calls.map((c: any[]) => c[0].where)
+    expect(lecturas).toHaveLength(2)
+    expect(lecturas[0].id).toBeUndefined()
+    expect(lecturas[1].id).toEqual({ gt: 'oo-P099' })
+    expect(notifyOrderEvent).toHaveBeenCalledWith('ord-Z', 'ACCEPTED')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no revivieron'),
+      expect.objectContaining({ leidos: 101, sinRevivir: 100 }),
+    )
+  })
+
+  it('R13: a lo más 10 páginas por pasada', async () => {
+    let n = 0
+    prismaMock.onlineOrder.findMany.mockImplementation((async () =>
+      Array.from({ length: 100 }, () => cerrado(`X${String(n++).padStart(5, '0')}`))) as any)
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    await syncPaidClosedFolios({}, () => NOW)
+    expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledTimes(10)
   })
 
   it('una fila que truena se registra y la pasada sigue', async () => {

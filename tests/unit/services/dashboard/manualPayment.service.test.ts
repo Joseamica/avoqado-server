@@ -37,6 +37,12 @@ jest.mock('@/services/shared/paymentShiftClaim', () => {
 
 import { Prisma } from '@prisma/client'
 
+// S9 v5 (U10): la nota del dinero tardío (folio «Nadie» anulado) se prueba en `cuentaCancelada.onlineOrder.test.ts` y
+// `manualPayment.folioCancelado.test.ts`; los `tx` a mano de esta suite no traen `onlineOrder` y aquí no hay folios.
+jest.mock('@/services/shared/cuentaCancelada', () => ({
+  ...jest.requireActual('@/services/shared/cuentaCancelada'),
+  notarDineroEnFolioCerradoEnTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -652,6 +658,8 @@ describe('manualPayment.service', () => {
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
           paymentAllocation: { create: jest.fn() },
+          // S9: una cuenta anulada pregunta si es de un folio (`OnlineOrder`); aquí no lo es.
+          onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
           ...handlers,
         })
     }

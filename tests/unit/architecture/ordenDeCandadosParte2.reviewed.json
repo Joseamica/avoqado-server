@@ -195,6 +195,10 @@
       "clase": "EN_TX",
       "etiqueta": "applyEvaluatedDiscount"
     },
+    "src/services/dashboard/discountEngine.service.ts#bloquearDescuentosEnOrdenEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "bloquearDescuentosEnOrdenEnTx"
+    },
     "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
       "clase": "EN_TX",
       "etiqueta": "removeDiscountFromOrder"
@@ -326,6 +330,10 @@
     "src/services/onboarding/demoSeed.service.ts#seedCustomers": {
       "clase": "SENTENCIA",
       "etiqueta": "seedCustomers"
+    },
+    "src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "convertirBeneficiosEnCortesiaEnTx"
     },
     "src/services/public/customerBookingAccess.service.ts#activateCustomerAccount": {
       "clase": "EN_TX",

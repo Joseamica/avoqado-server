@@ -46,6 +46,7 @@ import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
+import { despertarPasesTrasCommit } from '../online-ordering/cortesiaDeFolio'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -166,6 +167,7 @@ import {
   cierreAutomaticoPermitido,
   esCobroCompletadoDeLaOrden,
   esCobroNuevo,
+  notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
@@ -4458,6 +4460,21 @@ export async function registrarAbonoEnTx(
     tipPesos: shiftTip,
   })
 
+  // 🔴 S9 v5 (B3): la nota del dinero que ENTRA, con lo mismo que se escribió en la fila, en PESOS (`amountDecimal` y `tipDecimal`,
+  // ya recortados y repartidos; `entrada.amountCents` son centavos). Un folio «Nadie» anulado avisa una vez y renueva su recuperación;
+  // fuera de `WEB` no consulta nada.
+  await notarDineroEnFolioCerradoEnTx(tx, {
+    venueId,
+    orderId,
+    entra: new Prisma.Decimal(amountDecimal).plus(tipDecimal),
+    source: fresh.source,
+    reabierta: reabiertaDeCancelada,
+    canal: canalDeReapertura,
+    paymentId: newPayment.id,
+    idempotencyKey: input.idempotencyKey ?? null,
+    staffId: effectiveStaffId ?? null,
+  })
+
   // Create VenueTransaction for financial tracking
   await tx.venueTransaction.create({
     data: {
@@ -6267,6 +6284,17 @@ export async function returnGiftBalanceAndCancelOrder(
         )
       }
 
+      // S9 (P2-5, R55 b): en una cuenta de FOLIO, sus beneficios regresan a la clienta y su fila se queda como cortesía, ya pasadas las
+      // validaciones y ANTES de tomar los cobros y los sobres (beneficios → sobres, como las demás cancelaciones). En otra cuenta, como
+      // hoy: este camino no devuelve canjes (decisión 30 del plan).
+      const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, {
+        venueId,
+        orderId,
+        staffId,
+        camino: 'returnGiftBalanceAndCancelOrder',
+        soloSiEsFolio: true,
+      })
+
       // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
       // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
       // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
@@ -6340,7 +6368,15 @@ export async function returnGiftBalanceAndCancelOrder(
         ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
         ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
       ]
-      return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+      return {
+        orderId,
+        table,
+        tables: reconciled.tables,
+        hadBoundTable: Boolean(boundTable),
+        tpvTableFreed,
+        affectedRefs,
+        clientasConPremio: canjes.clientasConPremio,
+      }
     },
     { etiqueta: 'returnGiftBalanceAndCancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
@@ -6692,7 +6728,8 @@ export async function cancelOrderInTransaction(
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-  await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
+  // S9: en una cuenta de folio, sus beneficios regresan y su fila queda como cortesía (`publishCancelledOrder` despierta el pase).
+  const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
@@ -6714,13 +6751,26 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
+  return {
+    orderId,
+    table,
+    tables: reconciled.tables,
+    hadBoundTable: Boolean(boundTable),
+    tpvTableFreed,
+    affectedRefs,
+    valesSoltados,
+    clientasConPremio: canjes?.clientasConPremio,
+  }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
   // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
-  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
+  // `clientasConPremio` (S9) también: quien no anula un folio no lo trae.
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados' | 'clientasConPremio'> & {
+    valesSoltados?: ValesSoltados | null
+    clientasConPremio?: string[]
+  },
   staffId?: string,
   reason?: string,
   /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
@@ -6764,6 +6814,8 @@ export async function publishCancelledOrder(
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
+  // S9: el pase de Wallet de cada clienta con premio regresado (si no, lo manda el barrido con la fila de la bandeja).
+  despertarPasesTrasCommit(venueId, result.clientasConPremio)
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.

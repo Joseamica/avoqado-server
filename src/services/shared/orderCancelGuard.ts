@@ -4,7 +4,8 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
-import { findCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
@@ -202,8 +203,13 @@ export async function assertOrderCancellableUnderLock(
 export interface CanjesDevueltos {
   pointsRefunded: number
   stampRewardsReturned: string[]
-  /** Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). */
+  /**
+   * Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). En una cuenta de folio (S9) son las que se
+   * convirtieron en cortesía: no salen, pero la venta sí tenía beneficios (la limpieza de abandonadas la anula en vez de borrarla).
+   */
   filasQuitadas: number
+  /** S9: las clientas con premio regresado en una cuenta de folio; quien anula despierta su pase después del commit. */
+  clientasConPremio: string[]
 }
 
 /** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
@@ -222,12 +228,23 @@ const PAGINA_DE_CANJES = 100
  *
  * Va dentro de la transacción del que anula, con la orden YA bloqueada (Order → Customer/StampReward, el orden de siempre).
  * Los descuentos que no son canje se quedan como historia de la venta anulada.
+ *
+ * 🔴 Tienda híbrida (S9, P2-5): en una cuenta de FOLIO (toda cuenta con `OnlineOrder`) no se borra nada: los beneficios regresan y su
+ * fila se queda como cortesía (`convertirBeneficiosEnCortesiaEnTx`), así la cuenta conserva el precio que vio la clienta si después
+ * llega dinero. `soloSiEsFolio`: en otra cuenta no hace nada (el camino de «Regresar el saldo y cancelar», que hoy no devuelve canjes).
  */
 export async function devolverCanjesDeVentaAnuladaEnTx(
   tx: TxConReintento,
-  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
+  input: { venueId: string; orderId: string; staffId?: string | null; camino: string; soloSiEsFolio?: true },
 ): Promise<CanjesDevueltos> {
-  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }
+  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] }
+  if (await esCuentaDeFolioEnTx(tx, input)) {
+    // S9 (v5, B1): el sello va ANTES de convertir y también sin beneficios: es lo que dice después «este folio se anuló».
+    await sellarFolioAnuladoEnTx(tx, input)
+    const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
+    return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
+  }
+  if (input.soloSiEsFolio) return devuelto
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
   for (;;) {

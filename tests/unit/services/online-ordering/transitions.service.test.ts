@@ -13,9 +13,15 @@ jest.mock('@/services/kds/kitchenDisplayStations', () => ({ __esModule: true, de
 jest.mock('@/services/shared/orderCancelGuard', () => ({
   __esModule: true,
   findLiveTerminalCharge: jest.fn(),
-  devolverCanjesDeVentaAnuladaEnTx: jest.fn(async () => ({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 })),
+  devolverCanjesDeVentaAnuladaEnTx: jest.fn(async () => ({
+    pointsRefunded: 0,
+    stampRewardsReturned: [],
+    filasQuitadas: 0,
+    clientasConPremio: [],
+  })),
 }))
 jest.mock('@/services/mobile/order.mobile.service', () => ({ __esModule: true, cancelOrder: jest.fn() }))
+jest.mock('@/services/online-ordering/cortesiaDeFolio', () => ({ __esModule: true, despertarPasesTrasCommit: jest.fn() }))
 jest.mock('@/services/online-ordering/notifications.service', () => ({
   __esModule: true,
   notifyOrderEvent: jest.fn(async () => undefined),
@@ -36,6 +42,7 @@ import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.s
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
+import { despertarPasesTrasCommit } from '@/services/online-ordering/cortesiaDeFolio'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
@@ -363,6 +370,46 @@ describe('expireOnlineOrder', () => {
     expect(cas.data).toEqual({ status: 'EXPIRED', expiredAt: BAJO_CANDADO })
   })
 
+  it('S9: vencer un folio con premio: el premio regresa en la misma transacción y la cuenta sigue en $134 (sólo cambia su estado)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(
+      row({ requiresAcceptance: false, acceptDeadlineAt: NOW, order: { paidAmount: D('0') } }) as any,
+    )
+    ;(devolverCanjesDeVentaAnuladaEnTx as jest.Mock).mockResolvedValueOnce({
+      pointsRefunded: 0,
+      stampRewardsReturned: ['csr1'],
+      filasQuitadas: 1,
+      clientasConPremio: ['cana'],
+    })
+
+    await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
+
+    expect(devolverCanjesDeVentaAnuladaEnTx).toHaveBeenCalledWith(prismaMock, {
+      venueId: 'v1',
+      orderId: 'ord1',
+      camino: 'pedidoEnLinea:EXPIRE',
+    })
+    const devolver = (devolverCanjesDeVentaAnuladaEnTx as jest.Mock).mock.invocationCallOrder[0]
+    expect(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0]).toBeLessThan(devolver)
+    expect(devolver).toBeLessThan(prismaMock.order.updateMany.mock.invocationCallOrder[0])
+    // La cuenta no se recalcula: sólo su estado. La cortesía conserva los $85 y el total sigue en el precio que vio la clienta.
+    expect((prismaMock.order.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'CANCELLED' })
+    // Después del commit, el pase de Wallet de la clienta se despierta.
+    expect(despertarPasesTrasCommit).toHaveBeenCalledWith('v1', ['cana'])
+    expect((despertarPasesTrasCommit as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.order.updateMany.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('S9: si la transición no gana (STALE), nada se despierta', async () => {
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: NOW } as any)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect(devolverCanjesDeVentaAnuladaEnTx).not.toHaveBeenCalled()
+    expect(despertarPasesTrasCommit).not.toHaveBeenCalled()
+  })
+
   it('sólo vence si la hora ya pasó y se audita con actor de sistema', async () => {
     const r = await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
     const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
@@ -396,7 +443,7 @@ describe('expireOnlineOrder', () => {
       prismaMock.payment.groupBy.mockResolvedValue([{ orderId: 'ord1', _sum: { amount: D(amount), tipAmount: D(tipAmount) } }])
     beforeEach(() => prismaMock.payment.groupBy.mockResolvedValue([]))
 
-    it('vence (EXPIRED) SIN cancelar la cuenta ni devolver canjes; el CAS repite estado, hora y requiresAcceptance:false', async () => {
+    it('vence (EXPIRED) SIN cancelar la cuenta; el CAS repite estado, hora y requiresAcceptance:false', async () => {
       prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
       neto('0.00')
       await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
@@ -410,7 +457,12 @@ describe('expireOnlineOrder', () => {
       })
       expect(cas.data).toEqual({ status: 'EXPIRED', expiredAt: NOW })
       expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // la cuenta queda como la dejó el reembolso
-      expect(devolverCanjesDeVentaAnuladaEnTx).not.toHaveBeenCalled() // la venta no se anula
+      // S9 (decisión 15 del plan): la venta no se anula, pero sus beneficios sí regresan a la clienta (y su fila queda como cortesía).
+      expect(devolverCanjesDeVentaAnuladaEnTx).toHaveBeenCalledWith(prismaMock, {
+        venueId: 'v1',
+        orderId: 'ord1',
+        camino: 'pedidoEnLinea:EXPIRE',
+      })
       // El neto se lee bajo el candado, sólo de esta cuenta y de lo COMPLETED.
       expect(prismaMock.payment.groupBy).toHaveBeenCalledWith(
         expect.objectContaining({ by: ['orderId'], where: { orderId: { in: ['ord1'] }, status: 'COMPLETED' } }),

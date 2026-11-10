@@ -124,7 +124,7 @@ function escanear() {
   return { filas, cabecera, codigo }
 }
 
-type Fila = { clase: 'ESCRIBE' | 'QUITA' | 'SINCRONIZA' | 'CONSERVA' | 'RECORTA'; marcas: string[] }
+type Fila = { clase: 'ESCRIBE' | 'QUITA' | 'SINCRONIZA' | 'CONSERVA' | 'RECORTA' | 'CONGELA'; marcas: string[] }
 const SYNC = 'sincronizarRepartos('
 // Codex r1 P1: todo escritor que crea una fila sobre una orden YA existente conserva antes el descuento histórico de cabecera.
 const HISTORICO = 'conservarDescuentoHistorico('
@@ -208,6 +208,12 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
   // B2c T1 (P4, P5): lo dirigido a los renglones que salen o se regalan se recorta por su parte guardada o se retira, devolviendo
   // puntos, premio y la reducción de impuesto (B2b).
+  // Tienda híbrida S9 (P2-5): la fila de beneficio de un folio anulado se CONGELA como cortesía de importe fijo, con su mismo importe,
+  // IVA y reparto (no los toca): así un % convertido no crece al agregar un producto a la cuenta revivida (`seRecalculaComoPorcentajeDeCuenta`).
+  'src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx': {
+    clase: 'CONGELA',
+    marcas: ["type: 'FIXED_AMOUNT'", 'value: f.amount', 'compReason: MOTIVO_BENEFICIO_REGRESADO'],
+  },
   'src/services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones': {
     clase: 'RECORTA',
     marcas: ['recorteDeFila(', 'refundLoyaltyForOrderDiscount(', 'refundStampRewardForOrderDiscount(', 'reduccionDeImpuestoCobrado('],

@@ -209,7 +209,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/creditPack.public.service.ts': 5,
   'src/services/dashboard/customer.dashboard.service.ts': 1,
   'src/services/dashboard/customerGroup.dashboard.service.ts': 2,
-  'src/services/dashboard/discount.dashboard.service.ts': 3,
+  'src/services/dashboard/discount.dashboard.service.ts': 2,
   'src/services/dashboard/discountEngine.service.ts': 3,
   'src/services/dashboard/feature.service.ts': 2,
   'src/services/dashboard/fifoBatch.service.ts': 3,

@@ -733,6 +733,14 @@ const WRITERS: Record<string, Writer> = {
     creates: ['.order.create('],
     note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
   },
+  // Tienda híbrida S9 (P2-5): al anular un folio, sus filas de beneficio quedan como cortesía del MISMO importe, IVA y reparto.
+  'src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx': {
+    class: 'EXCLUDED',
+    reason:
+      'converts the benefit rows of an online-order account being cancelled into a same-amount courtesy (same amount, taxReduction and reparto; only type FIXED_AMOUNT, value = amount and the links change): no amount of the account moves, so the documentary capture reads the same totals',
+    residual:
+      'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
+  },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
   'src/services/online-ordering/transitions.service.ts#casTransitionInTx': {
     class: 'LOCKED',

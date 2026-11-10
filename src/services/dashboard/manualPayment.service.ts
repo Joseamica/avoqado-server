@@ -22,7 +22,8 @@ import {
 } from '@/services/shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPayments'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
-import { assertNotCardOnlineOrderInTx } from '@/services/online-ordering/card/guards'
+import { assertNotCardOnlineOrderInTx, esCuentaDeFolioEnTx } from '@/services/online-ordering/card/guards'
+import { notarDineroEnFolioCerradoEnTx, reabrirSiRecibeDinero } from '@/services/shared/cuentaCancelada'
 import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { withDeadlockRetry, isRetryableDbError } from '@/utils/serializableRetry'
@@ -187,6 +188,8 @@ export async function createManualPayment(
       // para nacer en ESTA misma transacción cuando el pago la salda.
       let orderItems: unknown[] = []
       let yaEstabaPagada = false
+      // S9 v5 (B3): lo que la nota necesita de la cuenta existente (Modo 1); la sombra no es de folio.
+      let paraLaNota: { source: string | null; reabierta: boolean } | null = null
 
       // Disciplina global de locks para dinero sobre una orden durable:
       // Order → Payment (si aplica) → Shift. Una sombra todavía no tiene fila
@@ -273,9 +276,33 @@ export async function createManualPayment(
         // Reject payments on terminated orders. Without this guard, an admin
         // could attach cash to a CANCELLED/DELETED order and revenue reports
         // would credit a sale that the customer never confirmed.
+        // 🔴 S9 (P2-5): salvo la cuenta anulada de un FOLIO. Lo que aquí se registra es dinero YA capturado (una transferencia tardía,
+        // el resto de un abono sin red), y el folio ya vale el precio que vio la clienta (su beneficio quedó como cortesía al anularlo):
+        // se revive en ESTA transacción con la regla de siempre (`reabrirSiRecibeDinero`, como el POS y la TPV) y se salda con la
+        // aritmética de hoy. Las demás cuentas anuladas lo siguen rechazando.
+        let estadoAlCobrar = order.status
         if (order.status === 'CANCELLED' || order.status === 'DELETED') {
-          throw new BadRequestError('No se puede registrar un pago en una orden cancelada o eliminada')
+          if (!(await esCuentaDeFolioEnTx(tx, { venueId, orderId: order.id }))) {
+            throw new BadRequestError('No se puede registrar un pago en una orden cancelada o eliminada')
+          }
+          estadoAlCobrar = await reabrirSiRecibeDinero(tx, {
+            venueId,
+            orderId: order.id,
+            status: order.status,
+            originSystem: order.originSystem,
+            source: order.source,
+            cobrado: amount.plus(tipAmount),
+            // Codex r13 #1: ¿lo cobrado cubre lo que la cuenta debe TAL COMO ESTÁ (cancelada)? Es lo que decide si el folio pasa a
+            // «Por entregar». Con IVA incluido (los folios nacen así) es exactamente el saldo de la cuenta viva.
+            cubreComoCancelada: computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }]).isFullyPaid,
+            canal: 'manualPayment',
+            idempotencyKey: input.idempotencyKey ?? null,
+            staffId,
+          })
         }
+        // La cuenta con el estado con el que RECIBE este dinero: los saldos de abajo se calculan con él.
+        const cuenta = { ...order, status: estadoAlCobrar }
+        paraLaNota = { source: order.source, reabierta: estadoAlCobrar !== order.status }
 
         anchorOrderId = order.id
 
@@ -291,8 +318,8 @@ export async function createManualPayment(
         // que usa la terminal (`updateOrderTotalsForStandalonePayment`): propinas dentro del total y de lo pagado, IVA aparte según el
         // contrato, y un REFUND NO reabre saldo (antes se sumaban TODOS los COMPLETED, con el reembolso negativo restando).
         // Las filas ya vienen con `type`: sin él un reembolso sería indistinguible de un cobro negativo.
-        const saldoAntes = computeOrderBalance(order, order.payments)
-        saldoCanonico = computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
+        const saldoAntes = computeOrderBalance(cuenta, order.payments)
+        saldoCanonico = computeOrderBalance(cuenta, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
         aggregatedTipAmount = saldoCanonico.tipAmount
         anchorOrderTotal = saldoCanonico.total
 
@@ -505,6 +532,20 @@ export async function createManualPayment(
             ...(fullyPaid && !yaEstabaPagada ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId } : {}),
           },
         })
+        // 🔴 S9 v5 (B3): la nota del dinero que entra (un folio «Nadie» anulado avisa una vez y renueva su recuperación).
+        if (paraLaNota) {
+          await notarDineroEnFolioCerradoEnTx(tx, {
+            venueId,
+            orderId: anchorOrderId,
+            entra: cobrado.plus(tipAmount), // lo mismo que se escribió en la fila, en pesos
+            source: paraLaNota.source,
+            reabierta: paraLaNota.reabierta,
+            canal: 'manualPayment',
+            paymentId: payment.id,
+            idempotencyKey: input.idempotencyKey ?? null,
+            staffId,
+          })
+        }
 
         // Vale durable de inventario, atómico con la transición a PAID. Sólo al
         // SALDAR (un abono parcial no descuenta, igual que en el TPV) y sólo si

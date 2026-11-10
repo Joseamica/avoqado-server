@@ -47,7 +47,18 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
     customerName: 'María',
     customerPhone: null,
     specialRequests: null,
-    items: [{ productName: 'Flautas', productId: 'p1', product: null, quantity: 2, notes: null, unitPrice: new Prisma.Decimal('93.00'), total: new Prisma.Decimal('186.00'), modifiers: [] }],
+    items: [
+      {
+        productName: 'Flautas',
+        productId: 'p1',
+        product: null,
+        quantity: 2,
+        notes: null,
+        unitPrice: new Prisma.Decimal('93.00'),
+        total: new Prisma.Decimal('186.00'),
+        modifiers: [],
+      },
+    ],
     payments: o.paymentStatus === 'PAID' ? [{ createdAt: PAGADO_A }] : [],
   },
 })
@@ -113,9 +124,13 @@ describe('listFolios', () => {
     expect(r.toPay[0].paidAt).toBeNull()
     expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
     const lista = listas()[0]
-    expect(lista.select.order.select.payments).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
+    expect(lista.select.order.select.payments).toMatchObject({
+      // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
-      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
   })
 
@@ -261,6 +276,8 @@ describe('listFolios', () => {
         return [{ id: orderId }]
       })
       prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+      // S9: el paso que revive relee el folio bajo el candado de la orden antes de su CAS.
+      prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo-A', status: 'EXPIRED' } as any)
       const listasYConteos = prismaMock.onlineOrder.findMany.getMockImplementation()!
       prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
         !esLista(a) && a.where.status?.in

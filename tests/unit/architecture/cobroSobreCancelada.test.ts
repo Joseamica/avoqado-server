@@ -30,6 +30,8 @@ const LLAVE = 'salirSiLaLlaveYaTienePago('
 // Revisión de 6a-2, M-1: el cierre que da por saldada una cuenta pasa por la regla; sin ella una cancelada volvía a cerrarse.
 const CIERRE = 'cierreAutomaticoPermitido('
 const PROPIA = '.order.create('
+// S9 v5 (R12, B3): todo escritor que deja dinero en la cuenta de un folio deja la NOTA (aviso una vez por folio y renovación).
+const NOTA = 'notarDineroEnFolioCerradoEnTx('
 const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, string]> }> = {
   // Tarea A7: el `payment.create` vive en el núcleo extraído; las reglas de cuenta cancelada se movieron con él, intactas.
   'services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
@@ -40,6 +42,7 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['registrarAbonoEnTx', RECHAZA],
       ['registrarAbonoEnTx', REABRE],
       ['registrarAbonoEnTx', CIERRE],
+      ['registrarAbonoEnTx', NOTA],
     ],
   },
   'services/tpv/payment.tpv.service.ts#recordOrderPayment': {
@@ -52,6 +55,8 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['updateOrderTotalsForStandalonePayment', REABRE],
       ['settleStandalonePaymentInTx', CIERRE],
       ['updateOrderTotalsForStandalonePayment', CIERRE],
+      ['settleStandalonePaymentInTx', NOTA],
+      ['updateOrderTotalsForStandalonePayment', NOTA],
     ],
   },
   // PREVIO (Plan B7): la confirmación deja la cancelada como hoy; la iniciación ya rechaza.
@@ -62,16 +67,31 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['settleOrderForConfirmedCryptoPayment', 'UNA ORDEN CANCELADA NO SE RESUCITA'],
     ],
   },
-  // PREVIO (Plan B8): el registro manual rechaza una cancelada, como hoy.
+  // Plan B8: el registro manual rechaza una cancelada, como hoy, salvo la cuenta anulada de un FOLIO (tienda híbrida S9, P2-5): ahí es
+  // dinero ya capturado (una transferencia tardía) y la REABRE con la regla de siempre, en su transacción.
   'services/dashboard/manualPayment.service.ts#createManualPayment': {
-    clase: 'YA RECHAZA (PREVIO)',
-    marcadores: [['createManualPayment', 'No se puede registrar un pago en una orden cancelada']],
+    clase: 'RECHAZA otra cuenta cancelada / REABRE la de un folio (S9)',
+    marcadores: [
+      ['createManualPayment', 'No se puede registrar un pago en una orden cancelada'],
+      ['createManualPayment', 'esCuentaDeFolioEnTx('],
+      ['createManualPayment', REABRE],
+      ['createManualPayment', NOTA],
+    ],
   },
   // v14 (Codex r13 #3): «liquidar» crea un efectivo en ese momento: es un cobro nuevo y se rechaza.
-  'services/dashboard/order.dashboard.service.ts#settleOrder': { clase: 'RECHAZA (cobro nuevo)', marcadores: [['settleOrder', RECHAZA]] },
+  'services/dashboard/order.dashboard.service.ts#settleOrder': {
+    clase: 'RECHAZA (cobro nuevo)',
+    marcadores: [
+      ['settleOrder', RECHAZA],
+      ['settleOrder', NOTA],
+    ],
+  },
   'services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': {
     clase: 'YA RECHAZA',
-    marcadores: [['settleCustomerBalance', 'CUENTA_NO_CANCELADA']],
+    marcadores: [
+      ['settleCustomerBalance', 'CUENTA_NO_CANCELADA'],
+      ['settleCustomerBalance', NOTA],
+    ],
   },
   'services/tpv/payment.tpv.service.ts#recordFastPayment': {
     clase: 'ORDEN PROPIA (una existente la delega)',
@@ -140,8 +160,8 @@ Object.assign(ESCRITORES, {
     marcadores: [],
   },
   'services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx': {
-    clase: 'DINERO_TARDIO: confirma y atribuye dinero B4Bit ya capturado; conserva liquidación canónica.',
-    marcadores: [],
+    clase: 'DINERO_TARDIO: confirma y atribuye dinero B4Bit ya capturado; conserva liquidación canónica. S9 v5: deja la nota (plan B).',
+    marcadores: [['completeAndAttributeB4BitPaymentInTx', NOTA]],
   },
   'services/b4bit/b4bit.service.ts#cancelCryptoPayment': {
     clase: 'DINERO_TARDIO: cancela un intento B4Bit según el estado del procesador, no edita artículos ni beneficios.',
@@ -281,10 +301,30 @@ const COMO_HOY = [
 ]
 const REGLA_DE_REAPERTURA = [REABRE, 'estadoParaCobrar(', 'estadoAlRecibirDinero(']
 it('control — M-1: los escritores que siguen como hoy (PREVIO / VERDAD EXTERNA) no reabren una cuenta cancelada', () => {
-  expect(COMO_HOY.length).toBeGreaterThanOrEqual(6) // b4bit, manual, ingesta, pos-sync, cancelación externa, MCP
+  expect(COMO_HOY.length).toBeGreaterThanOrEqual(6) // b4bit, liberación de tarjeta, ingesta, pos-sync, cancelación externa, MCP
   const reabren = COMO_HOY.flatMap(rel => {
     const texto = fs.readFileSync(path.join(SRC, rel), 'utf8')
     return REGLA_DE_REAPERTURA.filter(t => texto.includes(t)).map(t => `${rel}: «${t}»`)
   })
   expect(reabren).toEqual([])
+})
+
+it('S9 v5 (U9): el embudo de la anulación sella; la conciliación de un folio «Nadie» sella y renueva pero no deja la nota', () => {
+  const leer = (rel: string) => fs.readFileSync(path.join(SRC, rel), 'utf8').split('\n')
+  expect(cuerpo(leer('services/shared/orderCancelGuard.ts'), 'devolverCanjesDeVentaAnuladaEnTx')).toContain('sellarFolioAnuladoEnTx(')
+  const conciliacion = cuerpo(leer('services/shared/cuentaCancelada.ts'), 'conciliarPedidoEnLinea') ?? ''
+  const ramaNadie = conciliacion.slice(
+    conciliacion.indexOf('if (esFolio) {'),
+    conciliacion.indexOf('return\n', conciliacion.indexOf('if (esFolio) {')),
+  )
+  expect(ramaNadie).toContain('sellarFolioAnuladoEnTx(')
+  expect(ramaNadie).toContain('renovarRecuperacionDeFolioEnTx(')
+  expect(ramaNadie).not.toContain(NOTA)
+  expect(ramaNadie).not.toContain('avisarDelCobroTardioEnTx(')
+  // La trampa de la v1: el `updateMany` de `OnlineOrder` nunca vive en el archivo de cripto.
+  expect(fs.readFileSync(path.join(SRC, 'services/b4bit/b4bit.service.ts'), 'utf8')).not.toMatch(/onlineOrder\.updateMany/)
+  // La conversión de cortesías no ganó una bitácora nueva con el sello.
+  expect(
+    (fs.readFileSync(path.join(SRC, 'services/online-ordering/cortesiaDeFolio.ts'), 'utf8').match(/activityLog\.create\(/g) ?? []).length,
+  ).toBe(1)
 })
