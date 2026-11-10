@@ -214,7 +214,17 @@ describe('new atomic TPV money behavior', () => {
     expect(await snapshot(o.id)).toEqual(before)
     expect(await prisma.serializedItem.count({ where: { venueId, serialNumber: o.id.toUpperCase() } })).toBe(0)
   })
-  it.each(writers)('%s waits for fiscal admission and rereads PAID without a version bump', async (_name, run) => {
+  // D18: el texto exacto que lee la cajera. «add» y «serial» se quedan en inglés: las rondas de ANDROID e iOS buscan «paid order».
+  const rechazoPorCuentaPagada: Record<(typeof writers)[number][0], string> = {
+    add: 'Cannot add items to a paid order',
+    serial: 'Cannot add items to a paid order',
+    remove:
+      'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    comp: 'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    void: 'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    discount: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+  }
+  it.each(writers)('%s waits for fiscal admission and rereads PAID without a version bump', async (name, run) => {
     const o = await newOrder()
     const before = await snapshot(o.id)
     const fiscal = holdFiscal(o.id, tx => tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: 100 } }))
@@ -229,7 +239,7 @@ describe('new atomic TPV money behavior', () => {
       await fiscal.done
       await writer
     }
-    expect((await writer!).error?.message).toContain('paid order')
+    expect((await writer!).error?.message).toBe(rechazoPorCuentaPagada[name])
     expect((await snapshot(o.id)).items).toEqual(before.items)
     expect((await snapshot(o.id)).version).toBe(before.version)
   })
@@ -616,7 +626,13 @@ describe('D1·$0: la ruta vieja de descuento que deja la cuenta en $0 pide permi
   })
   it('con permiso de cortesía ⇒ se aplica', async () => {
     const o = await newOrder()
-    const r = await applyDiscount(venueId, o.id, { type: 'PERCENTAGE', value: 100, staffId, expectedVersion: o.version, puedeRegalar: true })
+    const r = await applyDiscount(venueId, o.id, {
+      type: 'PERCENTAGE',
+      value: 100,
+      staffId,
+      expectedVersion: o.version,
+      puedeRegalar: true,
+    })
     expect(Number(r.discountAmount)).toBeGreaterThan(0)
   })
   it('un fijo un centavo menor que los productos, sin permiso ⇒ se aplica como hoy', async () => {

@@ -130,7 +130,12 @@ describe('cancelarCuentaSinCobrar — el panel cancela una cuenta sin cobrar', (
   it('🔴 PENDING con un pago COMPLETED registrado (estado histórico) cuenta como dinero: no se cancela', async () => {
     prismaMock.payment.count.mockResolvedValue(1)
 
-    await expect(cancelarCuentaSinCobrar(VENUE, ORDER, 'error', 'staff-1')).rejects.toMatchObject({ statusCode: 400 })
+    await expect(cancelarCuentaSinCobrar(VENUE, ORDER, 'error', 'staff-1')).rejects.toMatchObject({
+      statusCode: 400,
+      // D21: sin «Reembólsalos antes de cancelarla»; un reembolso no la vuelve cancelable.
+      message:
+        'Esta cuenta tiene pagos registrados y no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    })
     expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 

@@ -28,7 +28,7 @@ export const listEcommerceMerchantsQuerySchema = z.object({
  */
 export const ecommerceMerchantIdParamSchema = z.object({
   params: z.object({
-    id: z.string().min(1, 'E-commerce merchant ID is required'),
+    id: z.string().min(1, 'El ID del comercio en línea es obligatorio'),
   }),
 })
 
@@ -37,7 +37,7 @@ export const ecommerceMerchantIdParamSchema = z.object({
  */
 export const venueIdParamSchema = z.object({
   params: z.object({
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
   }),
 })
 
@@ -51,10 +51,10 @@ export const venueIdParamSchema = z.object({
 export const createEcommerceMerchantSchema = z.object({
   body: z.object({
     // Venue relationship (REQUIRED)
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
 
     // Channel identifier
-    channelName: z.string().min(1, 'Channel name is required').default('Web Principal'),
+    channelName: z.string().min(1, 'El nombre del canal es obligatorio').default('Web Principal'),
 
     // Basic info
     // businessName is optional in the API: for Stripe Connect, Stripe collects
@@ -62,19 +62,19 @@ export const createEcommerceMerchantSchema = z.object({
     // channelName when missing so the DB column (NOT NULL) stays satisfied.
     businessName: z.string().min(1).optional(),
     rfc: z.string().optional(),
-    contactEmail: z.string().email('Invalid email format'),
+    contactEmail: z.string().email('El correo de contacto no es válido'),
     contactPhone: z.string().optional(),
-    website: z.string().url('Invalid URL format').optional(),
+    website: z.string().url('La dirección web del sitio no es válida').optional(),
 
     // Provider Integration
-    providerId: z.string().min(1, 'Provider ID is required'),
+    providerId: z.string().min(1, 'El proveedor es obligatorio'),
 
     // Provider-specific credentials (JSON)
     // For Blumon: { blumonMerchantId, blumonApiKey, blumonPosId, webhookSecret }
     // For Stripe Connect: { businessType } at create — connectAccountId is added
     // by the onboarding endpoint after the Stripe Connect account is created.
     providerCredentials: z.record(z.any()).refine(val => typeof val === 'object', {
-      message: 'Provider credentials must be a valid JSON object',
+      message: 'Las credenciales del proveedor deben ser un objeto JSON válido',
     }),
 
     // Cost Structure (optional, what provider charges Avoqado)
@@ -84,7 +84,7 @@ export const createEcommerceMerchantSchema = z.object({
     pricingStructureId: z.string().optional(),
 
     // Webhook configuration (optional)
-    webhookUrl: z.string().url('Invalid webhook URL').optional(),
+    webhookUrl: z.string().url('La dirección web del webhook no es válida').optional(),
     webhookEvents: z.array(z.string()).optional().default(['payment.completed', 'payment.failed']),
 
     // Dashboard access
@@ -107,9 +107,9 @@ export const updateEcommerceMerchantSchema = z.object({
     // Basic info (all optional for update)
     businessName: z.string().min(1).optional(),
     rfc: z.string().optional(),
-    contactEmail: z.string().email('Invalid email format').optional(),
+    contactEmail: z.string().email('El correo de contacto no es válido').optional(),
     contactPhone: z.string().optional(),
-    website: z.string().url('Invalid URL format').optional(),
+    website: z.string().url('La dirección web del sitio no es válida').optional(),
 
     // Provider Integration
     providerId: z.string().optional(),
@@ -120,7 +120,7 @@ export const updateEcommerceMerchantSchema = z.object({
     pricingStructureId: z.string().optional(),
 
     // Webhook configuration
-    webhookUrl: z.string().url('Invalid webhook URL').optional(),
+    webhookUrl: z.string().url('La dirección web del webhook no es válida').optional(),
     webhookEvents: z.array(z.string()).optional(),
 
     // Dashboard access
@@ -137,7 +137,7 @@ export const updateEcommerceMerchantSchema = z.object({
  */
 export const toggleEcommerceMerchantStatusSchema = z.object({
   body: z.object({
-    active: z.boolean({ required_error: 'Active status is required' }),
+    active: z.boolean({ required_error: 'Indica si el comercio en línea está activo' }),
   }),
 })
 
@@ -169,7 +169,7 @@ export const getEcommerceMerchantSchema = z.object({
  */
 export const createEcommerceMerchantWithVenueSchema = z.object({
   params: z.object({
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
   }),
   body: createEcommerceMerchantSchema.shape.body.omit({ venueId: true }), // venueId comes from params
 })

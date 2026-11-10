@@ -1000,7 +1000,7 @@ export async function getModifierGroups(venueId: string, query: ModifierGroupQue
   const where: Prisma.ModifierGroupWhereInput = {
     venueId,
     ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
-    ...(active !== undefined ? { active } : {}),
+    active: active ?? true, // D16: un grupo borrado queda archivado; sólo sale si se pide `active=false` a propósito
   }
 
   const order: Record<string, 'asc' | 'desc'> = {}
@@ -1067,7 +1067,7 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
 
 export async function getModifierGroupById(venueId: string, modifierGroupId: string): Promise<ModifierGroup & { modifiers: Modifier[] }> {
   const group = await prisma.modifierGroup.findFirst({
-    where: { id: modifierGroupId, venueId },
+    where: { id: modifierGroupId, venueId, active: true },
     include: {
       modifiers: {
         include: {
@@ -1090,7 +1090,7 @@ export async function updateModifierGroup(
   modifierGroupId: string,
   data: UpdateModifierGroupDto,
 ): Promise<ModifierGroup & { modifiers: Modifier[] }> {
-  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!existing) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1107,11 +1107,14 @@ export async function updateModifierGroup(
 
   // Note: Modifiers should be managed via dedicated endpoints (create/update/delete modifier)
 
-  const updated = await prisma.modifierGroup.update({
-    where: { id: modifierGroupId },
-    data: updateData,
-    include: { modifiers: true },
-  })
+  // D16: `active: true` también aquí, para que un PATCH que llegó justo tras un DELETE no resucite el grupo.
+  const updated = await prisma.modifierGroup
+    .update({ where: { id: modifierGroupId, active: true }, data: updateData, include: { modifiers: true } })
+    .catch((e: unknown) => {
+      if ((e as { code?: string }).code === 'P2025')
+        throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+      throw e
+    })
 
   logAction({ venueId, action: 'MODIFIER_GROUP_UPDATED', entity: 'ModifierGroup', entityId: updated.id, data: { name: updated.name } })
 
@@ -1119,17 +1122,23 @@ export async function updateModifierGroup(
 }
 
 export async function deleteModifierGroup(venueId: string, modifierGroupId: string): Promise<void> {
-  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!existing) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
-  // Codex #3: el negocio primero, como los escritores de extras (el motor de variantes toma su cerco antes de rehacer los
-  // enlaces de una familia). Sin él, el borrado bloqueaba el grupo y esperaba esos enlaces mientras la edición, al
-  // recrearlos, esperaba al grupo: deadlock.
+  // D16 (founder, 9-nov, A): se ARCHIVA. Borrarlo de verdad arrastraba sus extras: cambiaba el precio de una liga ya enviada
+  // (PaymentLinkItemModifier en CASCADE), se los quitaba al reporte (OrderItemModifier en SET NULL), borraba su historial de
+  // precios y hacía rechazar una venta sin red que los trajera. Sus enlaces a productos sí se van: sin ellos nadie lo ofrece,
+  // y un grupo obligatorio sin opciones trabaría la venta.
+  // Codex #3 y D16: el negocio primero y `NO KEY UPDATE`, para esperar a todo escritor de extras (toman `FOR SHARE`) sin frenar las
+  // ventas (su FK sólo pide `KEY SHARE`). Si no, un enlace que una edición recrea a media operación se quedaría en un grupo archivado.
   await prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
-    await tx.modifierGroup.delete({ where: { id: modifierGroupId } })
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR NO KEY UPDATE`
+    await tx.productGroupModifierGroup.deleteMany({ where: { modifierGroupId } })
+    await tx.productModifierGroup.deleteMany({ where: { groupId: modifierGroupId } })
+    await tx.modifier.updateMany({ where: { groupId: modifierGroupId }, data: { active: false } })
+    await tx.modifierGroup.update({ where: { id: modifierGroupId }, data: { active: false } })
   })
 
   logAction({ venueId, action: 'MODIFIER_GROUP_DELETED', entity: 'ModifierGroup', entityId: existing.id, data: { name: existing.name } })
@@ -1154,7 +1163,7 @@ function modifierCost(
 }
 
 export async function createModifier(venueId: string, modifierGroupId: string, data: CreateModifierDto): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1187,7 +1196,7 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
 }
 
 export async function getModifierById(venueId: string, modifierGroupId: string, modifierId: string): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1212,7 +1221,7 @@ export async function updateModifier(
   modifierId: string,
   data: UpdateModifierDto,
 ): Promise<Modifier> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1295,7 +1304,7 @@ export async function updateModifier(
 }
 
 export async function deleteModifier(venueId: string, modifierGroupId: string, modifierId: string): Promise<void> {
-  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
@@ -1305,7 +1314,10 @@ export async function deleteModifier(venueId: string, modifierGroupId: string, m
     throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
   }
 
-  await prisma.modifier.delete({ where: { id: modifierId } })
+  // D17 (founder, 9-nov, A): se ARCHIVA, como el grupo (D16). Borrarlo le quitaba el extra a una liga ya enviada (CASCADE), al reporte
+  // (SET NULL) y a su historial de precios, y rechazaba la venta sin red que lo traía. Las lecturas de administración no cambian a
+  // propósito: el apagado se ve y se vuelve a prender (el ANDROID viejo, con su interruptor «Activo» desde la lista).
+  await prisma.modifier.update({ where: { id: modifierId }, data: { active: false } })
 
   logAction({ venueId, action: 'MODIFIER_DELETED', entity: 'Modifier', entityId: existing.id, data: { name: existing.name } })
 }
@@ -1320,7 +1332,7 @@ export async function assignModifierGroupToProduct(
     await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}.`)
 
     // Verify group belongs to venue
-    const group = await tx.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId } })
+    const group = await tx.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId, active: true } })
     if (!group) {
       throw new NotFoundError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}.`)
     }
@@ -1975,8 +1987,16 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // reject a row created while waiting or leave a partially replaced menu.
       // REPLACE MODE (plan 5, D2): the old menu goes, but NO product is ever hard-deleted — the ones the file does not bring are
       // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
-      // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers too, except the ones
-      // something alive still uses (P5-R15).
+      // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers are never deleted either
+      // (D16): they are turned off, and a file that brings the name back reuses the same row.
+      const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
+        OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
+      }
+      // D17 (Codex r2-r4): los extras que el archivo conserva o crea. «Reemplazar» apaga los demás AL FINAL, no al principio: quitar un
+      // extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el vigente), y buscarlos todavía
+      // prendidos deja que gane el vigente. Crece con el archivo, no con el catálogo.
+      const extrasDelArchivo = new Set<string>()
+      const grupoDeFamilia = new Map<string, boolean>() // sólo de los grupos que trae el archivo
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -1997,28 +2017,16 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         // 1. Remove product-modifier links first — only LOOSE products' (variants keep their parent's; rondas 2-3, N1)
         await tx.productModifierGroup.deleteMany({ where: { product: { venueId, productGroupId: null } } })
 
-        // 2-3. Modifiers and groups (plan 5, P5-R15): a group a live payment link (one of its extras) or a variable recipe still
-        //      uses is KEPT, turned OFF with all its extras — deleting it would cascade the link's paid extra away (the link would
-        //      charge less) and unlink the recipe. The rest are deleted as before (OrderItemModifier keeps its denormalized name).
-        //      Codex C5-1: lock the venue's groups and extras FIRST (after the Venue fence; nothing new Order → Venue). A link or
-        //      recipe being saved holds its extra/group until it commits, so this waits for it, and the deletes below — SEPARATE
-        //      statements, so in READ COMMITTED they see what committed meanwhile — keep what it uses. One that arrives after the
-        //      lock waits for this transaction and, if its extra was deleted, fails on the foreign key instead of losing it silently.
+        // 2-3. Modifiers and groups (plan 5, P5-R15; D16, founder 9-nov, A): none is deleted. They are turned OFF with all their
+        //      extras: deleting would cascade a live payment link's paid extra away, unlink a recipe, drop price history and reject
+        //      an offline sale that still carries the extra. Lock the venue's groups and extras FIRST (after the Venue fence), so a
+        //      link or recipe being saved finishes before this runs. A group ANY family uses — live or archived, through the parent
+        //      or its variants' links — is the family's, not the file's: not turned off, its extras too (Variantes, Codex #1, ronda 2).
         await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
         await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
-        // Variantes (Codex #1, ronda 2): a group ANY family uses — live or archived, through the parent or its variants' links —
-        // is the family's, not the file's: neither deleted nor turned off, its extras too. An archived family that a later
-        // import revives comes back with its extras exactly as they were, and one turned off by hand stays off.
-        const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
-          OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
-        }
-        const extrasEnUso: Prisma.ModifierGroupWhereInput = {
-          OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }, usadoPorFamilia],
-        }
-        await tx.modifier.deleteMany({ where: { group: { venueId, NOT: extrasEnUso } } })
-        await tx.modifierGroup.deleteMany({ where: { venueId, NOT: extrasEnUso } })
-        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
-        await tx.modifierGroup.updateMany({ where: { venueId, NOT: usadoPorFamilia }, data: { active: false } })
+        // (los extras se apagan al final, tras recorrer el archivo: ver `extrasDelArchivo`)
+        // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
+        await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
         // 4. Archive (never delete) the products the file does not bring
         productsArchived = await archivarProductos(
@@ -2242,8 +2250,11 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
             for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
               // Check if modifier group exists by name
+              // D16: «combinar» ignora los archivados y crea uno nuevo, como cuando se borraban: ni precios viejos ni cambiarle el precio a
+              // una liga vieja. «Reemplazar» sí los reusa, porque acaba de apagar a todos (gana el último que estuvo vivo).
               let modifierGroup = await tx.modifierGroup.findFirst({
-                where: { venueId, name: groupData.name },
+                where: { venueId, name: groupData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
+                orderBy: [{ active: 'desc' }, { updatedAt: 'desc' }],
               })
 
               if (!modifierGroup) {
@@ -2260,8 +2271,9 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 })
                 modifierGroupsCreated++
               } else if (data.mode === 'replace') {
-                // Plan 5 (P5-R15): in replace the file is the truth. A reused group (replace kept it because a live link or a
-                // recipe uses it) keeps its id and references, and takes the file's selection rules and comes back ON.
+                // Plan 5 (P5-R15): in replace the file is the truth. A reused group (replace archived it above) keeps its id and
+                // references, and takes the file's selection rules and comes back ON. It counts as created, as when it was deleted.
+                if (!modifierGroup.active) modifierGroupsCreated++
                 await tx.modifierGroup.update({
                   where: { id: modifierGroup.id },
                   data: {
@@ -2294,39 +2306,61 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               // Handle modifiers
               for (const modifierData of groupData.modifiers) {
                 // Check if modifier exists by name in this group
+                // D17 (Codex r1): como el grupo en D16, «combinar» ignora los extras archivados (quitar ya no los destruye) y crea otro con
+                // el precio del archivo, como cuando se borraban; revivir el viejo lo devolvía con su precio anterior. «Reemplazar» sí
+                // los reusa: como todavía no los apaga (D17, ver `extrasDelArchivo`), gana el prendido (Codex r2) y luego el más nuevo.
+                // ponytail: «el más nuevo» es el id cuid más alto (Modifier no tiene fechas); sólo decide entre puros archivados.
                 const existingModifier = await tx.modifier.findFirst({
-                  where: { groupId: modifierGroup.id, name: modifierData.name },
+                  where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
+                  orderBy: [{ active: 'desc' }, { id: 'desc' }],
                 })
 
                 if (!existingModifier) {
                   // Create new modifier
-                  await tx.modifier.create({
+                  const creado = await tx.modifier.create({
                     data: {
                       groupId: modifierGroup.id,
                       name: modifierData.name,
                       price: modifierData.price,
                     },
                   })
+                  if (data.mode === 'replace') extrasDelArchivo.add(creado.id)
                   modifiersCreated++
                 } else if (data.mode === 'replace') {
                   // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
+                  // Cuenta como creado lo que antes se apagaba al principio: lo de un grupo que no es de familia, una sola vez aunque
+                  // el archivo lo repita (Codex r5: un grupo de familia apagado a mano no se apagaba, y su extra vivo no contaba).
+                  let deFamilia = grupoDeFamilia.get(modifierGroup.id)
+                  if (deFamilia === undefined) {
+                    deFamilia = (await tx.modifierGroup.count({ where: { id: modifierGroup.id, ...usadoPorFamilia } })) > 0
+                    grupoDeFamilia.set(modifierGroup.id, deFamilia)
+                  }
+                  const seApagabaAlPrincipio = !deFamilia && !extrasDelArchivo.has(existingModifier.id)
+                  if (!existingModifier.active || seApagabaAlPrincipio) modifiersCreated++
+                  extrasDelArchivo.add(existingModifier.id)
                   await tx.modifier.update({
                     where: { id: existingModifier.id },
                     data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
                   })
-                } else if (!existingModifier.active || existingModifier.isDemo) {
-                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off, and
-                  // (Codex C5-2) a demo one the file adopts stops being demo.
-                  await tx.modifier.update({
-                    where: { id: existingModifier.id },
-                    data: { active: true, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
-                  })
+                } else if (existingModifier.isDemo) {
+                  // Merge keeps today's behaviour (a live extra is not overwritten); (Codex C5-2) a demo one the file adopts stops
+                  // being demo.
+                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { isDemo: false } })
                 }
               }
             }
           }
         }
+      }
+
+      if (data.mode === 'replace') {
+        // 2-3 (D17): lo que el archivo no conservó ni creó se apaga, igual que antes se hacía al principio (D16: nunca se borra; lo de
+        // una familia, tampoco se apaga). Va aquí, antes de las familias, como iba antes de ellas.
+        await tx.modifier.updateMany({
+          where: { group: { venueId, NOT: usadoPorFamilia }, id: { notIn: [...extrasDelArchivo] } },
+          data: { active: false },
+        })
       }
 
       // Variantes (V8), segunda pasada, por llave en el orden del archivo: se vuelve a revisar cada familia contra la base de ahora

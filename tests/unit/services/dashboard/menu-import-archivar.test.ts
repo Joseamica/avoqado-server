@@ -90,32 +90,28 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     })
   })
 
-  it('P5-R15 · conserva APAGADOS los grupos de extras que usa una liga viva o una receta variable; borra los demás y los vínculos como hoy', async () => {
+  it('D16 · nunca borra un grupo ni un extra: apaga todos los que no use una familia, y borra sólo los vínculos', async () => {
     await importMenu(V, archivo('replace', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
 
     // Variantes (tarea 11, Codex #1 ronda 2): lo que usa CUALQUIER familia (viva o archivada, por el padre o por sus variantes)
-    // ni se borra ni se apaga; las uniones de las variantes se conservan (sólo se borran las de productos sueltos).
+    // no se apaga; las uniones de las variantes se conservan (sólo se borran las de productos sueltos).
     const usadoPorFamilia = {
       OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
     }
-    const extrasEnUso = {
-      OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }, usadoPorFamilia],
-    }
     expect(prismaMock.productModifierGroup.deleteMany).toHaveBeenCalledWith({ where: { product: { venueId: V, productGroupId: null } } })
-    expect(prismaMock.modifier.deleteMany).toHaveBeenCalledWith({ where: { group: { venueId: V, NOT: extrasEnUso } } })
-    expect(prismaMock.modifierGroup.deleteMany).toHaveBeenCalledWith({ where: { venueId: V, NOT: extrasEnUso } })
+    expect(prismaMock.modifier.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.modifierGroup.deleteMany).not.toHaveBeenCalled()
+    // D17 (Codex r2-r4): se apagan AL FINAL, menos los que el archivo conservó o creó (aquí ninguno), y sin leer el catálogo.
     expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith({
-      where: { group: { venueId: V, NOT: usadoPorFamilia } },
+      where: { group: { venueId: V, NOT: usadoPorFamilia }, id: { notIn: [] } },
       data: { active: false },
     })
+    expect(prismaMock.modifier.findMany).not.toHaveBeenCalled()
+    // Sólo los vivos: así el `updatedAt` de un archivado no se mueve y, con nombres repetidos, gana el que estaba vivo.
     expect(prismaMock.modifierGroup.updateMany).toHaveBeenCalledWith({
-      where: { venueId: V, NOT: usadoPorFamilia },
+      where: { venueId: V, active: true, NOT: usadoPorFamilia },
       data: { active: false },
     })
-    // Se apaga lo que queda DESPUÉS de borrar lo demás: sólo sobreviven los que algo usa.
-    expect(prismaMock.modifierGroup.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
-      prismaMock.modifierGroup.updateMany.mock.invocationCallOrder[0],
-    )
   })
 
   /** Un archivo con un Latte cuyo grupo «Leche» trae reglas y precio NUEVOS: opcional, hasta 2, «Avena» a $30. */
@@ -173,13 +169,104 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true, price: 30 } })
   })
 
-  it('REGRESIÓN · «Combinar» no sobrescribe precio ni reglas de un grupo o extra existente: sólo enciende el que estaba apagado', async () => {
+  it('D17 (Codex r2) · «Reemplazar» con dos extras del mismo nombre reusa el que estaba VIVO, no el que se quitó', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
+    // Todavía prendido cuando se busca: la base lo da primero por `active desc`.
+    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-vivo', active: true, price: 20 } as never)
+
+    const r = await importMenu(V, conLeche('replace'), HUMANO)
+
+    expect(prismaMock.modifier.findFirst).toHaveBeenCalledWith({
+      where: { groupId: 'grupo-leche', name: 'Avena' },
+      orderBy: [{ active: 'desc' }, { id: 'desc' }],
+    })
+    expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-vivo' }, data: { active: true, price: 30 } })
+    expect(r.stats).toMatchObject({ modifiers: 1 }) // cuenta como creado, igual que todo lo que «Reemplazar» trae
+    // El conservado no se apaga al final; y se apaga DESPUÉS de buscarlo.
+    expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { notIn: ['extra-vivo'] } }) }),
+    )
+    expect(prismaMock.modifier.findFirst.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.modifier.updateMany.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('REGRESIÓN (Codex r5) · un extra vivo de un grupo de FAMILIA apagado a mano no cuenta como creado, como antes', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
+    prismaMock.modifierGroup.count.mockResolvedValueOnce(1) // lo usa una familia
+    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-vivo', active: true, price: 20 } as never)
+
+    const r = await importMenu(V, conLeche('replace'), HUMANO)
+
+    expect(prismaMock.modifierGroup.count).toHaveBeenCalledWith({
+      where: { id: 'grupo-leche', OR: expect.any(Array) },
+    })
+    expect(r.stats).toMatchObject({ modifiers: 0 })
+  })
+
+  it('D17 · «Reemplazar» que CREA un extra no lo apaga al final', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
+    prismaMock.modifier.findFirst.mockResolvedValueOnce(null)
+    prismaMock.modifier.create.mockResolvedValueOnce({ id: 'extra-nuevo' } as never)
+
+    await importMenu(V, conLeche('replace'), HUMANO)
+
+    expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { notIn: ['extra-nuevo'] } }) }),
+    )
+  })
+
+  it('REGRESIÓN · sin uno vivo, la búsqueda prefiere el prendido y luego el más nuevo', async () => {
     conservados()
+
+    await importMenu(V, conLeche('replace'), HUMANO)
+
+    expect(prismaMock.modifier.findFirst).toHaveBeenCalledWith({
+      where: { groupId: 'grupo-leche', name: 'Avena' },
+      orderBy: [{ active: 'desc' }, { id: 'desc' }],
+    })
+  })
+
+  it('REGRESIÓN · «Combinar» no sobrescribe un grupo VIVO: no toca sus reglas', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
 
     await importMenu(V, conLeche('merge'), HUMANO)
 
-    expect(prismaMock.modifierGroup.update).toHaveBeenCalledWith({ where: { id: 'grupo-leche' }, data: { active: true } })
-    expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true } })
+    expect(prismaMock.modifierGroup.update).not.toHaveBeenCalled()
+  })
+
+  it('D17 · «Combinar» sólo busca extras vivos: uno quitado (archivado) no revive con su precio viejo, se crea otro con el del archivo', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
+
+    await importMenu(V, conLeche('merge'), HUMANO)
+
+    expect(prismaMock.modifier.findFirst).toHaveBeenCalledWith({
+      where: { groupId: 'grupo-leche', name: 'Avena', active: true },
+      orderBy: [{ active: 'desc' }, { id: 'desc' }],
+    })
+    expect(prismaMock.modifier.create).toHaveBeenCalledWith({ data: { groupId: 'grupo-leche', name: 'Avena', price: 30 } })
+    expect(prismaMock.modifier.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN · «Combinar» no le cambia el precio a un extra VIVO que ya existe', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
+    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-avena', active: true, price: 20 } as never)
+
+    await importMenu(V, conLeche('merge'), HUMANO)
+
+    expect(prismaMock.modifier.create).not.toHaveBeenCalled()
+    expect(prismaMock.modifier.update).not.toHaveBeenCalled()
+  })
+
+  it('D16 · «Combinar» sólo busca grupos vivos; «Reemplazar» también los apagados', async () => {
+    conservados()
+    await importMenu(V, conLeche('merge'), HUMANO)
+    expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]).toMatchObject({ where: { active: true } })
+
+    prismaMock.modifierGroup.findFirst.mockClear()
+    conservados()
+    await importMenu(V, conLeche('replace'), HUMANO)
+    expect(prismaMock.modifierGroup.findFirst.mock.calls[0][0]?.where).not.toHaveProperty('active')
   })
 
   it('REGRESIÓN · «Combinar» no archiva ni toca categorías ajenas al archivo; la nueva se asigna como hoy', async () => {

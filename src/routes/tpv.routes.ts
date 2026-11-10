@@ -38,6 +38,7 @@ import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as angelpayValidationController from '../controllers/tpv/angelpayValidation.tpv.controller'
 import onlineOrdersTpvRoutes from './tpv/onlineOrders.tpv.routes'
 import giftCardsTpvRoutes from './tpv/giftCards.tpv.routes'
+import campoTpvRouter from './campo.tpv.routes'
 import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { expandWildcards, resolvePermissions } from '../lib/permissions'
@@ -8525,5 +8526,8 @@ router.post(
 // Tienda híbrida (R21): los folios de la tienda en línea se cobran y se entregan desde la terminal (subconjunto de /mobile, mismos permisos).
 router.use('/venues/:venueId/online-orders', onlineOrdersTpvRoutes)
 router.use('/venues/:venueId/gift-cards', giftCardsTpvRoutes)
+
+// App de campo (bloque 0): lo que sube el celular del promotor.
+router.use('/campo', campoTpvRouter)
 
 export default router

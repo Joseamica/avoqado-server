@@ -4,7 +4,7 @@ import { reservationModifierSelectionsSchema } from '@/schemas/dashboard/reserva
 export const consumerOAuthSchema = z.object({
   body: z.object({
     provider: z.enum(['GOOGLE', 'APPLE']),
-    idToken: z.string().min(20, 'idToken invalido'),
+    idToken: z.string().min(20, 'idToken inválido'),
     firstName: z.string().max(80).optional(),
     lastName: z.string().max(80).optional(),
   }),
@@ -34,7 +34,7 @@ export const consumerCreateReservationSchema = z.object({
     .object({
       startsAt: z.coerce.date().optional(),
       endsAt: z.coerce.date().optional(),
-      duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
+      duration: z.number().int().min(1, 'La duración mínima es 1 minuto').max(1440).optional(),
       guestName: z.string().min(1).max(200).optional(),
       guestPhone: z.string().min(1).max(20).optional(),
       guestEmail: z.string().email().max(200).optional(),
@@ -68,14 +68,14 @@ export const consumerCreateReservationSchema = z.object({
       if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+          message: 'La duración mínima sin windowSemantics=base es 5 minutos',
           path: ['duration'],
         })
       }
       if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+          message: 'La duración máxima sin windowSemantics=base es 480 minutos',
           path: ['duration'],
         })
       }
@@ -109,7 +109,7 @@ export const consumerCreateReservationSchema = z.object({
         return Math.abs(diffMin - data.duration) <= 1
       },
       {
-        message: 'La duracion no coincide con el rango de fechas',
+        message: 'La duración no coincide con el rango de fechas',
         path: ['duration'],
       },
     ),
@@ -117,7 +117,7 @@ export const consumerCreateReservationSchema = z.object({
 
 export const consumerFinalizeCreditCheckoutSchema = z.object({
   body: z.object({
-    sessionId: z.string().min(8, 'sessionId invalido').regex(/^cs_/, 'sessionId invalido'),
+    sessionId: z.string().min(8, 'sessionId inválido').regex(/^cs_/, 'sessionId inválido'),
   }),
 })
 
@@ -137,6 +137,6 @@ export const consumerReservationDepositCheckoutSchema = z.object({
 
 export const consumerFinalizeReservationDepositCheckoutSchema = z.object({
   body: z.object({
-    sessionId: z.string().min(8, 'sessionId invalido').regex(/^cs_/, 'sessionId invalido'),
+    sessionId: z.string().min(8, 'sessionId inválido').regex(/^cs_/, 'sessionId inválido'),
   }),
 })

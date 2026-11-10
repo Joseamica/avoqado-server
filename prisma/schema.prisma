@@ -4015,9 +4015,20 @@ model TimeEntry {
   validatedAt      DateTime?
   validationNote   String? // Reason for rejection
 
+  // Checada desde el celular (app de campo): llaves de idempotencia, hora y ubicación falsa
+  llaveEntrada           String?
+  llaveSalida            String?
+  clockOutRecibidaAt     DateTime?
+  clockInOrigenHora      OrigenDeLaHora?
+  clockOutOrigenHora     OrigenDeLaHora?
+  clockInUbicacionFalsa  Boolean?
+  clockOutUbicacionFalsa Boolean?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([staffId, llaveEntrada])
+  @@unique([staffId, llaveSalida])
   @@index([staffId, venueId])
   @@index([venueId, clockInTime])
   @@index([status])
@@ -4787,10 +4798,10 @@ model Payment {
   maskedPan String? // "411111******1111"
   entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
 
-  // Card issuer-country classification (shadow mode, 2026-07-31).
-  // These nullable/additive fields intentionally do NOT replace the legacy
-  // processorData.isInternational boolean yet. Financial calculations keep using
-  // the legacy value until the shadow results have been observed and approved.
+  // Card issuer-country classification (shadow mode 2026-07-31; decides money since v2, 2026-11-10).
+  // Financial readers still use processorData.isInternational; since classification v2 that
+  // boolean is DECIDED by this classification when the card's country is known (DOMESTIC /
+  // INTERNATIONAL) and keeps the terminal's own flag when it is UNKNOWN. v1 rows are observational.
   internationalityStatus                CardInternationalityStatus?
   internationalitySource                CardInternationalitySource?
   issuerCountryCode                     String?                     @db.VarChar(3)
@@ -21570,4 +21581,131 @@ model CrmWhatsappMessage {
 
   @@index([contactPhone, sentAt])
   @@index([phoneNumberId, sentAt])
+}
+
+enum OrigenDeLaHora {
+  SERVIDOR
+  RELOJ_ANCLADO
+  RELOJ_DEL_CELULAR
+}
+
+enum EstadoVentaDeCampo {
+  EN_CURSO
+  COMPLETA
+}
+
+// Ficha de venta de la app de campo. Sin relaciones Prisma a propósito (ids sueltos).
+model VentaDeCampo {
+  id                 String             @id @default(cuid())
+  venueId            String
+  staffId            String
+  llave              String
+  serialNumber       String
+  serializedItemId   String?            @unique
+  precio             Decimal            @db.Decimal(10, 2)
+  ocurrioAt          DateTime
+  origenHora         OrigenDeLaHora
+  estado             EstadoVentaDeCampo @default(EN_CURSO)
+  orderId            String?            @unique
+  paymentId          String?            @unique
+  saleVerificationId String?
+  /// El celular de campo que la mandó (bloque 1); nulo en las anteriores.
+  celularId          String?
+  ocupacion          String?
+  ocupadaHasta       DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([venueId, llave])
+  @@index([staffId, createdAt])
+  @@map("ventas_de_campo")
+}
+
+// App de campo (bloque 1): el celular de UNA persona. Sin relaciones Prisma a propósito (ids sueltos, como VentaDeCampo).
+// La credencial sólo la conoce el celular: aquí va su sha256.
+model CelularDeCampo {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  staffId             String
+  /// = staffId mientras está vinculado; null al desvincular. El único impide dos celulares vivos por persona (spec §4.9 r4).
+  staffIdVinculado    String?   @unique
+  credencialHash      String    @unique
+  /// La ÚNICA Session del celular: la prueba de que un token es suyo (el deviceId de la Session lo pone el cliente).
+  sesionId            String?   @unique
+  pinSal              String
+  aparatoId           String
+  marca               String?
+  modelo              String?
+  versionAndroid      String?
+  versionApp          String?
+  codigoId            String?
+  vistoAt             DateTime?
+  porSubir            Int       @default(0)
+  porSubirDetalle     Json?
+  /// Huellas (sha256 de tipo, sucursal y cuerpo) de lo que el celular tenía por subir en su último latido.
+  huellasPorSubir     String[]  @default([])
+  huellasReportadasAt DateTime?
+  pinFallos           Int       @default(0)
+  pinBloqueadoHasta   DateTime?
+  desvinculadoAt      DateTime?
+  desvinculadoPor     String?
+  /// PANEL | CELULAR | CELULAR_NUEVO | MCP
+  motivoDesvinculo    String?
+  /// Se desvinculó como perdido o robado: la gracia no aplica nada sola, todo queda «por revisar» (CELULAR_PERDIDO).
+  sinGracia           Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([organizationId, staffId])
+  @@map("celulares_de_campo")
+}
+
+// App de campo (bloque 1): el código con que una persona activa su celular. Uno por persona y organización; generar otro
+// lo reemplaza. El código se queda al usarse o anularse, para poder decir «ya se usó».
+model CodigoDeCelular {
+  id                String    @id @default(cuid())
+  organizationId    String
+  staffId           String
+  codigo            String    @unique
+  expiraAt          DateTime
+  intentos          Int       @default(0)
+  generadoPor       String
+  usadoAt           DateTime?
+  usadoPorAparatoId String?
+  anuladoAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([organizationId, staffId])
+  @@map("codigos_de_celular")
+}
+
+// App de campo (bloque 1): lo que un celular desvinculado (o de una persona dada de baja) subió y no se aplicó solo.
+// Nada se descarta: lo resuelve un supervisor («Aplicar» o «Descartar»).
+model EnvioRetenidoDeCampo {
+  id             String    @id @default(cuid())
+  organizationId String
+  celularId      String
+  staffId        String
+  venueId        String
+  /// VENTA | ENTRADA | SALIDA | CUSTODIA_ACEPTAR | CUSTODIA_RECHAZAR | EVIDENCIA
+  tipo           String
+  huella         String
+  /// El cuerpo tal como llegó (texto exacto: su huella se calcula sobre él).
+  cuerpoJson     String
+  /// NO_REPORTADA | FUERA_DE_PLAZO | PERSONA_DADA_DE_BAJA | SIN_PERMISO | RECHAZADO | CELULAR_PERDIDO | APLICADO_EN_GRACIA (no se retuvo: guarda el desenlace)
+  motivo         String
+  rechazo        Json?
+  /// PENDIENTE → APLICANDO → APLICADO, o PENDIENTE → DESCARTADO. Desde APLICANDO ya no se descarta.
+  estado         String    @default("PENDIENTE")
+  resueltoAt     DateTime?
+  resueltoPor    String?
+  nota           String?
+  resultado      Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([celularId, huella])
+  @@index([organizationId, estado, createdAt])
+  @@map("envios_retenidos_de_campo")
 }

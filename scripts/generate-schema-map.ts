@@ -207,6 +207,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OAuthState: 'Staff, Auth, Permissions & Time',
   DeviceToken: 'Staff, Auth, Permissions & Time',
   TimeEntry: 'Staff, Auth, Permissions & Time',
+  VentaDeCampo: 'Staff, Auth, Permissions & Time',
+  CelularDeCampo: 'Staff, Auth, Permissions & Time',
+  CodigoDeCelular: 'Staff, Auth, Permissions & Time',
+  EnvioRetenidoDeCampo: 'Staff, Auth, Permissions & Time',
   TimeEntryBreak: 'Staff, Auth, Permissions & Time',
   PromoterLocationPing: 'Staff, Auth, Permissions & Time',
 

@@ -459,8 +459,8 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
 })
 
 describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
-  const devolver = (e: Estado, extra: { soloSiEsFolio?: true } = {}) =>
-    devolverCanjesDeVentaAnuladaEnTx(txSobre(e), { venueId: VENUE, orderId: ORDER, staffId: STAFF, camino: 'prueba', ...extra })
+  const devolver = (e: Estado) =>
+    devolverCanjesDeVentaAnuladaEnTx(txSobre(e), { venueId: VENUE, orderId: ORDER, staffId: STAFF, camino: 'prueba' })
 
   it('cuenta de folio: convierte (no borra) y reporta lo devuelto', async () => {
     const e = estado({
@@ -497,7 +497,7 @@ describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
     expect(e.bitacora).toEqual([expect.objectContaining({ action: 'ORDER_CANCEL_LOYALTY_RETURNED' })])
   })
 
-  it('S9 (B1, U3): la rama de folio SELLA antes de convertir, también sin beneficios y con soloSiEsFolio', async () => {
+  it('S9 (B1, U3): la rama de folio SELLA antes de convertir, también sin beneficios', async () => {
     const conBeneficio = estado({ filas: [fila('od1', { loyaltyTransactionId: 'clt1', amount: D(30) })] })
     conBeneficio.movimientos.push({ id: 'clt1', customerId: ANA, points: -300, orderId: ORDER, type: 'REDEEM' })
     await devolver(conBeneficio)
@@ -505,24 +505,14 @@ describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
     expect(conBeneficio.llamadas.indexOf(`sello:${ORDER}`)).toBeLessThan(conBeneficio.llamadas.indexOf('leer'))
 
     const sinBeneficios = estado()
-    await devolver(sinBeneficios, { soloSiEsFolio: true })
+    await devolver(sinBeneficios)
     expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'leer'])
   })
 
   it('S9: una cuenta que no es de folio no se sella', async () => {
     const e = estado({ folio: false })
-    await devolver(e, { soloSiEsFolio: true })
+    await devolver(e)
     expect(e.llamadas.filter(l => l.startsWith('sello'))).toEqual([])
-  })
-
-  it('soloSiEsFolio en una cuenta que no es de folio: no lee ni devuelve nada (como hoy en «Regresar el saldo y cancelar»)', async () => {
-    const e = estado({ folio: false, filas: [fila('od1', { loyaltyTransactionId: 'clt1' })] })
-
-    const r = await devolver(e, { soloSiEsFolio: true })
-
-    expect(r).toEqual({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] })
-    expect(e.llamadas).toEqual([])
-    expect(quitarComoHoy).not.toHaveBeenCalled()
   })
 })
 

@@ -4360,7 +4360,7 @@ describe('Task8 native move clear merge cancel', () => {
     })
     expect(await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).toMatchObject({
       status: 'CANCELLED',
-      specialRequests: 'Cancelled:   keep spaces  ',
+      specialRequests: 'Cancelada:   keep spaces  ',
     })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: table.id } })).toMatchObject({
       status: 'OCCUPIED',
@@ -4955,7 +4955,7 @@ describe('Task8 native guard controls and observed rollback TDD', () => {
           expect(inside.kds).toEqual(completed)
           expect(inside.kdsItems).toEqual(before.kdsItems.filter(row => row.kdsOrderId === completed[0].id))
           expect(inside.items).toEqual(before.items)
-          expect(inside.orders[0]).toMatchObject({ status: 'CANCELLED', specialRequests: 'Cancelled:   keep spaces  ' })
+          expect(inside.orders[0]).toMatchObject({ status: 'CANCELLED', specialRequests: 'Cancelada:   keep spaces  ' })
           expect(inside.tables[0]).toMatchObject({ status: 'AVAILABLE', currentOrderId: null })
         },
       )
@@ -5821,7 +5821,7 @@ test('Task8 legacy cancel DELETE body preserves exact reason and audit without c
   expect(await stored(f.input)).toBeNull()
   expect(await prisma.order.findUniqueOrThrow({ where: { id: f.source.id } })).toMatchObject({
     status: 'CANCELLED',
-    specialRequests: 'Cancelled:   legacy exact  ',
+    specialRequests: 'Cancelada:   legacy exact  ',
   })
   expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ORDER_CANCELLED', staffId: authorId, entityId: f.source.id }))
 })
@@ -6077,7 +6077,7 @@ test.each(task9UniqueCells)('Task9 I1 $action $ordering: real callback behind ob
           },
         })
       } else {
-        expect(newSource).toMatchObject({ status: 'CANCELLED', specialRequests: 'Cancelled:   exact  ' })
+        expect(newSource).toMatchObject({ status: 'CANCELLED', specialRequests: 'Cancelada:   exact  ' })
         expect(newTarget).toEqual(oldTarget)
         expect(sourceState).toMatchObject({ status: 'OCCUPIED', currentOrderId: sibling.id })
         expect(targetState).toEqual(before.tables.find(row => row.id === targetTable.id))

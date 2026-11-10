@@ -15,10 +15,10 @@ import { CampaignStatus, DeliveryStatus } from '@prisma/client'
 // ==========================================
 
 const createTemplateSchema = z.object({
-  name: z.string().min(1, 'Name is required').max(100),
-  subject: z.string().min(1, 'Subject is required').max(200),
-  bodyHtml: z.string().min(1, 'HTML body is required'),
-  bodyText: z.string().min(1, 'Text body is required'),
+  name: z.string().min(1, 'El nombre de la plantilla es obligatorio').max(100),
+  subject: z.string().min(1, 'El asunto de la plantilla es obligatorio').max(200),
+  bodyHtml: z.string().min(1, 'El cuerpo en HTML de la plantilla es obligatorio'),
+  bodyText: z.string().min(1, 'El cuerpo en texto de la plantilla es obligatorio'),
 })
 
 const updateTemplateSchema = z.object({
@@ -29,10 +29,10 @@ const updateTemplateSchema = z.object({
 })
 
 const createCampaignSchema = z.object({
-  name: z.string().min(1, 'Name is required').max(100),
-  subject: z.string().min(1, 'Subject is required').max(200),
-  bodyHtml: z.string().min(1, 'HTML body is required'),
-  bodyText: z.string().min(1, 'Text body is required'),
+  name: z.string().min(1, 'El nombre de la campaña es obligatorio').max(100),
+  subject: z.string().min(1, 'El asunto de la campaña es obligatorio').max(200),
+  bodyHtml: z.string().min(1, 'El cuerpo en HTML de la campaña es obligatorio'),
+  bodyText: z.string().min(1, 'El cuerpo en texto de la campaña es obligatorio'),
   templateId: z.string().optional(),
   targetAllVenues: z.boolean().default(true),
   targetVenueIds: z.array(z.string()).default([]),

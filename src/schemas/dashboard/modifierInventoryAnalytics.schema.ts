@@ -9,7 +9,7 @@ import { existingId } from '../common/existingId.schema'
 
 // Shared venue param validation
 const venueIdParam = z.object({
-  venueId: z.string().cuid('Invalid venue ID format'),
+  venueId: z.string().cuid('El ID del negocio no es válido'),
 })
 
 // Date string validation (ISO 8601)
@@ -20,7 +20,7 @@ const isoDateString = z
       const date = new Date(val)
       return !isNaN(date.getTime())
     },
-    { message: 'Invalid date format. Use ISO 8601 format (e.g., 2024-01-15T00:00:00.000Z)' },
+    { message: 'Formato de fecha inválido. Usa el formato ISO 8601, por ejemplo 2024-01-15T00:00:00.000Z' },
   )
   .transform(val => new Date(val))
 
@@ -39,7 +39,7 @@ export const GetModifierUsageStatsSchema = z.object({
       .optional()
       .transform(val => (val ? parseInt(val, 10) : 50))
       .refine(val => val >= 1 && val <= 500, {
-        message: 'Limit must be between 1 and 500',
+        message: 'El límite debe estar entre 1 y 500',
       }),
   }),
 })

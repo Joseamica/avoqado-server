@@ -87,8 +87,8 @@ export const merchantAccountsQuerySchema = z.object({
  */
 export const recalculateProfitsSchema = z.object({
   body: z.object({
-    startDate: z.string().min(1, 'Start date is required'),
-    endDate: z.string().min(1, 'End date is required'),
+    startDate: z.string().min(1, 'La fecha de inicio es obligatoria'),
+    endDate: z.string().min(1, 'La fecha de fin es obligatoria'),
     venueId: z.string().optional(),
   }),
 })
@@ -98,12 +98,12 @@ export const recalculateProfitsSchema = z.object({
  */
 export const providerCostStructureSchema = z.object({
   body: z.object({
-    providerId: z.string().min(1, 'Provider ID is required'),
-    merchantAccountId: z.string().min(1, 'Merchant account ID is required'),
-    debitRate: z.number().min(0).max(1, 'Debit rate must be between 0 and 1'),
-    creditRate: z.number().min(0).max(1, 'Credit rate must be between 0 and 1'),
-    amexRate: z.number().min(0).max(1, 'Amex rate must be between 0 and 1'),
-    internationalRate: z.number().min(0).max(1, 'International rate must be between 0 and 1'),
+    providerId: z.string().min(1, 'El proveedor es obligatorio'),
+    merchantAccountId: z.string().min(1, 'La cuenta de comercio es obligatoria'),
+    debitRate: z.number().min(0).max(1, 'La tasa de débito debe estar entre 0 y 1'),
+    creditRate: z.number().min(0).max(1, 'La tasa de crédito debe estar entre 0 y 1'),
+    amexRate: z.number().min(0).max(1, 'La tasa de American Express debe estar entre 0 y 1'),
+    internationalRate: z.number().min(0).max(1, 'La tasa internacional debe estar entre 0 y 1'),
     // includesTax: false → tasa base, calc agrega IVA. true → tasa final.
     // null/undefined → legacy (no se aplica tax al calc).
     includesTax: z.boolean().nullable().optional(),
@@ -112,7 +112,7 @@ export const providerCostStructureSchema = z.object({
     monthlyFee: z.number().min(0).optional(),
     minimumVolume: z.number().min(0).optional(),
     volumeDiscount: z.number().min(0).max(1).optional(),
-    effectiveFrom: z.string().min(1, 'Effective from date is required'),
+    effectiveFrom: z.string().min(1, 'La fecha de inicio de vigencia es obligatoria'),
     effectiveTo: z.string().optional(),
     proposalReference: z.string().optional(),
     notes: z.string().optional(),
@@ -124,19 +124,19 @@ export const providerCostStructureSchema = z.object({
  */
 export const venuePricingStructureSchema = z.object({
   body: z.object({
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
     accountType: z.nativeEnum(AccountType),
-    debitRate: z.number().min(0).max(1, 'Debit rate must be between 0 and 1'),
-    creditRate: z.number().min(0).max(1, 'Credit rate must be between 0 and 1'),
-    amexRate: z.number().min(0).max(1, 'Amex rate must be between 0 and 1'),
-    internationalRate: z.number().min(0).max(1, 'International rate must be between 0 and 1'),
+    debitRate: z.number().min(0).max(1, 'La tasa de débito debe estar entre 0 y 1'),
+    creditRate: z.number().min(0).max(1, 'La tasa de crédito debe estar entre 0 y 1'),
+    amexRate: z.number().min(0).max(1, 'La tasa de American Express debe estar entre 0 y 1'),
+    internationalRate: z.number().min(0).max(1, 'La tasa internacional debe estar entre 0 y 1'),
     includesTax: z.boolean().nullable().optional(),
     taxRate: z.number().min(0).max(1).optional(),
     fixedFeePerTransaction: z.number().min(0).optional(),
     monthlyServiceFee: z.number().min(0).optional(),
     minimumMonthlyVolume: z.number().min(0).optional(),
     volumePenalty: z.number().min(0).optional(),
-    effectiveFrom: z.string().min(1, 'Effective from date is required'),
+    effectiveFrom: z.string().min(1, 'La fecha de inicio de vigencia es obligatoria'),
     effectiveTo: z.string().optional(),
     contractReference: z.string().optional(),
     notes: z.string().optional(),
@@ -148,7 +148,7 @@ export const venuePricingStructureSchema = z.object({
  */
 export const updateMonthlyProfitStatusSchema = z.object({
   params: z.object({
-    monthlyProfitId: z.string().min(1, 'Monthly profit ID is required'),
+    monthlyProfitId: z.string().min(1, 'El ID de la utilidad mensual es obligatorio'),
   }),
   body: z.object({
     status: z.nativeEnum(ProfitStatus),
@@ -161,8 +161,8 @@ export const updateMonthlyProfitStatusSchema = z.object({
  */
 export const exportProfitDataQuerySchema = z.object({
   query: z.object({
-    startDate: z.string().min(1, 'Start date is required'),
-    endDate: z.string().min(1, 'End date is required'),
+    startDate: z.string().min(1, 'La fecha de inicio es obligatoria'),
+    endDate: z.string().min(1, 'La fecha de fin es obligatoria'),
     format: z.enum(['csv', 'xlsx']).default('csv'),
     includeTransactionDetails: z
       .string()
@@ -179,16 +179,16 @@ export const exportProfitDataQuerySchema = z.object({
 export const enhancedCreateVenueSchema = z.object({
   body: z.object({
     // Basic venue information
-    name: z.string().min(1, 'Venue name is required'),
-    type: z.string().min(1, 'Venue type is required'),
-    logo: z.string().url('Logo must be a valid URL').optional().nullable(),
-    address: z.string().min(1, 'Address is required'),
-    city: z.string().min(1, 'City is required'),
-    state: z.string().min(1, 'State is required'),
+    name: z.string().min(1, 'El nombre del negocio es obligatorio'),
+    type: z.string().min(1, 'El tipo de negocio es obligatorio'),
+    logo: z.string().url('El logo debe ser una dirección web válida').optional().nullable(),
+    address: z.string().min(1, 'La dirección es obligatoria'),
+    city: z.string().min(1, 'La ciudad es obligatoria'),
+    state: z.string().min(1, 'El estado es obligatorio'),
     country: z.string().default('MX'),
-    zipCode: z.string().min(1, 'ZIP code is required'),
-    phone: z.string().min(1, 'Phone number is required'),
-    email: z.string().email('Valid email is required'),
+    zipCode: z.string().min(1, 'El código postal es obligatorio'),
+    phone: z.string().min(1, 'El teléfono es obligatorio'),
+    email: z.string().email('Escribe un correo electrónico válido'),
     website: z.string().url().optional(),
 
     // Payment configuration

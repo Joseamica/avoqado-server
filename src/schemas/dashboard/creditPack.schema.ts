@@ -11,8 +11,8 @@ export const createCreditPackSchema = z.object({
     description: z.string().optional(),
     price: z.number({ required_error: 'Escribe el precio' }).positive('El precio debe ser mayor a 0'),
     currency: z.string().default('MXN'),
-    validityDays: z.number().int().positive('Los dias de vigencia deben ser mayor a 0').optional(),
-    maxPerCustomer: z.number().int().positive('El limite por cliente debe ser mayor a 0').optional(),
+    validityDays: z.number().int().positive('Los días de vigencia deben ser mayores a 0').optional(),
+    maxPerCustomer: z.number().int().positive('El límite por cliente debe ser mayor a 0').optional(),
     displayOrder: z.number().int().min(0).optional(),
     items: z
       .array(
@@ -134,10 +134,10 @@ export const publicCheckoutSchema = z.object({
   // Fase 0.B: la identidad viene de la sesión, nunca del body.
   body: rejectBodyCustomerId(
     z.object({
-      email: z.string().email('Email invalido').optional(),
-      phone: z.string().min(1, 'El telefono es requerido'),
-      successUrl: z.string().url('URL de exito invalida'),
-      cancelUrl: z.string().url('URL de cancelacion invalida'),
+      email: z.string().email('Email inválido').optional(),
+      phone: z.string().min(1, 'El teléfono es requerido'),
+      successUrl: z.string().url('URL de éxito inválida'),
+      cancelUrl: z.string().url('URL de cancelación inválida'),
     }),
   ),
 })

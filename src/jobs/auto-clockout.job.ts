@@ -160,7 +160,8 @@ export class AutoClockOutJob {
 
           for (const entry of openEntries) {
             try {
-              await this.clockOutEntry(entry, `Hora de cierre programada (${configuredTime})`, timezone)
+              // Sólo cuenta lo que este job cerró: una salida real que llegó mientras corría no es suya.
+              if (!(await this.clockOutEntry(entry, `Hora de cierre programada (${configuredTime})`, timezone))) continue
               count++
 
               logger.info(`Auto clock-out (fixed time): ${entry.staff.firstName} ${entry.staff.lastName}`, {
@@ -248,7 +249,7 @@ export class AutoClockOutJob {
 
           for (const entry of overdueEntries) {
             try {
-              await this.clockOutEntry(entry, `Turno excedió ${maxHours} horas`, timezone)
+              if (!(await this.clockOutEntry(entry, `Turno excedió ${maxHours} horas`, timezone))) continue
               count++
 
               logger.info(`Auto clock-out (max duration): ${entry.staff.firstName} ${entry.staff.lastName}`, {
@@ -314,7 +315,7 @@ export class AutoClockOutJob {
   }
 
   /**
-   * Clock out a time entry and calculate hours worked
+   * Clock out a time entry and calculate hours worked. Returns whether THIS job closed it (false: another exit already did).
    */
   private async clockOutEntry(
     entry: {
@@ -324,7 +325,7 @@ export class AutoClockOutJob {
     },
     reason: string,
     _timezone?: string, // Reserved for future timezone-aware calculations
-  ): Promise<void> {
+  ): Promise<boolean> {
     const now = new Date()
 
     // Calculate break minutes (only completed breaks)
@@ -336,31 +337,40 @@ export class AutoClockOutJob {
       return total
     }, 0)
 
-    // Close any open breaks first
-    const openBreak = entry.breaks.find(b => !b.endTime)
-    if (openBreak) {
-      await prisma.timeEntryBreak.update({
-        where: { id: openBreak.id },
-        data: { endTime: now },
-      })
-    }
-
     // Calculate total hours worked (clock out - clock in - breaks)
     const totalMinutes = (now.getTime() - entry.clockInTime.getTime()) / (1000 * 60) - breakMinutes
     const totalHours = new Decimal(Math.max(0, totalMinutes / 60)).toDecimalPlaces(2)
 
-    // Update the time entry
-    await prisma.timeEntry.update({
-      where: { id: entry.id },
-      data: {
-        clockOutTime: now,
-        status: TimeEntryStatus.CLOCKED_OUT,
-        totalHours,
-        breakMinutes: Math.round(breakMinutes),
-        autoClockOut: true,
-        autoClockOutNote: `[Sistema] Salida automática: ${reason}`,
-      },
+    const openBreak = entry.breaks.find(b => !b.endTime)
+
+    // Una sola transacción: sólo cierra si la entrada sigue abierta (una salida real que llegó
+    // mientras el job corría no se pisa) y, sólo entonces, cierra el descanso abierto con el mismo `now`.
+    const closed = await prisma.$transaction(async tx => {
+      const { count } = await tx.timeEntry.updateMany({
+        where: { id: entry.id, clockOutTime: null },
+        data: {
+          clockOutTime: now,
+          status: TimeEntryStatus.CLOCKED_OUT,
+          totalHours,
+          breakMinutes: Math.round(breakMinutes),
+          autoClockOut: true,
+          autoClockOutNote: `[Sistema] Salida automática: ${reason}`,
+        },
+      })
+      if (count !== 1) return false
+      if (openBreak) {
+        await tx.timeEntryBreak.update({
+          where: { id: openBreak.id },
+          data: { endTime: now },
+        })
+      }
+      return true
     })
+
+    if (!closed) {
+      logger.info(`Auto clock-out skipped: entry ${entry.id} was already closed by another exit`)
+    }
+    return closed
   }
 
   /**

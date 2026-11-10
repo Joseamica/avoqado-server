@@ -37,7 +37,7 @@ export type UpdateTpvSettingsInput = z.infer<typeof UpdateTpvSettingsSchema>
  */
 export const UpdateVenueSettingsSchema = z.object({
   params: z.object({
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del negocio es obligatorio'),
   }),
   body: z.object({
     // Operations

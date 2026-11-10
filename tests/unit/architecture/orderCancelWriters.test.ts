@@ -70,10 +70,10 @@ const INVENTARIO: Record<string, Clase> = {
   'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
   // Tarjetas de regalo (spec § 5.4.4): regresar el saldo y cancelar. Candado de topología (comandas → Order → mesas) +
   // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
-  // S9 (decisión 30 del plan): en una cuenta de folio convierte sus beneficios (`soloSiEsFolio`); en otra, como hoy (no devuelve canjes).
+  // Devuelve los canjes (deuda P1, 31-oct); en una cuenta de folio (S9) los convierte en cortesía.
   'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES, 'soloSiEsFolio: true'],
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
   },
   // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela en la MISMA
   // tx del reembolso, que ya tiene el candado de la Order (issueRefund / recordRefund → lockExistingOrderForPayment). Con un cobro de

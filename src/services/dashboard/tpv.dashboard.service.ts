@@ -1,5 +1,5 @@
 import logger from '@/config/logger'
-import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import { DeviceFormFactor, FulfillmentMode, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { countUpdatedTerminals, lockTerminalRow, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
@@ -10,6 +10,26 @@ import prisma from '../../utils/prismaClient'
 import { ACTIVATABLE_TERMINAL_TYPES, type DeviceManagementDto, toDeviceManagementDto } from '../device-capabilities.service'
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
+import { extrasDeLaFicha, type ExtrasDeLaFicha } from './tpvDetailExtras'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+
+/**
+ * Aparatos claros, Paso 2: letrero opcional de la lista. Misma regla que `extrasDeLaFicha` (interruptor + plan).
+ * Si falla, la lista responde como siempre, sin `areaTickets`.
+ */
+async function leerValesDeLaLista(venueId: string): Promise<{ enabled: boolean; activeAreaCount: number } | undefined> {
+  try {
+    const [ajustes, activeAreaCount] = await Promise.all([
+      prisma.venueAreaTicketSettings.findUnique({ where: { venueId }, select: { enabled: true } }),
+      prisma.fulfillmentArea.count({ where: { venueId, active: true } }),
+    ])
+    const enabled = Boolean(ajustes?.enabled) && (await venueHasFeatureAccess(venueId, 'AREA_TICKETS'))
+    return { enabled, activeAreaCount }
+  } catch (error) {
+    logger.warn('[Lista de aparatos] no se pudieron leer los vales; se responde sin ellos', { venueId, error })
+    return undefined
+  }
+}
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -149,6 +169,9 @@ export async function getTerminalsData(
       },
       skip,
       take,
+      include: {
+        fulfillmentArea: { select: { id: true, name: true, active: true, sendsComanda: true, fulfillmentMode: true } },
+      },
     }),
     prisma.terminal.count({
       where: whereClause,
@@ -197,6 +220,8 @@ export async function getTerminalsData(
     ),
   )
 
+  const areaTickets = await leerValesDeLaLista(venueId)
+
   // 6. Estructurar y devolver la respuesta final
   return {
     data: terminalsWithStats,
@@ -206,6 +231,7 @@ export async function getTerminalsData(
       pageSize,
       pageCount: Math.ceil(total / pageSize),
     },
+    ...(areaTickets ? { areaTickets } : {}),
   }
 }
 
@@ -215,7 +241,15 @@ export async function getTerminalsData(
  * @param tpvId - El ID de la terminal.
  * @returns La terminal encontrada.
  */
-export async function getTpvById(venueId: string, tpvId: string): Promise<DeviceManagementDto<Terminal>> {
+export async function getTpvById(
+  venueId: string,
+  tpvId: string,
+): Promise<
+  DeviceManagementDto<
+    Terminal & { fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null }
+  > &
+    ExtrasDeLaFicha
+> {
   // 1. Validar parámetros de entrada
   if (!venueId) {
     throw new NotFoundError('El ID del Venue es requerido.')
@@ -230,6 +264,8 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
       id: tpvId,
       venueId: venueId,
     },
+    // Aparatos claros: el área que emite y si manda comanda, para el letrero de arriba de la ficha (campo nuevo, opcional).
+    include: { fulfillmentArea: { select: { id: true, name: true, sendsComanda: true, active: true, fulfillmentMode: true } } },
   })
 
   // 3. Verificar si la terminal existe
@@ -237,7 +273,7 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
   }
 
-  return toDeviceManagementDto(terminal)
+  return { ...toDeviceManagementDto(terminal), ...(await extrasDeLaFicha(venueId, terminal)) }
 }
 
 export interface UpdateTpvActor {

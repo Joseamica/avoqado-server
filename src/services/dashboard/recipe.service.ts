@@ -758,6 +758,8 @@ export async function configureVariableIngredient(
       where: {
         id: data.linkedModifierGroupId,
         venueId,
+        // D16: un grupo archivado no se liga de nuevo; la línea que ya lo traía se puede volver a guardar sin cambiarlo.
+        ...(data.linkedModifierGroupId === line.linkedModifierGroupId ? {} : { active: true }),
       },
     })
 

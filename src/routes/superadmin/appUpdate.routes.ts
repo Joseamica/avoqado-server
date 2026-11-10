@@ -24,7 +24,7 @@ const listUpdatesSchema = z.object({
 
 const updateIdSchema = z.object({
   params: z.object({
-    id: z.string().cuid('Invalid update ID'),
+    id: z.string().cuid('ID de actualización inválido'),
   }),
 })
 
@@ -40,10 +40,10 @@ const createUpdateSchema = z.object({
     // Accepts X.Y.Z or X.Y.Z-suffix (e.g., 1.3.0-sandbox)
     versionName: z
       .string()
-      .regex(/^\d+\.\d+\.\d+(-\w+)?$/, 'Version name must be in format X.Y.Z or X.Y.Z-suffix')
+      .regex(/^\d+\.\d+\.\d+(-\w+)?$/, 'La versión debe tener el formato X.Y.Z o X.Y.Z-sufijo')
       .optional(),
     // versionCode is now optional - auto-detected from APK if not provided
-    versionCode: z.number({ coerce: true }).int().positive('Version code must be a positive integer').optional(),
+    versionCode: z.number({ coerce: true }).int().positive('El código de versión debe ser un entero positivo').optional(),
     environment: z.enum(['SANDBOX', 'PRODUCTION']),
     releaseNotes: z.string().optional(),
     updateMode: z.enum(['NONE', 'BANNER', 'FORCE']).optional().default('NONE'),
@@ -55,7 +55,7 @@ const createUpdateSchema = z.object({
 
 const updateAppUpdateSchema = z.object({
   params: z.object({
-    id: z.string().cuid('Invalid update ID'),
+    id: z.string().cuid('ID de actualización inválido'),
   }),
   body: z.object({
     releaseNotes: z.string().optional(),

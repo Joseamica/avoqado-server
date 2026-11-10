@@ -54,11 +54,24 @@ describe('cancelación genérica: Rappi conserva la autoridad sobre su pedido', 
     await expect(assertOrderCancellableUnderLock(prismaMock, input)).resolves.toMatchObject({ id: 'o1' })
   })
 
-  it('control: una cuenta normal con dinero conserva el rechazo de reembolso', async () => {
+  it('una cuenta pagada se rechaza en español y sin código (el «Cambio» reconoce ese rechazo por no llevar código)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orden('TPV', 'PAID'))
+    const error = await assertOrderCancellableUnderLock(prismaMock, input).catch(e => e)
+    expect(error).toMatchObject({
+      statusCode: 400,
+      message:
+        'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    })
+    expect(error.code).toBeUndefined()
+  })
+
+  it('control: una cuenta normal con un abono se rechaza sin prometer que reembolsar la deja cancelar (D21)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(orden('TPV', 'PARTIAL'))
+    // Un reembolso no reabre la cuenta (`orderBalance.ts`): después, este mismo guardia la vuelve a rechazar.
     await expect(assertOrderCancellableUnderLock(prismaMock, input)).rejects.toMatchObject({
       statusCode: 400,
-      message: expect.stringContaining('Reembólsalos'),
+      message:
+        'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
     })
   })
 })

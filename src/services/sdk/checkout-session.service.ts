@@ -63,18 +63,18 @@ export async function createCheckoutSession(
   }
 
   if (!merchant.active) {
-    throw new UnauthorizedError('Merchant account is inactive')
+    throw new UnauthorizedError('La cuenta de comercio está inactiva')
   }
 
   await assertVenueSalesEnabled(merchant.venueId)
 
   if (!merchant.provider) {
-    throw new BadRequestError('Provider configuration is missing')
+    throw new BadRequestError('Falta la configuración del procesador de pagos')
   }
 
   // 2. Validate amount
   if (data.amount <= 0) {
-    throw new BadRequestError('Amount must be greater than 0')
+    throw new BadRequestError('El monto debe ser mayor a 0')
   }
 
   // 3. Generate unique session ID
@@ -184,12 +184,12 @@ export async function getCheckoutSession(sessionId: string, ecommerceMerchantId?
   })
 
   if (!session) {
-    throw new NotFoundError('Checkout session not found')
+    throw new NotFoundError('Sesión de pago no encontrada')
   }
 
   // Authorization check: if ecommerceMerchantId provided, verify it matches
   if (ecommerceMerchantId && session.ecommerceMerchantId !== ecommerceMerchantId) {
-    throw new UnauthorizedError('Unauthorized access to checkout session')
+    throw new UnauthorizedError('No tienes acceso a esta sesión de pago')
   }
 
   return session
@@ -264,18 +264,18 @@ export async function cancelCheckoutSession(sessionId: string, ecommerceMerchant
   })
 
   if (!session) {
-    throw new NotFoundError('Checkout session not found')
+    throw new NotFoundError('Sesión de pago no encontrada')
   }
 
   // Authorization check
   if (session.ecommerceMerchantId !== ecommerceMerchantId) {
-    throw new UnauthorizedError('Unauthorized access to checkout session')
+    throw new UnauthorizedError('No tienes acceso a esta sesión de pago')
   }
 
   // Can only cancel PENDING or PROCESSING sessions
   const cancellableStatuses: CheckoutStatus[] = [CheckoutStatus.PENDING, CheckoutStatus.PROCESSING]
   if (!cancellableStatuses.includes(session.status)) {
-    throw new BadRequestError(`Cannot cancel session with status ${session.status}. Only PENDING or PROCESSING sessions can be cancelled.`)
+    throw new BadRequestError(`No se puede cancelar una sesión en estado ${session.status}. Sólo se cancelan las que están pendientes o en proceso.`)
   }
 
   // 🔴 Auditoría 2026-09-30: leer el estado y escribir después dejaba pisar un cobro en curso (CHARGING).
@@ -284,7 +284,7 @@ export async function cancelCheckoutSession(sessionId: string, ecommerceMerchant
     data: { status: CheckoutStatus.CANCELLED, cancelledAt: new Date() },
   })
   if (cancelled.count === 0) {
-    throw new BadRequestError('Cannot cancel session: its status changed. Only PENDING or PROCESSING sessions can be cancelled.')
+    throw new BadRequestError('No se puede cancelar la sesión porque su estado cambió. Sólo se cancelan las que están pendientes o en proceso.')
   }
 
   const updatedSession = await prisma.checkoutSession.findUniqueOrThrow({ where: { sessionId } })

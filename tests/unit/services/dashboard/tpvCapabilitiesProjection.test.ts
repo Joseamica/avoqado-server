@@ -192,3 +192,25 @@ describe('activation filters are applied before pagination', () => {
     expect(where).not.toHaveProperty('activatedAt')
   })
 })
+
+describe('Aparatos claros: la ficha trae el área que emite y los extras (campos opcionales)', () => {
+  it('lee el área con su comanda y agrega areaTicketsEnabled y deviceMenus', async () => {
+    const area = { id: 'a1', name: 'Panadería', sendsComanda: false, active: true, fulfillmentMode: 'HOLD_UNTIL_PAID' }
+    prismaMock.terminal.findFirst.mockResolvedValue(posRow({ canIssueAreaTickets: true, fulfillmentArea: area, version: '2.25.33' }))
+    prismaMock.venueAreaTicketSettings.findUnique.mockResolvedValue({ enabled: false } as never)
+    prismaMock.terminalMenu.findMany.mockResolvedValue([] as never)
+
+    const detail = await getTpvById('venue-1', 'pos-1')
+
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ include: { fulfillmentArea: { select: { id: true, name: true, sendsComanda: true, active: true, fulfillmentMode: true } } } }),
+    )
+    expect(detail).toEqual(
+      expect.objectContaining({
+        fulfillmentArea: area,
+        areaTicketsEnabled: false,
+        deviceMenus: { menus: [], needsAppUpdate: false },
+      }),
+    )
+  })
+})

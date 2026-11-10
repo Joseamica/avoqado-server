@@ -1,6 +1,8 @@
 import { registerHybridBillingTools } from './tools/hybridBilling'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { ListToolsRequestSchema, type ListToolsResult } from '@modelcontextprotocol/sdk/types.js'
+import { guardarListaMcp, listaMcpGuardada, llaveDeListaMcp } from './listaGuardada'
 import type { Request, Response } from 'express'
 import { emisionDeCadena, verifyMcpToken } from './mcpToken'
 import { isActiveSuperAdmin, resolveScope, type McpScope } from './scope'
@@ -71,6 +73,7 @@ import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
 import { registerManualSaleTools } from './tools/manualSale'
 import { registerPromoterLocationTools } from './tools/promoterLocation'
+import { registerCelularesDeCampoTools } from './tools/celularesDeCampo'
 import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
@@ -198,6 +201,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
 
   if (flags.serializedEnabled) {
     registerSerializedTools(server, scope)
+    registerCelularesDeCampoTools(server, scope)
     registerSaleVerificationTools(server, scope)
     registerManualSaleTools(server, scope)
     registerCashOutTools(server, scope)
@@ -238,14 +242,19 @@ export async function buildHandshakeServer(staffId: string, profile: McpProfile 
   return createMcpServer(await isActiveSuperAdmin(staffId), profile)
 }
 
-/** Build a per-request MCP server bound to the caller's resolved scope. */
+/**
+ * Build a per-request MCP server bound to the caller's resolved scope.
+ * `paraLista` (D19): a lone `tools/list`. Its answer comes from the copy of this exact connection when there is one; when
+ * not, `llaveDeLista` tells the caller under which key to keep the answer this full server is about to send.
+ */
 async function buildServerForIdentity(
   staffId: string,
   activeOrg: string,
   scopes?: string[],
   profile: McpProfile = 'manual',
   clientId: string | null = null,
-): Promise<McpServer> {
+  paraLista = false,
+): Promise<{ server: McpServer; llaveDeLista?: string }> {
   const scope = await resolveScope(staffId, activeOrg)
   // Never discard an explicit empty grant or give legacy tokens implicit write access.
   scope.scopes = scopes ?? ['mcp:read']
@@ -276,8 +285,22 @@ async function buildServerForIdentity(
   // the caller is entitled to, and tools/list would hand it over as good. Never deliver a partial build.
   const cut = pendingCancellation()
   if (cut) throw cut
-  registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled, catalogEnabled: catalogAccess?.canRead === true })
-  return server
+  const flags = { serializedEnabled, whiteLabelEnabled, catalogEnabled: catalogAccess?.canRead === true }
+  // D19: registering ~460 tools and converting their schemas held the event loop 209–457 ms per tools/list in production.
+  // The key holds EVERYTHING the registration receives (the whole scope, resolved again on this very request, the flags,
+  // the profile and the instrumentation identity), so two connections that could see different tools never share a list.
+  const llaveDeLista = paraLista
+    ? (llaveDeListaMcp({ perfil: profile, banderas: flags, alcance: { scope, conexion: { staffId, activeOrg, clientId } } }) ?? undefined)
+    : undefined
+  const guardada = llaveDeLista ? listaMcpGuardada(llaveDeLista) : undefined
+  if (guardada) {
+    // Same identity, capabilities and instructions as the full server (createMcpServer), and the list it sent.
+    const ligero = createMcpServer(isSuperAdmin, profile)
+    ligero.server.setRequestHandler(ListToolsRequestSchema, () => guardada as ListToolsResult)
+    return { server: ligero }
+  }
+  registerAllTools(server, scope, flags)
+  return { server, llaveDeLista }
 }
 
 /**
@@ -318,10 +341,20 @@ async function handleMcpProfileRequest(req: Request, res: Response, profile: Mcp
     }
     const message = describeMcpMessage(req.body)
     const isHandshake = message.kind === 'request' && MCP_HANDSHAKE_METHODS.has(message.method ?? '')
-    const server = isHandshake
-      ? await buildHandshakeServer(staffId, profile)
-      : await buildServerForIdentity(staffId, activeOrg, scopes, profile, clientId)
+    // D19: only a lone tools/list uses or fills the copy; a batch, tools/call or anything else builds as always.
+    const esLista = message.kind === 'request' && message.method === 'tools/list'
+    const { server, llaveDeLista } = isHandshake
+      ? { server: await buildHandshakeServer(staffId, profile), llaveDeLista: undefined }
+      : await buildServerForIdentity(staffId, activeOrg, scopes, profile, clientId, esLista)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+    if (llaveDeLista) {
+      // The answer this full server sends is the one to keep: guardarListaMcp ignores anything without a tools array.
+      const enviar = transport.send.bind(transport)
+      transport.send = (mensaje, opciones) => {
+        if ('result' in mensaje) guardarListaMcp(llaveDeLista, mensaje.result)
+        return enviar(mensaje, opciones)
+      }
+    }
     res.on('close', () => {
       void transport.close()
     })

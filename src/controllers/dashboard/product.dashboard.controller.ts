@@ -7,37 +7,44 @@ import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalog
 import { estadoIvaPorProducto } from '../../services/fiscal/encendidoIva.service'
 
 /**
+ * Cómo lee la query el listado de productos. La terminal arma con esto su llave de caché (D20): una opción nueva aquí entra
+ * sola a la llave y nunca se sirve la copia de otra combinación.
+ */
+export const opcionesDelListadoDeProductos = (req: Request) => {
+  const { includeRecipe, includeModifiers, includePricingPolicy, categoryId, orderBy } = req.query
+  // The modifier + recipe trees default ON (backward-compatible — this list always loaded them).
+  // Callers that only need id/name/price opt OUT with ?includeRecipe=false / ?includeModifiers=false
+  // to skip the deep includes (big speed win on large catalogs). Only an explicit 'false' turns it off.
+  return {
+    includeRecipe: includeRecipe !== 'false',
+    includeModifiers: includeModifiers !== 'false',
+    includePricingPolicy: includePricingPolicy === 'true',
+    categoryId: categoryId as string | undefined,
+    orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',
+  }
+}
+
+/**
  * Cuerpo común del listado de productos: lo usan el panel (`getProductsHandler`) y la terminal
  * (`menu.tpv.controller.getProducts`, que le suma `catalogAt`). Devuelve el sobre
  * `{ message, data, correlationId }` tal cual lo responde el panel.
  */
 export const buildProductsListResponse = async (req: Request) => {
   const { venueId } = req.params
-  const { includeRecipe, includeModifiers, includePricingPolicy, categoryId, orderBy } = req.query
+  const { categoryId, orderBy } = req.query
   const correlationId = (req as any).correlationId
-
-  // The modifier + recipe trees default ON (backward-compatible — this list always loaded them).
-  // Callers that only need id/name/price opt OUT with ?includeRecipe=false / ?includeModifiers=false
-  // to skip the deep includes (big speed win on large catalogs). Only an explicit 'false' turns it off.
-  const wantRecipe = includeRecipe !== 'false'
-  const wantModifiers = includeModifiers !== 'false'
+  const opciones = opcionesDelListadoDeProductos(req)
 
   logger.info(`Fetching products for venue ${venueId}`, {
     correlationId,
-    includeRecipe: wantRecipe,
-    includeModifiers: wantModifiers,
-    includePricingPolicy: includePricingPolicy === 'true',
+    includeRecipe: opciones.includeRecipe,
+    includeModifiers: opciones.includeModifiers,
+    includePricingPolicy: opciones.includePricingPolicy,
     categoryId: categoryId || undefined,
     orderBy: orderBy || 'displayOrder',
   })
 
-  const products = await productService.getProducts(venueId, {
-    includeRecipe: wantRecipe,
-    includeModifiers: wantModifiers,
-    includePricingPolicy: includePricingPolicy === 'true',
-    categoryId: categoryId as string | undefined,
-    orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',
-  })
+  const products = await productService.getProducts(venueId, opciones)
 
   return {
     message: `Products for venue ${venueId}`,

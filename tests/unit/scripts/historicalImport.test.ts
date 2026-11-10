@@ -158,6 +158,72 @@ describe('planHistoricalImport', () => {
   })
 })
 
+// El calendario de Isaac (9-nov) manda también el número portado: es opcional y no cambia nada de la vinculación.
+describe('el número portado', () => {
+  const ENCABEZADOS = ['ID SIM', 'Tipo deSIM', 'Mes', 'Fecha', '# Vinculación', 'Status Venta']
+  const conPortado = (iccid: unknown, numero: unknown, portado: unknown) => [...fila(iccid, numero), portado]
+
+  it('lee la columna del portado con cualquiera de sus nombres', () => {
+    for (const nombre of ['# Portabilidad', 'Número portado', '# Portado', 'Número de portabilidad']) {
+      const [row] = parseHistoricalWorkbook(libro([conPortado(ICCID(1), 5511111111, 5566666666)], [...ENCABEZADOS, nombre]))
+      expect([nombre, row.rawPorted]).toEqual([nombre, '5566666666'])
+    }
+  })
+
+  it('sin columna de portado el renglón no trae portado (el Excel del 2-nov)', () => {
+    const [row] = parseHistoricalWorkbook(libro([fila(ICCID(1), 5511111111)]))
+    expect(row.rawPorted).toBeUndefined()
+  })
+
+  const ventas = new Map([
+    [ICCID(1), { id: 'sv-sin-portado', linkingNumber: null, portedNumber: null }],
+    [ICCID(2), { id: 'sv-con-otro-portado', linkingNumber: '5522222222', portedNumber: '5588888888' }],
+  ])
+  const plan = planHistoricalImport(
+    parseHistoricalWorkbook(
+      libro(
+        [
+          conPortado(ICCID(1), 5511111111, 5566666666), // 4: venta sin portado → se llenan los dos
+          conPortado(ICCID(2), 5522222222, 5577777777), // 5: venta con otro portado → choque del portado, no se pisa
+          conPortado(ICCID(3), 5533333333, 5512345678), // 6: sin venta → los dos al histórico
+          conPortado(ICCID(4), 5544444444, '55O0000000'), // 7: portado con una «O» → inválido; la vinculación sigue
+          conPortado(ICCID(5), 5555555555, 'NO'), // 8: sin dígitos (columna de sí/no) → no hay portado
+          conPortado(ICCID(6), 5560606060, 5560606060), // 9: el mismo número en los dos campos → no es repetido
+          conPortado(ICCID(7), '334651O556', 5570707070), // 10: vinculación inválida → el portado sí entra
+        ],
+        [...ENCABEZADOS, '# Portabilidad'],
+      ),
+    ),
+    ventas,
+  )
+
+  it('llena el portado de la venta que no lo tiene y no pisa el que ya tiene otro', () => {
+    expect(plan.fillPorted).toEqual([{ verificationId: 'sv-sin-portado', number: '5566666666', rowIndex: 4 }])
+    expect(plan.portedConflicts).toEqual([
+      { verificationId: 'sv-con-otro-portado', current: '5588888888', excel: '5577777777', rowIndex: 5 },
+    ])
+    expect(plan.fillSale).toEqual([{ verificationId: 'sv-sin-portado', number: '5511111111', rowIndex: 4 }])
+    expect(plan.conflicts).toEqual([])
+  })
+
+  it('el portado sin venta va al histórico junto con la vinculación', () => {
+    const numeros = plan.toHistorical.filter(h => h.iccid === ICCID(3)).map(h => h.number)
+    expect(numeros).toEqual(['5533333333', '5512345678'])
+    expect(plan.toHistorical.filter(h => h.iccid === ICCID(7)).map(h => h.number)).toEqual(['5570707070'])
+  })
+
+  it('un portado inválido va a su propia lista y no tumba la vinculación del renglón', () => {
+    expect(plan.invalidPorted).toEqual([{ rowIndex: 7, raw: '55O0000000' }])
+    expect(plan.invalid).toEqual([{ rowIndex: 10, raw: '334651O556' }])
+    expect(plan.toHistorical.filter(h => h.iccid === ICCID(4)).map(h => h.number)).toEqual(['5544444444'])
+    expect(plan.toHistorical.filter(h => h.iccid === ICCID(5)).map(h => h.number)).toEqual(['5555555555'])
+  })
+
+  it('el mismo número en vinculación y portado del mismo renglón no cuenta como repetido', () => {
+    expect(plan.repeatedNumbers).toEqual([])
+  })
+})
+
 describe('importBatchFor', () => {
   it('<fecha de México>-<8 del sha1 del archivo>', () => {
     // sha1('abc') = a9993e36…; las 03:00 UTC del 3-nov todavía son el 2-nov en México.

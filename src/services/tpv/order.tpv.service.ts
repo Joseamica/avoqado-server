@@ -2635,7 +2635,9 @@ export async function removeOrderItem(
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot remove items from a paid order')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
 
       // Verify item exists in order
@@ -2892,7 +2894,9 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot comp items from a paid order')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
 
       // Validate staff exists
@@ -3210,7 +3214,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot void items from a paid order')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
 
       // Validate staff exists
@@ -3294,7 +3300,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Anular TODO cancela la orden: con dinero ya cobrado (PARTIAL) se rechaza, igual que `cancelOrder`. Una anulación
       // parcial sobre una PARTIAL sigue permitida (no cancela nada).
       if (isVoidingAllItems && order.paymentStatus === 'PARTIAL') {
-        throw new BadRequestError('Esta cuenta ya tiene pagos registrados. Reembólsalos antes de anular todos sus artículos.')
+        // D21: sin «Reembólsalos antes de…»; un reembolso no baja lo cobrado (`orderBalance.ts`).
+        throw new BadRequestError(
+          'Esta cuenta ya tiene pagos registrados y ya no se pueden anular todos sus artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
       if (anulacionExigeOrdenSinCobroVivo({ isVoidingAllItems })) {
         await assertNoLiveTerminalCharge(
@@ -3397,7 +3406,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
-          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Reembolsa primero la diferencia o anula menos artículos.`,
+          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Anula menos artículos; si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.`,
           'ORDER_VOID_BELOW_PAID',
           { paidAmount: pagado.toFixed(2), newTotal: totalNuevo.toFixed(2) },
         )
@@ -3629,7 +3638,7 @@ export async function applyDiscount(
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot apply discount to a paid order')
+        throw new BadRequestError('Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.')
       }
 
       // Validate staff exists
@@ -4642,6 +4651,8 @@ export async function sellSerializedItem(
   venueId: string,
   input: SellSerializedItemInput,
   staffId: string,
+  // Gancho opcional (venta del celular): corre en la MISMA transacción tras crear la orden; si lanza, todo se revierte.
+  opciones?: { enLaTransaccion?: (tx: Prisma.TransactionClient, order: { id: string }) => Promise<void> },
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`💵 [ORDER SERVICE] Quick sell serialized item ${input.serialNumber}`)
   await assertVenueSalesEnabled(venueId)
@@ -4743,6 +4754,8 @@ export async function sellSerializedItem(
         items: true,
       },
     })
+
+    if (opciones?.enLaTransaccion) await opciones.enLaTransaccion(tx, { id: order.id })
 
     // ⚠️ DO NOT mark as SOLD here - only mark as SOLD when payment completes
     // Item will be marked as SOLD in processPayment() when payment succeeds

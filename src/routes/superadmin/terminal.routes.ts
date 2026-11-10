@@ -34,9 +34,9 @@ const terminalQuerySchema = z.object({
 
 const createTerminalSchema = z.object({
   body: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    serialNumber: z.string().min(1, 'Serial number is required'),
-    name: z.string().min(1, 'Terminal name is required'),
+    venueId: z.string().cuid('ID de negocio inválido'),
+    serialNumber: z.string().min(1, 'El número de serie es obligatorio'),
+    name: z.string().min(1, 'El nombre de la terminal es obligatorio'),
     type: z.enum(['TPV_ANDROID', 'TPV_IOS', 'PRINTER_RECEIPT', 'PRINTER_KITCHEN', 'KDS']),
     // Not a strict enum: `brand` is shared with printers/KDS/tablets, which use
     // values outside the payment-hardware set (Epson, Apple, Star Micronics…).
@@ -55,7 +55,7 @@ const createTerminalSchema = z.object({
 
 const updateTerminalSchema = z.object({
   params: z.object({
-    terminalId: z.string().cuid('Invalid terminal ID'),
+    terminalId: z.string().cuid('ID de terminal inválido'),
   }),
   body: z.object({
     name: z.string().optional(),
@@ -77,13 +77,13 @@ const updateTerminalSchema = z.object({
     // pulls Y's `/tpv/terminals/:serial/config` payload on next heartbeat).
     // Service-level guard: assigned merchants are cleared on venue move
     // (cross-tenant assignments are never valid).
-    venueId: z.string().cuid('Invalid venue ID').optional(),
+    venueId: z.string().cuid('ID de negocio inválido').optional(),
   }),
 })
 
 const terminalIdSchema = z.object({
   params: z.object({
-    terminalId: z.string().cuid('Invalid terminal ID'),
+    terminalId: z.string().cuid('ID de terminal inválido'),
   }),
 })
 
@@ -110,7 +110,7 @@ router.post(
     z.object({
       params: z.object({ requestId: z.string().min(1) }),
       body: z.object({
-        venueId: z.string().cuid('Invalid venue ID'),
+        venueId: z.string().cuid('ID de negocio inválido'),
         // A6 · S6: el motivo es obligatorio y queda en la bitácora con quién soltó la terminal; puros espacios no cuentan.
         reason: z.string().trim().min(3, 'Escribe por qué se suelta la terminal (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
       }),

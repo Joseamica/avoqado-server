@@ -95,7 +95,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
   })
 
   if (!category) {
-    throw new AppError('Category not found or does not belong to this venue', 404)
+    throw new AppError('La categoría no existe o no pertenece a este negocio', 404)
   }
 
   // SKU: use provided value if non-empty, otherwise auto-generate.
@@ -121,7 +121,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
         printStationId: data.printStationId,
       })
       if (modifierGroupIds.length > 0) {
-        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId } })
+        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
         if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
       }
       const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
@@ -220,7 +220,7 @@ export async function configureInventoryStep2(venueId: string, productId: string
   })
 
   if (!product) {
-    throw new AppError('Product not found', 404)
+    throw new AppError('Producto no encontrado', 404)
   }
 
   if (!data.useInventory || !data.inventoryMethod) {
@@ -247,7 +247,7 @@ export async function configureInventoryStep2(venueId: string, productId: string
   }
 
   if (!data.inventoryMethod) {
-    throw new AppError('Inventory method is required when useInventory is true', 400)
+    throw new AppError('Elige cómo se controla el inventario de este producto', 400)
   }
 
   // Set inventory method (✅ WORLD-CLASS: Uses dedicated column)
@@ -295,7 +295,7 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
       where: { id: productId, venueId },
       select: { externalData: true, updatedAt: true, recipe: { select: { id: true } } },
     })
-    if (!product) throw new AppError('Product not found', 404)
+    if (!product) throw new AppError('Producto no encontrado', 404)
     if (!mismaVersion(product.updatedAt)) throw productoCambioError()
     // La versión se vuelve a exigir al escribir el producto (abajo), salvo si este paso ya lo escribió y tiene su candado.
     let versionAlEscribir = esperado
@@ -396,11 +396,11 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
   })
 
   if (!product) {
-    throw new AppError('Product not found', 404)
+    throw new AppError('Producto no encontrado', 404)
   }
 
   if (product.venueId !== venueId) {
-    throw new AppError('Product does not belong to this venue', 403)
+    throw new AppError('El producto no pertenece a este negocio', 403)
   }
 
   // ✅ WORLD-CLASS: Auto-switch from QUANTITY to RECIPE if needed
@@ -427,7 +427,7 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
   })
 
   if (rawMaterials.length !== rawMaterialIds.length) {
-    throw new AppError('Some ingredients were not found or do not belong to this venue', 404)
+    throw new AppError('Algunos ingredientes no existen o no pertenecen a este negocio', 404)
   }
 
   // Create recipe
@@ -546,7 +546,7 @@ export async function getWizardProgress(venueId: string, productId: string) {
   })
 
   if (!product) {
-    throw new AppError('Product not found', 404)
+    throw new AppError('Producto no encontrado', 404)
   }
 
   const externalData = (product.externalData as any) || {}
@@ -613,10 +613,10 @@ export async function switchInventoryMethod(
 
   const product = await db.product.findUnique({ where: { id: productId }, select: { venueId: true } })
   if (!product) {
-    throw new AppError('Product not found', 404)
+    throw new AppError('Producto no encontrado', 404)
   }
   if (product.venueId !== venueId) {
-    throw new AppError('Product does not belong to this venue', 403)
+    throw new AppError('El producto no pertenece a este negocio', 403)
   }
 
   // 🔴 El producto PRIMERO (toma su candado de fila) y DESPUÉS se borra la configuración vieja por

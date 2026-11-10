@@ -115,6 +115,17 @@ export async function assertNoLiveTerminalCharge(
 
 export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).'
 
+/** 🔴 `cancelExchange` reconoce estos dos rechazos por su texto exacto: usa las constantes, no copies la frase. */
+/**
+ * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID o PARTIAL, `orderBalance.ts`), así que
+ * cancelarla después tampoco se podría (Codex D18 r1 #1 y D21, 9 y 10-nov). La salida honesta es Reembolso, como
+ * «Corregir un cobro ya hecho» (23-oct).
+ */
+export const MENSAJE_CUENTA_PAGADA =
+  'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
+export const MENSAJE_CUENTA_CON_PAGOS =
+  'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
+
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
   mensajeConDinero?: string
@@ -143,7 +154,7 @@ export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawD
 
 /**
  * Candado de la orden → relectura → 400 si ya tiene dinero (PAID/PARTIAL) → 409 si hay un cobro de terminal vivo.
- * El orden importa: con dinero adentro la respuesta es «reembolsa primero», y no se consulta la terminal.
+ * El orden importa: con dinero adentro la respuesta es «no se puede; usa Reembolso», y no se consulta la terminal.
  * Devuelve la fila releída bajo el candado; la escritura de la cancelación va inmediatamente después, en la misma tx.
  */
 export async function assertOrderCancellableUnderLock(
@@ -164,10 +175,7 @@ export async function assertOrderCancellableUnderLock(
   // después cancelar, igual que en Square.
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError(
-      opciones.mensajeConDinero ??
-        (order.paymentStatus === 'PAID'
-          ? 'Cannot cancel a paid order'
-          : 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'),
+      opciones.mensajeConDinero ?? (order.paymentStatus === 'PAID' ? MENSAJE_CUENTA_PAGADA : MENSAJE_CUENTA_CON_PAGOS),
     )
   }
   if (opciones.contarPagosRegistrados) {
@@ -181,7 +189,7 @@ export async function assertOrderCancellableUnderLock(
       },
     })
     if (pagos > 0) {
-      throw new BadRequestError(opciones.mensajeConDinero ?? 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.')
+      throw new BadRequestError(opciones.mensajeConDinero ?? MENSAJE_CUENTA_CON_PAGOS)
     }
   }
 
@@ -231,11 +239,18 @@ const PAGINA_DE_CANJES = 100
  *
  * 🔴 Tienda híbrida (S9, P2-5): en una cuenta de FOLIO (toda cuenta con `OnlineOrder`) no se borra nada: los beneficios regresan y su
  * fila se queda como cortesía (`convertirBeneficiosEnCortesiaEnTx`), así la cuenta conserva el precio que vio la clienta si después
- * llega dinero. `soloSiEsFolio`: en otra cuenta no hace nada (el camino de «Regresar el saldo y cancelar», que hoy no devuelve canjes).
+ * llega dinero. «Regresar el saldo y cancelar» también pasa por aquí (deuda P1, 31-oct): un folio convierte y otra cuenta devuelve.
  */
 export async function devolverCanjesDeVentaAnuladaEnTx(
   tx: TxConReintento,
-  input: { venueId: string; orderId: string; staffId?: string | null; camino: string; soloSiEsFolio?: true },
+  input: {
+    venueId: string
+    orderId: string
+    staffId?: string | null
+    camino: string
+    /** Sólo «Regresar saldo y cancelar»: la venta trae abonos que se regresan en esta misma transacción (`PAID` se sigue rechazando). */
+    abonosDeSaldoSeRegresanEnEstaTx?: boolean
+  },
 ): Promise<CanjesDevueltos> {
   const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] }
   if (await esCuentaDeFolioEnTx(tx, input)) {
@@ -244,7 +259,6 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
     return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
   }
-  if (input.soloSiEsFolio) return devuelto
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
   for (;;) {
@@ -262,6 +276,7 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     for (const fila of canjes) {
       const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined, {
         porAnulacion: true,
+        abonosDeSaldoSeRegresanEnEstaTx: input.abonosDeSaldoSeRegresanEnEstaTx,
       })
       devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0
       if (r.stampRefund) devuelto.stampRewardsReturned.push(r.stampRefund.rewardId)

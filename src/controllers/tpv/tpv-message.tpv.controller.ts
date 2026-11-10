@@ -14,7 +14,7 @@ export async function getPendingMessages(req: Request, res: Response, next: Next
     if (!venueId || !terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing venueId (from auth) or terminalId (query param)',
+        message: 'Falta el negocio o la terminal',
       })
     }
 
@@ -41,7 +41,7 @@ export async function getMessageHistory(req: Request, res: Response, next: NextF
     if (!venueId || !terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing venueId (from auth) or terminalId (query param)',
+        message: 'Falta el negocio o la terminal',
       })
     }
 
@@ -124,7 +124,7 @@ export async function respondToMessage(req: Request, res: Response, next: NextFu
     if (!terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing terminalId in request body or query param',
+        message: 'Falta la terminal',
       })
     }
 

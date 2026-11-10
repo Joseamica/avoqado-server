@@ -2562,7 +2562,13 @@ export async function removeOrderDiscountInTransaction(
   orderId: string,
   orderDiscountId: string,
   staffId?: string,
-  opciones?: { porAnulacion?: true },
+  /**
+   * `porAnulacion` (S9): lo pide quien anula (`devolverCanjesDeVentaAnuladaEnTx`); bloquea sin el rechazo de cuenta cancelada de
+   * `bloquearCuentaParaEditar`.
+   * `abonosDeSaldoSeRegresanEnEstaTx`: sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA
+   * transacción, así que un canje de una cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
+   */
+  opciones: { porAnulacion?: true; abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
 ) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
@@ -2586,14 +2592,14 @@ export async function removeOrderDiscountInTransaction(
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
+    select: { id: true, paymentStatus: true, paidAmount: true, tipAmount: true, discountAmount: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Order not found')
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+  if (order.paymentStatus === 'PAID' || (order.paymentStatus === 'PARTIAL' && !opciones.abonosDeSaldoSeRegresanEnEstaTx)) {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
 
@@ -2613,7 +2619,8 @@ export async function removeOrderDiscountInTransaction(
   const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
   if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
   await tx.orderDiscount.delete({ where: { id: row.id } })
-  const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  const propinaYaCobrada = opciones.abonosDeSaldoSeRegresanEnEstaTx ? Number(order.tipAmount || 0) : 0
+  const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx, propinaYaCobrada)
   return { row, refund: refunded, stampRefund: stamp, totals: t }
 }
 
@@ -6284,15 +6291,17 @@ export async function returnGiftBalanceAndCancelOrder(
         )
       }
 
-      // S9 (P2-5, R55 b): en una cuenta de FOLIO, sus beneficios regresan a la clienta y su fila se queda como cortesía, ya pasadas las
-      // validaciones y ANTES de tomar los cobros y los sobres (beneficios → sobres, como las demás cancelaciones). En otra cuenta, como
-      // hoy: este camino no devuelve canjes (decisión 30 del plan).
+      // 🔴 LEALTAD (deuda P1, 31-oct): el premio de sellos y los puntos vuelven al cliente, igual que al anular. Antes de los abonos: el
+      // reembolso reclama el turno y Customer/StampReward van antes que él (Order → Customer/StampReward; premio → cobro → turno al
+      // crear la venta). Si algo falla después, la transacción revierte también esto.
+      // S9 (P2-5, R55 b): en una cuenta de FOLIO no se borran: sus beneficios regresan a la clienta y su fila se queda como cortesía
+      // (beneficios → sobres, como las demás cancelaciones).
       const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, {
         venueId,
         orderId,
         staffId,
-        camino: 'returnGiftBalanceAndCancelOrder',
-        soloSiEsFolio: true,
+        camino: 'returnGiftBalance',
+        abonosDeSaldoSeRegresanEnEstaTx: true,
       })
 
       // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
@@ -6375,7 +6384,7 @@ export async function returnGiftBalanceAndCancelOrder(
         hadBoundTable: Boolean(boundTable),
         tpvTableFreed,
         affectedRefs,
-        clientasConPremio: canjes.clientasConPremio,
+        clientasConPremio: canjes?.clientasConPremio,
       }
     },
     { etiqueta: 'returnGiftBalanceAndCancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
@@ -6732,7 +6741,7 @@ export async function cancelOrderInTransaction(
   const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
-    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
+    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
     select: { tableId: true },
   })
   // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.

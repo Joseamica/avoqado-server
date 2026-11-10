@@ -14,7 +14,7 @@ import { LoyaltyTransactionType } from '@prisma/client'
  */
 export const UpdateLoyaltyConfigSchema = z.object({
   body: z.object({
-    pointsPerDollar: z.number().min(0, 'Points per dollar must be non-negative').optional(),
+    pointsPerDollar: z.number().min(0, 'Los puntos por cada $1 gastado no pueden ser negativos').optional(),
     // D7 (5-nov): el panel y el servicio usan estos nombres; sin ellos `validateRequest` los borraba y el panel respondía 200 sin guardar
     // (prender o apagar el programa, el bono, el mínimo para canjear, la caducidad). Los nombres de abajo (`enabled`,
     // `minRedemptionPoints`, `pointsExpirationDays`) se quedan aceptados: ningún cliente los manda hoy y el servicio no los lee.
@@ -31,15 +31,15 @@ export const UpdateLoyaltyConfigSchema = z.object({
       .min(0, 'La caducidad no puede ser negativa')
       .nullable()
       .optional(), // null = los puntos no caducan
-    minPurchaseAmount: z.number().min(0, 'Minimum purchase amount must be non-negative').optional(),
-    redemptionRate: z.number().min(0, 'Redemption rate must be non-negative').optional(),
-    minRedemptionPoints: z.number().int().min(0, 'Minimum redemption points must be non-negative').optional(),
+    minPurchaseAmount: z.number().min(0, 'La compra mínima no puede ser negativa').optional(),
+    redemptionRate: z.number().min(0, 'La tasa de canje no puede ser negativa').optional(),
+    minRedemptionPoints: z.number().int().min(0, 'El mínimo de puntos para canjear no puede ser negativo').optional(),
     maxRedemptionPercentage: z
       .number()
-      .min(0, 'Maximum redemption percentage must be at least 0')
-      .max(100, 'Maximum redemption percentage cannot exceed 100')
+      .min(0, 'El porcentaje máximo de canje no puede ser menor a 0')
+      .max(100, 'El porcentaje máximo de canje no puede ser mayor a 100')
       .optional(),
-    pointsExpirationDays: z.number().int().min(0, 'Points expiration days must be non-negative').optional(),
+    pointsExpirationDays: z.number().int().min(0, 'Los días hasta que expiran los puntos no pueden ser negativos').optional(),
     enabled: z.boolean().optional(),
 
     // ── Programa de sellos (la tarjeta de la cartera) ────────────────────────
@@ -66,7 +66,7 @@ export const UpdateLoyaltyConfigSchema = z.object({
  */
 export const CalculatePointsSchema = z.object({
   body: z.object({
-    amount: z.number().positive('Amount must be positive'),
+    amount: z.number().positive('El monto debe ser mayor a cero'),
   }),
 })
 
@@ -75,8 +75,8 @@ export const CalculatePointsSchema = z.object({
  */
 export const CalculateDiscountSchema = z.object({
   body: z.object({
-    points: z.number().int().positive('Points must be positive'),
-    orderTotal: z.number().positive('Order total must be positive'),
+    points: z.number().int().positive('Los puntos deben ser mayores a cero'),
+    orderTotal: z.number().positive('El total de la orden debe ser mayor a cero'),
   }),
 })
 
@@ -85,8 +85,8 @@ export const CalculateDiscountSchema = z.object({
  */
 export const RedeemPointsSchema = z.object({
   body: z.object({
-    points: z.number().int().positive('Points must be positive'),
-    orderId: z.string().cuid('Invalid order ID format'),
+    points: z.number().int().positive('Los puntos deben ser mayores a cero'),
+    orderId: z.string().cuid('El ID de la orden no es válido'),
   }),
 })
 
@@ -95,8 +95,8 @@ export const RedeemPointsSchema = z.object({
  */
 export const AdjustPointsSchema = z.object({
   body: z.object({
-    points: z.number().int('Points must be an integer'),
-    reason: z.string().min(5, 'Reason must be at least 5 characters').max(500, 'Reason must be less than 500 characters'),
+    points: z.number().int('Los puntos deben ser un número entero'),
+    reason: z.string().min(5, 'El motivo debe tener al menos 5 caracteres').max(500, 'El motivo admite hasta 500 caracteres'),
   }),
 })
 
@@ -107,8 +107,8 @@ export const AdjustPointsSchema = z.object({
  */
 export const AdjustStampsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
-    customerId: z.string().cuid('Invalid customer ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
+    customerId: z.string().cuid('El ID del cliente no es válido'),
   }),
   body: z
     .object({
@@ -147,8 +147,8 @@ export const LoyaltyTransactionsQuerySchema = z.object({
  */
 export const LoyaltyParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
-    customerId: z.string().cuid('Invalid customer ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
+    customerId: z.string().cuid('El ID del cliente no es válido'),
   }),
 })
 
@@ -157,7 +157,7 @@ export const LoyaltyParamsSchema = z.object({
  */
 export const LoyaltyVenueParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 

@@ -92,7 +92,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
   // (`cancelarCuentaSinCobrar`). Sin confirm sólo muestra la cuenta; el catálogo ata la confirmación a esa vista previa.
   server.tool(
     'cancel_unpaid_order',
-    'Cancela una cuenta abierta que no tiene NINGÚN pago y no es de mesa ni pedido en línea (por ejemplo, una cuenta por cobrar abierta por error). Pide el motivo, que queda en la bitácora. Con cualquier pago hay que reembolsar primero. Sin confirm:true sólo muestra la cuenta.',
+    'Cancela una cuenta abierta que no tiene NINGÚN pago y no es de mesa ni pedido en línea (por ejemplo, una cuenta por cobrar abierta por error). Pide el motivo, que queda en la bitácora. Con cualquier pago no se puede cancelar, tampoco después de un reembolso: si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel, y la cuenta queda como está. Sin confirm:true sólo muestra la cuenta.',
     {
       venueId: z.string().describe('Venue de la cuenta (debe estar en tu scope)'),
       orderId: z.string().describe('Id de la cuenta (el de find_order u open_orders)'),

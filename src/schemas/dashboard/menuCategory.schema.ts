@@ -7,7 +7,7 @@ const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
 export const MenuCategorySchema = z.object({
   id: z.string().cuid(),
   venueId: z.string().cuid(),
-  name: z.string().min(1, 'Name is required'),
+  name: z.string().min(1, 'El nombre de la categoría es obligatorio'),
   description: z.string().nullable().optional(),
   slug: z.string(),
   displayOrder: z.number().int().default(0),
@@ -16,8 +16,8 @@ export const MenuCategorySchema = z.object({
   icon: z.string().nullable().optional(),
   parentId: z.string().cuid().nullable().optional(),
   active: z.boolean().default(true),
-  availableFrom: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').nullable().optional(),
-  availableUntil: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').nullable().optional(),
+  availableFrom: z.string().regex(TIME_REGEX, 'Formato de hora inválido. Se esperaba HH:mm').nullable().optional(),
+  availableUntil: z.string().regex(TIME_REGEX, 'Formato de hora inválido. Se esperaba HH:mm').nullable().optional(),
   availableDays: z.array(z.enum(DAYS_OF_WEEK)).nullable().optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
@@ -25,7 +25,7 @@ export const MenuCategorySchema = z.object({
 
 export const CreateMenuCategorySchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().min(1, 'El nombre de la categoría es obligatorio'),
     description: z.string().optional().nullable(), // Ensure nullable aligns with Prisma optional strings
     displayOrder: z.number().int().optional(),
     imageUrl: z.string().url().optional().nullable(),
@@ -33,8 +33,8 @@ export const CreateMenuCategorySchema = z.object({
     icon: z.string().optional().nullable(),
     parentId: existingId('El ID de la categoría no es válido').optional().nullable(), // This can be string (cuid) or null
     active: z.boolean().optional(),
-    availableFrom: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
-    availableUntil: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
+    availableFrom: z.union([z.string().regex(TIME_REGEX, 'Formato de hora inválido. Se esperaba HH:mm'), z.null()]).optional(),
+    availableUntil: z.union([z.string().regex(TIME_REGEX, 'Formato de hora inválido. Se esperaba HH:mm'), z.null()]).optional(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional().nullable(),
     avoqadoMenus: z
       .array(
@@ -76,7 +76,7 @@ export const CreateMenuCategorySchema = z.object({
     printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
   }),
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 export type CreateMenuCategoryDto = z.infer<typeof CreateMenuCategorySchema>['body']
@@ -84,7 +84,7 @@ export type CreateMenuCategoryDto = z.infer<typeof CreateMenuCategorySchema>['bo
 export const UpdateMenuCategorySchema = z.object({
   body: CreateMenuCategorySchema.shape.body.partial(), // All fields optional
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
     categoryId: existingId('El ID de la categoría no es válido'),
   }),
 })
@@ -93,7 +93,7 @@ export type UpdateMenuCategoryDto = z.infer<typeof UpdateMenuCategorySchema>['bo
 // Schema for validating just the parameters for routes like GET /:venueId/menucategories/:categoryId
 export const GetMenuCategoryParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
     categoryId: existingId('El ID de la categoría no es válido'),
   }),
 })
@@ -101,7 +101,7 @@ export const GetMenuCategoryParamsSchema = z.object({
 // Schema for validating venueId param, used in list or top-level POST for a venue
 export const VenueIdParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 
@@ -113,9 +113,9 @@ export const ReorderMenuCategoriesSchema = z.object({
         displayOrder: z.number().int(),
       }),
     )
-    .min(1, 'At least one category must be provided for reordering'),
+    .min(1, 'Indica al menos una categoría para reordenar'),
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
   }),
 })
 export type ReorderMenuCategoriesDto = z.infer<typeof ReorderMenuCategoriesSchema>['body']

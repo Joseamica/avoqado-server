@@ -10,6 +10,8 @@
  *  - venta con otro número → no se pisa: va al reporte como choque;
  *  - sin venta (ventas de antes de Avoqado) → `HistoricalLinkingNumber`, para que los repetidos futuros se detecten;
  *  - número inválido (como `334651O556`) o sin ICCID → no se guarda: va al reporte.
+ *  - si el Excel trae columna de portado («# Portabilidad», «# Portado» o «Número portado»), el portado sigue las mismas
+ *    reglas en `portedNumber`; una celda sin dígitos («NO») es que la venta no fue portabilidad.
  * Se puede repetir: la venta sólo se llena si sigue sin número (CAS) y el histórico salta lo que ya está (llave única
  * organización + ICCID + número). `importBatch = <fecha>-<8 del sha1 del archivo>`.
  *
@@ -18,6 +20,7 @@
  */
 import 'dotenv/config'
 import { readFileSync, writeFileSync } from 'node:fs'
+import type { Prisma } from '@prisma/client'
 import * as XLSX from 'xlsx'
 
 import { correr, elegirBase, exigirHostConfirmado, hostDeLaBase, leerValor, Rechazo } from './lib/linkingNumbers/baseCli'
@@ -28,7 +31,7 @@ const PAGINA = 5_000
 const TANDA_VENTAS = 100
 const TANDA_HISTORICO = 1_000
 
-type Venta = { id: string; venueId: string; linkingNumber: string | null; createdAt: Date }
+type Venta = { id: string; venueId: string; linkingNumber: string | null; portedNumber: string | null; createdAt: Date }
 
 async function main(): Promise<void> {
   const archivo = leerValor('--file')
@@ -67,7 +70,7 @@ async function main(): Promise<void> {
     for (let cursor: string | undefined; ; ) {
       const pagina = await prisma.saleVerification.findMany({
         where: { venue: { organizationId: org.id } },
-        select: { id: true, venueId: true, serialNumbers: true, linkingNumber: true, createdAt: true },
+        select: { id: true, venueId: true, serialNumbers: true, linkingNumber: true, portedNumber: true, createdAt: true },
         orderBy: { id: 'asc' },
         take: PAGINA,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -90,17 +93,25 @@ async function main(): Promise<void> {
       choques: plan.conflicts.length,
       aHistorico: plan.toHistorical.length,
       invalidos: plan.invalid.length,
+      portadosALlenar: plan.fillPorted.length,
+      choquesDePortado: plan.portedConflicts.length,
+      portadosInvalidos: plan.invalidPorted.length,
       repetidos: plan.repeatedNumbers.length,
       iccidsEnVariasVentas: enVariasVentas.size,
     }
     console.log(
       `Ventas de la organización con ICCID: ${ventas.size}\n` +
         `Filas ${resumen.filas} · a llenar ${resumen.aLlenar} · choques ${resumen.choques} · a histórico ${resumen.aHistorico} · ` +
-        `inválidas ${resumen.invalidos} · números repetidos en el archivo ${resumen.repetidos}`,
+        `inválidas ${resumen.invalidos} · números repetidos en el archivo ${resumen.repetidos}\n` +
+        (filas.some(f => f.rawPorted !== undefined)
+          ? `Portado: a llenar ${resumen.portadosALlenar} · choques ${resumen.choquesDePortado} · inválidos ${resumen.portadosInvalidos}`
+          : 'Portado: el Excel no trae columna de portado («# Portabilidad», «# Portado» o «Número portado»).'),
     )
     if (enVariasVentas.size) console.log(`⚠️  ${enVariasVentas.size} ICCID están en más de una venta: se usó la más reciente.`)
     // Sólo el número de fila: el valor crudo puede ser el teléfono de un cliente (va en el JSON de --report).
     if (plan.invalid.length) console.log(`  inválidas (${plan.invalid.length}), filas: ${plan.invalid.map(i => i.rowIndex).join(', ')}`)
+    if (plan.invalidPorted.length)
+      console.log(`  portados inválidos (${plan.invalidPorted.length}), filas: ${plan.invalidPorted.map(i => i.rowIndex).join(', ')}`)
     const guardarReporte = (aplicado?: object) => {
       if (reporte) writeFileSync(reporte, JSON.stringify({ organizationId: org.id, importBatch, resumen, plan, aplicado }, null, 2))
     }
@@ -116,59 +127,68 @@ async function main(): Promise<void> {
       return
     }
 
-    // 1) Llenar ventas: cada una sólo si sigue sin número; su bitácora va en la MISMA transacción.
+    // 1) Llenar ventas (vinculación, luego portado): cada una sólo si sigue sin ese número; su bitácora va en la MISMA
+    // transacción.
     const venuePorVenta = new Map([...ventas.values()].map(v => [v.id, v.venueId]))
-    const llenadas: typeof plan.fillSale = []
-    const sinLlenar: typeof plan.fillSale = []
     const ahora = new Date()
-    for (let i = 0; i < plan.fillSale.length; i += TANDA_VENTAS) {
-      const tanda = plan.fillSale.slice(i, i + TANDA_VENTAS)
-      const r = await prisma.$transaction(
-        async tx => {
-          const ok: typeof tanda = []
-          const no: typeof tanda = []
-          for (const f of tanda) {
-            const u = await tx.saleVerification.updateMany({
-              where: { id: f.verificationId, linkingNumber: null },
-              data: { linkingNumber: f.number, linkingNumberSource: 'IMPORT', linkingNumberSetAt: ahora },
-            })
-            ;(u.count === 1 ? ok : no).push(f)
-          }
-          if (ok.length)
-            await tx.activityLog.createMany({
-              data: ok.map(f => ({
-                venueId: venuePorVenta.get(f.verificationId) ?? null,
-                organizationId: org.id,
-                action: 'SALE_VERIFICATION_NUMBER_IMPORT',
-                entity: 'SaleVerification',
-                entityId: f.verificationId,
-                data: { field: 'linkingNumber', before: null, after: f.number, source: 'IMPORT', importBatch, rowIndex: f.rowIndex },
-              })),
-            })
-          return { ok, no }
-        },
-        { timeout: 60_000, maxWait: 10_000 },
-      )
-      llenadas.push(...r.ok)
-      sinLlenar.push(...r.no)
+    const llenar = async (campo: 'linkingNumber' | 'portedNumber', porLlenar: typeof plan.fillSale) => {
+      const llenadas: typeof porLlenar = []
+      const sinLlenar: typeof porLlenar = []
+      for (let i = 0; i < porLlenar.length; i += TANDA_VENTAS) {
+        const tanda = porLlenar.slice(i, i + TANDA_VENTAS)
+        const r = await prisma.$transaction(
+          async tx => {
+            const ok: typeof tanda = []
+            const no: typeof tanda = []
+            for (const f of tanda) {
+              const where: Prisma.SaleVerificationWhereInput =
+                campo === 'linkingNumber' ? { id: f.verificationId, linkingNumber: null } : { id: f.verificationId, portedNumber: null }
+              const data: Prisma.SaleVerificationUpdateManyMutationInput =
+                campo === 'linkingNumber'
+                  ? { linkingNumber: f.number, linkingNumberSource: 'IMPORT', linkingNumberSetAt: ahora }
+                  : { portedNumber: f.number, portedNumberSource: 'IMPORT', portedNumberSetAt: ahora }
+              const u = await tx.saleVerification.updateMany({ where, data })
+              ;(u.count === 1 ? ok : no).push(f)
+            }
+            if (ok.length)
+              await tx.activityLog.createMany({
+                data: ok.map(f => ({
+                  venueId: venuePorVenta.get(f.verificationId) ?? null,
+                  organizationId: org.id,
+                  action: 'SALE_VERIFICATION_NUMBER_IMPORT',
+                  entity: 'SaleVerification',
+                  entityId: f.verificationId,
+                  data: { field: campo, before: null, after: f.number, source: 'IMPORT', importBatch, rowIndex: f.rowIndex },
+                })),
+              })
+            return { ok, no }
+          },
+          { timeout: 60_000, maxWait: 10_000 },
+        )
+        llenadas.push(...r.ok)
+        sinLlenar.push(...r.no)
+      }
+      // Las que alguien llenó entre la lectura y la escritura: si quedó otro número, es un choque más.
+      const actuales = sinLlenar.length
+        ? await prisma.saleVerification.findMany({
+            where: { id: { in: sinLlenar.map(f => f.verificationId) } },
+            select: { id: true, linkingNumber: true, portedNumber: true },
+            take: sinLlenar.length,
+          })
+        : []
+      const actualPorId = new Map(actuales.map(v => [v.id, v[campo]]))
+      const choquesAlAplicar = sinLlenar
+        .filter(f => actualPorId.get(f.verificationId) !== f.number)
+        .map(f => ({
+          verificationId: f.verificationId,
+          current: actualPorId.get(f.verificationId) ?? '',
+          excel: f.number,
+          rowIndex: f.rowIndex,
+        }))
+      return { llenadas, choquesAlAplicar }
     }
-    // Las que alguien llenó entre la lectura y la escritura: si quedó otro número, es un choque más.
-    const actuales = sinLlenar.length
-      ? await prisma.saleVerification.findMany({
-          where: { id: { in: sinLlenar.map(f => f.verificationId) } },
-          select: { id: true, linkingNumber: true },
-          take: sinLlenar.length,
-        })
-      : []
-    const actualPorId = new Map(actuales.map(v => [v.id, v.linkingNumber]))
-    const choquesAlAplicar = sinLlenar
-      .filter(f => actualPorId.get(f.verificationId) !== f.number)
-      .map(f => ({
-        verificationId: f.verificationId,
-        current: actualPorId.get(f.verificationId) ?? '',
-        excel: f.number,
-        rowIndex: f.rowIndex,
-      }))
+    const vinculacion = await llenar('linkingNumber', plan.fillSale)
+    const portado = await llenar('portedNumber', plan.fillPorted)
 
     // 2) Histórico: la llave única salta lo que ya estaba (se puede repetir).
     let historicosNuevos = 0
@@ -188,14 +208,17 @@ async function main(): Promise<void> {
     }
 
     const aplicado = {
-      ventasLlenadas: llenadas.length,
-      choquesAlAplicar,
+      ventasLlenadas: vinculacion.llenadas.length,
+      choquesAlAplicar: vinculacion.choquesAlAplicar,
+      portadosLlenados: portado.llenadas.length,
+      choquesDePortadoAlAplicar: portado.choquesAlAplicar,
       historicosNuevos,
       historicosQueYaEstaban: plan.toHistorical.length - historicosNuevos,
     }
     guardarReporte(aplicado)
     console.log(
-      `✅ Ventas llenadas ${aplicado.ventasLlenadas} · choques al aplicar ${choquesAlAplicar.length} · ` +
+      `✅ Ventas llenadas ${aplicado.ventasLlenadas} · choques al aplicar ${aplicado.choquesAlAplicar.length} · ` +
+        `portados llenados ${aplicado.portadosLlenados} · choques de portado ${aplicado.choquesDePortadoAlAplicar.length} · ` +
         `histórico nuevo ${historicosNuevos} (ya estaban ${aplicado.historicosQueYaEstaban})`,
     )
   } finally {

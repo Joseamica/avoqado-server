@@ -92,19 +92,19 @@ export async function updateLoyaltyConfig(
 ) {
   // Validate inputs
   if (data.pointsPerDollar !== undefined && data.pointsPerDollar < 0) {
-    throw new BadRequestError('Points per dollar must be non-negative')
+    throw new BadRequestError('Los puntos por peso no pueden ser negativos')
   }
   if (data.pointsPerVisit !== undefined && data.pointsPerVisit < 0) {
-    throw new BadRequestError('Points per visit must be non-negative')
+    throw new BadRequestError('Los puntos por visita no pueden ser negativos')
   }
   if (data.redemptionRate !== undefined && data.redemptionRate < 0) {
-    throw new BadRequestError('Redemption rate must be non-negative')
+    throw new BadRequestError('El valor de canje no puede ser negativo')
   }
   if (data.minPointsRedeem !== undefined && data.minPointsRedeem < 0) {
-    throw new BadRequestError('Minimum redemption points must be non-negative')
+    throw new BadRequestError('El mínimo de puntos para canjear no puede ser negativo')
   }
   if (data.pointsExpireDays !== undefined && data.pointsExpireDays !== null && data.pointsExpireDays < 0) {
-    throw new BadRequestError('Points expiration days must be non-negative or null')
+    throw new BadRequestError('Los días para que venzan los puntos no pueden ser negativos')
   }
 
   // ── Programa de sellos ───────────────────────────────────────────────────
@@ -245,7 +245,7 @@ export async function getCustomerPointsBalance(venueId: string, customerId: stri
   })
 
   if (!customer) {
-    throw new NotFoundError('Customer not found')
+    throw new NotFoundError('Cliente no encontrado')
   }
 
   return customer.loyaltyPoints
@@ -688,13 +688,13 @@ export async function adjustPoints(
   })
 
   if (!customer) {
-    throw new NotFoundError('Customer not found')
+    throw new NotFoundError('Cliente no encontrado')
   }
 
   // Check that adjustment won't result in negative balance
   const newBalance = customer.loyaltyPoints + points
   if (newBalance < 0) {
-    throw new BadRequestError(`Cannot adjust points. Would result in negative balance (${newBalance})`)
+    throw new BadRequestError(`No se pueden ajustar los puntos: el saldo quedaría negativo (${newBalance})`)
   }
 
   // 🔴 D1 (24-oct): la lectura de arriba sólo da el mensaje. Lo que impide el saldo negativo es la resta CONDICIONAL: dos
@@ -760,7 +760,7 @@ export async function getLoyaltyTransactions(
   })
 
   if (!customer) {
-    throw new NotFoundError('Customer not found')
+    throw new NotFoundError('Cliente no encontrado')
   }
 
   const page = options.page || 1

@@ -6,7 +6,7 @@ const boundedIdentifier = (label: string) =>
 export const createDisplayModeRequestSchema = z.object({
   params: z
     .object({
-      venueId: boundedIdentifier('El venue'),
+      venueId: boundedIdentifier('El negocio'),
       terminalId: boundedIdentifier('La terminal'),
     })
     .strict(),
@@ -20,7 +20,7 @@ export const createDisplayModeRequestSchema = z.object({
 export const cancelDisplayModeRequestSchema = z.object({
   params: z
     .object({
-      venueId: boundedIdentifier('El venue'),
+      venueId: boundedIdentifier('El negocio'),
       terminalId: boundedIdentifier('La terminal'),
       requestId: boundedIdentifier('La solicitud'),
     })

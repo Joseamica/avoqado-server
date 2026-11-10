@@ -9,12 +9,13 @@ import { PaymentMethod } from '@prisma/client'
  */
 export const createTestPaymentSchema = z.object({
   body: z.object({
-    venueId: z.string().cuid('Invalid venue ID format'),
-    amount: z.number().int().positive('Amount must be a positive integer (in cents)'),
-    tipAmount: z.number().int().nonnegative('Tip amount must be a non-negative integer (in cents)').default(0),
+    venueId: z.string().cuid('El ID del negocio no es válido'),
+    amount: z.number().int().positive('El monto debe ser un número entero mayor a cero, en centavos'),
+    tipAmount: z.number().int().nonnegative('La propina debe ser un número entero de cero o más, en centavos').default(0),
     method: z.nativeEnum(PaymentMethod, {
       errorMap: () => ({
-        message: 'Invalid payment method. Must be one of: CASH, CREDIT_CARD, DEBIT_CARD, DIGITAL_WALLET, BANK_TRANSFER, OTHER',
+        message:
+          'El método de pago no es válido. Usa efectivo, tarjeta de crédito, tarjeta de débito, cartera digital, transferencia u otro',
       }),
     }),
   }),
@@ -25,13 +26,13 @@ export const createTestPaymentSchema = z.object({
  */
 export const getTestPaymentsSchema = z.object({
   query: z.object({
-    venueId: z.string().cuid('Invalid venue ID format').optional(),
+    venueId: z.string().cuid('El ID del negocio no es válido').optional(),
     limit: z
       .string()
       .optional()
       .transform(val => (val ? parseInt(val, 10) : 10))
       .refine(val => val > 0 && val <= 100, {
-        message: 'Limit must be between 1 and 100',
+        message: 'El límite debe estar entre 1 y 100',
       }),
   }),
 })

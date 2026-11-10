@@ -251,7 +251,7 @@ describe('D2 · «Reemplazar» archiva lo que no viene: la historia y su IVA no 
     expect(
       (await prisma.recipeLine.findFirstOrThrow({ where: { recipeId: receta.id, rawMaterialId: leche.id } })).linkedModifierGroupId,
     ).toBe(grupoLeche.id)
-    // Los dos que algo usa quedan APAGADOS con sus extras; «Salsas», que nadie usa, se borró como hoy.
+    // D16: los tres quedan APAGADOS con sus extras, también «Salsas», que nadie usa. Ninguno se borra.
     expect(
       await prisma.modifierGroup.findMany({
         where: { venueId: x.venueId },
@@ -261,6 +261,7 @@ describe('D2 · «Reemplazar» archiva lo que no viene: la historia y su IVA no 
     ).toEqual([
       { name: 'Extras', active: false },
       { name: 'Leche', active: false },
+      { name: 'Salsas', active: false },
     ])
     expect(await prisma.modifier.findUniqueOrThrow({ where: { id: shot.id }, select: { active: true } })).toEqual({ active: false })
     expect(Number((await prisma.inventory.findUniqueOrThrow({ where: { id: inventario.id } })).currentStock)).toBe(7)

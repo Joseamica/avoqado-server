@@ -168,10 +168,18 @@ describe('fresh discount mutations', () => {
   })
   // The global client still says PENDING: the rejection proves the PAID read goes through the transaction. That this
   // read happens AFTER the lock is proven on real PostgreSQL (discountMoney.atomic.integration.test.ts).
+  // D18: lo que lee la cajera, en español y con qué hacer.
+  const rechazoPorCuentaPagada: Record<(typeof writers)[number][0], string> = {
+    predefined: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+    manual: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+    auto: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+    remove: 'Esta cuenta ya está pagada: su descuento ya no se puede quitar.',
+    coupon: 'Esta cuenta ya está pagada y ya no admite cupones. Si cobraste de más, reembolsa la diferencia.',
+  }
   it.each(writers)('%s rejects a PAID order read through the transaction, not the global client', async (name, run) => {
     tx.order.findUnique.mockResolvedValue({ ...order(), paymentStatus: 'PAID' })
-    if (name === 'coupon') expect(await run()).toMatchObject({ success: false, error: 'Cannot apply coupon to a paid order' })
-    else await expect(run()).rejects.toThrow(/paid order/)
+    if (name === 'coupon') expect(await run()).toMatchObject({ success: false, error: rechazoPorCuentaPagada.coupon })
+    else await expect(run()).rejects.toMatchObject({ message: rechazoPorCuentaPagada[name] })
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
     expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
   })

@@ -125,13 +125,16 @@ describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () 
       discountName: '',
       amount: 0,
       newOrderTotal: 100,
-      error: 'Cannot apply coupon to a paid order',
+      error: 'Esta cuenta ya está pagada y ya no admite cupones. Si cobraste de más, reembolsa la diferencia.',
     })
 
     const res = await aplicar()
 
     expect(res.status).toBe(400)
-    expect(res.body).toEqual({ success: false, error: 'Cannot apply coupon to a paid order' })
+    expect(res.body).toEqual({
+      success: false,
+      error: 'Esta cuenta ya está pagada y ya no admite cupones. Si cobraste de más, reembolsa la diferencia.',
+    })
   })
 
   it('el cupón aplicado sigue respondiendo 200 con el mismo sobre', async () => {
