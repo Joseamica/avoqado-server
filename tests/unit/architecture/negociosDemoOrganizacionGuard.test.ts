@@ -51,6 +51,11 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   SimRegistrationRequest: 'registro de SIMs (PlayTelecom): ' + CERRADO,
   HistoricalLinkingNumber:
     'histórico de números de vinculación (PlayTelecom): sólo lo carga el script de Avoqado con el «sí, en prod» del founder; ninguna ruta lo escribe',
+  CodigoDeCelular:
+    'App de campo (PlayTelecom): los códigos los genera el panel de organización (/dashboard/organizations/:orgId/celulares-de-campo); ' +
+    DE_ORGANIZACION,
+  CelularDeCampo:
+    'App de campo (PlayTelecom): nace al activar con un código por /tpv/campo y lo desvincula el panel de organización; el usuario demo no escribe en /tpv ni en /dashboard/organizations',
   CashOutCommissionRate: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   CashOutScheduleDay: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   PromoterBankAccount: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
