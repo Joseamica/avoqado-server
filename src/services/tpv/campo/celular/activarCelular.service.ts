@@ -19,6 +19,9 @@ export type AparatoDelCelular = { aparatoId: string; marca?: string; modelo?: st
 /** Ventana en que el MISMO aparato puede repetir una activación cuya respuesta se perdió. */
 const VENTANA_DE_REINTENTO_MS = 10 * 60 * 1000
 
+/** Celulares vinculados a la persona al activar uno nuevo: uno por diseño (cada activación desvincula los anteriores). */
+const TOPE_DE_VINCULADOS = 50
+
 /** Centinela interno: el CAS del consumo no encontró la fila (revierte la transacción; nunca sale del módulo). */
 class CodigoCambio extends Error {}
 
@@ -160,6 +163,7 @@ export async function activarCelular(e: { codigo: string; pin: string; aparato: 
       const anteriores = await tx.celularDeCampo.findMany({
         where: { staffIdVinculado: codigo.staffId },
         select: { id: true, organizationId: true },
+        take: TOPE_DE_VINCULADOS,
       })
       if (anteriores.length > 0) {
         await tx.celularDeCampo.updateMany({

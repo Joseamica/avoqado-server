@@ -137,6 +137,7 @@ export async function listarCelularesDeCampo(organizationId: string, f: FiltrosD
     ? await Promise.all([
         prisma.celularDeCampo.findMany({
           where: { organizationId, staffIdVinculado: { in: paginaIds } },
+          take: paginaIds.length, // uno vinculado por persona (activar desvincula los anteriores), y una página de personas
           select: {
             id: true,
             staffIdVinculado: true,

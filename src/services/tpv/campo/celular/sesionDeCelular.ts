@@ -22,6 +22,8 @@ export type SesionDeCelular = { accessToken: string; refreshToken: string; venue
 export type VerificadorDePin = { algoritmo: 'PBKDF2-SHA256'; iteraciones: 100000; sal: string; hash: string }
 
 const pbkdf2Async = promisify(pbkdf2)
+/** Sesiones vivas de UN celular: una por diseño (entrar revoca la anterior). El `updateMany` las revoca todas igual. */
+const TOPE_DE_SESIONES_VIVAS = 50
 
 /** Revoca y corta YA (caché de 60 s y socket), como `revokeSessionsForDevice`. */
 async function cerrarSesion(sessionId: string, motivo: string) {
@@ -73,7 +75,7 @@ export async function crearSesionDeCelular(
 /** Revoca las sesiones vivas del celular (sólo `celular:<id>`: la PAX de la persona sigue). Devuelve cuántas cerró. */
 export async function revocarSesionesDelCelular(celularId: string, motivo: string, salvoSid?: string): Promise<number> {
   const where = { deviceId: deviceIdDelCelular(celularId), revokedAt: null, ...(salvoSid && { id: { not: salvoSid } }) }
-  const vivas = await prisma.session.findMany({ where, select: { id: true } })
+  const vivas = await prisma.session.findMany({ where, select: { id: true }, take: TOPE_DE_SESIONES_VIVAS })
   if (vivas.length === 0) return 0
   const { count } = await prisma.session.updateMany({ where, data: { revokedAt: new Date(), revokedReason: motivo } })
   for (const s of vivas) {

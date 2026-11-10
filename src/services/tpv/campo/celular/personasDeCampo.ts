@@ -11,6 +11,10 @@ export type SucursalDeLaPersona = { staffVenueId: string; venueId: string; nombr
 
 export const ROLES_DE_CAMPO: StaffRole[] = [StaffRole.WAITER, StaffRole.CASHIER]
 
+/** Sucursales de una organización (PlayTelecom tiene decenas) y asignaciones de una persona: topes que nadie alcanza. */
+const TOPE_DE_SUCURSALES_DE_LA_ORG = 2000
+const TOPE_DE_SUCURSALES_DE_LA_PERSONA = 200
+
 /** UNA sola definición de «promotor» (A8) para las dos rutas: `esPromotorDeCampo` y la búsqueda de todos los sin celular. */
 export const filtroDePromotor = (venueIds: string[]) => ({
   active: true,
@@ -21,7 +25,14 @@ export const filtroDePromotor = (venueIds: string[]) => ({
 
 /** Sucursales de la organización con inventario serializado (una consulta de módulo para todas, no una por sucursal). */
 export async function sucursalesConCampo(organizationId: string): Promise<string[]> {
-  const ids = (await prisma.venue.findMany({ where: { organizationId }, select: { id: true } })).map(v => v.id)
+  const ids = (
+    await prisma.venue.findMany({
+      where: { organizationId },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_SUCURSALES_DE_LA_ORG,
+    })
+  ).map(v => v.id)
   const prendidas = await moduleService.venuesWithModule(ids, MODULE_CODES.SERIALIZED_INVENTORY)
   return ids.filter(id => prendidas.has(id))
 }
@@ -37,6 +48,7 @@ export async function sucursalesDeLaPersona(staffId: string, organizationId: str
     },
     select: { id: true, venueId: true, role: true, pin: true, venue: { select: { name: true } } },
     orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
+    take: TOPE_DE_SUCURSALES_DE_LA_PERSONA,
   })
   return filas.map(f => ({ staffVenueId: f.id, venueId: f.venueId, nombre: f.venue.name, role: f.role, pin: f.pin }))
 }
