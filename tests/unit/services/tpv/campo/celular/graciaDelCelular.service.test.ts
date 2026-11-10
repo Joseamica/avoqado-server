@@ -813,6 +813,72 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
   })
 })
 
+describe('arreglo final 3: una VENTA con su ficha EN_CURSO está A MEDIAS (U2)', () => {
+  const AMEDIAS = { hecho: false, aMedias: true }
+
+  it('«Aplicar»: ficha EN_CURSO + rechazo definitivo → sigue APLICANDO (no PENDIENTE), «Descartar» → 409, «Aplicar» completa UNA venta', async () => {
+    const f = retenido()
+    efecto.mockResolvedValue(AMEDIAS)
+    aplicar.mockResolvedValueOnce(rechazado('VENTAS_DESHABILITADAS'))
+    await expect(resolver('APLICAR')).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'NO_SE_PUDO_APLICAR',
+      details: { aMedias: true, rechazo: { code: 'VENTAS_DESHABILITADAS' } },
+    })
+    expect(f).toMatchObject({ estado: 'APLICANDO', rechazo: { code: 'VENTAS_DESHABILITADAS' } })
+
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_A_MEDIAS' })
+    expect(f.estado).toBe('APLICANDO')
+
+    aplicar.mockResolvedValueOnce(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+    expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', resultado: { orderId: 'o' } })
+    expect(f.estado).toBe('APLICADO')
+    expect(aplicar).toHaveBeenCalledTimes(2)
+    expect(aplicar.mock.calls[0]).toEqual(aplicar.mock.calls[1]) // la misma llave: el servicio retoma la ficha, UNA venta
+  })
+
+  it('gracia, intento en plazo: rechazo con la ficha EN_CURSO → la fila sigue APLICANDO (el reintento de gracia la termina)', async () => {
+    const e = envio()
+    efecto.mockResolvedValue(AMEDIAS)
+    aplicar.mockResolvedValueOnce(rechazado('VENTAS_DESHABILITADAS'))
+    expect(await recibirEnGracia(reportado(e), e)).toEqual({
+      status: 202,
+      body: { retenido: true, motivo: 'RECHAZADO', aMedias: true },
+    })
+    expect(filas[0]).toMatchObject({ estado: 'APLICANDO', motivo: 'APLICADO_EN_GRACIA', rechazo: { code: 'VENTAS_DESHABILITADAS' } })
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'APLICACION_A_MEDIAS' })
+
+    aplicar.mockResolvedValueOnce(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+    expect((await recibirEnGracia(reportado(e), e)).status).toBe(200)
+    expect(filas[0].estado).toBe('APLICADO')
+    expect(aplicar).toHaveBeenCalledTimes(2)
+  })
+
+  it('gracia, reintento pasadas las 24 h con la ficha EN_CURSO → no ejecuta y NO vuelve a PENDIENTE: APLICANDO con su motivo', async () => {
+    const e = envio()
+    aplicar.mockRejectedValueOnce(new ConflictError('procesando', 'VENTA_EN_PROCESO'))
+    await expect(recibirEnGracia(reportado(e), e)).rejects.toMatchObject({ code: 'VENTA_EN_PROCESO' })
+    efecto.mockResolvedValue(AMEDIAS)
+    const tarde = await recibirEnGracia(reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) }), e)
+    expect(tarde).toEqual({ status: 202, body: { retenido: true, motivo: 'FUERA_DE_PLAZO' } })
+    expect(aplicar).toHaveBeenCalledTimes(1)
+    expect(filas[0]).toMatchObject({ estado: 'APLICANDO', motivo: 'FUERA_DE_PLAZO' })
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'APLICACION_A_MEDIAS' })
+    // «Aplicar» la termina.
+    aplicar.mockResolvedValueOnce(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+    expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO' })
+  })
+
+  it('una VENTA nueva que se retiene con su ficha EN_CURSO (de antes de desvincular) nace APLICANDO: no se puede descartar', async () => {
+    const e = envio() // sin huella reportada → NO_REPORTADA
+    efecto.mockResolvedValue(AMEDIAS)
+    expect(await recibirEnGracia(celular(), e)).toEqual({ status: 202, body: { retenido: true, motivo: 'NO_REPORTADA' } })
+    expect(filas[0]).toMatchObject({ estado: 'APLICANDO', motivo: 'NO_REPORTADA' })
+    expect(aplicar).not.toHaveBeenCalled()
+    await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'APLICACION_A_MEDIAS' })
+  })
+})
+
 describe('arreglo final 2: el tope y las sucursales de campo (T5, T7)', () => {
   it('T5 · con 500 por revisar, una evidencia que se aplicaría sola (y quedaría PENDIENTE por VENTA_PENDIENTE) → 409 sin fila nueva', async () => {
     for (let i = 0; i < 500; i++) filas.push({ id: `x${i}`, celularId: 'cel1', huella: `h${i}`, estado: 'PENDIENTE' })

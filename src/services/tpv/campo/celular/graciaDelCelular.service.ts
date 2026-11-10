@@ -14,6 +14,8 @@
  * ¿El efecto ya ocurrió? lo contesta UNA función por tipo (`efectoYaHecho`, T1), y se pregunta SIEMPRE antes de reanudar un
  * APLICANDO y antes de regresar una fila a PENDIENTE (T2). Reanudar sin efecto no es recuperar: vuelve a pasar por las reglas
  * de una pieza nueva (la gracia: baja, plazo y permisos; «Aplicar»: persona activa con asignación, A6).
+ * U2: una VENTA con su ficha EN_CURSO está A MEDIAS (`estaAMedias`): su fila nunca vuelve a PENDIENTE (ni nace PENDIENTE),
+ * así que no se descarta; la terminan «Aplicar» o el reintento de la gracia, y el servicio retoma la ficha por su llave.
  */
 import { CelularDeCampo, EnvioRetenidoDeCampo, Prisma } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -21,7 +23,17 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, Validati
 import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
-import { aplicarEnvio, cuerpoValido, efectoYaHecho, huellaDelEnvio, permisosDelEnvio, ResultadoDelEnvio, TipoDeEnvio } from './envioDeCampo'
+import {
+  aplicarEnvio,
+  cuerpoValido,
+  EfectoDelEnvio,
+  efectoYaHecho,
+  estaAMedias,
+  huellaDelEnvio,
+  permisosDelEnvio,
+  ResultadoDelEnvio,
+  TipoDeEnvio,
+} from './envioDeCampo'
 import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from './personasDeCampo'
 
 const GRACIA_MS = 24 * 60 * 60 * 1000
@@ -116,8 +128,9 @@ async function evaluar(
   previo: EnvioRetenidoDeCampo | null,
 ): Promise<{ status: number; body: unknown }> {
   // T2: reanudar empieza por preguntar si el efecto ya ocurrió (aun pasadas las 24 h o tras una baja: ya es un hecho).
+  let ya: EfectoDelEnvio | null = null
   if (previo) {
-    const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, previo.createdAt)
+    ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, previo.createdAt)
     if (ya.hecho) return terminarEnGracia(celular, e, previo, comoJson(ya.resultado), { recuperado: true })
   }
 
@@ -138,9 +151,10 @@ async function evaluar(
   )
   if (previo) {
     if (!motivo) return aplicarEnGracia(celular, e, cuerpo, previo)
+    // U2: una venta a medias no vuelve a PENDIENTE: queda APLICANDO con su motivo (no se descarta) y la termina «Aplicar».
     const { count } = await prisma.envioRetenidoDeCampo.updateMany({
       where: { id: previo.id, estado: 'APLICANDO' },
-      data: { estado: 'PENDIENTE', motivo },
+      data: { estado: estaAMedias(ya) ? 'APLICANDO' : 'PENDIENTE', motivo },
     })
     return count === 0 ? comoQuedo(previo.id) : { status: 202, body: { retenido: true, motivo } }
   }
@@ -157,7 +171,9 @@ async function evaluar(
     )
   }
   if (motivo) {
-    const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo })
+    // U2: una VENTA cuya ficha quedó a medias (por la ruta normal, antes de desvincular) nace APLICANDO: no se descarta.
+    const aMedias = e.tipo === 'VENTA' && estaAMedias(await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, new Date()))
+    const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo, ...(aMedias && { estado: 'APLICANDO' as const }) })
     return nueva ? { status: 202, body: { retenido: true, motivo } } : contestarPrevio(celular, e, cuerpo, huella, fila)
   }
 
@@ -218,6 +234,11 @@ async function aplicarEnGracia(
   // T2: un rechazo, en CUALQUIER intento, no se cree a ciegas: ¿el efecto ya ocurrió (p. ej. por la ruta normal)?
   const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, fila.createdAt)
   if (ya.hecho) return terminarEnGracia(celular, e, fila, comoJson(ya.resultado), { recuperado: true, rechazo })
+  if (estaAMedias(ya)) {
+    // U2: la venta quedó a medias: la fila sigue APLICANDO (no descartable) con su rechazo; la termina el reintento o «Aplicar».
+    const { count } = await prisma.envioRetenidoDeCampo.updateMany({ where: { id: fila.id, estado: 'APLICANDO' }, data: { rechazo } })
+    return count === 0 ? comoQuedo(fila.id) : { status: 202, body: { retenido: true, motivo: 'RECHAZADO', aMedias: true } }
+  }
 
   // Rechazo definitivo sin efecto: queda por revisar con su rechazo.
   const { count } = await prisma.envioRetenidoDeCampo.updateMany({
@@ -350,10 +371,12 @@ export async function listarRetenidos(
     prisma.staff.findMany({
       where: { id: { in: [...new Set(filas.map(x => x.staffId))] } },
       select: { id: true, firstName: true, lastName: true },
+      take: f.pageSize, // los de UNA página de retenidos
     }),
     prisma.venue.findMany({
       where: { id: { in: [...new Set(filas.map(x => x.venueId))] } },
       select: { id: true, name: true, timezone: true },
+      take: f.pageSize,
     }),
   ])
   const persona = new Map(personas.map(p => [p.id, `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim()]))
@@ -516,9 +539,14 @@ export async function resolverRetenido(p: {
   // T2: el rechazo de CUALQUIER intento (también el primero, o el de dos «Aplicar» a la vez) no se cree a ciegas.
   const ya = await efectoYaHecho(tipo, ctx, cuerpo, r.createdAt)
   if (ya.hecho) return marcarAplicado(comoJson(ya.resultado), true)
+  const rechazo = comoJson(res.rechazo)
+  if (estaAMedias(ya)) {
+    // U2: la venta quedó a medias: sigue APLICANDO (no se descarta) con su rechazo; tocar «Aplicar» otra vez la termina.
+    await prisma.envioRetenidoDeCampo.updateMany({ where: { id, estado: 'APLICANDO' }, data: { rechazo } })
+    throw noSePudo({ rechazo, aMedias: true })
+  }
 
   // Rechazo definitivo sin efecto: vuelve a PENDIENTE.
-  const rechazo = comoJson(res.rechazo)
   const vuelta = await prisma.envioRetenidoDeCampo.updateMany({
     where: { id, estado: 'APLICANDO' },
     data: { estado: 'PENDIENTE', rechazo },

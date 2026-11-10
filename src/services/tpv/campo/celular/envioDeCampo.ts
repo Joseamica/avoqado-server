@@ -203,8 +203,13 @@ export async function aplicarEnvio(
 // ¿El efecto ya ocurrió? (T1)
 // ------------------------------------------------------------------------------------------------------------------------
 
-export type EfectoDelEnvio = { hecho: true; resultado: unknown } | { hecho: false }
+/**
+ * `aMedias` (U2): una VENTA con su ficha EN_CURSO. No está hecha, pero tampoco es «nada»: puede tener orden o cobro. La fila
+ * nunca vuelve a PENDIENTE ni se descarta; «Aplicar» o el reintento de la gracia la terminan (el servicio la retoma por llave).
+ */
+export type EfectoDelEnvio = { hecho: true; resultado: unknown } | { hecho: false; aMedias?: true }
 const NO_HECHO: EfectoDelEnvio = { hecho: false }
+export const estaAMedias = (ya: EfectoDelEnvio | null): boolean => !!ya && !ya.hecho && ya.aMedias === true
 
 /** Las asignaciones que dan a una persona la versión que ve su celular (las dos escriben ASSIGNED_TO_PROMOTER o el traslado). */
 const ASIGNACIONES_A_LA_PERSONA = ['ASSIGNED_TO_PROMOTER', 'REASSIGNED_PROMOTER_TO_PROMOTER'] as const
@@ -228,8 +233,9 @@ export async function efectoYaHecho(
       const b = validar<{ llave: string; serialNumber: string }>(ESQUEMAS.VENTA, cuerpo)
       if (!b) return NO_HECHO
       const f = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: b.llave } } })
-      // EN_CURSO no es hecho: el servicio la retoma por su llave.
-      if (f?.estado !== 'COMPLETA' || f.staffId !== ctx.staffId || f.serialNumber !== b.serialNumber) return NO_HECHO
+      if (!f || f.staffId !== ctx.staffId || f.serialNumber !== b.serialNumber) return NO_HECHO
+      // EN_CURSO: a medias (U2), ni hecha ni descartable; el servicio la retoma por su llave.
+      if (f.estado === 'EN_CURSO') return { hecho: false, aMedias: true }
       return {
         hecho: true,
         resultado: { orderId: f.orderId, paymentId: f.paymentId, saleVerificationId: f.saleVerificationId, recuperado: true },

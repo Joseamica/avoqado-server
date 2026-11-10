@@ -314,8 +314,19 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
       })
       expect(db.ventaDeCampo.findUnique).toHaveBeenCalledWith({ where: { venueId_llave: { venueId: 'v1', llave } } })
     })
-    it('EN_CURSO (el servicio la retoma por llave), de otra persona, de otra SIM o sin ficha → no hecho', async () => {
-      for (const f of [{ ...ficha, estado: 'EN_CURSO' }, { ...ficha, staffId: 'otra' }, { ...ficha, serialNumber: '1' }, null]) {
+    it('U2 · EN_CURSO de la misma persona y la misma SIM → A MEDIAS (no hecho, pero tampoco descartable)', async () => {
+      db.ventaDeCampo.findUnique.mockResolvedValue({ ...ficha, estado: 'EN_CURSO', paymentId: null, saleVerificationId: null })
+      expect(await efectoYaHecho('VENTA', ctx, cuerpoVenta, LIMITE)).toEqual({ hecho: false, aMedias: true })
+    })
+    it('EN_CURSO de otra persona o de otra SIM, COMPLETA de otra persona o de otra SIM, o sin ficha → no hecho', async () => {
+      const enCurso = { ...ficha, estado: 'EN_CURSO' }
+      for (const f of [
+        { ...enCurso, staffId: 'otra' },
+        { ...enCurso, serialNumber: '1' },
+        { ...ficha, staffId: 'otra' },
+        { ...ficha, serialNumber: '1' },
+        null,
+      ]) {
         db.ventaDeCampo.findUnique.mockResolvedValue(f)
         expect(await efectoYaHecho('VENTA', ctx, cuerpoVenta, LIMITE)).toEqual({ hecho: false })
       }
