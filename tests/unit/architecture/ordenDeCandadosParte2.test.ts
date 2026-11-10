@@ -69,7 +69,7 @@ const ESCRITURAS = new Set([
 ])
 const BORRADOS = new Set(['delete', 'deleteMany'])
 const CAMBIOS = new Set(['update', 'updateMany', 'updateManyAndReturn', 'upsert'])
-const ASESOR_DEL_CUPON = new Set(['apartarCupon', 'bloquearDescuento'])
+const ASESOR_DEL_CUPON = new Set(['apartarCupon', 'bloquearDescuentoDelCupon'])
 const CRUDAS = new Set(['$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe'])
 const ABREN = new Set(['$transaction', 'withDeadlockRetry', 'withSerializableRetry'])
 const MUTADORES = new Set(['push', 'add', 'set', 'splice', 'delete', 'unshift', 'pop', 'shift', 'clear'])
@@ -1439,5 +1439,35 @@ describe('S9 · conversión de los beneficios de un folio', () => {
 
   it('las transacciones de anular que la alcanzan abren con withDeadlockRetry (semilla de aperturas)', () => {
     for (const k of ANULAN) expect([k, (revisado.aperturas[k]?.cantidad ?? 0) > 0]).toEqual([k, true])
+  })
+})
+
+/**
+ * S10 (P2-4): la cadena de beneficios y el cuerpo del motor son escritores EN_TX (corren en la transacción de quien crea o bloquea la
+ * cuenta y nunca abren otra); la simulación de la cotización abre la suya con `withDeadlockRetry`. El orden de sus candados (prevención)
+ * y lo que la simulación NO toma (R9) lo prueban `beneficios.service.test.ts` y `discountEngine.service.test.ts`.
+ */
+describe('S10 · la cadena de beneficios de la tienda', () => {
+  const ESCRITORES = [
+    'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx',
+    'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
+    'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx',
+  ]
+
+  it('sus escritores están en el inventario como EN_TX y piden un TxConReintento', () => {
+    for (const k of ESCRITORES) {
+      expect([k, revisado.escritores[k]?.clase]).toEqual([k, 'EN_TX'])
+      const [archivo, funcion] = k.split('#')
+      const fuente = fs.readFileSync(path.join(RAIZ, archivo), 'utf8')
+      expect([k, new RegExp(`(?:export )?async function ${funcion}\\(\\s*tx: TxConReintento`).test(fuente)]).toEqual([k, true])
+    }
+  })
+
+  it('la cotización abre UNA transacción con reintento por traba, y applyAutomaticDiscounts la suya', () => {
+    expect(revisado.aperturas['src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios']).toMatchObject({
+      etiqueta: 'cotizarConBeneficios',
+      cantidad: 1,
+    })
+    expect(revisado.aperturas['src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts']).toMatchObject({ cantidad: 1 })
   })
 })

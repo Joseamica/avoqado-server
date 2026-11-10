@@ -160,6 +160,11 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     marcas: [HISTORICO, RECORTA, 'nuevoRepartoDirigido(', 'importesDeLasFilas(', SYNC],
   },
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': { clase: 'ESCRIBE', marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', SYNC] },
+  // Tienda híbrida S10 (P2-4): el cupón de la clienta sobre su cuenta nueva (la cotización y el folio), montado como `applyCouponCode`.
+  'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx': {
+    clase: 'ESCRIBE',
+    marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', SYNC],
+  },
   // B2c T5 (P5): cada descuento de artículo del vale gana su fila ESPEJO (abrir el vale y agregarle renglones la llaman).
   'src/services/mobile/areaTicket.mobile.service.ts#crearEspejosDelVale': { clase: 'ESCRIBE', marcas: ['buildItemDiscountRow('] },
   'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount': {
@@ -252,6 +257,10 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     origen: 'FILAS',
     nota: 'cabecera += la fila del cupón, que trae su reparto',
   },
+  'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx': {
+    origen: 'FILAS',
+    nota: 'S10: cabecera += la fila del cupón de la tienda, que trae su reparto (como applyCouponCode)',
+  },
   'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount': {
     origen: 'FILAS',
     nota: 'cabecera += la fila del motor, que trae su reparto',
@@ -281,9 +290,9 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'P4 + P13: recorta lo dirigido a lo anulado y recalcula como borrar',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { origen: 'CERO', nota: 'la cuenta nace vacía, sin descuento' },
-  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
+  'src/services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx': {
     origen: 'CERO',
-    nota: 'pedido en línea: la orden nace sin descuento (la tienda no aplica descuentos en la v1)',
+    nota: 'pedido en línea: la cuenta nace sin descuento; desde S10 sus beneficios entran después por aplicarBeneficiosEnTx',
   },
   'src/services/tpv/table.tpv.service.ts#assignTable': { origen: 'CERO', nota: 'la cuenta de la mesa nace vacía, sin descuento' },
   // Tarjetas de regalo (spec 2026-10-14 § 5.1, R11): la cuenta de tarjetas nace en 0 y sus guardias rechazan todo descuento.
@@ -580,9 +589,9 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: 'venta serializada: orden nueva de un solo renglón',
   },
-  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
+  'src/services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx': {
     clase: 'CREACION',
-    nota: 'pedido en línea: orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
+    nota: 'pedido en línea (S10: extraída de writeOnlineOrderInTx): orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
   },
   'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
     clase: 'CREACION',

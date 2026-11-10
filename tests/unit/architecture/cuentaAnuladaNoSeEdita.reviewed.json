@@ -78,6 +78,10 @@
     "categoria": "DINERO_TARDIO",
     "motivo": "Liquidación de saldo del cliente: el listado y el CAS bajo lock excluyen CANCELLED/DELETED; sólo el CAS ganador registra Payment CASH y los efectos de saldar. No permite edición ordinaria de una anulada."
   },
+  "services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx": {
+    "clase": "PUENTE",
+    "motivo": "S10: el cuerpo de applyAutomaticDiscounts sin su candado. Lo llaman applyAutomaticDiscounts (EDITOR, lockDiscountOrder) y la cadena de beneficios sobre la cuenta que la cotización acaba de crear; cada llamador se revisa."
+  },
   "services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
     "clase": "EDITOR",
     "candado": "lockDiscountOrder"
@@ -343,6 +347,20 @@
     "categoria": "ADMIN",
     "motivo": "Administración o fixtures explícitos de demo/pruebas; no es una edición de venta por una persona en el POS."
   },
+  "services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx": {
+    "clase": "PUENTE",
+    "motivo": "S10 (P2-4): la cadena de beneficios corre sobre la cuenta NUEVA que su llamador creó en la misma transacción (cotizarConBeneficios; el folio en S11)."
+  },
+  "services/online-ordering/beneficios.service.ts#aplicarCuponEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "S10 (P2-4): el cupón de la tienda sólo se monta sobre la cuenta nueva que la cotización (o el folio) acaba de crear en su misma transacción; nunca edita una cuenta existente."
+  },
+  "services/online-ordering/beneficios.service.ts#cotizarConBeneficios": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "S10 (P2-4): la simulación crea su cuenta provisional COTIZACION-<cuid> en su propia transacción, le aplica los beneficios y la deshace entera; no edita ninguna cuenta existente."
+  },
   "services/online-ordering/card/capture.service.ts#finishCapture": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
@@ -357,6 +375,11 @@
     "clase": "EXCEPCION",
     "categoria": "ANULACION",
     "motivo": "S9 (P2-5): parte de la anulación misma de un folio. Sólo la llama devolverCanjesDeVentaAnuladaEnTx, bajo el candado del que anula, y convierte sus filas de beneficio en cortesía del mismo importe, IVA y reparto: tiene que operar sobre la cuenta que se está anulando."
+  },
+  "services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "S10: la cuenta nueva del pedido en línea (extraída de writeOnlineOrderInTx) en la transacción de quien la crea; no edita una cancelada existente."
   },
   "services/online-ordering/order.service.ts#writeOnlineOrderInTx": {
     "clase": "EXCEPCION",

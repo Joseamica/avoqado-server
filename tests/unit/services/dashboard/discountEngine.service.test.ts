@@ -7,7 +7,10 @@ import {
   removeDiscountFromOrder,
   applyManualDiscount,
   getOrderDiscountsSummary,
+  applyAutomaticDiscounts,
+  aplicarDescuentosDelMotorEnTx,
 } from '../../../../src/services/dashboard/discountEngine.service'
+import logger from '../../../../src/config/logger'
 import { prismaMock } from '../../../__helpers__/setup'
 import { NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -1881,5 +1884,130 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
 
     // 1000 − 100 + 50 + 80
     expect(Number(lastOrderUpdate().total)).toBe(1030)
+  })
+})
+
+/**
+ * S10 (P2-4): el cuerpo de `applyAutomaticDiscounts` se extrajo SIN el candado de la cuenta (`aplicarDescuentosDelMotorEnTx`) para que
+ * la cotización y el folio lo reusen dentro de SU transacción. Su pasada de contadores toma las filas `Discount` en UNA pasada
+ * ascendente, la del cupón incluida (prevención). En simulación (cotizar, R9) no toca `Discount`. Y no emite nada (R4).
+ */
+describe('S10 · aplicarDescuentosDelMotorEnTx', () => {
+  const pedido = {
+    id: 'o-1',
+    venueId: 'v1',
+    customerId: null,
+    subtotal: new Decimal(100),
+    taxAmount: new Decimal(0),
+    discountAmount: new Decimal(0),
+    tipAmount: new Decimal(0),
+    total: new Decimal(100),
+    paidAmount: new Decimal(0),
+    status: 'PENDING',
+    paymentStatus: 'PENDING',
+    originSystem: 'AVOQADO',
+    contratoDePrecio: 'IVA_INCLUIDO',
+    items: [
+      {
+        id: 'i1',
+        productId: 'p1',
+        product: { id: 'p1', categoryId: 'c1', taxRate: null },
+        quantity: 1,
+        unitPrice: new Decimal(100),
+        total: new Decimal(100),
+        taxAmount: new Decimal(0),
+        orderPromotionId: null,
+        modifiers: [],
+      },
+    ],
+    orderDiscounts: [],
+  }
+  let trazo: Array<[string, unknown]>
+  const sql = (s: unknown) => (Array.isArray(s) ? s.join('?') : String((s as any)?.sql ?? s))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    trazo = []
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+    prismaMock.order.findUnique.mockResolvedValue(pedido as never)
+    prismaMock.order.update.mockResolvedValue({} as never)
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-x' } as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as never)
+    prismaMock.customerDiscount.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      createMockDbDiscount({ id: 'z-auto', name: 'Z', type: 'FIXED_AMOUNT', value: new Decimal(5), isStackable: true }),
+      createMockDbDiscount({ id: 'a-auto', name: 'A', type: 'FIXED_AMOUNT', value: new Decimal(5), isStackable: true }),
+    ] as never)
+    prismaMock.$queryRaw.mockImplementation((async (s: unknown, ...v: unknown[]) => {
+      if (sql(s).includes('"Discount"')) {
+        trazo.push(['bloqueo', { texto: sql(s), ids: v[1] }])
+        return []
+      }
+      return [{ id: 'o-1' }]
+    }) as never)
+    prismaMock.discount.update.mockImplementation((async (a: any) => {
+      trazo.push(['contador', a.where.id])
+      return {}
+    }) as never)
+  })
+
+  it('con el descuento de un cupón: bloquearDescuentosEnOrdenEnTx recibe motor ∪ cupón, ordenados, y es la primera escritura de Discount', async () => {
+    const r = await aplicarDescuentosDelMotorEnTx(prismaMock as never, { venueId: 'v1', orderId: 'o-1', bloquearTambien: ['m-cupon'] })
+
+    expect(r.applied.map(d => d.discountId)).toEqual(['z-auto', 'a-auto'])
+    expect(trazo[0][0]).toBe('bloqueo')
+    expect(trazo[0][1]).toMatchObject({ ids: ['a-auto', 'm-cupon', 'z-auto'] })
+    expect((trazo[0][1] as any).texto).toMatch(/FOR NO KEY UPDATE/)
+    // Sólo los del motor suben su contador (el cupón se cuenta al pagar), en orden ascendente.
+    expect(trazo.slice(1)).toEqual([
+      ['contador', 'a-auto'],
+      ['contador', 'z-auto'],
+    ])
+    // R65 b: las bitácoras salen en el retorno (nacen dentro), una por descuento aplicado.
+    expect(r.audits.map(a => a.action)).toEqual(['DISCOUNT_APPLIED', 'DISCOUNT_APPLIED'])
+  })
+
+  it('R9: en simulación (cotizar) no hay pasada de contadores: ni FOR UPDATE/NO KEY UPDATE ni UPDATE sobre Discount', async () => {
+    const r = await aplicarDescuentosDelMotorEnTx(prismaMock as never, {
+      venueId: 'v1',
+      orderId: 'o-1',
+      bloquearTambien: ['m-cupon'],
+      simulacion: true,
+    })
+
+    expect(r.applied).toHaveLength(2)
+    expect(trazo).toEqual([])
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
+    for (const [s] of prismaMock.$queryRaw.mock.calls) expect(sql(s)).not.toMatch(/"Discount"[\s\S]*FOR (NO KEY )?UPDATE/)
+  })
+
+  it('R4: no emite «Discount applied» dentro de la transacción; applyAutomaticDiscounts lo emite DESPUÉS del commit', async () => {
+    await aplicarDescuentosDelMotorEnTx(prismaMock as never, { venueId: 'v1', orderId: 'o-1' })
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(0)
+
+    // La transacción corre el cuerpo y NO confirma: nada se anuncia.
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => {
+      await cb(prismaMock)
+      throw new Error('commit falló')
+    })
+    await expect(applyAutomaticDiscounts('o-1', undefined, 'v1')).rejects.toThrow('commit falló')
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(0)
+
+    const r = await applyAutomaticDiscounts('o-1', undefined, 'v1')
+    expect(r).toEqual({ applied: expect.any(Array), total: 10 })
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(2)
+  })
+
+  it('applyAutomaticDiscounts sigue igual: candado de la cuenta, el mismo retorno y los mismos UPDATE ascendentes (sin SELECT nuevo)', async () => {
+    const r = await applyAutomaticDiscounts('o-1', undefined, 'v1')
+
+    expect(r.total).toBe(10)
+    expect(r.applied.map(d => d.discountId)).toEqual(['z-auto', 'a-auto'])
+    expect(trazo).toEqual([
+      ['contador', 'a-auto'],
+      ['contador', 'z-auto'],
+    ])
   })
 })

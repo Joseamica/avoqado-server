@@ -338,11 +338,23 @@ const WRITERS: Record<string, Writer> = {
     class: 'CALLER_LOCKED',
     callers: [
       'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder',
-      'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts',
+      // S10: el cuerpo de applyAutomaticDiscounts, extraído sin el candado (lo hereda: ver LOCK_HOLDERS y «S10 · la cadena»).
+      'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx',
     ],
     proof: T3('applyPredefinedDiscount'),
   },
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': { class: 'LOCKED', lock: LOCK, proof: T3('applyCouponCode') },
+  // Tienda híbrida S10 (P2-4): el cupón de la clienta sobre su cuenta NUEVA, dentro de la cadena de beneficios (que recibe el tx de
+  // quien la acaba de crear: la cotización; el folio en S11).
+  'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx'],
+    proof: proof(
+      'tests/integration/online-ordering/cotizacion.integration.test.ts',
+      'aplicarBeneficiosEnTx',
+      'automático de grupo $10 + cupón 10 % + premio $1 sobre $100 ⇒ $79, igual que el estricto',
+    ),
+  },
   // IVA por producto B2: la ÚNICA escritura de repartos, con el tx de quien ya tiene el candado. Cada tarea suma sus llamadores.
   'src/services/shared/repartoDescuentoTx.ts#sincronizarRepartos': {
     class: 'CALLER_LOCKED',
@@ -359,6 +371,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
       'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
@@ -396,6 +409,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
       'src/services/tpv/order.tpv.service.ts#removeOrderItem',
@@ -462,6 +476,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
@@ -836,6 +851,11 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
+  // S10 (P2-4): reciben el tx de quien YA tiene la cuenta: la bloqueó (applyAutomaticDiscounts, `lockDiscountOrder(`) o la acaba de
+  // crear en esa misma transacción (cotizarConBeneficios, `crearCuentaDelPedidoEnTx(`). Sin candado propio: la cadena de llamadores
+  // la fija «S10 · quien hereda la cuenta» (abajo).
+  'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx': [],
+  'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': LOCK,
   'src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider': [
     'withDeliveryOrderLockConReintento(',
@@ -996,9 +1016,9 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
-  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
+  'src/services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx': {
     class: 'PRIVATE_CREATION',
-    why: 'online order: new Order, lines and modifiers in one admission transaction',
+    why: 'online order (S10: split out of writeOnlineOrderInTx): new Order, lines and modifiers in the admission transaction or the quote simulation',
     markers: NEW_ORDER,
   },
   'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
@@ -1139,6 +1159,31 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       expect({ file: p.file, mentions: p.mentions, found: text.includes(p.mentions) }).toMatchObject({ found: true })
     },
   )
+
+  it('S10 · quien hereda la cuenta: sus llamadores son exactamente éstos, y cada uno la bloquea o la acaba de crear', () => {
+    // aplicarDescuentosDelMotorEnTx y aplicarBeneficiosEnTx no toman el candado: lo traen de su llamador (LOCK_HOLDERS sin marcas).
+    const HEREDAN: Record<string, Record<string, string[]>> = {
+      'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx': {
+        'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
+        'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
+      },
+      'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': {
+        'src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
+      },
+    }
+    for (const [hereda, llamadores] of Object.entries(HEREDAN)) {
+      expect(LOCK_HOLDERS[hereda]).toEqual([])
+      const name = hereda.split('#')[1]
+      const actual = [...new Set(calls.filter(c => c.callee === name && c.owner !== hereda).map(c => c.owner))].sort()
+      expect({ hereda, actual }).toEqual({ hereda, actual: Object.keys(llamadores).sort() })
+      for (const [llamador, marcas] of Object.entries(llamadores)) {
+        const cuerpo = codeOf(llamador)
+        for (const m of marcas) expect({ llamador, m, present: cuerpo.includes(m) }).toMatchObject({ present: true })
+        // La cuenta se crea ANTES de aplicarle los beneficios, en la misma transacción.
+        if (marcas.length === 2) expect(cuerpo.indexOf(marcas[0])).toBeLessThan(cuerpo.indexOf(marcas[1]))
+      }
+    }
+  })
 
   it('C06/C09/C13 exchange recovery delegates to one budgeted opener and inherits its Order union', () => {
     const opener = 'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction'
@@ -1357,6 +1402,11 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
 const OWN_BUDGET: Record<string, { options: string; reason: string }> = {
+  'src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios': {
+    options: 'SIMULACION.transaccion',
+    reason:
+      "S10 (R5''): the quote simulation only locks its own NEW Order (created in the same transaction) and the customer's own rows; it yields instead of waiting: { maxWait: 300, timeout: 800 } plus SET LOCAL lock_timeout 200ms / statement_timeout 500ms, and degrades to calculados:false",
+  },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     options: 'OPCIONES_DE_TRANSACCION_DEL_INTENTO',
     reason:
@@ -1530,6 +1580,8 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
     'src/services/dashboard/paymentLink.service.ts#completeCharge',
     'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
     'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
+    // S10: el cupón de la tienda va sobre la cuenta que la cotización (o el folio) acaba de crear en la misma transacción.
+    'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
   ])
   const rearman = [
     ...new Set(calls.filter(c => c.callee === 'sincronizarRepartos' || c.callee === 'recalculateOrderTotals').map(c => c.owner)),

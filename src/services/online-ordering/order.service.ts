@@ -261,21 +261,25 @@ export function fromQuoteSnapshot(s: QuoteSnapshot): QuoteForOrder {
   }
 }
 
+/** Lo que necesita la cuenta (`Order`) de un pedido en línea; el folio de verdad le agrega su `OnlineOrder` (`writeOnlineOrderInTx`). */
+export interface CuentaDelPedido {
+  venueId: string
+  externalId: string
+  orderNumber: string
+  quote: QuoteSnapshot
+  customer: { name: string; phone: string | null; email: string | null }
+  customerId: string | null
+  note: string | null
+  paymentMode: OnlineOrderPaymentMode
+}
+
 /**
  * La cuenta del pedido en línea (`Order` con renglones y extras + `OnlineOrder`) y el nombre del cliente si le faltaba, en la
  * transacción de quien ya tomó los candados de admisión. La comparten pagar al recoger y la tarjeta (fase 2).
  */
 export async function writeOnlineOrderInTx(
   tx: TxConReintento,
-  i: {
-    venueId: string
-    externalId: string
-    orderNumber: string
-    quote: QuoteSnapshot
-    customer: { name: string; phone: string | null; email: string | null }
-    customerId: string | null
-    note: string | null
-    paymentMode: OnlineOrderPaymentMode
+  i: CuentaDelPedido & {
     trackingToken: string
     requestHash: string
     acceptDeadlineAt: Date
@@ -284,6 +288,38 @@ export async function writeOnlineOrderInTx(
     channel: 'QR' | 'LINK' | null
   },
 ): Promise<{ orderId: string; onlineOrderId: string }> {
+  const order = await crearCuentaDelPedidoEnTx(tx, i)
+
+  const online = await tx.onlineOrder.create({
+    data: {
+      orderId: order.orderId,
+      venueId: i.venueId,
+      status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+      paymentMode: i.paymentMode,
+      trackingToken: i.trackingToken,
+      requestHash: i.requestHash,
+      acceptDeadlineAt: i.acceptDeadlineAt,
+      whatsappConsent: i.whatsappConsent,
+      requiresAcceptance: i.requiresAcceptance,
+      channel: i.channel,
+    },
+  })
+  // S3: `verify` para PEDIR no pone nombre (R7: no activa la cuenta de reservas) y la tienda no lo manda al verificar; sin esto
+  // el Customer nacía vacío y «Clientes» lo mostraba sin nombre. Sólo llena si estaba vacío, nunca pisa lo del negocio, y una
+  // repetición ya salió antes sin llegar aquí. No toca la cuenta de reservas.
+  if (i.customerId) {
+    const cliente = await tx.customer.findFirst({ where: { id: i.customerId, venueId: i.venueId } })
+    if (cliente) await ponerNombreSiFalta(tx, cliente, i.customer.name)
+  }
+  return { orderId: order.orderId, onlineOrderId: online.id }
+}
+
+/**
+ * S10 (P2-4): sólo la cuenta (`Order` con renglones y extras), en la transacción de quien llama. La usan el folio de verdad
+ * (`writeOnlineOrderInTx`) y la simulación de la cotización con beneficios, que la deshace entera (`beneficios.service.ts`). Con
+ * `customerId`, crearla toma el `FOR KEY SHARE` implícito de esa `Customer` (R6).
+ */
+export async function crearCuentaDelPedidoEnTx(tx: TxConReintento, i: CuentaDelPedido): Promise<{ orderId: string }> {
   const quote = fromQuoteSnapshot(i.quote)
   const zero = new Prisma.Decimal(0)
   // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles": el pedido nace desde el teléfono del comensal, no en el
@@ -349,29 +385,7 @@ export async function writeOnlineOrderInTx(
       },
     },
   })
-
-  const online = await tx.onlineOrder.create({
-    data: {
-      orderId: order.id,
-      venueId: i.venueId,
-      status: OnlineOrderStatus.PENDING_ACCEPTANCE,
-      paymentMode: i.paymentMode,
-      trackingToken: i.trackingToken,
-      requestHash: i.requestHash,
-      acceptDeadlineAt: i.acceptDeadlineAt,
-      whatsappConsent: i.whatsappConsent,
-      requiresAcceptance: i.requiresAcceptance,
-      channel: i.channel,
-    },
-  })
-  // S3: `verify` para PEDIR no pone nombre (R7: no activa la cuenta de reservas) y la tienda no lo manda al verificar; sin esto
-  // el Customer nacía vacío y «Clientes» lo mostraba sin nombre. Sólo llena si estaba vacío, nunca pisa lo del negocio, y una
-  // repetición ya salió antes sin llegar aquí. No toca la cuenta de reservas.
-  if (i.customerId) {
-    const cliente = await tx.customer.findFirst({ where: { id: i.customerId, venueId: i.venueId } })
-    if (cliente) await ponerNombreSiFalta(tx, cliente, i.customer.name)
-  }
-  return { orderId: order.id, onlineOrderId: online.id }
+  return { orderId: order.id }
 }
 
 /** El aviso de cuenta nueva a las apps del negocio, después del commit. Nunca lanza. */

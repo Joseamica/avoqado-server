@@ -962,8 +962,21 @@ export async function applyDiscountToOrder(
     },
     { etiqueta: 'applyDiscountToOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
+  anunciarDescuentosAplicados(audits)
   for (const audit of audits) void logAction(audit)
   return result
+}
+
+/**
+ * S10 (R4): el «Discount applied…» del log sale DESPUÉS del commit, de las bitácoras que el cuerpo devolvió; dentro de la transacción
+ * (una cotización que se deshace, un intento abortado por 40P01) anunciaría un descuento que nunca quedó.
+ */
+function anunciarDescuentosAplicados(audits: LogActionParams[], nombres: ReadonlyMap<string, string> = new Map()): void {
+  for (const a of audits) {
+    if (a.action !== 'DISCOUNT_APPLIED') continue
+    const data = (a.data ?? {}) as { discountId?: string; amount?: number }
+    logger.info(`🎟️ Discount applied to order ${a.entityId}: ${nombres.get(data.discountId ?? '') ?? data.discountId} (-$${data.amount})`)
+  }
 }
 
 /**
@@ -1106,8 +1119,7 @@ async function applyEvaluatedDiscount(
     })
 
   // Reportar SIEMPRE el monto realmente aplicado (recortado), no el solicitado — si no, la
-  // bitácora y el retorno mienten cuando el recorte entra en juego.
-  logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
+  // bitácora y el retorno mienten cuando el recorte entra en juego. S10 (R4): el log lo emite quien confirma, tras el commit.
 
   // D3 (Codex D1 r3 #2): `appliedById`/`authorizedById` son `StaffVenue.id`; la bitácora (`ActivityLog.staffId`) quiere a la
   // PERSONA. Con el id de la membresía la inserción violaba la FK y quedaba «sin identificar».
@@ -1308,60 +1320,75 @@ export async function applyAutomaticDiscounts(
   venueId?: string,
 ): Promise<{ applied: DiscountCalculationResult[]; total: number }> {
   // R65 b: las bitácoras nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01 no deja las suyas.
-  const { result, audits } = await withDeadlockRetry(
+  const { applied, audits } = await withDeadlockRetry(
     async tx => {
-      const audits: LogActionParams[] = []
-      const result = await (async () => {
-        const tenant = await lockDiscountOrder(tx, orderId, venueId)
-        const order = tenant
-          ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
-          : null
-        if (!order) throw new NotFoundError('Order not found')
-        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
-        // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
-        // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
-        // Rappi 2b (T10): tampoco un pedido de plataforma.
-        if (esOrdenImportada(order) || esPedidoDePlataforma(order)) return { applied: [], total: 0 }
-        // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
-        if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
-
-        const discounts = await evaluateOrderDiscounts(order, undefined, tx)
-
-        const applied: DiscountCalculationResult[] = []
-        const usedDiscountIds: string[] = []
-        let totalDiscount = 0
-
-        for (const discount of discounts) {
-          // Skip discounts requiring approval in automatic mode
-          if (discount.requiresApproval) {
-            continue
-          }
-
-          const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
-          if (!current) throw new NotFoundError('Order not found')
-          const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, appliedById, undefined, usedDiscountIds)
-
-          if (outcome.success) {
-            applied.push(discount)
-            totalDiscount += discount.amount
-          }
-        }
-
-        // Usage counters go LAST and in ascending id order, so two batches never lock the same Discount rows in opposite
-        // orders (ABBA deadlock). Only when/in which order the counter rows are written changes — application order,
-        // amounts, caps and stacking above are untouched.
-        for (const id of usedDiscountIds.sort()) {
-          await tx.discount.update({ where: { id }, data: { currentUses: { increment: 1 } } })
-        }
-
-        return { applied, total: totalDiscount }
-      })()
-      return { result, audits }
+      const tenant = await lockDiscountOrder(tx, orderId, venueId)
+      if (!tenant) throw new NotFoundError('Order not found')
+      return aplicarDescuentosDelMotorEnTx(tx, { venueId: tenant, orderId, appliedById })
     },
     { etiqueta: 'applyAutomaticDiscounts', ...ORDER_LOCK_WAIT_BUDGET },
   )
+  anunciarDescuentosAplicados(audits, new Map(applied.map(d => [d.discountId, d.name])))
   for (const audit of audits) void logAction(audit)
-  return result
+  // La misma suma de siempre: los importes evaluados de los que sí se aplicaron, en su orden.
+  return { applied, total: applied.reduce((suma, d) => suma + d.amount, 0) }
+}
+
+/**
+ * Tienda híbrida (S10, P2-4): el cuerpo de `applyAutomaticDiscounts` SIN el candado de la cuenta, para correr dentro de la transacción
+ * de quien ya la tiene (o la acaba de crear: la cotización y el folio). Las bitácoras nacen aquí y salen en el retorno (R65 b): quien
+ * confirma las publica; dentro no se emite nada (R4).
+ *
+ * La pasada de contadores va al final y toma las filas `Discount` en UNA pasada ascendente (`bloquearDescuentosEnOrdenEnTx`, rango 6)
+ * con las usadas MÁS `bloquearTambien` (el descuento del cupón que esa transacción va a apartar: sólo se bloquea, su contador sube al
+ * pagar). `simulacion` (cotizar, R9): sin pasada de contadores, así cotizar no bloquea ni escribe ninguna fila `Discount`; quien llama
+ * cuenta en memoria los usos propios (`applied`) para los límites que valida después (R9').
+ */
+export async function aplicarDescuentosDelMotorEnTx(
+  tx: TxConReintento,
+  o: { venueId: string; orderId: string; bloquearTambien?: string[]; appliedById?: string; simulacion?: boolean },
+): Promise<{ applied: DiscountCalculationResult[]; audits: LogActionParams[] }> {
+  const { venueId, orderId } = o
+  const audits: LogActionParams[] = []
+  const applied: DiscountCalculationResult[] = []
+  const order = await tx.order.findUnique({ where: { id: orderId, venueId }, include: ORDER_EVALUATION_INCLUDE })
+  if (!order) throw new NotFoundError('Order not found')
+  if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
+  // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
+  // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
+  // Rappi 2b (T10): tampoco un pedido de plataforma.
+  // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
+  const seSalta = esOrdenImportada(order) || esPedidoDePlataforma(order) || tieneRenglonDeTarjeta(order.items)
+  const discounts = seSalta ? [] : await evaluateOrderDiscounts(order, undefined, tx)
+  const usedDiscountIds: string[] = []
+
+  for (const discount of discounts) {
+    // Skip discounts requiring approval in automatic mode
+    if (discount.requiresApproval) {
+      continue
+    }
+
+    const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
+    if (!current) throw new NotFoundError('Order not found')
+    const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, o.appliedById, undefined, usedDiscountIds)
+
+    if (outcome.success) {
+      applied.push(discount)
+    }
+  }
+
+  // Usage counters go LAST and in ascending id order, so two batches never lock the same Discount rows in opposite
+  // orders (ABBA deadlock). Only when/in which order the counter rows are written changes — application order,
+  // amounts, caps and stacking above are untouched. S10: with the coupon's Discount to lock too, every row is first taken in ONE
+  // ascending pass; without it (applyAutomaticDiscounts) the ascending UPDATEs below already are that pass, exactly as before.
+  if (!o.simulacion) {
+    if (o.bloquearTambien?.length) await bloquearDescuentosEnOrdenEnTx(tx, venueId, [...usedDiscountIds, ...o.bloquearTambien])
+    for (const id of usedDiscountIds.sort()) {
+      await tx.discount.update({ where: { id }, data: { currentUses: { increment: 1 } } })
+    }
+  }
+
+  return { applied, audits }
 }
 
 // ==========================================

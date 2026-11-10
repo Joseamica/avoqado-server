@@ -12,7 +12,8 @@ import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/ser
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
-import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
+import { toPublicQuote } from '@/services/online-ordering/quote.service'
+import { cotizarConBeneficios } from '@/services/online-ordering/beneficios.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 
 /** R8: de 32 a 64 caracteres. Una llave corta se adivina; la repetición además exige al mismo cliente (servicio). */
@@ -124,10 +125,14 @@ export async function getMenu(req: Request, res: Response) {
   }
 }
 
-/** POST /quote */
+/** POST /quote — S10: con sesión de la clienta, además sus beneficios (`req.body.beneficios` = lo que eligió usar). */
 export async function postQuote(req: Request, res: Response) {
   try {
-    const q = await quoteCart(venueOf(req).id, req.body.items)
+    const auth = (req as any).customerAuth as CustomerAuthContext | null
+    const q = await cotizarConBeneficios(venueOf(req).id, req.body.items, {
+      customerId: auth?.customerId ?? null,
+      eleccion: req.body.beneficios ?? null,
+    })
     return res.json({ success: true, data: toPublicQuote(q) })
   } catch (error) {
     return fail(res, error, 'No se pudo calcular tu pedido')
