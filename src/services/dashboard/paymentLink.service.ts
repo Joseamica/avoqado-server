@@ -72,6 +72,7 @@ import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 async function validateBundleItems(
   venueId: string,
   rawItems: Array<{ productId: string; quantity: number; modifiers?: Array<{ modifierId: string; quantity?: number }> }>,
+  extrasYaEnLaLiga: Map<string, Set<string>> = new Map(),
 ): Promise<
   Array<{
     productId: string
@@ -106,6 +107,7 @@ async function validateBundleItems(
   })
 
   const distinctProductIds = [...byProduct.keys()]
+  const archivadosPermitidos = [...new Set([...extrasYaEnLaLiga.values()].flatMap(extras => [...extras]))]
 
   // Load each product with its modifier groups + modifiers. We need the
   // group metadata (required, minSelections, maxSelections) to validate the
@@ -123,7 +125,10 @@ async function validateBundleItems(
               required: true,
               minSelections: true,
               maxSelections: true,
-              modifiers: { where: { active: true }, select: { id: true } },
+              modifiers: {
+                where: archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
+                select: { id: true, active: true },
+              },
             },
           },
         },
@@ -151,6 +156,7 @@ async function validateBundleItems(
     const allowedModifiers = new Set<string>()
     for (const g of groups) {
       for (const m of g.modifiers) {
+        if (m.active === false && !extrasYaEnLaLiga.get(product.id)?.has(m.id)) continue
         modifierToGroup.set(m.id, g)
         allowedModifiers.add(m.id)
       }
@@ -195,6 +201,23 @@ async function validateBundleItems(
       modifiers: [...entry.modifiers.entries()].map(([modifierId, quantity]) => ({ modifierId, quantity })),
     }
   })
+}
+
+/**
+ * Lo que la liga ya trae, por producto. Archivar un extra no debe impedir editarla: una liga ya enviada mantiene su precio
+ * (founder, 9-nov-2026). Sólo vale para el mismo producto; un archivado nunca se puede agregar de nuevo.
+ */
+async function extrasDeLaLiga(
+  linkId: string,
+  rawItems: Array<{ modifiers?: Array<{ modifierId: string }> }>,
+): Promise<Map<string, Set<string>>> {
+  if (!rawItems.some(item => item.modifiers?.length)) return new Map()
+  const items = await prisma.paymentLinkItem.findMany({
+    where: { paymentLinkId: linkId },
+    select: { productId: true, modifiers: { select: { modifierId: true } } },
+    take: 20,
+  })
+  return new Map(items.map(item => [item.productId, new Set(item.modifiers.map(m => m.modifierId))]))
 }
 
 /**
@@ -1054,7 +1077,7 @@ export async function updatePaymentLink(
     if (rawItems.length === 0) {
       itemReplacement = []
     } else {
-      itemReplacement = await validateBundleItems(venueId, rawItems)
+      itemReplacement = await validateBundleItems(venueId, rawItems, await extrasDeLaLiga(linkId, rawItems))
     }
   }
   if (data.customFields !== undefined) {

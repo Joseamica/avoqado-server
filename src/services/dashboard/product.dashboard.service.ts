@@ -624,6 +624,12 @@ export async function createProduct(venueId: string, productData: CreateProductD
           categoryId: productFields.categoryId,
           printStationId: productFields.printStationId,
         })
+        if (modifierGroupIds?.length) {
+          // D16: un grupo archivado ya no se enlaza (la FK dejó de impedirlo). Va después de la guardia de catálogo, que ya tomó el
+          // negocio `FOR NO KEY UPDATE`: un borrado en curso termina antes. No tomar aquí `FOR SHARE`: subir el candado es deadlock.
+          const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
+          if (vivos !== new Set(modifierGroupIds).size) throw new AppError('Grupo de modificadores no encontrado', 404)
+        }
         const maxOrder = await tx.product.findFirst({
           where: { venueId },
           orderBy: { displayOrder: 'desc' },
@@ -927,6 +933,7 @@ export async function updateProduct(
         where: {
           id: { in: modifierGroupIds },
           venueId,
+          active: true,
         },
         select: { id: true },
       })
@@ -976,6 +983,12 @@ export async function updateProduct(
       requestedActive: productData.active === true,
       actor,
     })
+    // D16: la validación de arriba corrió sin candado. La guardia de catálogo ya tomó el negocio (`FOR NO KEY UPDATE`): un borrado en
+    // curso terminó antes. Si no, este PATCH re-enlazaría un grupo recién archivado.
+    if (modifierGroupIds?.length) {
+      const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
+      if (vivos !== new Set(modifierGroupIds).size) throw new AppError(`Invalid modifier group IDs: ${modifierGroupIds.join(', ')}`, 400)
+    }
     await assertLegacyProductReferencesForVenue(tx, {
       venueId,
       categoryId: productData.categoryId,
@@ -1368,7 +1381,7 @@ export async function assignModifierGroupToProduct(
 
     // Check if modifier group exists and belongs to venue
     const modifierGroup = await tx.modifierGroup.findFirst({
-      where: { id: data.modifierGroupId, venueId },
+      where: { id: data.modifierGroupId, venueId, active: true },
     })
 
     if (!modifierGroup) {
