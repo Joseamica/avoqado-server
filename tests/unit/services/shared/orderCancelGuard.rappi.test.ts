@@ -61,11 +61,12 @@ describe('cancelación genérica: Rappi conserva la autoridad sobre su pedido', 
     expect(error.code).toBeUndefined()
   })
 
-  it('control: una cuenta normal con dinero conserva el rechazo de reembolso', async () => {
+  it('control: una cuenta normal con un abono se rechaza sin prometer que reembolsar la deja cancelar (D21)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(orden('TPV', 'PARTIAL'))
+    // Un reembolso no reabre la cuenta (`orderBalance.ts`): después, este mismo guardia la vuelve a rechazar.
     await expect(assertOrderCancellableUnderLock(prismaMock, input)).rejects.toMatchObject({
       statusCode: 400,
-      message: expect.stringContaining('Reembólsalos'),
+      message: 'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.',
     })
   })
 })

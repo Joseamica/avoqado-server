@@ -804,7 +804,8 @@ export async function updateOrder(
   return updatedOrder
 }
 
-const MENSAJE_ORDEN_CON_DINERO = 'Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.'
+// D21: sin «Reembolsa primero»; un reembolso no la vuelve eliminable (`orderBalance.ts`).
+const MENSAJE_ORDEN_CON_DINERO = 'Esta orden tiene pagos registrados y no se puede eliminar. Si hay que devolver dinero, usa Reembolso.'
 
 /**
  * Eliminar una orden.
@@ -910,7 +911,7 @@ export async function cancelarCuentaSinCobrar(
         contarPagosRegistrados: true,
         rechazarYaCancelada: true,
         rechazarCuentaDeMesa: true,
-        mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
+        mensajeConDinero: 'Esta cuenta tiene pagos registrados y no se puede cancelar. Si hay que devolver dinero, usa Reembolso.',
       })
     },
     { etiqueta: 'cancelarCuentaSinCobrar', ...ORDER_LOCK_WAIT_BUDGET },
