@@ -361,6 +361,8 @@ export async function getCustomerDiscounts(
 
 /** B2 (spec §4.1, D7): los alcances que se reparten sobre la cuenta; los demás van DIRIGIDOS a sus renglones. */
 const ALCANCE_DE_CUENTA = new Set<DiscountScope>(['ORDER', 'CUSTOMER_GROUP'])
+// D18: lo lee la cajera tal cual; ninguna app lo compara (grep del 9-nov en android, ios, tpv y dashboard).
+const CUENTA_PAGADA_SIN_DESCUENTOS = 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.'
 
 /**
  * Calculate the discount amount for a given discount and order context
@@ -918,7 +920,7 @@ export async function applyDiscountToOrder(
           ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
           : null
         if (!order) return orderNotFound(venueId)
-        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
+        if (order.paymentStatus === 'PAID') throw new BadRequestError(CUENTA_PAGADA_SIN_DESCUENTOS)
 
         const picked = typeof discount === 'string'
         const discountId = picked ? discount : discount.discountId
@@ -1157,7 +1159,7 @@ export async function removeDiscountFromOrder(
         // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
         rechazarSiEsImportada(order)
         await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
-        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot remove discount from a paid order')
+        if (order.paymentStatus === 'PAID') throw new BadRequestError('Esta cuenta ya está pagada: su descuento ya no se puede quitar.')
 
         const orderDiscount = await tx.orderDiscount.findFirst({
           where: { id: orderDiscountId, orderId },
@@ -1290,7 +1292,7 @@ export async function applyAutomaticDiscounts(
           ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
           : null
         if (!order) throw new NotFoundError('Order not found')
-        if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
+        if (order.paymentStatus === 'PAID') throw new BadRequestError(CUENTA_PAGADA_SIN_DESCUENTOS)
         // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
         // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
         // Rappi 2b (T10): tampoco un pedido de plataforma.
@@ -1380,7 +1382,7 @@ export async function applyManualDiscount(
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(order)
     await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
-    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
+    if (order.paymentStatus === 'PAID') throw new BadRequestError(CUENTA_PAGADA_SIN_DESCUENTOS)
 
     // 🔴 MONEY: cada descuento se calcula contra lo que QUEDA por descontar, nunca contra el
     // subtotal completo. Aplicar 100% dos veces descontaba 200% del subtotal y dejaba `total`

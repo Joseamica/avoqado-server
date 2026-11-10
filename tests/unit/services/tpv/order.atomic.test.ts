@@ -153,10 +153,20 @@ const writers = [
   ['serial', () => addSerializedItemToOrder('venue', 'order', { serialNumber: 'SERIAL', price: 20 }, 1, 'staff')],
 ] as const
 
+// D18: lo que lee la cajera, en español. «add» y «serial» se quedan en inglés: las rondas de ANDROID e iOS buscan «paid order».
+const rechazoPorCuentaPagada: Record<(typeof writers)[number][0], string> = {
+  add: 'Cannot add items to a paid order',
+  serial: 'Cannot add items to a paid order',
+  remove: 'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, usa Reembolso.',
+  comp: 'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, usa Reembolso.',
+  void: 'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, usa Reembolso.',
+  discount: 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+}
+
 describe('new atomic writers', () => {
-  it.each(writers)('%s rejects PAID from the transaction even when the global snapshot is still pending', async (_name, run) => {
+  it.each(writers)('%s rejects PAID from the transaction even when the global snapshot is still pending', async (name, run) => {
     tx.order.findUnique.mockResolvedValue({ ...order(), paymentStatus: 'PAID' })
-    await expect(run()).rejects.toThrow(/paid order/)
+    await expect(run()).rejects.toMatchObject({ message: rechazoPorCuentaPagada[name] })
     expect(tx.$queryRaw).toHaveBeenCalled()
     expect(globalDb.order.findUnique).not.toHaveBeenCalled()
     for (const model of ['orderItem', 'orderServiceCharge'])

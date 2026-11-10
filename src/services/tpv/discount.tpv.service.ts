@@ -334,7 +334,7 @@ export async function applyCouponCode(
           discountName: '',
           amount: 0,
           newOrderTotal: Number(order.total),
-          error: 'Cannot apply coupon to a paid order',
+          error: 'Esta cuenta ya está pagada y ya no admite cupones. Si cobraste de más, reembolsa la diferencia.',
         }
       }
 

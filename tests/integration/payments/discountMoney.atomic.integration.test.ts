@@ -206,8 +206,18 @@ describe('new serialized discount behavior', () => {
       await fiscal.done
       await writer
     }
-    if (name === 'coupon') expect((await writer!).value).toMatchObject({ success: false, error: 'Cannot apply coupon to a paid order' })
-    else expect((await writer!).error?.message).toContain('paid order')
+    // D18: el texto exacto que lee la cajera.
+    if (name === 'coupon')
+      expect((await writer!).value).toMatchObject({
+        success: false,
+        error: 'Esta cuenta ya está pagada y ya no admite cupones. Si cobraste de más, reembolsa la diferencia.',
+      })
+    else
+      expect((await writer!).error?.message).toBe(
+        name === 'remove'
+          ? 'Esta cuenta ya está pagada: su descuento ya no se puede quitar.'
+          : 'Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.',
+      )
     expect(await snapshot(o.id)).toEqual(before)
   })
   it.each(writers)('%s from another venue gets 404 and writes nothing', async (name, run) => {
@@ -798,8 +808,13 @@ describe('existing discount policies', () => {
     })
     it('50 % y luego 100 % de lo que queda sin permiso: el segundo es 403', async () => {
       const o = await newOrder()
-      expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 50, 'Mitad', staffVenueId)).toMatchObject({ success: true, amount: 50 })
-      await expect(tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Resto', staffVenueId)).rejects.toMatchObject({ statusCode: 403 })
+      expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 50, 'Mitad', staffVenueId)).toMatchObject({
+        success: true,
+        amount: 50,
+      })
+      await expect(tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Resto', staffVenueId)).rejects.toMatchObject({
+        statusCode: 403,
+      })
       expect((await snapshot(o.id)).discounts).toHaveLength(1)
     })
     it.each([
