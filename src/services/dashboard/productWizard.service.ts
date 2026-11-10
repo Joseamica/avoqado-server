@@ -121,7 +121,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
         printStationId: data.printStationId,
       })
       if (modifierGroupIds.length > 0) {
-        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId } })
+        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
         if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
       }
       const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
