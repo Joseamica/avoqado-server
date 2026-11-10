@@ -211,6 +211,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // regala a CASHIER/WAITER. Permiso propio, sin dependencias, MANAGER+ de fábrica (patrón Toast:
   // "Cash Drawers (Blind)" vs "Full").
   'cash-drawer:view-expected': ['cash-drawer:view-expected'],
+  // Retirar efectivo de la caja (pay-out) con permiso propio; Toast «3.22 Pay Out» (founder, 10-nov D1)
+  'cash-drawer:pay-out': ['cash-drawer:pay-out'],
   'shifts:close': [
     'shifts:read',
     'shifts:close',
@@ -1033,6 +1035,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.MANAGER]: [
     'inventory:log-waste', // registrar merma desde el POS (además tiene inventory:adjust)
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
+    'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — lista y check-in del kiosco
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -1220,6 +1223,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.ADMIN]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
+    'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -1373,6 +1377,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
+    'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -2043,7 +2048,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
   // Cajón físico (Android/iOS): ver el esperado durante el día = conteo NO ciego (Toast: Full vs Blind).
-  'cash-drawer': ['cash-drawer:view-expected'],
+  'cash-drawer': ['cash-drawer:view-expected', 'cash-drawer:pay-out'],
   tpv: [
     'tpv:read',
     'tpv:create',
