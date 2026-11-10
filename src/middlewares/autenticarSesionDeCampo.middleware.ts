@@ -40,9 +40,12 @@ const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
 function alTerminarReconciliar(req: Request, res: Response, celularId: string, venueId: string) {
   const tipo = req.method === 'POST' ? TIPO_POR_RUTA[req.path.split('/').slice(3).join('/')] : undefined
   if (!tipo) return
+  // Arreglo 8 (R7-1): la hora en que ESTA petición pasó el candado. Su reenvío por la gracia nace después (la gracia sólo
+  // retiene lo de un celular ya desvinculado, y esta petición entró con el celular vinculado): el gancho busca desde aquí.
+  const inicio = new Date()
   res.on('finish', () => {
     if (res.statusCode < 200 || res.statusCode >= 300) return
-    reconciliarConLaRutaNormal(celularId, venueId, tipo).catch(error =>
+    reconciliarConLaRutaNormal(celularId, venueId, tipo, inicio).catch(error =>
       logger.warn('No se pudieron reconciliar los retenidos del celular de campo', { celularId, venueId, tipo, error }),
     )
   })

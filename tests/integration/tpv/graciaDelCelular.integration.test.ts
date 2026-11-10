@@ -61,6 +61,37 @@ async function nuevaSim() {
 const ventaDe = (serialNumber: string) => ({ llave: randomUUID(), serialNumber, precioVisto: 0 })
 /** El `updatedAt` de una APLICANDO cuyo proceso murió (I2): más vieja que la ventana en vuelo, nadie la tiene. */
 const vencida = () => new Date(Date.now() - VENTANA_EN_VUELO_MS - 60_000)
+/**
+ * Arreglo 8: la petición normal ENTRA hace 10 min (antes que su retenido, al que las pruebas «vencen» con `vencida()`), así el
+ * gancho busca desde ahí, como en la vida real. Sólo se atrasa el reloj de JS mientras la petición pasa el candado.
+ */
+async function entroHaceDiezMinutos<T>(f: () => Promise<T>): Promise<T> {
+  jest.useFakeTimers({
+    now: Date.now() - 10 * 60_000,
+    advanceTimers: true,
+    doNotFake: [
+      'hrtime',
+      'nextTick',
+      'performance',
+      'queueMicrotask',
+      'requestAnimationFrame',
+      'cancelAnimationFrame',
+      'requestIdleCallback',
+      'cancelIdleCallback',
+      'setImmediate',
+      'clearImmediate',
+      'setInterval',
+      'clearInterval',
+      'setTimeout',
+      'clearTimeout',
+    ],
+  })
+  try {
+    return await f()
+  } finally {
+    jest.useRealTimers()
+  }
+}
 
 /** Un celular vinculado con su sesión: su latido reporta `huellas` y luego se desvincula (la foto queda congelada). */
 async function celularQueReportaYSeDesvincula(huellas: string[], antes?: (token: string, celularId: string) => Promise<void>) {
@@ -682,12 +713,14 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     })
     let normal!: Promise<request.Response>
     const { credencial, celular } = await celularQueReportaYSeDesvincula([], async token => {
-      normal = request(server)
-        .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(cuerpo)
-        .then(r => r)
-      await yaEntro
+      await entroHaceDiezMinutos(async () => {
+        normal = request(server)
+          .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(cuerpo)
+          .then(r => r)
+        await yaEntro
+      })
     })
     // Su reenvío por la gracia nace PENDIENTE (no reportado, todavía sin ficha); pasa la ventana y el supervisor lo descarta.
     expect((await enGracia(credencial, 'VENTA', cuerpoJson)).status).toBe(202)
@@ -754,12 +787,14 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     const venta = enPausa(ventasDeCampo, 'registrarVentaDeCampo')
     let normal!: Promise<request.Response>
     const c = await celularQueReportaYSeDesvincula([], async token => {
-      normal = request(server)
-        .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(cuerpo)
-        .then(r => r)
-      await venta.yaEntro
+      await entroHaceDiezMinutos(async () => {
+        normal = request(server)
+          .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(cuerpo)
+          .then(r => r)
+        await venta.yaEntro
+      })
     })
     return { ...c, normal: () => normal, seguirLaVenta: venta.seguir }
   }
@@ -904,7 +939,7 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
       status: 201,
     })
 
-    expect(await reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA')).toBe(1)
+    expect(await reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA', hace(4 * 60 * 60_000))).toBe(1)
     const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
     expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: nuevo.id } })).toMatchObject({
       estado: 'APLICADO',
@@ -913,8 +948,54 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id, estado: 'DESCARTADO' } })).toBe(500)
   })
 
+  it('arreglo 8 (R7-1) · el caso de Codex en Postgres: el objetivo DESCARTADO cuya venta normal terminó y 500 descartes POSTERIORES → APLICADO con la reversión', async () => {
+    const { celular } = await celularQueReportaYSeDesvincula([])
+    const hace = (ms: number) => new Date(Date.now() - ms)
+    const inicio = hace(20 * 60_000) // la petición normal empezó antes de que naciera su retenido
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const objetivo = await retenidoDe(celular.id, JSON.stringify(cuerpo), {
+      estado: 'DESCARTADO',
+      resueltoPor: supervisorId,
+      resueltoAt: hace(9 * 60_000), // el descarte más viejo de los 501
+      createdAt: hace(10 * 60_000),
+    })
+    await prisma.envioRetenidoDeCampo.createMany({
+      data: Array.from({ length: 500 }, (_, i) => {
+        const cuerpoJson = JSON.stringify({ llave: randomUUID(), serialNumber: `8956${String(i).padStart(15, '0')}`, precioVisto: 0 })
+        return {
+          organizationId: orgId,
+          celularId: celular.id,
+          staffId: promotorId,
+          venueId,
+          tipo: 'VENTA',
+          huella: huellaDelEnvio('VENTA', venueId, cuerpoJson),
+          cuerpoJson,
+          motivo: 'NO_REPORTADA',
+          estado: 'DESCARTADO',
+          resueltoPor: supervisorId,
+          resueltoAt: hace(60_000 - i),
+          createdAt: hace(5 * 60_000 - i),
+        }
+      }),
+    })
+    expect(await aplicarEnvio({ venueId, orgId, staffId: promotorId, celularId: celular.id }, 'VENTA', cuerpo)).toMatchObject({
+      tipo: 'APLICADO',
+      status: 201,
+    })
+
+    expect(await reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA', inicio)).toBe(1)
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: objetivo.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resultado: expect.objectContaining({ paymentId: cobros[0].id }),
+    })
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO', entityId: objetivo.id }))
+  })
+
   it('costo (medido) · un celular sin retenidos: el gancho cuesta lo que UNA consulta indexada; con candidatos abre el candado', async () => {
     const { celular } = await celularQueReportaYSeDesvincula([])
+    const inicio = new Date()
     const N = 200
     const promedio = async (f: () => Promise<unknown>) => {
       await f() // calienta
@@ -925,9 +1006,9 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     const unaConsulta = await promedio(() =>
       prisma.envioRetenidoDeCampo.findFirst({ where: { celularId: celular.id }, select: { id: true } }),
     )
-    const gancho = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA'))
+    const gancho = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA', inicio))
     await retenidoDe(celular.id, JSON.stringify(ventaDe((await nuevaSim()).serialNumber)), {}) // un candidato sin efecto
-    const conCandado = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA'))
+    const conCandado = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA', inicio))
     console.log(
       `[costo del gancho I8] una consulta indexada: ${unaConsulta.toFixed(2)} ms · gancho sin retenidos: ${gancho.toFixed(2)} ms · ` +
         `gancho con 1 candidato (candado): ${conCandado.toFixed(2)} ms · ${N} corridas cada uno`,

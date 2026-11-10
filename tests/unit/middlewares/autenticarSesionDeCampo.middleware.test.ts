@@ -187,12 +187,17 @@ describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar e
     ['checadas/entrada', 'ENTRADA'],
     ['checadas/salida', 'SALIDA'],
     ['evidencia', 'EVIDENCIA'],
-  ])('POST %s en 2xx → reconciliar(celular, sucursal, %s) DESPUÉS de contestar', async (ruta, tipo) => {
+  ])('POST %s en 2xx → reconciliar(celular, sucursal, %s, inicio) DESPUÉS de contestar', async (ruta, tipo) => {
+    const antes = Date.now()
     const r = await mandar(ruta)
     expect(r.status).toBe(201)
     while (!reconciliar.mock.calls.length) await tick()
     expect(reconciliar).toHaveBeenCalledTimes(1)
-    expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', tipo)
+    expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', tipo, expect.any(Date))
+    // Arreglo 8: la hora en que la petición pasó el candado (sus retenidos nacen después), no la del final.
+    const inicio: Date = reconciliar.mock.calls[0][3]
+    expect(inicio.getTime()).toBeGreaterThanOrEqual(antes)
+    expect(inicio.getTime()).toBeLessThanOrEqual(Date.now())
   })
 
   it('un rechazo de la ruta (4xx), un candado que no la deja pasar o el GET de prueba → no se reconcilia nada', async () => {

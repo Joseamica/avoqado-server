@@ -438,50 +438,60 @@ async function nacer(celular: CelularDeCampo, e: Envio, cuerpo: unknown, huella:
   return { status: 202, body: { retenido: true, motivo } }
 }
 
-/** R6-2: cuánto historial mira el gancho. Una petición normal no sigue en vuelo un día después del descarte de su retenido. */
-const DESCARTES_RECIENTES_MS = 24 * 60 * 60 * 1000
+/**
+ * Arreglo 8 (R7-1): el gancho busca desde que empezó su petición, menos este margen. `inicio` es la hora del servidor y
+ * `createdAt` la de Postgres (`now()`); entre instancias y la base los relojes pueden diferir unos segundos.
+ */
+const MARGEN_DE_RELOJ_MS = 60 * 1000
+/** Cada página del recorrido del gancho (cada consulta lleva su `take`; el recorrido sigue hasta la última fila). */
+const PAGINA_DEL_GANCHO = 500
 
 /**
  * I7 · El que aplicó gana, también por la ruta normal (R5-1). Esperar `VENTANA_EN_VUELO_MS` (I6) no prueba que una petición
  * normal admitida antes de desvincular ya terminó (no tiene tope de ejecución). Por eso, cuando una ruta del bloque 0 del
  * celular termina en 2xx, se revisan los retenidos de ESE celular, sucursal y tipo que no estén APLICADO: el que ya tiene su
  * efecto queda APLICADO (I4, con CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado). Sin huella: manda `efectoYaHecho`.
+ * Arreglo 8 (R7-1): el reenvío de ESTE efecto siempre nace DESPUÉS de que su petición empezó (`inicio`: la gracia sólo retiene
+ * tras desvincular, y la petición entró antes), así que se revisa TODO lo nacido desde `inicio − MARGEN_DE_RELOJ_MS`, del más
+ * viejo al más nuevo, en páginas con cursor: ni el historial (500 descartes posteriores) ni un tope dejan fuera al objetivo.
  * I8: entero con el candado del celular, así nunca ve una decisión a medias ni se la salta. Lo de casi siempre (un celular
  * sin retenidos) es UNA consulta, sin transacción: cuenta toda fila viva, también la APLICANDO en vuelo, porque una decisión
  * en curso deja ver la fila como estaba antes de decidir (lo suyo se ve al soltar el candado). La única decisión sin fila
  * visible es el nacimiento, y ése vuelve a mirar el efecto al soltar el candado (`nacer`).
  * Devuelve cuántos quedaron APLICADO. Lo llama `autenticarSesionDeCampo` al terminar la respuesta.
  */
-export async function reconciliarConLaRutaNormal(celularId: string, venueId: string, tipo: TipoDeEnvio): Promise<number> {
-  const base = { celularId, venueId, tipo }
-  const descartadaHace = { estado: 'DESCARTADO', resueltoAt: { gte: new Date(Date.now() - DESCARTES_RECIENTES_MS) } }
+export async function reconciliarConLaRutaNormal(celularId: string, venueId: string, tipo: TipoDeEnvio, inicio: Date): Promise<number> {
+  const base = { celularId, venueId, tipo, createdAt: { gte: new Date(inicio.getTime() - MARGEN_DE_RELOJ_MS) } }
   const alguna = await prisma.envioRetenidoDeCampo.findFirst({
-    where: { ...base, OR: [{ estado: { in: ['PENDIENTE', 'APLICANDO'] } }, descartadaHace] },
+    where: { ...base, estado: { in: ['PENDIENTE', 'APLICANDO', 'DESCARTADO'] } },
     select: { id: true },
   })
   if (!alguna) return 0
   return conElCandadoDelCelular(celularId, async db => {
-    // R6-2: dos grupos, cada uno con su tope y lo más reciente primero: el historial nunca tapa lo nuevo.
-    // Vivas: PENDIENTE y APLICANDO sin dueño (≤ TOPE_DE_RETENIDOS por la admisión). Una APLICANDO en vuelo, aquí dentro, es una
-    // EJECUCIÓN («Aplicar» o la gracia aplicando; una decisión nunca se ve a medias): llega a APLICADO por su propio efecto (I4)
-    // o su rechazo se decide con este mismo candado.
-    const vivas = await db.envioRetenidoDeCampo.findMany({
-      where: { ...base, OR: [{ estado: 'PENDIENTE' }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: TOPE_DE_RETENIDOS,
-    })
-    const descartadas = await db.envioRetenidoDeCampo.findMany({
-      where: { ...base, ...descartadaHace },
-      orderBy: [{ resueltoAt: 'desc' }, { id: 'desc' }],
-      take: TOPE_DE_RETENIDOS,
-    })
-    let aplicados = 0
-    for (const r of [...vivas, ...descartadas]) {
-      const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
-      const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt, db)
-      if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId, db))) aplicados++
+    // PENDIENTE, APLICANDO sin dueño y DESCARTADO. Una APLICANDO en vuelo, aquí dentro, es una EJECUCIÓN («Aplicar» o la gracia
+    // aplicando; una decisión nunca se ve a medias): llega a APLICADO por su propio efecto (I4) o su rechazo se decide con
+    // este mismo candado.
+    const where = {
+      ...base,
+      OR: [{ estado: { in: ['PENDIENTE', 'DESCARTADO'] } }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }],
     }
-    return aplicados
+    let aplicados = 0
+    let despuesDe: string | undefined
+    for (;;) {
+      const pagina = await db.envioRetenidoDeCampo.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: PAGINA_DEL_GANCHO,
+        ...(despuesDe && { cursor: { id: despuesDe }, skip: 1 }),
+      })
+      for (const r of pagina) {
+        const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
+        const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt, db)
+        if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId, db))) aplicados++
+      }
+      if (pagina.length < PAGINA_DEL_GANCHO) return aplicados
+      despuesDe = pagina[pagina.length - 1].id
+    }
   })
 }
 

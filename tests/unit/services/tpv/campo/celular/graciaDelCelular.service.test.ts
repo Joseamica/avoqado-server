@@ -441,6 +441,8 @@ describe('recibirEnGracia', () => {
 
 /** Cuándo nació un retenido ya guardado: hace una hora (más que la ventana de I6). */
 const NACIO = new Date(AHORA.getTime() - HORA)
+/** Arreglo 8: cuándo empezó la petición normal cuyo gancho corre (sus retenidos nacen después). */
+const INICIO = new Date(NACIO.getTime() - HORA)
 /** Un retenido ya guardado, como lo deja la gracia. */
 function retenido(extra: object = {}) {
   const f = {
@@ -1571,7 +1573,7 @@ describe('arreglo final 6: el que aplicó gana también por la ruta normal (I7, 
       const f = retenido({ estado: 'DESCARTADO', resueltoPor: 'sup1', resueltoAt: new Date(AHORA.getTime() - MIN), nota: 'no vino' })
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
 
       expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA, resueltoPor: null })
       expect(efecto).toHaveBeenCalledWith(
@@ -1606,7 +1608,7 @@ describe('arreglo final 6: el que aplicó gana también por la ruta normal (I7, 
       )
       const antes = filas.map(f => ({ ...f }))
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
 
       expect(hecha).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
       expect([sinEfecto, aMedias, yaAplicada, enVuelo]).toEqual(antes.slice(1))
@@ -1619,7 +1621,7 @@ describe('arreglo final 6: el que aplicó gana también por la ruta normal (I7, 
       retenido({ id: 'r3', tipo: 'ENTRADA' })
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0)
 
       expect(filas.every(f => f.estado === 'PENDIENTE')).toBe(true)
       expect(efecto).not.toHaveBeenCalled()
@@ -1646,7 +1648,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
   const valor = (x: any) => (x instanceof Date ? x.getTime() : x)
   beforeEach(() => {
     // Como Postgres: filtra, ORDENA según `orderBy` y luego corta en `take`.
-    db.envioRetenidoDeCampo.findMany.mockImplementation(async ({ where, take, orderBy }: any) => {
+    db.envioRetenidoDeCampo.findMany.mockImplementation(async ({ where, take, orderBy, cursor, skip }: any) => {
       await tick()
       const orden: any[] = (Array.isArray(orderBy) ? orderBy : [orderBy]).filter(Boolean)
       const cmp = (a: any, b: any) => {
@@ -1657,11 +1659,9 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
         }
         return 0
       }
-      return filas
-        .filter(f => coincide(f, where))
-        .sort(cmp)
-        .slice(0, take)
-        .map(f => ({ ...f }))
+      const ordenadas = filas.filter(f => coincide(f, where)).sort(cmp)
+      const desde = cursor ? ordenadas.findIndex(f => f.id === cursor.id) + (skip ?? 0) : 0
+      return ordenadas.slice(desde, desde + take).map(f => ({ ...f }))
     })
   })
   const llaveDelCandado = () => db.$queryRaw.mock.calls.map((c: any[]) => c.slice(1).join('|'))
@@ -1677,7 +1677,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
       // La venta normal ya existe; su gancho corre mientras «Descartar» tiene el candado.
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
       let terminoElGancho = false
-      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO).finally(() => (terminoElGancho = true))
       await dejaCorrer()
       expect(terminoElGancho).toBe(false) // espera su turno: no se salta la fila ocupada
 
@@ -1698,7 +1698,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
     it('al revés: el gancho llegó antes de que «Descartar» tomara el candado → la deja APLICADO y «Descartar» contesta YA_APLICADO', async () => {
       const f = retenido()
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
       await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'YA_APLICADO' })
       expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
     })
@@ -1711,7 +1711,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
       while (!efecto.mock.calls.length) await tick()
 
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0) // aún no hay fila: sin candado, sin trabajo
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0) // aún no hay fila: sin candado, sin trabajo
 
       consulta.soltar({ hecho: false })
       expect(await g).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
@@ -1723,7 +1723,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
     it('el gancho pasó antes de que la gracia tomara el candado → su consulta (dentro) ve la venta y nace APLICADO', async () => {
       const e = envio()
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0)
       expect(await recibirEnGracia(celular(), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
       expect(filas[0]).toMatchObject({ estado: 'APLICADO' })
     })
@@ -1738,7 +1738,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
 
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
       let terminoElGancho = false
-      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO).finally(() => (terminoElGancho = true))
       await dejaCorrer()
       expect(terminoElGancho).toBe(false)
 
@@ -1758,7 +1758,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
 
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
       let terminoElGancho = false
-      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO).finally(() => (terminoElGancho = true))
       await dejaCorrer()
       expect(terminoElGancho).toBe(false)
 
@@ -1784,7 +1784,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
 
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
       let terminoElGancho = false
-      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO).finally(() => (terminoElGancho = true))
       await dejaCorrer()
       expect(terminoElGancho).toBe(false)
 
@@ -1802,7 +1802,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
       while (!aplicar.mock.calls.length) await tick()
       efecto.mockClear()
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0) // no espera a la ejecución: no tiene el candado
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0) // no espera a la ejecución: no tiene el candado
       expect(efecto).not.toHaveBeenCalled()
       expect(f.estado).toBe('APLICANDO')
 
@@ -1819,7 +1819,7 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
       while (!efecto.mock.calls.length) await tick()
 
       efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
-      expect(await reconciliarConLaRutaNormal('cel2', 'v1', 'VENTA')).toBe(1)
+      expect(await reconciliarConLaRutaNormal('cel2', 'v1', 'VENTA', INICIO)).toBe(1)
       expect(filas[1].estado).toBe('APLICADO')
       consulta.soltar({ hecho: false })
       await d
@@ -1829,8 +1829,9 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
   describe('el costo de la ruta normal', () => {
     it('un celular sin retenidos: UNA consulta (por celular, prefijo del único), sin transacción ni candado ni selección', async () => {
       retenido({ estado: 'APLICADO' }) // lo aplicado no cuenta
-      retenido({ id: 'r2', estado: 'DESCARTADO', resueltoAt: new Date(AHORA.getTime() - 25 * HORA) }) // historial viejo tampoco
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      // Arreglo 8: lo que nació antes de que empezara la petición tampoco (no puede ser su reenvío).
+      retenido({ id: 'r2', estado: 'DESCARTADO', createdAt: new Date(INICIO.getTime() - 2 * MIN) })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0)
       expect(db.envioRetenidoDeCampo.findFirst).toHaveBeenCalledTimes(1)
       expect(db.envioRetenidoDeCampo.findFirst.mock.calls[0][0]).toMatchObject({
         where: { celularId: 'cel1', venueId: 'v1', tipo: 'VENTA' },
@@ -1851,8 +1852,8 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
           huella: `d${i}`,
           cuerpoJson: cuerpoVenta({ serialNumber: `VIEJA${i}` }),
           estado: 'DESCARTADO',
-          resueltoAt: new Date(AHORA.getTime() - 2 * HORA),
-          createdAt: new Date(AHORA.getTime() - 3 * HORA + i),
+          resueltoAt: new Date(AHORA.getTime() - 2 * MIN),
+          createdAt: new Date(INICIO.getTime() + i),
         })
       }
       const nuevo = retenido({ id: 'nuevo', huella: 'nuevo', cuerpoJson: cuerpoVenta({ serialNumber: 'NUEVA' }), createdAt: AHORA })
@@ -1860,48 +1861,98 @@ describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6
         cuerpo.serialNumber === 'NUEVA' ? { hecho: true, resultado: HECHA } : { hecho: false },
       )
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
       expect(nuevo).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
       expect(efecto.mock.calls.some((c: any[]) => c[2].serialNumber === 'NUEVA')).toBe(true)
     })
+  })
 
-    it('los DESCARTADO: sólo los resueltos en las últimas 24 h, el más reciente primero (también con más de 500)', async () => {
-      const viejo = retenido({
-        id: 'viejo',
-        huella: 'viejo',
-        cuerpoJson: cuerpoVenta({ serialNumber: 'VIEJO' }),
+  describe('arreglo 8 (R7-1) · el gancho recorre TODO lo nacido desde que empezó su petición, en páginas', () => {
+    const descartado = (i: number, extra: object = {}) =>
+      retenido({
+        id: `d${String(i).padStart(4, '0')}`,
+        huella: `d${i}`,
+        cuerpoJson: cuerpoVenta({ serialNumber: `OTRA${i}` }),
         estado: 'DESCARTADO',
-        resueltoAt: new Date(AHORA.getTime() - 25 * HORA),
-        createdAt: new Date(AHORA.getTime() - 30 * HORA), // el más viejo: un orden por antigüedad lo elegiría primero
+        resueltoPor: 'sup1',
+        resueltoAt: new Date(AHORA.getTime() - 30 * MIN + i * 1000),
+        createdAt: new Date(NACIO.getTime() + (i + 1) * 1000),
+        ...extra,
       })
-      for (let i = 0; i < 501; i++) {
-        retenido({
-          id: `d${i}`,
-          huella: `d${i}`,
-          cuerpoJson: cuerpoVenta({ serialNumber: i === 500 ? 'RECIENTE' : `OTRA${i}` }),
-          estado: 'DESCARTADO',
-          resueltoAt: new Date(AHORA.getTime() - 20 * HORA + i * 1000), // el d500 es el último descartado
-          createdAt: new Date(AHORA.getTime() - 23 * HORA),
-        })
-      }
+
+    it('el caso de Codex: el objetivo DESCARTADO y 500 descartes POSTERIORES (mismo tipo y sucursal, en 24 h) → el objetivo queda APLICADO con la reversión', async () => {
+      const objetivo = retenido({
+        id: 'objetivo',
+        huella: 'objetivo',
+        cuerpoJson: cuerpoVenta({ serialNumber: 'OBJETIVO' }),
+        estado: 'DESCARTADO',
+        resueltoPor: 'sup1',
+        resueltoAt: new Date(AHORA.getTime() - 40 * MIN), // el descarte más viejo de los 501
+        createdAt: NACIO,
+      })
+      for (let i = 0; i < 500; i++) descartado(i)
       efecto.mockImplementation(async (_t: string, _c: unknown, cuerpo: any) =>
-        ['RECIENTE', 'VIEJO'].includes(cuerpo.serialNumber) ? { hecho: true, resultado: HECHA } : { hecho: false },
+        cuerpo.serialNumber === 'OBJETIVO' ? { hecho: true, resultado: HECHA } : { hecho: false },
       )
 
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
-      expect(filas.find(f => f.id === 'd500')).toMatchObject({ estado: 'APLICADO' })
-      expect(viejo.estado).toBe('DESCARTADO')
-      expect(efecto.mock.calls.some((c: any[]) => c[2].serialNumber === 'VIEJO')).toBe(false)
-      expect(efecto).toHaveBeenCalledTimes(500)
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
+      expect(objetivo).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO', entityId: 'objetivo' }))
     })
 
-    it('PENDIENTE y APLICANDO sin dueño van aparte, los más recientes primero, con su propio tope', async () => {
+    it('1,001 candidatos posteriores: recorre las 3 páginas de 500 (createdAt asc, cursor), cada consulta con su take; ninguno queda fuera', async () => {
+      for (let i = 0; i < 1000; i++) descartado(i)
+      const ultimo = retenido({
+        id: 'zultimo',
+        huella: 'ultimo',
+        cuerpoJson: cuerpoVenta({ serialNumber: 'ULTIMO' }),
+        createdAt: AHORA, // PENDIENTE, el 1,001: tercera página
+      })
+      efecto.mockImplementation(async (_t: string, _c: unknown, cuerpo: any) =>
+        cuerpo.serialNumber === 'ULTIMO' ? { hecho: true, resultado: HECHA } : { hecho: false },
+      )
+
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
+      expect(ultimo).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+      expect(efecto).toHaveBeenCalledTimes(1001)
+      const paginas = db.envioRetenidoDeCampo.findMany.mock.calls.map((c: any[]) => c[0])
+      expect(paginas).toHaveLength(3)
+      for (const pg of paginas) expect(pg).toMatchObject({ take: 500, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      expect(paginas[0].cursor).toBeUndefined()
+      expect(paginas[1]).toMatchObject({ cursor: { id: 'd0499' }, skip: 1 })
+      expect(paginas[2]).toMatchObject({ cursor: { id: 'd0999' }, skip: 1 })
+    })
+
+    it('lo nacido ANTES de que empezara la petición (fuera del margen de 1 min) no se revisa; dentro del margen, sí', async () => {
+      const antes = retenido({
+        id: 'antes',
+        huella: 'antes',
+        cuerpoJson: cuerpoVenta({ serialNumber: 'ANTES' }),
+        estado: 'DESCARTADO',
+        resueltoAt: new Date(AHORA.getTime() - MIN),
+        createdAt: new Date(INICIO.getTime() - 61 * 1000),
+      })
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0)
+      expect(antes.estado).toBe('DESCARTADO')
+      expect(efecto).not.toHaveBeenCalled()
+      expect(db.$transaction).not.toHaveBeenCalled() // la consulta barata ya no lo cuenta
+
+      const enElMargen = retenido({ id: 'margen', huella: 'margen', createdAt: new Date(INICIO.getTime() - 30 * 1000) })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(1)
+      expect(enElMargen.estado).toBe('APLICADO')
+      expect(antes.estado).toBe('DESCARTADO')
+    })
+
+    it('la consulta barata y las páginas filtran por createdAt ≥ inicio − 1 min (sin ventana de 24 h para los descartes)', async () => {
       retenido({ id: 'p1' })
-      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
-      const [vivas, descartadas] = db.envioRetenidoDeCampo.findMany.mock.calls.map((c: any[]) => c[0])
-      expect(vivas).toMatchObject({ take: 500, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-      expect(descartadas).toMatchObject({ take: 500, orderBy: [{ resueltoAt: 'desc' }, { id: 'desc' }] })
-      expect(descartadas.where).toMatchObject({ estado: 'DESCARTADO', resueltoAt: { gte: new Date(AHORA.getTime() - 24 * HORA) } })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA', INICIO)).toBe(0)
+      const desde = new Date(INICIO.getTime() - MIN)
+      expect(db.envioRetenidoDeCampo.findFirst.mock.calls[0][0].where).toMatchObject({ createdAt: { gte: desde } })
+      const [pagina] = db.envioRetenidoDeCampo.findMany.mock.calls.map((c: any[]) => c[0])
+      expect(pagina.where).toMatchObject({ celularId: 'cel1', venueId: 'v1', tipo: 'VENTA', createdAt: { gte: desde } })
+      expect(JSON.stringify(pagina.where)).not.toContain('resueltoAt')
     })
   })
 })
