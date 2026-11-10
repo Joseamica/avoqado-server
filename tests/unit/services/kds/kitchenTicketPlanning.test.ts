@@ -124,3 +124,30 @@ describe('originKeyFor — el origen es el mismo en la caja y en el servidor', (
     expect(originKeyFor(linea({ id: 'a' }), { id: 'ord-3', externalId: null, tableId: null }, T0)).toBe('order:ord-3')
   })
 })
+
+describe('estación «No lleva comanda» (sinComanda)', () => {
+  it('planeador_salta_sin_comanda: lo ruteado a una estación sin comanda no arma comanda, aunque venga entre las pantallas', () => {
+    const conTienda = { defaultStationId: 'cocina', activeStationIds: new Set(['cocina', 'barra', 'tienda']) }
+    const plans = planKitchenTickets({
+      ...base,
+      routing: conTienda,
+      screens: [...screens, { id: 'tienda', since }],
+      sinComanda: new Set(['tienda']),
+      order: venta,
+      lines: [linea({ id: 'takis', categoryStationId: 'tienda' }), linea({ id: 'cafe', categoryStationId: 'barra' })],
+    })
+    expect(plans.map(p => [p.stationId, p.lines.map(l => l.id)])).toEqual([['barra', ['cafe']]])
+  })
+
+  it('sin_estacion_sigue_saliendo: lo que no tiene estación sigue en «Sin estación»', () => {
+    const sinDefault = { defaultStationId: null, activeStationIds: new Set(['cocina', 'barra', 'tienda']) }
+    const plans = planKitchenTickets({
+      ...base,
+      routing: sinDefault,
+      sinComanda: new Set(['tienda']),
+      order: venta,
+      lines: [linea({ id: 'a' })],
+    })
+    expect(plans).toEqual([expect.objectContaining({ sourceKey: 'sale:ext-1:none', stationId: null })])
+  })
+})

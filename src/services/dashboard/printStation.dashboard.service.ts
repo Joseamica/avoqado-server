@@ -555,6 +555,7 @@ export async function assignRouting(venueId: string, input: AssignRoutingInput, 
 export async function previewRouting(venueId: string, input: PreviewRoutingInput) {
   const config = await buildPrintConfig(venueId)
   const stationName = new Map(config.stations.map(s => [s.id, s.name]))
+  const sinComanda = new Set(config.stations.filter(s => !s.sendsComanda).map(s => s.id))
 
   const productIds = [...new Set(input.items.map(i => i.productId))]
   const products = await prisma.product.findMany({
@@ -586,6 +587,8 @@ export async function previewRouting(venueId: string, input: PreviewRoutingInput
       stationId: plan.stationId,
       stationName: plan.stationId ? (stationName.get(plan.stationId) ?? null) : null,
       unrouted: plan.unrouted,
+      // «No lleva comanda»: el simulador dice que ahí no sale papel ni pantalla.
+      sendsComanda: !(plan.stationId && sinComanda.has(plan.stationId)),
       lines: plan.lines.map(l => ({ productName: l.productName, quantity: l.quantity })),
     })),
     unrouted: plans.some(p => p.unrouted),
