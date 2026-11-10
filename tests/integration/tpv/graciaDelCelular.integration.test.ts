@@ -17,7 +17,8 @@ import prisma from '@/utils/prismaClient'
 import { CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { huellaDelEnvio, TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
-import { listarRetenidos, resolverRetenido } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import { listarRetenidos, resolverRetenido, VENTANA_EN_VUELO_MS } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import { generateAccessToken } from '@/jwt.service'
 import { aceptarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { moduleService } from '@/services/modules/module.service'
 import * as pagos from '@/services/tpv/payment.tpv.service'
@@ -49,6 +50,8 @@ async function nuevaSim() {
   })
 }
 const ventaDe = (serialNumber: string) => ({ llave: randomUUID(), serialNumber, precioVisto: 0 })
+/** El `updatedAt` de una APLICANDO cuyo proceso murió (I2): más vieja que la ventana en vuelo, nadie la tiene. */
+const vencida = () => new Date(Date.now() - VENTANA_EN_VUELO_MS - 60_000)
 
 /** Un celular vinculado con su sesión: su latido reporta `huellas` y luego se desvincula (la foto queda congelada). */
 async function celularQueReportaYSeDesvincula(huellas: string[], antes?: (token: string, celularId: string) => Promise<void>) {
@@ -185,7 +188,7 @@ describe('POST /tpv/campo/gracia', () => {
     const filaEv = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id, tipo: 'EVIDENCIA' } })
     await prisma.envioRetenidoDeCampo.update({
       where: { id: filaEv.id },
-      data: { estado: 'APLICANDO', resultado: Prisma.DbNull, resueltoAt: null },
+      data: { estado: 'APLICANDO', resultado: Prisma.DbNull, resueltoAt: null, updatedAt: vencida() },
     })
     const otra = await enGracia(credencial, 'EVIDENCIA', evidenciaJson)
     expect(otra.status).toBe(200)
@@ -304,7 +307,7 @@ describe('POST /tpv/campo/gracia', () => {
     const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id, tipo: 'CUSTODIA_ACEPTAR' } })
 
     // El primer «Aplicar» tomó la fila y aceptó la SIM; el proceso cayó antes de marcarla APLICADO.
-    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { estado: 'APLICANDO' } })
+    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { estado: 'APLICANDO', updatedAt: vencida() } })
     const aceptada = await aceptarCustodiaDeCampo({ venueId, staffId: promotorId, role: 'CASHIER' }, cuerpo)
     expect(aceptada.body.summary).toMatchObject({ succeeded: 1, failed: 0 })
     // Mientras tanto la SIM se vendió (desde la PAX u otro celular).
@@ -412,6 +415,7 @@ describe('POST /tpv/campo/gracia', () => {
           cuerpoJson,
           motivo: 'APLICADO_EN_GRACIA',
           estado: 'APLICANDO',
+          updatedAt: vencida(), // el proceso cayó hace rato: ya no está en vuelo (I2)
         },
       })
       await prisma.staffVenue.updateMany({ where: { staffId: otra.id }, data: { active: false } }) // la dieron de baja
@@ -435,5 +439,152 @@ describe('POST /tpv/campo/gracia', () => {
       await prisma.staffOrganization.deleteMany({ where: { staffId: otra.id } })
       await prisma.staff.delete({ where: { id: otra.id } })
     }
+  })
+})
+
+describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta real', () => {
+  let tokenDelPanel: string
+  beforeAll(async () => {
+    const sid = (
+      await prisma.session.create({ data: { staffId: supervisorId, venueId, deviceId: `panel-${sufijo}`, authMethod: 'PASSWORD' } })
+    ).id
+    tokenDelPanel = generateAccessToken(supervisorId, orgId, venueId, 'MANAGER', false, { sid })
+  })
+  const desdeElPanel = (retenidoId: string, accion: 'APLICAR' | 'DESCARTAR') =>
+    request(server)
+      .post(`/api/v1/dashboard/organizations/${orgId}/celulares-de-campo/retenidos/${retenidoId}/resolver`)
+      .set('Authorization', `Bearer ${tokenDelPanel}`)
+      .send({ accion })
+  /** Una venta COMPLETA por la ruta normal del bloque 0 (la respuesta se perdió: el celular la sigue teniendo por subir). */
+  const vendidaPorLaRutaNormal = (cuerpo: ReturnType<typeof ventaDe>) => async (token: string) => {
+    const normal = await request(server)
+      .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(cuerpo)
+    expect(normal.status).toBe(201)
+  }
+  const retenidoDe = (celularId: string, cuerpoJson: string, datos: Partial<Prisma.EnvioRetenidoDeCampoUncheckedCreateInput>) =>
+    prisma.envioRetenidoDeCampo.create({
+      data: {
+        organizationId: orgId,
+        celularId,
+        staffId: promotorId,
+        venueId,
+        tipo: 'VENTA',
+        huella: huellaDelEnvio('VENTA', venueId, cuerpoJson),
+        cuerpoJson,
+        motivo: 'NO_REPORTADA',
+        ...datos,
+      },
+    })
+
+  it('I1 al nacer (R3-1) · una venta COMPLETA por la ruta normal que llega retenida (no reportada) nace APLICADO, no PENDIENTE; un solo cobro', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    // Su latido no la traía: la gracia la retendría (NO_REPORTADA)… pero ya está hecha.
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([], vendidaPorLaRutaNormal(cuerpo))
+    const { cobros: antes } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(antes).toHaveLength(1)
+
+    const res = await enGracia(credencial, 'VENTA', cuerpoJson)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ resuelto: 'APLICADO', resultado: expect.objectContaining({ paymentId: antes[0].id, recuperado: true }) })
+    expect(await prisma.envioRetenidoDeCampo.findMany({ where: { celularId: celular.id } })).toEqual([
+      expect.objectContaining({
+        estado: 'APLICADO',
+        motivo: 'NO_REPORTADA',
+        resultado: expect.objectContaining({ paymentId: antes[0].id }),
+      }),
+    ])
+    const { ordenes, cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect([ordenes.length, cobros.length]).toEqual([1, 1])
+    // Nunca aparece en «por revisar».
+    const sinResolver = await listarRetenidos(orgId, { estado: ['PENDIENTE', 'APLICANDO'], page: 1, pageSize: 50 })
+    expect(sinResolver.items.some(i => i.resumen.includes(sim.serialNumber))).toBe(false)
+  })
+
+  it('I1 en «Descartar» · una PENDIENTE cuyo efecto ya existe queda APLICADO y responde { estado: APLICADO, yaEstabaHecho: true }, nunca DESCARTADO', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    const { celular } = await celularQueReportaYSeDesvincula([], vendidaPorLaRutaNormal(cuerpo))
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    const fila = await retenidoDe(celular.id, cuerpoJson, { estado: 'PENDIENTE' })
+
+    const r = await desdeElPanel(fila.id, 'DESCARTAR')
+
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({
+      estado: 'APLICADO',
+      yaEstabaHecho: true,
+      repetida: false,
+      resultado: expect.objectContaining({ paymentId: cobros[0].id }),
+    })
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resueltoPor: supervisorId,
+    })
+    expect((await filas(sim.serialNumber, cuerpo.llave)).cobros).toHaveLength(1)
+  })
+
+  it('I2 · una APLICANDO en vuelo → «Aplicar» y «Descartar» 409 APLICACION_EN_CURSO sin tocarla; vencida (updatedAt explícito en create) «Aplicar» sí la toma', async () => {
+    const { celular } = await celularQueReportaYSeDesvincula([])
+
+    // En vuelo: tomada hace un momento por otra ejecución.
+    const simA = await nuevaSim()
+    const cuerpoA = ventaDe(simA.serialNumber)
+    const tomadaAt = new Date(Date.now() - 1000)
+    const enVuelo = await retenidoDe(celular.id, JSON.stringify(cuerpoA), { estado: 'APLICANDO', updatedAt: tomadaAt })
+    expect(enVuelo.updatedAt.getTime()).toBe(tomadaAt.getTime()) // Prisma respeta el updatedAt explícito en create
+    for (const accion of ['APLICAR', 'DESCARTAR'] as const) {
+      const r = await desdeElPanel(enVuelo.id, accion)
+      expect(r.status).toBe(409)
+      expect(r.body).toMatchObject({
+        code: 'APLICACION_EN_CURSO',
+        message: 'Se está aplicando en este momento. Vuelve a intentar en unos minutos.',
+      })
+    }
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: enVuelo.id } })).toMatchObject({
+      estado: 'APLICANDO',
+      updatedAt: tomadaAt,
+    })
+    expect((await filas(simA.serialNumber, cuerpoA.llave)).ordenes).toHaveLength(0)
+
+    // Vencida: el proceso que la tomó murió. «Descartar» no la descarta (sigue sin dueño); «Aplicar» la toma y vende una vez.
+    const simB = await nuevaSim()
+    const cuerpoB = ventaDe(simB.serialNumber)
+    const hace = vencida()
+    const huerfana = await retenidoDe(celular.id, JSON.stringify(cuerpoB), { estado: 'APLICANDO', updatedAt: hace })
+    expect(huerfana.updatedAt.getTime()).toBe(hace.getTime())
+    const descartar = await desdeElPanel(huerfana.id, 'DESCARTAR')
+    expect(descartar.status).toBe(409)
+    expect(descartar.body).toMatchObject({ code: 'APLICACION_A_MEDIAS' })
+    const aplicar = await desdeElPanel(huerfana.id, 'APLICAR')
+    expect(aplicar.status).toBe(200)
+    expect(aplicar.body.data).toMatchObject({ estado: 'APLICADO', repetida: false, resultado: { paymentId: expect.any(String) } })
+    const { ordenes, cobros } = await filas(simB.serialNumber, cuerpoB.llave)
+    expect([ordenes.length, cobros.length]).toEqual([1, 1])
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: huerfana.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resueltoPor: supervisorId,
+    })
+  })
+
+  it('R3-3 · la evidencia por la gracia con replaceIndex y sin photoLabel → 400 CUERPO_INVALIDO y no se retiene nada', async () => {
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([])
+    const foto = `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2Fsin-etiqueta.jpg`
+    const captura = { captureSeq: 1, captureDeviceId: celular.id, idempotencyKey: randomUUID(), capturedAt: new Date().toISOString() }
+
+    const r = await enGracia(
+      credencial,
+      'EVIDENCIA',
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: [foto], replaceIndex: 0, ...captura }),
+    )
+
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'CUERPO_INVALIDO' })
+    expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id } })).toBe(0)
   })
 })
