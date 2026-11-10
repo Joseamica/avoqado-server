@@ -191,6 +191,19 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     )
   })
 
+  it('REGRESIÓN (Codex r5) · un extra vivo de un grupo de FAMILIA apagado a mano no cuenta como creado, como antes', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
+    prismaMock.modifierGroup.count.mockResolvedValueOnce(1) // lo usa una familia
+    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-vivo', active: true, price: 20 } as never)
+
+    const r = await importMenu(V, conLeche('replace'), HUMANO)
+
+    expect(prismaMock.modifierGroup.count).toHaveBeenCalledWith({
+      where: { id: 'grupo-leche', OR: expect.any(Array) },
+    })
+    expect(r.stats).toMatchObject({ modifiers: 0 })
+  })
+
   it('D17 · «Reemplazar» que CREA un extra no lo apaga al final', async () => {
     prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
     prismaMock.modifier.findFirst.mockResolvedValueOnce(null)

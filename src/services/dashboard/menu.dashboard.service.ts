@@ -1996,6 +1996,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el vigente), y buscarlos todavía
       // prendidos deja que gane el vigente. Crece con el archivo, no con el catálogo.
       const extrasDelArchivo = new Set<string>()
+      const grupoDeFamilia = new Map<string, boolean>() // sólo de los grupos que trae el archivo
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -2328,9 +2329,14 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 } else if (data.mode === 'replace') {
                   // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
-                  // Cuenta como creado lo que antes se apagaba al principio: lo de un grupo que no es de familia (ese grupo llegó
-                  // apagado), una sola vez aunque el archivo lo repita.
-                  const seApagabaAlPrincipio = !modifierGroup.active && !extrasDelArchivo.has(existingModifier.id)
+                  // Cuenta como creado lo que antes se apagaba al principio: lo de un grupo que no es de familia, una sola vez aunque
+                  // el archivo lo repita (Codex r5: un grupo de familia apagado a mano no se apagaba, y su extra vivo no contaba).
+                  let deFamilia = grupoDeFamilia.get(modifierGroup.id)
+                  if (deFamilia === undefined) {
+                    deFamilia = (await tx.modifierGroup.count({ where: { id: modifierGroup.id, ...usadoPorFamilia } })) > 0
+                    grupoDeFamilia.set(modifierGroup.id, deFamilia)
+                  }
+                  const seApagabaAlPrincipio = !deFamilia && !extrasDelArchivo.has(existingModifier.id)
                   if (!existingModifier.active || seApagabaAlPrincipio) modifiersCreated++
                   extrasDelArchivo.add(existingModifier.id)
                   await tx.modifier.update({
