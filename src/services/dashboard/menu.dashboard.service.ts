@@ -1155,6 +1155,9 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
   return rawMaterial
 }
 
+/** Un extra por grupo y nombre, como lo empareja la importación de menú. */
+const claveDeExtra = (groupId: string, name: string) => `${groupId}\u0000${name}`
+
 function modifierCost(
   rawMaterial: { avgCostPerUnit: Prisma.Decimal } | null,
   quantityPerUnit: Prisma.Decimal | number | null | undefined,
@@ -1989,6 +1992,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
       // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers are never deleted either
       // (D16): they are turned off, and a file that brings the name back reuses the same row.
+      const extraVivoAntes = new Map<string, { id: string; active: boolean; isDemo: boolean }>() // D17: lo llena «Reemplazar»
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -2019,7 +2023,14 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
           OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
         }
-        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
+        // D17 (Codex r2): quitar un extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el que
+        // «Combinar» creó después). Se apagan sólo los vivos y se recuerda cuáles eran: abajo, con nombres repetidos, gana el vivo.
+        const apagados = await tx.modifier.updateManyAndReturn({
+          where: { group: { venueId, NOT: usadoPorFamilia }, active: true },
+          data: { active: false },
+          select: { id: true, groupId: true, name: true, isDemo: true },
+        })
+        for (const m of apagados) extraVivoAntes.set(claveDeExtra(m.groupId, m.name), { id: m.id, active: false, isDemo: m.isDemo })
         // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
         await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
@@ -2303,10 +2314,17 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Check if modifier exists by name in this group
                 // D17 (Codex r1): como el grupo en D16, «combinar» ignora los extras archivados (quitar ya no los destruye) y crea otro con
                 // el precio del archivo, como cuando se borraban; revivir el viejo lo devolvía con su precio anterior. «Reemplazar» sí
-                // los reusa, porque acaba de apagar a todos.
-                const existingModifier = await tx.modifier.findFirst({
-                  where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
-                })
+                // los reusa, porque acaba de apagar a todos: primero el que estaba vivo (Codex r2), luego el prendido y el más nuevo.
+                // ponytail: «el más nuevo» es el id cuid más alto (Modifier no tiene fechas); sólo decide entre puros archivados.
+                const clave = claveDeExtra(modifierGroup.id, modifierData.name)
+                const vivoAntes = extraVivoAntes.get(clave)
+                extraVivoAntes.delete(clave) // si el archivo lo vuelve a traer, la búsqueda lo encuentra ya prendido
+                const existingModifier =
+                  vivoAntes ??
+                  (await tx.modifier.findFirst({
+                    where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
+                    orderBy: [{ active: 'desc' }, { id: 'desc' }],
+                  }))
 
                 if (!existingModifier) {
                   // Create new modifier

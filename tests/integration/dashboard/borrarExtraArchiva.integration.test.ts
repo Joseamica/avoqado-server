@@ -248,6 +248,52 @@ describe('Borrar un extra lo archiva', () => {
     expect(await getPaymentLinkByShortCode(corto)).toEqual(ligaAntes)
   })
 
+  it('Codex r2 · quitar → «Combinar» → «Reemplazar»: revive el que estaba vivo, con su SKU, y el quitado se queda como estaba', async () => {
+    const x = await negocio()
+    const { grupoId, extraId } = await grupoConExtras(x) // «Shot» A a $20
+    await prisma.modifier.update({ where: { id: extraId }, data: { sku: 'SHOT-A' } })
+    await deleteModifier(x.venueId, grupoId, extraId)
+    const conShot = (mode: 'merge' | 'replace', price: number) => ({
+      mode,
+      categories: [
+        {
+          name: 'IVA',
+          slug: `iva-${x.rfc}`.toLowerCase(),
+          products: [
+            {
+              name: 'Café',
+              sku: `P-${x.rfc}`,
+              price: 100,
+              modifierGroups: [
+                {
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: false,
+                  minSelections: 0,
+                  maxSelections: 1,
+                  modifiers: [{ name: 'Shot', price }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    const actor = { type: 'SERVICE', servicePrincipalId: 'D17_PRUEBA' } as any
+    await importMenu(x.venueId, conShot('merge', 25) as any, actor)
+    const b = await prisma.modifier.findFirstOrThrow({ where: { groupId: grupoId, name: 'Shot', active: true } })
+    await prisma.modifier.update({ where: { id: b.id }, data: { sku: 'SHOT-B' } })
+
+    await importMenu(x.venueId, conShot('replace', 30) as any, actor)
+
+    const shots = await prisma.modifier.findMany({
+      where: { name: 'Shot', group: { venueId: x.venueId } },
+      select: { id: true, active: true, price: true, sku: true },
+    })
+    expect(shots.find(m => m.active)).toEqual({ id: b.id, active: true, price: new Prisma.Decimal(30), sku: 'SHOT-B' })
+    expect(shots.find(m => m.id === extraId)).toEqual({ id: extraId, active: false, price: new Prisma.Decimal(20), sku: 'SHOT-A' })
+  })
+
   // Regresión: los 404 de hoy
   it('de otro negocio o de otro grupo: 404 y no toca nada', async () => {
     const x = await negocio()
