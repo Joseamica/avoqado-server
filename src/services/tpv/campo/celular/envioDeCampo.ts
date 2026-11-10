@@ -113,16 +113,17 @@ const ESQUEMAS: Record<Exclude<TipoDeEnvio, 'EVIDENCIA'>, ZodTypeAny> = {
 
 /**
  * La evidencia: su llave de venta y el resto validado con el esquema de la ruta (el id de prueba sólo llena `paymentId`).
- * Fuera de su ruta exige los campos de captura (S9) y un destino estable, `photoLabel` o `replaceIndex` (T3): la captura es
- * la llave de idempotencia de la foto, pero sólo en una ranura fija; agregada al final, repetir la pondría otra vez.
+ * Fuera de su ruta (la gracia y «Aplicar») exige los campos de captura (S9) y `photoLabel` (R3-3): la captura es la llave de
+ * idempotencia de la foto, pero sólo en una ranura FIJA, y la única fija es la de la etiqueta (Vinculacion = 0, Portabilidad
+ * = 1). `replaceIndex` solo no basta: sobre una verificación vacía la ruta normal la pone en la 0 y la repetición en la 1, y
+ * la misma foto queda dos veces. Sin `photoLabel` → CUERPO_INVALIDO. La ruta normal de la TPV no cambia.
  */
 function evidenciaValida(cuerpo: unknown): { ventaLlave: string; resto: Record<string, unknown>; b: any } | null {
   const conLlave = validar<{ ventaLlave: string; paymentId?: unknown }>(evidenciaDeCampoLlaveSchema, cuerpo)
   if (!conLlave) return null
   const { ventaLlave, paymentId: _ignorado, ...resto } = conLlave
   const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: cuid() })
-  const conDestino = b && (b.photoLabel !== undefined || b.replaceIndex !== undefined)
-  return conDestino && capturaDe(b) ? { ventaLlave, resto, b } : null
+  return b && b.photoLabel !== undefined && capturaDe(b) ? { ventaLlave, resto, b } : null
 }
 
 /** La venta de la evidencia: COMPLETA, de esta persona y de ESTE celular (el nuevo de la persona no la nombra). */
@@ -243,15 +244,19 @@ export async function efectoYaHecho(
     }
     case 'ENTRADA':
     case 'SALIDA': {
-      const b = validar<{ llave: string }>(ESQUEMAS[tipo], cuerpo)
+      const b = validar<{ llave: string; timeEntryId?: string; llaveEntrada?: string }>(ESQUEMAS[tipo], cuerpo)
       if (!b) return NO_HECHO
       const where =
         tipo === 'ENTRADA'
           ? { staffId_llaveEntrada: { staffId: ctx.staffId, llaveEntrada: b.llave } }
           : { staffId_llaveSalida: { staffId: ctx.staffId, llaveSalida: b.llave } }
-      const t = await prisma.timeEntry.findUnique({ where, select: { id: true, venueId: true } })
+      const t = await prisma.timeEntry.findUnique({ where, select: { id: true, venueId: true, llaveEntrada: true } })
       // La misma llave en otra sucursal es otra checada (LLAVE_REUSADA), no ésta.
-      return t && t.venueId === ctx.venueId ? { hecho: true, resultado: { timeEntryId: t.id, recuperado: true } } : NO_HECHO
+      if (!t || t.venueId !== ctx.venueId) return NO_HECHO
+      // R3-4: la salida es de la entrada que NOMBRA el cuerpo, igual que el escritor (checadaDeCampo.service, «esLaNombrada»):
+      // la llave de salida de la entrada A con un cuerpo que nombra la B es LLAVE_REUSADA, no la salida de B.
+      const esLaNombrada = tipo === 'ENTRADA' || (b.timeEntryId ? t.id === b.timeEntryId : t.llaveEntrada === b.llaveEntrada)
+      return esLaNombrada ? { hecho: true, resultado: { timeEntryId: t.id, recuperado: true } } : NO_HECHO
     }
     case 'CUSTODIA_ACEPTAR':
     case 'CUSTODIA_RECHAZAR':
@@ -268,11 +273,11 @@ export async function efectoYaHecho(
       if (!sv) return NO_HECHO
       const { seq, deviceId } = capturaDe(valida.b)!
       const aplicadas = (sv.appliedCaptureSeqs ?? {}) as AppliedCaptureSeqs
-      const { photoLabel, replaceIndex } = valida.b
-      const ranura: CaptureDestination =
-        photoLabel === 'Vinculacion' || (!photoLabel && replaceIndex === 0) ? 'PHOTO_VINCULACION' : 'PHOTO_PORTABILIDAD'
-      // En su ranura: ésta o una más nueva del mismo aparato. En cualquier ranura: ESTA misma captura (replaceIndex 1 sobre
-      // una verificación vacía cae en la 0). Una más nueva en la OTRA ranura no dice nada de ésta.
+      const { photoLabel } = valida.b
+      // R3-3: fuera de su ruta siempre trae photoLabel: ésa es su ranura.
+      const ranura: CaptureDestination = photoLabel === 'Vinculacion' ? 'PHOTO_VINCULACION' : 'PHOTO_PORTABILIDAD'
+      // En su ranura: ésta o una más nueva del mismo aparato. En cualquier ranura: ESTA misma captura (la puso la ruta normal
+      // con otro acomodo). Una más nueva en la OTRA ranura no dice nada de ésta.
       const exacta = (['PHOTO_VINCULACION', 'PHOTO_PORTABILIDAD'] as const).some(d => aplicadas[d]?.[deviceId] === seq)
       if (!exacta && isNewerCapture(aplicadas, ranura, deviceId, seq)) return NO_HECHO
       return { hecho: true, resultado: { verificationId: sv.id, paymentId: ficha.paymentId, recuperado: true } }

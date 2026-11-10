@@ -245,17 +245,21 @@ describe('aplicarEnvio', () => {
       expect(evidencia).not.toHaveBeenCalled()
     })
 
-    it('T3 · sin destino estable (ni photoLabel ni replaceIndex) → CUERPO_INVALIDO: repetir la agregaría al final otra vez', async () => {
+    it('R3-3 · sin photoLabel (también con sólo replaceIndex) → CUERPO_INVALIDO: sólo la etiqueta es una ranura estable', async () => {
       const alFinal: Record<string, unknown> = { ...fotos }
       delete alFinal.photoLabel
-      expect(await aplicarEnvio(ctx, 'EVIDENCIA', alFinal)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
-      expect(cuerpoValido('EVIDENCIA', alFinal)).toBe(false)
+      for (const cuerpo of [alFinal, { ...alFinal, replaceIndex: 0 }, { ...alFinal, replaceIndex: 1 }]) {
+        expect(await aplicarEnvio(ctx, 'EVIDENCIA', cuerpo)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
+        expect(cuerpoValido('EVIDENCIA', cuerpo)).toBe(false)
+      }
       expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
       expect(evidencia).not.toHaveBeenCalled()
-      // Con replaceIndex también hay destino.
+      // Con photoLabel (y replaceIndex de más) sí entra.
       db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
       evidencia.mockResolvedValue({ verificationId: 'sv' })
-      expect(await aplicarEnvio(ctx, 'EVIDENCIA', { ...alFinal, replaceIndex: 1 })).toMatchObject({ tipo: 'APLICADO' })
+      expect(await aplicarEnvio(ctx, 'EVIDENCIA', { ...alFinal, photoLabel: 'Portabilidad', replaceIndex: 1 })).toMatchObject({
+        tipo: 'APLICADO',
+      })
     })
 
     it('VERIFICATION_MOVED (la venta cambió de tienda, «vuelve a intentarlo») se lanza: es reintentable', async () => {
@@ -290,7 +294,7 @@ describe('cuerpoValido (S7, S9): el mismo esquema que aplicarEnvio, sin tocar la
     expect(cuerpoValido('CUSTODIA_RECHAZAR', { serialNumber: 'A' })).toBe(false)
     const foto = { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], ...captura }
     expect(cuerpoValido('EVIDENCIA', { ...foto, photoLabel: 'Vinculacion' })).toBe(true)
-    expect(cuerpoValido('EVIDENCIA', { ...foto, replaceIndex: 0 })).toBe(true)
+    expect(cuerpoValido('EVIDENCIA', { ...foto, replaceIndex: 0 })).toBe(false) // R3-3: sin photoLabel no hay ranura estable
     expect(cuerpoValido('EVIDENCIA', { ventaLlave: llave, photoUrls: ['https://example.test/a.jpg'], photoLabel: 'Vinculacion' })).toBe(
       false,
     )
@@ -336,24 +340,39 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
 
   describe('ENTRADA / SALIDA', () => {
     it('la checada de la persona con esa llave, en esa sucursal → hecho con su timeEntryId; en otra sucursal o sin checada → no', async () => {
-      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'v1' })
+      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'v1', llaveEntrada: llave })
       expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({
         hecho: true,
         resultado: { timeEntryId: 't1', recuperado: true },
       })
       expect(db.timeEntry.findUnique).toHaveBeenLastCalledWith({
         where: { staffId_llaveEntrada: { staffId: 's1', llaveEntrada: llave } },
-        select: { id: true, venueId: true },
+        select: { id: true, venueId: true, llaveEntrada: true },
       })
-      expect(await efectoYaHecho('SALIDA', ctx, { llave, llaveEntrada: randomUUID() }, LIMITE)).toMatchObject({ hecho: true })
+      const llaveSalida = randomUUID()
+      expect(await efectoYaHecho('SALIDA', ctx, { llave: llaveSalida, llaveEntrada: llave }, LIMITE)).toMatchObject({ hecho: true })
       expect(db.timeEntry.findUnique).toHaveBeenLastCalledWith({
-        where: { staffId_llaveSalida: { staffId: 's1', llaveSalida: llave } },
-        select: { id: true, venueId: true },
+        where: { staffId_llaveSalida: { staffId: 's1', llaveSalida } },
+        select: { id: true, venueId: true, llaveEntrada: true },
       })
-      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'otra' })
+      db.timeEntry.findUnique.mockResolvedValue({ id: 't1', venueId: 'otra', llaveEntrada: llave })
       expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: false })
       db.timeEntry.findUnique.mockResolvedValue(null)
       expect(await efectoYaHecho('ENTRADA', ctx, { llave }, LIMITE)).toEqual({ hecho: false })
+    })
+
+    it('R3-4 · SALIDA: la llave de salida de la entrada A con un cuerpo que nombra la entrada B → no hecho (B sigue sin cerrar)', async () => {
+      const llaveA = randomUUID()
+      db.timeEntry.findUnique.mockResolvedValue({ id: 'tA', venueId: 'v1', llaveEntrada: llaveA })
+      // Por llaveEntrada: la de A sí, la de B no.
+      expect(await efectoYaHecho('SALIDA', ctx, { llave, llaveEntrada: llaveA }, LIMITE)).toMatchObject({ hecho: true })
+      expect(await efectoYaHecho('SALIDA', ctx, { llave, llaveEntrada: randomUUID() }, LIMITE)).toEqual({ hecho: false })
+      // Por timeEntryId: el de A sí, el de B no.
+      expect(await efectoYaHecho('SALIDA', ctx, { llave, timeEntryId: 'tA' }, LIMITE)).toEqual({
+        hecho: true,
+        resultado: { timeEntryId: 'tA', recuperado: true },
+      })
+      expect(await efectoYaHecho('SALIDA', ctx, { llave, timeEntryId: 'tB' }, LIMITE)).toEqual({ hecho: false })
     })
   })
 
@@ -465,12 +484,15 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
         select: { id: true, appliedCaptureSeqs: true },
       })
       conSeqs({ PHOTO_VINCULACION: { cel: 9 } })
-      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 0 }), LIMITE)).toMatchObject({ hecho: true })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Vinculacion' }), LIMITE)).toMatchObject({ hecho: true })
+      conSeqs({ PHOTO_PORTABILIDAD: { cel: 5 } })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Portabilidad' }), LIMITE)).toMatchObject({ hecho: true })
     })
 
-    it('replaceIndex 1 sobre una verificación vacía cae en la ranura 0: esa misma captura ahí también es hecho', async () => {
+    it('R3-3 · replaceIndex sin photoLabel no es un cuerpo válido: no hecho y sin tocar la base', async () => {
       conSeqs({ PHOTO_VINCULACION: { cel: 5 } })
-      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 1 }), LIMITE)).toMatchObject({ hecho: true })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 1 }), LIMITE)).toEqual({ hecho: false })
+      expect(db.saleVerification.findUnique).not.toHaveBeenCalled()
     })
 
     it('una captura anterior, otro aparato, una más nueva en la OTRA ranura, sin verificación o sin ficha → no hecho', async () => {

@@ -1,7 +1,8 @@
 /**
  * La gracia de 24 h y «por revisar» (App de campo, bloque 1, Tarea 7). `aplicarEnvio` va mockeado (lo prueba
  * envioDeCampo.test.ts); la huella es la real. Los retenidos viven en una tabla en memoria con el MISMO comportamiento que
- * importa de Postgres: el único `(celularId, huella)` (P2002) y los `updateMany` condicionados por estado (el CAS).
+ * importa de Postgres: el único `(celularId, huella)` (P2002), los `updateMany` condicionados por estado (el CAS) y el
+ * `@updatedAt` que Prisma pone en cada escritura (salvo que la escritura lo dé), que es la marca de «en vuelo» (I2).
  */
 import { Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
@@ -53,10 +54,17 @@ const DESVINCULADO = new Date(AHORA.getTime() - 2 * HORA)
 
 /** La tabla de retenidos en memoria. */
 let filas: any[]
+const igual = (a: any, b: any) => (a instanceof Date && b instanceof Date ? a.getTime() === b.getTime() : a === b)
 const coincide = (f: any, where: any): boolean =>
-  Object.entries(where).every(([k, v]: [string, any]) =>
-    k === 'AND' ? v.every((w: any) => coincide(f, w)) : v && typeof v === 'object' && 'in' in v ? v.in.includes(f[k]) : f[k] === v,
-  )
+  Object.entries(where).every(([k, v]: [string, any]) => {
+    if (k === 'AND') return v.every((w: any) => coincide(f, w))
+    if (k === 'OR') return v.some((w: any) => coincide(f, w))
+    if (!v || typeof v !== 'object' || v instanceof Date) return igual(f[k], v)
+    if ('in' in v) return v.in.includes(f[k])
+    if ('lt' in v) return f[k] instanceof Date && f[k] < v.lt
+    return igual(f[k], v)
+  })
+const MIN = 60 * 1000
 const tick = () => new Promise(r => setImmediate(r))
 
 const cuerpoVenta = (extra: object = {}) => JSON.stringify({ llave: randomUUID(), serialNumber: '89520001', precioVisto: 0, ...extra })
@@ -85,27 +93,39 @@ beforeEach(() => {
   db.venue.findUnique.mockImplementation(async ({ where }: any) => ({ organizationId: where.id === 'vOtra' ? 'org2' : 'org1' }))
   db.venue.findMany.mockResolvedValue([{ id: 'v1', name: 'Sucursal Centro', timezone: 'America/Mexico_City' }])
   db.staff.findMany.mockResolvedValue([{ id: 's1', firstName: 'Ana', lastName: 'Campo' }])
-  db.envioRetenidoDeCampo.findUnique.mockImplementation(
-    async ({ where }: any) =>
-      (where.id
+  // Como Postgres, una lectura es una FOTO de la fila (no la fila viva que después cambia otra escritura).
+  const foto = (f: any) => (f ? { ...f } : null)
+  db.envioRetenidoDeCampo.findUnique.mockImplementation(async ({ where }: any) =>
+    foto(
+      where.id
         ? filas.find(f => f.id === where.id)
-        : filas.find(f => f.celularId === where.celularId_huella.celularId && f.huella === where.celularId_huella.huella)) ?? null,
+        : filas.find(f => f.celularId === where.celularId_huella.celularId && f.huella === where.celularId_huella.huella),
+    ),
   )
   db.envioRetenidoDeCampo.findFirst.mockImplementation(async ({ where }: any) => {
     await tick()
-    return filas.find(f => coincide(f, where)) ?? null
+    return foto(filas.find(f => coincide(f, where)))
   })
   db.envioRetenidoDeCampo.updateMany.mockImplementation(async ({ where, data }: any) => {
     await tick()
     const m = filas.filter(f => coincide(f, where))
-    m.forEach(f => Object.assign(f, data))
+    m.forEach(f => Object.assign(f, { updatedAt: new Date() }, data)) // @updatedAt, salvo que la escritura lo dé
     return { count: m.length }
   })
   db.envioRetenidoDeCampo.create.mockImplementation(async ({ data }: any) => {
     if (filas.some(f => f.celularId === data.celularId && f.huella === data.huella)) {
       throw new Prisma.PrismaClientKnownRequestError('único', { code: 'P2002', clientVersion: 'x' })
     }
-    const f = { id: `r${filas.length + 1}`, estado: 'PENDIENTE', rechazo: null, resultado: null, nota: null, createdAt: AHORA, ...data }
+    const f = {
+      id: `r${filas.length + 1}`,
+      estado: 'PENDIENTE',
+      rechazo: null,
+      resultado: null,
+      nota: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...data,
+    }
     filas.push(f)
     return f
   })
@@ -165,14 +185,26 @@ describe('recibirEnGracia', () => {
     expect(filas).toHaveLength(1)
   })
 
-  it('dos subidas a la vez de la misma huella admitida: la que pierde el único (P2002) termina la misma aplicación; UNA fila', async () => {
+  it('dos subidas a la vez de la misma huella admitida: la que pierde el único (P2002) no la vuelve a ejecutar (409 o lo aplicado); UNA fila', async () => {
     const e = envio()
     db.envioRetenidoDeCampo.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null)
     aplicar.mockResolvedValue(aplicado())
-    const [a, b] = await Promise.all([recibirEnGracia(reportado(e), e), recibirEnGracia(reportado(e), e)])
+    const [a, b] = await Promise.all(
+      [recibirEnGracia(reportado(e), e), recibirEnGracia(reportado(e), e)].map(x =>
+        x.then(
+          r => r,
+          err => err,
+        ),
+      ),
+    )
     expect(filas).toHaveLength(1)
     expect(filas[0]).toMatchObject({ estado: 'APLICADO', motivo: 'APLICADO_EN_GRACIA' })
-    expect([a.status, b.status].sort()).toEqual([200, 201])
+    expect(aplicar).toHaveBeenCalledTimes(1)
+    const [gano, perdio] = a.status === 201 ? [a, b] : [b, a]
+    expect(gano.status).toBe(201)
+    // I2: mientras la otra la aplica es 409 reintentable; si ya terminó, contesta lo aplicado.
+    if (perdio instanceof Error) expect(perdio).toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+    else expect(perdio.body).toMatchObject({ resuelto: 'APLICADO' })
   })
 
   it('custodia aceptada en parte en la gracia → fila APLICADA con las fallidas en resultado y 200 { resuelto: APLICADO }', async () => {
@@ -378,6 +410,7 @@ function retenido(extra: object = {}) {
     resultado: null,
     nota: null,
     createdAt: AHORA,
+    updatedAt: new Date(AHORA.getTime() - HORA), // tocada hace una hora: nadie la está aplicando
     ...extra,
   }
   filas.push(f)
@@ -400,9 +433,14 @@ describe('resolverRetenido', () => {
     )
     expect(permiso).not.toHaveBeenCalled()
     expect(f).toMatchObject({ estado: 'APLICADO', resueltoPor: 'sup1', resueltoAt: AHORA, nota: 'sí la vendió' })
+    // I2: tomarla es un CAS: PENDIENTE, o APLICANDO que nadie toca hace más de la ventana; la marca es su updatedAt.
     expect(db.envioRetenidoDeCampo.updateMany).toHaveBeenCalledWith({
-      where: { id: 'r1', organizationId: 'org1', estado: { in: ['PENDIENTE', 'APLICANDO'] } },
-      data: { estado: 'APLICANDO' },
+      where: {
+        id: 'r1',
+        organizationId: 'org1',
+        OR: [{ estado: 'PENDIENTE' }, { estado: 'APLICANDO', updatedAt: { lt: new Date(AHORA.getTime() - 5 * MIN) } }],
+      },
+      data: { estado: 'APLICANDO', updatedAt: AHORA },
     })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CAMPO_RETENIDO_APLICADO', staffId: 'sup1', entityId: 'r1' }))
   })
@@ -466,28 +504,18 @@ describe('resolverRetenido', () => {
       let soltar!: () => void
       aplicar.mockImplementation(() => new Promise(listo => (soltar = () => listo(aplicado()))))
 
-      const aplicando = resolver('APLICAR').then(
-        r => r,
-        e => e,
-      )
-      if (!descartaPrimero) {
-        while (f.estado !== 'APLICANDO') await tick() // «Aplicar» ya tomó el retenido
-      }
-      const descartando = resolver('DESCARTAR').then(
-        r => r,
-        e => e,
-      )
-      const d = await descartando
-      if (aplicar.mock.calls.length) soltar()
-      const a = await aplicando
-
-      if (f.estado === 'DESCARTADO') {
+      if (descartaPrimero) {
+        expect(await resolver('DESCARTAR')).toEqual({ estado: 'DESCARTADO', repetida: false })
+        await expect(resolver('APLICAR')).rejects.toMatchObject({ code: 'YA_RESUELTO' })
         expect(aplicar).not.toHaveBeenCalled()
-        expect(a).toMatchObject({ code: 'YA_RESUELTO' })
       } else {
-        expect(f.estado).toBe('APLICADO')
+        const aplicando = resolver('APLICAR')
+        while (!aplicar.mock.calls.length) await tick() // «Aplicar» ya la tomó y está aplicando
+        // I2: nadie le quita la fila a quien la está aplicando.
+        await expect(resolver('DESCARTAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+        soltar()
+        expect(await aplicando).toMatchObject({ estado: 'APLICADO' })
         expect(aplicar).toHaveBeenCalledTimes(1)
-        expect(d).toMatchObject({ code: 'APLICACION_A_MEDIAS' })
       }
       expect(f.estado).toBe(descartaPrimero ? 'DESCARTADO' : 'APLICADO')
     }
@@ -724,7 +752,8 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
   it('R2-1 · gracia, PRIMER intento: la ruta normal ya la aceptó (respuesta perdida) y la SIM se vendió; el rechazo consulta el efecto → APLICADO', async () => {
     const e = custodia()
     aplicar.mockResolvedValueOnce(simVendida)
-    efecto.mockResolvedValueOnce({ hecho: true, resultado: recuperada })
+    // Antes de ejecutar todavía no se ve (I1); la ruta normal la termina mientras tanto y el rechazo vuelve a preguntar.
+    efecto.mockResolvedValueOnce({ hecho: false }).mockResolvedValueOnce({ hecho: true, resultado: recuperada })
     const r = await recibirEnGracia(reportado(e), e)
     expect(r).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: recuperada } })
     expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: recuperada })
@@ -741,7 +770,7 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     const e = custodia()
     aplicar.mockResolvedValueOnce(simVendida)
     expect((await recibirEnGracia(reportado(e), e)).body).toEqual({ retenido: true, motivo: 'RECHAZADO' })
-    expect(efecto).toHaveBeenCalledTimes(1)
+    expect(efecto).toHaveBeenCalledTimes(2) // antes de ejecutar (I1) y antes de regresarla
     expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo: { code: 'CUSTODIA_INCOMPLETA' } })
   })
 
@@ -785,18 +814,16 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
   it('R2-1 · «Aplicar» desde PENDIENTE (primer intento): rechazo, pero la ruta normal ya la había aceptado → APLICADO, no PENDIENTE', async () => {
     const f = retenido({ tipo: 'CUSTODIA_RECHAZAR', cuerpoJson: JSON.stringify({ serialNumber: 'SIM-D', custodyVersion: 1 }) })
     aplicar.mockResolvedValueOnce({ tipo: 'RECHAZADO', rechazo: { code: 'NOT_IN_YOUR_CUSTODY', message: 'ya no' } })
-    efecto.mockResolvedValueOnce({ hecho: true, resultado: { recuperadoDeLaBitacora: true } })
+    efecto.mockResolvedValueOnce({ hecho: false }).mockResolvedValueOnce({ hecho: true, resultado: { recuperadoDeLaBitacora: true } })
     expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', resultado: { recuperadoDeLaBitacora: true } })
     expect(f.estado).toBe('APLICADO')
-    expect(efecto).toHaveBeenCalledTimes(1) // desde PENDIENTE no hay nada que reanudar: sólo antes de regresarla
+    expect(efecto).toHaveBeenCalledTimes(2) // antes de ejecutar (I1) y antes de regresarla
   })
 
-  it('R2-1 · dos «Aplicar» a la vez: el primero cae tras aceptar, el segundo ve un rechazo; el efecto existe → APLICADO, nunca PENDIENTE', async () => {
+  it('R2-1 · dos «Aplicar» a la vez: el segundo ve la fila en vuelo → 409 (I2); el primero cae tras aceptar y el tercero la recupera', async () => {
     const f = retenido({ tipo: 'CUSTODIA_ACEPTAR', cuerpoJson: JSON.stringify({ sims: [{ serialNumber: 'SIM-E', custodyVersion: 1 }] }) })
     let caer!: () => void
-    aplicar
-      .mockImplementationOnce(() => new Promise((_, rechazar) => (caer = () => rechazar(new Error('cayó tras aceptar')))))
-      .mockImplementationOnce(async () => simVendida)
+    aplicar.mockImplementationOnce(() => new Promise((_, rechazar) => (caer = () => rechazar(new Error('cayó tras aceptar')))))
     let aceptada = false
     efecto.mockImplementation(async () => (aceptada ? { hecho: true, resultado: { recuperadoDeLaBitacora: true } } : { hecho: false }))
     const a = resolver('APLICAR').then(
@@ -805,10 +832,13 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     )
     while (!aplicar.mock.calls.length) await tick()
     aceptada = true // el primero ya aceptó la SIM en la base
-    const b = await resolver('APLICAR')
+    await expect(resolver('APLICAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+    expect(f.estado).toBe('APLICANDO')
     caer()
     expect(await a).toMatchObject({ message: 'cayó tras aceptar' })
-    expect(b).toMatchObject({ estado: 'APLICADO' })
+    // Al caer la soltó: el siguiente «Aplicar» no espera la ventana, mira el efecto y la deja APLICADA sin ejecutar.
+    expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', resultado: { recuperadoDeLaBitacora: true } })
+    expect(aplicar).toHaveBeenCalledTimes(1)
     expect(f.estado).toBe('APLICADO')
   })
 })
@@ -957,5 +987,238 @@ describe('alcance del que pregunta (S3, MCP)', () => {
     db.venue.findUnique.mockResolvedValue({ organizationId: 'org1' })
     sucursales.mockResolvedValue([{ staffVenueId: 'sv', venueId: 'vB', nombre: 'B', role: 'CASHIER', pin: null }])
     expect(await resolver('APLICAR', { venueIds: ['vB'] })).toMatchObject({ estado: 'APLICADO' })
+  })
+})
+
+describe('arreglo final 4: las cuatro invariantes del retenido', () => {
+  const HECHA = { orderId: 'o', paymentId: 'p', saleVerificationId: 'sv', recuperado: true }
+  const enVueloHace = (ms: number) => new Date(AHORA.getTime() - ms)
+  const pendiente = <T>() => {
+    let soltar!: (v: T) => void
+    const promesa = new Promise<T>(r => (soltar = r))
+    return { promesa, soltar }
+  }
+
+  describe('I1 · lo que pasó manda', () => {
+    it('R3-1 · una VENTA COMPLETA por la ruta normal que llega retenida (NO_REPORTADA) nace APLICADO con su resultado', async () => {
+      const e = envio() // sin huella reportada → se retendría
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await recibirEnGracia(celular(), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: HECHA, resueltoAt: AHORA })
+      expect(aplicar).not.toHaveBeenCalled()
+      expect(efecto).toHaveBeenCalledWith(
+        'VENTA',
+        { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
+        JSON.parse(e.cuerpoJson),
+        AHORA,
+      )
+      // «Descartar» ya no la puede dejar como «no se registra».
+      await expect(
+        resolverRetenido({ retenidoId: filas[0].id, organizationId: 'org1', accion: 'DESCARTAR', porStaffId: 'sup1' }),
+      ).rejects.toMatchObject({
+        code: 'YA_APLICADO',
+      })
+    })
+
+    it('al nacer vale para todos los tipos: una SALIDA ya checada que llega fuera de plazo nace APLICADO', async () => {
+      const e = envio(JSON.stringify({ llave: randomUUID(), llaveEntrada: randomUUID() }), 'SALIDA')
+      efecto.mockResolvedValue({ hecho: true, resultado: { timeEntryId: 't1', recuperado: true } })
+      const tarde = reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) })
+      expect(await recibirEnGracia(tarde, e)).toEqual({
+        status: 200,
+        body: { resuelto: 'APLICADO', resultado: { timeEntryId: 't1', recuperado: true } },
+      })
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', tipo: 'SALIDA' })
+    })
+
+    it('antes de la PRIMERA ejecución de la gracia: si ya está hecho no se ejecuta', async () => {
+      const e = envio()
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await recibirEnGracia(reportado(e), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
+      expect(aplicar).not.toHaveBeenCalled()
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO' })
+    })
+
+    it('«Descartar» de una PENDIENTE cuyo efecto ya ocurrió → queda APLICADO y contesta { estado: APLICADO, resultado, yaEstabaHecho }', async () => {
+      const f = retenido()
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await resolver('DESCARTAR', { nota: 'no la vendió' })).toEqual({
+        estado: 'APLICADO',
+        resultado: HECHA,
+        repetida: false,
+        yaEstabaHecho: true,
+      })
+      expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA, resueltoPor: 'sup1' })
+      expect(aplicar).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CAMPO_RETENIDO_DESCARTADO' }))
+    })
+
+    it('«Descartar» de una PENDIENTE con la venta a medias → la fila pasa a APLICANDO (sin dueño) y 409 APLICACION_A_MEDIAS', async () => {
+      const f = retenido()
+      efecto.mockResolvedValue({ hecho: false, aMedias: true })
+      await expect(resolver('DESCARTAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_A_MEDIAS' })
+      expect(f.estado).toBe('APLICANDO')
+      // Sin dueño: «Aplicar» la toma enseguida, sin esperar la ventana.
+      aplicar.mockResolvedValue(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+      expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO' })
+    })
+
+    it('«Aplicar» de una PENDIENTE cuyo efecto ya ocurrió → APLICADO sin ejecutar ni pedir asignación', async () => {
+      const f = retenido()
+      sucursales.mockResolvedValue([])
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await resolver('APLICAR')).toEqual({ estado: 'APLICADO', resultado: HECHA, repetida: false })
+      expect(aplicar).not.toHaveBeenCalled()
+      expect(f.estado).toBe('APLICADO')
+    })
+
+    it('la gracia no contesta «retenido» ni «descartado» de una fila cuyo efecto ya ocurrió: la deja APLICADO', async () => {
+      const e = envio()
+      const huella = huellaDelEnvio('VENTA', 'v1', e.cuerpoJson)
+      for (const estado of ['PENDIENTE', 'DESCARTADO']) {
+        filas = []
+        const f = retenido({ huella, cuerpoJson: e.cuerpoJson, estado, resueltoPor: estado === 'DESCARTADO' ? 'sup9' : null })
+        efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+        expect(await recibirEnGracia(celular(), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
+        expect(f.estado).toBe('APLICADO')
+      }
+      expect(aplicar).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('I2 · nadie le quita la fila a quien la está aplicando', () => {
+    it('una APLICANDO tocada hace 1 min: «Aplicar» y «Descartar» → 409 APLICACION_EN_CURSO en español, sin tocarla ni ejecutar', async () => {
+      const f = retenido({ estado: 'APLICANDO', updatedAt: enVueloHace(MIN) })
+      for (const accion of ['APLICAR', 'DESCARTAR'] as const) {
+        await expect(resolver(accion)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'APLICACION_EN_CURSO',
+          message: 'Se está aplicando en este momento. Vuelve a intentar en unos minutos.',
+        })
+      }
+      expect(f).toMatchObject({ estado: 'APLICANDO', updatedAt: enVueloHace(MIN) })
+      expect(aplicar).not.toHaveBeenCalled()
+      expect(efecto).not.toHaveBeenCalled()
+    })
+
+    it('R3-2 · la primera subida sigue aplicando; un reintento ya fuera de plazo → 409 (reintentable), NO la regresa a PENDIENTE', async () => {
+      const e = envio()
+      const venta = pendiente<any>()
+      aplicar.mockReturnValueOnce(venta.promesa)
+      const primera = recibirEnGracia(reportado(e), e)
+      while (!aplicar.mock.calls.length) await tick()
+
+      const tarde = reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) })
+      await expect(recibirEnGracia(tarde, e)).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+      await expect(recibirEnGracia(reportado(e, { sinGracia: true }), e)).rejects.toMatchObject({ code: 'APLICACION_EN_CURSO' })
+      await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'APLICACION_EN_CURSO' })
+      expect(filas[0].estado).toBe('APLICANDO')
+
+      venta.soltar(aplicado())
+      expect((await primera).status).toBe(201)
+      expect(filas[0].estado).toBe('APLICADO')
+      expect(aplicar).toHaveBeenCalledTimes(1)
+    })
+
+    it('vencida (nadie la toca hace 6 min, el proceso cayó): el reintento de la gracia la vuelve a tomar y la termina', async () => {
+      const e = envio()
+      retenido({
+        huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson),
+        cuerpoJson: e.cuerpoJson,
+        estado: 'APLICANDO',
+        motivo: 'APLICADO_EN_GRACIA',
+        updatedAt: enVueloHace(6 * MIN),
+      })
+      aplicar.mockResolvedValue(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+      expect((await recibirEnGracia(reportado(e), e)).status).toBe(200)
+      expect(filas[0].estado).toBe('APLICADO')
+      expect(efecto).toHaveBeenCalledTimes(1) // I1 antes de volver a ejecutar
+    })
+  })
+
+  describe('I3 · APLICANDO sólo vuelve a PENDIENTE por quien la tiene', () => {
+    it('la gracia tarda más que la ventana y «Aplicar» la retoma: el rechazo de la gracia ya no la regresa; gana el que aplica', async () => {
+      const e = envio()
+      const deLaGracia = pendiente<any>()
+      const delPanel = pendiente<any>()
+      aplicar.mockReturnValueOnce(deLaGracia.promesa).mockReturnValueOnce(delPanel.promesa)
+      const gracia = recibirEnGracia(reportado(e), e).then(
+        r => r,
+        err => err,
+      )
+      while (aplicar.mock.calls.length < 1) await tick()
+
+      jest.setSystemTime(new Date(AHORA.getTime() + 6 * MIN)) // la gracia se colgó: ya no está en vuelo
+      const panel = resolverRetenido({ retenidoId: filas[0].id, organizationId: 'org1', accion: 'APLICAR', porStaffId: 'sup1' })
+      while (aplicar.mock.calls.length < 2) await tick()
+
+      deLaGracia.soltar(rechazado()) // la gracia recibe un rechazo y no hay efecto: pero ya no es suya
+      expect(await gracia).toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+      expect(filas[0].estado).toBe('APLICANDO')
+
+      delPanel.soltar(aplicado())
+      expect(await panel).toMatchObject({ estado: 'APLICADO' })
+      expect(filas[0].estado).toBe('APLICADO')
+    })
+
+    it('vencida y ya no procede (24 h) sin efecto ni a medias → PENDIENTE con su motivo (sólo la fila vencida)', async () => {
+      const e = envio()
+      retenido({
+        huella: huellaDelEnvio('VENTA', 'v1', e.cuerpoJson),
+        cuerpoJson: e.cuerpoJson,
+        estado: 'APLICANDO',
+        motivo: 'APLICADO_EN_GRACIA',
+        updatedAt: enVueloHace(6 * MIN),
+      })
+      const tarde = reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 30 * HORA) })
+      expect(await recibirEnGracia(tarde, e)).toEqual({ status: 202, body: { retenido: true, motivo: 'FUERA_DE_PLAZO' } })
+      expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'FUERA_DE_PLAZO' })
+      expect(aplicar).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('I4 · el que aplicó gana', () => {
+    it('la gracia aplica después de que la fila quedó DESCARTADO → APLICADO, contesta lo aplicado y deja CAMPO_RETENIDO_DESCARTE_REVERTIDO', async () => {
+      const e = envio()
+      aplicar.mockImplementationOnce(async () => {
+        Object.assign(filas[0], { estado: 'DESCARTADO', resueltoPor: 'sup9', nota: 'no era' }) // tardó más que la ventana
+        return aplicado()
+      })
+      expect(await recibirEnGracia(reportado(e), e)).toEqual({
+        status: 201,
+        body: { orderId: 'o', paymentId: 'p', repetida: false, aplicadoEnGracia: true },
+      })
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: { orderId: 'o', paymentId: 'p', repetida: false } })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO',
+          entityId: filas[0].id,
+          data: expect.objectContaining({ descartadoPor: 'sup9', notaDelDescarte: 'no era' }),
+        }),
+      )
+    })
+
+    it('«Aplicar» que aplica sobre un DESCARTADO también lo revierte y lo deja en la bitácora', async () => {
+      const f = retenido()
+      aplicar.mockImplementationOnce(async () => {
+        Object.assign(f, { estado: 'DESCARTADO', resueltoPor: 'sup9' })
+        return aplicado()
+      })
+      expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO' })
+      expect(f.estado).toBe('APLICADO')
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO', data: expect.objectContaining({ descartadoPor: 'sup9' }) }),
+      )
+    })
+  })
+
+  it('R3-3 · en la gracia, una evidencia con replaceIndex y sin photoLabel → 400 CUERPO_INVALIDO sin fila', async () => {
+    const e = envio(
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: ['https://example.test/a.jpg'], replaceIndex: 1, ...CAPTURA }),
+      'EVIDENCIA',
+    )
+    await expect(recibirEnGracia(celular(), e)).rejects.toMatchObject({ statusCode: 400, code: 'CUERPO_INVALIDO' })
+    expect(filas).toHaveLength(0)
   })
 })
