@@ -1314,7 +1314,10 @@ export async function deleteModifier(venueId: string, modifierGroupId: string, m
     throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
   }
 
-  await prisma.modifier.delete({ where: { id: modifierId } })
+  // D17 (founder, 9-nov, A): se ARCHIVA, como el grupo (D16). Borrarlo le quitaba el extra a una liga ya enviada (CASCADE), al reporte
+  // (SET NULL) y a su historial de precios, y rechazaba la venta sin red que lo traía. Las lecturas de administración no cambian a
+  // propósito: el apagado se ve y se vuelve a prender (el ANDROID viejo, con su interruptor «Activo» desde la lista).
+  await prisma.modifier.update({ where: { id: modifierId }, data: { active: false } })
 
   logAction({ venueId, action: 'MODIFIER_DELETED', entity: 'Modifier', entityId: existing.id, data: { name: existing.name } })
 }
