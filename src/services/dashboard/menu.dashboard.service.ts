@@ -2301,8 +2301,11 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               // Handle modifiers
               for (const modifierData of groupData.modifiers) {
                 // Check if modifier exists by name in this group
+                // D17 (Codex r1): como el grupo en D16, «combinar» ignora los extras archivados (quitar ya no los destruye) y crea otro con
+                // el precio del archivo, como cuando se borraban; revivir el viejo lo devolvía con su precio anterior. «Reemplazar» sí
+                // los reusa, porque acaba de apagar a todos.
                 const existingModifier = await tx.modifier.findFirst({
-                  where: { groupId: modifierGroup.id, name: modifierData.name },
+                  where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
                 })
 
                 if (!existingModifier) {
@@ -2323,13 +2326,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                     where: { id: existingModifier.id },
                     data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
                   })
-                } else if (!existingModifier.active || existingModifier.isDemo) {
-                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off, and
-                  // (Codex C5-2) a demo one the file adopts stops being demo.
-                  await tx.modifier.update({
-                    where: { id: existingModifier.id },
-                    data: { active: true, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
-                  })
+                } else if (existingModifier.isDemo) {
+                  // Merge keeps today's behaviour (a live extra is not overwritten); (Codex C5-2) a demo one the file adopts stops
+                  // being demo.
+                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { isDemo: false } })
                 }
               }
             }

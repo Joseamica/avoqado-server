@@ -167,14 +167,32 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true, price: 30 } })
   })
 
-  it('REGRESIÓN · «Combinar» no sobrescribe un grupo VIVO: no toca sus reglas, y un extra suyo apagado sólo se enciende, sin cambiarle el precio', async () => {
+  it('REGRESIÓN · «Combinar» no sobrescribe un grupo VIVO: no toca sus reglas', async () => {
     prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
-    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-avena', active: false, price: 20 } as never)
 
     await importMenu(V, conLeche('merge'), HUMANO)
 
     expect(prismaMock.modifierGroup.update).not.toHaveBeenCalled()
-    expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-avena' }, data: { active: true } })
+  })
+
+  it('D17 · «Combinar» sólo busca extras vivos: uno quitado (archivado) no revive con su precio viejo, se crea otro con el del archivo', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
+
+    await importMenu(V, conLeche('merge'), HUMANO)
+
+    expect(prismaMock.modifier.findFirst).toHaveBeenCalledWith({ where: { groupId: 'grupo-leche', name: 'Avena', active: true } })
+    expect(prismaMock.modifier.create).toHaveBeenCalledWith({ data: { groupId: 'grupo-leche', name: 'Avena', price: 30 } })
+    expect(prismaMock.modifier.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN · «Combinar» no le cambia el precio a un extra VIVO que ya existe', async () => {
+    prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: true, required: true } as never)
+    prismaMock.modifier.findFirst.mockResolvedValueOnce({ id: 'extra-avena', active: true, price: 20 } as never)
+
+    await importMenu(V, conLeche('merge'), HUMANO)
+
+    expect(prismaMock.modifier.create).not.toHaveBeenCalled()
+    expect(prismaMock.modifier.update).not.toHaveBeenCalled()
   })
 
   it('D16 · «Combinar» sólo busca grupos vivos; «Reemplazar» también los apagados', async () => {

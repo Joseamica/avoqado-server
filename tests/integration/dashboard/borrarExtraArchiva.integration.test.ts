@@ -6,7 +6,13 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 
-import { deleteModifier, getModifierGroupById, getModifierGroups, updateModifier } from '@/services/dashboard/menu.dashboard.service'
+import {
+  deleteModifier,
+  getModifierGroupById,
+  getModifierGroups,
+  importMenu,
+  updateModifier,
+} from '@/services/dashboard/menu.dashboard.service'
 import { getPaymentLinkByShortCode } from '@/services/dashboard/paymentLink.service'
 import { getProducts } from '@/services/dashboard/product.dashboard.service'
 import { createOrderWithItems } from '@/services/mobile/order.mobile.service'
@@ -195,6 +201,51 @@ describe('Borrar un extra lo archiva', () => {
     await expect(deleteModifier(x.venueId, grupoId, lecheId)).resolves.toBeUndefined()
 
     expect(await prisma.modifier.count({ where: { groupId: grupoId, active: false } })).toBe(2)
+  })
+
+  it('Codex r1 · «Combinar» un menú que trae el extra quitado no lo revive con su precio viejo: crea otro con el del archivo', async () => {
+    const x = await negocio()
+    const { productId, grupoId, extraId } = await grupoConExtras(x) // «Shot» a $20
+    const corto = await ligaConExtra(x, productId, extraId)
+    const ligaAntes = await getPaymentLinkByShortCode(corto)
+    await deleteModifier(x.venueId, grupoId, extraId)
+
+    const archivo = {
+      mode: 'merge',
+      categories: [
+        {
+          name: 'IVA',
+          slug: `iva-${x.rfc}`.toLowerCase(),
+          products: [
+            {
+              name: 'Café',
+              sku: `P-${x.rfc}`,
+              price: 100,
+              modifierGroups: [
+                {
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: false,
+                  minSelections: 0,
+                  maxSelections: 1,
+                  modifiers: [{ name: 'Shot', price: 25 }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+    await importMenu(x.venueId, archivo as any, { type: 'SERVICE', servicePrincipalId: 'D17_PRUEBA' } as any)
+
+    expect(await prisma.modifier.findUniqueOrThrow({ where: { id: extraId }, select: { active: true, price: true } })).toEqual({
+      active: false,
+      price: new Prisma.Decimal(20),
+    })
+    const shots = await prisma.modifier.findMany({ where: { groupId: grupoId, name: 'Shot', active: true } })
+    expect(shots.map(m => Number(m.price))).toEqual([25])
+    expect(shots[0].id).not.toBe(extraId)
+    expect(await getPaymentLinkByShortCode(corto)).toEqual(ligaAntes)
   })
 
   // Regresión: los 404 de hoy
