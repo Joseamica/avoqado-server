@@ -31,6 +31,7 @@ import { comoJson, nuevoRepartoDeCuenta } from '@/services/shared/repartoDescuen
 import { conservarDescuentoHistorico, sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 import { baseDeCargos, recalcularCargosPorServicio } from '@/services/shared/serviceCharges'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
+import type { LogActionParams } from '@/services/dashboard/activity-log.service'
 import { crearCuentaDelPedidoEnTx, toQuoteSnapshot } from './order.service'
 import { quoteCart, type CartItemInput, type QuoteResult } from './quote.service'
 
@@ -59,6 +60,8 @@ export interface QuoteConBeneficios extends QuoteResult {
   descartados?: BeneficioElegido[]
   /** `false` = no se simuló (sin lugar, candado o tiempo agotado, o pool desconocido): la tienda dice que se calculan al pedir. */
   beneficios?: { calculados: boolean }
+  /** S11 (Codex r8): `false` = `aplicados` llegó al tope (`MAX_APLICADOS`): `toPublicQuote` nunca lo publica (sale degradada). */
+  aplicadosCompletos?: false
 }
 
 export const BENEFIT_UNAVAILABLE = 'BENEFIT_UNAVAILABLE'
@@ -111,33 +114,41 @@ function comoNoDisponible(error: unknown, cual: BeneficioElegido): AppError {
   throw error
 }
 
+/** Lo que devuelve un canje tolerante que la caja rechazó (queda en `descartados`). */
+const DESCARTADO = Symbol('descartado')
+
 /**
  * Un canje elegido. Estricto: su rechazo de negocio es `BENEFIT_UNAVAILABLE`. Tolerante: corre en su `SAVEPOINT` (el patrón de
- * `paymentEffects.service.ts`); si la caja lo rechaza, `ROLLBACK TO SAVEPOINT` y devuelve `true` (descartado). 🔴 Una traba (40P01), un
+ * `paymentEffects.service.ts`); si la caja lo rechaza, `ROLLBACK TO SAVEPOINT` y devuelve `DESCARTADO`. 🔴 Una traba (40P01), un
  * candado o tiempo vencidos (55P03, 57014, P2028) NO se atrapan aquí: suben y abortan la simulación entera; `withDeadlockRetry` repite
  * sólo la traba. Seguir tras un `ROLLBACK TO SAVEPOINT` de una víctima mostraría como «descartado» un beneficio que sí estaba (R63).
+ * S11 (R7): devuelve lo que devolvió el canje, para su bitácora.
  */
-async function canjear(tx: TxConReintento, cual: BeneficioElegido, tolerante: boolean, fn: () => Promise<unknown>): Promise<boolean> {
+async function canjear<T>(
+  tx: TxConReintento,
+  cual: BeneficioElegido,
+  tolerante: boolean,
+  fn: () => Promise<T>,
+): Promise<T | typeof DESCARTADO> {
   if (!tolerante) {
     try {
-      await fn()
+      return await fn()
     } catch (error) {
       throw comoNoDisponible(error, cual)
     }
-    return false
   }
   const punto = `beneficio_${cual.toLowerCase()}`
   await tx.$executeRawUnsafe(`SAVEPOINT ${punto}`)
-  let descartado = false
+  let resultado: T | typeof DESCARTADO
   try {
-    await fn()
+    resultado = await fn()
   } catch (error) {
     comoNoDisponible(error, cual)
     await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${punto}`)
-    descartado = true
+    resultado = DESCARTADO
   }
   await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${punto}`)
-  return descartado
+  return resultado
 }
 
 /**
@@ -155,7 +166,7 @@ async function aplicarCuponEnTx(
     simulacion: boolean
     usosPropios: ReadonlyMap<string, number>
   },
-): Promise<void> {
+): Promise<{ discountId: string; couponCodeId: string; monto: number }> {
   const order = await tx.order.findFirst({
     where: { id: c.orderId, venueId: c.venueId },
     select: {
@@ -228,6 +239,7 @@ async function aplicarCuponEnTx(
       remainingBalance: Math.max(0, total - Number(order.paidAmount)),
     },
   })
+  return { discountId: cupon.discount.id, couponCodeId: cupon.id, monto }
 }
 
 /**
@@ -247,6 +259,13 @@ export async function aplicarBeneficiosEnTx(
   /** Sólo si la cuenta trae más de `MAX_APLICADOS` filas: el desglose llega hasta el tope y aquí va el conteo real (r5 #2). */
   aplicadosCompletos?: false
   aplicadosTotal?: number
+  /** S11 (Codex r8): el premio elegido quedó canjeado en esta cuenta. Se sabe por su fila, no por el desglose (que puede ir recortado). */
+  premio: boolean
+  /**
+   * S11 (R7): sólo en estricto, la bitácora de cada canje real (la del motor y las de los envoltorios públicos del cupón, el premio y
+   * los puntos). Quien crea el folio la escribe con su `tx`: un intento revertido se lleva sus filas.
+   */
+  auditorias?: LogActionParams[]
 }> {
   const { venueId, orderId, customerId, eleccion } = i
   const simulacion = opciones.tolerante === true
@@ -274,28 +293,58 @@ export async function aplicarBeneficiosEnTx(
   const usosPropios = new Map<string, number>()
   if (simulacion) for (const d of motor.applied) usosPropios.set(d.discountId, (usosPropios.get(d.discountId) ?? 0) + 1)
 
+  const auditorias: LogActionParams[] = [...motor.audits]
+  const auditoria = (action: string, entity: string, entityId: string, data: Prisma.InputJsonValue): LogActionParams => ({
+    staffId: null,
+    venueId,
+    action,
+    entity,
+    entityId,
+    data,
+  })
+
   if (codigo) {
-    const fuera = await canjear(tx, 'CUPON', simulacion, () =>
+    const r = await canjear(tx, 'CUPON', simulacion, () =>
       aplicarCuponEnTx(tx, { venueId, orderId, customerId, codigo, simulacion, usosPropios }),
     )
-    if (fuera) descartados.push('CUPON')
+    if (r === DESCARTADO) descartados.push('CUPON')
+    else {
+      const data = { discountId: r.discountId, couponCodeId: r.couponCodeId, amount: r.monto, source: 'coupon' }
+      auditorias.push(auditoria('DISCOUNT_APPLIED', 'Order', orderId, data))
+    }
   }
   if (eleccion.premioId) {
     const premioId = eleccion.premioId
-    const fuera = await canjear(tx, 'PREMIO', simulacion, async () => {
+    const r = await canjear(tx, 'PREMIO', simulacion, async () => {
       if (!config?.active || !config.stampsEnabled) throw new BadRequestError('La tarjeta de sellos no está activa en este negocio.')
-      await canjearPremioEnTx(tx, venueId, orderId, premioId)
+      return canjearPremioEnTx(tx, venueId, orderId, premioId)
     })
-    if (fuera) descartados.push('PREMIO')
+    if (r === DESCARTADO) descartados.push('PREMIO')
+    else {
+      // La misma de `avisarPremioCanjeado` (redeemStampReward.service.ts).
+      const data = {
+        orderId,
+        customerId,
+        rewardType: r.reward?.rewardType ?? null,
+        rewardLabel: r.reward?.rewardLabel ?? null,
+        discountAmount: r.discountAmount,
+      }
+      auditorias.push(auditoria('STAMP_REWARD_REDEEMED', 'StampReward', premioId, data))
+    }
   }
   if (eleccion.puntos) {
     const puntos = eleccion.puntos
-    const fuera = await canjear(tx, 'PUNTOS', simulacion, async () => {
+    const r = await canjear(tx, 'PUNTOS', simulacion, async () => {
       if (!config?.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
       const programa = { ...config, pointsPerDollar: config.pointsPerDollar.toNumber(), redemptionRate: config.redemptionRate.toNumber() }
-      await redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, puntos, undefined, programa)
+      return redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, puntos, undefined, programa)
     })
-    if (fuera) descartados.push('PUNTOS')
+    if (r === DESCARTADO) descartados.push('PUNTOS')
+    else {
+      // La misma de `redeemPointsToOrder` (loyalty.mobile.service.ts).
+      const data = { customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
+      auditorias.push(auditoria('LOYALTY_POINTS_REDEEMED', 'Order', orderId, data))
+    }
   }
 
   const cuenta = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { total: true } })
@@ -329,7 +378,14 @@ export async function aplicarBeneficiosEnTx(
     monto: new Prisma.Decimal(f.amount),
     orderDiscountId: f.id,
   }))
-  return { total: new Prisma.Decimal(cuenta.total), aplicados, descartados, ...incompleto }
+  return {
+    total: new Prisma.Decimal(cuenta.total),
+    aplicados,
+    descartados,
+    premio: filaDelPremio !== null,
+    ...incompleto,
+    ...(simulacion ? {} : { auditorias }),
+  }
 }
 
 // ── oferta ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -466,7 +522,7 @@ function codigoDe(error: unknown): string | undefined {
  * (P1001, P1002, P1008, P1017). Un error de negocio o de programación sube tal cual.
  */
 const CEDE_POR_INFRAESTRUCTURA = new Set(['55P03', '57014', 'P2028', 'P2024', 'P1001', 'P1002', 'P1008', 'P1017'])
-function cedeLaSimulacion(error: unknown): boolean {
+export function cedeLaSimulacion(error: unknown): boolean {
   if (isDeadlockError(error) || isModelLockTimeoutError(error)) return true
   if (CEDE_POR_INFRAESTRUCTURA.has(codigoDe(error) ?? '')) return true
   return error instanceof Prisma.PrismaClientUnknownRequestError && /code: "(55P03|57014)"/.test(error.message)
@@ -479,11 +535,66 @@ class Simulada extends Error {
   }
 }
 
+type CarritoCotizado = Pick<QuoteResult, 'subtotal' | 'total' | 'lines'>
+
 /**
- * La cotización de la tienda. Sin sesión, la de hoy (`quoteCart`). Con sesión, además, la SIMULACIÓN: en una transacción acotada
- * (R5''), la cuenta provisional `COTIZACION-<cuid>` (su `FOR KEY SHARE` de la clienta va primero, R6) + `aplicarBeneficiosEnTx`
- * tolerante, y se deshace lanzando `Simulada`. Nunca lanza `BENEFIT_UNAVAILABLE`: lo que ya no está sale en `descartados`.
- * ponytail: una escritura deshecha por cotización con sesión (≈ 20–40 sentencias); si pesa, una cotización por clienta cada N s.
+ * La SIMULACIÓN (R5'', R9): en una transacción acotada, la cuenta provisional `COTIZACION-<cuid>` (su `FOR KEY SHARE` de la clienta va
+ * primero, R6) + `aplicarBeneficiosEnTx` tolerante, y se deshace lanzando `Simulada`. El lugar del semáforo lo toma quien llama.
+ * ponytail: una escritura deshecha por simulación (≈ 20–40 sentencias); si pesa, una por clienta cada N s.
+ */
+async function simularLaCadena(venueId: string, quote: CarritoCotizado, customerId: string, eleccion: EleccionDeBeneficios) {
+  const folio = `COTIZACION-${cuid()}`
+  return withDeadlockRetry(
+    async tx => {
+      // Cede ella, nunca la caja: espera poco un candado y nunca deja una sentencia larga.
+      await tx.$executeRaw`SET LOCAL lock_timeout = '200ms'`
+      await tx.$executeRaw`SET LOCAL statement_timeout = '500ms'`
+      const { orderId } = await crearCuentaDelPedidoEnTx(tx, {
+        venueId,
+        externalId: folio,
+        orderNumber: folio,
+        quote: toQuoteSnapshot(quote),
+        customer: { name: 'Cotización', phone: null, email: null },
+        customerId,
+        note: null,
+        paymentMode: 'PAY_AT_PICKUP',
+      })
+      throw new Simulada(await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true }))
+    },
+    { etiqueta: 'simularLaCadena', ...SIMULACION.transaccion },
+  ).catch((error: unknown) => {
+    if (error instanceof Simulada) return error.resultado
+    throw error
+  })
+}
+
+/**
+ * S11 (R2'', R2'''): el total del borrador de tarjeta, sin crear nada: la MISMA simulación que cotizar, con un lugar del MISMO semáforo
+ * (global y por negocio, contado junto con las cotizaciones) tomado ANTES de pedir conexión, pero sin la degradación de S10. `null` = no
+ * hubo lugar (el borrador responde 503, sin decisión bajo la llave); un error de infraestructura sube (`cedeLaSimulacion` lo
+ * reconoce). Termina, con su rollback, antes de que el borrador abra su transacción.
+ */
+export async function simularBeneficios(
+  venueId: string,
+  quote: CarritoCotizado,
+  customerId: string,
+  eleccion: EleccionDeBeneficios,
+): Promise<Awaited<ReturnType<typeof aplicarBeneficiosEnTx>> | null> {
+  const soltar = await tomarLugar(venueId)
+  if (!soltar) {
+    logger.info('[OnlineOrdering] simulación de beneficios sin lugar', { venueId, tope: SIMULACION.global })
+    return null
+  }
+  try {
+    return await simularLaCadena(venueId, quote, customerId, eleccion)
+  } finally {
+    soltar()
+  }
+}
+
+/**
+ * La cotización de la tienda. Sin sesión, la de hoy (`quoteCart`). Con sesión, además, la SIMULACIÓN (`simularLaCadena`), con su lugar
+ * del semáforo. Nunca lanza `BENEFIT_UNAVAILABLE`: lo que ya no está sale en `descartados`.
  */
 export async function cotizarConBeneficios(
   venueId: string,
@@ -500,33 +611,10 @@ export async function cotizarConBeneficios(
     return { ...quote, beneficios: { calculados: false } }
   }
   const inicio = Date.now()
-  const eleccion = o.eleccion ?? {}
-  const folio = `COTIZACION-${cuid()}`
   let calculados = false
   try {
     const oferta = await ofertaDeBeneficios(venueId, customerId)
-    const r = await withDeadlockRetry(
-      async tx => {
-        // Cede ella, nunca la caja: espera poco un candado y nunca deja una sentencia larga.
-        await tx.$executeRaw`SET LOCAL lock_timeout = '200ms'`
-        await tx.$executeRaw`SET LOCAL statement_timeout = '500ms'`
-        const { orderId } = await crearCuentaDelPedidoEnTx(tx, {
-          venueId,
-          externalId: folio,
-          orderNumber: folio,
-          quote: toQuoteSnapshot(quote),
-          customer: { name: 'Cotización', phone: null, email: null },
-          customerId,
-          note: null,
-          paymentMode: 'PAY_AT_PICKUP',
-        })
-        throw new Simulada(await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true }))
-      },
-      { etiqueta: 'cotizarConBeneficios', ...SIMULACION.transaccion },
-    ).catch((error: unknown) => {
-      if (error instanceof Simulada) return error.resultado
-      throw error
-    })
+    const r = await simularLaCadena(venueId, quote, customerId, o.eleccion ?? {})
     // r6: o se calcula todo o no se calcula. Con más filas que el tope del desglose, no se anuncian beneficios con detalle incompleto.
     if (r.aplicadosCompletos === false) {
       logger.warn('[OnlineOrdering] la cotización sale sin beneficios: el desglose pasa del tope', {

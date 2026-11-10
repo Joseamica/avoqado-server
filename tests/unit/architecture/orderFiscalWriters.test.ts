@@ -756,6 +756,20 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
   },
+  // Tienda híbrida S11 (P2-4): el folio que un beneficio dejó en $0 se cierra pagado sin cobro, en la transacción de quien YA tiene la
+  // cuenta: la que la acaba de crear (createOnlineOrder) o la aceptación de «Mi equipo» (casTransition, tras casTransitionInTx).
+  'src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/online-ordering/order.service.ts#createOnlineOrder',
+      'src/services/online-ordering/transitions.service.ts#acceptWithoutCapture',
+    ],
+    proof: proof(
+      'tests/integration/online-ordering/canjeEnElFolio.integration.test.ts',
+      'cerrarFolioEnCeroEnTx',
+      '«Nadie» en $0 por un premio ⇒ PAID sin Payment, «Por entregar», comanda marcada, vale, cupón canjeado y sin loyaltyEligibleAt',
+    ),
+  },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
   'src/services/online-ordering/transitions.service.ts#casTransitionInTx': {
     class: 'LOCKED',
@@ -856,6 +870,10 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   // la fija «S10 · quien hereda la cuenta» (abajo).
   'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx': [],
   'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
+  // S11: el folio nace y se cierra en $0 en la MISMA transacción (la cuenta es nueva: nadie más la ve).
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': ['writeOnlineOrderInTx(', 'cerrarFolioEnCeroEnTx('],
+  // S11 (R6): la aceptación de «Mi equipo» cierra el $0 en su afterCas, después de casTransitionInTx (candado de la orden).
+  'src/services/online-ordering/transitions.service.ts#acceptWithoutCapture': ['casTransition(', 'cerrarFolioEnCeroEnTx('],
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': LOCK,
   'src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider': [
     'withDeliveryOrderLockConReintento(',
@@ -1168,7 +1186,9 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
         'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
       },
       'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': {
-        'src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
+        // S11: la simulación (cotizar y el borrador de tarjeta) y el folio de verdad; los dos crean la cuenta antes.
+        'src/services/online-ordering/beneficios.service.ts#simularLaCadena': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
+        'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
       },
     }
     for (const [hereda, llamadores] of Object.entries(HEREDAN)) {
@@ -1383,6 +1403,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/online-ordering/folios.service.ts#prepararFolioPagado': 1,
   'src/services/online-ordering/folios.service.ts#syncPaidClosedFolios': 1,
   'src/services/online-ordering/cancelledOrderSync.ts#cerrarCanceladasReleyendo': 1,
+  // S11: crear el folio (y el pedido de tarjeta) canjea en la misma transacción: el premio bloquea la cuenta NUEVA
+  // (bloquearCuentaParaEditar) y el $0 de «Nadie» pasa a «Por entregar» (casTransitionInTx), con el presupuesto único.
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': 1,
+  'src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization': 1,
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
@@ -1402,7 +1426,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
 const OWN_BUDGET: Record<string, { options: string; reason: string }> = {
-  'src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios': {
+  'src/services/online-ordering/beneficios.service.ts#simularLaCadena': {
     options: 'SIMULACION.transaccion',
     reason:
       "S10 (R5''): the quote simulation only locks its own NEW Order (created in the same transaction) and the customer's own rows; it yields instead of waiting: { maxWait: 300, timeout: 800 } plus SET LOCAL lock_timeout 200ms / statement_timeout 500ms, and degrades to calculados:false",

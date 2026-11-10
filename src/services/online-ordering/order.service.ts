@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import AppError, { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
@@ -48,6 +49,103 @@ import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.servi
 import { chargeMerchant, cardOnlineAvailable } from './card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { TxConReintento } from '@/utils/serializableRetry'
+import type { LogActionParams } from '@/services/dashboard/activity-log.service'
+import {
+  BENEFIT_UNAVAILABLE,
+  aplicarBeneficiosEnTx,
+  cotizarConBeneficios,
+  type BeneficioElegido,
+  type EleccionDeBeneficios,
+} from './beneficios.service'
+import { cerrarFolioEnCeroEnTx, prepararCierreEnCero, trasCerrarFolioEnCero, type CierreEnCero } from './folios.service'
+import { despertarPasesTrasCommit } from './cortesiaDeFolio'
+import { PRECIO_CAMBIO_AL_CONFIRMAR } from './card/confirm.service'
+
+/** S11 (E4): una elección sin nada que usar es «sin beneficios» (así la huella de hoy no cambia); el cupón, recortado y en mayúsculas. */
+export function eleccionNormalizada(e: EleccionDeBeneficios | null | undefined): EleccionDeBeneficios | null {
+  const cupon = e?.cupon?.trim().toUpperCase() || undefined
+  const n: EleccionDeBeneficios = {
+    ...(e?.premioId ? { premioId: e.premioId } : {}),
+    ...(e?.puntos ? { puntos: e.puntos } : {}),
+    ...(cupon ? { cupon } : {}),
+  }
+  return Object.keys(n).length ? n : null
+}
+
+/**
+ * S11 (R1'): la decisión de PRECIO (`PRICE_CHANGED`) es UNA por negocio y llave, la misma para toda identidad y medio de pago: la leen
+ * pagar al recoger y el borrador de tarjeta antes de crear nada. Los prefijos no chocan con las decisiones por identidad de hoy
+ * (`rejectionKey`): ningún staff se llama `llave` y el endpoint lleva su sufijo.
+ */
+export const decisionDePrecio = (venueId: string, idempotencyKey: string) => ({
+  organizationId: `venue:${venueId}`,
+  actorStaffId: 'llave',
+  endpoint: 'POST /public/ordering/orders#precio',
+  idempotencyKey,
+})
+
+const conflictoDeLlave = () =>
+  final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
+
+/** El error que se guardó como decisión de una llave, tal cual. */
+const errorDeLaDecision = (fila: { responseStatus: number; responseBody: Prisma.JsonValue }) => {
+  const body = fila.responseBody as { code?: string; message: string; details?: unknown }
+  return final(new AppError(body.message, fila.responseStatus, true, body.code, body.details))
+}
+
+/** S11 (R1'): bajo el candado de la llave. La misma solicitud recibe la decisión guardada; otra huella con esa llave choca. */
+export async function leerDecisionDePrecio(tx: Prisma.TransactionClient, venueId: string, idempotencyKey: string, requestHash: string) {
+  const fila = await tx.idempotencyRequest.findUnique({
+    where: { organizationId_actorStaffId_endpoint_idempotencyKey: decisionDePrecio(venueId, idempotencyKey) },
+  })
+  if (!fila) return
+  if (fila.requestHash !== requestHash) throw conflictoDeLlave()
+  throw errorDeLaDecision(fila)
+}
+
+/** S11 (R1'): guarda el `PRICE_CHANGED` como LA decisión de la llave (en la transacción que confirma, bajo el candado de la llave). */
+export async function guardarDecisionDePrecio(
+  tx: Prisma.TransactionClient,
+  d: { venueId: string; idempotencyKey: string; requestHash: string; error: AppError; now: Date },
+) {
+  await tx.idempotencyRequest.create({
+    data: {
+      ...decisionDePrecio(d.venueId, d.idempotencyKey),
+      requestHash: d.requestHash,
+      responseStatus: d.error.statusCode,
+      responseBody: JSON.parse(JSON.stringify({ code: d.error.code, message: d.error.message, details: d.error.details })),
+      expiresAt: new Date(d.now.getTime() + 24 * 3600_000),
+    },
+  })
+  return final(d.error)
+}
+
+/** S11 (P2-4): la sesión se cerró entre cotizar y pedir y la solicitud trae beneficios: el precio sin ellos. */
+export const sinSesion = (quote: QuoteResult) =>
+  new ConflictError('Tu sesión se cerró: entra otra vez para usar tus beneficios, o confirma el precio sin ellos.', 'PRICE_CHANGED', {
+    quote: toPublicQuote(quote),
+    motivo: 'SIN_SESION',
+  })
+
+/**
+ * S11: lo que se decide DESPUÉS de escribir la cuenta y aplicar los beneficios (el total estricto mayor que lo que vio, o pagar al
+ * recoger en una tienda de sólo tarjeta con total positivo). Se lanza para revertir el intento entero, y se guarda después.
+ */
+class RechazoTrasElCanje extends Error {
+  constructor(readonly rechazo: AppError | null) {
+    super('rechazo tras el canje')
+  }
+}
+
+/** Una fila de bitácora del canje (R7), como la escribiría `logAction`, pero con el `tx` del folio. */
+const filaDeBitacora = (a: LogActionParams): Prisma.ActivityLogCreateManyInput => ({
+  staffId: a.staffId ?? null,
+  venueId: a.venueId ?? null,
+  action: a.action,
+  entity: a.entity ?? null,
+  entityId: a.entityId ?? null,
+  data: a.data,
+})
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -58,8 +156,10 @@ export interface CreateOnlineOrderInput {
   expectedTotal: string
   /** T7: en «Nadie» basta el nombre; el teléfono sólo cuenta si es el que probó la sesión (pestaña vieja o «Mi equipo»). */
   customer: { name: string; phone?: string | null; email?: string | null }
-  /** De la sesión de cliente (`req.customerAuth`), nunca del cuerpo. */
+  /** De la sesión de cliente (`req.customerAuth`, por `clientaDeLaSesion.ts`), nunca del cuerpo. */
   customerId: string | null
+  /** S11 (P2-4): lo que la clienta eligió usar (premio, puntos, cupón). Sólo cuenta con sesión; sin ella es `PRICE_CHANGED` (P2-4). */
+  beneficios?: EleccionDeBeneficios | null
   /** R6/H1: el teléfono que probó el OTP de WhatsApp (reclamo `verifiedPhone` del token de PEDIDOS, tarea 7b). */
   verifiedPhone: string | null
   /** Tienda híbrida: por dónde llegó la clienta (`?canal=qr` del QR de «Compartir tu tienda»), sólo para medir. */
@@ -96,6 +196,7 @@ export interface CreateOnlineOrderResult {
  * A1 (P1-01): huella de la solicitud normalizada. La repetición idempotente la compara en vez del total de la cuenta (la caja
  * puede cambiarlo) y del cliente solo (otro carrito del mismo total pasaría). Renglones en el orden recibido; las opciones de
  * cada renglón ordenadas por id (sin cantidad = 1); nota recortada; nombre y teléfono tal como se guardan en la cuenta.
+ * S11 (E4): la elección de beneficios entra sólo si trae algo (normalizada, al final): una huella sin beneficios es la de hoy.
  */
 export function onlineOrderRequestHash(r: {
   venueId: string
@@ -105,7 +206,9 @@ export function onlineOrderRequestHash(r: {
   items: CartItemInput[]
   customerName: string
   customerPhone: string
+  beneficios?: EleccionDeBeneficios | null
 }): string {
+  const beneficios = eleccionNormalizada(r.beneficios)
   const normalized = {
     venueId: r.venueId,
     customerId: r.customerId,
@@ -120,6 +223,7 @@ export function onlineOrderRequestHash(r: {
         .sort((a, b) => (a.modifierId === b.modifierId ? a.quantity - b.quantity : a.modifierId < b.modifierId ? -1 : 1)),
     })),
     customer: { name: r.customerName, phone: r.customerPhone },
+    ...(beneficios ? { beneficios } : {}),
   }
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex')
 }
@@ -206,6 +310,29 @@ export const final = <E extends AppError>(error: E): E & { final: true } => Obje
 
 export const TX_OPTIONS = { timeout: 15_000, maxWait: 5_000 }
 
+/**
+ * S11 (R1', Codex r5–r6): UNA regla para los dos creadores (pagar al recoger y el borrador de tarjeta). Un error que sale ANTES de la
+ * transacción final y que no es una decisión que se guarde (el 503 del plan, un 500, Prisma, 401/408/429, un error sin status, o un
+ * rechazo definitivo que el creador no guarda) nunca tapa lo ya decidido sobre la llave: antes de dejarlo salir, `leer` —el lector de
+ * ese creador, bajo `lockKey`— se corre en una transacción corta. Lo que encuentra gana: lanza la decisión guardada o el conflicto de
+ * otra elección, o devuelve lo ya creado (SU pedido, SU borrador). Con la llave libre sale el error original; si la lectura misma
+ * falla, también (sigue siendo reintentable). Decisión = lo que el lector lanza con `final` (Codex r7). Un envío que validó con la
+ * llave libre y falló después ve lo que otro decidió mientras.
+ */
+export async function loDecididoOEste<T>(leer: (tx: Prisma.TransactionClient) => Promise<T | null>, error: unknown): Promise<T> {
+  let previo: T | null
+  try {
+    previo = await prisma.$transaction(tx => leer(tx), TX_OPTIONS)
+  } catch (decision) {
+    // Codex r7: una decisión RECUPERADA lleva su marca durable (`final`, la de todo lo que los lectores lanzan de lo guardado), sea el
+    // código que sea, también el 401 guardado de «Mi equipo». Cualquier otro error es un fallo al leerla: sale el original.
+    if (decision instanceof AppError && (decision as { final?: unknown }).final === true) throw decision
+    throw error
+  }
+  if (previo) return previo
+  throw error
+}
+
 /** Folio corto que no choque con otra cuenta ABIERTA del mismo negocio (dentro del candado de admisión). */
 export async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -276,6 +403,12 @@ export interface CuentaDelPedido {
 /**
  * La cuenta del pedido en línea (`Order` con renglones y extras + `OnlineOrder`) y el nombre del cliente si le faltaba, en la
  * transacción de quien ya tomó los candados de admisión. La comparten pagar al recoger y la tarjeta (fase 2).
+ *
+ * S11 (P2-4): con `beneficios`, se canjean UNA vez aquí: cuenta → `aplicarBeneficiosEnTx` ESTRICTO → `OnlineOrder` (así no la frenan
+ * las guardas de tarjeta, `card/guards.ts`) → nombre. Secuencia de candados, tras llave y admisión (R3): cuenta nueva → asesor del cupón
+ * → `Discount` → premio → `Customer` de los puntos → `Customer` del nombre (la MISMA fila). Los `KEY SHARE` sobre la cuenta NUEVA no
+ * cuentan: nadie más la ve. `validarTotal` (de quien llama) decide con el total estricto ANTES del `OnlineOrder`; lanzar revierte todo.
+ * La bitácora de cada canje (R7) va con este `tx`: un intento revertido se la lleva.
  */
 export async function writeOnlineOrderInTx(
   tx: TxConReintento,
@@ -286,9 +419,22 @@ export async function writeOnlineOrderInTx(
     whatsappConsent: boolean
     requiresAcceptance: boolean
     channel: 'QR' | 'LINK' | null
+    beneficios?: { customerId: string; eleccion: EleccionDeBeneficios | null } | null
+    validarTotal?: (total: Prisma.Decimal) => void
   },
-): Promise<{ orderId: string; onlineOrderId: string }> {
+): Promise<{ orderId: string; onlineOrderId: string; total: Prisma.Decimal; premio: boolean }> {
   const order = await crearCuentaDelPedidoEnTx(tx, i)
+  const canje = i.beneficios
+    ? await aplicarBeneficiosEnTx(tx, {
+        venueId: i.venueId,
+        orderId: order.orderId,
+        customerId: i.beneficios.customerId,
+        eleccion: i.beneficios.eleccion ?? {},
+      })
+    : null
+  const total = canje ? canje.total : new Prisma.Decimal(i.quote.total)
+  i.validarTotal?.(total)
+  if (canje?.auditorias?.length) await tx.activityLog.createMany({ data: canje.auditorias.map(filaDeBitacora) })
 
   const online = await tx.onlineOrder.create({
     data: {
@@ -311,7 +457,8 @@ export async function writeOnlineOrderInTx(
     const cliente = await tx.customer.findFirst({ where: { id: i.customerId, venueId: i.venueId } })
     if (cliente) await ponerNombreSiFalta(tx, cliente, i.customer.name)
   }
-  return { orderId: order.orderId, onlineOrderId: online.id }
+  // Codex r8: si se canjeó el premio lo dice su fila (`premio`), no el desglose, que puede venir recortado (MAX_APLICADOS).
+  return { orderId: order.orderId, onlineOrderId: online.id, total, premio: canje?.premio === true }
 }
 
 /**
@@ -470,13 +617,16 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   //    prueba nada); si no, el pedido es anónimo (cliente y teléfono nulos).
   const sessionPhone =
     input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.verifiedPhone : null
-  const customerId = sessionPhone ? input.customerId : null
   // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato, sin plan ni tienda ni cotización: lo único que se lee primero es el
   // modo de la tienda (su fila de ajustes, por su llave). R85: ese 401 SÍ se registra como la decisión de la llave (fila `anon:<llave>`,
   // más abajo): una decisión por llave; si no, el original tardío —que aún cotiza fuera de su transacción— crea un segundo pedido
   // (Codex fase 2 r1–r3). La tienda suelta la llave tras este 401; el reintento con sesión verificada usa `customer:<id>` y no choca.
   // En «Nadie» esa misma lectura es la de la tienda (paso 3).
-  const ajustesSinSesion = customerId ? undefined : await getSettings(input.venueId)
+  const ajustesSinSesion = sessionPhone ? undefined : await getSettings(input.venueId)
+  // S11 (E1, E11): en «Nadie» la clienta es la de la sesión con algún contacto probado (el controlador ya la filtró con
+  // `clientaDeLaSesion`, la MISMA regla de cotizar), sin teléfono si no lo probó; en «Mi equipo», como hoy, la del teléfono probado.
+  const customerId = sessionPhone || ajustesSinSesion?.requiresAcceptance === false ? input.customerId : null
+  const eleccion = eleccionNormalizada(input.beneficios)
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
   const phone = sessionPhone ? (canonicalPhoneE164(sessionPhone) ?? `+${sessionPhone.replace(/\D/g, '')}`) : null
@@ -491,6 +641,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     items: input.items,
     customerName: input.customer.name,
     customerPhone: phone ?? '',
+    beneficios: eleccion,
   })
 
   if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
@@ -557,6 +708,8 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     if (card) throw final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
     const replay = await findReplay(tx, input.venueId, externalId, requestHash)
     if (replay) return replay
+    // S11 (R1'): la decisión de precio es UNA por negocio y llave, para toda identidad y medio de pago.
+    await leerDecisionDePrecio(tx, input.venueId, input.idempotencyKey, requestHash)
     const rejected = await tx.idempotencyRequest.findUnique({
       where: { organizationId_actorStaffId_endpoint_idempotencyKey: keyOfRejection },
     })
@@ -569,6 +722,10 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   }
   /** Codex r3: el rechazo definitivo se guarda y la transacción CONFIRMA devolviéndolo; se lanza después del commit. */
   const saveRejection = async (tx: Prisma.TransactionClient, error: AppError) => {
+    // S11 (R1'): un `PRICE_CHANGED` es la decisión de la llave para todos; los demás rechazos, por identidad, como hoy.
+    if (error.code === 'PRICE_CHANGED') {
+      return guardarDecisionDePrecio(tx, { venueId: input.venueId, idempotencyKey: input.idempotencyKey, requestHash, error, now })
+    }
     await tx.idempotencyRequest.create({
       data: {
         ...keyOfRejection,
@@ -590,6 +747,10 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   let acceptDeadlineAt: Date
   /** R52 (Codex f1 r5): el horario con el que se comprueba, justo antes de escribir, que el folio nace vigente (sólo folios). */
   let horarioDelFolio: { hours: OnlineOrderingConfig['hours']; timezone: string } | null = null
+  /** S11 (R8, R8'): una tienda de sólo tarjeta con sesión y elección: el rechazo de hoy, decidido con el total estricto (> 0). */
+  let rechazoDeRecoger: AppError | null = null
+  /** S11: con sesión en «Nadie», lo que pide cerrar un folio que el canje deje en $0 (leído fuera de la transacción). */
+  let cierreEnCero: { marcarCocina: boolean; minutes: number } | null = null
   try {
     // 2. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
     await opts.assertCanCreate()
@@ -609,12 +770,16 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
       // (misma regla que `paymentModes.cardOnline` de GET /info), le dice qué hacer. El código no cambia.
       const cardOnline = await cardOnlineAvailable(state.config, prisma, input.venueId)
-      throw new BadRequestError(
+      const rechazo = new BadRequestError(
         cardOnline
           ? 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.'
           : 'Este negocio no acepta pagar al recoger.',
         'PAYMENT_MODE_NOT_ACCEPTED',
       )
+      // S11 (R8'): sólo una solicitud con sesión Y elección de beneficios puede calificar para el folio en $0; ésa sigue hasta la puerta
+      // de la transacción (R8). Todas las demás, como hoy, antes de cotizar.
+      if (!customerId || !eleccion) throw rechazo
+      rechazoDeRecoger = rechazo
     }
 
     // 4. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
@@ -624,7 +789,10 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         issues: quote.issues,
       })
     }
-    if (!quote.total.equals(expectedTotal)) {
+    // S11 (P2-4): sin sesión el precio es el de lista, como hoy; una elección sin sesión es una sesión que se cerró entre cotizar y pedir.
+    // Con sesión, el precio lo decide el canje estricto dentro de la transacción (R2).
+    if (!customerId && eleccion) throw sinSesion(quote)
+    if (!customerId && !quote.total.equals(expectedTotal)) {
       throw new ConflictError('El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.', 'PRICE_CHANGED', {
         quote: toPublicQuote(quote),
       })
@@ -641,11 +809,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       const cierre = closesAt(state.config.hours, now, horarioDelFolio.timezone)
       const plazo = new Date(now.getTime() + FOLIO_TIMEOUT_MINUTES * 60_000)
       acceptDeadlineAt = cierre && cierre < plazo ? cierre : plazo
+      if (customerId) cierreEnCero = await prepararCierreEnCero(input.venueId)
     }
   } catch (error) {
     // 5. Un rechazo definitivo se decide en una transacción corta, bajo la llave: si ya hay pedido es SU pedido (R8, aunque el plan
     //    venza o la tienda cierre); si ya hay rechazo guardado, ése; si no, se guarda éste. Cualquier otro error sale tal cual.
-    if (!isDefinitiveRejection(error)) throw error
+    if (!isDefinitiveRejection(error)) return loDecididoOEste(decidedBefore, error)
     const rejection = error
     const decided = await prisma.$transaction(async tx => (await decidedBefore(tx)) ?? saveRejection(tx, rejection), TX_OPTIONS)
     if (decided instanceof AppError) throw decided
@@ -654,9 +823,9 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
 
   try {
     const result = await withDeadlockRetry(
-      async (tx): Promise<CreateOnlineOrderResult | AppError> => {
+      async (tx): Promise<Creado | AppError> => {
         const before = await decidedBefore(tx)
-        if (before) return before
+        if (before) return { r: before }
 
         let orderNumber: string
         try {
@@ -667,7 +836,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
           await lockAdmission(tx, input.venueId)
 
           const again = await findReplay(tx, input.venueId, externalId, requestHash)
-          if (again) return again
+          if (again) return { r: again }
 
           // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente. T7: sólo con teléfono.
           if (phone) {
@@ -726,35 +895,102 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
           whatsappConsent: input.whatsappConsent === true,
           requiresAcceptance,
           channel: input.channel ?? null,
+          beneficios: customerId ? { customerId, eleccion } : null,
+          validarTotal: total => {
+            // R8: en una tienda de sólo tarjeta, pagar al recoger sólo entra si el canje deja el total en $0 exacto.
+            if (rechazoDeRecoger && total.gt(0)) throw new RechazoTrasElCanje(rechazoDeRecoger)
+            // R2: nunca un folio más caro que lo que vio; si queda más barato, nace con el total menor (y la cuenta lo dice).
+            if (customerId && total.gt(expectedTotal)) throw new RechazoTrasElCanje(null)
+          },
         })
+        // P2-4: un folio de «Nadie» que el canje deja en $0 se cierra pagado aquí mismo; el de «Mi equipo» espera a una persona.
+        const cerrado =
+          cierreEnCero && created.total.isZero()
+            ? await cerrarFolioEnCeroEnTx(tx, { venueId: input.venueId, orderId: created.orderId, ...cierreEnCero, reloj })
+            : null
+        const porEntregar = cerrado?.cerrado === true && cerrado.cas.r === 'OK'
         return {
-          orderId: created.orderId,
-          onlineOrderId: created.onlineOrderId,
-          trackingToken,
-          status: OnlineOrderStatus.PENDING_ACCEPTANCE,
-          orderNumber,
-          total: quote.total.toFixed(2),
-          acceptDeadlineAt: acceptDeadlineAt.toISOString(),
-          replay: false,
+          r: {
+            orderId: created.orderId,
+            onlineOrderId: created.onlineOrderId,
+            trackingToken,
+            status: porEntregar ? OnlineOrderStatus.ACCEPTED : OnlineOrderStatus.PENDING_ACCEPTANCE,
+            orderNumber,
+            total: created.total.toFixed(2),
+            acceptDeadlineAt: acceptDeadlineAt.toISOString(),
+            replay: false,
+          },
+          cerrado,
+          premio: created.premio,
         }
       },
-      { etiqueta: 'createOnlineOrder', ...TX_OPTIONS },
+      // S11: canjea en la cuenta nueva (el premio la bloquea; el $0 pasa a «Por entregar»): el presupuesto único del candado de la
+      // orden, los mismos 15 s / 5 s de `TX_OPTIONS`.
+      { etiqueta: 'createOnlineOrder', ...ORDER_LOCK_WAIT_BUDGET },
     )
     if (result instanceof AppError) throw result // Codex r3: el rechazo ya quedó guardado
+    const creado = result.r
 
     // T7: un folio sin pagar no se anuncia: las apps viejas lo tratarían como cuenta nueva (sale de las listas hasta pagarse).
-    if (!result.replay && requiresAcceptance) {
-      emitOnlineOrderCreated(input.venueId, { orderId: result.orderId, orderNumber: result.orderNumber, externalId }, now)
+    if (!creado.replay && requiresAcceptance) {
+      emitOnlineOrderCreated(input.venueId, { orderId: creado.orderId, orderNumber: creado.orderNumber, externalId }, now)
     }
-    return result
+    // Lo de después del commit (nunca dentro del cuerpo reintentable): el folio en $0 y Wallet del premio (si no, su barrido).
+    if (result.cerrado && cierreEnCero) {
+      trasCerrarFolioEnCero({ venueId: input.venueId, orderId: creado.orderId, staffId: null, ...cierreEnCero }, result.cerrado)
+    }
+    if (result.premio && customerId) despertarPasesTrasCommit(input.venueId, [customerId])
+    return creado
   } catch (error) {
     // Dos peticiones con la misma llave a la vez: gana una, la otra recibe al ganador (si es del mismo cliente, R8).
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const again = await findReplay(prisma, input.venueId, externalId, requestHash)
       if (again) return again
     }
+    // S11: el canje revirtió el intento entero (ni folio ni canjes). R1: la respuesta se GUARDA como la decisión de la llave, en su
+    // propia escritura bajo el candado de la llave (un envío tardío con la misma llave nunca crea). R2: `descartados` sale del error
+    // estricto, no de la recotización (que puede salir degradada).
+    const perdido = error instanceof AppError && error.code === BENEFIT_UNAVAILABLE
+    if (error instanceof RechazoTrasElCanje || perdido) {
+      const cual = perdido ? ((error.details as { cual?: BeneficioElegido } | undefined)?.cual ?? null) : null
+      let rechazo: AppError
+      try {
+        rechazo =
+          error instanceof RechazoTrasElCanje && error.rechazo
+            ? error.rechazo
+            : await precioCambiadoConBeneficios(input.venueId, input.items, customerId, eleccion, cual)
+      } catch (recotizar) {
+        // La recotización que falla (no la degradación de S10, que nunca lanza) tampoco tapa lo ya decidido.
+        return loDecididoOEste(decidedBefore, recotizar)
+      }
+      const decided = await prisma.$transaction(async tx => (await decidedBefore(tx)) ?? saveRejection(tx, rechazo), TX_OPTIONS)
+      if (decided instanceof AppError) throw decided
+      return decided
+    }
     throw error
   }
+}
+
+/** Lo que confirma la transacción de crear: el folio (o su repetición) y lo de después del commit. */
+type Creado = { r: CreateOnlineOrderResult; cerrado?: CierreEnCero | null; premio?: boolean }
+
+/** S11: el `PRICE_CHANGED` de un canje que cambió entre cotizar y pedir, con la recotización (tolerante, S10) y lo descartado. */
+async function precioCambiadoConBeneficios(
+  venueId: string,
+  items: CartItemInput[],
+  customerId: string | null,
+  eleccion: EleccionDeBeneficios | null,
+  cual: BeneficioElegido | null,
+): Promise<ConflictError> {
+  const q = await cotizarConBeneficios(venueId, items, { customerId, eleccion })
+  const descartados = cual ? [cual] : null
+  return new ConflictError(
+    cual
+      ? 'Uno de tus beneficios ya no está disponible. Revisa el nuevo total antes de confirmar.'
+      : 'El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.',
+    'PRICE_CHANGED',
+    { quote: { ...toPublicQuote(q), ...(descartados ? { descartados } : {}) }, ...(descartados ? { descartados } : {}) },
+  )
 }
 
 type DraftCharge = { status: OnlineOrderChargeStatus; lastError: string | null }
@@ -822,6 +1058,12 @@ export interface PublicTracking {
   requiresAcceptance?: boolean
   /** T15: por dónde llegó el pedido; `null` con tarjeta o si no se midió. */
   channel?: 'QR' | 'LINK' | null
+  /**
+   * S11 (R4, R4'): sólo en un borrador de tarjeta que se liberó porque al confirmarlo el precio cambió (un beneficio ya no estaba, o el
+   * total estricto no era lo autorizado). El total nuevo (`null` si no se pudo calcular) y lo descartado, para volver a confirmar.
+   * «No se te cobró» sólo con la liberación confirmada (`RELEASED`).
+   */
+  precioNuevo?: { motivo: 'BENEFIT_GONE' | 'PRICE_CHANGED'; total: number | null; descartados: BeneficioElegido[]; mensaje: string }
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -915,6 +1157,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   const c = await prisma.onlineOrderCharge.findUnique({
     where: { trackingToken: token },
     select: {
+      id: true,
       status: true,
       lastError: true,
       request: true,
@@ -927,6 +1170,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   })
   if (!c) return null
   const quote = (c.request as unknown as { quote: QuoteSnapshot }).quote
+  const precioNuevo = await precioNuevoDelBorrador(c)
   return {
     orderNumber: '', // el folio nace con el pedido
     status: cardDraftTrackingStatus(c),
@@ -952,6 +1196,31 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
     canCancel: false,
     requiresAcceptance: true, // el borrador de tarjeta es de «Mi equipo»
     channel: null,
+    ...(precioNuevo ? { precioNuevo } : {}),
+  }
+}
+
+/**
+ * S11 (R4, R4'): el motivo y el precio nuevo los guarda la liberación en la bitácora del cargo (índice `[entity, entityId]`), junto con
+ * su decisión de liberar; ni la liberación ni la conciliación los borran. Así llegan aunque el aviso de Stripe haya confirmado primero
+ * o el servidor se haya reiniciado.
+ */
+async function precioNuevoDelBorrador(c: { id: string; status: OnlineOrderChargeStatus }): Promise<PublicTracking['precioNuevo'] | null> {
+  const liberado = c.status === OnlineOrderChargeStatus.RELEASED
+  if (!liberado && c.status !== OnlineOrderChargeStatus.RELEASING) return null
+  const fila = await prisma.activityLog.findFirst({
+    where: { entity: 'OnlineOrderCharge', entityId: c.id, action: PRECIO_CAMBIO_AL_CONFIRMAR },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { data: true },
+  })
+  const d = fila?.data as { motivo?: string; totalEstricto?: string | null; descartados?: BeneficioElegido[] } | null | undefined
+  if (d?.motivo !== 'BENEFIT_GONE' && d?.motivo !== 'PRICE_CHANGED') return null
+  const causa = d.motivo === 'BENEFIT_GONE' ? 'Tu beneficio ya no estaba' : 'El total de tu pedido cambió'
+  return {
+    motivo: d.motivo,
+    total: d.totalEstricto != null ? Number(d.totalEstricto) : null,
+    descartados: d.descartados ?? [],
+    mensaje: liberado ? `${causa}: no se te cobró. Confirma el precio nuevo.` : `${causa}: estamos liberando el apartado de tu tarjeta.`,
   }
 }
 

@@ -13,13 +13,29 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn() },
 }))
+// S11: la cadena de beneficios y el cierre en $0 son dobles aquí (su prueba: `order.service.beneficios.test.ts` y la integración). Con
+// sesión, la cadena deja el total de la cuenta tal cual (sin automáticos ni elección).
+jest.mock('@/services/online-ordering/beneficios.service', () => ({
+  __esModule: true,
+  BENEFIT_UNAVAILABLE: 'BENEFIT_UNAVAILABLE',
+  aplicarBeneficiosEnTx: jest.fn(),
+  cotizarConBeneficios: jest.fn(),
+}))
+jest.mock('@/services/online-ordering/folios.service', () => ({
+  __esModule: true,
+  prepararCierreEnCero: jest.fn(async () => ({ marcarCocina: false, minutes: 15 })),
+  cerrarFolioEnCeroEnTx: jest.fn(),
+  trasCerrarFolioEnCero: jest.fn(),
+}))
 
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
+import { aplicarBeneficiosEnTx, cotizarConBeneficios } from '@/services/online-ordering/beneficios.service'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import {
   createOnlineOrder,
+  decisionDePrecio,
   fromQuoteSnapshot,
   getTrackingByToken,
   onlineOrderRequestHash,
@@ -109,6 +125,17 @@ const existing = (o: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   ;(getAcceptingStatus as jest.Mock).mockResolvedValue(OPEN)
   ;(quoteCart as jest.Mock).mockResolvedValue(QUOTE_OK)
+  ;(aplicarBeneficiosEnTx as jest.Mock).mockImplementation(async () => ({
+    // El total de la cuenta tal cual: el de la cotización de lista (sin automáticos ni elección).
+    total: (await (quoteCart as jest.Mock).mock.results.at(-1)!.value).total,
+    aplicados: [],
+    descartados: [],
+    auditorias: [],
+  }))
+  ;(cotizarConBeneficios as jest.Mock).mockImplementation(async () => ({
+    ...(await (quoteCart as jest.Mock)()),
+    beneficios: { calculados: false },
+  }))
   prismaMock.order.findUnique.mockReset() // sin lecturas «Once» sobrantes de otra prueba
   prismaMock.order.findUnique.mockResolvedValue(null)
   prismaMock.order.findFirst.mockResolvedValue(null)
@@ -378,7 +405,10 @@ describe('createOnlineOrder', () => {
     })
     expect(prismaMock.idempotencyRequest.findUnique).toHaveBeenCalledTimes(1) // R85: sólo la decisión de ESTA llave (anon:<llave>)
     expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1) // R85: el 401 anónimo se registra como la decisión de la llave
-    expect((prismaMock.idempotencyRequest.create.mock.calls[0][0] as any).data).toMatchObject({ actorStaffId: `anon:${KEY}`, responseStatus: 401 })
+    expect((prismaMock.idempotencyRequest.create.mock.calls[0][0] as any).data).toMatchObject({
+      actorStaffId: `anon:${KEY}`,
+      responseStatus: 401,
+    })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -388,7 +418,13 @@ describe('createOnlineOrder', () => {
       id: 'ord1',
       orderNumber: 'W-0042',
       total: D('93.00'),
-      onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW, requestHash: 'otra-huella' },
+      onlineOrder: {
+        id: 'oo1',
+        status: 'PENDING_ACCEPTANCE',
+        trackingToken: 'T'.repeat(32),
+        acceptDeadlineAt: NOW,
+        requestHash: 'otra-huella',
+      },
     } as any)
     await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({
       statusCode: 401,
@@ -522,11 +558,26 @@ describe('createOnlineOrder', () => {
       code: 'PRICE_CHANGED',
       details: { quote: { total: 206 } },
     })
-    // Codex r2: se rechazó bajo el candado de la llave; al del negocio no se llegó: ni topes, ni folio, ni escrituras.
+    // S11 (R2): con sesión, el precio lo decide el canje estricto DENTRO de la transacción (que se revierte: ni pedido ni canjes) y la
+    // decisión se guarda después, bajo la llave (R1'). Sin sesión, como antes: fuera y sin llegar al candado del negocio (abajo).
+    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK, ADMISSION_LOCK, KEY_LOCK])
+    expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+      ...decisionDePrecio('v1', KEY),
+      responseStatus: 409,
+    })
+  })
+
+  it("sin sesión (folio de «Nadie»), el precio de lista se decide FUERA, bajo la llave, y nada se crea (R5); la decisión es de la llave (R1')", async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, config: { ...OPEN.config, requiresAcceptance: false, hours: null } })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: false })
+    const anonimo = input({ customerId: null, verifiedPhone: null, customer: { name: 'María G.', email: null }, expectedTotal: '200.00' })
+    await expect(createOnlineOrder(anonimo, PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'PRICE_CHANGED' })
     expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK])
     expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
-    expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    expect(aplicarBeneficiosEnTx).not.toHaveBeenCalled()
+    expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject(decisionDePrecio('v1', KEY))
   })
 
   it('tope de pedidos por aceptar por teléfono, comparado ya normalizado (R23)', async () => {
@@ -749,14 +800,8 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
         return pasa()
       },
     ],
-    [
-      'precio cambiado',
-      'PRICE_CHANGED',
-      () => {
-        ;(quoteCart as jest.Mock).mockResolvedValue({ ...QUOTE_OK, total: D('210.00') })
-        return pasa()
-      },
-    ],
+    // S11 (R2): «precio cambiado» con sesión ya no se lee fuera: lo decide el canje estricto dentro de la transacción y se guarda bajo
+    // la llave (R1'). Sus pruebas: «si el total del servidor no es el que vio…» (arriba) y `order.service.beneficios.test.ts`.
   ]
 
   it.each(RECHAZOS)(
@@ -906,11 +951,16 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
 
     it('una llave con un rechazo guardado responde ESE rechazo (status, code, mensaje y details) aunque plan, tienda y cotización ya pasen', async () => {
       const details = { status: 'PAUSED', reason: 'MANUAL_PAUSE' }
-      ;(prismaMock.idempotencyRequest.findUnique as jest.Mock).mockResolvedValue({
-        requestHash: huella(),
-        responseStatus: 409,
-        responseBody: { code: 'ORDERING_PAUSED', message: 'La tienda no está recibiendo pedidos en este momento.', details },
-      })
+      // S11 (R1'): la decisión de precio de la llave se mira antes; aquí no hay ninguna, sólo el rechazo de esta identidad.
+      ;(prismaMock.idempotencyRequest.findUnique as jest.Mock).mockImplementation(async (a: any) =>
+        a.where.organizationId_actorStaffId_endpoint_idempotencyKey.actorStaffId === 'customer:cust1'
+          ? {
+              requestHash: huella(),
+              responseStatus: 409,
+              responseBody: { code: 'ORDERING_PAUSED', message: 'La tienda no está recibiendo pedidos en este momento.', details },
+            }
+          : null,
+      )
       const assertCanCreate = jest.fn()
       const err = await createOnlineOrder(input(), { assertCanCreate }).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(AppError)
@@ -950,14 +1000,41 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
       ['un error de Prisma', new Prisma.PrismaClientKnownRequestError('x', { code: 'P1001', clientVersion: 'x' })],
     ]
     it.each(NO_DEFINITIVOS)(
-      '%s: NO se guarda ni abre transacción y sale ese error, sin final (la tienda conserva la llave)',
+      '%s: NO se guarda; la transacción corta sólo LEE lo ya decidido bajo la llave (Codex r5) y sale ese error, sin final (la tienda conserva la llave)',
       async (_n, caida) => {
         const err = await createOnlineOrder(input(), { assertCanCreate: jest.fn().mockRejectedValue(caida) }).catch((e: unknown) => e)
         expect(err).toBe(caida)
         expect(err).not.toHaveProperty('final')
-        expect(prismaMock.$transaction).not.toHaveBeenCalled()
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+        expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, k]) => k)).toEqual([KEY_LOCK])
+        expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+        expect(prismaMock.order.create).not.toHaveBeenCalled()
       },
     )
+
+    it('Codex r5: si esa lectura misma falla, sale el error ORIGINAL (no el de la lectura)', async () => {
+      const caida = new ServiceUnavailableError('x', 'FEATURE_CHECK_UNAVAILABLE')
+      ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('x', { code: 'P2028', clientVersion: 'x' }),
+      )
+      await expect(
+        createOnlineOrder(input(), { assertCanCreate: jest.fn().mockRejectedValue(caida) }).catch((e: unknown) => e),
+      ).resolves.toBe(caida)
+    })
+
+    it.each(NO_DEFINITIVOS)('Codex r5: %s con la llave YA decidida ⇒ esa decisión (final), nunca el error de ahora', async (_n, caida) => {
+      ;(prismaMock.idempotencyRequest.findUnique as jest.Mock).mockResolvedValue({
+        requestHash: huella(),
+        responseStatus: 409,
+        responseBody: { code: 'ORDERING_PAUSED', message: 'x' },
+      })
+      await expect(createOnlineOrder(input(), { assertCanCreate: jest.fn().mockRejectedValue(caida) })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'ORDERING_PAUSED',
+        final: true,
+      })
+      expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    })
 
     it('un error no definitivo DENTRO de la transacción de crear (al contar los topes) la deshace sin guardar nada', async () => {
       const caida = new Prisma.PrismaClientKnownRequestError('x', { code: 'P1001', clientVersion: 'x' })
@@ -1655,7 +1732,14 @@ describe('getTrackingByToken', () => {
         total: D('206.00'),
         paymentStatus: 'PENDING',
         items: [
-          { productName: 'Flautas', quantity: 2, notes: null, unitPrice: D('103.00'), total: D('206.00'), modifiers: [{ name: 'Salsa verde', quantity: 1 }] },
+          {
+            productName: 'Flautas',
+            quantity: 2,
+            notes: null,
+            unitPrice: D('103.00'),
+            total: D('206.00'),
+            modifiers: [{ name: 'Salsa verde', quantity: 1 }],
+          },
         ],
         customerName: 'Ana',
         payments: [],
@@ -1744,23 +1828,38 @@ describe('getTrackingByToken', () => {
     })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: true, paidAt: at.toISOString() })
     const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
-    expect(pagos).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
+    expect(pagos).toMatchObject({
+      // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
-      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    })
     prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: null, payments: [] } })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
   })
 
   it('R82: amountPaid y remaining son los CANÓNICOS de la cuenta (paidAmount/remainingBalance, con propina): $185 + abono $100 + propina $10 ⇒ pagó 110, falta 85, igual que to-pay; nunca negativo', async () => {
     const base = folioNadie({}, 'PARTIAL')
-    const cuenta = (o: Record<string, any>) => ({ ...base, order: { ...base.order, customerName: 'M', payments: [{ createdAt: NOW }], ...o } }) as any
+    const cuenta = (o: Record<string, any>) =>
+      ({ ...base, order: { ...base.order, customerName: 'M', payments: [{ createdAt: NOW }], ...o } }) as any
     prismaMock.onlineOrder.findUnique.mockResolvedValue(
       cuenta({ total: D('195.00'), paidAmount: D('110.00'), remainingBalance: D('85.00') }),
     )
-    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ total: 195, paid: false, paidAt: null, amountPaid: 110, remaining: 85 })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({
+      total: 195,
+      paid: false,
+      paidAt: null,
+      amountPaid: 110,
+      remaining: 85,
+    })
     const sel = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
     expect(sel).toMatchObject({ paidAmount: true, remainingBalance: true })
-    expect(sel.payments).toMatchObject({ take: 1, select: { createdAt: true }, where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } })
+    expect(sel.payments).toMatchObject({
+      take: 1,
+      select: { createdAt: true },
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    })
     expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
     prismaMock.onlineOrder.findUnique.mockResolvedValue(cuenta({ paidAmount: D('0.00'), remainingBalance: D('93.00'), payments: [] }))
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 0, remaining: 93 })
@@ -1877,7 +1976,16 @@ describe('getTrackingByToken', () => {
         createdAt: NOW,
         venueId: 'v1',
         charge: { status: 'RELEASING' },
-        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', payments: [], paidAmount: D('0'), remainingBalance: D('250'), items: [], venue: VENUE },
+        order: {
+          orderNumber: 'WABCD',
+          total: D('250.00'),
+          paymentStatus: 'PENDING',
+          payments: [],
+          paidAmount: D('0'),
+          remainingBalance: D('250'),
+          items: [],
+          venue: VENUE,
+        },
       } as any)
       await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
     })
@@ -1984,7 +2092,9 @@ describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta 
       channel: null,
     })
 
-    expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })
+    // S11: además el total de la cuenta (con sesión, el del canje estricto) y si se canjeó el premio (Codex r8: por su fila, nunca el
+    // desglose, que puede venir recortado).
+    expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1', total: D('206'), premio: false })
     // Codex r1 C1: la de tarjeta, además, nace cobro del momento (nunca fiado).
     expect((prismaMock.order.create.mock.calls[0][0] as any).data).toEqual({ ...order, payLater: false })
     expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data).toEqual({ ...online, paymentMode: 'CARD_ONLINE' })

@@ -261,6 +261,10 @@ const n = (d: Prisma.Decimal): number => Number(d.toFixed(2))
 
 export function toPublicQuote(q: QuoteResult | QuoteConBeneficios): PublicQuote {
   const b = q as QuoteConBeneficios
+  // S11 (Codex r8): un desglose que la cadena SABE recortado (más de `MAX_APLICADOS` filas) nunca sale como completo, venga de donde
+  // venga: la cotización entera degrada como en S10 (o todo o nada), sin desglose ni oferta y con el total de lista. Quien necesita el
+  // total estricto para autorizar lo manda aparte (`totalEstricto` del borrador de tarjeta).
+  if (b.aplicadosCompletos === false) return { beneficios: { calculados: false }, ...toPublicQuoteBase(q, q.total) }
   return {
     ...(b.beneficios ? { beneficios: b.beneficios } : {}),
     ...(b.aplicados ? { aplicados: b.aplicados.map(a => ({ tipo: a.tipo, nombre: a.nombre, monto: n(a.monto) })) } : {}),

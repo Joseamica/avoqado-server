@@ -798,6 +798,11 @@ export async function recordCouponRedemption(venueId: string, couponId: string, 
       if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
       const existingRedemption = await tx.couponRedemption.findUnique({ where: { orderId } })
       if (existingRedemption) throw new BadRequestError('This order already has a coupon redemption')
+      // AJENO S11 (E12): la clienta del canje es de ESTA sucursal. La llave foránea sólo mira el id: sin esto se ligaba (y se devolvía
+      // con su nombre) una clienta de otra sucursal. Sigue opcional.
+      if (customerId && !(await tx.customer.findFirst({ where: { id: customerId, venueId }, select: { id: true } }))) {
+        throw new NotFoundError('Cliente no encontrado')
+      }
 
       // Create redemption record
       const redemption = await tx.couponRedemption.create({

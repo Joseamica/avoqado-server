@@ -32,6 +32,11 @@ jest.mock('@/services/online-ordering/card/capture.service', () => ({
   __esModule: true,
   acceptCardOnlineOrder: jest.fn(async () => ({ outcome: 'CONFIRMING_PAYMENT' })),
 }))
+jest.mock('@/services/online-ordering/folios.service', () => ({
+  ...jest.requireActual('@/services/online-ordering/folios.service'),
+  cerrarFolioEnCeroEnTx: jest.fn(async () => ({ cerrado: false })),
+  trasCerrarFolioEnCero: jest.fn(),
+}))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn() },
@@ -47,6 +52,7 @@ import { notifyOrderEvent } from '@/services/online-ordering/notifications.servi
 import { getSettings } from '@/services/online-ordering/settings.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { acceptCardOnlineOrder } from '@/services/online-ordering/card/capture.service'
+import { cerrarFolioEnCeroEnTx, trasCerrarFolioEnCero } from '@/services/online-ordering/folios.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByCustomer,
@@ -92,6 +98,35 @@ beforeEach(() => {
 })
 
 describe('acceptOnlineOrder', () => {
+  it('S11 · «Mi equipo» en $0 por un beneficio: aceptar lo cierra pagado en la MISMA transacción, después del CAS', async () => {
+    ;(cerrarFolioEnCeroEnTx as jest.Mock).mockResolvedValueOnce({ cerrado: true, postingId: 'post1', cas: { r: 'NOT_FOLIO' } })
+    await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    expect(cerrarFolioEnCeroEnTx).toHaveBeenCalledWith(prismaMock, {
+      venueId: 'v1',
+      orderId: 'ord1',
+      marcarCocina: true,
+      minutes: 15,
+      reloj: expect.any(Function),
+    })
+    expect((cerrarFolioEnCeroEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    // Después del commit: el vale de inventario (la comanda y los avisos ya los da la aceptación de hoy).
+    expect(trasCerrarFolioEnCero).toHaveBeenCalledWith(
+      { venueId: 'v1', orderId: 'ord1', staffId: 'staff1', marcarCocina: true, minutes: 15 },
+      { cerrado: true, postingId: 'post1', cas: { r: 'NOT_FOLIO' } },
+    )
+  })
+
+  it('S11 · el cierre en $0 no corre si el CAS de aceptar perdió (otro actor ganó)', async () => {
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: NOW } as any)
+    await acceptOnlineOrder(base)
+    expect(cerrarFolioEnCeroEnTx).not.toHaveBeenCalled()
+  })
+
   it('aceptar un folio sin pagar responde PAYMENT_REQUIRED y no escribe nada', async () => {
     prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
     await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })

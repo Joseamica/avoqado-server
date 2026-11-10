@@ -31,8 +31,10 @@ const CALLERS_EXTRA = {
     'e949dbd631f6397166abd46c236f261f76d09d73170e1b697e276bce27a054ed',
   'services/online-ordering/transitions.service.ts#casTransition:casTransitionInTx':
     '7f1c56ed0daae0c337e928cf803e6b1619e853ceba2251517e95ddbf6198a0d8',
+  // S11 (R6): la aceptación cierra en la MISMA transacción el pedido de «Mi equipo» que un beneficio dejó en $0 (afterCas →
+  // cerrarFolioEnCeroEnTx, que nunca escribe loyaltyEligibleAt: ver EXENTAS); su orderExtra no cambió.
   'services/online-ordering/transitions.service.ts#acceptWithoutCapture:casTransition':
-    'f27df0037107bfb8b06bc8e86fd3a375338f0a26008d9932067756c726c9900b',
+    'e2d031ded415fc2d4e603ac0bbf843659223fef5b1e2c3a4fe0eb82728dcf111',
   'services/online-ordering/transitions.service.ts#rejectOnlineOrder:casTransition':
     'df0ca08ed26053dd6507de5a955c096c6a76bfd5e799e3eb3a3207b4b8199d03',
   'services/online-ordering/transitions.service.ts#expireOnlineOrder:casTransition':
@@ -422,6 +424,10 @@ const EXENTAS: Record<string, { motivo: string; prueba: string }> = {
     motivo:
       'Sólo alias POS existingOrder.externalId distinto: resolución exacta o de tres componentes a instance:0:folio, releída bajo lock. El namespace oficial web:key de dos componentes no llega a ese alias.',
     prueba: 'paymentStatus: orderData.paymentStatus',
+  },
+  'services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx:updateMany:data': {
+    motivo: 'S11 (P2-4): el folio que un beneficio deja en $0 se cierra pagado sin cobro; un folio de $0 no suma sello ni puntos.',
+    prueba: 'completedAt: ahora',
   },
   'services/tpv/order.tpv.service.ts#runCreateOrderTransaction:create:data': {
     motivo: 'Orden nueva gratuita: cierre en cero sin dinero no suma (P2-4); con dinero nace pendiente. No implementa S11.',

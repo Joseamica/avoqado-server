@@ -93,6 +93,8 @@ export const createOrderSchema = z.object({
       whatsappConsent: z.boolean().optional(),
       // Tienda híbrida: por dónde llegó la clienta (el QR de «Compartir tu tienda» lleva `?canal=qr`), sólo para medir.
       channel: z.enum(['QR', 'LINK'], { errorMap: () => ({ message: 'Canal inválido' }) }).optional(),
+      // S11 (P2-4): lo que eligió usar, la MISMA forma que al cotizar; sólo cuenta con sesión (lo decide el servicio).
+      beneficios: beneficios.optional(),
     })
     .superRefine((b, ctx) => {
       if (b.paymentMode === 'CARD_ONLINE' && !b.customer.phone) {

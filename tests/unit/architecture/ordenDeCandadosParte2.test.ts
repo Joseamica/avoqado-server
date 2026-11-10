@@ -1463,9 +1463,17 @@ describe('S10 · la cadena de beneficios de la tienda', () => {
     }
   })
 
+  it('S11 · el cierre del folio en $0 está en el inventario como EN_TX y pide un TxConReintento', () => {
+    const k = 'src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx'
+    expect([k, revisado.escritores[k]?.clase]).toEqual([k, 'EN_TX'])
+    const fuente = fs.readFileSync(path.join(RAIZ, 'src/services/online-ordering/folios.service.ts'), 'utf8')
+    expect(/export async function cerrarFolioEnCeroEnTx\(\s*tx: TxConReintento/.test(fuente)).toBe(true)
+  })
+
   it('la cotización abre UNA transacción con reintento por traba, y applyAutomaticDiscounts la suya', () => {
-    expect(revisado.aperturas['src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios']).toMatchObject({
-      etiqueta: 'cotizarConBeneficios',
+    // S11: la simulación vive en simularLaCadena (la comparten la cotización y el borrador de tarjeta, R2'').
+    expect(revisado.aperturas['src/services/online-ordering/beneficios.service.ts#simularLaCadena']).toMatchObject({
+      etiqueta: 'simularLaCadena',
       cantidad: 1,
     })
     expect(revisado.aperturas['src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts']).toMatchObject({ cantidad: 1 })

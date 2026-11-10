@@ -47,7 +47,9 @@ import {
   MAX_APLICADOS,
   SIMULACION,
   aplicarBeneficiosEnTx,
+  cedeLaSimulacion,
   cotizarConBeneficios,
+  simularBeneficios,
   ofertaDeBeneficios,
   topeGlobalDeSimulaciones,
 } from '@/services/online-ordering/beneficios.service'
@@ -291,6 +293,53 @@ describe('aplicarBeneficiosEnTx — el desglose completo (r5 #2: nada se trunca 
     expect((logger.warn as jest.Mock).mock.calls.some(c => String(c[0]).includes('desglose') && c[1]?.filas === MAX_APLICADOS + 7)).toBe(
       true,
     )
+  })
+})
+
+describe('Codex r8 · el desglose recortado nunca se publica como completo', () => {
+  const fila = (i: number) => ({
+    id: `od-${String(i).padStart(3, '0')}`,
+    name: `Automático ${i}`,
+    amount: D('0.01'),
+    couponCodeId: null,
+    loyaltyTransactionId: null,
+  })
+
+  it('más de MAX_APLICADOS filas con el premio canjeado FUERA del tope: `premio` lo dice su fila, el desglose no lo trae', async () => {
+    prismaMock.orderDiscount.findMany.mockResolvedValue(Array.from({ length: MAX_APLICADOS + 1 }, (_, i) => fila(i)) as any)
+    prismaMock.orderDiscount.count.mockResolvedValue(MAX_APLICADOS + 1)
+    prismaMock.stampReward.findFirst.mockResolvedValue({ orderDiscountId: 'od-premio-despues-del-tope' } as any)
+    const r = await aplicarBeneficiosEnTx(tx, entrada({ premioId: 'premio-1' }), { tolerante: true })
+    expect(r).toMatchObject({ aplicadosCompletos: false, premio: true })
+    expect(r.aplicados).toHaveLength(MAX_APLICADOS)
+    expect(r.aplicados.some(a => a.tipo === 'PREMIO')).toBe(false)
+  })
+
+  it('sin premio elegido, `premio` es false', async () => {
+    prismaMock.orderDiscount.findMany.mockResolvedValue([fila(0)] as any)
+    expect((await aplicarBeneficiosEnTx(tx, entrada({}), { tolerante: true })).premio).toBe(false)
+  })
+
+  it('el serializador REAL: con `aplicadosCompletos:false` sale degradada (sin desglose ni oferta, total de lista, calculados:false)', () => {
+    const recortada = {
+      ...QUOTE,
+      totalConBeneficios: D('85.00'),
+      aplicados: Array.from({ length: MAX_APLICADOS }, (_, i) => ({
+        tipo: 'DESCUENTO' as const,
+        nombre: `Automático ${i}`,
+        monto: D('0.01'),
+        orderDiscountId: `od-${i}`,
+      })),
+      oferta: { premio: null, puntos: null, cupon: false },
+      descartados: [],
+      beneficios: { calculados: true },
+      aplicadosCompletos: false as const,
+    }
+    const pub = toPublicQuote(recortada as any)
+    expect(pub).toEqual({ ...toPublicQuote(QUOTE as any), beneficios: { calculados: false } })
+    expect(pub).not.toHaveProperty('aplicados')
+    expect(pub).not.toHaveProperty('oferta')
+    expect(JSON.stringify(pub)).not.toMatch(/aplicadosCompletos/)
   })
 })
 
@@ -664,5 +713,98 @@ describe('toPublicQuote con beneficios', () => {
       beneficios: { calculados: true },
     })
     expect(JSON.stringify(pub)).not.toContain('od-x')
+  })
+})
+
+describe('S11 · R7: en estricto, la cadena devuelve la bitácora de cada canje real (la del motor, el cupón, el premio y los puntos)', () => {
+  it('estricto: una auditoría por canje, como sus envoltorios públicos; tolerante (cotizar): ninguna', async () => {
+    const delMotor = {
+      staffId: null,
+      venueId: 'v1',
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: 'o-sim',
+      data: { discountId: 'd-auto' },
+    }
+    ;(aplicarDescuentosDelMotorEnTx as jest.Mock).mockImplementation(anota('motor', { applied: [], audits: [delMotor] }))
+    ;(canjearPremioEnTx as jest.Mock).mockImplementation(
+      anota('premio', { reward: { customerId: 'c1', rewardType: 'FIXED_AMOUNT', rewardLabel: 'Café gratis' }, discountAmount: 1 }),
+    )
+    ;(redeemPointsToOrderInTransaction as jest.Mock).mockImplementation(anota('puntos', { pointsToBurn: 100, discountAmount: 1 }))
+
+    const r = await aplicarBeneficiosEnTx(tx, entrada(), {})
+    expect(r.auditorias).toEqual([
+      delMotor,
+      {
+        staffId: null,
+        venueId: 'v1',
+        action: 'DISCOUNT_APPLIED',
+        entity: 'Order',
+        entityId: 'o-sim',
+        data: { discountId: 'd-cupon', couponCodeId: 'cc-1', amount: 9, source: 'coupon' },
+      },
+      {
+        staffId: null,
+        venueId: 'v1',
+        action: 'STAMP_REWARD_REDEEMED',
+        entity: 'StampReward',
+        entityId: 'premio-1',
+        data: { orderId: 'o-sim', customerId: 'c1', rewardType: 'FIXED_AMOUNT', rewardLabel: 'Café gratis', discountAmount: 1 },
+      },
+      {
+        staffId: null,
+        venueId: 'v1',
+        action: 'LOYALTY_POINTS_REDEEMED',
+        entity: 'Order',
+        entityId: 'o-sim',
+        data: { customerId: 'c1', points: 100, discountAmount: 1 },
+      },
+    ])
+    const simulada = await aplicarBeneficiosEnTx(tx, entrada(), { tolerante: true })
+    expect(simulada).not.toHaveProperty('auditorias')
+  })
+})
+
+describe("S11 · R2'': la simulación del borrador de tarjeta (sin semáforo ni degradación de S10)", () => {
+  it('con lugar: la cuenta provisional + la cadena tolerante, deshecha; sin la degradación de S10 (no lee la oferta)', async () => {
+    const antes = SIMULACION.global
+    SIMULACION.global = 1
+    try {
+      ;(canjearPremioEnTx as jest.Mock).mockRejectedValue(new BadRequestError('Este premio ya fue canjeado.'))
+      const r = await simularBeneficios('v1', QUOTE as any, 'c1', ELECCION)
+      expect(r!.total.toFixed(2)).toBe('78.00')
+      expect(r!.descartados).toEqual(['PREMIO'])
+      expect(trazo.filter(p => !['sql', 'set'].includes(p))[0]).toBe('cuenta')
+      expect((crearCuentaDelPedidoEnTx as jest.Mock).mock.calls[0][1].orderNumber).toMatch(/^COTIZACION-c[a-z0-9]{24}$/)
+      expect(prismaMock.stampReward.findFirst).not.toHaveBeenCalledWith(expect.objectContaining({ orderBy: expect.anything() }))
+    } finally {
+      SIMULACION.global = antes
+    }
+  })
+
+  it("R2''': comparte el semáforo de S10: con tope 0 (pool sin límite explícito) no abre transacción y responde null", async () => {
+    const antes = SIMULACION.global
+    SIMULACION.global = 0
+    try {
+      expect(await simularBeneficios('v1', QUOTE as any, 'c1', ELECCION)).toBeNull()
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    } finally {
+      SIMULACION.global = antes
+    }
+  })
+
+  it('un error de infraestructura SUBE (el borrador responde 503) y suelta su lugar; cedeLaSimulacion lo reconoce', async () => {
+    const antes = SIMULACION.global
+    SIMULACION.global = 1
+    try {
+      ;(crearCuentaDelPedidoEnTx as jest.Mock).mockRejectedValueOnce(candadoVencido())
+      const err = await simularBeneficios('v1', QUOTE as any, 'c1', ELECCION).catch((e: unknown) => e)
+      expect(cedeLaSimulacion(err)).toBe(true)
+      expect(cedeLaSimulacion(new TypeError('x'))).toBe(false)
+      // El lugar se soltó: la siguiente simula.
+      expect(await simularBeneficios('v1', QUOTE as any, 'c1', {})).not.toBeNull()
+    } finally {
+      SIMULACION.global = antes
+    }
   })
 })

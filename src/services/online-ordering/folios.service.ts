@@ -1,6 +1,10 @@
-import { OnlineOrderStatus, OrderStatus, Prisma } from '@prisma/client'
+import { OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { bloquearDescuentosEnOrdenEnTx } from '@/services/dashboard/discountEngine.service'
+import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLedger'
+import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
+import { bloquearDescuentoDelCupon, canjearCuponEnTx } from '@/services/shared/cuponDeLaVenta'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { CUENTA_SALDADA, FOLIO_CERRADO, revivirFolioSaldadoEnTx } from '@/services/shared/cuentaCancelada'
@@ -75,6 +79,116 @@ export async function prepararFolioPagadoEnTx(
     })
   }
   return r
+}
+
+/** S11: lo que dejó el cierre de un folio en $0 (para lo de después del commit). */
+export type CierreEnCero = { cerrado: false } | { cerrado: true; postingId: string | null; cas: CasResult | { r: 'NOT_FOLIO' } }
+
+/** S11: lo que el cierre en $0 necesita y se lee FUERA de la transacción (la marca de cocina nunca lanza). */
+export async function prepararCierreEnCero(venueId: string): Promise<{ marcarCocina: boolean; minutes: number }> {
+  return { marcarCocina: await debeMarcarCocina(venueId), minutes: await prepMinutes(venueId) }
+}
+
+/**
+ * S11 (P2-4, E5): un folio que un beneficio dejó en $0 se cierra pagado SIN cobro en la transacción de quien lo decide: la que crea el
+ * folio en «Nadie», o la que lo acepta en «Mi equipo» (otra transacción, R6). No pasa por caja ni abre un cobro de $0.
+ * - CAS de la cuenta: `total = 0` y por pagar ⇒ `PAID`, `COMPLETED`, `completedAt` y la marca de cocina con la hora AL ESCRIBIR (R52),
+ *   sin `loyaltyEligibleAt`: un folio de $0 no suma sello ni puntos.
+ * - El vale de inventario (`createSalePostingInTx`) y sus sobres (R8); el vale se aplica después del commit y su barrido lo retoma.
+ * - El cupón, si lo trae, se canjea aquí (nadie cobra, así que `finalizeCouponsForOrder` no lo vería): asesor → su fila `Discount` →
+ *   el canje (rango 6b). Al crear, la cadena ya los tomó y volver a pedirlos no espera; al aceptar, se toman en este orden.
+ * - Bitácora en la misma transacción y, en «Nadie», a «Por entregar» por el único paso (`prepararFolioPagadoEnTx`).
+ */
+export async function cerrarFolioEnCeroEnTx(
+  tx: TxConReintento,
+  a: { venueId: string; orderId: string; marcarCocina: boolean; minutes: number; reloj?: Reloj },
+): Promise<CierreEnCero> {
+  const ahora = (a.reloj ?? (() => new Date()))()
+  const cerrada = await tx.order.updateMany({
+    where: {
+      id: a.orderId,
+      venueId: a.venueId,
+      total: 0,
+      paymentStatus: PaymentStatus.PENDING,
+      status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
+    },
+    data: {
+      paymentStatus: PaymentStatus.PAID,
+      status: OrderStatus.COMPLETED,
+      completedAt: ahora,
+      ...(a.marcarCocina ? { kitchenPendingAt: ahora } : {}),
+      remainingBalance: 0,
+    },
+  })
+  if (cerrada.count !== 1) return { cerrado: false }
+
+  const cuenta = await tx.order.findFirst({
+    where: { id: a.orderId, venueId: a.venueId },
+    select: { customerId: true, orderNumber: true, items: { include: { modifiers: { include: { modifier: true } } } } },
+  })
+  const posting = await createSalePostingInTx(tx, {
+    venueId: a.venueId,
+    orderId: a.orderId,
+    items: (cuenta?.items ?? []) as never,
+    staffId: null,
+  })
+  // R8 (tarjetas de regalo): como cada vale de una venta saldada (la tienda hoy no vende tarjetas: no encuentra sobres).
+  await activarSobresDeCuentaPagadaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, staffId: null, items: cuenta?.items ?? [] })
+  const cupon = await tx.orderDiscount.findFirst({
+    where: { orderId: a.orderId, couponCodeId: { not: null } },
+    select: { couponCodeId: true, amount: true, couponCode: { select: { discountId: true } } },
+    orderBy: { id: 'asc' },
+  })
+  if (cupon?.couponCodeId && cupon.couponCode) {
+    const discountId = cupon.couponCode.discountId
+    await bloquearDescuentoDelCupon(tx, discountId)
+    await bloquearDescuentosEnOrdenEnTx(tx, a.venueId, [discountId])
+    await canjearCuponEnTx(tx, {
+      orderId: a.orderId,
+      couponCodeId: cupon.couponCodeId,
+      discountId,
+      customerId: cuenta?.customerId ?? null,
+      amountSaved: cupon.amount,
+    })
+  }
+  await tx.activityLog.create({
+    data: {
+      venueId: a.venueId,
+      action: 'ONLINE_ORDER_CLOSED_AT_ZERO',
+      entity: 'Order',
+      entityId: a.orderId,
+      data: { orderNumber: cuenta?.orderNumber ?? null, postingId: posting?.id ?? null, couponCodeId: cupon?.couponCodeId ?? null },
+    },
+  })
+  // La cuenta ya va pagada: la cocina no se marca otra vez aquí (ya quedó en la escritura de arriba).
+  const cas = await prepararFolioPagadoEnTx(tx, {
+    venueId: a.venueId,
+    orderId: a.orderId,
+    marcarCocina: false,
+    minutes: a.minutes,
+    reloj: a.reloj,
+  })
+  return { cerrado: true, postingId: posting?.id ?? null, cas }
+}
+
+/** S11: lo de después del commit de un cierre en $0: el vale de inventario y, si pasó a «Por entregar», sus avisos y su comanda. */
+export function trasCerrarFolioEnCero(
+  i: { venueId: string; orderId: string; staffId: string | null; marcarCocina: boolean; minutes: number },
+  c: CierreEnCero,
+): void {
+  if (!c.cerrado) return
+  if (c.postingId) {
+    const postingId = c.postingId
+    void applySalePosting(postingId, i.staffId).catch(error =>
+      logger.error('[OnlineOrdering] no se pudo aplicar el vale de inventario de un folio en $0 (lo retoma su barrido)', {
+        postingId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
+  if (c.cas.r !== 'OK') return
+  announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes: i.minutes, marcarCocina: false }, c.cas)
+  if (i.marcarCocina) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
 }
 
 /** `prepararFolioPagadoEnTx` en su transacción y, tras el commit, los avisos de una aceptación y el armado de la comanda. */

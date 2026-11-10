@@ -349,17 +349,17 @@
   },
   "services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx": {
     "clase": "PUENTE",
-    "motivo": "S10 (P2-4): la cadena de beneficios corre sobre la cuenta NUEVA que su llamador creó en la misma transacción (cotizarConBeneficios; el folio en S11)."
+    "motivo": "S10 (P2-4): la cadena de beneficios corre sobre la cuenta NUEVA que su llamador creó en la misma transacción (simularLaCadena; el folio, writeOnlineOrderInTx en S11)."
   },
   "services/online-ordering/beneficios.service.ts#aplicarCuponEnTx": {
     "clase": "EXCEPCION",
     "categoria": "CREA_CUENTA",
     "motivo": "S10 (P2-4): el cupón de la tienda sólo se monta sobre la cuenta nueva que la cotización (o el folio) acaba de crear en su misma transacción; nunca edita una cuenta existente."
   },
-  "services/online-ordering/beneficios.service.ts#cotizarConBeneficios": {
+  "services/online-ordering/beneficios.service.ts#simularLaCadena": {
     "clase": "EXCEPCION",
     "categoria": "CREA_CUENTA",
-    "motivo": "S10 (P2-4): la simulación crea su cuenta provisional COTIZACION-<cuid> en su propia transacción, le aplica los beneficios y la deshace entera; no edita ninguna cuenta existente."
+    "motivo": "S10 (P2-4), S11: la simulación (de la cotización y del borrador de tarjeta) crea su cuenta provisional COTIZACION-<cuid> en su propia transacción, le aplica los beneficios y la deshace entera; no edita ninguna cuenta existente."
   },
   "services/online-ordering/card/capture.service.ts#finishCapture": {
     "clase": "EXCEPCION",
@@ -375,6 +375,11 @@
     "clase": "EXCEPCION",
     "categoria": "ANULACION",
     "motivo": "S9 (P2-5): parte de la anulación misma de un folio. Sólo la llama devolverCanjesDeVentaAnuladaEnTx, bajo el candado del que anula, y convierte sus filas de beneficio en cortesía del mismo importe, IVA y reparto: tiene que operar sobre la cuenta que se está anulando."
+  },
+  "services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "S11 (P2-4): cierra pagado sin cobro el folio que un beneficio dejó en $0, con un CAS que excluye CANCELLED/DELETED: al crearlo, sobre la cuenta nueva de la misma transacción; en «Mi equipo», dentro de la aceptación (casTransitionInTx ya devolvió STALE para una cancelada antes de escribir)."
   },
   "services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx": {
     "clase": "EXCEPCION",

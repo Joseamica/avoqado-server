@@ -24,6 +24,15 @@ jest.mock('@/services/online-ordering/notifications.service', () => ({
   __esModule: true,
   notifyOrderEvent: jest.fn(async () => undefined),
 }))
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: jest.fn(async () => ({ id: 'post1' })),
+  applySalePosting: jest.fn(async () => undefined),
+}))
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardLedger'),
+  activarSobresDeCuentaPagadaEnTx: jest.fn(async () => ({ activated: [] })),
+}))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, getSettings: jest.fn() }))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -35,7 +44,9 @@ import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.s
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
+import { createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import {
+  cerrarFolioEnCeroEnTx,
   cerrarFoliosDelDiaTerminado,
   leerFoliosConAbonoDevuelto,
   leerPedidosVencidos,
@@ -566,5 +577,79 @@ describe('R52 · la hora se lee al escribir o decidir, no al empezar la pasada',
     // …y el día se compara contra ese mismo instante.
     expect(sql).toContain("TIMESTAMP '2026-11-07 10:00:01.000'")
     expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'COMPLETED', completedAt: ESCRIBE })
+  })
+})
+
+describe('S11 · cerrarFolioEnCeroEnTx: un folio que un beneficio deja en $0 se cierra pagado sin cobro (P2-4, E5)', () => {
+  const ITEMS = [{ id: 'oi1', productId: 'p1', quantity: 1, modifiers: [] }]
+  const cerrar = () =>
+    cerrarFolioEnCeroEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', marcarCocina: true, minutes: 15, reloj: () => NOW })
+
+  beforeEach(() => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.order.findFirst.mockResolvedValue({ customerId: 'cust1', items: ITEMS } as any)
+    prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
+    prismaMock.activityLog.create.mockResolvedValue({} as any)
+    prismaMock.couponRedemption.create.mockResolvedValue({} as any)
+    prismaMock.couponCode.update.mockResolvedValue({} as any)
+    prismaMock.discount.update.mockResolvedValue({} as any)
+  })
+
+  it('«Nadie»: PAID y COMPLETED sin Payment, horas al escribir, comanda marcada, vale de inventario y «Por entregar»; nunca loyaltyEligibleAt', async () => {
+    const r = await cerrar()
+    expect(prismaMock.order.updateMany.mock.calls[0][0]).toEqual({
+      where: { id: 'ord1', venueId: 'v1', total: 0, paymentStatus: 'PENDING', status: { notIn: ['CANCELLED', 'DELETED'] } },
+      data: { paymentStatus: 'PAID', status: 'COMPLETED', completedAt: NOW, kitchenPendingAt: NOW, remainingBalance: 0 },
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(createSalePostingInTx).toHaveBeenCalledWith(prismaMock, { venueId: 'v1', orderId: 'ord1', items: ITEMS, staffId: null })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ venueId: 'v1', action: 'ONLINE_ORDER_CLOSED_AT_ZERO', entity: 'Order', entityId: 'ord1' }),
+    })
+    // El paso de etapa 1 a «Por entregar» (CAS PENDING_ACCEPTANCE → ACCEPTED), sin volver a marcar la cocina.
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: { in: ['PENDING_ACCEPTANCE'] } }),
+        data: expect.objectContaining({ status: 'ACCEPTED' }),
+      }),
+    )
+    expect(r).toMatchObject({ cerrado: true, postingId: 'post1', cas: { r: 'OK' } })
+  })
+
+  it('con cupón: asesor del descuento → su fila Discount → el canje (CouponCode 6b con su Discount ya tomada)', async () => {
+    prismaMock.orderDiscount.findFirst.mockResolvedValue({
+      couponCodeId: 'cc1',
+      amount: D('100.00'),
+      couponCode: { discountId: 'd1' },
+    } as any)
+    await cerrar()
+    const raw = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([sql]) =>
+      Array.isArray(sql) ? sql.join('?') : String(sql?.sql ?? sql?.strings?.join('?') ?? sql),
+    )
+    const asesor = raw.findIndex(t => /pg_advisory_xact_lock/.test(t))
+    const fila = raw.findIndex(t => /FOR NO KEY UPDATE/.test(t))
+    expect(asesor).toBeGreaterThanOrEqual(0)
+    expect(fila).toBeGreaterThan(asesor)
+    expect(prismaMock.couponRedemption.create).toHaveBeenCalledWith({
+      data: { couponCodeId: 'cc1', orderId: 'ord1', customerId: 'cust1', amountSaved: D('100.00') },
+    })
+    expect(prismaMock.couponCode.update).toHaveBeenCalledWith({ where: { id: 'cc1' }, data: { currentUses: { increment: 1 } } })
+    expect(prismaMock.discount.update).toHaveBeenCalledWith({ where: { id: 'd1' }, data: { currentUses: { increment: 1 } } })
+  })
+
+  it('una cuenta que no está en $0 o ya no está por pagar no se toca (CAS en 0): ni vale, ni canje, ni bitácora', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 })
+    expect(await cerrar()).toEqual({ cerrado: false })
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+    expect(prismaMock.couponRedemption.create).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('«Mi equipo»: se cierra pagado y el pedido sigue su aceptación de hoy (no lo pasa a «Por entregar»)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(folio({ requiresAcceptance: true }) as any)
+    const r = await cerrar()
+    expect(r).toMatchObject({ cerrado: true, cas: { r: 'NOT_FOLIO' } })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 })

@@ -9,11 +9,12 @@ import { closesAt } from '@/services/online-ordering/hours'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
+import { clientaDeLaSesion } from '@/services/online-ordering/clientaDeLaSesion'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { toPublicQuote } from '@/services/online-ordering/quote.service'
-import { cotizarConBeneficios } from '@/services/online-ordering/beneficios.service'
+import { cotizarConBeneficios, type EleccionDeBeneficios } from '@/services/online-ordering/beneficios.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 
 /** R8: de 32 a 64 caracteres. Una llave corta se adivina; la repetición además exige al mismo cliente (servicio). */
@@ -27,9 +28,11 @@ function fail(res: Response, error: any, fallback: string) {
   // Un 5xx no expone su código interno (p. ej. el de Prisma). Excepción explícita: «no pudimos verificar el plan» (503 nuestro,
   // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar. Igual «no pudimos abrir la página de
   // pago» (502 nuestro, fase 2): el reintento con la misma llave recupera la sesión.
+  // S11 (R2''): «no pudimos calcular tus beneficios» (503 nuestro) también: el reintento con la misma llave la vuelve a calcular.
   const expose =
     status < 500 ||
     (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE') ||
+    (status === 503 && error?.code === 'BENEFITS_CALCULATION_UNAVAILABLE') ||
     (status === 502 && error?.code === 'CARD_PROVIDER_UNAVAILABLE')
   return res.status(status).json({
     success: false,
@@ -129,8 +132,9 @@ export async function getMenu(req: Request, res: Response) {
 export async function postQuote(req: Request, res: Response) {
   try {
     const auth = (req as any).customerAuth as CustomerAuthContext | null
+    // S11 (E11): la MISMA regla de quién es la clienta que al crear el folio.
     const q = await cotizarConBeneficios(venueOf(req).id, req.body.items, {
-      customerId: auth?.customerId ?? null,
+      customerId: clientaDeLaSesion(auth),
       eleccion: req.body.beneficios ?? null,
     })
     return res.json({ success: true, data: toPublicQuote(q) })
@@ -160,9 +164,12 @@ export async function postOrder(req: Request, res: Response) {
       note?: string
       whatsappConsent?: boolean
       channel?: 'QR' | 'LINK'
+      beneficios?: EleccionDeBeneficios
     }
     // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
     const opts = { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) }
+    // R6/H1: el cliente y el teléfono PROBADO salen de la sesión, nunca del cuerpo. S11 (E11): la MISMA regla que cotizar.
+    const auth = (req as any).customerAuth as CustomerAuthContext | null
 
     // Fase 2: con tarjeta no se pide OTP (la tarjeta apartada respalda el pedido): borrador + página de pago de Stripe.
     if (body.paymentMode === 'CARD_ONLINE') {
@@ -177,16 +184,18 @@ export async function postOrder(req: Request, res: Response) {
           customer: { name: body.customer.name, phone: body.customer.phone as string, email: body.customer.email ?? null },
           note: body.note ?? null,
           whatsappConsent: body.whatsappConsent === true,
+          // S11: la clienta cuenta si su teléfono probado es el del pedido (lo decide el servicio); con ella, sus beneficios.
+          customerId: clientaDeLaSesion(auth),
+          verifiedPhone: auth?.verifiedPhone ?? null,
+          beneficios: body.beneficios ?? null,
         },
         opts,
       )
       return res.status(draft.replay ? 200 : 201).json({ success: true, data: draft })
     }
 
-    // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. En «Mi equipo»
-    // el servicio exige que el teléfono del pedido sea ése (sin sesión, 401 PHONE_VERIFICATION_REQUIRED); en «Nadie» basta el
-    // nombre y, sin sesión que coincida, el folio nace anónimo (T7).
-    const auth = (req as any).customerAuth as CustomerAuthContext | null
+    // En «Mi equipo» el servicio exige que el teléfono del pedido sea el probado (sin sesión, 401 PHONE_VERIFICATION_REQUIRED); en
+    // «Nadie» basta el nombre y, con una sesión que probó algún contacto, el folio nace con su clienta (S11) o anónimo (T7).
 
     const result = await createOnlineOrder(
       {
@@ -196,8 +205,9 @@ export async function postOrder(req: Request, res: Response) {
         paymentMode: 'PAY_AT_PICKUP',
         expectedTotal: body.expectedTotal,
         customer: { name: body.customer.name, phone: body.customer.phone ?? null, email: body.customer.email ?? null },
-        customerId: auth?.customerId ?? null,
+        customerId: clientaDeLaSesion(auth),
         verifiedPhone: auth?.verifiedPhone ?? null,
+        beneficios: body.beneficios ?? null,
         channel: body.channel ?? null,
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,

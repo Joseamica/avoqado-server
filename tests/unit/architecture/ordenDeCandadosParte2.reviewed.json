@@ -383,7 +383,12 @@
     "src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx": {
       "clase": "EN_TX",
       "etiqueta": "aplicarBeneficiosEnTx",
-      "nota": "S10 (P2-4): corre en la transacción de quien crea la cuenta (cotizarConBeneficios; el folio en S11): no abre otra. Estricto: asesor del cupón (bloquearDescuentoDelCupon) → motor con la pasada única de Discount → cupón → premio → Customer (puntos), con el KEY SHARE de Customer de la cuenta antes (R6). Tolerante (simulación, R9): sin asesor ni pasada de Discount; sólo filas nuevas y de la propia clienta. Nunca WalletPass."
+      "nota": "S10 (P2-4): corre en la transacción de quien crea la cuenta (simularLaCadena; el folio, writeOnlineOrderInTx en S11): no abre otra. Estricto: asesor del cupón (bloquearDescuentoDelCupon) → motor con la pasada única de Discount → cupón → premio → Customer (puntos), con el KEY SHARE de Customer de la cuenta antes (R6). Tolerante (simulación, R9): sin asesor ni pasada de Discount; sólo filas nuevas y de la propia clienta. Nunca WalletPass. S11 (R7): en estricto devuelve la bitácora de cada canje, que el folio escribe con su tx."
+    },
+    "src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "cerrarFolioEnCeroEnTx",
+      "nota": "S11 (P2-4): el cierre del folio en $0 canjea su cupón: asesor (bloquearDescuentoDelCupon) → su fila Discount (bloquearDescuentosEnOrdenEnTx) → canjearCuponEnTx (CouponCode, rango 6b). Corre en la transacción que crea el folio en «Nadie» (createOnlineOrder, donde la cadena ya los tomó) o en la que lo acepta en «Mi equipo» (casTransition). Nunca WalletPass."
     },
     "src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx": {
       "clase": "EN_TX",
@@ -949,10 +954,15 @@
       "etiqueta": "prepararFolioPagado",
       "cantidad": 1
     },
-    "src/services/online-ordering/beneficios.service.ts#cotizarConBeneficios": {
-      "etiqueta": "cotizarConBeneficios",
+    "src/services/online-ordering/beneficios.service.ts#simularLaCadena": {
+      "etiqueta": "simularLaCadena",
       "cantidad": 1,
-      "nota": "S10: la simulación de la cotización con sesión, que se deshace lanzando el centinela `Simulada` (no es una traba: sale al primer intento). Con lock_timeout 200 ms, statement_timeout 500 ms y { maxWait: 300, timeout: 800 }; 55P03 y el tiempo agotado no se repiten (calculados:false), el 40P01 sí."
+      "nota": "S10/S11: la simulación de la cotización y del borrador de tarjeta (R2''), que se deshace lanzando el centinela `Simulada` (no es una traba: sale al primer intento). Con lock_timeout 200 ms, statement_timeout 500 ms y { maxWait: 300, timeout: 800 }; su lugar del semáforo SIMULACION lo toman cotizarConBeneficios y simularBeneficios ANTES de pedir conexión (R2'''). 55P03 y el tiempo agotado no se repiten, el 40P01 sí."
+    },
+    "src/services/online-ordering/card/draft.service.ts#createCardOnlineDraft": {
+      "etiqueta": "createCardOnlineDraft",
+      "cantidad": 1,
+      "nota": "S11 (R3): llave → admisión como pagar al recoger, ahora con la red por traba. No escribe tablas de beneficios: lee y guarda la decisión de precio de la llave (R1') y crea el borrador."
     },
     "src/services/online-ordering/order.service.ts#createOnlineOrder": {
       "etiqueta": "createOnlineOrder",

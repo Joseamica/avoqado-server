@@ -656,6 +656,39 @@ describe('Coupon Dashboard Service', () => {
     beforeEach(() => {
       prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-123' }])
       prismaMock.order.count.mockResolvedValue(0)
+      // AJENO S11 (E12): la clienta del canje es de ESTA sucursal.
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-123' })
+    })
+
+    it('AJENO S11 · una clienta de OTRA sucursal se rechaza dentro de la transacción: ni canje ni contadores', async () => {
+      prismaMock.couponCode.findFirst.mockResolvedValue({ ...createMockCoupon(), discount: createMockDiscount() })
+      prismaMock.couponRedemption.findUnique.mockResolvedValue(null)
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+
+      await expect(recordCouponRedemption('venue-123', 'coupon-123', 'order-123', 10, 'customer-de-otra')).rejects.toMatchObject({
+        statusCode: 404,
+        message: 'Cliente no encontrado',
+      })
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
+        where: { id: 'customer-de-otra', venueId: 'venue-123' },
+        select: { id: true },
+      })
+      // Después de las guardas de S2 (candado de la cuenta y canje existente), antes de escribir.
+      expect(prismaMock.couponRedemption.findUnique.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.customer.findFirst.mock.invocationCallOrder[0],
+      )
+      expect(prismaMock.couponRedemption.create).not.toHaveBeenCalled()
+      expect(prismaMock.couponCode.update).not.toHaveBeenCalled()
+      expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    })
+
+    it('AJENO S11 · sin clienta (parámetro ausente) no se busca nada y el canje sigue como hoy', async () => {
+      prismaMock.couponCode.findFirst.mockResolvedValue({ ...createMockCoupon(), discount: createMockDiscount() })
+      prismaMock.couponRedemption.findUnique.mockResolvedValue(null)
+      prismaMock.couponRedemption.create.mockResolvedValue({ id: 'redemption-123', amountSaved: new Decimal(10) })
+      await recordCouponRedemption('venue-123', 'coupon-123', 'order-123', 10)
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.couponRedemption.create).toHaveBeenCalled()
     })
 
     it.each(['CANCELLED', 'DELETED'])('%s sin pagos no consume el canje ni los dos cupos', async status => {
