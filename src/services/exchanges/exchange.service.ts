@@ -17,7 +17,7 @@ import socketManager from '@/communication/sockets'
 import { SocketEventType } from '@/communication/sockets/types'
 import { executeExchangeInTransaction, cancelOrderInTransaction, publishCancelledOrder } from '../mobile/order.mobile.service'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
-import { MENSAJE_CUENTA_PAGADA } from '../shared/orderCancelGuard'
+import { MENSAJE_CUENTA_CON_PAGOS, MENSAJE_CUENTA_PAGADA } from '../shared/orderCancelGuard'
 import { ExchangeGenerationChanged } from './exchangeSettle'
 import { ExchangeReleaseNotDue, releaseExchangeInTx } from './exchangeCharge'
 import { OrderTableTopologyChanged } from '../shared/tableOrderLock'
@@ -510,7 +510,7 @@ export async function cancelExchange(input: {
       const moneyGuard =
         error instanceof BadRequestError &&
         !error.code &&
-        [MENSAJE_CUENTA_PAGADA, 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'].includes(error.message)
+        [MENSAJE_CUENTA_PAGADA, MENSAJE_CUENTA_CON_PAGOS].includes(error.message)
       const code = (error as { code?: string }).code
       if (code === 'EXCHANGE_CHARGE_EXISTS' || code === 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE' || moneyGuard) {
         // The cancellation transaction has rolled back before this opener takes original/root Orders.
