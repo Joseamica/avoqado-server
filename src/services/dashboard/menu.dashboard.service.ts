@@ -1155,9 +1155,6 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
   return rawMaterial
 }
 
-/** Un extra por grupo y nombre, como lo empareja la importación de menú. */
-const claveDeExtra = (groupId: string, name: string) => `${groupId}\u0000${name}`
-
 function modifierCost(
   rawMaterial: { avgCostPerUnit: Prisma.Decimal } | null,
   quantityPerUnit: Prisma.Decimal | number | null | undefined,
@@ -1992,7 +1989,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
       // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers are never deleted either
       // (D16): they are turned off, and a file that brings the name back reuses the same row.
-      const extraVivoAntes = new Map<string, { id: string; active: boolean; isDemo: boolean }>() // D17: lo llena «Reemplazar»
+      const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
+        OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
+      }
+      // D17 (Codex r2-r4): los extras que el archivo conserva o crea. «Reemplazar» apaga los demás AL FINAL, no al principio: quitar un
+      // extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el vigente), y buscarlos todavía
+      // prendidos deja que gane el vigente. Crece con el archivo, no con el catálogo.
+      const extrasDelArchivo = new Set<string>()
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -2020,23 +2023,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         //      or its variants' links — is the family's, not the file's: not turned off, its extras too (Variantes, Codex #1, ronda 2).
         await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
         await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
-        const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
-          OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
-        }
-        // D17 (Codex r2): quitar un extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el que
-        // «Combinar» creó después). Antes de apagar, se recuerda cuál estaba vivo: abajo, con nombres repetidos, gana ése. Sólo los
-        // nombres que trae el archivo (Codex r3): la lectura crece con el archivo, no con el catálogo.
-        const gruposDelArchivo = data.categories.flatMap(c => c.products.flatMap(p => p.modifierGroups ?? []))
-        const vivos = await tx.modifier.findMany({
-          where: {
-            active: true,
-            name: { in: [...new Set(gruposDelArchivo.flatMap(g => g.modifiers.map(m => m.name)))] },
-            group: { venueId, name: { in: [...new Set(gruposDelArchivo.map(g => g.name))] }, NOT: usadoPorFamilia },
-          },
-          select: { id: true, groupId: true, name: true, isDemo: true },
-        })
-        for (const m of vivos) extraVivoAntes.set(claveDeExtra(m.groupId, m.name), { id: m.id, active: false, isDemo: m.isDemo })
-        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
+        // (los extras se apagan al final, tras recorrer el archivo: ver `extrasDelArchivo`)
         // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
         await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
@@ -2320,32 +2307,32 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Check if modifier exists by name in this group
                 // D17 (Codex r1): como el grupo en D16, «combinar» ignora los extras archivados (quitar ya no los destruye) y crea otro con
                 // el precio del archivo, como cuando se borraban; revivir el viejo lo devolvía con su precio anterior. «Reemplazar» sí
-                // los reusa, porque acaba de apagar a todos: primero el que estaba vivo (Codex r2), luego el prendido y el más nuevo.
+                // los reusa: como todavía no los apaga (D17, ver `extrasDelArchivo`), gana el prendido (Codex r2) y luego el más nuevo.
                 // ponytail: «el más nuevo» es el id cuid más alto (Modifier no tiene fechas); sólo decide entre puros archivados.
-                const clave = claveDeExtra(modifierGroup.id, modifierData.name)
-                const vivoAntes = extraVivoAntes.get(clave)
-                extraVivoAntes.delete(clave) // si el archivo lo vuelve a traer, la búsqueda lo encuentra ya prendido
-                const existingModifier =
-                  vivoAntes ??
-                  (await tx.modifier.findFirst({
-                    where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
-                    orderBy: [{ active: 'desc' }, { id: 'desc' }],
-                  }))
+                const existingModifier = await tx.modifier.findFirst({
+                  where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
+                  orderBy: [{ active: 'desc' }, { id: 'desc' }],
+                })
 
                 if (!existingModifier) {
                   // Create new modifier
-                  await tx.modifier.create({
+                  const creado = await tx.modifier.create({
                     data: {
                       groupId: modifierGroup.id,
                       name: modifierData.name,
                       price: modifierData.price,
                     },
                   })
+                  if (data.mode === 'replace') extrasDelArchivo.add(creado.id)
                   modifiersCreated++
                 } else if (data.mode === 'replace') {
                   // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
-                  if (!existingModifier.active) modifiersCreated++
+                  // Cuenta como creado lo que antes se apagaba al principio: lo de un grupo que no es de familia (ese grupo llegó
+                  // apagado), una sola vez aunque el archivo lo repita.
+                  const seApagabaAlPrincipio = !modifierGroup.active && !extrasDelArchivo.has(existingModifier.id)
+                  if (!existingModifier.active || seApagabaAlPrincipio) modifiersCreated++
+                  extrasDelArchivo.add(existingModifier.id)
                   await tx.modifier.update({
                     where: { id: existingModifier.id },
                     data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
@@ -2359,6 +2346,15 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             }
           }
         }
+      }
+
+      if (data.mode === 'replace') {
+        // 2-3 (D17): lo que el archivo no conservó ni creó se apaga, igual que antes se hacía al principio (D16: nunca se borra; lo de
+        // una familia, tampoco se apaga). Va aquí, antes de las familias, como iba antes de ellas.
+        await tx.modifier.updateMany({
+          where: { group: { venueId, NOT: usadoPorFamilia }, id: { notIn: [...extrasDelArchivo] } },
+          data: { active: false },
+        })
       }
 
       // Variantes (V8), segunda pasada, por llave en el orden del archivo: se vuelve a revisar cada familia contra la base de ahora

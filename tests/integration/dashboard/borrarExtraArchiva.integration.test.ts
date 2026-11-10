@@ -294,6 +294,48 @@ describe('Borrar un extra lo archiva', () => {
     expect(shots.find(m => m.id === extraId)).toEqual({ id: extraId, active: false, price: new Prisma.Decimal(20), sku: 'SHOT-A' })
   })
 
+  it('Codex r4 · «Reemplazar» elige el que está vivo aunque sea el más viejo, y apaga lo que el archivo no trae', async () => {
+    const x = await negocio()
+    const { grupoId, extraId: a, lecheId } = await grupoConExtras(x) // A, el viejo
+    const b = (await prisma.modifier.create({ data: { groupId: grupoId, name: 'Shot', price: 22 } })).id // B, el nuevo
+    await deleteModifier(x.venueId, grupoId, b)
+    const actor = { type: 'SERVICE', servicePrincipalId: 'D17_PRUEBA' } as any
+    const archivo = {
+      mode: 'replace',
+      categories: [
+        {
+          name: 'IVA',
+          slug: `iva-${x.rfc}`.toLowerCase(),
+          products: [
+            {
+              name: 'Café',
+              sku: `P-${x.rfc}`,
+              price: 100,
+              modifierGroups: [
+                {
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: false,
+                  minSelections: 0,
+                  maxSelections: 1,
+                  modifiers: [{ name: 'Shot', price: 30 }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const r = await importMenu(x.venueId, archivo as any, actor)
+
+    const estado = await prisma.modifier.findMany({ where: { groupId: grupoId }, select: { id: true, active: true, price: true } })
+    expect(estado.find(m => m.id === a)).toEqual({ id: a, active: true, price: new Prisma.Decimal(30) })
+    expect(estado.find(m => m.id === b)).toEqual({ id: b, active: false, price: new Prisma.Decimal(22) })
+    expect(estado.find(m => m.id === lecheId)?.active).toBe(false) // el archivo no la trae
+    expect(r.stats).toMatchObject({ modifiers: 1 })
+  })
+
   // Regresión: los 404 de hoy
   it('de otro negocio o de otro grupo: 404 y no toca nada', async () => {
     const x = await negocio()
