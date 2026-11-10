@@ -710,7 +710,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       },
     )
 
-    it('stores shadow classification without replacing the legacy financial boolean', async () => {
+    it('D3: un BIN verificado de BBVA decide — nacional aunque la terminal diga internacional (clase Doña Simona)', async () => {
       const mockOrder = {
         id: mockOrderId,
         venueId: mockVenueId,
@@ -767,12 +767,137 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
             internationalityStatus: 'DOMESTIC',
             internationalitySource: 'BIN_REGISTRY',
             issuerCountryCode: '484',
-            internationalityClassificationVersion: 1,
+            internationalityClassificationVersion: 2,
             internationalityClassifiedAt: expect.any(Date),
-            processorData: expect.objectContaining({ isInternational: true }),
+            // El dato del que cuelgan costo, reportes, reembolsos y liquidación es el DEFINITIVO; lo que dijo la terminal queda guardado.
+            processorData: expect.objectContaining({ isInternational: false, isInternationalFromTerminal: true }),
           }),
         }),
       )
+    })
+
+    it('D3: una Nexgo manda «nacional» y el chip dice Estados Unidos — el pago se guarda como INTERNACIONAL', async () => {
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'ORD-001',
+        total: new Decimal(440),
+        paymentStatus: 'PENDING',
+        source: 'TPV',
+        externalId: null,
+        items: [],
+        payments: [],
+      }
+      const merchantAccountId = 'cmn3a6xr8000kn227eg8zeh41'
+      const mockPaymentData = {
+        venueId: mockVenueId,
+        amount: 44000,
+        tip: 0,
+        status: 'COMPLETED' as const,
+        method: 'CREDIT_CARD' as const,
+        source: 'TPV',
+        splitType: 'FULLPAYMENT' as const,
+        tpvId: 'tpv-1',
+        staffId: 'staff-1',
+        paidProductsId: [],
+        currency: 'MXN',
+        // Así lo manda hoy la terminal Nexgo con AngelPay: nunca marca internacional, sólo adjunta el país del chip.
+        isInternational: false,
+        issuerCountryCode: '0840',
+        issuerCountrySource: 'EMV_5F28' as const,
+        merchantAccountId,
+      }
+
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.merchantAccount.findUnique as jest.Mock).mockResolvedValue({ id: merchantAccountId, active: true })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 440,
+        amount: new Decimal(440),
+        tipAmount: new Decimal(0),
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+      })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
+
+      await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')
+
+      expect(prisma.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            internationalityStatus: 'INTERNATIONAL',
+            internationalitySource: 'EMV_5F28',
+            issuerCountryCode: '840',
+            processorData: expect.objectContaining({
+              isInternational: true,
+              isInternationalFromTerminal: false,
+              issuerCountryEvidence: { code: '0840', source: 'EMV_5F28' },
+            }),
+          }),
+        }),
+      )
+    })
+
+    it('D3 · regresión: sin país de la tarjeta se guarda lo que dijo la terminal, sin llave extra', async () => {
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'ORD-001',
+        total: new Decimal(440),
+        paymentStatus: 'PENDING',
+        source: 'TPV',
+        externalId: null,
+        items: [],
+        payments: [],
+      }
+      const merchantAccountId = 'cmn3a6xr8000kn227eg8zeh41'
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.merchantAccount.findUnique as jest.Mock).mockResolvedValue({ id: merchantAccountId, active: true })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 440,
+        amount: new Decimal(440),
+        tipAmount: new Decimal(0),
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+      })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
+
+      await (paymentService as any).recordOrderPayment(
+        mockVenueId,
+        mockOrderId,
+        {
+          venueId: mockVenueId,
+          amount: 44000,
+          tip: 0,
+          status: 'COMPLETED' as const,
+          method: 'CREDIT_CARD' as const,
+          source: 'TPV',
+          splitType: 'FULLPAYMENT' as const,
+          tpvId: 'tpv-1',
+          staffId: 'staff-1',
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: true,
+          merchantAccountId,
+        },
+        'user-1',
+      )
+
+      const data = (prisma.payment.create as jest.Mock).mock.calls[0][0].data
+      expect(data.processorData.isInternational).toBe(true)
+      expect(data.processorData).not.toHaveProperty('isInternationalFromTerminal')
+      expect(data).toMatchObject({ internationalityStatus: 'UNKNOWN', internationalitySource: 'LEGACY' })
     })
 
     it('should still create payment record correctly', async () => {

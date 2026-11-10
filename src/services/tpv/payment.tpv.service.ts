@@ -434,6 +434,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   classifyCardInternationality,
+  resolveIsInternational,
   type CardInternationalityDecision,
   type ClientCountryEvidenceSource,
 } from '../payments/cardInternationality.service'
@@ -2888,6 +2889,10 @@ interface PaymentCreationData {
   isInternational: boolean
   issuerCountryCode?: string
   issuerCountrySource?: ClientCountryEvidenceSource
+  /** D3: lo que dijo la terminal, cuando el país de la tarjeta decidió OTRA cosa. Sólo lo pone `fijarInternacionalidadDefinitiva`. */
+  isInternationalFromTerminal?: boolean
+  /** D3: la clasificación por país, calculada UNA vez al entrar al registrador; creación y consolidación usan la misma. */
+  internacionalidad?: CardInternationalityDecision | null
 
   // Additional fields
   reviewRating?: string
@@ -2960,10 +2965,10 @@ interface PaymentCreationData {
 }
 
 /**
- * Shadow-only issuer-country decision. Cash/manual/external methods have no card
- * issuer to classify and therefore keep the new Payment fields null.
+ * Issuer-country decision. Cash/manual/external methods have no card issuer to classify and therefore keep the Payment
+ * classification fields null.
  */
-function classifyPaymentInternationalityShadow(paymentData: PaymentCreationData): CardInternationalityDecision | null {
+function classifyPaymentInternationality(paymentData: PaymentCreationData): CardInternationalityDecision | null {
   if (paymentData.method !== 'CREDIT_CARD' && paymentData.method !== 'DEBIT_CARD') return null
 
   return classifyCardInternationality({
@@ -2974,16 +2979,30 @@ function classifyPaymentInternationalityShadow(paymentData: PaymentCreationData)
   })
 }
 
-function logPaymentInternationalityShadow(
-  paymentId: string,
-  legacyIsInternational: boolean,
-  decision: CardInternationalityDecision | null,
-): void {
-  if (!decision) return
+/**
+ * D3 (10-nov-2026): la internacionalidad DEFINITIVA la decide el país de la tarjeta (chip o BIN verificado) y viaja en
+ * `paymentData` desde la entrada del registrador, igual que la afiliación definitiva: creación, evidencia y consolidación usan
+ * el MISMO dato, y todos sus lectores (`processorData.isInternational`: costo, reportes, reembolsos, liquidación) siguen iguales.
+ * Sin evidencia se conserva lo que dijo la terminal; un cobro nacido del webhook sigue SIN dato. Idempotente: la venta rápida
+ * que delega en `recordOrderPayment` conserva la primera decisión.
+ */
+function fijarInternacionalidadDefinitiva(paymentData: PaymentCreationData): void {
+  if (paymentData.internacionalidad !== undefined) return
+  const decision = classifyPaymentInternationality(paymentData)
+  const definitivo = resolveIsInternational(decision, paymentData.isInternational)
+  paymentData.internacionalidad = decision
+  if (definitivo !== paymentData.isInternational) paymentData.isInternationalFromTerminal = paymentData.isInternational
+  paymentData.isInternational = definitivo
+}
 
-  logger.info('[CardInternationality][shadow] Classification recorded; financial behavior unchanged', {
+function logPaymentInternationality(paymentId: string, paymentData: PaymentCreationData): void {
+  const decision = paymentData.internacionalidad
+  if (!decision) return
+  const legacyIsInternational = paymentData.isInternationalFromTerminal ?? paymentData.isInternational
+
+  logger.info('[CardInternationality] Classification applied: the issuer country decides the card-type rate', {
     paymentId,
-    shadowMode: true,
+    isInternational: paymentData.isInternational,
     status: decision.status,
     source: decision.source,
     reasonCode: decision.reasonCode,
@@ -3592,6 +3611,7 @@ export async function recordOrderPayment(
   paymentData.merchantAccountId = afiliacion.merchantAccountId
   // Codex R7-2: la identidad de afiliación que mandó el APK viaja con el entrante (consolidación y huella la contrastan como conjunto).
   ;(paymentData as RegistroEntrante).merchantAccountIdDelApk = afiliacion.merchantAccountIdDelApk ?? null
+  fijarInternacionalidadDefinitiva(paymentData)
 
   // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
   // See recordFastPayment for full explanation. Both checks run in sequence to
@@ -3801,7 +3821,7 @@ export async function recordOrderPayment(
 
   // Shadow mode only: persist the new evidence/result beside the legacy boolean,
   // but keep every pricing and settlement consumer on the legacy path for now.
-  const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
+  const internationalityShadow = paymentData.internacionalidad ?? null
   const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
   // The request object is shared/mutable. Claim and persistence must observe one
   // primitive snapshot, even if an awaited hook mutates the wrapper in between.
@@ -4112,6 +4132,9 @@ export async function recordOrderPayment(
               mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
               mentaTicketId: paymentData.mentaTicketId,
               isInternational: paymentData.isInternational,
+              ...(paymentData.isInternationalFromTerminal !== undefined
+                ? { isInternationalFromTerminal: paymentData.isInternationalFromTerminal }
+                : {}),
               ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
                 ? {
                     issuerCountryEvidence: {
@@ -4561,7 +4584,7 @@ export async function recordOrderPayment(
     netAmount: payment.netAmount,
     elapsedMs: elapsedMs(),
   })
-  logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+  logPaymentInternationality(payment.id, paymentData)
   // D11: la cuenta de este cobro no tiene aviso del banco. Sólo llega aquí un cobro nuevo y comiteado; nadie lo espera y nunca lanza.
   void avisarSiCobraSinAviso(payment, venueId)
   // Pedidos en línea fase 2: el dinero ya se movió y se registra; si el pedido de tarjeta ya estaba cobrado, el cliente pagó dos
@@ -5381,6 +5404,7 @@ export async function recordFastPayment(
   paymentData.merchantAccountId = afiliacion.merchantAccountId
   // Codex R7-2: la identidad de afiliación que mandó el APK viaja con el entrante (consolidación y huella la contrastan como conjunto).
   ;(paymentData as RegistroEntrante).merchantAccountIdDelApk = afiliacion.merchantAccountIdDelApk ?? null
+  fijarInternacionalidadDefinitiva(paymentData)
 
   if (paymentData.idempotencyKey) {
     const existingByKey = await prisma.payment.findUnique({
@@ -5512,7 +5536,7 @@ export async function recordFastPayment(
 
   // Same additive shadow snapshot as order payments. No existing consumer reads
   // these fields yet, so old cost/settlement behavior remains byte-for-byte intact.
-  const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
+  const internationalityShadow = paymentData.internacionalidad ?? null
   const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
   // Snapshot once: the nullable Shift claim and the Payment row must classify
   // the same state even if an awaited Order/tender hook mutates the request.
@@ -5794,6 +5818,9 @@ export async function recordFastPayment(
               authorizationNumber: paymentData.authorizationNumber,
               referenceNumber: paymentData.referenceNumber,
               isInternational: paymentData.isInternational,
+              ...(paymentData.isInternationalFromTerminal !== undefined
+                ? { isInternationalFromTerminal: paymentData.isInternationalFromTerminal }
+                : {}),
               ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
                 ? {
                     issuerCountryEvidence: {
@@ -6093,7 +6120,7 @@ export async function recordFastPayment(
     feeAmount: payment.feeAmount,
     netAmount: payment.netAmount,
   })
-  logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+  logPaymentInternationality(payment.id, paymentData)
   // D11: mismo punto que en el cobro con orden.
   void avisarSiCobraSinAviso(payment, venueId)
 

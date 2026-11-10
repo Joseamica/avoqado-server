@@ -4796,10 +4796,10 @@ model Payment {
   maskedPan String? // "411111******1111"
   entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
 
-  // Card issuer-country classification (shadow mode, 2026-07-31).
-  // These nullable/additive fields intentionally do NOT replace the legacy
-  // processorData.isInternational boolean yet. Financial calculations keep using
-  // the legacy value until the shadow results have been observed and approved.
+  // Card issuer-country classification (shadow mode 2026-07-31; decides money since v2, 2026-11-10).
+  // Financial readers still use processorData.isInternational; since classification v2 that
+  // boolean is DECIDED by this classification when the card's country is known (DOMESTIC /
+  // INTERNATIONAL) and keeps the terminal's own flag when it is UNKNOWN. v1 rows are observational.
   internationalityStatus                CardInternationalityStatus?
   internationalitySource                CardInternationalitySource?
   issuerCountryCode                     String?                     @db.VarChar(3)
