@@ -26,6 +26,8 @@
  *   I6 · Lo que ya venía en camino termina antes de descartar (R4-1). Un retenido no se DESCARTA antes de `VENTANA_EN_VUELO_MS`
  *        desde su `createdAt` (409 DESCARTE_MUY_PRONTO): una petición normal admitida antes de que naciera ya terminó o murió,
  *        y entonces I5 + I1 dicen la verdad. «Aplicar» no espera (es idempotente por su llave o su efecto).
+ *   I7 · El que aplicó gana también por la ruta normal (R5-1): I6 sólo achica la ventana; la petición normal que termina
+ *        tarde reconcilia sus retenidos al contestar 2xx (`reconciliarConLaRutaNormal`).
  *
  * Quien termina sin dueño (se lanzó algo reintentable, o la venta quedó a medias) la SUELTA: deja `updatedAt` ya vencido, así
  * el siguiente no espera la ventana. Si el proceso muere, la ventana la suelta sola.
@@ -266,7 +268,9 @@ async function reanudar(
   huella: string,
   previo: EnvioRetenidoDeCampo,
 ): Promise<{ status: number; body: unknown }> {
-  const marca = await tomar(previo.id)
+  // R5-2: la toma es EXACTA (la APLICANDO vencida que se leyó): si otro la cambió mientras tanto (p. ej. la regresó a
+  // PENDIENTE), no se toma y se contesta como quedó.
+  const marca = await tomar(previo.id, { estado: previo.estado, updatedAt: previo.updatedAt })
   if (!marca) return comoQuedo(previo.id)
   try {
     // I1: reanudar empieza por preguntar si el efecto ya ocurrió (aun pasadas las 24 h o tras una baja: ya es un hecho).
@@ -278,8 +282,9 @@ async function reanudar(
     const n = await regresar(previo.id, marca, estaAMedias(ya), { motivo })
     return n === 0 ? comoQuedo(previo.id) : { status: 202, body: { retenido: true, motivo } }
   } catch (error) {
-    // Lo que falló (o USA_TU_SESION) la deja como estaba: APLICANDO y ya vencida. No-op si ya no es suya.
-    await soltar(previo.id, marca).catch(() => 0)
+    // Lo que falló (o USA_TU_SESION) la deja como la tomó: APLICANDO sin dueño, que es lo que se leyó (la toma es exacta),
+    // así que deshacerla y soltarla son lo mismo; si ya ejecutó (aplicarEnGracia) también queda así. No-op si ya no es suya.
+    await regresar(previo.id, marca, previo.estado === 'APLICANDO').catch(() => 0)
     throw error
   }
 }
@@ -340,6 +345,35 @@ async function nacer(celular: CelularDeCampo, e: Envio, cuerpo: unknown, huella:
   const marca = new Date()
   const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo: 'APLICADO_EN_GRACIA', estado: 'APLICANDO', updatedAt: marca })
   return nueva ? aplicarEnGracia(celular, e, cuerpo, fila, marca) : contestarPrevio(celular, e, cuerpo, huella, fila)
+}
+
+/**
+ * I7 · El que aplicó gana, también por la ruta normal (R5-1). Esperar `VENTA_EN_VUELO_MS` (I6) no prueba que una petición
+ * normal admitida antes de desvincular ya terminó (no tiene tope de ejecución). Por eso, cuando una ruta del bloque 0 del
+ * celular termina en 2xx, se revisan los retenidos de ESE celular, sucursal y tipo que no estén APLICADO (PENDIENTE,
+ * DESCARTADO, o APLICANDO sin dueño; la que alguien está aplicando no se toca): el que ya tiene su efecto queda APLICADO
+ * (I4, con CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado). Sin huella: manda `efectoYaHecho`, no el texto del cuerpo.
+ * Un celular sólo tiene retenidos ya desvinculado y entonces no entra por su sesión: casi siempre es una lectura vacía.
+ * Devuelve cuántos quedaron APLICADO. Lo llama `autenticarSesionDeCampo` al terminar la respuesta.
+ */
+export async function reconciliarConLaRutaNormal(celularId: string, venueId: string, tipo: TipoDeEnvio): Promise<number> {
+  const filas = await prisma.envioRetenidoDeCampo.findMany({
+    where: {
+      celularId,
+      venueId,
+      tipo,
+      OR: [{ estado: { in: ['PENDIENTE', 'DESCARTADO'] } }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }],
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: TOPE_DE_RETENIDOS,
+  })
+  let aplicados = 0
+  for (const r of filas) {
+    const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
+    const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt)
+    if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId))) aplicados++
+  }
+  return aplicados
 }
 
 async function comoQuedo(id: string) {

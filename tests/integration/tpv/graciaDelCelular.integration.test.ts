@@ -22,6 +22,8 @@ import { generateAccessToken } from '@/jwt.service'
 import { aceptarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { moduleService } from '@/services/modules/module.service'
 import * as pagos from '@/services/tpv/payment.tpv.service'
+import * as ventasDeCampo from '@/services/tpv/campo/ventaDeCampo.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { crearCelularConSesion } from '../../helpers/celularDeCampo'
 
 jest.setTimeout(120000)
@@ -654,5 +656,67 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     expect(r.status).toBe(400)
     expect(r.body).toMatchObject({ code: 'CUERPO_INVALIDO' })
     expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id } })).toBe(0)
+  })
+
+  it('I7 (R5-1) · la venta normal admitida antes de desvincular termina DESPUÉS del descarte: el retenido queda APLICADO, con la bitácora de reversión; un cobro', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    // La petición normal pasa el candado y se queda esperando (p. ej. el escaneo del inventario) ANTES de crear su ficha.
+    const original = ventasDeCampo.registrarVentaDeCampo
+    let llego!: () => void
+    const yaEntro = new Promise<void>(r => (llego = r))
+    let seguir!: () => void
+    const puedeSeguir = new Promise<void>(r => (seguir = r))
+    jest.spyOn(ventasDeCampo, 'registrarVentaDeCampo').mockImplementationOnce(async (...args) => {
+      llego()
+      await puedeSeguir
+      return original(...args)
+    })
+    let normal!: Promise<request.Response>
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([], async token => {
+      normal = request(server)
+        .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(cuerpo)
+        .then(r => r)
+      await yaEntro
+    })
+    // Su reenvío por la gracia nace PENDIENTE (no reportado, todavía sin ficha); pasa la ventana y el supervisor lo descarta.
+    expect((await enGracia(credencial, 'VENTA', cuerpoJson)).status).toBe(202)
+    const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id } })
+    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { createdAt: vencida() } })
+    const descarte = await desdeElPanel(fila.id, 'DESCARTAR')
+    expect(descarte.status).toBe(200)
+    expect(descarte.body.data).toEqual({ estado: 'DESCARTADO', repetida: false })
+
+    // La venta normal termina: su cobro existe, y al contestar 2xx el retenido de ese celular se reconcilia.
+    seguir()
+    const r = await normal
+    expect(r.status).toBe(201)
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(cobros).toHaveLength(1)
+    const espera = async <T>(leer: () => Promise<T>, listo: (x: T) => boolean) => {
+      for (let i = 0; i < 100; i++) {
+        const x = await leer()
+        if (listo(x)) return x
+        await new Promise(res => setTimeout(res, 50))
+      }
+      return leer()
+    }
+    const final = await espera(
+      () => prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } }),
+      x => x.estado === 'APLICADO',
+    )
+    expect(final).toMatchObject({ estado: 'APLICADO', resultado: expect.objectContaining({ paymentId: cobros[0].id }) })
+    // La bitácora va por `logAction`, que la integración deja mockeado (integration-setup).
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO',
+        entityId: fila.id,
+        data: expect.objectContaining({ descartadoPor: supervisorId }),
+      }),
+    )
+    expect((await filas(sim.serialNumber, cuerpo.llave)).cobros).toHaveLength(1)
   })
 })

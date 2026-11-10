@@ -14,17 +14,21 @@ import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCa
 import { firmarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import { autenticarSesionDeCampo } from '@/middlewares/autenticarSesionDeCampo.middleware'
+import logger from '@/config/logger'
+import { reconciliarConLaRutaNormal } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { celularDeCampo: { findUnique: jest.fn() } } }))
 jest.mock('@/services/auth/sessionCache', () => ({ isSessionAliveCached: jest.fn() }))
 jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeSesionInvalidada: jest.fn() }))
 jest.mock('@/services/tpv/campo/celular/personasDeCampo', () => ({ sucursalesDeLaPersona: jest.fn() }))
 jest.mock('@/observability/executionContext', () => ({ enrichContext: jest.fn() }))
+jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({ reconciliarConLaRutaNormal: jest.fn() }))
 
 const db = prisma as any
 const viva = isSessionAliveCached as jest.Mock
 const corte = motivoDeSesionInvalidada as jest.Mock
 const sucursales = sucursalesDeLaPersona as jest.Mock
+const reconciliar = reconciliarConLaRutaNormal as jest.Mock
 
 const celular = { id: 'cel1', organizationId: 'org1', staffId: 'staff1', staffIdVinculado: 'staff1', sesionId: 'ses1' }
 const deCampo = (extra: Partial<{ venueId: string; sid: string; role: 'CASHIER' | 'WAITER' }> = {}) =>
@@ -35,6 +39,13 @@ const app = express()
 app.get('/venues/:venueId/x', autenticarSesionDeCampo, (req: Request, res: Response) =>
   res.json({ authContext: req.authContext, celularId: res.locals.celular.id }),
 )
+// Las rutas del bloque 0 (R5-1): lo que contesta el controlador lo decide la prueba.
+let respuesta = { status: 201, body: { ok: true } as object }
+for (const ruta of ['ventas', 'custodia/aceptar', 'custodia/rechazar', 'checadas/entrada', 'checadas/salida', 'evidencia']) {
+  app.post(`/venues/:venueId/${ruta}`, autenticarSesionDeCampo, (_req: Request, res: Response) =>
+    res.status(respuesta.status).json(respuesta.body),
+  )
+}
 app.use((err: any, _req: Request, res: Response, _next: unknown) => res.status(500).json({ error: err.message }))
 
 const pedir = (token?: string, venueId = 'vA', extra: Record<string, string> = {}) => {
@@ -48,6 +59,8 @@ beforeEach(() => {
   viva.mockResolvedValue(true)
   corte.mockResolvedValue(null)
   sucursales.mockResolvedValue([sucursal('vA', 'WAITER'), sucursal('vB')])
+  reconciliar.mockResolvedValue(0)
+  respuesta = { status: 201, body: { ok: true } }
 })
 
 describe('autenticarSesionDeCampo', () => {
@@ -159,5 +172,49 @@ describe('autenticarSesionDeCampo', () => {
     viva.mockRejectedValue(new Error('base caída'))
     const r = await pedir(deCampo())
     expect(r.status).toBe(500)
+  })
+})
+
+describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar en 2xx se reconcilian los retenidos de ESE celular', () => {
+  const tick = () => new Promise(r => setImmediate(r))
+  const mandar = (ruta: string, token = deCampo()) =>
+    request(app).post(`/venues/vA/${ruta}`).set('Authorization', `Bearer ${token}`).send({})
+
+  it.each([
+    ['ventas', 'VENTA'],
+    ['custodia/aceptar', 'CUSTODIA_ACEPTAR'],
+    ['custodia/rechazar', 'CUSTODIA_RECHAZAR'],
+    ['checadas/entrada', 'ENTRADA'],
+    ['checadas/salida', 'SALIDA'],
+    ['evidencia', 'EVIDENCIA'],
+  ])('POST %s en 2xx → reconciliar(celular, sucursal, %s) DESPUÉS de contestar', async (ruta, tipo) => {
+    const r = await mandar(ruta)
+    expect(r.status).toBe(201)
+    while (!reconciliar.mock.calls.length) await tick()
+    expect(reconciliar).toHaveBeenCalledTimes(1)
+    expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', tipo)
+  })
+
+  it('un rechazo de la ruta (4xx), un candado que no la deja pasar o el GET de prueba → no se reconcilia nada', async () => {
+    respuesta = { status: 409, body: { code: 'VENTA_EN_PROCESO' } }
+    expect((await mandar('ventas')).status).toBe(409)
+    expect((await mandar('ventas', deCampo({ sid: 'ses-vieja' }))).status).toBe(401)
+    expect((await pedir(deCampo())).status).toBe(200)
+    for (let i = 0; i < 5; i++) await tick()
+    expect(reconciliar).not.toHaveBeenCalled()
+  })
+
+  it('si la reconciliación falla, la respuesta normal no cambia: sólo queda un logger.warn', async () => {
+    const aviso = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+    reconciliar.mockRejectedValue(new Error('base caída'))
+    respuesta = { status: 200, body: { orderId: 'o1', repetida: true } }
+
+    const r = await mandar('ventas')
+
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ orderId: 'o1', repetida: true })
+    while (!aviso.mock.calls.length) await tick()
+    expect(aviso).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ celularId: 'cel1', venueId: 'vA', tipo: 'VENTA' }))
+    aviso.mockRestore()
   })
 })

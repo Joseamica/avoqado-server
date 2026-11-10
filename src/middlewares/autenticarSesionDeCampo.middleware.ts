@@ -8,14 +8,45 @@
  * `requireVenueMembership` y los controladores de la TPV sigan igual, y `res.locals.celular`.
  */
 import { NextFunction, Request, Response } from 'express'
+import logger from '@/config/logger'
 import AppError, { ForbiddenError, UnauthorizedError } from '@/errors/AppError'
 import { enrichContext } from '@/observability/executionContext'
 import { buildAuthContextFromPayload } from '@/security'
 import { isSessionAliveCached } from '@/services/auth/sessionCache'
+import type { TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
+import { reconciliarConLaRutaNormal } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import prisma from '@/utils/prismaClient'
+
+/** Las rutas del bloque 0 que la gracia también recibe (`/venues/:venueId/<ruta>`), con su tipo de envío. */
+const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
+  ventas: 'VENTA',
+  'custodia/aceptar': 'CUSTODIA_ACEPTAR',
+  'custodia/rechazar': 'CUSTODIA_RECHAZAR',
+  'checadas/entrada': 'ENTRADA',
+  'checadas/salida': 'SALIDA',
+  evidencia: 'EVIDENCIA',
+}
+
+/**
+ * I7 (R5-1): una petición normal admitida antes de desvincular puede terminar después de que su reenvío por la gracia se
+ * retuvo, o hasta se descartó. Al contestar 2xx se reconcilian los retenidos de ese celular (el que ya tiene su efecto
+ * queda APLICADO). Va después de la respuesta: nunca la frena ni la cambia; un error sólo queda en el log.
+ * ponytail: si el proceso muere entre el efecto y este gancho, la fila puede quedar DESCARTADO con el efecto hecho; el dinero
+ * queda bien (la venta y su cobro existen) y «Aplicar», la gracia o «Descartar» la corrigen al releer. Sin barrido periódico.
+ */
+function alTerminarReconciliar(req: Request, res: Response, celularId: string, venueId: string) {
+  const tipo = req.method === 'POST' ? TIPO_POR_RUTA[req.path.split('/').slice(3).join('/')] : undefined
+  if (!tipo) return
+  res.on('finish', () => {
+    if (res.statusCode < 200 || res.statusCode >= 300) return
+    reconciliarConLaRutaNormal(celularId, venueId, tipo).catch(error =>
+      logger.warn('No se pudieron reconciliar los retenidos del celular de campo', { celularId, venueId, tipo, error }),
+    )
+  })
+}
 
 const invalida = () => new UnauthorizedError('Tu sesión del celular no es válida. Entra de nuevo con tu PIN.', 'SESION_INVALIDA')
 
@@ -54,6 +85,7 @@ export async function autenticarSesionDeCampo(req: Request, res: Response, next:
     })
     enrichContext({ venueId: t.venueId, venueName: hoy.nombre, userId: t.sub, role: hoy.role })
     res.locals.celular = celular
+    alTerminarReconciliar(req, res, celular.id, t.venueId)
     next()
   } catch (error) {
     if (error instanceof AppError && error.statusCode < 500) {
