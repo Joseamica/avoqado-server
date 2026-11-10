@@ -878,13 +878,13 @@ describe('R10: anular renglones exige una cuenta viva, incluso cuando se anulan 
 describe('S9 (P2-5): anular TODOS los artículos de un folio es cancelarlo como pedido', () => {
   const dos = () => ({ ...order(), items: [line, { ...line, id: 'line-2' }] })
 
-  it('todos ⇒ 409 FOLIO_SE_CANCELA_COMO_PEDIDO, antes de devolver beneficios, borrar renglones o tocar la cuenta', async () => {
+  it('todos ⇒ 400 FOLIO_SE_CANCELA_COMO_PEDIDO (no 409: la TPV lee todo 409 como «la modificó otra terminal»), antes de devolver beneficios, borrar renglones o tocar la cuenta', async () => {
     tx.order.findUnique.mockResolvedValue(dos())
     tx.onlineOrder.findFirst.mockResolvedValue({ id: 'online-1' })
     await expect(
       voidItems('venue', 'order', { itemIds: ['line', 'line-2'], reason: 'error', staffId: 'staff', expectedVersion: 1 }),
     ).rejects.toMatchObject({
-      statusCode: 409,
+      statusCode: 400,
       code: 'FOLIO_SE_CANCELA_COMO_PEDIDO',
       message: 'Este es un pedido en línea: cancélalo como pedido',
     })

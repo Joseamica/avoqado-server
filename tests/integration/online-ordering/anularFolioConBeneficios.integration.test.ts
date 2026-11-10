@@ -1314,12 +1314,12 @@ describe('S9 · anular un folio regresa sus beneficios y su fila queda como cort
     expect((await fila(f.filaId)).amount.toFixed(2)).toBe('43.80')
   })
 
-  it('anular TODOS los artículos de un folio ⇒ 409 FOLIO_SE_CANCELA_COMO_PEDIDO; la cuenta y su premio siguen igual', async () => {
+  it('anular TODOS los artículos de un folio ⇒ 400 FOLIO_SE_CANCELA_COMO_PEDIDO; la cuenta y su premio siguen igual', async () => {
     const f = await folio('premio')
     const o = await prisma.order.findUniqueOrThrow({ where: { id: f.orderId }, include: { items: true } })
     await expect(
       voidItems(venueId, f.orderId, { itemIds: o.items.map(i => i.id), reason: 'S9', staffId, expectedVersion: o.version }),
-    ).rejects.toMatchObject({ statusCode: 409, code: 'FOLIO_SE_CANCELA_COMO_PEDIDO' })
+    ).rejects.toMatchObject({ statusCode: 400, code: 'FOLIO_SE_CANCELA_COMO_PEDIDO' })
     expect((await cuenta(f.orderId)).status).toBe('PENDING')
     expect(await prisma.stampReward.findUniqueOrThrow({ where: { id: f.premioId } })).toMatchObject({ status: 'REDEEMED' })
   })

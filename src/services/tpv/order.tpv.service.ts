@@ -3234,8 +3234,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (order.items.every(item => input.itemIds.includes(item.id))) {
         // S9 (P2-5): en un folio, anular todo dejaría la cuenta en $0 DESPUÉS de convertir sus beneficios (recorta los descuentos y
         // borra los renglones), y el dinero tardío llegaría a una cuenta vacía. Se cancela como pedido, que sí conserva su precio.
+        // 400 y no 409, como el de Rappi de arriba (Codex S16): toda TPV lee un 409 de voidItems como «la modificó otra terminal»;
+        // con 400 la 2.18+ muestra este texto (la 2.10–2.17, su texto fijo de 400).
         if (await esCuentaDeFolioEnTx(tx, { venueId, orderId })) {
-          throw new ConflictError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
+          throw new BadRequestError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
         }
         await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
         order = await leerOrden()
