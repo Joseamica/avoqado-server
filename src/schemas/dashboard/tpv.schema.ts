@@ -12,6 +12,8 @@ export type PaginatedTerminalsResponse = {
     pageSize: number
     pageCount: number
   }
+  /** Opcional (Aparatos claros, Paso 2): vales por área del negocio. */
+  areaTickets?: { enabled: boolean; activeAreaCount: number }
 }
 
 // Opcional: Define los tipos para los filtros del query
