@@ -444,7 +444,7 @@ async function nacer(celular: CelularDeCampo, e: Envio, cuerpo: unknown, huella:
  * celular termina en 2xx, se revisa el retenido de ESE envío: el que ya tiene su efecto queda APLICADO (I4, con
  * CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado).
  * Arreglo 9 (R8-1, R8-2): ya no se adivina qué filas revisar. `cuerpoJson` es el texto EXACTO que llegó por la ruta normal
- * (`req.rawBody`), así que su huella es la misma que el celular reporta en su latido y que la gracia guardó: UNA consulta por
+ * (`textoDelCuerpo`), así que su huella es la misma que el celular reporta en su latido y que la gracia guardó: UNA consulta por
  * el único `(celularId, huella)` da con la fila, nazca cuando nazca, y nada se recorre dentro de la transacción.
  * Contrato (bloque 2): la petición normal manda como cuerpo exactamente el texto de su huella.
  * ponytail: si el celular manda por la ruta normal un texto distinto al de su huella (otros espacios u orden), el gancho no

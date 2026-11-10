@@ -13,7 +13,7 @@ import { isSessionAliveCached } from '@/services/auth/sessionCache'
 import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { firmarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
-import { autenticarSesionDeCampo, guardarCuerpoDelCelular } from '@/middlewares/autenticarSesionDeCampo.middleware'
+import { autenticarSesionDeCampo, guardarCuerpoDelCelular, textoDelCuerpo } from '@/middlewares/autenticarSesionDeCampo.middleware'
 import logger from '@/config/logger'
 import { reconciliarConLaRutaNormal } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
@@ -36,7 +36,7 @@ const deCampo = (extra: Partial<{ venueId: string; sid: string; role: 'CASHIER' 
 const sucursal = (venueId: string, role = 'CASHIER') => ({ staffVenueId: `sv-${venueId}`, venueId, nombre: venueId, role, pin: '1234' })
 
 const app = express()
-// Como `configureCoreMiddlewares`: el parser global con el `verify` que guarda el texto crudo sólo del celular (arreglo 9).
+// Como `configureCoreMiddlewares`: el parser global con el `verify` que guarda una referencia al cuerpo crudo (arreglo 9).
 app.use(express.json({ verify: guardarCuerpoDelCelular }))
 app.get('/venues/:venueId/x', autenticarSesionDeCampo, (req: Request, res: Response) =>
   res.json({ authContext: req.authContext, celularId: res.locals.celular.id }),
@@ -49,10 +49,12 @@ for (const ruta of ['ventas', 'custodia/aceptar', 'custodia/rechazar', 'checadas
     res.status(respuesta.status).json(respuesta.body),
   )
 }
-app.use('/api/v1/tpv/campo', campo)
-// Fuera del celular de campo (p. ej. una ruta de la TPV): el texto crudo NO se guarda.
-app.post('/api/v1/tpv/:tpvId/cualquiera', (req: Request, res: Response) => res.json({ crudo: req.rawBody ?? null, body: req.body }))
-app.post('/api/v1/tpv/campo/gracia', (req: Request, res: Response) => res.json({ crudo: req.rawBody ?? null }))
+// Montado como en el SERVIDOR: `/api/v1/tpv` → `tpv.routes` → `router.use('/campo', …)`.
+const tpv = express.Router()
+tpv.use('/campo', campo)
+app.use('/api/v1/tpv', tpv)
+// Fuera del celular de campo (p. ej. una ruta de la TPV): el parser contesta igual que siempre.
+app.post('/api/v1/tpv/:tpvId/cualquiera', (req: Request, res: Response) => res.json({ crudo: null, body: req.body }))
 app.use((err: any, _req: Request, res: Response, _next: unknown) => res.status(500).json({ error: err.message }))
 
 const pedir = (token?: string, venueId = 'vA', extra: Record<string, string> = {}) => {
@@ -213,34 +215,36 @@ describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar e
     expect(reconciliar).not.toHaveBeenCalled()
   })
 
-  it('req.rawBody sólo se llena en /api/v1/tpv/campo/venues/…: ni en otra ruta de la TPV ni en la gracia', async () => {
+  it('R11: el tipo sale de la ruta que Express eligió, no del texto de la URL (doble diagonal, mayúsculas, diagonal final)', async () => {
+    for (const url of [
+      '/api/v1/tpv//campo/venues/vA/ventas',
+      '/api/v1/tpv/campo//venues/vA/ventas',
+      '/api/v1/tpv/CAMPO/venues/vA/VENTAS',
+      '/api/v1/tpv/campo/venues/vA/ventas/',
+    ]) {
+      reconciliar.mockClear()
+      const r = await request(app).post(url).set('Authorization', `Bearer ${deCampo()}`).set('Content-Type', 'application/json').send(TEXTO)
+      expect(r.status).toBe(201)
+      for (let i = 0; i < 5; i++) await tick()
+      expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', 'VENTA', TEXTO)
+    }
+  })
+
+  it('el parser no cambia para otras rutas: mismo cuerpo, y sólo se guarda una referencia (sin copiar el texto)', async () => {
     const otra = await request(app).post('/api/v1/tpv/t1/cualquiera').set('Content-Type', 'application/json').send(TEXTO)
     expect(otra.body).toEqual({ crudo: null, body: { llave: 'k-1', serialNumber: '8952', precioVisto: 0 } })
-    const gracia = await request(app).post('/api/v1/tpv/campo/gracia').set('Content-Type', 'application/json').send(TEXTO)
-    expect(gracia.body).toEqual({ crudo: null })
   })
 
-  it('R10-1: el texto se guarda en las mismas rutas que acepta Express (mayúsculas, otro prefijo), nunca en la gracia ni con ?venues en la consulta', () => {
-    const guarda = (url: string) => {
-      const req = { originalUrl: url, url } as any
-      guardarCuerpoDelCelular(req, {} as any, Buffer.from(TEXTO, 'utf8'), 'utf-8')
-      return req.rawBody
+  it('R9-1: el texto sólo existe en UTF-8; otra codificación que el parser acepta (utf-16be, utf-16) no truena y no tiene texto', () => {
+    const conCuerpo = (buf: Buffer, enc: string) => {
+      const req = {} as any
+      guardarCuerpoDelCelular(req, {} as any, buf, enc)
+      return textoDelCuerpo(req)
     }
-    expect(guarda('/api/v1/tpv/CAMPO/venues/vA/ventas')).toBe(TEXTO)
-    expect(guarda('/api/v2/tpv/campo/Venues/vA/ventas')).toBe(TEXTO)
-    expect(guarda('/api/v1/tpv/campo/gracia')).toBeUndefined()
-    expect(guarda('/api/v1/tpv/t1/cualquiera?x=/tpv/campo/venues/')).toBeUndefined()
-  })
-
-  it('R9-1: otra codificación que el parser acepta (utf-16be, utf-16) no truena ni guarda texto; utf-8 sí lo guarda', () => {
-    const req = (url: string) => ({ originalUrl: url, url }) as any
-    const enCampo = req('/api/v1/tpv/campo/venues/vA/ventas')
-    for (const enc of ['utf-16be', 'utf-16', 'utf-16le']) {
-      expect(() => guardarCuerpoDelCelular(enCampo, {} as any, Buffer.from(TEXTO, 'utf16le'), enc)).not.toThrow()
-      expect(enCampo.rawBody).toBeUndefined()
-    }
-    guardarCuerpoDelCelular(enCampo, {} as any, Buffer.from(TEXTO, 'utf8'), 'utf-8')
-    expect(enCampo.rawBody).toBe(TEXTO)
+    for (const enc of ['utf-16be', 'utf-16', 'utf-16le']) expect(conCuerpo(Buffer.from(TEXTO, 'utf16le'), enc)).toBeUndefined()
+    expect(conCuerpo(Buffer.from(TEXTO, 'utf8'), 'utf-8')).toBe(TEXTO)
+    expect(conCuerpo(Buffer.from(TEXTO, 'utf8'), 'UTF-8')).toBe(TEXTO)
+    expect(textoDelCuerpo({} as any)).toBeUndefined()
   })
 
   it('un rechazo de la ruta (4xx), un candado que no la deja pasar o el GET de prueba → no se reconcilia nada', async () => {

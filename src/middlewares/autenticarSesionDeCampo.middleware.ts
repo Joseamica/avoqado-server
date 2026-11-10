@@ -28,42 +28,49 @@ import prisma from '@/utils/prismaClient'
  * relea; no mueve dinero. Para cubrirla, el celular tendría que mandar por la gracia el mismo texto que por su ruta.
  */
 const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
-  ventas: 'VENTA',
-  'custodia/aceptar': 'CUSTODIA_ACEPTAR',
-  'custodia/rechazar': 'CUSTODIA_RECHAZAR',
-  'checadas/entrada': 'ENTRADA',
-  'checadas/salida': 'SALIDA',
+  '/venues/:venueId/ventas': 'VENTA',
+  '/venues/:venueId/custodia/aceptar': 'CUSTODIA_ACEPTAR',
+  '/venues/:venueId/custodia/rechazar': 'CUSTODIA_RECHAZAR',
+  '/venues/:venueId/checadas/entrada': 'ENTRADA',
+  '/venues/:venueId/checadas/salida': 'SALIDA',
 }
 
 /**
- * Arreglo 9: el `verify` del parser JSON global (`configureCoreMiddlewares`). Guarda el texto EXACTO del cuerpo en
- * `req.rawBody` SÓLO en las rutas del celular de campo (`/api/v1/tpv/campo/venues/…`): el gancho I7 busca el retenido por la
- * huella de ese texto, la misma que el celular reporta en su latido. Cualquier otra URL (PAX, Nexgo, el panel, la gracia) no
- * guarda nada: ni memoria ni comportamiento cambian.
+ * Arreglo 9 y R11: el `verify` del parser JSON global (`configureCoreMiddlewares`) guarda una REFERENCIA al cuerpo crudo que
+ * el parser ya tiene en memoria (sin copiarlo ni decodificarlo) en toda petición JSON. Decidir aquí por el texto de la URL
+ * fallaba con variantes que Express sí acepta (mayúsculas, doble diagonal): ahora sólo lo LEE el gancho del celular de campo,
+ * que corre únicamente en las rutas que Express emparejó. Para cualquier otra ruta (PAX, Nexgo, el panel) nada cambia: ni el
+ * cuerpo ni los errores del parser.
  */
-/** R10-1: igual que el router de Express (sin distinguir mayúsculas) y sin depender de `API_PREFIX`. */
-export const RUTAS_CON_CUERPO_CRUDO = /\/tpv\/campo\/venues\//i
 export function guardarCuerpoDelCelular(req: IncomingMessage, _res: ServerResponse, buf: Buffer, encoding: string) {
-  const ruta = ((req as Request).originalUrl ?? req.url ?? '').split('?')[0]
-  // R9-1: sólo UTF-8 (la huella del celular se calcula sobre UTF-8). Otra codificación que el parser sí acepta (UTF-16BE…)
-  // no tiene texto que guardar: la ruta sigue normal y el gancho no la encuentra (mismo límite que «texto distinto»).
-  if (RUTAS_CON_CUERPO_CRUDO.test(ruta) && /^utf-?8$/i.test(encoding || 'utf-8')) (req as Request).rawBody = buf.toString('utf8')
+  ;(req as Request).cuerpoCrudo = { buf, encoding }
+}
+
+/**
+ * El texto EXACTO que mandó el celular, sobre el que calcula su huella. R9-1: sólo UTF-8 (la huella del celular se calcula
+ * sobre UTF-8); otra codificación que el parser acepta (UTF-16…) no tiene texto: la ruta sigue normal y el gancho no la busca
+ * (mismo límite que «texto distinto»).
+ */
+export function textoDelCuerpo(req: Request): string | undefined {
+  const c = req.cuerpoCrudo
+  return c && /^utf-?8$/i.test(c.encoding || 'utf-8') ? c.buf.toString('utf8') : undefined
 }
 
 /**
  * I7 (R5-1): una petición normal admitida antes de desvincular puede terminar después de que su reenvío por la gracia se
  * retuvo, o hasta se descartó. Al contestar 2xx se reconcilian los retenidos de ese celular (el que ya tiene su efecto
  * queda APLICADO). Va después de la respuesta: nunca la frena ni la cambia; un error sólo queda en el log.
+ * R11: el tipo sale de la ruta DECLARADA que Express emparejó (`req.route.path`), no del texto de la URL.
  * ponytail: si el proceso muere entre el efecto y este gancho, la fila puede quedar DESCARTADO con el efecto hecho; el dinero
  * queda bien (la venta y su cobro existen) y «Aplicar», la gracia o «Descartar» la corrigen al releer. Sin barrido periódico.
  */
 function alTerminarReconciliar(req: Request, res: Response, celularId: string, venueId: string) {
-  const tipo = req.method === 'POST' ? TIPO_POR_RUTA[req.path.split('/').slice(3).join('/')] : undefined
+  const tipo = req.method === 'POST' ? TIPO_POR_RUTA[req.route?.path as string] : undefined
   if (!tipo) return
   res.on('finish', () => {
-    // Arreglo 9: el texto exacto que mandó el celular (lo guarda `guardarCuerpoDelCelular`); sin él no hay huella que buscar.
-    if (res.statusCode < 200 || res.statusCode >= 300 || req.rawBody === undefined) return
-    reconciliarConLaRutaNormal(celularId, venueId, tipo, req.rawBody).catch(error =>
+    const texto = textoDelCuerpo(req)
+    if (res.statusCode < 200 || res.statusCode >= 300 || texto === undefined) return
+    reconciliarConLaRutaNormal(celularId, venueId, tipo, texto).catch(error =>
       logger.warn('No se pudieron reconciliar los retenidos del celular de campo', { celularId, venueId, tipo, error }),
     )
   })

@@ -27,7 +27,7 @@ export const configureCoreMiddlewares = (app: Express) => {
 
   // Body parsers with size limits
   logger.info(`Configuring body-parser: JSON limit ${BODY_JSON_LIMIT}, URL-encoded limit ${BODY_URLENCODED_LIMIT}`)
-  // `verify`: el texto crudo SÓLO para las rutas del celular de campo (su gancho busca por la huella de ese texto); el resto igual.
+  // `verify`: una referencia al cuerpo crudo (sin copiarlo); sólo la lee el gancho del celular de campo para su huella.
   app.use(express.json({ limit: BODY_JSON_LIMIT, verify: guardarCuerpoDelCelular }))
   app.use(express.urlencoded({ extended: true, limit: BODY_URLENCODED_LIMIT }))
 
