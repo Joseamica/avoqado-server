@@ -116,11 +116,14 @@ export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desd
 
 /** 🔴 `cancelExchange` reconoce estos dos rechazos por su texto exacto: usa las constantes, no copies la frase. */
 /**
- * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID, `orderBalance.ts`), así que cancelarla después
- * tampoco se podría (Codex D18 r1 #1, 9-nov). La salida honesta es Reembolso, como «Corregir un cobro ya hecho» (23-oct).
+ * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID o PARTIAL, `orderBalance.ts`), así que
+ * cancelarla después tampoco se podría (Codex D18 r1 #1 y D21, 9 y 10-nov). La salida honesta es Reembolso, como
+ * «Corregir un cobro ya hecho» (23-oct).
  */
-export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.'
-export const MENSAJE_CUENTA_CON_PAGOS = 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'
+export const MENSAJE_CUENTA_PAGADA =
+  'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
+export const MENSAJE_CUENTA_CON_PAGOS =
+  'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
@@ -150,7 +153,7 @@ export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawD
 
 /**
  * Candado de la orden → relectura → 400 si ya tiene dinero (PAID/PARTIAL) → 409 si hay un cobro de terminal vivo.
- * El orden importa: con dinero adentro la respuesta es «reembolsa primero», y no se consulta la terminal.
+ * El orden importa: con dinero adentro la respuesta es «no se puede; usa Reembolso», y no se consulta la terminal.
  * Devuelve la fila releída bajo el candado; la escritura de la cancelación va inmediatamente después, en la misma tx.
  */
 export async function assertOrderCancellableUnderLock(

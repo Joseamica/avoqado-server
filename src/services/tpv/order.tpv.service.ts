@@ -2630,7 +2630,7 @@ export async function removeOrderItem(
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
-          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, usa Reembolso.',
+          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
         )
       }
 
@@ -2888,7 +2888,9 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, usa Reembolso.')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
 
       // Validate staff exists
@@ -3207,7 +3209,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
-          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, usa Reembolso.',
+          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
         )
       }
 
@@ -3287,7 +3289,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Anular TODO cancela la orden: con dinero ya cobrado (PARTIAL) se rechaza, igual que `cancelOrder`. Una anulación
       // parcial sobre una PARTIAL sigue permitida (no cancela nada).
       if (isVoidingAllItems && order.paymentStatus === 'PARTIAL') {
-        throw new BadRequestError('Esta cuenta ya tiene pagos registrados. Reembólsalos antes de anular todos sus artículos.')
+        // D21: sin «Reembólsalos antes de…»; un reembolso no baja lo cobrado (`orderBalance.ts`).
+        throw new BadRequestError(
+          'Esta cuenta ya tiene pagos registrados y ya no se pueden anular todos sus artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
       if (anulacionExigeOrdenSinCobroVivo({ isVoidingAllItems })) {
         await assertNoLiveTerminalCharge(
@@ -3390,7 +3395,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
-          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Reembolsa primero la diferencia o anula menos artículos.`,
+          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Anula menos artículos; si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.`,
           'ORDER_VOID_BELOW_PAID',
           { paidAmount: pagado.toFixed(2), newTotal: totalNuevo.toFixed(2) },
         )
