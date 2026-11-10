@@ -19,7 +19,12 @@
  */
 import prisma from '../../utils/prismaClient'
 
-export const VIDA_DEL_CATALOGO_MS = 30 * 60_000
+/**
+ * D8 (10-nov): era 30 min, y los POS piden cada 5: la 7.ª bajada encontraba la copia vencida y volvía a armar todo aunque la
+ * versión no hubiera cambiado (La Galeterie, cada 35 min, 420–760 ms con el hilo retenido; Better Stack, 9-nov). La versión es
+ * la que dice si cambió; la vida sólo suelta la memoria de los negocios que dejaron de preguntar.
+ */
+export const VIDA_DEL_CATALOGO_MS = 24 * 60 * 60_000
 /** Memoria máxima de la caché. Hoy La Galeterie, el catálogo más grande, pesa 2.5 MB de JSON (≤ 5 MB contados así). */
 export const TOPE_DE_BYTES_EN_CACHE = 48 * 1024 * 1024
 /** Lo que cuenta cada negocio aunque su catálogo esté vacío: acota el número de entradas. */
