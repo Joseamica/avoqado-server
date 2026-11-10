@@ -115,7 +115,11 @@ export async function assertNoLiveTerminalCharge(
 export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).'
 
 /** 🔴 `cancelExchange` reconoce estos dos rechazos por su texto exacto: usa las constantes, no copies la frase. */
-export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada. Reembólsala antes de cancelarla.'
+/**
+ * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID, `orderBalance.ts`), así que cancelarla después
+ * tampoco se podría (Codex D18 r1 #1, 9-nov). La salida honesta es Reembolso, como «Corregir un cobro ya hecho» (23-oct).
+ */
+export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.'
 export const MENSAJE_CUENTA_CON_PAGOS = 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'
 
 export interface OrderCancelGuardOptions {
@@ -167,10 +171,7 @@ export async function assertOrderCancellableUnderLock(
   // después cancelar, igual que en Square.
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError(
-      opciones.mensajeConDinero ??
-        (order.paymentStatus === 'PAID'
-          ? MENSAJE_CUENTA_PAGADA
-          : MENSAJE_CUENTA_CON_PAGOS),
+      opciones.mensajeConDinero ?? (order.paymentStatus === 'PAID' ? MENSAJE_CUENTA_PAGADA : MENSAJE_CUENTA_CON_PAGOS),
     )
   }
   if (opciones.contarPagosRegistrados) {
