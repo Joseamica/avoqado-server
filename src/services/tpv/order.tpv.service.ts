@@ -2629,7 +2629,7 @@ export async function removeOrderItem(
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot remove items from a paid order')
+        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de quitarle artículos.')
       }
 
       // Verify item exists in order
@@ -2886,7 +2886,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot comp items from a paid order')
+        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de dar cortesías.')
       }
 
       // Validate staff exists
@@ -3204,7 +3204,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot void items from a paid order')
+        throw new BadRequestError('Esta cuenta ya está pagada. Reembólsala antes de anular artículos.')
       }
 
       // Validate staff exists
@@ -3618,7 +3618,7 @@ export async function applyDiscount(
 
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot apply discount to a paid order')
+        throw new BadRequestError('Esta cuenta ya está pagada y ya no admite descuentos. Si cobraste de más, reembolsa la diferencia.')
       }
 
       // Validate staff exists

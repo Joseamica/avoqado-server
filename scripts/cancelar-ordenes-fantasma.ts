@@ -20,7 +20,7 @@
  * estricta a propósito: CONFIRMED + PENDING + CERO filas de Payment + sin cobro a terminal vivo +
  * sin mesa + nunca tocada después de crearse + más vieja que la edad mínima. La gemela es sólo
  * informativa para la lista que aprueba el founder. Espeja lo que escribe `cancelOrder`
- * (`order.mobile.service.ts`): `status = CANCELLED`, `specialRequests = "Cancelled: <motivo>"` y
+ * (`order.mobile.service.ts`): `status = CANCELLED`, `specialRequests = "Cancelada: <motivo>"` (D15/D18) y
  * bitácora `ORDER_CANCELLED`; no hay mesa que liberar ni inventario que devolver (nunca se dedujo:
  * la deducción es al pagar).
  *
@@ -335,7 +335,7 @@ async function main(): Promise<void> {
               payments: { none: {} },
               areaTicketCheckoutSession: { is: null },
             },
-            data: { status: 'CANCELLED', specialRequests: `Cancelled: ${motivo}` },
+            data: { status: 'CANCELLED', specialRequests: `Cancelada: ${motivo}` },
           })
           if (r.count !== 1) {
             throw new Error(
