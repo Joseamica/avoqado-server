@@ -33,6 +33,7 @@ import { quoteCart } from '@/services/online-ordering/quote.service'
 import { aplicarBeneficiosEnTx, cotizarConBeneficios } from '@/services/online-ordering/beneficios.service'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
+import { MOTIVO_BENEFICIO_REGRESADO } from '@/services/online-ordering/cortesiaDeFolio'
 import {
   createOnlineOrder,
   decisionDePrecio,
@@ -1932,6 +1933,169 @@ describe('getTrackingByToken', () => {
   it('un token desconocido devuelve null', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
     await expect(getTrackingByToken('x'.repeat(32))).resolves.toBeNull()
+  })
+
+  describe('S14: el seguimiento trae sus beneficios, si regresaron y lo que sumó («Sumaste», P2-5, P2-8)', () => {
+    const MOTIVO = MOTIVO_BENEFICIO_REGRESADO
+    const fila = (name: string, regresado = false) => ({
+      name,
+      amount: D('45.00'),
+      isComp: regresado,
+      compReason: regresado ? MOTIVO : null,
+    })
+    /** Un folio con su cuenta: `orderId` arriba (como el `OnlineOrder`), la clienta y sus filas de descuento en la cuenta. */
+    const folio = (cuenta: Record<string, any> = {}, paymentStatus = 'PAID', over: Record<string, any> = {}) => {
+      const base = folioNadie({ orderId: 'ord-1', ...over }, paymentStatus)
+      return { ...base, order: { ...base.order, customerId: 'cus-ana', orderDiscounts: [], _count: { orderDiscounts: 0 }, ...cuenta } }
+    }
+    /** La fila del sello de la venta: la cartilla que acreditó su EARN (contador canónico de hoy y meta) y si se revirtió. */
+    const SELLO = { customerId: 'cus-ana', stampsEarned: 7, stampsRequired: 10, revertido: false }
+    const consultaDelSello = () => (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0] as { text: string; values: unknown[] }
+
+    beforeEach(() => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: true, stampsEnabled: true })
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([SELLO])
+      prismaMock.loyaltyTransaction.findFirst.mockResolvedValue({ points: 42 })
+      prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
+    })
+
+    it('seguimiento de un folio vencido con premio ⇒ beneficioRegresado true (y sus beneficios, en pesos)', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(
+        folio({ orderDiscounts: [fila('Premio', true)], _count: { orderDiscounts: 1 } }, 'PENDING', { status: 'EXPIRED' }),
+      )
+      const t = await getTrackingByToken('T'.repeat(32))
+      expect(t).toMatchObject({
+        status: 'EXPIRED',
+        beneficios: [{ nombre: 'Premio', monto: 45 }],
+        beneficiosTotal: 1,
+        beneficioRegresado: true,
+      })
+      // Lo dijo su propia fila: no hace falta preguntarle a la base.
+      expect(prismaMock.orderDiscount.findFirst).not.toHaveBeenCalled()
+      const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
+      expect(cuenta.orderDiscounts).toMatchObject({ take: 10, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      expect(cuenta._count).toEqual({ select: { orderDiscounts: true } })
+    })
+
+    it('un premio que sigue aplicado ⇒ beneficioRegresado false', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ orderDiscounts: [fila('Premio')], _count: { orderDiscounts: 1 } }))
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ beneficioRegresado: false })
+      expect(prismaMock.orderDiscount.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('R1: con más filas de las 10 publicadas, «regresó» se le pregunta a la base (nunca se adivina por las primeras 10)', async () => {
+      const diez = Array.from({ length: 10 }, (_, i) => fila(`Descuento ${i + 1}`))
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ orderDiscounts: diez, _count: { orderDiscounts: 12 } }, 'PENDING'))
+      prismaMock.orderDiscount.findFirst.mockResolvedValue({ id: 'od-11' })
+      const t = await getTrackingByToken('T'.repeat(32))
+      expect(t).toMatchObject({ beneficiosTotal: 12, beneficioRegresado: true })
+      expect(t!.beneficios).toHaveLength(10)
+      expect((prismaMock.orderDiscount.findFirst.mock.calls[0][0] as any).where).toEqual({
+        orderId: 'ord-1',
+        isComp: true,
+        compReason: MOTIVO,
+      })
+    })
+
+    it('pagado con cliente y sellos prendidos ⇒ lealtad.sello {7, 10}: el contador canónico de la cartilla de ESE sello, y sus puntos', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      const t = await getTrackingByToken('T'.repeat(32))
+      expect(t!.lealtad).toEqual({ sello: { ganados: 7, meta: 10 }, puntos: 42 })
+      expect((prismaMock.loyaltyTransaction.findFirst.mock.calls[0][0] as any).where).toEqual({
+        orderId: 'ord-1',
+        customerId: 'cus-ana',
+        type: 'EARN',
+      })
+      // Codex r1 #2: nunca se reconstruye la cartilla por fechas.
+      expect(prismaMock.stampEvent.aggregate).not.toHaveBeenCalled()
+      expect(prismaMock.stampEvent.findMany).not.toHaveBeenCalled()
+    })
+
+    it('Codex r1 #3: EARN y REVERSAL son dos búsquedas por (venueId, orderId), cada una con su tipo ESCRITO (el predicado de su índice parcial), nunca un IN', () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      return getTrackingByToken('T'.repeat(32)).then(() => {
+        const { text: sql, values } = consultaDelSello()
+        expect(sql).toContain(`se."type" = 'EARN'`)
+        expect(sql).toContain(`r."type" = 'REVERSAL'`)
+        expect(sql).toMatch(/se\."venueId" = \$\d+ AND se\."orderId" = \$\d+/)
+        expect(sql).toMatch(/r\."venueId" = \$\d+ AND r\."orderId" = \$\d+/)
+        expect(sql).not.toMatch(/\bIN\s*\(/i)
+        expect(values).toEqual(['v1', 'ord-1', 'v1', 'ord-1'])
+      })
+    })
+
+    it('Codex r1 #2: una cartilla que ya se llenó dice «10 de 10» (su premio nació ahí; no se mezcla con la cartilla nueva)', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ ...SELLO, stampsEarned: 10 }])
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ sello: { ganados: 10, meta: 10 }, puntos: 42 })
+    })
+
+    it('Codex r1 #1: la clienta ligada desde la TPV (primario, sin `customerId`) recibe su «Sumaste»; el primario gana al heredado', async () => {
+      const deBeto = [{ ...SELLO, customerId: 'cus-beto' }]
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue(deBeto)
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ customerId: null, orderCustomers: [{ customerId: 'cus-beto' }] }))
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ sello: { ganados: 7, meta: 10 }, puntos: 42 })
+      expect((prismaMock.loyaltyTransaction.findFirst.mock.calls[0][0] as any).where).toMatchObject({ customerId: 'cus-beto' })
+      jest.clearAllMocks()
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ customerId: 'cus-ana', orderCustomers: [{ customerId: 'cus-beto' }] }))
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ sello: { ganados: 7, meta: 10 }, puntos: 42 })
+      expect((prismaMock.loyaltyTransaction.findFirst.mock.calls[0][0] as any).where).toMatchObject({ customerId: 'cus-beto' })
+    })
+
+    it('un sello que cayó en la cartilla de OTRA clienta no es «Sumaste» de ésta', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ ...SELLO, customerId: 'cus-otra' }])
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ puntos: 42 })
+    })
+
+    it('sin cliente ⇒ lealtad null (sin leer la lealtad)', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ customerId: null }))
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ lealtad: null })
+      expect(prismaMock.loyaltyConfig.findUnique).not.toHaveBeenCalled()
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    })
+
+    it('sellos apagados ⇒ sin sello (los puntos siguen); el programa apagado ⇒ lealtad null', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: true, stampsEnabled: false })
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ puntos: 42 })
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: true })
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ lealtad: null })
+    })
+
+    it('un sello que una devolución ya quitó no se presume: sólo los puntos', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ ...SELLO, revertido: true }])
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ puntos: 42 })
+    })
+
+    it('nada que decir ⇒ lealtad null (nunca «no sumaste»); sin pagar no se lee la lealtad', async () => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+      prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ lealtad: null })
+      jest.clearAllMocks()
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({}, 'PENDING'))
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ lealtad: null })
+      expect(prismaMock.loyaltyConfig.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('nunca el teléfono ni el correo: de la ficha no se lee nada más que su id', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(folio({ orderDiscounts: [fila('Premio')], _count: { orderDiscounts: 1 } }))
+      const t = await getTrackingByToken('T'.repeat(32))
+      expect(JSON.stringify(t)).not.toMatch(/customerPhone|customerEmail|phone":"\+52|@/)
+      const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
+      expect(cuenta).toMatchObject({ customerId: true })
+      // Codex r1 #1: del primario de las ligas, también sólo su id.
+      expect(cuenta.orderCustomers).toEqual({
+        where: { isPrimary: true },
+        orderBy: [{ addedAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { customerId: true },
+      })
+      for (const campo of ['customer', 'customerPhone', 'customerEmail']) expect(cuenta).not.toHaveProperty(campo)
+    })
   })
 
   describe('S4 (Codex plan r1 #3 y r2 #3): con el dinero en duda no se afirma «no se cobró»', () => {

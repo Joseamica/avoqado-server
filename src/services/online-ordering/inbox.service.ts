@@ -13,6 +13,7 @@ import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './consta
 import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
+import { BENEFICIOS_SELECT, CLIENTA_SELECT, beneficiosDeLaCuenta, clientaDeLaCuenta } from './beneficiosDeLaCuenta'
 import type { Reloj } from './types'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
@@ -51,6 +52,12 @@ export interface InboxOrder {
   channel: 'QR' | 'LINK' | null
   /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. Opcional para las apps viejas. */
   paidAt?: string | null
+  /** S14 (P2-3, R2): de qué clienta es la cuenta: su id y su nombre de pila con la inicial del apellido; `null` sin cuenta. Nunca su contacto. */
+  cliente?: { id: string; nombre: string } | null
+  /** S14 (R1): las filas de descuento de la cuenta (hasta 10, en el orden en que se aplicaron), en pesos. */
+  beneficios?: Array<{ nombre: string; monto: number }>
+  /** S14 (R1): cuántas filas de descuento tiene la cuenta; si pasa de `beneficios.length`, se dice «y N más». */
+  beneficiosTotal?: number
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -100,8 +107,17 @@ export const INBOX_SELECT = {
       customerName: true,
       customerPhone: true,
       specialRequests: true,
+      // S14 (R2): de la ficha de la clienta (la del primario y la heredada) sólo su id y su nombre, nunca teléfono ni correo; R1: sus
+      // beneficios, con tope y conteo. Todo en esta misma lectura.
+      ...CLIENTA_SELECT,
+      ...BENEFICIOS_SELECT,
       // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio).
-      payments: { where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] }, orderBy: { createdAt: 'desc' as const }, take: 1, select: { createdAt: true } },
+      payments: {
+        where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] },
+        orderBy: { createdAt: 'desc' as const },
+        take: 1,
+        select: { createdAt: true },
+      },
       // Topes que nunca recortan lo que pidió el comensal: la tienda crea la cuenta con ≤ MAX_CART_LINES renglones y ≤ 30
       // opciones por renglón (esquema público `onlineOrdering.schema.ts`). El doble de renglones deja lugar a lo que la caja
       // agregue después a la cuenta; 50 opciones cubren las 30 del pedido.
@@ -158,6 +174,8 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     requiresAcceptance: r.requiresAcceptance,
     channel: (r.channel as InboxOrder['channel']) ?? null, // en el esquema es String? (T1): sólo 'QR' | 'LINK'
     paidAt: r.order.paymentStatus === 'PAID' ? (r.order.payments?.[0]?.createdAt.toISOString() ?? null) : null,
+    cliente: clientaDeLaCuenta(r.order),
+    ...beneficiosDeLaCuenta(r.order),
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,

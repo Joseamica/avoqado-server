@@ -60,6 +60,15 @@ import {
 import { cerrarFolioEnCeroEnTx, prepararCierreEnCero, trasCerrarFolioEnCero, type CierreEnCero } from './folios.service'
 import { despertarPasesTrasCommit } from './cortesiaDeFolio'
 import { PRECIO_CAMBIO_AL_CONFIRMAR } from './card/confirm.service'
+import {
+  BENEFICIOS_SELECT,
+  CLIENTA_ID_SELECT,
+  beneficioRegresado,
+  beneficiosDeLaCuenta,
+  clientaIdDeLaCuenta,
+  lealtadDeLaCuenta,
+  type LealtadDeLaCuenta,
+} from './beneficiosDeLaCuenta'
 
 /** S11 (E4): una elección sin nada que usar es «sin beneficios» (así la huella de hoy no cambia); el cupón, recortado y en mayúsculas. */
 export function eleccionNormalizada(e: EleccionDeBeneficios | null | undefined): EleccionDeBeneficios | null {
@@ -1064,6 +1073,13 @@ export interface PublicTracking {
    * «No se te cobró» sólo con la liberación confirmada (`RELEASED`).
    */
   precioNuevo?: { motivo: 'BENEFIT_GONE' | 'PRICE_CHANGED'; total: number | null; descartados: BeneficioElegido[]; mensaje: string }
+  /** S14 (R1): las filas de descuento de la cuenta (hasta 10), en pesos, y cuántas son; opcionales para quien ya lee esta respuesta. */
+  beneficios?: Array<{ nombre: string; monto: number }>
+  beneficiosTotal?: number
+  /** S14 (P2-5): `true` = lo que la clienta usó en este folio ya regresó a su cuenta (el folio se anuló). */
+  beneficioRegresado?: boolean
+  /** S14 (P2-8): lo que sumó con esta cuenta ya pagada (sello y puntos), sólo con clienta y la función prendida; `null` si nada. */
+  lealtad?: LealtadDeLaCuenta | null
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -1231,6 +1247,7 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
   const row = await prisma.onlineOrder.findUnique({
     where: { trackingToken: token },
     select: {
+      orderId: true,
       status: true,
       paymentMode: true,
       requiresAcceptance: true,
@@ -1249,6 +1266,10 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           remainingBalance: true,
           paymentStatus: true,
           customerName: true,
+          // S14: de la clienta sólo su id (para «Sumaste»), con la regla del otorgamiento; sus beneficios con tope y conteo, en esta
+          // misma lectura.
+          ...CLIENTA_ID_SELECT,
+          ...BENEFICIOS_SELECT,
           payments: {
             // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
             where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
@@ -1278,6 +1299,12 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
   // del total y de lo pagado, un reembolso no reabre saldo) cada vez que entra dinero. Son los mismos que la caja y `to-pay`, sin
   // sumar nada aparte (ni filas topadas, ni una suma propia que olvide la propina).
   const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
+  const paid = row.order.paymentStatus === PaymentStatus.PAID
+  // S14: «Sumaste» sólo cuando ya se pagó (antes no hay nada que sumar, y el seguimiento se consulta seguido).
+  const [regresado, lealtad] = await Promise.all([
+    beneficioRegresado(row.orderId, row.order),
+    paid ? lealtadDeLaCuenta({ venueId: row.venueId, orderId: row.orderId, customerId: clientaIdDeLaCuenta(row.order) }) : null,
+  ])
   return {
     orderNumber: row.order.orderNumber,
     status: row.status,
@@ -1297,7 +1324,7 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       modifiers: i.modifiers.map(m => ({ name: m.name ?? '', quantity: m.quantity })),
     })),
     total: Number(new Prisma.Decimal(row.order.total).toFixed(2)),
-    paid: row.order.paymentStatus === PaymentStatus.PAID,
+    paid,
     amountPaid: Number(new Prisma.Decimal(row.order.paidAmount).toFixed(2)),
     remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.remainingBalance), 0).toDecimalPlaces(2).toNumber(),
     customerName: row.order.customerName ?? null,
@@ -1313,5 +1340,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
         : pending,
     requiresAcceptance: row.requiresAcceptance,
     channel: (row.channel as 'QR' | 'LINK' | null) ?? null,
+    ...beneficiosDeLaCuenta(row.order),
+    beneficioRegresado: regresado,
+    lealtad,
   }
 }
