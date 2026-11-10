@@ -17,9 +17,6 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
-import type { CardInternationalityDecision } from '../payments/cardInternationality.service'
-import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
-import { sqlNoEsDelMedioSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 import { avisarAprobacionTardiaTrasVentana, terminalPaymentService } from '../terminal-payment.service'
 import {
   afiliacionDelApkDelRegistro,
@@ -35,11 +32,6 @@ export interface RegistroEntrante {
   tip?: number
   method?: string
   isInternational?: boolean
-  /** D3: lo que dijo la terminal cuando el país de la tarjeta decidió otra cosa, la evidencia del país y su clasificación. */
-  isInternationalFromTerminal?: boolean
-  issuerCountryCode?: string
-  issuerCountrySource?: string
-  internacionalidad?: CardInternationalityDecision | null
   idempotencyKey?: string
   referenceNumber?: string
   authorizationNumber?: string
@@ -82,16 +74,6 @@ export interface PlanDeConsolidacion {
     processorData: Record<string, unknown>
     /** Llaves del JSON que SÍ se sobrescriben (el resto sólo rellena lo vacío). */
     sobrescribir: Record<string, unknown>
-    /**
-     * D3 · Codex r1-3: la clasificación por país que se ESCRIBE (columnas `internationality*`), o `null` si no toca. Un Payment
-     * nacido del webhook ya trae `UNKNOWN/NONE` (no está vacío): la decide, junto con el método, el PRIMER REST que lo acredita.
-     */
-    internacionalidad: CardInternationalityDecision | null
-    /**
-     * D3 · Codex r3-4: con este relleno el cobro APRENDE que su tarjeta es internacional (nació sin el dato y el entrante lo trae
-     * en `true`). Es el único momento en que una devolución ya registrada puede haber copiado «sin dato»: aprende lo mismo aquí.
-     */
-    aprendeQueEsInternacional: boolean
   }
   hayRelleno: boolean
 }
@@ -170,11 +152,6 @@ export function planDeConsolidacion(existente: Payment, entrante: RegistroEntran
       ? (entrante.method as PaymentMethod)
       : null
   const metodoProvisional = metaExistente.methodProvisional === true
-  // D3: sólo el REST que CIERRA el método provisional acredita el país de la tarjeta; un webhook repetido (sin evidencia) o un
-  // reintento posterior nunca reemplazan la clasificación ya decidida.
-  const acreditaLaTarjeta = metodoProvisional && !!metodoEntrante
-  const paisCodigo = limpio(entrante.issuerCountryCode)
-  const paisFuente = limpio(entrante.issuerCountrySource)
   if (metodoEntrante && !metodoProvisional && metodoEntrante !== existente.method) contradice('method', existente.method, metodoEntrante)
 
   const processorData: Record<string, unknown> = {}
@@ -189,8 +166,6 @@ export function planDeConsolidacion(existente: Payment, entrante: RegistroEntran
     mentaTicketId: limpio(entrante.mentaTicketId),
     deviceSerialNumber: limpio(entrante.authenticatedTerminalSerial ?? entrante.deviceSerialNumber),
     isInternational: typeof entrante.isInternational === 'boolean' ? entrante.isInternational : null,
-    isInternationalFromTerminal: typeof entrante.isInternationalFromTerminal === 'boolean' ? entrante.isInternationalFromTerminal : null,
-    issuerCountryEvidence: paisCodigo && paisFuente ? { code: paisCodigo, source: paisFuente } : null,
   })) {
     if (v !== null && v !== undefined) processorData[k] = v
   }
@@ -203,9 +178,6 @@ export function planDeConsolidacion(existente: Payment, entrante: RegistroEntran
     method: metodoProvisional && metodoEntrante ? metodoEntrante : null,
     processorData,
     sobrescribir: metodoProvisional && metodoEntrante ? { methodProvisional: false } : {},
-    internacionalidad: acreditaLaTarjeta ? (entrante.internacionalidad ?? null) : null,
-    // El existente gana en el JSON: sólo se aprende si el cobro NO traía la llave (ni `false`).
-    aprendeQueEsInternacional: processorData.isInternational === true && (metaExistente.isInternational ?? null) === null,
   }
   const hayRelleno =
     Object.keys(processorData).length > 0 ||
@@ -298,11 +270,6 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
               "referenceNumber" = COALESCE("referenceNumber", ${r.referenceNumber}),
               "idempotencyKey" = COALESCE("idempotencyKey", ${llaveDurable}),
               "method" = COALESCE(CAST(${r.method} AS "PaymentMethod"), "method"),
-              "internationalityStatus" = COALESCE(CAST(${r.internacionalidad?.status ?? null} AS "CardInternationalityStatus"), "internationalityStatus"),
-              "internationalitySource" = COALESCE(CAST(${r.internacionalidad?.source ?? null} AS "CardInternationalitySource"), "internationalitySource"),
-              "issuerCountryCode" = COALESCE(${r.internacionalidad?.issuerCountryCode ?? null}, "issuerCountryCode"),
-              "internationalityClassificationVersion" = COALESCE(CAST(${r.internacionalidad?.classificationVersion ?? null} AS INTEGER), "internationalityClassificationVersion"),
-              "internationalityClassifiedAt" = CASE WHEN CAST(${r.internacionalidad !== null} AS BOOLEAN) THEN (NOW() AT TIME ZONE 'UTC') ELSE "internationalityClassifiedAt" END,
               "processorData" = (CAST(${JSON.stringify(r.processorData)} AS jsonb) ||
                 CASE WHEN jsonb_typeof("processorData") = 'object'
                   THEN COALESCE((SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each("processorData") AS e
@@ -316,21 +283,6 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
             paymentId: existente.id,
             escritas,
           })
-        }
-        // D3 · Codex r1-1 / r2-2 / r3-4: las devoluciones de TARJETA que este cobro ya tenía copiaron «sin dato». Aprenden lo mismo
-        // AQUÍ, en la transacción y bajo el candado del cobro (el que toma toda devolución antes de registrarse): no depende del
-        // costo, del worker ni de la liquidación, y las que nazcan después copian de la fila bloqueada. Nunca toca saldo a favor,
-        // crédito de cambio ni lo que volvió por otro medio (la regla `mismoMedio` del panel). Son las devoluciones de UN cobro.
-        if (r.aprendeQueEsInternacional) {
-          await tx.$executeRaw`
-            UPDATE "Payment" r SET "processorData" = COALESCE(r."processorData", '{}'::jsonb) || '{"isInternational": true}'::jsonb
-            WHERE r."venueId" = ${venueId}
-              AND r."type" = 'REFUND'
-              AND r."processorData"->>'originalPaymentId' = ${existente.id}
-              AND r."method" IN ('CREDIT_CARD', 'DEBIT_CARD')
-              AND ${sqlPaymentIsNotExchangeCredit('r')}
-              AND ${sqlNoEsDelMedioSaldoAFavor('r')}
-              AND COALESCE(r."processorData"->>'isInternational', '') <> 'true'`
         }
         // S2: si el costo estaba PENDIENTE esperando la marca (Payment nacido del webhook), que el worker lo tome ya.
         await tx.paymentEffect.updateMany({

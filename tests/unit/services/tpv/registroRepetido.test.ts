@@ -1,6 +1,5 @@
 import { Prisma, type Payment } from '@prisma/client'
 import { planDeConsolidacion } from '@/services/tpv/registroRepetido'
-import { classifyCardInternationality } from '@/services/payments/cardInternationality.service'
 
 const existente = {
   id: 'p1',
@@ -93,108 +92,5 @@ describe('Codex R2 · N1: lo que el webhook no sabe nunca acredita', () => {
     expect(plan.relleno.method).toBe('DEBIT_CARD')
     expect(plan.relleno.sobrescribir).toEqual({ methodProvisional: false })
     expect(plan.relleno.processorData).toMatchObject({ isInternational: true })
-  })
-})
-
-describe('D3 · la terminal completa un pago nacido del aviso del banco: entra el país de la tarjeta', () => {
-  const nacidoDelAviso = {
-    ...existente,
-    method: 'CREDIT_CARD',
-    internationalityStatus: 'UNKNOWN',
-    internationalitySource: 'NONE',
-    issuerCountryCode: null,
-    processorData: { methodProvisional: true, registradoVia: 'webhook' },
-  } as unknown as Payment
-  const extranjera = classifyCardInternationality({
-    issuerCountryCode: '0840',
-    issuerCountrySource: 'EMV_5F28',
-    legacyIsInternational: false,
-  })
-  // Lo que llega a la consolidación: `paymentData` ya con el dato DEFINITIVO (lo fija el registrador al entrar).
-  const restDeLaTerminal = {
-    amount: 10000,
-    tip: 0,
-    method: 'CREDIT_CARD',
-    isInternational: true,
-    isInternationalFromTerminal: false,
-    issuerCountryCode: '0840',
-    issuerCountrySource: 'EMV_5F28',
-    internacionalidad: extranjera,
-  }
-
-  it('rellena el dato definitivo, lo que dijo la terminal, la evidencia del país y la clasificación', () => {
-    const plan = planDeConsolidacion(nacidoDelAviso, restDeLaTerminal, 'o1')
-    expect(plan.contradicciones).toEqual([])
-    expect(plan.relleno.processorData).toMatchObject({
-      isInternational: true,
-      isInternationalFromTerminal: false,
-      issuerCountryEvidence: { code: '0840', source: 'EMV_5F28' },
-    })
-    expect(plan.relleno.internacionalidad).toMatchObject({ status: 'INTERNATIONAL', source: 'EMV_5F28', issuerCountryCode: '840' })
-    expect(plan.hayRelleno).toBe(true)
-    // Codex r3-4: el cobro APRENDE que es internacional ⇒ sus devoluciones de tarjeta ya registradas aprenden lo mismo.
-    expect(plan.relleno.aprendeQueEsInternacional).toBe(true)
-  })
-
-  it('una terminal vieja sin país deja constancia de lo que dijo, sin inventar evidencia', () => {
-    const sinPais = classifyCardInternationality({ legacyIsInternational: false })
-    const plan = planDeConsolidacion(
-      nacidoDelAviso,
-      { amount: 10000, tip: 0, method: 'CREDIT_CARD', isInternational: false, internacionalidad: sinPais },
-      'o1',
-    )
-    expect(plan.relleno.processorData).toMatchObject({ isInternational: false })
-    expect(plan.relleno.processorData).not.toHaveProperty('issuerCountryEvidence')
-    expect(plan.relleno.processorData).not.toHaveProperty('isInternationalFromTerminal')
-    expect(plan.relleno.internacionalidad).toMatchObject({ status: 'UNKNOWN', source: 'LEGACY' })
-  })
-
-  it('🔴 un aviso del banco repetido (sin evidencia) nunca escribe clasificación ni el dato', () => {
-    const delAviso = classifyCardInternationality({})
-    const plan = planDeConsolidacion(
-      nacidoDelAviso,
-      { amount: 10000, tip: 0, method: 'CREDIT_CARD', registradoVia: 'webhook', internacionalidad: delAviso },
-      'o1',
-    )
-    expect(plan.relleno.internacionalidad).toBeNull()
-    expect(plan.relleno.processorData).not.toHaveProperty('isInternational')
-  })
-
-  it('una clasificación ya guardada por la terminal no se pisa (reintento del mismo registro)', () => {
-    const yaClasificado = {
-      ...existente,
-      method: 'CREDIT_CARD',
-      internationalityStatus: 'DOMESTIC',
-      internationalitySource: 'EMV_5F28',
-      issuerCountryCode: '484',
-      processorData: { isInternational: false },
-    } as unknown as Payment
-    const plan = planDeConsolidacion(yaClasificado, restDeLaTerminal, 'o1')
-    expect(plan.relleno.internacionalidad).toBeNull()
-  })
-
-  it('sólo se «aprende» una vez y sólo si es internacional: nacional, terminal vieja, aviso repetido o reintento no tocan las devoluciones', () => {
-    const mexicana = classifyCardInternationality({
-      issuerCountryCode: '0484',
-      issuerCountrySource: 'EMV_5F28',
-      legacyIsInternational: true,
-    })
-    const nacional = {
-      ...restDeLaTerminal,
-      isInternational: false,
-      isInternationalFromTerminal: true,
-      issuerCountryCode: '0484',
-      internacionalidad: mexicana,
-    }
-    expect(planDeConsolidacion(nacidoDelAviso, nacional, 'o1').relleno.aprendeQueEsInternacional).toBe(false)
-    expect(
-      planDeConsolidacion(nacidoDelAviso, { amount: 10000, tip: 0, method: 'CREDIT_CARD', registradoVia: 'webhook' }, 'o1').relleno
-        .aprendeQueEsInternacional,
-    ).toBe(false)
-    // Reintento: el cobro YA tiene el dato (aunque sea `false`): el existente gana y nada se aprende.
-    for (const yaSabe of [true, false]) {
-      const acreditado = { ...nacidoDelAviso, processorData: { isInternational: yaSabe } } as unknown as Payment
-      expect(planDeConsolidacion(acreditado, restDeLaTerminal, 'o1').relleno.aprendeQueEsInternacional).toBe(false)
-    }
   })
 })

@@ -360,29 +360,13 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
 
 describe('Codex r1 de D2 — la devolución de la terminal conserva la marca internacional de su cobro', () => {
   it('cobro internacional ⇒ su devolución también (el reporte la pone en el renglón internacional)', async () => {
-    const { fotoVieja, fotoBloqueada } = armarCarrera()
+    const { fotoVieja } = armarCarrera()
     ;(prismaMock as any).payment.findFirst.mockResolvedValue({ ...fotoVieja, processorData: { isInternational: true } })
-    ;(prismaMock as any).$queryRaw.mockResolvedValue([
-      { ...fotoBloqueada, processorData: { ...((fotoBloqueada.processorData as object | null) ?? {}), isInternational: true } },
-    ])
 
     await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     const data = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(data.processorData).toMatchObject({ originalPaymentId: 'pay-orig', isInternational: true })
-  })
-
-  // D3 · Codex r1-1: el país de la tarjeta puede acreditarse (REST de la terminal sobre un Payment nacido del webhook) entre la
-  // lectura de entrada y el candado. La devolución copia de la fila BLOQUEADA, no de la foto vieja.
-  it('🔴 la foto de entrada aún no lo sabía y la fila bloqueada sí ⇒ la devolución es internacional', async () => {
-    const { fotoBloqueada } = armarCarrera()
-    ;(prismaMock as any).$queryRaw.mockResolvedValue([
-      { ...fotoBloqueada, processorData: { ...((fotoBloqueada.processorData as object | null) ?? {}), isInternational: true } },
-    ])
-
-    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
-
-    expect((prismaMock as any).payment.create.mock.calls[0][0].data.processorData).toMatchObject({ isInternational: true })
   })
 
   it('cobro nacional ⇒ su devolución no inventa la marca', async () => {

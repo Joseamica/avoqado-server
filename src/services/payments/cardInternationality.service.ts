@@ -1,12 +1,6 @@
 import type { CardInternationalitySource, CardInternationalityStatus } from '@prisma/client'
-import { ISO_ALPHA2, ISO_ALPHA3_TO_ALPHA2, ISO_NUMERIC_TO_ALPHA2 } from './iso3166'
 
-/**
- * v1 (ago-2026) = sólo observación («en sombra»). v2 (D3, 10-nov-2026) = la clasificación DECIDE el dato financiero
- * `processorData.isInternational` de los cobros nuevos (`resolveIsInternational`). La versión guardada en cada Payment dice
- * con cuál régimen se clasificó.
- */
-export const CARD_INTERNATIONALITY_CLASSIFICATION_VERSION = 2
+export const CARD_INTERNATIONALITY_CLASSIFICATION_VERSION = 1
 
 export type ClientCountryEvidenceSource = Extract<CardInternationalitySource, 'EMV_5F28' | 'PROCESSOR'>
 
@@ -56,16 +50,6 @@ const VERIFIED_BIN_COUNTRIES = new Map<string, string>([
 
 const INVALID_COUNTRY_TOKENS = new Set(['', '0', '000', '999', 'UNKNOWN', 'DEFAULT', 'N/A', 'NA', 'NULL'])
 
-/**
- * D3 · Codex r1-2 / r2-1 / r2-3 / r3-1: desde que el país decide dinero, «tiene forma de código» no basta — `123`, `QQ`, los
- * códigos de prueba y macrorregiones que ICU nombra (`973` → XA, `967` → EU), los retirados (`280`, `810`, `AN`) y las
- * agrupaciones (`172` CEI, `830` Islas del Canal) no son un país emisor. La única verdad es ISO 3166-1 VIGENTE (`iso3166.ts`):
- * numérico del chip, y alfa-2 o alfa-3 del procesador. Lo que no está ahí no clasifica: decide la terminal, como antes de D3.
- */
-function isRealCountry(code: string): boolean {
-  return ISO_NUMERIC_TO_ALPHA2.has(code) || ISO_ALPHA2.has(code) || ISO_ALPHA3_TO_ALPHA2.has(code)
-}
-
 function normalizeCountryEvidence(raw: string | null | undefined, source: ClientCountryEvidenceSource | null | undefined): string | null {
   if (!raw || !source) return null
 
@@ -77,19 +61,15 @@ function normalizeCountryEvidence(raw: string | null | undefined, source: Client
     .replace(/\s+/g, '')
 
   if (INVALID_COUNTRY_TOKENS.has(normalized)) return null
-  // Codex r4-2: las letras (incluido «MEXICO») sólo las puede traer el procesador. El chip (5F28) es SIEMPRE numérico: un texto
-  // presentado como dato del chip es evidencia mal formada y no decide.
-  if (source === 'PROCESSOR' && (normalized === 'MEXICO' || normalized === 'MEX' || normalized === 'MX')) {
-    return normalized === 'MX' ? 'MX' : 'MEX'
-  }
+  if (normalized === 'MEXICO' || normalized === 'MEX' || normalized === 'MX') return normalized === 'MX' ? 'MX' : 'MEX'
 
   // EMV 5F28 is ISO-3166 numeric encoded as n3 in two BCD bytes, hence values
   // observed as 0484 (Mexico) and 0840 (USA). Strip only that padding nibble.
   const numeric = /^0\d{3}$/.test(normalized) ? normalized.slice(1) : normalized
-  if (/^\d{3}$/.test(numeric) && numeric !== '000' && numeric !== '999') return isRealCountry(numeric) ? numeric : null
+  if (/^\d{3}$/.test(numeric) && numeric !== '000' && numeric !== '999') return numeric
 
   // EMV must be numeric. A processor may instead provide ISO alpha-2/alpha-3.
-  if (source === 'PROCESSOR' && /^[A-Z]{2,3}$/.test(normalized)) return isRealCountry(normalized) ? normalized : null
+  if (source === 'PROCESSOR' && /^[A-Z]{2,3}$/.test(normalized)) return normalized
 
   return null
 }
@@ -118,8 +98,8 @@ function compareWithLegacy(status: CardInternationalityStatus, legacy: boolean |
 }
 
 /**
- * Pure classifier. It never reads bank/product strings and never touches authorization or Payment.status. Since v2 its
- * result feeds `resolveIsInternational`, which is what the card-type rate, reports, refunds and settlement read.
+ * Pure shadow classifier. It never reads bank/product strings and never changes
+ * authorization, Payment.status, TransactionCost, settlement dates, or balances.
  */
 export function classifyCardInternationality(input: CardInternationalityInput): CardInternationalityDecision {
   const normalizedCountry = normalizeCountryEvidence(input.issuerCountryCode, input.issuerCountrySource)
@@ -140,10 +120,7 @@ export function classifyCardInternationality(input: CardInternationalityInput): 
     }
   }
 
-  // Codex r4-1: orden de la evidencia = chip > BIN verificado > procesador. El BIN verificado es evidencia de la TARJETA y decide
-  // dinero; el país que sólo reporta el procesador es observación y no lo desplaza cuando coinciden (si chocan ya salió arriba,
-  // como CONFLICT).
-  if (normalizedCountry && !(input.issuerCountrySource === 'PROCESSOR' && registryCountry)) {
+  if (normalizedCountry) {
     const status: CardInternationalityStatus = isMexicoCountry(normalizedCountry) ? 'DOMESTIC' : 'INTERNATIONAL'
     return {
       status,
@@ -180,27 +157,4 @@ export function classifyCardInternationality(input: CardInternationalityInput): 
     legacyComparison: compareWithLegacy(status, input.legacyIsInternational),
     registryMatched,
   }
-}
-
-/** Las fuentes que DECIDEN dinero: lo que dice la propia tarjeta (chip) o un BIN que el emisor confirmó. */
-const MONEY_SOURCES: ReadonlySet<CardInternationalitySource> = new Set<CardInternationalitySource>(['EMV_5F28', 'BIN_REGISTRY'])
-
-/** ¿Esta clasificación decidió el dato financiero del cobro? (lo usa también la respuesta del MCP). */
-export function decidesMoney(decision: Pick<CardInternationalityDecision, 'status' | 'source'> | null | undefined): boolean {
-  return !!decision && decision.status !== 'UNKNOWN' && MONEY_SOURCES.has(decision.source)
-}
-
-/**
- * D3 (10-nov-2026, founder: «Sí, por país»): el dato DEFINITIVO del que cuelgan costo, reportes, reembolsos y liquidación
- * (`processorData.isInternational`). Decide el país que dice la TARJETA (chip, `EMV_5F28`) o un BIN verificado; un país que
- * sólo reporta el procesador (`PROCESSOR`, que hoy ninguna app manda) queda como observación. Sin esa evidencia se conserva
- * EXACTAMENTE lo que dijo la terminal — incluido «nada» (`undefined`, el webhook de AngelPay): inventar un `false` taparía al
- * REST que lo acredita después.
- */
-export function resolveIsInternational<T extends boolean | null | undefined>(
-  decision: Pick<CardInternationalityDecision, 'status' | 'source'> | null | undefined,
-  legacyIsInternational: T,
-): boolean | T {
-  if (!decidesMoney(decision)) return legacyIsInternational
-  return decision!.status === 'INTERNATIONAL'
 }
