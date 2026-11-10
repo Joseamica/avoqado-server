@@ -12,7 +12,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
 import { sucursalesDeCampoDeLaPersona, sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { aplicarEnvio, efectoYaHecho, huellaDelEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
-import { listarRetenidos, recibirEnGracia, resolverRetenido } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import {
+  listarRetenidos,
+  recibirEnGracia,
+  resolverRetenido,
+  VENTANA_EN_VUELO_MS,
+} from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -393,6 +398,8 @@ describe('recibirEnGracia', () => {
   })
 })
 
+/** Cuándo nació un retenido ya guardado: hace una hora (más que la ventana de I6). */
+const NACIO = new Date(AHORA.getTime() - HORA)
 /** Un retenido ya guardado, como lo deja la gracia. */
 function retenido(extra: object = {}) {
   const f = {
@@ -409,7 +416,7 @@ function retenido(extra: object = {}) {
     estado: 'PENDIENTE',
     resultado: null,
     nota: null,
-    createdAt: AHORA,
+    createdAt: NACIO, // I6: llegó hace una hora (ya se puede descartar)
     updatedAt: new Date(AHORA.getTime() - HORA), // tocada hace una hora: nadie la está aplicando
     ...extra,
   }
@@ -434,10 +441,13 @@ describe('resolverRetenido', () => {
     expect(permiso).not.toHaveBeenCalled()
     expect(f).toMatchObject({ estado: 'APLICADO', resueltoPor: 'sup1', resueltoAt: AHORA, nota: 'sí la vendió' })
     // I2: tomarla es un CAS: PENDIENTE, o APLICANDO que nadie toca hace más de la ventana; la marca es su updatedAt.
+    // I5: y exacto (la fila tal como se leyó), así quien la toma sabe en qué estado la tomó.
     expect(db.envioRetenidoDeCampo.updateMany).toHaveBeenCalledWith({
       where: {
         id: 'r1',
         organizationId: 'org1',
+        estado: 'PENDIENTE',
+        updatedAt: new Date(AHORA.getTime() - HORA),
         OR: [{ estado: 'PENDIENTE' }, { estado: 'APLICANDO', updatedAt: { lt: new Date(AHORA.getTime() - 5 * MIN) } }],
       },
       data: { estado: 'APLICANDO', updatedAt: AHORA },
@@ -608,7 +618,7 @@ describe('listarRetenidos', () => {
           motivo: 'NO_REPORTADA',
           rechazo: null,
           resumen: 'SIM 89520001 · $150.00',
-          createdAt: AHORA,
+          createdAt: NACIO,
           estado: 'PENDIENTE',
         },
       ],
@@ -727,7 +737,8 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
     expect(aplicar).toHaveBeenCalledTimes(1) // el reintento no ejecutó nada
     expect(filas).toHaveLength(1)
     expect(filas[0]).toMatchObject({ estado: 'PENDIENTE', motivo: 'PERSONA_DADA_DE_BAJA' })
-    // Ya es descartable: no tiene efecto.
+    // Ya es descartable: no tiene efecto (pasada la ventana de I6 desde que nació).
+    jest.setSystemTime(new Date(AHORA.getTime() + 6 * MIN))
     expect(await resolver('DESCARTAR')).toEqual({ estado: 'DESCARTADO', repetida: false })
   })
 
@@ -788,7 +799,7 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
       'CUSTODIA_RECHAZAR',
       { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
       { serialNumber: 'SIM-C', custodyVersion: 1 },
-      AHORA,
+      NACIO,
     )
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'CAMPO_RETENIDO_APLICADO', data: expect.objectContaining({ recuperado: true }) }),
@@ -1220,5 +1231,193 @@ describe('arreglo final 4: las cuatro invariantes del retenido', () => {
     )
     await expect(recibirEnGracia(celular(), e)).rejects.toMatchObject({ statusCode: 400, code: 'CUERPO_INVALIDO' })
     expect(filas).toHaveLength(0)
+  })
+})
+
+describe('arreglo final 5: se decide con la fila en la mano (I5); lo que ya venía en camino termina antes de descartar (I6)', () => {
+  const HECHA = { orderId: 'o', paymentId: 'p', saleVerificationId: 'sv', recuperado: true }
+  const pendiente = <T>() => {
+    let soltar!: (v: T) => void
+    const promesa = new Promise<T>(r => (soltar = r))
+    return { promesa, soltar }
+  }
+  const SUCURSAL = [{ staffVenueId: 'sv1', venueId: 'v1', nombre: 'Sucursal Centro', role: 'CASHIER', pin: null }]
+  /** Lo que la gracia empezó a aplicar sola y cuyo proceso murió (APLICANDO vencida). */
+  const vencidaDeLaGracia = (e: ReturnType<typeof envio>) =>
+    retenido({
+      tipo: e.tipo,
+      huella: huellaDelEnvio(e.tipo, e.venueId, e.cuerpoJson),
+      cuerpoJson: e.cuerpoJson,
+      estado: 'APLICANDO',
+      motivo: 'APLICADO_EN_GRACIA',
+      updatedAt: new Date(AHORA.getTime() - 6 * MIN),
+    })
+
+  describe('I5 · la fila se toma ANTES de preguntar por el efecto', () => {
+    it('R4-2 · el reintento de la gracia ya tiene la fila mientras evalúa: «Aplicar» no la ejecuta a medias por debajo y nada regresa a PENDIENTE con efecto', async () => {
+      const e = envio(
+        JSON.stringify({
+          sims: [
+            { serialNumber: 'SIM-A', custodyVersion: 1 },
+            { serialNumber: 'SIM-B', custodyVersion: 1 },
+          ],
+        }),
+        'CUSTODIA_ACEPTAR',
+      )
+      const f = vencidaDeLaGracia(e)
+      let aceptada = false
+      efecto.mockImplementation(async () => (aceptada ? { hecho: true, resultado: { recuperadoDeLaBitacora: true } } : { hecho: false }))
+      // «Aplicar» aceptaría la primera SIM y una falla de infraestructura cortaría el lote (una transacción por SIM).
+      aplicar.mockImplementation(async () => {
+        aceptada = true
+        throw new Error('se cayó la base en la segunda SIM')
+      })
+      const sucursalesDeA = pendiente<any[]>()
+      deCampo.mockReturnValueOnce(sucursalesDeA.promesa)
+      // A: el reintento de la gracia de un celular perdido; se queda esperando sus sucursales.
+      const a = recibirEnGracia(reportado(e, { sinGracia: true }), e)
+      while (!deCampo.mock.calls.length) await tick()
+
+      // B: «Aplicar» ve la fila en vuelo (A la tiene): 409, no ejecuta.
+      await expect(resolver('APLICAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+      expect(aplicar).not.toHaveBeenCalled()
+
+      sucursalesDeA.soltar(SUCURSAL)
+      expect(await a).toEqual({ status: 202, body: { retenido: true, motivo: 'CELULAR_PERDIDO' } })
+      expect(f).toMatchObject({ estado: 'PENDIENTE', motivo: 'CELULAR_PERDIDO' })
+      expect(aceptada).toBe(false)
+    })
+
+    it('R4-2 · al revés: «Aplicar» la dejó a medias (soltada); el reintento de la gracia la toma, ve el efecto y la deja APLICADO', async () => {
+      const e = envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-A', custodyVersion: 1 }] }), 'CUSTODIA_ACEPTAR')
+      const f = vencidaDeLaGracia(e)
+      let aceptada = false
+      efecto.mockImplementation(async () => (aceptada ? { hecho: true, resultado: { recuperadoDeLaBitacora: true } } : { hecho: false }))
+      aplicar.mockImplementationOnce(async () => {
+        aceptada = true
+        throw new Error('se cayó la base en la segunda SIM')
+      })
+      await expect(resolver('APLICAR')).rejects.toThrow('se cayó la base')
+      expect(f.estado).toBe('APLICANDO')
+
+      expect(await recibirEnGracia(reportado(e, { sinGracia: true }), e)).toEqual({
+        status: 200,
+        body: { resuelto: 'APLICADO', resultado: { recuperadoDeLaBitacora: true } },
+      })
+      expect(f.estado).toBe('APLICADO')
+      expect(aplicar).toHaveBeenCalledTimes(1)
+    })
+
+    it('la gracia pregunta por el efecto de una fila vencida cuando YA es suya (APLICANDO con su marca), no con la lectura vieja', async () => {
+      const e = envio()
+      const f = vencidaDeLaGracia(e)
+      let visto: any
+      efecto.mockImplementation(async () => {
+        visto = { ...f }
+        return { hecho: false }
+      })
+      aplicar.mockResolvedValue(aplicado(200, { orderId: 'o', paymentId: 'p', repetida: true }))
+      expect((await recibirEnGracia(reportado(e), e)).status).toBe(200)
+      expect(visto).toMatchObject({ estado: 'APLICANDO', updatedAt: AHORA })
+    })
+
+    it('si al reanudar la persona sigue vinculada (USA_TU_SESION), la gracia suelta la fila: sigue APLICANDO, ya vencida', async () => {
+      const e = envio()
+      const f = vencidaDeLaGracia(e)
+      await expect(recibirEnGracia(reportado(e, { staffIdVinculado: 's1' }), e)).rejects.toMatchObject({ code: 'USA_TU_SESION' })
+      expect(f.estado).toBe('APLICANDO')
+      expect(f.updatedAt.getTime()).toBeLessThan(AHORA.getTime() - VENTANA_EN_VUELO_MS)
+      expect(aplicar).not.toHaveBeenCalled()
+    })
+
+    it('«Descartar» toma la fila y luego pregunta: mientras pregunta, «Aplicar» → 409; sin efecto queda DESCARTADO por su marca', async () => {
+      const f = retenido()
+      const consulta = pendiente<any>()
+      let visto: any
+      efecto.mockImplementationOnce(async () => {
+        visto = { ...f }
+        return consulta.promesa
+      })
+      const d = resolver('DESCARTAR', { nota: 'no era' })
+      while (!efecto.mock.calls.length) await tick()
+      expect(visto).toMatchObject({ estado: 'APLICANDO', updatedAt: AHORA })
+
+      await expect(resolver('APLICAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
+      expect(aplicar).not.toHaveBeenCalled()
+
+      consulta.soltar({ hecho: false })
+      expect(await d).toEqual({ estado: 'DESCARTADO', repetida: false })
+      expect(f).toMatchObject({ estado: 'DESCARTADO', resueltoPor: 'sup1', nota: 'no era' })
+    })
+
+    it('«Descartar» cuya consulta del efecto falla → deshace la toma: la fila vuelve a PENDIENTE (descartable), sin quedar «a medias»', async () => {
+      const f = retenido()
+      efecto.mockRejectedValueOnce(new Error('se cayó la base'))
+      await expect(resolver('DESCARTAR')).rejects.toThrow('se cayó la base')
+      expect(f.estado).toBe('PENDIENTE')
+      expect(await resolver('DESCARTAR')).toEqual({ estado: 'DESCARTADO', repetida: false })
+    })
+
+    it('«Aplicar» toma la fila ANTES de preguntar por el efecto (y la toma exacta: la que leyó)', async () => {
+      const f = retenido()
+      let visto: any
+      efecto.mockImplementationOnce(async () => {
+        visto = { ...f }
+        return { hecho: false }
+      })
+      aplicar.mockResolvedValue(aplicado())
+      expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', repetida: false })
+      expect(visto).toMatchObject({ estado: 'APLICANDO', updatedAt: AHORA })
+    })
+
+    it('«Aplicar» cuya consulta del efecto falla → deshace la toma (PENDIENTE sigue PENDIENTE; APLICANDO queda soltada)', async () => {
+      const f = retenido()
+      efecto.mockRejectedValueOnce(new Error('se cayó la base'))
+      await expect(resolver('APLICAR')).rejects.toThrow('se cayó la base')
+      expect(f.estado).toBe('PENDIENTE')
+      expect(aplicar).not.toHaveBeenCalled()
+
+      const g = retenido({ id: 'r2', estado: 'APLICANDO', updatedAt: new Date(AHORA.getTime() - 6 * MIN) })
+      efecto.mockRejectedValueOnce(new Error('se cayó la base'))
+      await expect(resolverRetenido({ retenidoId: 'r2', organizationId: 'org1', accion: 'APLICAR', porStaffId: 'sup1' })).rejects.toThrow(
+        'se cayó la base',
+      )
+      expect(g.estado).toBe('APLICANDO')
+      expect(g.updatedAt.getTime()).toBeLessThan(AHORA.getTime() - VENTANA_EN_VUELO_MS)
+    })
+  })
+
+  describe('I6 · no se descarta antes de VENTANA_EN_VUELO_MS desde que nació', () => {
+    it('R4-1 · nace PENDIENTE mientras la venta normal sigue en camino: «Descartar» → 409 DESCARTE_MUY_PRONTO; pasada la ventana ve la venta → APLICADO', async () => {
+      const e = envio() // no reportada → nace PENDIENTE: todavía no hay ficha
+      expect(await recibirEnGracia(celular(), e)).toEqual({ status: 202, body: { retenido: true, motivo: 'NO_REPORTADA' } })
+      const id = filas[0].id
+      const descartar = () => resolverRetenido({ retenidoId: id, organizationId: 'org1', accion: 'DESCARTAR', porStaffId: 'sup1' })
+      efecto.mockClear()
+
+      await expect(descartar()).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'DESCARTE_MUY_PRONTO',
+        message: 'Este envío acaba de llegar. Espera unos minutos antes de descartarlo: puede que todavía se esté registrando.',
+      })
+      expect(filas[0].estado).toBe('PENDIENTE')
+      expect(efecto).not.toHaveBeenCalled()
+
+      // La petición normal (admitida antes de desvincular) termina y registra la venta y su cobro.
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      jest.setSystemTime(new Date(AHORA.getTime() + VENTANA_EN_VUELO_MS - 1000))
+      await expect(descartar()).rejects.toMatchObject({ code: 'DESCARTE_MUY_PRONTO' })
+      jest.setSystemTime(new Date(AHORA.getTime() + VENTANA_EN_VUELO_MS))
+      expect(await descartar()).toEqual({ estado: 'APLICADO', resultado: HECHA, repetida: false, yaEstabaHecho: true })
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: HECHA, resueltoPor: 'sup1' })
+      expect(aplicar).not.toHaveBeenCalled()
+    })
+
+    it('«Aplicar» no espera la ventana: un retenido recién nacido se aplica (es idempotente por su llave)', async () => {
+      const f = retenido({ createdAt: AHORA })
+      aplicar.mockResolvedValue(aplicado())
+      expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', repetida: false })
+      expect(f.estado).toBe('APLICADO')
+    })
   })
 })

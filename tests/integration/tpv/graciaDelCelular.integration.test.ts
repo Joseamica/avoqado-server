@@ -16,7 +16,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
-import { huellaDelEnvio, TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
+import { aplicarEnvio, huellaDelEnvio, TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
 import { listarRetenidos, resolverRetenido, VENTANA_EN_VUELO_MS } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 import { generateAccessToken } from '@/jwt.service'
 import { aceptarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
@@ -511,7 +511,8 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
     const cuerpoJson = JSON.stringify(cuerpo)
     const { celular } = await celularQueReportaYSeDesvincula([], vendidaPorLaRutaNormal(cuerpo))
     const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
-    const fila = await retenidoDe(celular.id, cuerpoJson, { estado: 'PENDIENTE' })
+    // I6: nació hace más que la ventana (ya se puede descartar).
+    const fila = await retenidoDe(celular.id, cuerpoJson, { estado: 'PENDIENTE', createdAt: vencida() })
 
     const r = await desdeElPanel(fila.id, 'DESCARTAR')
 
@@ -581,6 +582,73 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
       credencial,
       'EVIDENCIA',
       JSON.stringify({ ventaLlave: randomUUID(), photoUrls: [foto], replaceIndex: 0, ...captura }),
+    )
+
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'CUERPO_INVALIDO' })
+    expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id } })).toBe(0)
+  })
+
+  it('I6 (R4-1) · recién nacido: «Descartar» → 409 DESCARTE_MUY_PRONTO sin tocarlo; la venta que venía en camino termina; pasada la ventana «Descartar» la deja APLICADO, un cobro', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([])
+    // Su reenvío por la gracia llega ANTES de que la petición normal cree la ficha: nace PENDIENTE (no reportada).
+    const g = await enGracia(credencial, 'VENTA', cuerpoJson)
+    expect(g.status).toBe(202)
+    const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id } })
+    expect(fila.estado).toBe('PENDIENTE')
+
+    const pronto = await desdeElPanel(fila.id, 'DESCARTAR')
+    expect(pronto.status).toBe(409)
+    expect(pronto.body).toMatchObject({
+      code: 'DESCARTE_MUY_PRONTO',
+      message: 'Este envío acaba de llegar. Espera unos minutos antes de descartarlo: puede que todavía se esté registrando.',
+    })
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({
+      estado: 'PENDIENTE',
+      updatedAt: fila.updatedAt,
+    })
+
+    // La petición normal, admitida antes de desvincular, termina: el MISMO servicio que su ruta, a nombre de ese celular.
+    const normal = await aplicarEnvio({ venueId, orgId, staffId: promotorId, celularId: celular.id }, 'VENTA', cuerpo)
+    expect(normal).toMatchObject({ tipo: 'APLICADO', status: 201 })
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(cobros).toHaveLength(1)
+
+    // Pasa la ventana.
+    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { createdAt: vencida() } })
+    const tarde = await desdeElPanel(fila.id, 'DESCARTAR')
+    expect(tarde.status).toBe(200)
+    expect(tarde.body.data).toMatchObject({
+      estado: 'APLICADO',
+      yaEstabaHecho: true,
+      resultado: expect.objectContaining({ paymentId: cobros[0].id }),
+    })
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resueltoPor: supervisorId,
+    })
+    expect((await filas(sim.serialNumber, cuerpo.llave)).cobros).toHaveLength(1)
+
+    // Sin efecto y pasada la ventana, «Descartar» sí descarta.
+    const otra = await nuevaSim()
+    const sinEfecto = await retenidoDe(celular.id, JSON.stringify(ventaDe(otra.serialNumber)), { createdAt: vencida() })
+    const descartada = await desdeElPanel(sinEfecto.id, 'DESCARTAR')
+    expect(descartada.status).toBe(200)
+    expect(descartada.body.data).toEqual({ estado: 'DESCARTADO', repetida: false })
+  })
+
+  it('R4-3 · evidencia por la gracia con photoLabel Portabilidad y replaceIndex 0 (otra ranura) → 400 CUERPO_INVALIDO y no se retiene nada', async () => {
+    const { credencial, celular } = await celularQueReportaYSeDesvincula([])
+    const foto = `https://firebasestorage.googleapis.com/v0/b/prueba/o/venues%2F${venueId}%2Fcontradice.jpg`
+    const captura = { captureSeq: 5, captureDeviceId: celular.id, idempotencyKey: randomUUID(), capturedAt: new Date().toISOString() }
+
+    const r = await enGracia(
+      credencial,
+      'EVIDENCIA',
+      JSON.stringify({ ventaLlave: randomUUID(), photoUrls: [foto], photoLabel: 'Portabilidad', replaceIndex: 0, ...captura }),
     )
 
     expect(r.status).toBe(400)

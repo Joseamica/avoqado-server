@@ -262,6 +262,28 @@ describe('aplicarEnvio', () => {
       })
     })
 
+    it('R4-3 · un replaceIndex que contradice la ranura de su photoLabel → CUERPO_INVALIDO; el que coincide entra con su ranura', async () => {
+      for (const [photoLabel, replaceIndex] of [
+        ['Portabilidad', 0],
+        ['Vinculacion', 1],
+        ['Vinculacion', 2],
+      ] as const) {
+        const cuerpo = { ...fotos, photoLabel, replaceIndex }
+        expect(cuerpoValido('EVIDENCIA', cuerpo)).toBe(false)
+        expect(await aplicarEnvio(ctx, 'EVIDENCIA', cuerpo)).toMatchObject({ tipo: 'RECHAZADO', rechazo: { code: 'CUERPO_INVALIDO' } })
+      }
+      expect(db.ventaDeCampo.findUnique).not.toHaveBeenCalled()
+      expect(evidencia).not.toHaveBeenCalled()
+      // La que coincide: el escritor recibe el índice y la etiqueta de la MISMA ranura.
+      db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
+      evidencia.mockResolvedValue({ verificationId: 'sv' })
+      expect(cuerpoValido('EVIDENCIA', { ...fotos, photoLabel: 'Vinculacion', replaceIndex: 0 })).toBe(true)
+      expect(await aplicarEnvio(ctx, 'EVIDENCIA', { ...fotos, photoLabel: 'Portabilidad', replaceIndex: 1 })).toMatchObject({
+        tipo: 'APLICADO',
+      })
+      expect(evidencia.mock.calls[0].slice(5, 7)).toEqual([1, 'Portabilidad'])
+    })
+
     it('VERIFICATION_MOVED (la venta cambió de tienda, «vuelve a intentarlo») se lanza: es reintentable', async () => {
       db.ventaDeCampo.findUnique.mockResolvedValue(fichaCompleta)
       const movida = new ConflictError('La venta cambió de tienda mientras se guardaba; vuelve a intentarlo', 'VERIFICATION_MOVED')
@@ -493,6 +515,19 @@ describe('efectoYaHecho (T1): ¿lo que pide este cuerpo ya está en la base?', (
       conSeqs({ PHOTO_VINCULACION: { cel: 5 } })
       expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ replaceIndex: 1 }), LIMITE)).toEqual({ hecho: false })
       expect(db.saleVerification.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('R4-3 · Portabilidad con replaceIndex 0 (el escritor iría a la ranura 0) no lee la ranura 1: no hecho y sin tocar la base', async () => {
+      // Una captura 10 anterior en Portabilidad: con la etiqueta sola diría «ya está»; con el índice 0 no es su ranura.
+      conSeqs({ PHOTO_PORTABILIDAD: { cel: 10 } })
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Portabilidad', replaceIndex: 0 }), LIMITE)).toEqual({
+        hecho: false,
+      })
+      expect(db.saleVerification.findUnique).not.toHaveBeenCalled()
+      // Con el índice de su ranura sí se lee esa ranura.
+      expect(await efectoYaHecho('EVIDENCIA', ctx, foto({ photoLabel: 'Portabilidad', replaceIndex: 1 }), LIMITE)).toMatchObject({
+        hecho: true,
+      })
     })
 
     it('una captura anterior, otro aparato, una más nueva en la OTRA ranura, sin verificación o sin ficha → no hecho', async () => {

@@ -117,13 +117,23 @@ const ESQUEMAS: Record<Exclude<TipoDeEnvio, 'EVIDENCIA'>, ZodTypeAny> = {
  * idempotencia de la foto, pero sólo en una ranura FIJA, y la única fija es la de la etiqueta (Vinculacion = 0, Portabilidad
  * = 1). `replaceIndex` solo no basta: sobre una verificación vacía la ruta normal la pone en la 0 y la repetición en la 1, y
  * la misma foto queda dos veces. Sin `photoLabel` → CUERPO_INVALIDO. La ruta normal de la TPV no cambia.
+ * R4-3: la ranura es UNA y sale de la etiqueta. El escritor compartido (`placePhotos`) prefiere `replaceIndex` cuando esa
+ * posición existe, así que un índice que no es el de la etiqueta mandaría la foto a otra ranura que la que lee
+ * `efectoYaHecho`: `replaceIndex` sólo se acepta si coincide con la etiqueta (entonces los dos caminos del escritor caen en la
+ * misma ranura); si no → CUERPO_INVALIDO.
  */
-function evidenciaValida(cuerpo: unknown): { ventaLlave: string; resto: Record<string, unknown>; b: any } | null {
+const RANURA_DE_LA_ETIQUETA = { Vinculacion: 0, Portabilidad: 1 } as const
+function evidenciaValida(
+  cuerpo: unknown,
+): { ventaLlave: string; resto: Record<string, unknown>; b: any; ranura: CaptureDestination } | null {
   const conLlave = validar<{ ventaLlave: string; paymentId?: unknown }>(evidenciaDeCampoLlaveSchema, cuerpo)
   if (!conLlave) return null
   const { ventaLlave, paymentId: _ignorado, ...resto } = conLlave
   const b = validar<any>(createProofOfSaleSchema.shape.body, { ...resto, paymentId: cuid() })
-  return b && b.photoLabel !== undefined && capturaDe(b) ? { ventaLlave, resto, b } : null
+  if (!b || b.photoLabel === undefined || !capturaDe(b)) return null
+  const indice = RANURA_DE_LA_ETIQUETA[b.photoLabel as keyof typeof RANURA_DE_LA_ETIQUETA]
+  if (b.replaceIndex !== undefined && b.replaceIndex !== indice) return null
+  return { ventaLlave, resto, b, ranura: indice === 0 ? 'PHOTO_VINCULACION' : 'PHOTO_PORTABILIDAD' }
 }
 
 /** La venta de la evidencia: COMPLETA, de esta persona y de ESTE celular (el nuevo de la persona no la nombra). */
@@ -273,9 +283,8 @@ export async function efectoYaHecho(
       if (!sv) return NO_HECHO
       const { seq, deviceId } = capturaDe(valida.b)!
       const aplicadas = (sv.appliedCaptureSeqs ?? {}) as AppliedCaptureSeqs
-      const { photoLabel } = valida.b
-      // R3-3: fuera de su ruta siempre trae photoLabel: ésa es su ranura.
-      const ranura: CaptureDestination = photoLabel === 'Vinculacion' ? 'PHOTO_VINCULACION' : 'PHOTO_PORTABILIDAD'
+      // R3-3/R4-3: la MISMA ranura que usará el escritor (la de la etiqueta; un replaceIndex distinto no pasa la validación).
+      const { ranura } = valida
       // En su ranura: ésta o una más nueva del mismo aparato. En cualquier ranura: ESTA misma captura (la puso la ruta normal
       // con otro acomodo). Una más nueva en la OTRA ranura no dice nada de ésta.
       const exacta = (['PHOTO_VINCULACION', 'PHOTO_PORTABILIDAD'] as const).some(d => aplicadas[d]?.[deviceId] === seq)
