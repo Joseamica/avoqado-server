@@ -1314,7 +1314,10 @@ export async function deleteModifier(venueId: string, modifierGroupId: string, m
     throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
   }
 
-  await prisma.modifier.delete({ where: { id: modifierId } })
+  // D17 (founder, 9-nov, A): se ARCHIVA, como el grupo (D16). Borrarlo le quitaba el extra a una liga ya enviada (CASCADE), al reporte
+  // (SET NULL) y a su historial de precios, y rechazaba la venta sin red que lo traía. Las lecturas de administración no cambian a
+  // propósito: el apagado se ve y se vuelve a prender (el ANDROID viejo, con su interruptor «Activo» desde la lista).
+  await prisma.modifier.update({ where: { id: modifierId }, data: { active: false } })
 
   logAction({ venueId, action: 'MODIFIER_DELETED', entity: 'Modifier', entityId: existing.id, data: { name: existing.name } })
 }
@@ -1986,6 +1989,14 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
       // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers are never deleted either
       // (D16): they are turned off, and a file that brings the name back reuses the same row.
+      const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
+        OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
+      }
+      // D17 (Codex r2-r4): los extras que el archivo conserva o crea. «Reemplazar» apaga los demás AL FINAL, no al principio: quitar un
+      // extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el vigente), y buscarlos todavía
+      // prendidos deja que gane el vigente. Crece con el archivo, no con el catálogo.
+      const extrasDelArchivo = new Set<string>()
+      const grupoDeFamilia = new Map<string, boolean>() // sólo de los grupos que trae el archivo
       if (data.mode === 'replace') {
         // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
         // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
@@ -2013,10 +2024,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         //      or its variants' links — is the family's, not the file's: not turned off, its extras too (Variantes, Codex #1, ronda 2).
         await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
         await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
-        const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
-          OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
-        }
-        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
+        // (los extras se apagan al final, tras recorrer el archivo: ver `extrasDelArchivo`)
         // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
         await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
@@ -2298,40 +2306,61 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               // Handle modifiers
               for (const modifierData of groupData.modifiers) {
                 // Check if modifier exists by name in this group
+                // D17 (Codex r1): como el grupo en D16, «combinar» ignora los extras archivados (quitar ya no los destruye) y crea otro con
+                // el precio del archivo, como cuando se borraban; revivir el viejo lo devolvía con su precio anterior. «Reemplazar» sí
+                // los reusa: como todavía no los apaga (D17, ver `extrasDelArchivo`), gana el prendido (Codex r2) y luego el más nuevo.
+                // ponytail: «el más nuevo» es el id cuid más alto (Modifier no tiene fechas); sólo decide entre puros archivados.
                 const existingModifier = await tx.modifier.findFirst({
-                  where: { groupId: modifierGroup.id, name: modifierData.name },
+                  where: { groupId: modifierGroup.id, name: modifierData.name, ...(data.mode === 'replace' ? {} : { active: true }) },
+                  orderBy: [{ active: 'desc' }, { id: 'desc' }],
                 })
 
                 if (!existingModifier) {
                   // Create new modifier
-                  await tx.modifier.create({
+                  const creado = await tx.modifier.create({
                     data: {
                       groupId: modifierGroup.id,
                       name: modifierData.name,
                       price: modifierData.price,
                     },
                   })
+                  if (data.mode === 'replace') extrasDelArchivo.add(creado.id)
                   modifiersCreated++
                 } else if (data.mode === 'replace') {
                   // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
-                  if (!existingModifier.active) modifiersCreated++
+                  // Cuenta como creado lo que antes se apagaba al principio: lo de un grupo que no es de familia, una sola vez aunque
+                  // el archivo lo repita (Codex r5: un grupo de familia apagado a mano no se apagaba, y su extra vivo no contaba).
+                  let deFamilia = grupoDeFamilia.get(modifierGroup.id)
+                  if (deFamilia === undefined) {
+                    deFamilia = (await tx.modifierGroup.count({ where: { id: modifierGroup.id, ...usadoPorFamilia } })) > 0
+                    grupoDeFamilia.set(modifierGroup.id, deFamilia)
+                  }
+                  const seApagabaAlPrincipio = !deFamilia && !extrasDelArchivo.has(existingModifier.id)
+                  if (!existingModifier.active || seApagabaAlPrincipio) modifiersCreated++
+                  extrasDelArchivo.add(existingModifier.id)
                   await tx.modifier.update({
                     where: { id: existingModifier.id },
                     data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
                   })
-                } else if (!existingModifier.active || existingModifier.isDemo) {
-                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off, and
-                  // (Codex C5-2) a demo one the file adopts stops being demo.
-                  await tx.modifier.update({
-                    where: { id: existingModifier.id },
-                    data: { active: true, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
-                  })
+                } else if (existingModifier.isDemo) {
+                  // Merge keeps today's behaviour (a live extra is not overwritten); (Codex C5-2) a demo one the file adopts stops
+                  // being demo.
+                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { isDemo: false } })
                 }
               }
             }
           }
         }
+      }
+
+      if (data.mode === 'replace') {
+        // 2-3 (D17): lo que el archivo no conservó ni creó se apaga, igual que antes se hacía al principio (D16: nunca se borra; lo de
+        // una familia, tampoco se apaga). Va aquí, antes de las familias, como iba antes de ellas.
+        await tx.modifier.updateMany({
+          where: { group: { venueId, NOT: usadoPorFamilia }, id: { notIn: [...extrasDelArchivo] } },
+          data: { active: false },
+        })
       }
 
       // Variantes (V8), segunda pasada, por llave en el orden del archivo: se vuelve a revisar cada familia contra la base de ahora
