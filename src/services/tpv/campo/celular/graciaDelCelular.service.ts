@@ -439,59 +439,40 @@ async function nacer(celular: CelularDeCampo, e: Envio, cuerpo: unknown, huella:
 }
 
 /**
- * Arreglo 8 (R7-1): el gancho busca desde que empezó su petición, menos este margen. `inicio` es la hora del servidor y
- * `createdAt` la de Postgres (`now()`); entre instancias y la base los relojes pueden diferir unos segundos.
- */
-const MARGEN_DE_RELOJ_MS = 60 * 1000
-/** Cada página del recorrido del gancho (cada consulta lleva su `take`; el recorrido sigue hasta la última fila). */
-const PAGINA_DEL_GANCHO = 500
-
-/**
  * I7 · El que aplicó gana, también por la ruta normal (R5-1). Esperar `VENTANA_EN_VUELO_MS` (I6) no prueba que una petición
  * normal admitida antes de desvincular ya terminó (no tiene tope de ejecución). Por eso, cuando una ruta del bloque 0 del
- * celular termina en 2xx, se revisan los retenidos de ESE celular, sucursal y tipo que no estén APLICADO: el que ya tiene su
- * efecto queda APLICADO (I4, con CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado). Sin huella: manda `efectoYaHecho`.
- * Arreglo 8 (R7-1): el reenvío de ESTE efecto siempre nace DESPUÉS de que su petición empezó (`inicio`: la gracia sólo retiene
- * tras desvincular, y la petición entró antes), así que se revisa TODO lo nacido desde `inicio − MARGEN_DE_RELOJ_MS`, del más
- * viejo al más nuevo, en páginas con cursor: ni el historial (500 descartes posteriores) ni un tope dejan fuera al objetivo.
- * I8: entero con el candado del celular, así nunca ve una decisión a medias ni se la salta. Lo de casi siempre (un celular
- * sin retenidos) es UNA consulta, sin transacción: cuenta toda fila viva, también la APLICANDO en vuelo, porque una decisión
- * en curso deja ver la fila como estaba antes de decidir (lo suyo se ve al soltar el candado). La única decisión sin fila
- * visible es el nacimiento, y ése vuelve a mirar el efecto al soltar el candado (`nacer`).
- * Devuelve cuántos quedaron APLICADO. Lo llama `autenticarSesionDeCampo` al terminar la respuesta.
+ * celular termina en 2xx, se revisa el retenido de ESE envío: el que ya tiene su efecto queda APLICADO (I4, con
+ * CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado).
+ * Arreglo 9 (R8-1, R8-2): ya no se adivina qué filas revisar. `cuerpoJson` es el texto EXACTO que llegó por la ruta normal
+ * (`req.rawBody`), así que su huella es la misma que el celular reporta en su latido y que la gracia guardó: UNA consulta por
+ * el único `(celularId, huella)` da con la fila, nazca cuando nazca, y nada se recorre dentro de la transacción.
+ * Contrato (bloque 2): la petición normal manda como cuerpo exactamente el texto de su huella.
+ * ponytail: si el celular manda por la ruta normal un texto distinto al de su huella (otros espacios u orden), el gancho no
+ * encuentra la fila; el dinero queda bien (la venta existe) y «Aplicar», «Descartar» o la gracia la corrigen al releer el efecto.
+ * I8: con el candado del celular, así nunca ve una decisión a medias ni se la salta. Afuera sólo se mira si hay fila viva (una
+ * decisión en curso deja ver la fila como estaba antes de decidir, y una APLICANDO en vuelo puede ser la ejecución cuyo rechazo
+ * se está decidiendo); dentro se relee. La única decisión sin fila visible es el nacimiento, y ése vuelve a mirar el efecto al
+ * soltar el candado (`nacer`). Sin fila, o ya APLICADO: una consulta y nada más (ni transacción).
+ * Devuelve 1 si quedó APLICADO. Lo llama `autenticarSesionDeCampo` al terminar la respuesta.
  */
-export async function reconciliarConLaRutaNormal(celularId: string, venueId: string, tipo: TipoDeEnvio, inicio: Date): Promise<number> {
-  const base = { celularId, venueId, tipo, createdAt: { gte: new Date(inicio.getTime() - MARGEN_DE_RELOJ_MS) } }
-  const alguna = await prisma.envioRetenidoDeCampo.findFirst({
-    where: { ...base, estado: { in: ['PENDIENTE', 'APLICANDO', 'DESCARTADO'] } },
-    select: { id: true },
-  })
-  if (!alguna) return 0
+export async function reconciliarConLaRutaNormal(
+  celularId: string,
+  venueId: string,
+  tipo: TipoDeEnvio,
+  cuerpoJson: string,
+): Promise<number> {
+  const donde = { celularId_huella: { celularId, huella: huellaDelEnvio(tipo, venueId, cuerpoJson) } }
+  const vista = await prisma.envioRetenidoDeCampo.findUnique({ where: donde, select: { estado: true } })
+  if (!vista || vista.estado === 'APLICADO') return 0
   return conElCandadoDelCelular(celularId, async db => {
-    // PENDIENTE, APLICANDO sin dueño y DESCARTADO. Una APLICANDO en vuelo, aquí dentro, es una EJECUCIÓN («Aplicar» o la gracia
-    // aplicando; una decisión nunca se ve a medias): llega a APLICADO por su propio efecto (I4) o su rechazo se decide con
-    // este mismo candado.
-    const where = {
-      ...base,
-      OR: [{ estado: { in: ['PENDIENTE', 'DESCARTADO'] } }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }],
-    }
-    let aplicados = 0
-    let despuesDe: string | undefined
-    for (;;) {
-      const pagina = await db.envioRetenidoDeCampo.findMany({
-        where,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: PAGINA_DEL_GANCHO,
-        ...(despuesDe && { cursor: { id: despuesDe }, skip: 1 }),
-      })
-      for (const r of pagina) {
-        const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
-        const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt, db)
-        if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId, db))) aplicados++
-      }
-      if (pagina.length < PAGINA_DEL_GANCHO) return aplicados
-      despuesDe = pagina[pagina.length - 1].id
-    }
+    const r = await db.envioRetenidoDeCampo.findUnique({ where: donde })
+    // Dentro del candado, una APLICANDO en vuelo es una EJECUCIÓN («Aplicar» o la gracia aplicando; una decisión nunca se ve a
+    // medias): llega a APLICADO por su propio efecto (I4) o su rechazo se decide con este mismo candado.
+    if (!r || r.estado === 'APLICADO' || enVuelo(r)) return 0
+    const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
+    const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt, db)
+    if (!ya.hecho) return 0
+    return (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId, db)) ? 1 : 0
   })
 }
 

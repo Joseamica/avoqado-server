@@ -8,6 +8,7 @@
  * `requireVenueMembership` y los controladores de la TPV sigan igual, y `res.locals.celular`.
  */
 import { NextFunction, Request, Response } from 'express'
+import type { IncomingMessage, ServerResponse } from 'http'
 import logger from '@/config/logger'
 import AppError, { ForbiddenError, UnauthorizedError } from '@/errors/AppError'
 import { enrichContext } from '@/observability/executionContext'
@@ -20,14 +21,30 @@ import { verificarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCamp
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import prisma from '@/utils/prismaClient'
 
-/** Las rutas del bloque 0 que la gracia también recibe (`/venues/:venueId/<ruta>`), con su tipo de envío. */
+/**
+ * Las rutas del bloque 0 que la gracia también recibe (`/venues/:venueId/<ruta>`), con su tipo de envío. Sin la evidencia: su
+ * ruta normal manda `paymentId` y la gracia `ventaLlave`, así que su texto nunca tiene la huella de su retenido (arreglo 9).
+ * ponytail: una evidencia retenida y descartada cuya foto sí subió por la ruta normal se queda DESCARTADO hasta que «Aplicar» la
+ * relea; no mueve dinero. Para cubrirla, el celular tendría que mandar por la gracia el mismo texto que por su ruta.
+ */
 const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
   ventas: 'VENTA',
   'custodia/aceptar': 'CUSTODIA_ACEPTAR',
   'custodia/rechazar': 'CUSTODIA_RECHAZAR',
   'checadas/entrada': 'ENTRADA',
   'checadas/salida': 'SALIDA',
-  evidencia: 'EVIDENCIA',
+}
+
+/**
+ * Arreglo 9: el `verify` del parser JSON global (`configureCoreMiddlewares`). Guarda el texto EXACTO del cuerpo en
+ * `req.rawBody` SÓLO en las rutas del celular de campo (`/api/v1/tpv/campo/venues/…`): el gancho I7 busca el retenido por la
+ * huella de ese texto, la misma que el celular reporta en su latido. Cualquier otra URL (PAX, Nexgo, el panel, la gracia) no
+ * guarda nada: ni memoria ni comportamiento cambian.
+ */
+export const RUTAS_CON_CUERPO_CRUDO = '/api/v1/tpv/campo/venues/'
+export function guardarCuerpoDelCelular(req: IncomingMessage, _res: ServerResponse, buf: Buffer, encoding: string) {
+  const url = (req as Request).originalUrl ?? req.url ?? ''
+  if (url.startsWith(RUTAS_CON_CUERPO_CRUDO)) (req as Request).rawBody = buf.toString((encoding || 'utf8') as BufferEncoding)
 }
 
 /**
@@ -40,12 +57,10 @@ const TIPO_POR_RUTA: Record<string, TipoDeEnvio> = {
 function alTerminarReconciliar(req: Request, res: Response, celularId: string, venueId: string) {
   const tipo = req.method === 'POST' ? TIPO_POR_RUTA[req.path.split('/').slice(3).join('/')] : undefined
   if (!tipo) return
-  // Arreglo 8 (R7-1): la hora en que ESTA petición pasó el candado. Su reenvío por la gracia nace después (la gracia sólo
-  // retiene lo de un celular ya desvinculado, y esta petición entró con el celular vinculado): el gancho busca desde aquí.
-  const inicio = new Date()
   res.on('finish', () => {
-    if (res.statusCode < 200 || res.statusCode >= 300) return
-    reconciliarConLaRutaNormal(celularId, venueId, tipo, inicio).catch(error =>
+    // Arreglo 9: el texto exacto que mandó el celular (lo guarda `guardarCuerpoDelCelular`); sin él no hay huella que buscar.
+    if (res.statusCode < 200 || res.statusCode >= 300 || req.rawBody === undefined) return
+    reconciliarConLaRutaNormal(celularId, venueId, tipo, req.rawBody).catch(error =>
       logger.warn('No se pudieron reconciliar los retenidos del celular de campo', { celularId, venueId, tipo, error }),
     )
   })

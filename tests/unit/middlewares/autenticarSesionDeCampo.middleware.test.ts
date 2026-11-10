@@ -13,7 +13,7 @@ import { isSessionAliveCached } from '@/services/auth/sessionCache'
 import { sucursalesDeLaPersona } from '@/services/tpv/campo/celular/personasDeCampo'
 import { firmarAccesoDeCampo } from '@/services/tpv/campo/celular/tokenDeCampo'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
-import { autenticarSesionDeCampo } from '@/middlewares/autenticarSesionDeCampo.middleware'
+import { autenticarSesionDeCampo, guardarCuerpoDelCelular } from '@/middlewares/autenticarSesionDeCampo.middleware'
 import logger from '@/config/logger'
 import { reconciliarConLaRutaNormal } from '@/services/tpv/campo/celular/graciaDelCelular.service'
 
@@ -36,16 +36,23 @@ const deCampo = (extra: Partial<{ venueId: string; sid: string; role: 'CASHIER' 
 const sucursal = (venueId: string, role = 'CASHIER') => ({ staffVenueId: `sv-${venueId}`, venueId, nombre: venueId, role, pin: '1234' })
 
 const app = express()
+// Como `configureCoreMiddlewares`: el parser global con el `verify` que guarda el texto crudo sólo del celular (arreglo 9).
+app.use(express.json({ verify: guardarCuerpoDelCelular }))
 app.get('/venues/:venueId/x', autenticarSesionDeCampo, (req: Request, res: Response) =>
   res.json({ authContext: req.authContext, celularId: res.locals.celular.id }),
 )
 // Las rutas del bloque 0 (R5-1): lo que contesta el controlador lo decide la prueba.
 let respuesta = { status: 201, body: { ok: true } as object }
+const campo = express.Router()
 for (const ruta of ['ventas', 'custodia/aceptar', 'custodia/rechazar', 'checadas/entrada', 'checadas/salida', 'evidencia']) {
-  app.post(`/venues/:venueId/${ruta}`, autenticarSesionDeCampo, (_req: Request, res: Response) =>
+  campo.post(`/venues/:venueId/${ruta}`, autenticarSesionDeCampo, (_req: Request, res: Response) =>
     res.status(respuesta.status).json(respuesta.body),
   )
 }
+app.use('/api/v1/tpv/campo', campo)
+// Fuera del celular de campo (p. ej. una ruta de la TPV): el texto crudo NO se guarda.
+app.post('/api/v1/tpv/:tpvId/cualquiera', (req: Request, res: Response) => res.json({ crudo: req.rawBody ?? null, body: req.body }))
+app.post('/api/v1/tpv/campo/gracia', (req: Request, res: Response) => res.json({ crudo: req.rawBody ?? null }))
 app.use((err: any, _req: Request, res: Response, _next: unknown) => res.status(500).json({ error: err.message }))
 
 const pedir = (token?: string, venueId = 'vA', extra: Record<string, string> = {}) => {
@@ -177,8 +184,14 @@ describe('autenticarSesionDeCampo', () => {
 
 describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar en 2xx se reconcilian los retenidos de ESE celular', () => {
   const tick = () => new Promise(r => setImmediate(r))
+  /** El texto EXACTO que manda el celular (con su orden y espacios): el gancho busca su huella. */
+  const TEXTO = '{"llave":"k-1",  "serialNumber":"8952","precioVisto":0}'
   const mandar = (ruta: string, token = deCampo()) =>
-    request(app).post(`/venues/vA/${ruta}`).set('Authorization', `Bearer ${token}`).send({})
+    request(app)
+      .post(`/api/v1/tpv/campo/venues/vA/${ruta}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('Content-Type', 'application/json')
+      .send(TEXTO)
 
   it.each([
     ['ventas', 'VENTA'],
@@ -186,18 +199,25 @@ describe('R5-1 · el que aplicó gana también por la ruta normal: al terminar e
     ['custodia/rechazar', 'CUSTODIA_RECHAZAR'],
     ['checadas/entrada', 'ENTRADA'],
     ['checadas/salida', 'SALIDA'],
-    ['evidencia', 'EVIDENCIA'],
-  ])('POST %s en 2xx → reconciliar(celular, sucursal, %s, inicio) DESPUÉS de contestar', async (ruta, tipo) => {
-    const antes = Date.now()
+  ])('POST %s en 2xx → reconciliar(celular, sucursal, %s, el texto EXACTO del cuerpo) DESPUÉS de contestar', async (ruta, tipo) => {
     const r = await mandar(ruta)
     expect(r.status).toBe(201)
     while (!reconciliar.mock.calls.length) await tick()
     expect(reconciliar).toHaveBeenCalledTimes(1)
-    expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', tipo, expect.any(Date))
-    // Arreglo 8: la hora en que la petición pasó el candado (sus retenidos nacen después), no la del final.
-    const inicio: Date = reconciliar.mock.calls[0][3]
-    expect(inicio.getTime()).toBeGreaterThanOrEqual(antes)
-    expect(inicio.getTime()).toBeLessThanOrEqual(Date.now())
+    expect(reconciliar).toHaveBeenCalledWith('cel1', 'vA', tipo, TEXTO)
+  })
+
+  it('la evidencia no se reconcilia por la ruta normal: su cuerpo (paymentId) no es el de la gracia (ventaLlave)', async () => {
+    expect((await mandar('evidencia')).status).toBe(201)
+    for (let i = 0; i < 5; i++) await tick()
+    expect(reconciliar).not.toHaveBeenCalled()
+  })
+
+  it('req.rawBody sólo se llena en /api/v1/tpv/campo/venues/…: ni en otra ruta de la TPV ni en la gracia', async () => {
+    const otra = await request(app).post('/api/v1/tpv/t1/cualquiera').set('Content-Type', 'application/json').send(TEXTO)
+    expect(otra.body).toEqual({ crudo: null, body: { llave: 'k-1', serialNumber: '8952', precioVisto: 0 } })
+    const gracia = await request(app).post('/api/v1/tpv/campo/gracia').set('Content-Type', 'application/json').send(TEXTO)
+    expect(gracia.body).toEqual({ crudo: null })
   })
 
   it('un rechazo de la ruta (4xx), un candado que no la deja pasar o el GET de prueba → no se reconcilia nada', async () => {

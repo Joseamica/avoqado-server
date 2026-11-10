@@ -28,6 +28,8 @@ declare global {
       tpvSettingsTarget?: BoundTpvSettingsTarget
       /** CRM keys `requireCrm` read from the database for THIS request (never from the token). */
       crmAccess?: CrmAccess
+      /** El texto EXACTO del cuerpo JSON. Sólo en `/api/v1/tpv/campo/venues/…` (ver `guardarCuerpoDelCelular`). */
+      rawBody?: string
       partnerContext?: {
         partnerId: string
         partnerName: string
