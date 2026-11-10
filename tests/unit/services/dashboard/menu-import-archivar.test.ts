@@ -37,7 +37,7 @@ beforeEach(() => {
   prismaMock.menu.findFirst.mockResolvedValue({ id: 'menu-1' } as never)
   prismaMock.menuCategory.findFirst.mockResolvedValue(null)
   prismaMock.menuCategory.create.mockResolvedValue({ id: 'cat-nueva' } as never)
-  prismaMock.modifier.updateManyAndReturn.mockResolvedValue([])
+  prismaMock.modifier.findMany.mockResolvedValue([])
 })
 
 describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archivo no trae', () => {
@@ -102,13 +102,18 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
     expect(prismaMock.productModifierGroup.deleteMany).toHaveBeenCalledWith({ where: { product: { venueId: V, productGroupId: null } } })
     expect(prismaMock.modifier.deleteMany).not.toHaveBeenCalled()
     expect(prismaMock.modifierGroup.deleteMany).not.toHaveBeenCalled()
-    // D17 (Codex r2): sólo los vivos, y se recuerda cuáles eran (con nombres repetidos, abajo gana el que estaba vivo).
-    expect(prismaMock.modifier.updateManyAndReturn).toHaveBeenCalledWith({
-      where: { group: { venueId: V, NOT: usadoPorFamilia }, active: true },
+    expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith({
+      where: { group: { venueId: V, NOT: usadoPorFamilia } },
       data: { active: false },
+    })
+    // D17 (Codex r2 y r3): antes de apagar, recuerda cuál estaba vivo, pero SÓLO de los nombres del archivo (aquí ninguno).
+    expect(prismaMock.modifier.findMany).toHaveBeenCalledWith({
+      where: { active: true, name: { in: [] }, group: { venueId: V, name: { in: [] }, NOT: usadoPorFamilia } },
       select: { id: true, groupId: true, name: true, isDemo: true },
     })
-    expect(prismaMock.modifier.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.modifier.findMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.modifier.updateMany.mock.invocationCallOrder[0],
+    )
     // Sólo los vivos: así el `updatedAt` de un archivado no se mueve y, con nombres repetidos, gana el que estaba vivo.
     expect(prismaMock.modifierGroup.updateMany).toHaveBeenCalledWith({
       where: { venueId: V, active: true, NOT: usadoPorFamilia },
@@ -173,12 +178,15 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
 
   it('D17 (Codex r2) · «Reemplazar» con dos extras del mismo nombre reusa el que estaba VIVO, no el que se quitó', async () => {
     prismaMock.modifierGroup.findFirst.mockResolvedValueOnce({ id: 'grupo-leche', active: false } as never)
-    prismaMock.modifier.updateManyAndReturn.mockResolvedValueOnce([
+    prismaMock.modifier.findMany.mockResolvedValueOnce([
       { id: 'extra-vivo', groupId: 'grupo-leche', name: 'Avena', isDemo: false },
     ] as never)
 
     const r = await importMenu(V, conLeche('replace'), HUMANO)
 
+    expect(prismaMock.modifier.findMany.mock.calls[0][0]).toMatchObject({
+      where: { active: true, name: { in: ['Avena'] }, group: { name: { in: ['Leche'] } } },
+    })
     expect(prismaMock.modifier.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.modifier.update).toHaveBeenCalledWith({ where: { id: 'extra-vivo' }, data: { active: true, price: 30 } })
     expect(r.stats).toMatchObject({ modifiers: 1 }) // cuenta como creado, igual que todo lo que «Reemplazar» trae

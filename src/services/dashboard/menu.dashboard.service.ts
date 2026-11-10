@@ -2024,13 +2024,19 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
         }
         // D17 (Codex r2): quitar un extra ya no lo destruye, así que un grupo puede tener dos con el mismo nombre (el quitado y el que
-        // «Combinar» creó después). Se apagan sólo los vivos y se recuerda cuáles eran: abajo, con nombres repetidos, gana el vivo.
-        const apagados = await tx.modifier.updateManyAndReturn({
-          where: { group: { venueId, NOT: usadoPorFamilia }, active: true },
-          data: { active: false },
+        // «Combinar» creó después). Antes de apagar, se recuerda cuál estaba vivo: abajo, con nombres repetidos, gana ése. Sólo los
+        // nombres que trae el archivo (Codex r3): la lectura crece con el archivo, no con el catálogo.
+        const gruposDelArchivo = data.categories.flatMap(c => c.products.flatMap(p => p.modifierGroups ?? []))
+        const vivos = await tx.modifier.findMany({
+          where: {
+            active: true,
+            name: { in: [...new Set(gruposDelArchivo.flatMap(g => g.modifiers.map(m => m.name)))] },
+            group: { venueId, name: { in: [...new Set(gruposDelArchivo.map(g => g.name))] }, NOT: usadoPorFamilia },
+          },
           select: { id: true, groupId: true, name: true, isDemo: true },
         })
-        for (const m of apagados) extraVivoAntes.set(claveDeExtra(m.groupId, m.name), { id: m.id, active: false, isDemo: m.isDemo })
+        for (const m of vivos) extraVivoAntes.set(claveDeExtra(m.groupId, m.name), { id: m.id, active: false, isDemo: m.isDemo })
+        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
         // Sólo los vivos: un archivado conserva su `updatedAt`, y con nombres repetidos la búsqueda de abajo elige al que estaba vivo.
         await tx.modifierGroup.updateMany({ where: { venueId, active: true, NOT: usadoPorFamilia }, data: { active: false } })
 
