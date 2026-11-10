@@ -17,7 +17,14 @@ import prisma from '@/utils/prismaClient'
 import { CABECERA_CREDENCIAL } from '@/services/tpv/campo/celular/credencial'
 import { desvincularCelular } from '@/services/tpv/campo/celular/desvincularCelular.service'
 import { aplicarEnvio, huellaDelEnvio, TipoDeEnvio } from '@/services/tpv/campo/celular/envioDeCampo'
-import { listarRetenidos, resolverRetenido, VENTANA_EN_VUELO_MS } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import * as envioDeCampo from '@/services/tpv/campo/celular/envioDeCampo'
+import {
+  listarRetenidos,
+  reconciliarConLaRutaNormal,
+  resolverRetenido,
+  VENTANA_EN_VUELO_MS,
+} from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import * as gracia from '@/services/tpv/campo/celular/graciaDelCelular.service'
 import { generateAccessToken } from '@/jwt.service'
 import { aceptarCustodiaDeCampo } from '@/services/tpv/campo/custodiaDeCampo.service'
 import { moduleService } from '@/services/modules/module.service'
@@ -718,5 +725,213 @@ describe('arreglo final 4 · el desenlace de un retenido (I1–I4) por la ruta r
       }),
     )
     expect((await filas(sim.serialNumber, cuerpo.llave)).cobros).toHaveLength(1)
+  })
+
+  // --- arreglo final 7 · I8: decidir y reconciliar van en fila, por celular (R6-1, R6-2) -------------------------------
+  const dormir = (ms: number) => new Promise(r => setTimeout(r, ms))
+  /** Una función real que se queda esperando: `yaEntro` cuando empezó (o ya consultó, si `despues`), sigue con `seguir()`. */
+  function enPausa<T extends object, K extends keyof T>(modulo: T, nombre: K, despues = false) {
+    const original = modulo[nombre] as unknown as (...a: any[]) => Promise<unknown>
+    let llego!: () => void
+    const yaEntro = new Promise<void>(r => (llego = r))
+    let seguir!: () => void
+    const puedeSeguir = new Promise<void>(r => (seguir = r))
+    jest.spyOn(modulo, nombre as any).mockImplementationOnce((async (...args: any[]) => {
+      if (!despues) {
+        llego()
+        await puedeSeguir
+        return original(...args)
+      }
+      const r = await original(...args)
+      llego()
+      await puedeSeguir
+      return r
+    }) as any)
+    return { yaEntro, seguir }
+  }
+  /** La venta normal de un celular VINCULADO que pasa el candado y se detiene antes de crear su ficha; luego se desvincula. */
+  async function ventaNormalEnVueloYDesvinculado(cuerpo: ReturnType<typeof ventaDe>) {
+    const venta = enPausa(ventasDeCampo, 'registrarVentaDeCampo')
+    let normal!: Promise<request.Response>
+    const c = await celularQueReportaYSeDesvincula([], async token => {
+      normal = request(server)
+        .post(`/api/v1/tpv/campo/venues/${venueId}/ventas`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(cuerpo)
+        .then(r => r)
+      await venta.yaEntro
+    })
+    return { ...c, normal: () => normal, seguirLaVenta: venta.seguir }
+  }
+  const llamadoDelGancho = async (gancho: jest.SpyInstance) => {
+    for (let i = 0; i < 200 && !gancho.mock.calls.length; i++) await dormir(20)
+    expect(gancho).toHaveBeenCalled()
+    // Envuelto: una función async que devolviera la promesa la adoptaría y se quedaría esperando al gancho.
+    return { termina: gancho.mock.results[0].value as Promise<number> }
+  }
+
+  it('I8 (R6-1) · «Descartar» y la venta normal a la vez: el gancho espera a que «Descartar» decida, ve el DESCARTADO y lo deja APLICADO con la reversión; un cobro', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    const { credencial, celular, normal, seguirLaVenta } = await ventaNormalEnVueloYDesvinculado(cuerpo)
+    expect((await enGracia(credencial, 'VENTA', cuerpoJson)).status).toBe(202)
+    const fila = await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id } })
+    await prisma.envioRetenidoDeCampo.update({ where: { id: fila.id }, data: { createdAt: vencida() } })
+
+    // «Descartar» toma la fila y consulta el efecto (todavía no hay ficha); se detiene con la decisión a medias.
+    const consulta = enPausa(envioDeCampo, 'efectoYaHecho', true)
+    const descarte = desdeElPanel(fila.id, 'DESCARTAR').then(r => r)
+    await consulta.yaEntro
+    const gancho = jest.spyOn(gracia, 'reconciliarConLaRutaNormal')
+
+    // La venta normal termina mientras tanto: 201, y su gancho arranca.
+    seguirLaVenta()
+    expect((await normal()).status).toBe(201)
+    const { termina: resultadoDelGancho } = await llamadoDelGancho(gancho)
+    await dormir(300) // si se saltara la fila ocupada, aquí ya habría terminado
+
+    consulta.seguir()
+    const d = await descarte
+    expect(d.status).toBe(200)
+    expect(d.body.data).toEqual({ estado: 'DESCARTADO', repetida: false })
+    expect(await resultadoDelGancho).toBe(1)
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(cobros).toHaveLength(1)
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resultado: expect.objectContaining({ paymentId: cobros[0].id }),
+    })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO',
+        entityId: fila.id,
+        data: expect.objectContaining({ descartadoPor: supervisorId }),
+      }),
+    )
+  })
+
+  it('I8 (variante de R6-1) · la gracia consulta (nada) y la venta normal termina antes de que nazca la fila: la gracia vuelve a mirar y contesta APLICADO; un cobro', async () => {
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const cuerpoJson = JSON.stringify(cuerpo)
+    const { credencial, celular, normal, seguirLaVenta } = await ventaNormalEnVueloYDesvinculado(cuerpo)
+
+    const consulta = enPausa(envioDeCampo, 'efectoYaHecho', true)
+    const g = enGracia(credencial, 'VENTA', cuerpoJson).then(r => r)
+    await consulta.yaEntro
+    const gancho = jest.spyOn(gracia, 'reconciliarConLaRutaNormal')
+
+    seguirLaVenta()
+    expect((await normal()).status).toBe(201)
+    expect(await (await llamadoDelGancho(gancho)).termina).toBe(0) // la fila todavía no existe: no hay nada que reconciliar
+
+    consulta.seguir()
+    const r = await g
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(cobros).toHaveLength(1)
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ resuelto: 'APLICADO', resultado: expect.objectContaining({ paymentId: cobros[0].id }) })
+    expect(await prisma.envioRetenidoDeCampo.findFirstOrThrow({ where: { celularId: celular.id } })).toMatchObject({
+      estado: 'APLICADO',
+      motivo: 'NO_REPORTADA',
+    })
+  })
+
+  it('I8 · el candado es de Postgres: con el candado de ese celular en otra conexión, «Descartar» espera y no toca la fila', async () => {
+    const { celular } = await celularQueReportaYSeDesvincula([])
+    const r = await retenidoDe(celular.id, JSON.stringify(ventaDe((await nuevaSim()).serialNumber)), { createdAt: vencida() })
+    let tengo!: () => void
+    const loTengo = new Promise<void>(x => (tengo = x))
+    let soltar!: () => void
+    const suelta = new Promise<void>(x => (soltar = x))
+    const otro = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`campo-retenidos:${celular.id}`}, 0))::text`
+        tengo()
+        await suelta
+      },
+      { timeout: 30_000 },
+    )
+    await loTengo
+    try {
+      let termino = false
+      const d = resolverRetenido({ retenidoId: r.id, organizationId: orgId, accion: 'DESCARTAR', porStaffId: supervisorId }).finally(
+        () => (termino = true),
+      )
+      await dormir(500)
+      expect(termino).toBe(false)
+      expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: r.id } })).toMatchObject({
+        estado: 'PENDIENTE',
+        updatedAt: r.updatedAt,
+      })
+      soltar()
+      await otro
+      expect(await d).toEqual({ estado: 'DESCARTADO', repetida: false })
+    } finally {
+      soltar()
+      await otro.catch(() => undefined)
+    }
+  })
+
+  it('R6-2 · los 501 de Codex en Postgres: 500 DESCARTADO + un PENDIENTE nuevo cuya venta normal terminó → el gancho lo deja APLICADO', async () => {
+    const { celular } = await celularQueReportaYSeDesvincula([])
+    const hace = (ms: number) => new Date(Date.now() - ms)
+    await prisma.envioRetenidoDeCampo.createMany({
+      data: Array.from({ length: 500 }, (_, i) => {
+        const cuerpoJson = JSON.stringify({ llave: randomUUID(), serialNumber: `8955${String(i).padStart(15, '0')}`, precioVisto: 0 })
+        return {
+          organizationId: orgId,
+          celularId: celular.id,
+          staffId: promotorId,
+          venueId,
+          tipo: 'VENTA',
+          huella: huellaDelEnvio('VENTA', venueId, cuerpoJson),
+          cuerpoJson,
+          motivo: 'NO_REPORTADA',
+          estado: 'DESCARTADO',
+          resueltoAt: hace(60 * 60_000),
+          resueltoPor: supervisorId,
+          createdAt: hace(3 * 60 * 60_000 - i),
+        }
+      }),
+    })
+    const sim = await nuevaSim()
+    const cuerpo = ventaDe(sim.serialNumber)
+    const nuevo = await retenidoDe(celular.id, JSON.stringify(cuerpo), {})
+    expect(await aplicarEnvio({ venueId, orgId, staffId: promotorId, celularId: celular.id }, 'VENTA', cuerpo)).toMatchObject({
+      tipo: 'APLICADO',
+      status: 201,
+    })
+
+    expect(await reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA')).toBe(1)
+    const { cobros } = await filas(sim.serialNumber, cuerpo.llave)
+    expect(await prisma.envioRetenidoDeCampo.findUniqueOrThrow({ where: { id: nuevo.id } })).toMatchObject({
+      estado: 'APLICADO',
+      resultado: expect.objectContaining({ paymentId: cobros[0].id }),
+    })
+    expect(await prisma.envioRetenidoDeCampo.count({ where: { celularId: celular.id, estado: 'DESCARTADO' } })).toBe(500)
+  })
+
+  it('costo (medido) · un celular sin retenidos: el gancho cuesta lo que UNA consulta indexada; con candidatos abre el candado', async () => {
+    const { celular } = await celularQueReportaYSeDesvincula([])
+    const N = 200
+    const promedio = async (f: () => Promise<unknown>) => {
+      await f() // calienta
+      const t0 = performance.now()
+      for (let i = 0; i < N; i++) await f()
+      return (performance.now() - t0) / N
+    }
+    const unaConsulta = await promedio(() =>
+      prisma.envioRetenidoDeCampo.findFirst({ where: { celularId: celular.id }, select: { id: true } }),
+    )
+    const gancho = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA'))
+    await retenidoDe(celular.id, JSON.stringify(ventaDe((await nuevaSim()).serialNumber)), {}) // un candidato sin efecto
+    const conCandado = await promedio(() => reconciliarConLaRutaNormal(celular.id, venueId, 'VENTA'))
+    console.log(
+      `[costo del gancho I8] una consulta indexada: ${unaConsulta.toFixed(2)} ms · gancho sin retenidos: ${gancho.toFixed(2)} ms · ` +
+        `gancho con 1 candidato (candado): ${conCandado.toFixed(2)} ms · ${N} corridas cada uno`,
+    )
+    expect(gancho).toBeLessThan(unaConsulta * 2 + 2)
   })
 })

@@ -7,6 +7,7 @@
  * Desenlaces: APLICADO (el status y el body que mandaría la ruta), RECHAZADO (definitivo: no deja efecto) o se LANZA
  * (reintentable: VENTA_EN_PROCESO, CUSTODIA_EN_PROCESO, CHECADA_EN_PROCESO, 429 y 5xx).
  */
+import type { Prisma } from '@prisma/client'
 import { createHash } from 'crypto'
 import cuid from 'cuid'
 import { ZodTypeAny } from 'zod'
@@ -30,6 +31,8 @@ import { AppliedCaptureSeqs, CaptureDestination, isNewerCapture } from '@/servic
 import prisma from '@/utils/prismaClient'
 
 export type TipoDeEnvio = (typeof TIPOS_DE_ENVIO)[number]
+/** Quien lee: el cliente de siempre, o la transacción del candado del celular (I8: la consulta va dentro de la decisión). */
+type Lector = Prisma.TransactionClient
 
 export type Rechazo = { code: string; message: string; detalle?: unknown }
 export type ResultadoDelEnvio = { tipo: 'APLICADO'; status: number; body: unknown } | { tipo: 'RECHAZADO'; rechazo: Rechazo }
@@ -137,8 +140,8 @@ function evidenciaValida(
 }
 
 /** La venta de la evidencia: COMPLETA, de esta persona y de ESTE celular (el nuevo de la persona no la nombra). */
-async function fichaDeLaEvidencia(ctx: { venueId: string; staffId: string; celularId: string }, ventaLlave: string) {
-  const ficha = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: ventaLlave } } })
+async function fichaDeLaEvidencia(ctx: { venueId: string; staffId: string; celularId: string }, ventaLlave: string, db: Lector = prisma) {
+  const ficha = await db.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: ventaLlave } } })
   const suya = ficha?.estado === 'COMPLETA' && !!ficha.paymentId && ficha.staffId === ctx.staffId && ficha.celularId === ctx.celularId
   return suya ? (ficha as typeof ficha & { paymentId: string }) : null
 }
@@ -238,12 +241,13 @@ export async function efectoYaHecho(
   ctx: { venueId: string; orgId: string; staffId: string; celularId: string },
   cuerpo: unknown,
   limite: Date,
+  db: Lector = prisma,
 ): Promise<EfectoDelEnvio> {
   switch (tipo) {
     case 'VENTA': {
       const b = validar<{ llave: string; serialNumber: string }>(ESQUEMAS.VENTA, cuerpo)
       if (!b) return NO_HECHO
-      const f = await prisma.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: b.llave } } })
+      const f = await db.ventaDeCampo.findUnique({ where: { venueId_llave: { venueId: ctx.venueId, llave: b.llave } } })
       if (!f || f.staffId !== ctx.staffId || f.serialNumber !== b.serialNumber) return NO_HECHO
       // EN_CURSO: a medias (U2), ni hecha ni descartable; el servicio la retoma por su llave.
       if (f.estado === 'EN_CURSO') return { hecho: false, aMedias: true }
@@ -260,7 +264,7 @@ export async function efectoYaHecho(
         tipo === 'ENTRADA'
           ? { staffId_llaveEntrada: { staffId: ctx.staffId, llaveEntrada: b.llave } }
           : { staffId_llaveSalida: { staffId: ctx.staffId, llaveSalida: b.llave } }
-      const t = await prisma.timeEntry.findUnique({ where, select: { id: true, venueId: true, llaveEntrada: true } })
+      const t = await db.timeEntry.findUnique({ where, select: { id: true, venueId: true, llaveEntrada: true } })
       // La misma llave en otra sucursal es otra checada (LLAVE_REUSADA), no ésta.
       if (!t || t.venueId !== ctx.venueId) return NO_HECHO
       // R3-4: la salida es de la entrada que NOMBRA el cuerpo, igual que el escritor (checadaDeCampo.service, «esLaNombrada»):
@@ -270,13 +274,13 @@ export async function efectoYaHecho(
     }
     case 'CUSTODIA_ACEPTAR':
     case 'CUSTODIA_RECHAZAR':
-      return custodiaHecha(tipo, ctx, cuerpo, limite)
+      return custodiaHecha(tipo, ctx, cuerpo, limite, db)
     case 'EVIDENCIA': {
       const valida = evidenciaValida(cuerpo)
       if (!valida) return NO_HECHO
-      const ficha = await fichaDeLaEvidencia(ctx, valida.ventaLlave)
+      const ficha = await fichaDeLaEvidencia(ctx, valida.ventaLlave, db)
       if (!ficha) return NO_HECHO
-      const sv = await prisma.saleVerification.findUnique({
+      const sv = await db.saleVerification.findUnique({
         where: { paymentId: ficha.paymentId },
         select: { id: true, appliedCaptureSeqs: true },
       })
@@ -307,6 +311,7 @@ async function custodiaHecha(
   ctx: { orgId: string; staffId: string },
   cuerpo: unknown,
   limite: Date,
+  db: Lector,
 ): Promise<EfectoDelEnvio> {
   const b = validar<any>(ESQUEMAS[tipo], cuerpo)
   if (!b) return NO_HECHO
@@ -317,13 +322,13 @@ async function custodiaHecha(
   }
   const select = { serialNumber: true, createdAt: true }
   const [asignaciones, decisiones] = await Promise.all([
-    prisma.serializedItemCustodyEvent.findMany({
+    db.serializedItemCustodyEvent.findMany({
       where: { ...base, eventType: { in: [...ASIGNACIONES_A_LA_PERSONA] }, toStaffId: ctx.staffId, createdAt: { lte: limite } },
       select,
       orderBy: { createdAt: 'desc' },
       take: TOPE_DE_EVENTOS,
     }),
-    prisma.serializedItemCustodyEvent.findMany({
+    db.serializedItemCustodyEvent.findMany({
       where: {
         ...base,
         eventType: tipo === 'CUSTODIA_ACEPTAR' ? 'ACCEPTED_BY_PROMOTER' : 'REJECTED_BY_PROMOTER',

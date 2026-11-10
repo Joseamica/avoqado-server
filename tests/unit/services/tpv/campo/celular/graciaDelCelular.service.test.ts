@@ -23,6 +23,9 @@ import {
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // I8: el candado por celular abre una transacción; el doble la corre con el mismo cliente (la fila la pone el código).
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     venue: { findUnique: jest.fn(), findMany: jest.fn() },
     staff: { findMany: jest.fn() },
     envioRetenidoDeCampo: {
@@ -68,6 +71,7 @@ const coincide = (f: any, where: any): boolean =>
     if (!v || typeof v !== 'object' || v instanceof Date) return igual(f[k], v)
     if ('in' in v) return v.in.includes(f[k])
     if ('lt' in v) return f[k] instanceof Date && f[k] < v.lt
+    if ('gte' in v) return f[k] instanceof Date && f[k] >= v.gte
     return igual(f[k], v)
   })
 const MIN = 60 * 1000
@@ -96,6 +100,42 @@ beforeEach(() => {
   jest.resetAllMocks()
   jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] }).setSystemTime(AHORA)
   filas = []
+  // Como Postgres: si la transacción lanza, las filas que escribió vuelven a como estaban (y las que creó desaparecen).
+  db.$transaction.mockImplementation(async (fn: any) => {
+    const antes = new Map<any, any>()
+    const r = db.envioRetenidoDeCampo
+    const tx = {
+      ...db,
+      envioRetenidoDeCampo: {
+        ...r,
+        updateMany: async (a: any) => {
+          filas.filter(f => coincide(f, a.where) && !antes.has(f)).forEach(f => antes.set(f, { ...f }))
+          return r.updateMany(a)
+        },
+        create: async (a: any) => {
+          const f = await r.create(a)
+          antes.set(
+            filas.find(x => x.id === f.id),
+            null,
+          )
+          return f
+        },
+      },
+    }
+    try {
+      return await fn(tx)
+    } catch (error) {
+      for (const [f, copia] of antes) {
+        if (copia === null) filas.splice(filas.indexOf(f), 1)
+        else {
+          for (const k of Object.keys(f)) if (!(k in copia)) delete f[k]
+          Object.assign(f, copia)
+        }
+      }
+      throw error
+    }
+  })
+  db.$queryRaw.mockResolvedValue([{ pg_advisory_xact_lock: '' }])
   db.venue.findUnique.mockImplementation(async ({ where }: any) => ({ organizationId: where.id === 'vOtra' ? 'org2' : 'org1' }))
   db.venue.findMany.mockResolvedValue([{ id: 'v1', name: 'Sucursal Centro', timezone: 'America/Mexico_City' }])
   db.staff.findMany.mockResolvedValue([{ id: 's1', firstName: 'Ana', lastName: 'Campo' }])
@@ -721,6 +761,7 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
       { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
       JSON.parse(e.cuerpoJson),
       AHORA,
+      expect.anything(), // I8: la transacción del candado
     )
     expect(aplicar).toHaveBeenCalledTimes(1)
     expect(filas).toHaveLength(1)
@@ -774,6 +815,7 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
       { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
       JSON.parse(e.cuerpoJson),
       AHORA,
+      expect.anything(), // I8: la transacción del candado
     )
     await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'YA_APLICADO' })
   })
@@ -801,6 +843,7 @@ describe('arreglo final: lo hecho nunca queda descartable (S1, S2)', () => {
       { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
       { serialNumber: 'SIM-C', custodyVersion: 1 },
       NACIO,
+      expect.anything(), // I8: la transacción del candado
     )
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'CAMPO_RETENIDO_APLICADO', data: expect.objectContaining({ recuperado: true }) }),
@@ -1024,6 +1067,7 @@ describe('arreglo final 4: las cuatro invariantes del retenido', () => {
         { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
         JSON.parse(e.cuerpoJson),
         AHORA,
+        expect.anything(), // I8: la transacción del candado
       )
       // «Descartar» ya no la puede dejar como «no se registra».
       await expect(
@@ -1273,20 +1317,44 @@ describe('arreglo final 5: se decide con la fila en la mano (I5); lo que ya ven�
         aceptada = true
         throw new Error('se cayó la base en la segunda SIM')
       })
-      const sucursalesDeA = pendiente<any[]>()
-      deCampo.mockReturnValueOnce(sucursalesDeA.promesa)
-      // A: el reintento de la gracia de un celular perdido; se queda esperando sus sucursales.
+      // A: el reintento de la gracia de un celular perdido; ya tomó la fila y se queda en su consulta del efecto (I8: con el
+      // candado; sus sucursales se piden ANTES, no dependen del efecto).
+      const consultaDeA = pendiente<any>()
+      efecto.mockImplementationOnce(async () => consultaDeA.promesa)
       const a = recibirEnGracia(reportado(e, { sinGracia: true }), e)
-      while (!deCampo.mock.calls.length) await tick()
+      while (!efecto.mock.calls.length) await tick()
 
       // B: «Aplicar» ve la fila en vuelo (A la tiene): 409, no ejecuta.
       await expect(resolver('APLICAR')).rejects.toMatchObject({ statusCode: 409, code: 'APLICACION_EN_CURSO' })
       expect(aplicar).not.toHaveBeenCalled()
 
-      sucursalesDeA.soltar(SUCURSAL)
+      consultaDeA.soltar({ hecho: false })
       expect(await a).toEqual({ status: 202, body: { retenido: true, motivo: 'CELULAR_PERDIDO' } })
       expect(f).toMatchObject({ estado: 'PENDIENTE', motivo: 'CELULAR_PERDIDO' })
       expect(aceptada).toBe(false)
+    })
+
+    it('R4-2 · A todavía no la toma (espera sus sucursales) y «Aplicar» la deja a medias con efecto: A ya no gana la toma exacta y no la regresa a PENDIENTE', async () => {
+      const e = envio(JSON.stringify({ sims: [{ serialNumber: 'SIM-A', custodyVersion: 1 }] }), 'CUSTODIA_ACEPTAR')
+      const f = vencidaDeLaGracia(e)
+      let aceptada = false
+      efecto.mockImplementation(async () => (aceptada ? { hecho: true, resultado: { recuperadoDeLaBitacora: true } } : { hecho: false }))
+      aplicar.mockImplementationOnce(async () => {
+        aceptada = true
+        throw new Error('se cayó la base en la segunda SIM')
+      })
+      const sucursalesDeA = pendiente<any[]>()
+      deCampo.mockReturnValueOnce(sucursalesDeA.promesa)
+      const a = recibirEnGracia(reportado(e, { sinGracia: true }), e)
+      while (!deCampo.mock.calls.length) await tick()
+
+      await expect(resolver('APLICAR')).rejects.toThrow('se cayó la base en la segunda SIM')
+      expect(f.estado).toBe('APLICANDO') // a medias, soltada
+
+      sucursalesDeA.soltar(SUCURSAL)
+      expect(await a).toEqual({ status: 202, body: { retenido: true, motivo: 'APLICADO_EN_GRACIA', repetida: true } })
+      expect(f.estado).toBe('APLICANDO') // nunca PENDIENTE con el efecto hecho; el siguiente «Aplicar» o reintento la termina
+      expect(await resolver('APLICAR')).toMatchObject({ estado: 'APLICADO', resultado: { recuperadoDeLaBitacora: true } })
     })
 
     it('R4-2 · al revés: «Aplicar» la dejó a medias (soltada); el reintento de la gracia la toma, ve el efecto y la deja APLICADO', async () => {
@@ -1511,6 +1579,7 @@ describe('arreglo final 6: el que aplicó gana también por la ruta normal (I7, 
         { venueId: 'v1', orgId: 'org1', staffId: 's1', celularId: 'cel1' },
         JSON.parse(f.cuerpoJson),
         NACIO,
+        expect.anything(), // I8: la transacción del candado
       )
       expect(logAction).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1554,9 +1623,285 @@ describe('arreglo final 6: el que aplicó gana también por la ruta normal (I7, 
 
       expect(filas.every(f => f.estado === 'PENDIENTE')).toBe(true)
       expect(efecto).not.toHaveBeenCalled()
-      expect(db.envioRetenidoDeCampo.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ celularId: 'cel1', venueId: 'v1', tipo: 'VENTA' }), take: 500 }),
+      // I8: la consulta barata ya filtra por celular, sucursal y tipo; sin candidatos no hay candado ni selección.
+      expect(db.envioRetenidoDeCampo.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ celularId: 'cel1', venueId: 'v1', tipo: 'VENTA' }) }),
       )
+      expect(db.envioRetenidoDeCampo.findMany).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe('arreglo final 7: decidir y reconciliar van en fila por celular (I8, R6-1); el gancho no se queda ciego (R6-2)', () => {
+  const HECHA = { orderId: 'o', paymentId: 'p', saleVerificationId: 'sv', recuperado: true }
+  const pendiente = <T>() => {
+    let soltar!: (v: T) => void
+    const promesa = new Promise<T>(r => (soltar = r))
+    return { promesa, soltar }
+  }
+  /** Deja correr lo que esté listo (p. ej. un gancho que, si no espera el candado, ya habría terminado). */
+  const dejaCorrer = async () => {
+    for (let i = 0; i < 30; i++) await tick()
+  }
+  const valor = (x: any) => (x instanceof Date ? x.getTime() : x)
+  beforeEach(() => {
+    // Como Postgres: filtra, ORDENA según `orderBy` y luego corta en `take`.
+    db.envioRetenidoDeCampo.findMany.mockImplementation(async ({ where, take, orderBy }: any) => {
+      await tick()
+      const orden: any[] = (Array.isArray(orderBy) ? orderBy : [orderBy]).filter(Boolean)
+      const cmp = (a: any, b: any) => {
+        for (const o of orden) {
+          const [k, dir] = Object.entries(o)[0] as [string, string]
+          const [x, y] = [valor(a[k]), valor(b[k])]
+          if (x !== y) return (x < y ? -1 : 1) * (dir === 'desc' ? -1 : 1)
+        }
+        return 0
+      }
+      return filas
+        .filter(f => coincide(f, where))
+        .sort(cmp)
+        .slice(0, take)
+        .map(f => ({ ...f }))
+    })
+  })
+  const llaveDelCandado = () => db.$queryRaw.mock.calls.map((c: any[]) => c.slice(1).join('|'))
+
+  describe('I8 · las decisiones y el gancho no se intercalan (tabla de intercalaciones)', () => {
+    it('R6-1 · «Descartar» consulta (nada), la venta normal termina y su gancho llega: espera el candado, ve el DESCARTADO y lo deja APLICADO con la reversión', async () => {
+      const f = retenido()
+      const consulta = pendiente<any>()
+      efecto.mockImplementationOnce(async () => consulta.promesa)
+      const d = resolver('DESCARTAR', { nota: 'no vino' })
+      while (!efecto.mock.calls.length) await tick()
+
+      // La venta normal ya existe; su gancho corre mientras «Descartar» tiene el candado.
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      let terminoElGancho = false
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      await dejaCorrer()
+      expect(terminoElGancho).toBe(false) // espera su turno: no se salta la fila ocupada
+
+      consulta.soltar({ hecho: false })
+      expect(await d).toEqual({ estado: 'DESCARTADO', repetida: false })
+      expect(await gancho).toBe(1)
+      expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CAMPO_RETENIDO_DESCARTE_REVERTIDO',
+          entityId: 'r1',
+          data: expect.objectContaining({ descartadoPor: 'sup1', notaDelDescarte: 'no vino' }),
+        }),
+      )
+      expect(llaveDelCandado()).toEqual(['campo-retenidos:cel1', 'campo-retenidos:cel1'])
+    })
+
+    it('al revés: el gancho llegó antes de que «Descartar» tomara el candado → la deja APLICADO y «Descartar» contesta YA_APLICADO', async () => {
+      const f = retenido()
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      await expect(resolver('DESCARTAR')).rejects.toMatchObject({ code: 'YA_APLICADO' })
+      expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+    })
+
+    it('variante de R6-1 · la gracia consulta (nada), la venta normal termina y su gancho no ve fila todavía: la gracia vuelve a mirar al soltar el candado → APLICADO', async () => {
+      const e = envio() // no reportada: nacería PENDIENTE
+      const consulta = pendiente<any>()
+      efecto.mockImplementationOnce(async () => consulta.promesa)
+      const g = recibirEnGracia(celular(), e)
+      while (!efecto.mock.calls.length) await tick()
+
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0) // aún no hay fila: sin candado, sin trabajo
+
+      consulta.soltar({ hecho: false })
+      expect(await g).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', motivo: 'NO_REPORTADA', resultado: HECHA })
+      expect(aplicar).not.toHaveBeenCalled()
+    })
+
+    it('el gancho pasó antes de que la gracia tomara el candado → su consulta (dentro) ve la venta y nace APLICADO', async () => {
+      const e = envio()
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      expect(await recibirEnGracia(celular(), e)).toEqual({ status: 200, body: { resuelto: 'APLICADO', resultado: HECHA } })
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO' })
+    })
+
+    it('el rechazo de la gracia regresa a PENDIENTE con el candado: el gancho que llega mientras decide espera, ve la PENDIENTE → APLICADO', async () => {
+      const e = envio()
+      aplicar.mockResolvedValue(rechazado())
+      const consulta = pendiente<any>()
+      efecto.mockResolvedValueOnce({ hecho: false }).mockImplementationOnce(async () => consulta.promesa)
+      const g = recibirEnGracia(reportado(e), e)
+      while (efecto.mock.calls.length < 2) await tick()
+
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      let terminoElGancho = false
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      await dejaCorrer()
+      expect(terminoElGancho).toBe(false)
+
+      consulta.soltar({ hecho: false })
+      expect(await g).toEqual({ status: 202, body: { retenido: true, motivo: 'RECHAZADO' } })
+      expect(await gancho).toBe(1)
+      expect(filas[0]).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+    })
+
+    it('el rechazo de «Aplicar» regresa a PENDIENTE con el candado: el gancho espera y la deja APLICADO', async () => {
+      const f = retenido()
+      aplicar.mockResolvedValue(rechazado())
+      const consulta = pendiente<any>()
+      efecto.mockResolvedValueOnce({ hecho: false }).mockImplementationOnce(async () => consulta.promesa)
+      const a = resolver('APLICAR')
+      while (efecto.mock.calls.length < 2) await tick()
+
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      let terminoElGancho = false
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      await dejaCorrer()
+      expect(terminoElGancho).toBe(false)
+
+      consulta.soltar({ hecho: false })
+      await expect(a).rejects.toMatchObject({ code: 'NO_SE_PUDO_APLICAR' })
+      expect(await gancho).toBe(1)
+      expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+    })
+
+    it('reanudar que ya no procede (24 h) regresa a PENDIENTE con el candado: el gancho espera y la deja APLICADO', async () => {
+      const e = envio()
+      const f = retenido({
+        huella: huellaDelEnvio(e.tipo, e.venueId, e.cuerpoJson),
+        cuerpoJson: e.cuerpoJson,
+        estado: 'APLICANDO',
+        motivo: 'APLICADO_EN_GRACIA',
+        updatedAt: new Date(AHORA.getTime() - 6 * MIN),
+      })
+      const consulta = pendiente<any>()
+      efecto.mockImplementationOnce(async () => consulta.promesa)
+      const g = recibirEnGracia(reportado(e, { desvinculadoAt: new Date(AHORA.getTime() - 25 * HORA) }), e)
+      while (!efecto.mock.calls.length) await tick()
+
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      let terminoElGancho = false
+      const gancho = reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA').finally(() => (terminoElGancho = true))
+      await dejaCorrer()
+      expect(terminoElGancho).toBe(false)
+
+      consulta.soltar({ hecho: false })
+      expect(await g).toEqual({ status: 202, body: { retenido: true, motivo: 'FUERA_DE_PLAZO' } })
+      expect(await gancho).toBe(1)
+      expect(f).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+    })
+
+    it('una EJECUCIÓN en vuelo («Aplicar» ejecutando) no detiene al gancho ni la toca: llega APLICADO por su propio efecto', async () => {
+      const f = retenido()
+      const ejecucion = pendiente<any>()
+      aplicar.mockImplementationOnce(async () => ejecucion.promesa)
+      const a = resolver('APLICAR')
+      while (!aplicar.mock.calls.length) await tick()
+      efecto.mockClear()
+
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0) // no espera a la ejecución: no tiene el candado
+      expect(efecto).not.toHaveBeenCalled()
+      expect(f.estado).toBe('APLICANDO')
+
+      ejecucion.soltar(aplicado())
+      expect(await a).toMatchObject({ estado: 'APLICADO', repetida: false })
+    })
+
+    it('el candado es por celular: lo de otro celular no espera', async () => {
+      retenido()
+      retenido({ id: 'r2', celularId: 'cel2', huella: 'k'.repeat(64) })
+      const consulta = pendiente<any>()
+      efecto.mockImplementationOnce(async () => consulta.promesa)
+      const d = resolver('DESCARTAR')
+      while (!efecto.mock.calls.length) await tick()
+
+      efecto.mockResolvedValue({ hecho: true, resultado: HECHA })
+      expect(await reconciliarConLaRutaNormal('cel2', 'v1', 'VENTA')).toBe(1)
+      expect(filas[1].estado).toBe('APLICADO')
+      consulta.soltar({ hecho: false })
+      await d
+    })
+  })
+
+  describe('el costo de la ruta normal', () => {
+    it('un celular sin retenidos: UNA consulta (por celular, prefijo del único), sin transacción ni candado ni selección', async () => {
+      retenido({ estado: 'APLICADO' }) // lo aplicado no cuenta
+      retenido({ id: 'r2', estado: 'DESCARTADO', resueltoAt: new Date(AHORA.getTime() - 25 * HORA) }) // historial viejo tampoco
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      expect(db.envioRetenidoDeCampo.findFirst).toHaveBeenCalledTimes(1)
+      expect(db.envioRetenidoDeCampo.findFirst.mock.calls[0][0]).toMatchObject({
+        where: { celularId: 'cel1', venueId: 'v1', tipo: 'VENTA' },
+        select: { id: true },
+      })
+      expect(db.$transaction).not.toHaveBeenCalled()
+      expect(db.$queryRaw).not.toHaveBeenCalled()
+      expect(db.envioRetenidoDeCampo.findMany).not.toHaveBeenCalled()
+      expect(efecto).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('R6-2 · el historial no tapa lo nuevo', () => {
+    it('los 501 de Codex: 500 DESCARTADO sin efecto + un envío nuevo PENDIENTE cuya venta normal terminó → el nuevo queda APLICADO', async () => {
+      for (let i = 0; i < 500; i++) {
+        retenido({
+          id: `d${i}`,
+          huella: `d${i}`,
+          cuerpoJson: cuerpoVenta({ serialNumber: `VIEJA${i}` }),
+          estado: 'DESCARTADO',
+          resueltoAt: new Date(AHORA.getTime() - 2 * HORA),
+          createdAt: new Date(AHORA.getTime() - 3 * HORA + i),
+        })
+      }
+      const nuevo = retenido({ id: 'nuevo', huella: 'nuevo', cuerpoJson: cuerpoVenta({ serialNumber: 'NUEVA' }), createdAt: AHORA })
+      efecto.mockImplementation(async (_t: string, _c: unknown, cuerpo: any) =>
+        cuerpo.serialNumber === 'NUEVA' ? { hecho: true, resultado: HECHA } : { hecho: false },
+      )
+
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(nuevo).toMatchObject({ estado: 'APLICADO', resultado: HECHA })
+      expect(efecto.mock.calls.some((c: any[]) => c[2].serialNumber === 'NUEVA')).toBe(true)
+    })
+
+    it('los DESCARTADO: sólo los resueltos en las últimas 24 h, el más reciente primero (también con más de 500)', async () => {
+      const viejo = retenido({
+        id: 'viejo',
+        huella: 'viejo',
+        cuerpoJson: cuerpoVenta({ serialNumber: 'VIEJO' }),
+        estado: 'DESCARTADO',
+        resueltoAt: new Date(AHORA.getTime() - 25 * HORA),
+        createdAt: new Date(AHORA.getTime() - 30 * HORA), // el más viejo: un orden por antigüedad lo elegiría primero
+      })
+      for (let i = 0; i < 501; i++) {
+        retenido({
+          id: `d${i}`,
+          huella: `d${i}`,
+          cuerpoJson: cuerpoVenta({ serialNumber: i === 500 ? 'RECIENTE' : `OTRA${i}` }),
+          estado: 'DESCARTADO',
+          resueltoAt: new Date(AHORA.getTime() - 20 * HORA + i * 1000), // el d500 es el último descartado
+          createdAt: new Date(AHORA.getTime() - 23 * HORA),
+        })
+      }
+      efecto.mockImplementation(async (_t: string, _c: unknown, cuerpo: any) =>
+        ['RECIENTE', 'VIEJO'].includes(cuerpo.serialNumber) ? { hecho: true, resultado: HECHA } : { hecho: false },
+      )
+
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(1)
+      expect(filas.find(f => f.id === 'd500')).toMatchObject({ estado: 'APLICADO' })
+      expect(viejo.estado).toBe('DESCARTADO')
+      expect(efecto.mock.calls.some((c: any[]) => c[2].serialNumber === 'VIEJO')).toBe(false)
+      expect(efecto).toHaveBeenCalledTimes(500)
+    })
+
+    it('PENDIENTE y APLICANDO sin dueño van aparte, los más recientes primero, con su propio tope', async () => {
+      retenido({ id: 'p1' })
+      expect(await reconciliarConLaRutaNormal('cel1', 'v1', 'VENTA')).toBe(0)
+      const [vivas, descartadas] = db.envioRetenidoDeCampo.findMany.mock.calls.map((c: any[]) => c[0])
+      expect(vivas).toMatchObject({ take: 500, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+      expect(descartadas).toMatchObject({ take: 500, orderBy: [{ resueltoAt: 'desc' }, { id: 'desc' }] })
+      expect(descartadas.where).toMatchObject({ estado: 'DESCARTADO', resueltoAt: { gte: new Date(AHORA.getTime() - 24 * HORA) } })
     })
   })
 })

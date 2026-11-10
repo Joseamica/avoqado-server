@@ -28,6 +28,9 @@
  *        y entonces I5 + I1 dicen la verdad. «Aplicar» no espera (es idempotente por su llave o su efecto).
  *   I7 · El que aplicó gana también por la ruta normal (R5-1): I6 sólo achica la ventana; la petición normal que termina
  *        tarde reconcilia sus retenidos al contestar 2xx (`reconciliarConLaRutaNormal`).
+ *   I8 · Decidir y reconciliar van en fila, por celular (arreglo final 7, R6-1): toda decisión que consulta el efecto y escribe
+ *        «no se hizo» (nacer, «Descartar», regresar a PENDIENTE) y el gancho I7 entero corren con `conElCandadoDelCelular`.
+ *        Las EJECUCIONES (la venta, la custodia, la checada, la foto) no: las protegen su llave y I2.
  *
  * Quien termina sin dueño (se lanzó algo reintentable, o la venta quedó a medias) la SUELTA: deja `updatedAt` ya vencido, así
  * el siguiente no espera la ventana. Si el proceso muere, la ventana la suelta sola.
@@ -43,7 +46,6 @@ import prisma from '@/utils/prismaClient'
 import {
   aplicarEnvio,
   cuerpoValido,
-  EfectoDelEnvio,
   efectoYaHecho,
   estaAMedias,
   huellaDelEnvio,
@@ -118,10 +120,51 @@ const descarteMuyPronto = () =>
     'DESCARTE_MUY_PRONTO',
   )
 
+// --- I8: decidir y reconciliar van en fila, por celular ----------------------------------------------------------------
+
+/** El cliente de siempre, o la transacción del candado (dentro del candado TODO va por ella: si se pierde, se pierde todo). */
+type Db = Prisma.TransactionClient
+
+/** Delante del candado, una fila en memoria por celular (ver `conElCandadoDelCelular`). */
+const enFila = new Map<string, Promise<unknown>>()
+
+/**
+ * I8 (R6-1). Las marcas `updatedAt` ordenan un retenido contra otro, no contra la ruta normal: ésta crea el efecto sin tocar
+ * la fila, así que una decisión que consultó «no hay efecto» y escribe después podía cruzarse con el gancho I7 (que se
+ * saltaba la fila ocupada) o nacer después de que el gancho ya buscó. Con este candado, la decisión entera (consulta +
+ * escritura) y el gancho entero van en fila: o la decisión terminó antes (el gancho ve lo que escribió) o empezó después
+ * (su consulta ve el efecto, que ya existía cuando el gancho arrancó). `fn` usa SU `db` (la transacción): lo que decide sólo
+ * se ve al soltar el candado, y si la transacción se cae, la decisión se cae con ella. Lanzar dentro deshace la toma.
+ * Postgres (`pg_advisory_xact_lock`, receta de `src/lib/angelpayIdentity.ts`; no usamos Redis) ordena entre procesos (un
+ * deploy con dos instancias). La fila en memoria evita que quien espera ocupe una conexión del pool: 60 subidas a la vez de
+ * un celular (su tope por minuto) dejarían sin conexiones a todo el servidor, terminales incluidas. Nunca se anida: `fn` no
+ * vuelve a pedir el candado del mismo celular (se esperaría a sí misma).
+ */
+async function conElCandadoDelCelular<T>(celularId: string, fn: (db: Db) => Promise<T>): Promise<T> {
+  const turno = (enFila.get(celularId) ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() =>
+      prisma.$transaction(
+        async tx => {
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`campo-retenidos:${celularId}`}, 0))::text`
+          return fn(tx)
+        },
+        // ponytail: el gancho con cientos de filas consulta una por una dentro; 60 s le sobran (lo normal es 1–2 filas).
+        { maxWait: 10_000, timeout: 60_000 },
+      ),
+    )
+  enFila.set(celularId, turno)
+  try {
+    return await turno
+  } finally {
+    if (enFila.get(celularId) === turno) enFila.delete(celularId)
+  }
+}
+
 /** Tomar la fila para ejecutarla (CAS): PENDIENTE o APLICANDO vencida → APLICANDO con la marca. null si otro la tiene. */
-async function tomar(id: string, extra: Prisma.EnvioRetenidoDeCampoWhereInput = {}): Promise<Date | null> {
+async function tomar(id: string, extra: Prisma.EnvioRetenidoDeCampoWhereInput = {}, db: Db = prisma): Promise<Date | null> {
   const marca = new Date()
-  const { count } = await prisma.envioRetenidoDeCampo.updateMany({
+  const { count } = await db.envioRetenidoDeCampo.updateMany({
     where: { id, ...extra, OR: [{ estado: 'PENDIENTE' }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }] },
     data: { estado: 'APLICANDO', updatedAt: marca },
   })
@@ -132,8 +175,13 @@ async function tomar(id: string, extra: Prisma.EnvioRetenidoDeCampoWhereInput = 
 const deQuienLaTomo = (id: string, marca: Date): Prisma.EnvioRetenidoDeCampoWhereInput => ({ id, estado: 'APLICANDO', updatedAt: marca })
 
 /** Quien la tomó termina sin dueño (reintentable o a medias): sigue APLICANDO (no se descarta) y ya vencida. */
-async function soltar(id: string, marca: Date, data: Prisma.EnvioRetenidoDeCampoUpdateManyMutationInput = {}): Promise<number> {
-  const { count } = await prisma.envioRetenidoDeCampo.updateMany({
+async function soltar(
+  id: string,
+  marca: Date,
+  data: Prisma.EnvioRetenidoDeCampoUpdateManyMutationInput = {},
+  db: Db = prisma,
+): Promise<number> {
+  const { count } = await db.envioRetenidoDeCampo.updateMany({
     where: deQuienLaTomo(id, marca),
     data: { ...data, updatedAt: sinDueno() },
   })
@@ -144,9 +192,15 @@ async function soltar(id: string, marca: Date, data: Prisma.EnvioRetenidoDeCampo
  * I3/I5: quien la tiene la regresa: a PENDIENTE (sin efecto, o deshaciendo una toma sin haber hecho nada), o `soltada`
  * (APLICANDO sin dueño: estaba a medias o así la tomó). 0: ya no era suya.
  */
-async function regresar(id: string, marca: Date, soltada: boolean, data: Prisma.EnvioRetenidoDeCampoUpdateManyMutationInput = {}) {
-  if (soltada) return soltar(id, marca, data)
-  const { count } = await prisma.envioRetenidoDeCampo.updateMany({
+async function regresar(
+  id: string,
+  marca: Date,
+  soltada: boolean,
+  data: Prisma.EnvioRetenidoDeCampoUpdateManyMutationInput = {},
+  db: Db = prisma,
+) {
+  if (soltada) return soltar(id, marca, data, db)
+  const { count } = await db.envioRetenidoDeCampo.updateMany({
     where: deQuienLaTomo(id, marca),
     data: { estado: 'PENDIENTE', ...data },
   })
@@ -165,16 +219,17 @@ async function marcarHecho(
   fila: EnvioRetenidoDeCampo,
   data: { resultado: Prisma.InputJsonValue; resueltoPor: string | null; rechazo?: Prisma.InputJsonValue; nota?: string },
   quien: string,
+  db: Db = prisma,
 ): Promise<boolean> {
   const aplicada = { estado: 'APLICADO', resueltoAt: new Date(), ...data }
-  const { count } = await prisma.envioRetenidoDeCampo.updateMany({
+  const { count } = await db.envioRetenidoDeCampo.updateMany({
     where: { id: fila.id, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
     data: aplicada,
   })
   if (count) return true
-  const hoy = await prisma.envioRetenidoDeCampo.findUnique({ where: { id: fila.id } })
+  const hoy = await db.envioRetenidoDeCampo.findUnique({ where: { id: fila.id } })
   if (hoy?.estado !== 'DESCARTADO') return false
-  const revertida = await prisma.envioRetenidoDeCampo.updateMany({ where: { id: fila.id, estado: 'DESCARTADO' }, data: aplicada })
+  const revertida = await db.envioRetenidoDeCampo.updateMany({ where: { id: fila.id, estado: 'DESCARTADO' }, data: aplicada })
   if (!revertida.count) return false
   void logAction({
     staffId: quien,
@@ -268,25 +323,31 @@ async function reanudar(
   huella: string,
   previo: EnvioRetenidoDeCampo,
 ): Promise<{ status: number; body: unknown }> {
-  // R5-2: la toma es EXACTA (la APLICANDO vencida que se leyó): si otro la cambió mientras tanto (p. ej. la regresó a
-  // PENDIENTE), no se toma y se contesta como quedó.
-  const marca = await tomar(previo.id, { estado: previo.estado, updatedAt: previo.updatedAt })
-  if (!marca) return comoQuedo(previo.id)
-  try {
+  // Si todavía procede no depende del efecto: va ANTES del candado (sus consultas no van por la transacción). Su error
+  // (USA_TU_SESION) sólo cuenta si no hay efecto: lo que ya ocurrió se reconoce igual.
+  const motivo = await motivoDe(celular, e, huella).then(
+    m => ({ m }),
+    (error: unknown) => ({ error }),
+  )
+  const d = await conElCandadoDelCelular(celular.id, async db => {
+    // R5-2: la toma es EXACTA (la APLICANDO vencida que se leyó): si otro la cambió mientras tanto (p. ej. la regresó a
+    // PENDIENTE), no se toma y se contesta como quedó.
+    const marca = await tomar(previo.id, { estado: previo.estado, updatedAt: previo.updatedAt }, db)
+    if (!marca) return { comoQuedo: true as const }
     // I1: reanudar empieza por preguntar si el efecto ya ocurrió (aun pasadas las 24 h o tras una baja: ya es un hecho).
-    const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, previo.createdAt)
-    if (ya.hecho) return await terminarEnGracia(celular, e, previo, comoJson(ya.resultado), { recuperado: true })
-    const motivo = await motivoDe(celular, e, huella)
-    if (!motivo) return await aplicarEnGracia(celular, e, cuerpo, previo, marca)
+    const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, previo.createdAt, db)
+    if (ya.hecho) return { resultado: comoJson(ya.resultado) }
+    // Lanzar deshace la toma: la fila queda como se leyó (APLICANDO sin dueño).
+    if ('error' in motivo) throw motivo.error
+    if (!motivo.m) return { marca }
     // I3: ya no procede y no hay efecto → PENDIENTE con su motivo; a medias → sigue APLICANDO sin dueño.
-    const n = await regresar(previo.id, marca, estaAMedias(ya), { motivo })
-    return n === 0 ? comoQuedo(previo.id) : { status: 202, body: { retenido: true, motivo } }
-  } catch (error) {
-    // Lo que falló (o USA_TU_SESION) la deja como la tomó: APLICANDO sin dueño, que es lo que se leyó (la toma es exacta),
-    // así que deshacerla y soltarla son lo mismo; si ya ejecutó (aplicarEnGracia) también queda así. No-op si ya no es suya.
-    await regresar(previo.id, marca, previo.estado === 'APLICANDO').catch(() => 0)
-    throw error
-  }
+    await regresar(previo.id, marca, estaAMedias(ya), { motivo: motivo.m }, db)
+    return { retenido: motivo.m }
+  })
+  if (d.comoQuedo) return comoQuedo(previo.id)
+  if (d.resultado !== undefined) return terminarEnGracia(celular, e, previo, d.resultado, { recuperado: true })
+  if (d.marca) return aplicarEnGracia(celular, e, cuerpo, previo, d.marca) // la ejecución va FUERA del candado
+  return { status: 202, body: { retenido: true, motivo: d.retenido } }
 }
 
 /**
@@ -308,72 +369,120 @@ async function motivoDe(celular: CelularDeCampo, e: Envio, huella: string): Prom
   )
 }
 
-/** Una pieza nueva (sin fila): I1 se pregunta ANTES de crearla; lo que nace PENDIENTE lo protege I6 en «Descartar». */
+/**
+ * Una pieza nueva (sin fila): I1 se pregunta ANTES de crearla, y la consulta y la fila que deja van juntas con el candado
+ * del celular (I8). Lo que nace PENDIENTE lo protege además I6 en «Descartar».
+ */
 async function nacer(celular: CelularDeCampo, e: Envio, cuerpo: unknown, huella: string): Promise<{ status: number; body: unknown }> {
   const motivo = await motivoDe(celular, e, huella)
 
-  // T5: el tope va ANTES de crear cualquier fila (también la que se aplica sola y puede acabar PENDIENTE).
-  // ponytail: contar y crear no son atómicos; dos subidas a la vez pueden pasar el tope por una. Basta como freno.
-  const porRevisar = await prisma.envioRetenidoDeCampo.count({
-    where: { celularId: celular.id, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
+  const nacida = await conElCandadoDelCelular(celular.id, async db => {
+    // Otra subida con la misma huella pudo nacer mientras ésta esperaba su turno: entonces contesta ésa.
+    const previo = await db.envioRetenidoDeCampo.findUnique({ where: { celularId_huella: { celularId: celular.id, huella } } })
+    if (previo) return { previo }
+    // T5: el tope va ANTES de crear cualquier fila (también la que se aplica sola y puede acabar PENDIENTE). Con el candado,
+    // contar y crear ya no se cruzan entre subidas del mismo celular.
+    const porRevisar = await db.envioRetenidoDeCampo.count({
+      where: { celularId: celular.id, estado: { in: ['PENDIENTE', 'APLICANDO'] } },
+    })
+    if (porRevisar >= TOPE_DE_RETENIDOS) {
+      throw new ConflictError(
+        'Este celular ya tiene demasiados envíos esperando revisión. Se quedan guardados en el celular y se vuelven a mandar cuando tu supervisor los revise.',
+        'RETENIDOS_LLENOS',
+      )
+    }
+    const crear = (datos: {
+      motivo: MotivoDeRetencion
+      estado?: 'APLICANDO' | 'APLICADO'
+      updatedAt?: Date
+      resultado?: Prisma.InputJsonValue
+      resueltoAt?: Date
+    }) =>
+      db.envioRetenidoDeCampo.create({
+        data: {
+          organizationId: celular.organizationId,
+          celularId: celular.id,
+          staffId: celular.staffId,
+          venueId: e.venueId,
+          tipo: e.tipo,
+          huella,
+          cuerpoJson: e.cuerpoJson,
+          ...datos,
+        },
+      })
+
+    // I1 al nacer (R3-1), para todos los tipos: lo que ya hizo la ruta normal (respuesta perdida) nace APLICADO y no se
+    // ejecuta otra vez; lo que quedó a medias nace APLICANDO sin dueño (no se descarta).
+    const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, new Date(), db)
+    if (ya.hecho) {
+      const resultado = comoJson(ya.resultado)
+      await crear({ motivo: motivo ?? 'APLICADO_EN_GRACIA', estado: 'APLICADO', resultado, resueltoAt: new Date() })
+      return { resultado }
+    }
+    if (motivo) return { retenida: await crear({ motivo, ...(estaAMedias(ya) ? { estado: 'APLICANDO', updatedAt: sinDueno() } : {}) }) }
+    // S1: la fila va ANTES que el efecto, ya tomada por esta subida (I2). El efecto se ejecuta FUERA del candado.
+    const marca = new Date()
+    return { marca, tomada: await crear({ motivo: 'APLICADO_EN_GRACIA', estado: 'APLICANDO', updatedAt: marca }) }
   })
-  if (porRevisar >= TOPE_DE_RETENIDOS) {
-    throw new ConflictError(
-      'Este celular ya tiene demasiados envíos esperando revisión. Se quedan guardados en el celular y se vuelven a mandar cuando tu supervisor los revise.',
-      'RETENIDOS_LLENOS',
-    )
-  }
 
-  // I1 al nacer (R3-1), para todos los tipos: lo que ya hizo la ruta normal (respuesta perdida) nace APLICADO y no se
-  // ejecuta otra vez; lo que quedó a medias nace APLICANDO sin dueño (no se descarta).
-  const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, new Date())
-  if (ya.hecho) {
-    const resultado = comoJson(ya.resultado)
-    const datos = { motivo: motivo ?? 'APLICADO_EN_GRACIA', estado: 'APLICADO' as const, resultado, resueltoAt: new Date() }
-    const { fila, nueva } = await crearOLeer(celular, e, huella, datos)
-    if (!nueva) return contestarPrevio(celular, e, cuerpo, huella, fila)
+  if (nacida.previo) return contestarPrevio(celular, e, cuerpo, huella, nacida.previo)
+  if (nacida.resultado !== undefined) {
     bitacoraDeGracia(celular, e, huella, true)
-    return { status: 200, body: { resuelto: 'APLICADO', resultado } }
+    return { status: 200, body: { resuelto: 'APLICADO', resultado: nacida.resultado } }
   }
-  if (motivo) {
-    const aMedias = estaAMedias(ya) ? { estado: 'APLICANDO' as const, updatedAt: sinDueno() } : {}
-    const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo, ...aMedias })
-    return nueva ? { status: 202, body: { retenido: true, motivo } } : contestarPrevio(celular, e, cuerpo, huella, fila)
-  }
-
-  // S1: la fila va ANTES que el efecto, ya tomada por esta subida (I2).
-  const marca = new Date()
-  const { fila, nueva } = await crearOLeer(celular, e, huella, { motivo: 'APLICADO_EN_GRACIA', estado: 'APLICANDO', updatedAt: marca })
-  return nueva ? aplicarEnGracia(celular, e, cuerpo, fila, marca) : contestarPrevio(celular, e, cuerpo, huella, fila)
+  if (nacida.tomada && nacida.marca) return aplicarEnGracia(celular, e, cuerpo, nacida.tomada, nacida.marca)
+  // Nació «no se hizo», y su fila no se veía hasta soltar el candado: la petición normal que terminó mientras tanto pudo
+  // correr su gancho sin encontrarla (la variante de R6-1). Ya visible, se vuelve a mirar: o el gancho la ve, o esto ve el efecto.
+  const despues = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, nacida.retenida.createdAt)
+  if (despues.hecho) return terminarEnGracia(celular, e, nacida.retenida, comoJson(despues.resultado), { recuperado: true })
+  return { status: 202, body: { retenido: true, motivo } }
 }
 
+/** R6-2: cuánto historial mira el gancho. Una petición normal no sigue en vuelo un día después del descarte de su retenido. */
+const DESCARTES_RECIENTES_MS = 24 * 60 * 60 * 1000
+
 /**
- * I7 · El que aplicó gana, también por la ruta normal (R5-1). Esperar `VENTA_EN_VUELO_MS` (I6) no prueba que una petición
+ * I7 · El que aplicó gana, también por la ruta normal (R5-1). Esperar `VENTANA_EN_VUELO_MS` (I6) no prueba que una petición
  * normal admitida antes de desvincular ya terminó (no tiene tope de ejecución). Por eso, cuando una ruta del bloque 0 del
- * celular termina en 2xx, se revisan los retenidos de ESE celular, sucursal y tipo que no estén APLICADO (PENDIENTE,
- * DESCARTADO, o APLICANDO sin dueño; la que alguien está aplicando no se toca): el que ya tiene su efecto queda APLICADO
- * (I4, con CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado). Sin huella: manda `efectoYaHecho`, no el texto del cuerpo.
- * Un celular sólo tiene retenidos ya desvinculado y entonces no entra por su sesión: casi siempre es una lectura vacía.
+ * celular termina en 2xx, se revisan los retenidos de ESE celular, sucursal y tipo que no estén APLICADO: el que ya tiene su
+ * efecto queda APLICADO (I4, con CAMPO_RETENIDO_DESCARTE_REVERTIDO si estaba descartado). Sin huella: manda `efectoYaHecho`.
+ * I8: entero con el candado del celular, así nunca ve una decisión a medias ni se la salta. Lo de casi siempre (un celular
+ * sin retenidos) es UNA consulta, sin transacción: cuenta toda fila viva, también la APLICANDO en vuelo, porque una decisión
+ * en curso deja ver la fila como estaba antes de decidir (lo suyo se ve al soltar el candado). La única decisión sin fila
+ * visible es el nacimiento, y ése vuelve a mirar el efecto al soltar el candado (`nacer`).
  * Devuelve cuántos quedaron APLICADO. Lo llama `autenticarSesionDeCampo` al terminar la respuesta.
  */
 export async function reconciliarConLaRutaNormal(celularId: string, venueId: string, tipo: TipoDeEnvio): Promise<number> {
-  const filas = await prisma.envioRetenidoDeCampo.findMany({
-    where: {
-      celularId,
-      venueId,
-      tipo,
-      OR: [{ estado: { in: ['PENDIENTE', 'DESCARTADO'] } }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }],
-    },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: TOPE_DE_RETENIDOS,
+  const base = { celularId, venueId, tipo }
+  const descartadaHace = { estado: 'DESCARTADO', resueltoAt: { gte: new Date(Date.now() - DESCARTES_RECIENTES_MS) } }
+  const alguna = await prisma.envioRetenidoDeCampo.findFirst({
+    where: { ...base, OR: [{ estado: { in: ['PENDIENTE', 'APLICANDO'] } }, descartadaHace] },
+    select: { id: true },
   })
-  let aplicados = 0
-  for (const r of filas) {
-    const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
-    const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt)
-    if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId))) aplicados++
-  }
-  return aplicados
+  if (!alguna) return 0
+  return conElCandadoDelCelular(celularId, async db => {
+    // R6-2: dos grupos, cada uno con su tope y lo más reciente primero: el historial nunca tapa lo nuevo.
+    // Vivas: PENDIENTE y APLICANDO sin dueño (≤ TOPE_DE_RETENIDOS por la admisión). Una APLICANDO en vuelo, aquí dentro, es una
+    // EJECUCIÓN («Aplicar» o la gracia aplicando; una decisión nunca se ve a medias): llega a APLICADO por su propio efecto (I4)
+    // o su rechazo se decide con este mismo candado.
+    const vivas = await db.envioRetenidoDeCampo.findMany({
+      where: { ...base, OR: [{ estado: 'PENDIENTE' }, { estado: 'APLICANDO', updatedAt: { lt: corte() } }] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: TOPE_DE_RETENIDOS,
+    })
+    const descartadas = await db.envioRetenidoDeCampo.findMany({
+      where: { ...base, ...descartadaHace },
+      orderBy: [{ resueltoAt: 'desc' }, { id: 'desc' }],
+      take: TOPE_DE_RETENIDOS,
+    })
+    let aplicados = 0
+    for (const r of [...vivas, ...descartadas]) {
+      const ctx = { venueId: r.venueId, orgId: r.organizationId, staffId: r.staffId, celularId: r.celularId }
+      const ya = await efectoYaHecho(tipo, ctx, leerJson(r.cuerpoJson), r.createdAt, db)
+      if (ya.hecho && (await marcarHecho(r, { resultado: comoJson(ya.resultado), resueltoPor: null }, r.staffId, db))) aplicados++
+    }
+    return aplicados
+  })
 }
 
 async function comoQuedo(id: string) {
@@ -427,20 +536,22 @@ async function aplicarEnGracia(
   // La custodia aceptada en parte YA tiene efecto: queda APLICADA con las filas fallidas, igual que en «Aplicar».
   const rechazo = comoJson(r.rechazo)
   if (aceptadaEnParte(e.tipo, r)) return terminarEnGracia(celular, e, fila, comoJson(r.rechazo.detalle), { rechazo })
-  // I1: un rechazo no se cree a ciegas: ¿el efecto ya ocurrió (p. ej. por la ruta normal)?
-  const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, fila.createdAt)
-  if (ya.hecho) return terminarEnGracia(celular, e, fila, comoJson(ya.resultado), { recuperado: true, rechazo })
-  if (estaAMedias(ya)) {
+  // I1 + I8: un rechazo no se cree a ciegas (¿el efecto ya ocurrió, p. ej. por la ruta normal?) y se decide con el candado.
+  const d = await conElCandadoDelCelular(celular.id, async db => {
+    const ya = await efectoYaHecho(e.tipo, ctxDe(celular, e), cuerpo, fila.createdAt, db)
+    if (ya.hecho) return { resultado: comoJson(ya.resultado) }
     // U2: la venta quedó a medias: sigue APLICANDO (no descartable) con su rechazo, sin dueño; la termina el reintento o «Aplicar».
-    const n = await soltar(fila.id, marca, { rechazo })
-    return n === 0 ? comoQuedo(fila.id) : { status: 202, body: { retenido: true, motivo: 'RECHAZADO', aMedias: true } }
-  }
-  // I3: rechazo definitivo sin efecto: queda por revisar, sólo si sigue siendo suya.
-  const { count } = await prisma.envioRetenidoDeCampo.updateMany({
-    where: deQuienLaTomo(fila.id, marca),
-    data: { estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo },
+    if (estaAMedias(ya)) return { n: await soltar(fila.id, marca, { rechazo }, db), aMedias: true }
+    // I3: rechazo definitivo sin efecto: queda por revisar, sólo si sigue siendo suya.
+    const { count } = await db.envioRetenidoDeCampo.updateMany({
+      where: deQuienLaTomo(fila.id, marca),
+      data: { estado: 'PENDIENTE', motivo: 'RECHAZADO', rechazo },
+    })
+    return { n: count, aMedias: false }
   })
-  return count === 0 ? comoQuedo(fila.id) : { status: 202, body: { retenido: true, motivo: 'RECHAZADO' } }
+  if (d.resultado !== undefined) return terminarEnGracia(celular, e, fila, d.resultado, { recuperado: true, rechazo })
+  if (d.n === 0) return comoQuedo(fila.id)
+  return { status: 202, body: d.aMedias ? { retenido: true, motivo: 'RECHAZADO', aMedias: true } : { retenido: true, motivo: 'RECHAZADO' } }
 }
 
 /** Una custodia aceptada en parte: el servicio la rechaza (CUSTODIA_INCOMPLETA), pero algunas SIMs sí quedaron aceptadas. */
@@ -466,41 +577,6 @@ async function motivoParaRetener(
     if (!(await staffHasPermissionInVenue({ staffId: celular.staffId, venueId: e.venueId, permission }))) return 'SIN_PERMISO'
   }
   return null
-}
-
-/** Inserta la fila de esta huella; si otra subida con la misma huella le ganó (P2002), devuelve ésa. */
-async function crearOLeer(
-  celular: CelularDeCampo,
-  e: Envio,
-  huella: string,
-  datos: {
-    motivo: MotivoDeRetencion
-    estado?: 'APLICANDO' | 'APLICADO'
-    updatedAt?: Date
-    resultado?: Prisma.InputJsonValue
-    resueltoAt?: Date
-  },
-): Promise<{ fila: EnvioRetenidoDeCampo; nueva: boolean }> {
-  try {
-    const fila = await prisma.envioRetenidoDeCampo.create({
-      data: {
-        organizationId: celular.organizationId,
-        celularId: celular.id,
-        staffId: celular.staffId,
-        venueId: e.venueId,
-        tipo: e.tipo,
-        huella,
-        cuerpoJson: e.cuerpoJson,
-        ...datos,
-      },
-    })
-    return { fila, nueva: true }
-  } catch (error) {
-    if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error
-    const previo = await prisma.envioRetenidoDeCampo.findUnique({ where: { celularId_huella: { celularId: celular.id, huella } } })
-    if (!previo) throw error
-    return { fila: previo, nueva: false }
-  }
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -616,8 +692,11 @@ const noSePudo = (detalle: Record<string, unknown>) =>
   new ValidationError('No se pudo aplicar. Revisa el motivo y vuelve a intentar.', 'NO_SE_PUDO_APLICAR', detalle)
 
 /** Un CAS que no tocó nada: se relee y se contesta según dónde quedó el retenido. */
-async function segunComoQuedo(p: { retenidoId: string; organizationId: string; accion: 'APLICAR' | 'DESCARTAR'; venueIds?: string[] }) {
-  const r = await prisma.envioRetenidoDeCampo.findFirst({
+async function segunComoQuedo(
+  p: { retenidoId: string; organizationId: string; accion: 'APLICAR' | 'DESCARTAR'; venueIds?: string[] },
+  db: Db = prisma,
+) {
+  const r = await db.envioRetenidoDeCampo.findFirst({
     where: { id: p.retenidoId, organizationId: p.organizationId, ...enElAlcance(p.venueIds) },
   })
   if (!r) throw new NotFoundError('No encontramos ese envío.', 'RETENIDO_NO_ENCONTRADO')
@@ -709,50 +788,48 @@ export async function resolverRetenido(p: {
     if (Date.now() - r.createdAt.getTime() < VENTANA_EN_VUELO_MS) throw descarteMuyPronto()
   }
 
-  // I5: se TOMA la fila tal como se leyó (CAS exacto: así se sabe en qué estado se tomó) y DESPUÉS se pregunta.
-  const marca = await tomar(id, { organizationId, ...alcance, estado: r.estado, updatedAt: r.updatedAt })
-  if (!marca) {
-    const otra = await segunComoQuedo(p)
-    if (!('organizationId' in otra)) return otra
-    // Cambió entre la lectura y el CAS y no quedó resuelto: nunca se decide sin haberlo tomado.
-    throw enProceso()
-  }
-  // I1: lo que pasó manda, antes de descartar o de ejecutar. Recuperar no pide asignación.
-  let ya: EfectoDelEnvio | null = null
-  let noProcede: { motivo: string; rechazo?: { code: string; message: string } } | null = null
-  try {
-    ya = await efectoYaHecho(tipo, ctx, cuerpo, r.createdAt)
-    if (!ya.hecho && p.accion === 'APLICAR') noProcede = await porQueNoSeAplica(r, organizationId)
-  } catch (error) {
-    // No hizo nada: la deja como la tomó (PENDIENTE sigue PENDIENTE; APLICANDO, soltada; a medias, soltada).
-    await regresar(id, marca, r.estado === 'APLICANDO' || estaAMedias(ya)).catch(() => 0)
-    throw error
-  }
-  if (ya.hecho) return marcarAplicado(comoJson(ya.resultado), true, yaEstabaHecho)
+  // APLICAR: si la persona sigue asignada no depende del efecto: va ANTES del candado (sus consultas no van por la
+  // transacción) y sólo cuenta si no hay efecto (recuperar no pide asignación).
+  const noProcede = p.accion === 'APLICAR' ? await porQueNoSeAplica(r, organizationId) : null
 
-  if (p.accion === 'DESCARTAR') {
-    if (estaAMedias(ya)) {
-      await soltar(id, marca) // I1: a medias no se descarta: APLICANDO sin dueño, «Aplicar» la termina
-      throw aMediasError()
+  // I5 + I8: se TOMA la fila tal como se leyó (CAS exacto: así se sabe en qué estado se tomó) y DESPUÉS se pregunta, todo
+  // con el candado del celular: el gancho de la ruta normal nunca ve esta decisión a medias. Lanzar dentro deshace la toma.
+  const d = await conElCandadoDelCelular(r.celularId, async db => {
+    const marca = await tomar(id, { organizationId, ...alcance, estado: r.estado, updatedAt: r.updatedAt }, db)
+    if (!marca) return { otra: await segunComoQuedo(p, db) }
+    // I1: lo que pasó manda, antes de descartar o de ejecutar.
+    const ya = await efectoYaHecho(tipo, ctx, cuerpo, r.createdAt, db)
+    if (ya.hecho) return { resultado: comoJson(ya.resultado) }
+    if (p.accion === 'DESCARTAR') {
+      if (estaAMedias(ya)) {
+        await soltar(id, marca, {}, db) // I1: a medias no se descarta: APLICANDO sin dueño, «Aplicar» la termina
+        return { error: aMediasError() }
+      }
+      const { count } = await db.envioRetenidoDeCampo.updateMany({
+        where: deQuienLaTomo(id, marca),
+        data: { estado: 'DESCARTADO', resueltoAt: new Date(), resueltoPor: p.porStaffId, nota: p.nota ?? null },
+      })
+      return count ? { descartada: true as const } : { otra: await segunComoQuedo(p, db) }
     }
-    const { count } = await prisma.envioRetenidoDeCampo.updateMany({
-      where: deQuienLaTomo(id, marca),
-      data: { estado: 'DESCARTADO', resueltoAt: new Date(), resueltoPor: p.porStaffId, nota: p.nota ?? null },
-    })
-    if (count === 0) {
-      const otra = await segunComoQuedo(p)
-      if ('organizationId' in otra) throw enProceso() // nunca se contesta la fila cruda
-      return otra
+    if (noProcede) {
+      // S10: el porqué queda en la fila, así «Por revisar» lo dice aunque se recargue. Vuelve como la tomó (I3/I5).
+      const conRechazo = noProcede.rechazo ? { rechazo: noProcede.rechazo } : {}
+      await regresar(id, marca, r.estado === 'APLICANDO' || estaAMedias(ya), conRechazo, db)
+      return { error: noSePudo(noProcede) }
     }
+    return { marca }
+  })
+  if (d.otra) {
+    if (!('organizationId' in d.otra)) return d.otra
+    throw enProceso() // cambió entre la lectura y el CAS y no quedó resuelto: nunca se decide sin haberlo tomado
+  }
+  if (d.error) throw d.error
+  if (d.resultado !== undefined) return marcarAplicado(d.resultado, true, yaEstabaHecho)
+  if (d.descartada) {
     bitacora(r, 'CAMPO_RETENIDO_DESCARTADO')
     return { estado: 'DESCARTADO', repetida: false }
   }
-
-  if (noProcede) {
-    // S10: el porqué queda en la fila, así «Por revisar» lo dice aunque se recargue. Vuelve como la tomó (I3/I5).
-    await regresar(id, marca, r.estado === 'APLICANDO' || estaAMedias(ya), noProcede.rechazo ? { rechazo: noProcede.rechazo } : {})
-    throw noSePudo(noProcede)
-  }
+  const { marca } = d
 
   // Desde aquí ya no se descarta. A nombre de la persona y de SU celular, sin revisar sus permisos (lo autoriza el
   // supervisor), con todas las reglas de los servicios. Lo reintentable se lanza y la fila queda APLICANDO, soltada.
@@ -765,19 +842,20 @@ export async function resolverRetenido(p: {
   }
   if (res.tipo === 'APLICADO') return marcarAplicado(comoJson(res.body), false)
   if (aceptadaEnParte(r.tipo, res)) return marcarAplicado(comoJson(res.rechazo.detalle), false)
-  // I1: el rechazo de CUALQUIER intento no se cree a ciegas.
-  const despues = await efectoYaHecho(tipo, ctx, cuerpo, r.createdAt)
-  if (despues.hecho) return marcarAplicado(comoJson(despues.resultado), true)
+  // I1 + I8: el rechazo de CUALQUIER intento no se cree a ciegas, y se decide con el candado.
   const rechazo = comoJson(res.rechazo)
-  if (estaAMedias(despues)) {
+  const fin = await conElCandadoDelCelular(r.celularId, async db => {
+    const despues = await efectoYaHecho(tipo, ctx, cuerpo, r.createdAt, db)
+    if (despues.hecho) return { resultado: comoJson(despues.resultado) }
     // U2: la venta quedó a medias: sigue APLICANDO (no se descarta) con su rechazo, soltada; tocar «Aplicar» otra vez la termina.
-    await soltar(id, marca, { rechazo })
-    throw noSePudo({ rechazo, aMedias: true })
-  }
-
-  // I3: rechazo definitivo sin efecto: vuelve a PENDIENTE, sólo si sigue siendo suya.
-  const vuelta = await prisma.envioRetenidoDeCampo.updateMany({ where: deQuienLaTomo(id, marca), data: { estado: 'PENDIENTE', rechazo } })
-  if (vuelta.count === 0) {
+    if (estaAMedias(despues)) return { aMedias: await soltar(id, marca, { rechazo }, db) }
+    // I3: rechazo definitivo sin efecto: vuelve a PENDIENTE, sólo si sigue siendo suya.
+    const vuelta = await db.envioRetenidoDeCampo.updateMany({ where: deQuienLaTomo(id, marca), data: { estado: 'PENDIENTE', rechazo } })
+    return { vuelta: vuelta.count }
+  })
+  if (fin.resultado !== undefined) return marcarAplicado(fin.resultado, true)
+  if (fin.aMedias !== undefined) throw noSePudo({ rechazo, aMedias: true })
+  if (fin.vuelta === 0) {
     // Otro ya la resolvió (p. ej. APLICADO) o la retomó tras la ventana: se contesta eso, no un falso 422.
     const otra = await segunComoQuedo(p)
     if (!('organizationId' in otra)) return otra
