@@ -48,6 +48,12 @@ export interface PrintConfigPayload {
     hasKitchenDisplay: boolean
     active: boolean
     displayOrder: number
+    /**
+     * `false` = «No lleva comanda»: lo ruteado aquí no imprime, no va a pantalla y no avisa. Manda sobre todo lo demás:
+     * para esas estaciones `printerId`, `hasKitchenDisplay`, `isDefault` e `isPacking` salen apagados aunque la fila diga
+     * otra cosa. Campo nuevo (10-nov-2026): las apps viejas lo ignoran y lo tratan como `true`.
+     */
+    sendsComanda: boolean
   }>
   defaultStationId: string | null
   /** La estación que empaca, o `null` si el negocio no marcó ninguna. */
@@ -59,6 +65,11 @@ export interface PrintConfigPayload {
   /** ¿La etapa 3 ya se lanzó a clientes? La tablet ofrece «Prender pantalla» sólo entonces. Fuera del hash. */
   kitchenDisplayOpenToClients: boolean
   version: string
+}
+
+/** ¿Es una estación «No lleva comanda»? La única respuesta; la usan print-config y la pantalla de cocina. */
+export function esSinComanda(station: { sendsComanda: boolean }): boolean {
+  return station.sendsComanda === false
 }
 
 export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayload> {
@@ -78,13 +89,15 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
     }),
   ])
 
-  const defaultStation = stations.find(s => s.isDefault && s.active) ?? null
+  // «No lleva comanda» manda sobre la fila: una mezclada (a mano o por un error) nunca imprime ni recibe el respaldo.
+  const conComanda = stations.filter(s => !esSinComanda(s))
+  const defaultStation = conComanda.find(s => s.isDefault && s.active) ?? null
   // `null` cuando nadie la marcó: entonces NO sale ticket de empaque. El default es no
   // cambiarle nada a quien no lo pidió.
-  const packingStation = stations.find(s => s.isPacking && s.active) ?? null
+  const packingStation = conComanda.find(s => s.isPacking && s.active) ?? null
 
   // Etapa 3 del KDS: el plan sólo se consulta si alguna estación activa tiene la casilla (la mayoría no).
-  const algunaConPantalla = stations.some(s => s.hasKitchenDisplay && s.active)
+  const algunaConPantalla = conComanda.some(s => s.hasKitchenDisplay && s.active)
   const planPantalla = algunaConPantalla ? await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY') : false
 
   const payload: Omit<PrintConfigPayload, 'version'> = {
@@ -102,17 +115,21 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
       lastStatus: p.lastStatus,
       lastSeenAt: p.lastSeenAt,
     })),
-    stations: stations.map(s => ({
-      id: s.id,
-      name: s.name,
-      printerId: s.printerId,
-      copies: s.copies,
-      isDefault: s.isDefault,
-      isPacking: s.isPacking,
-      hasKitchenDisplay: s.hasKitchenDisplay && s.active && planPantalla,
-      active: s.active,
-      displayOrder: s.displayOrder,
-    })),
+    stations: stations.map(s => {
+      const lleva = !esSinComanda(s)
+      return {
+        id: s.id,
+        name: s.name,
+        printerId: lleva ? s.printerId : null,
+        copies: s.copies,
+        isDefault: lleva && s.isDefault,
+        isPacking: lleva && s.isPacking,
+        hasKitchenDisplay: lleva && s.hasKitchenDisplay && s.active && planPantalla,
+        active: s.active,
+        displayOrder: s.displayOrder,
+        sendsComanda: lleva,
+      }
+    }),
     defaultStationId: defaultStation?.id ?? null,
     packingStationId: packingStation?.id ?? null,
     categoryRouting: categories.map(c => ({ categoryId: c.id, printStationId: c.printStationId as string })),

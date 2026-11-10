@@ -185,8 +185,27 @@ async function assertPrinterInVenue(venueId: string, printerId: string | null | 
   if (!printer) throw new BadRequestError('La impresora seleccionada no pertenece a este venue')
 }
 
+/**
+ * «No lleva comanda» (`sendsComanda=false`) se elige sólo al crear y nunca cambia, así que basta con mirar la fila leída: sin
+ * impresora, empaque, predeterminada ni pantalla. La predeterminada sostiene el papel de respaldo (Codex r1 #1, r2 #1).
+ */
+function assertCabeEnSinComanda(
+  sendsComanda: boolean,
+  pide: { printerId?: string | null; isPacking?: boolean; isDefault?: boolean; hasKitchenDisplay?: boolean },
+): void {
+  if (sendsComanda !== false) return // sólo `false` es «No lleva comanda», igual que `esSinComanda` de print-config
+  if (pide.printerId || pide.isPacking || pide.isDefault || pide.hasKitchenDisplay) {
+    throw new BadRequestError(
+      'Una estación «No lleva comanda» no lleva impresora, empaque, pantalla de cocina ni puede ser la predeterminada.',
+      'ESTACION_SIN_COMANDA_INCOMPATIBLE',
+    )
+  }
+}
+
 export async function createStation(venueId: string, input: CreateStationInput, performedBy?: string) {
   await assertVenue(venueId)
+  const sendsComanda = input.sendsComanda ?? true
+  assertCabeEnSinComanda(sendsComanda, input)
   await assertPrinterInVenue(venueId, input.printerId ?? null)
 
   const station = await prisma.$transaction(async tx => {
@@ -208,6 +227,7 @@ export async function createStation(venueId: string, input: CreateStationInput, 
         isDefault: input.isDefault ?? false,
         isPacking: input.isPacking ?? false,
         displayOrder: input.displayOrder ?? 0,
+        sendsComanda,
       },
     })
   })
@@ -222,6 +242,7 @@ export async function createStation(venueId: string, input: CreateStationInput, 
       printerId: station.printerId,
       isDefault: station.isDefault,
       isPacking: station.isPacking,
+      sendsComanda: station.sendsComanda,
     } as Prisma.InputJsonValue,
   })
   return station
@@ -230,6 +251,7 @@ export async function createStation(venueId: string, input: CreateStationInput, 
 export async function updateStation(venueId: string, stationId: string, input: UpdateStationInput, performedBy?: string) {
   const previous = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!previous) throw new NotFoundError('Estación no encontrada')
+  assertCabeEnSinComanda(previous.sendsComanda, input)
   await assertPrinterInVenue(venueId, input.printerId ?? null)
 
   const station = await prisma.$transaction(async tx => {
@@ -282,6 +304,7 @@ export const KITCHEN_DISPLAY_NOT_READY_NOTICE =
 export async function setKitchenDisplay(venueId: string, stationId: string, enabled: boolean, performedBy?: string) {
   const previous = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!previous) throw new NotFoundError('Estación no encontrada')
+  assertCabeEnSinComanda(previous.sendsComanda, { hasKitchenDisplay: enabled })
   const prende = enabled && !previous.hasKitchenDisplay
   if (prende) await assertPuedePrenderPantalla(venueId, performedBy)
   const station = await prisma.printStation.update({
@@ -389,7 +412,9 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   // salen si el negocio tiene alguna; `unroutedCategories` no cambia de significado (lo leen dashboards viejos y el MCP).
   const conSoloVale = soloVale.areas.length > 0
   const areaTicketOnlyUnrouted =
-    hasDefault || !conSoloVale ? 0 : await prisma.menuCategory.count({ where: { venueId, id: { in: [...soloVale.categoryIds] }, OR: sinRuta } })
+    hasDefault || !conSoloVale
+      ? 0
+      : await prisma.menuCategory.count({ where: { venueId, id: { in: [...soloVale.categoryIds] }, OR: sinRuta } })
   const summary = {
     unroutedCategories,
     hasDefault,
