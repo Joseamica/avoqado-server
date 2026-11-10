@@ -120,9 +120,10 @@ export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desd
  * cancelarla después tampoco se podría (Codex D18 r1 #1 y D21, 9 y 10-nov). La salida honesta es Reembolso, como
  * «Corregir un cobro ya hecho» (23-oct).
  */
-export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.'
+export const MENSAJE_CUENTA_PAGADA =
+  'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 export const MENSAJE_CUENTA_CON_PAGOS =
-  'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.'
+  'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
