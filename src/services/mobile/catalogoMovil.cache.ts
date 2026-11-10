@@ -61,7 +61,8 @@ export function catalogoMovilCacheado(venueId: string, version: string, ahora = 
 export function guardarCatalogoMovil(venueId: string, version: string, dataJson: string, ahora = Date.now()): void {
   soltar(venueId)
   for (const [id, e] of cache) if (ahora - e.guardadoEn >= VIDA_DEL_CATALOGO_MS) soltar(id)
-  const bytes = dataJson.length * 2 + COSTO_FIJO_POR_NEGOCIO
+  // D20 (Codex r1): la llave también cuenta. La de la TPV trae la query (un `categoryId` de miles de caracteres).
+  const bytes = (venueId.length + dataJson.length) * 2 + COSTO_FIJO_POR_NEGOCIO
   if (bytes > TOPE_DE_BYTES_EN_CACHE) return
   cache.set(venueId, { version, dataJson, guardadoEn: ahora, bytes })
   bytesGuardados += bytes
@@ -84,6 +85,9 @@ export function vaciarCacheDelCatalogoMovil(): void {
  * `xmin` con precios distintos (Codex r1 P1, reproducido en la prueba de integración). Cada UPDATE le da a su fila un `xmin`
  * distinto del que tenía, así que cualquier cambio confirmado cambia la huella.
  * Los productos inactivos o borrados también cuentan: es un superconjunto, sólo puede dar de más un «cambió».
+ * D20: también la usa la TPV (`menu.tpv.controller.getProducts`, que lee con `productService.getProducts`): por ella
+ * cuenta `PricingPolicy` (precio especial, `?includePricingPolicy=true`), que el POS no lee. Para el POS es superconjunto.
+ * Las llaves de la TPV son `["tpv",venueId,opciones]`; las del POS, el venueId suelto: nunca chocan.
  *
  * Devuelve null si no se pudo leer: entonces se arma como antes y no se guarda nada.
  */
@@ -109,6 +113,7 @@ export async function versionDelCatalogoMovil(venueId: string): Promise<string |
         UNION ALL SELECT 'r', id, x FROM r
         UNION ALL SELECT 'rl', id, x FROM rl
         UNION ALL SELECT 'rm', id, xmin::text FROM "RawMaterial" WHERE id IN (SELECT "rawMaterialId" FROM rl)
+        UNION ALL SELECT 'pp', id, xmin::text FROM "PricingPolicy" WHERE "productId" IN (SELECT id FROM p)
       )
       SELECT md5(coalesce(string_agg(t || ':' || id || ':' || x, ',' ORDER BY t, id), '')) AS version FROM filas`
     const version = Array.isArray(filas) ? filas[0]?.version : undefined

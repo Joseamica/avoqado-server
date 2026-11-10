@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import * as menuCategoryService from '../../services/dashboard/menu.dashboard.service'
-import { buildProductsListResponse } from '../dashboard/product.dashboard.controller'
+import { buildProductsListResponse, opcionesDelListadoDeProductos } from '../dashboard/product.dashboard.controller'
+import { catalogoMovilCacheado, guardarCatalogoMovil, versionDelCatalogoMovil } from '../../services/mobile/catalogoMovil.cache'
 
 /**
  * Menú, productos y categorías bajo `/tpv` (Plan B Task 5, 2026-07-27).
@@ -21,12 +22,37 @@ import { buildProductsListResponse } from '../dashboard/product.dashboard.contro
  * (si se tomara después, un cambio de precio ocurrido durante la lectura quedaría "antes" del catálogo
  * que la terminal ya trae). Aditivo: `data` queda igual para las versiones viejas, y la respuesta del
  * panel NO cambia (comparten `buildProductsListResponse`, no el handler). Cada producto ya trae `gtin`.
+ *
+ * D20 (10-nov): armarlo retenía el hilo único 206–699 ms (Better Stack, 8 al 10-nov) y la TPV lo pide aunque no haya
+ * cambiado. Igual que el POS (D6): si la versión del catálogo no cambió, se reutiliza el `data` ya armado para esa misma
+ * query. La versión se lee ANTES que los productos (un cambio a media lectura queda guardado bajo la versión vieja y la
+ * siguiente bajada rearma). `correlationId` y `catalogAt` son de cada petición: nunca se guardan. El panel no tiene caché.
  */
 export const getProducts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const catalogAt = new Date().toISOString()
-    const body = await buildProductsListResponse(req)
-    res.status(200).json({ ...body, catalogAt })
+    const { venueId } = req.params
+    // Nunca choca con la llave del POS (el venueId suelto).
+    const llave = JSON.stringify(['tpv', venueId, opcionesDelListadoDeProductos(req)])
+    const version = await versionDelCatalogoMovil(venueId)
+    const replacer = req.app?.get('json replacer')
+    let dataJson = version ? catalogoMovilCacheado(llave, version) : undefined
+    if (dataJson === undefined) {
+      const body = await buildProductsListResponse(req)
+      if (!version) {
+        res.status(200).json({ ...body, catalogAt })
+        return
+      }
+      dataJson = JSON.stringify(body.data, replacer)
+      guardarCatalogoMovil(llave, version, dataJson)
+    }
+    // Lo mismo que escribiría `res.json({ message, data, correlationId, catalogAt })`, sin volver a convertir `data`
+    // (el replacer de la app va por llave: da lo mismo aplicarlo por partes). Sin correlationId, la llave no sale.
+    const cola = JSON.stringify({ correlationId: (req as any).correlationId, catalogAt }, replacer)
+    res
+      .status(200)
+      .type('json')
+      .send(`{"message":${JSON.stringify(`Products for venue ${venueId}`)},"data":${dataJson},${cola.slice(1)}`)
   } catch (error) {
     next(error)
   }
