@@ -4,6 +4,8 @@
  */
 export const CODIGOS_TRANSITORIOS: ReadonlySet<string> = new Set([
   'VERSION_CONFLICT',
+  // D25: otra caja movía las mismas comandas de cocina a la vez (`ponerComandasConSuCuenta`); anular o unir sin red se reintenta.
+  'KDS_ORDER_OWNER_CHANGED',
   // Prisma / PostgreSQL transitorios: nunca deben convertirse en cuarentena.
   'P1001', // database unreachable
   'P1002', // connection timeout

@@ -77,7 +77,10 @@ const order = () => ({
 function db() {
   return {
     // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en esta orden de prueba.
-    $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) => (q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order' }])),
+    // D25: tampoco hay platillos de comanda que vivan en otra cuenta (`"KdsOrderItem"`).
+    $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) =>
+      q?.raw?.join('').includes('"OrderDiscount"') || q?.raw?.join('').includes('"KdsOrderItem"') ? [] : [{ id: 'order' }],
+    ),
     order: {
       findUnique: jest.fn(async () => order()),
       findUniqueOrThrow: jest.fn(async () => order()),
