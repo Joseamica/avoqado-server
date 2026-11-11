@@ -1661,6 +1661,7 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'ADD_ITEMS' }), 'discounts:apply')
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
     expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
   })
 
   // ── Paridad con el camino online (review final de la rama de promociones) ──
@@ -1709,30 +1710,38 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     const acks = await processIntents(params)
 
     expect(acks[0].errorCode).not.toBe('INVALID_PAYLOAD')
-    expect(promotionService.applyPromotionToOrder).toHaveBeenCalled()
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-1',
+      [expect.objectContaining({ promotionRef: expect.objectContaining({ promotionInstanceId: 'uuid-1' }) })],
+      3,
+      true,
+      expect.any(Function),
+      expect.any(Date),
+    )
   })
 
-  it('ADD_ITEMS conserva los tiempos históricos por grupo y marca una ronda también si sólo lleva combo', async () => {
-    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
-    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
-    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
-    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
-    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
-    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+  it('ADD_ITEMS conserva los tiempos históricos por grupo y la hora de venta (acotada) del combo', async () => {
+    const vendidoHace = new Date(Date.now() - 40 * 60_000)
     const selections = [
       { groupId: 'g1', optionId: 'o1', serviceCourse: { id: 'immediate', label: 'Al momento', kind: 'IMMEDIATE' } },
       { groupId: 'g2', optionId: 'o2', serviceCourse: { id: 'old-dessert', label: 'Con el postre', kind: 'STANDARD' } },
     ]
-    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections }, quantity: 1 }])
-    const acks = await processIntents(params)
-    expect(acks[0].status).toBe('ACKED')
-    expect(promotionService.applyPromotionToOrder).toHaveBeenCalledWith(
-      expect.objectContaining({ selections }),
-      undefined,
-      expect.objectContaining({ sentToKitchenAt: expect.any(Date), componentExternalIdPrefix: expect.stringMatching(/^sync:/) }),
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'i-add',
+          type: 'ADD_ITEMS',
+          createdAtLocal: vendidoHace.getTime(),
+          payload: { orderId: 'order-1', items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections }, quantity: 1 }] },
+        },
+      ]),
     )
-    const call = (promotionService.applyPromotionToOrder as jest.Mock).mock.calls[0]
-    expect(call[2].sentToKitchenAt).toEqual(call[0].soldAt)
+    expect(acks[0].status).toBe('ACKED')
+    const [, , ronda, , , , combosVendidosEn] = (orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0]
+    expect(ronda).toEqual([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections }, externalId: 'sync:i-add:0' }])
+    // La vigencia y el envío a cocina del combo usan la hora en que se vendió sin red, no la del sync.
+    expect(combosVendidosEn).toEqual(vendidoHace)
   })
 
   it('con orders:comp la cortesía offline SÍ pasa — no se rompe el flujo legítimo', async () => {
@@ -1794,9 +1803,10 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
 })
 
 /**
- * Plan3b T4 — la promoción de un ADD_ITEMS ahora espera el candado de la orden y relee bajo él. Su clasificación no
- * cambia: un rechazo de NEGOCIO sigue siendo REJECTED (con compensación por instanceId), y una espera que agota la
- * transacción (P2028) es transitoria → RETRY, sin compensar, sin persistir y cortando el batch.
+ * Plan3b T4 — la promoción de un ADD_ITEMS espera el candado de la orden y relee bajo él. Su clasificación no cambia: un
+ * rechazo de NEGOCIO sigue siendo REJECTED (con compensación por instanceId de lo que un intento ANTERIOR haya dejado), y una
+ * espera que agota la transacción (P2028) es transitoria → RETRY, sin compensar, sin persistir y cortando el batch.
+ * hz:5bda0b30:D3: desde que la ronda con combos es UNA transacción (`addItemsToOrder`), el rechazo llega de ahí.
  */
 describe('ADD_ITEMS con promoción — clasificación tras el candado de la orden (Plan3b T4)', () => {
   const promo = { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }
@@ -1808,15 +1818,15 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
     ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
     ;(prisma.posSyncIntent.delete as jest.Mock).mockResolvedValue({})
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(prisma.order.findFirst as jest.Mock).mockReset().mockResolvedValue({ version: 3, status: 'PENDING' })
     ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockReset().mockResolvedValue({ version: 4, total: 120 })
+    ;(promotionService.removeIntentPromotions as jest.Mock).mockReset().mockResolvedValue(0)
   })
 
   it('un rechazo de NEGOCIO leído bajo el candado → REJECTED y compensa las promos del intent por instanceId', async () => {
-    ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValue(
-      new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.'),
-    )
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValue(new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.'))
 
     const acks = await processIntents(baseParams([{ id: 'i-promo', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } }]))
 
@@ -1832,7 +1842,7 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
   })
 
   it('una espera del candado que agota la transacción (P2028) → RETRY: no compensa, no persiste y corta el batch', async () => {
-    ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValue(
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValue(
       Object.assign(new Error('Transaction already closed: the transaction expired while waiting'), { code: 'P2028' }),
     )
 
@@ -1853,7 +1863,6 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
 
   // El reducer no cambia (hoy ya deja salir lo que lance la compensación): la mitad roja de N5 está en removeIntentPromotions.
   it('control — Codex r2 N5: ronda mixta rechazada cuya compensación recibe un P2028 ⇒ RETRY (no REJECTED); el reintento la termina', async () => {
-    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValue(new BadRequestError('Producto inactivo'))
     ;(promotionService.removeIntentPromotions as jest.Mock)
       .mockRejectedValueOnce(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
@@ -1871,89 +1880,82 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     expect(promotionService.removeIntentPromotions).toHaveBeenCalledTimes(2)
   })
 
-  // hz:ce654971:D4 (Codex r4 B9 y r1 #1): la ronda NORMAL pone la marca de cocina en `addItemsToOrder`; la de SÓLO combos regresaba
-  // ACKED antes de llegar ahí y el combo salía a la pantalla hasta la siguiente ronda o el cobro. La marca va DENTRO de la
-  // transacción de cada combo (`marcarCocina`): una ronda con combos no se retoma tras una caída, así que una marca escrita
-  // aparte se perdía si el proceso moría entre guardar el combo y marcarlo.
-  describe('🔴 hz:ce654971:D4 · ronda de SÓLO combos y la pantalla de cocina', () => {
-    const ronda = (id = 'i-combo') => ({ id, type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } })
-    const opcionesDelCombo = () => (promotionService.applyPromotionToOrder as jest.Mock).mock.calls.map(c => c[2])
+  // 🔴 hz:5bda0b30:D3 (Codex r4 F1–F4 de cocina-avisos-perdidos): cada combo se guardaba en su propia transacción y los productos
+  // en otra. Si el SERVIDOR moría a la mitad quedaba un combo sin aviso a cocina, la ronda no se retomaba y lo que faltaba nunca
+  // llegaba; y el barrido podía cocinar un combo que la compensación borraba después. Ahora la ronda ENTERA va en UNA llamada a
+  // `addItemsToOrder` (la misma de la ronda con red): combos y productos, la marca de cocina en su CAS y la huella adentro.
+  describe('🔴 hz:5bda0b30:D3 · la ronda con combos es UNA transacción', () => {
+    const otro = { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-2', selections: [] } }
+    const llamadas = () => (orderTpvService.addItemsToOrder as jest.Mock).mock.calls
 
-    beforeEach(() => {
-      ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
-      armarComandasTrasCommitMock.mockReset().mockResolvedValue(undefined)
-      debeMarcarCocinaMock.mockReset().mockResolvedValue(true)
-    })
+    it('ronda de DOS combos: una sola llamada con los dos y sus prefijos; nada se guarda aparte ni la cola marca o arma', async () => {
+      const [ack] = await processIntents(baseParams([{ id: 'i-dos', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, otro] } }]))
 
-    it('negocio con pantalla: el combo se guarda pidiendo la marca (la mesa la decide el combo bajo candado) y la comanda se arma antes del ACK', async () => {
-      // `kitchenPendingAt` puesto = el combo encontró la cuenta en una mesa y dejó la marca en su transacción.
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 120, kitchenPendingAt: new Date() })
-
-      const [ack] = await processIntents(baseParams([ronda()]))
-
-      expect(ack).toMatchObject({ id: 'i-combo', status: 'ACKED' })
-      expect(opcionesDelCombo()).toEqual([expect.objectContaining({ marcarCocina: true, sentToKitchenAt: expect.any(Date) })])
-      // La cola no escribe la marca aparte: va con el combo.
-      expect(prisma.order.updateMany).not.toHaveBeenCalled()
-      expect(armarComandasTrasCommitMock).toHaveBeenCalledWith(VENUE, 'order-1', 'ROUND')
-    })
-
-    it('el replay de la misma ronda (combo ya aplicado) también arma: la marca quedó con el combo la primera vez', async () => {
-      ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: false })
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4, status: 'PENDING', total: 120, kitchenPendingAt: new Date() })
-
-      const [ack] = await processIntents(baseParams([ronda('i-combo-replay')]))
-
-      expect(ack).toMatchObject({ status: 'ACKED' })
-      expect(armarComandasTrasCommitMock).toHaveBeenCalledWith(VENUE, 'order-1', 'ROUND')
-    })
-
-    // Codex r3 #1: una marca puesta antes de que la ronda quede completa dejaba que el barrido cocinara un combo que la
-    // compensación borraba después. Sólo el ÚLTIMO combo de una ronda de puros combos la lleva; la mixta la pone el alta normal.
-    it('ronda de DOS combos: sólo el último lleva la marca', async () => {
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 240, kitchenPendingAt: new Date() })
-      const dos = {
-        id: 'i-dos',
-        type: 'ADD_ITEMS',
-        payload: {
-          orderId: 'order-1',
-          items: [promo, { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-2', selections: [] } }],
-        },
-      }
-
-      await processIntents(baseParams([dos]))
-
-      expect(opcionesDelCombo().map(o => o.marcarCocina)).toEqual([false, true])
-    })
-
-    it('ronda MIXTA (combo + producto): el combo no lleva marca; la pone el alta normal al final', async () => {
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 240 })
-      ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 5, total: 240 })
-      const mixta = {
-        id: 'i-mixta-d4',
-        type: 'ADD_ITEMS',
-        payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] },
-      }
-
-      const [ack] = await processIntents(baseParams([mixta]))
-
-      expect(ack).toMatchObject({ status: 'ACKED' })
-      expect(opcionesDelCombo().map(o => o.marcarCocina)).toEqual([false])
-      expect(orderTpvService.addItemsToOrder).toHaveBeenCalled()
-      expect(armarComandasTrasCommitMock).not.toHaveBeenCalled()
-    })
-
-    it('mostrador (el combo no dejó marca) o sin pantalla: no se arma nada, como la ronda normal', async () => {
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 120, kitchenPendingAt: null })
-      await processIntents(baseParams([ronda('i-mostrador')]))
-      debeMarcarCocinaMock.mockResolvedValue(false)
-      await processIntents(baseParams([ronda('i-sin-pantalla')]))
-
-      expect(opcionesDelCombo()).toEqual([
-        expect.objectContaining({ marcarCocina: true }),
-        expect.objectContaining({ marcarCocina: false }),
+      expect(ack).toMatchObject({ id: 'i-dos', status: 'ACKED', result: { orderId: 'order-1', version: 4, total: 120 } })
+      expect(llamadas()).toHaveLength(1)
+      expect(llamadas()[0].slice(0, 5)).toEqual([
+        VENUE,
+        'order-1',
+        [
+          { promotionRef: promo.promotionRef, externalId: 'sync:i-dos:0' },
+          { promotionRef: otro.promotionRef, externalId: 'sync:i-dos:1' },
+        ],
+        3,
+        true,
       ])
+      expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
+      expect(prisma.order.updateMany).not.toHaveBeenCalled()
       expect(armarComandasTrasCommitMock).not.toHaveBeenCalled()
+      expect(debeMarcarCocinaMock).not.toHaveBeenCalled()
+    })
+
+    it('ronda MIXTA: combos y productos en la MISMA llamada, con las llaves de siempre y la versión leída al inicio', async () => {
+      const [ack] = await processIntents(
+        baseParams([
+          { id: 'i-mixta-d3', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p-1', quantity: 2 }, promo] } },
+        ]),
+      )
+
+      expect(ack).toMatchObject({ status: 'ACKED' })
+      expect(llamadas()).toHaveLength(1)
+      expect(llamadas()[0][2]).toEqual([
+        { promotionRef: promo.promotionRef, externalId: 'sync:i-mixta-d3:1' },
+        { productId: 'p-1', quantity: 2, externalId: 'sync:i-mixta-d3:0' },
+      ])
+      expect(llamadas()[0][3]).toBe(3)
+      // Ya no hay transacciones previas que muevan la versión: no se relee.
+      expect(prisma.order.findFirst).toHaveBeenCalledTimes(1)
+    })
+
+    it('el combo viaja sólo con su referencia y su llave: un campo suelto del carrito no lo vuelve un producto', async () => {
+      await processIntents(
+        baseParams([
+          {
+            id: 'i-suelto',
+            type: 'ADD_ITEMS',
+            payload: { orderId: 'order-1', items: [{ ...promo, quantity: 1, customName: 'Combo comida', notes: 'sin hielo', externalId: 'sync:i-suelto:0' }] },
+          },
+        ]),
+      )
+
+      expect(llamadas()[0][2]).toEqual([{ promotionRef: promo.promotionRef, externalId: 'sync:i-suelto:0' }])
+    })
+
+    it('la ronda con combos nace RETOMABLE y su huella va DENTRO de la transacción de la ronda', async () => {
+      let huella: unknown
+      ;(orderTpvService.addItemsToOrder as jest.Mock).mockImplementation(async (...args: any[]) => {
+        const tx = { posSyncIntent: { updateMany: jest.fn(async (a: any) => ((huella = a.data.resultJson), { count: 1 })) } }
+        await args[5](tx, { orderId: 'order-1' })
+        return { version: 4, total: 120 }
+      })
+
+      const [ack] = await processIntents(baseParams([{ id: 'i-huella', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, otro] } }]))
+
+      expect(ack).toMatchObject({ status: 'ACKED' })
+      expect(prisma.posSyncIntent.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ resultJson: { protocolo: 'huella-v1', retomable: true } }),
+      })
+      expect(huella).toEqual({ protocolo: 'huella-v1', retomable: true, huella: { orderId: 'order-1' } })
     })
   })
 })
@@ -2236,7 +2238,8 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     })
   })
 
-  it('ADD_ITEMS con promoción en el payload ORIGINAL nace NO retomable', async () => {
+  // hz:5bda0b30:D3: la ronda con combos es UNA transacción (como la normal) y deja su huella adentro: se retoma igual.
+  it('ADD_ITEMS con promoción nace retomable, como cualquier ronda', async () => {
     await processIntents(
       baseParams([
         {
@@ -2248,7 +2251,7 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
       ]),
     )
     expect(prisma.posSyncIntent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ resultJson: { protocolo: 'huella-v1', retomable: false } }),
+      data: expect.objectContaining({ resultJson: { protocolo: 'huella-v1', retomable: true } }),
     })
   })
 
@@ -2383,6 +2386,7 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
   })
 
+  // Reservas nacidas antes de hz:5bda0b30:D3 (ronda con combos en varias transacciones): siguen sin retomarse.
   it('ADD_ITEMS marcado NO retomable (promoción en el original) no se retoma aunque el reenvío ya no la traiga', async () => {
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
       reserva('ADD_ITEMS', 'i-add', 6 * 60_000, { protocolo: 'huella-v1', retomable: false }),
