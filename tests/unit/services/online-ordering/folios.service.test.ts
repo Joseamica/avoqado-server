@@ -366,6 +366,146 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
   })
+
+  describe('regla C (founder, 10-nov): el folio cobrado en la caja ANTES de cerrarse llega a la cocina al revivir', () => {
+    const T = new Date(NOW.getTime() - 10 * 60_000) // venció hace 10 min
+    const MARCA = { where: { id: 'ord-A', venueId: 'v1' }, data: { kitchenPendingAt: NOW } }
+    // Un solo cobro llegó después del cierre: el que saldó y trae la hora.
+    beforeEach(() => prismaMock.payment.count.mockResolvedValue(1))
+    const releido = (horaDelCobro: Date | null, cierre: Record<string, Date | string | null> = { expiredAt: T }) => ({
+      id: 'oo-A',
+      status: 'EXPIRED',
+      createdAt: new Date(T.getTime() - 30 * 60_000), // se pidió 30 min antes de vencer
+      expiredAt: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      rejectedAt: null,
+      ...cierre,
+      order: { loyaltySaleAt: horaDelCobro },
+    })
+
+    it('cobrado a los 25 de 30 (sube después de vencer): la MISMA transacción marca la cocina tras el CAS y el armado ROUND va después del commit', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      let enLaTransaccion = false
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+        enLaTransaccion = true
+        try {
+          return await fn(prismaMock)
+        } finally {
+          enLaTransaccion = false
+        }
+      })
+      const dentro: boolean[] = []
+      ;(prismaMock.order.updateMany as jest.Mock).mockImplementationOnce(async () => {
+        dentro.push(enLaTransaccion)
+        return { count: 1 }
+      })
+      ;(armarComandasTrasCommit as jest.Mock).mockImplementationOnce(async () => {
+        dentro.push(enLaTransaccion)
+      })
+
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+
+      expect(debeMarcarCocina).toHaveBeenCalledWith('v1', { orderId: 'ord-A' })
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(MARCA)
+      expect(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.order.updateMany.mock.invocationCallOrder[0],
+      )
+      expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord-A', 'ROUND')
+      expect(dentro).toEqual([true, false]) // la marca dentro de la transacción; el armado, ya fuera
+      // Los cobros con dinero que llegaron desde el cierre, bajo el mismo candado (los reembolsos son filas negativas).
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: {
+          venueId: 'v1',
+          orderId: 'ord-A',
+          status: 'COMPLETED',
+          amount: { gt: 0 },
+          OR: [{ createdAt: { gte: T } }, { updatedAt: { gte: T } }],
+        },
+      })
+    })
+
+    it('Codex r1 #2: DOS cobros llegaron después del cierre (otra caja pudo cobrar su parte después y subirla antes) ⇒ como hoy', async () => {
+      prismaMock.payment.count.mockResolvedValue(2)
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['la clienta lo canceló', 'CANCELLED_BY_CUSTOMER', 'CUSTOMER'],
+      ['el personal lo canceló', 'CANCELLED_BY_STAFF', 'cstaff00000000000000000001'],
+    ])('%s: T es su `cancelledAt` (fecha exacta del CAS)', async (_c, status, cancelledBy) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', status)] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), { status, cancelledAt: T, cancelledBy }) as any,
+      )
+      await syncPaidClosedFolios({}, () => NOW)
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(MARCA)
+      expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord-A', 'ROUND')
+    })
+
+    it.each([
+      ['«cancelado por otra vía» (la sincronización o la conciliación reescriben la hora)', { cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' }],
+      ['el sello sin quién (la conciliación lo pone al llegar el dinero)', { cancelledBy: null }],
+    ])('cobrado antes de un `cancelledAt` que NO es exacto: %s ⇒ como hoy', async (_c, quien) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', 'CANCELLED_BY_STAFF')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), { status: 'CANCELLED_BY_STAFF', cancelledAt: T, ...quien }) as any,
+      )
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('T es la MENOR de sus fechas exactas: cobrado después de rechazarse ⇒ como hoy', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', 'REJECTED')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), {
+          status: 'REJECTED',
+          rejectedAt: new Date(T.getTime() - 2 * 60_000),
+          cancelledAt: T,
+          cancelledBy: 'CUSTOMER',
+        }) as any,
+      )
+      await syncPaidClosedFolios({}, () => NOW)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['cobrado DESPUÉS de cerrarse (a los 45)', new Date(T.getTime() + 15 * 60_000)],
+      ['cobrado justo en T (no es anterior)', T],
+      ['sin hora del cobro (TPV, panel, cripto, o el aparato no la mandó)', null],
+      ['hora anterior a que existiera el folio (reloj del aparato sin hora)', new Date(T.getTime() - 60 * 60_000)],
+    ])('%s ⇒ como hoy: revive sin marca ni armado', async (_c, hora) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(hora as Date | null) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('sin pantalla de cocina (`debeMarcarCocina` dice que no) ⇒ revive sin marca ni armado', async () => {
+      ;(debeMarcarCocina as jest.Mock).mockResolvedValue(false)
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('si el CAS pierde (otro ya lo revivió) ⇒ ni marca ni armado: la comanda es de quien ganó', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(0)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+  })
 })
 
 /** Una cancelación no termina «Entregado» (si `syncCancelled` falló en la pasada). */

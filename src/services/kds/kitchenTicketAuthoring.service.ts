@@ -19,6 +19,7 @@ import { initialPreparation, parsePreparation, PREPARATION_VERSION, preparationT
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
+import { cobradoATiempoEnTx } from '../shared/cuentaCancelada'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
@@ -93,16 +94,28 @@ export async function authorKitchenTickets(params: {
     // Se relee DENTRO del candado: una anulación que ganó la carrera ya retiró sus comandas y no hay que revivirlas.
     const vigente = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { status: true, onlineOrder: { select: { requiresAcceptance: true, expiredAt: true, cancelledAt: true, rejectedAt: true } } },
+      select: {
+        status: true,
+        loyaltySaleAt: true,
+        onlineOrder: {
+          select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
+        },
+      },
     })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
     // 🔴 S9 v5 (B4, D3 «en duda, manda»): un folio «Nadie» que se anuló alguna vez (el sello de A0) sólo NO se arma si ningún renglón se
     // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
     // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).
     // Una edición después de T espera el candado de la orden que soltó la anulación; `@updatedAt` y T leen el mismo reloj (una instancia).
+    // Regla C (founder, 10-nov): si la caja lo cobró ANTES de la fecha exacta de su cierre (`cobradoATiempoEnTx`), no es dinero tardío:
+    // se arma como un folio pagado a tiempo, sin preguntar por renglones.
     const oo = vigente.onlineOrder
     const fechas = oo?.requiresAcceptance === false ? [oo.expiredAt, oo.cancelledAt, oo.rejectedAt].filter((d): d is Date => d != null) : []
-    if (fechas.length > 0) {
+    const aTiempo =
+      oo != null &&
+      fechas.length > 0 &&
+      (await cobradoATiempoEnTx(tx, { venueId, orderId, folio: oo, horaDelCobro: vigente.loyaltySaleAt }))
+    if (fechas.length > 0 && !aTiempo) {
       const desde = new Date(Math.min(...fechas.map(d => d.getTime())) - HOLGURA_DE_RELOJ_MS)
       const tocado = await tx.orderItem.findFirst({
         where: { orderId, OR: [{ createdAt: { gte: desde } }, { updatedAt: { gte: desde } }] }, // índice [orderId]
