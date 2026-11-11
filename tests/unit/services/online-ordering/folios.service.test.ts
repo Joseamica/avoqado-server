@@ -370,6 +370,8 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
   describe('regla C (founder, 10-nov): el folio cobrado en la caja ANTES de cerrarse llega a la cocina al revivir', () => {
     const T = new Date(NOW.getTime() - 10 * 60_000) // venció hace 10 min
     const MARCA = { where: { id: 'ord-A', venueId: 'v1' }, data: { kitchenPendingAt: NOW } }
+    // Un solo cobro llegó después del cierre: el que saldó y trae la hora.
+    beforeEach(() => prismaMock.payment.count.mockResolvedValue(1))
     const releido = (horaDelCobro: Date | null, cierre: Record<string, Date | string | null> = { expiredAt: T }) => ({
       id: 'oo-A',
       status: 'EXPIRED',
@@ -412,6 +414,19 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
       )
       expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord-A', 'ROUND')
       expect(dentro).toEqual([true, false]) // la marca dentro de la transacción; el armado, ya fuera
+      // Los cobros con dinero que llegaron desde el cierre, bajo el mismo candado (los reembolsos son filas negativas).
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: { venueId: 'v1', orderId: 'ord-A', status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: T } },
+      })
+    })
+
+    it('Codex r1 #2: DOS cobros llegaron después del cierre (otra caja pudo cobrar su parte después y subirla antes) ⇒ como hoy', async () => {
+      prismaMock.payment.count.mockResolvedValue(2)
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
     })
 
     it.each([

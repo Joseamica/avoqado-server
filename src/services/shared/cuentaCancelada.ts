@@ -311,7 +311,7 @@ async function conciliarPedidoEnLinea(
   // todavía por pagar pasa a «Por entregar» (`ACCEPTED`) aquí, sin marca de cocina (como hoy). Un folio CERRADO (vencido, cancelado o
   // rechazado) NO (S9, Codex r2): lo revive `syncPaidClosedFolios`, cada 30 s y al leer la bandeja o las listas, que publica después del
   // commit (evento en vivo, aviso a la clienta y bitácora `ONLINE_ORDER_ACCEPTED`) y no marca la cocina salvo que la caja lo haya cobrado
-  // antes de cerrarse (regla C, founder 10-nov: `cobradoAntesDeCerrar`); desde esta transacción nadie
+  // antes de cerrarse (regla C, founder 10-nov: `cobradoATiempoEnTx`); desde esta transacción nadie
   // publicaba. ACCEPTED, READY y COMPLETED se quedan como están: el dinero nunca lo entrega. El `where` de cada CAS repite de quién es
   // (R15), para que ninguna rama escriba el destino de la otra. No saldada ⇒ hay dinero en una cuenta cancelada que quedó viva otra vez:
   // si el pedido sigue ABIERTO (el panel canceló y nadie leyó la bandeja, Codex plan r2 #4) se cierra como lo cierra la bandeja al leer
@@ -525,16 +525,44 @@ export const CUENTA_SALDADA: Prisma.OrderWhereInput = {
  * el dinero si no había fecha) y el de «cancelado por otra vía» (`CANCELLED_ELSEWHERE`: la sincronización y la conciliación lo
  * reescriben con su propia hora). Con ellas el cobro siempre parecería anterior.
  */
-export function cobradoAntesDeCerrar(
-  folio: { createdAt: Date; expiredAt: Date | null; cancelledAt: Date | null; cancelledBy: string | null; rejectedAt: Date | null },
-  horaDelCobro: Date | null | undefined,
-): boolean {
-  if (!horaDelCobro) return false
+function cobradoAntesDeCerrar(folio: FolioConCierre, horaDelCobro: Date | null | undefined): boolean {
+  const t = cierreExacto(folio)
+  if (!horaDelCobro || t == null) return false
+  const hora = horaDelCobro.getTime()
+  return hora >= folio.createdAt.getTime() && hora < t
+}
+
+type FolioConCierre = {
+  createdAt: Date
+  expiredAt: Date | null
+  cancelledAt: Date | null
+  cancelledBy: string | null
+  rejectedAt: Date | null
+}
+
+/** La T de la regla C: la menor fecha EXACTA de cierre (ms), o `null` si no hay ninguna. */
+function cierreExacto(folio: FolioConCierre): number | null {
   const cancelacionExacta = folio.cancelledBy != null && folio.cancelledBy !== CANCELLED_ELSEWHERE ? folio.cancelledAt : null
   const cierres = [folio.expiredAt, cancelacionExacta, folio.rejectedAt].filter((d): d is Date => d != null)
-  if (cierres.length === 0) return false
-  const hora = horaDelCobro.getTime()
-  return hora >= folio.createdAt.getTime() && hora < Math.min(...cierres.map(d => d.getTime()))
+  return cierres.length > 0 ? Math.min(...cierres.map(d => d.getTime())) : null
+}
+
+/**
+ * 🔴 Regla C completa, bajo el candado de la orden de quien llama: `cobradoAntesDeCerrar` y, además, que el dinero que llegó después
+ * del cierre sea UN solo cobro: el que saldó la cuenta y trae la hora. Con dos o más (Codex r1 #2: otra caja pudo cobrar su parte
+ * DESPUÉS del cierre y subirla antes, y entonces la hora del que salda no es la de cuando quedó pagado), como hoy. Sólo consulta
+ * cuando la hora ya dice «antes» (índice `[orderId]` de `Payment`; los reembolsos son filas negativas y no cuentan).
+ */
+export async function cobradoATiempoEnTx(
+  tx: Pick<Prisma.TransactionClient, 'payment'>,
+  a: { venueId: string; orderId: string; folio: FolioConCierre; horaDelCobro: Date | null | undefined },
+): Promise<boolean> {
+  const t = cierreExacto(a.folio)
+  if (t == null || !cobradoAntesDeCerrar(a.folio, a.horaDelCobro)) return false
+  const tardios = await tx.payment.count({
+    where: { venueId: a.venueId, orderId: a.orderId, status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: new Date(t) } },
+  })
+  return tardios === 1
 }
 
 /**
@@ -547,12 +575,12 @@ export function cobradoAntesDeCerrar(
  * de la escritura, R52). S9 v5: revive SIN avisar; el aviso al gerente lo da la nota del cobro (`notarDineroEnFolioCerradoEnTx`). Una
  * cuenta que no es de folio, o un folio que no está cerrado, no se toca. Devuelve lo que revivió (para los avisos de después del commit)
  * o `null`.
- * Regla C (founder, 10-nov): si la caja lo cobró antes de cerrarse (`cobradoAntesDeCerrar`) y `marcarCocina` (hay pantalla), marca la
+ * Regla C (founder, 10-nov): si la caja lo cobró antes de cerrarse (`cobradoATiempoEnTx`) y `marcarCocina` (hay pantalla), marca la
  * cocina en esta misma transacción y devuelve `cocina: true` para que quien llama arme la comanda después del commit; el armado no la
  * suprime (S9 B4 la deja pasar con la misma regla). Si no, como hoy: revive sin cocina.
  */
 export async function revivirFolioSaldadoEnTx(
-  tx: Pick<Prisma.TransactionClient, 'onlineOrder' | 'order'>,
+  tx: Pick<Prisma.TransactionClient, 'onlineOrder' | 'order' | 'payment'>,
   a: { venueId: string; orderId: string; ahora: Date; marcarCocina?: boolean },
 ): Promise<{ onlineOrderId: string; estadoAnterior: OnlineOrderStatus; acceptedAt: Date; cocina: boolean } | null> {
   const pedido = await tx.onlineOrder.findFirst({
@@ -574,7 +602,9 @@ export async function revivirFolioSaldadoEnTx(
     data: { status: OnlineOrderStatus.ACCEPTED, acceptedAt: a.ahora },
   })
   if (cas.count !== 1) return null
-  const cocina = a.marcarCocina === true && cobradoAntesDeCerrar(pedido, pedido.order?.loyaltySaleAt)
+  const cocina =
+    a.marcarCocina === true &&
+    (await cobradoATiempoEnTx(tx, { venueId: a.venueId, orderId: a.orderId, folio: pedido, horaDelCobro: pedido.order?.loyaltySaleAt }))
   // La cuenta ya es saldada y viva (el CAS lo exigió bajo el candado): sólo la marca, que limpia el armado o el barrido.
   if (cocina) await tx.order.updateMany({ where: { id: a.orderId, venueId: a.venueId }, data: { kitchenPendingAt: a.ahora } })
   return { onlineOrderId: pedido.id, estadoAnterior: pedido.status, acceptedAt: a.ahora, cocina }

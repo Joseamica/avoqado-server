@@ -18,7 +18,7 @@ import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kit
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
-import { cobradoAntesDeCerrar } from '../shared/cuentaCancelada'
+import { cobradoATiempoEnTx } from '../shared/cuentaCancelada'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
@@ -106,11 +106,15 @@ export async function authorKitchenTickets(params: {
     // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
     // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).
     // Una edición después de T espera el candado de la orden que soltó la anulación; `@updatedAt` y T leen el mismo reloj (una instancia).
-    // Regla C (founder, 10-nov): si la caja lo cobró ANTES de la fecha exacta de su cierre (`cobradoAntesDeCerrar`), no es dinero tardío:
+    // Regla C (founder, 10-nov): si la caja lo cobró ANTES de la fecha exacta de su cierre (`cobradoATiempoEnTx`), no es dinero tardío:
     // se arma como un folio pagado a tiempo, sin preguntar por renglones.
     const oo = vigente.onlineOrder
     const fechas = oo?.requiresAcceptance === false ? [oo.expiredAt, oo.cancelledAt, oo.rejectedAt].filter((d): d is Date => d != null) : []
-    if (oo && fechas.length > 0 && !cobradoAntesDeCerrar(oo, vigente.loyaltySaleAt)) {
+    const aTiempo =
+      oo != null &&
+      fechas.length > 0 &&
+      (await cobradoATiempoEnTx(tx, { venueId, orderId, folio: oo, horaDelCobro: vigente.loyaltySaleAt }))
+    if (fechas.length > 0 && !aTiempo) {
       const desde = new Date(Math.min(...fechas.map(d => d.getTime())) - HOLGURA_DE_RELOJ_MS)
       const tocado = await tx.orderItem.findFirst({
         where: { orderId, OR: [{ createdAt: { gte: desde } }, { updatedAt: { gte: desde } }] }, // índice [orderId]

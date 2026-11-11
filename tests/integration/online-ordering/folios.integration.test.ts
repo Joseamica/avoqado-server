@@ -729,7 +729,7 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
   })
 
   // ── Regla C (founder, 10-nov): la cajera cobró el folio sin red ANTES de que venciera; el dinero sube después ─────────────
-  describe('K12–K16 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
+  describe('K12–K17 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
     const MIN = 60_000
     /** Un folio pedido hace 40 min, con sus renglones de entonces (nadie los vuelve a tocar). */
     async function folioDeHace40() {
@@ -819,6 +819,20 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
       await cerrarCanceladasReleyendo({ venueId: f.venueId }, () => new Date())
       expect(await pedido(onlineOrderId)).toMatchObject({ status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' })
       await colaSinRed(orderId, CIEN, antesDeAnular)
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K17 (Codex r1 #2): la caja B cobra su mitad DESPUÉS de vencer y sube primero; la A cobró la otra mitad antes y sube después ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() + 1_000)) // B: después del cierre
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN)) // A: antes, pero es la que salda
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+      expect((await cuenta(orderId)).loyaltySaleAt!.getTime()).toBeLessThan((await pedido(onlineOrderId)).expiredAt!.getTime())
 
       await pasada()
       await porEntregar(onlineOrderId)

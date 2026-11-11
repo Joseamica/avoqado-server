@@ -48,7 +48,7 @@ type Folio = {
   cancelledBy?: string | null
   rejectedAt?: Date | null
 } | null
-function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobro?: Date | null } = {}) {
+function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobro?: Date | null; tardios?: number } = {}) {
   const folio = o.folio === undefined ? { requiresAcceptance: false, expiredAt: T } : o.folio
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async () => [{ id: ORDER }])
@@ -82,6 +82,7 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobr
   prismaMock.orderItem.findMany.mockResolvedValueOnce([RENGLON] as any).mockResolvedValue([])
   prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+  prismaMock.payment.count.mockResolvedValue(o.tardios ?? 1) // regla C: los cobros que llegaron desde el cierre
 }
 const tocadoLeido = () => prismaMock.orderItem.findFirst.mock.calls.map((c: any[]) => c[0]).find((a: any) => a.where.OR)
 
@@ -163,6 +164,16 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
     await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'ROUND' })).resolves.toEqual({ ticketIds: [] })
     expect(planKitchenTickets).not.toHaveBeenCalled()
     expect(tocadoLeido()).toBeDefined()
+  })
+
+  it('regla C (Codex r1 #2): cobrado antes de T, pero DOS cobros llegaron desde el cierre ⇒ la supresión de B4 sigue', async () => {
+    prismaMock.orderItem.findFirst.mockReset()
+    base({ horaDelCobro: new Date('2026-11-10T11:55:00.000Z'), tardios: 2 })
+    await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })).resolves.toEqual({ ticketIds: [] })
+    expect(planKitchenTickets).not.toHaveBeenCalled()
+    expect(prismaMock.payment.count).toHaveBeenCalledWith({
+      where: { venueId: VENUE, orderId: ORDER, status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: T } },
+    })
   })
 
   it('la relectura bajo el candado trae la hora del cobro y la creación del folio (una consulta, sin otra lectura)', async () => {
