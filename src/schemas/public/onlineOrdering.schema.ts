@@ -61,7 +61,19 @@ const items = z.array(cartItem).min(1, 'Agrega al menos un platillo').max(MAX_CA
 
 export const publicVenueSchema = z.object({ params: slugParams })
 
-export const quoteSchema = z.object({ params: slugParams, body: z.object({ items }) })
+/** S10 (P2-4): lo que la clienta eligió usar; sólo cuenta con sesión. La forma aquí; si está disponible lo decide el servicio. */
+const beneficios = z.object({
+  premioId: safeId('Premio inválido').optional(),
+  puntos: z
+    .number()
+    .int('Los puntos deben ser un número entero')
+    .min(1, 'Elige al menos 1 punto')
+    .max(100_000_000, 'Demasiados puntos')
+    .optional(),
+  cupon: sinControl(CONTROL, z.string().trim().min(1, 'Escribe tu cupón').max(50, 'Cupón demasiado largo')).optional(),
+})
+
+export const quoteSchema = z.object({ params: slugParams, body: z.object({ items, beneficios: beneficios.optional() }) })
 
 export const createOrderSchema = z.object({
   params: slugParams,
@@ -81,6 +93,8 @@ export const createOrderSchema = z.object({
       whatsappConsent: z.boolean().optional(),
       // Tienda híbrida: por dónde llegó la clienta (el QR de «Compartir tu tienda» lleva `?canal=qr`), sólo para medir.
       channel: z.enum(['QR', 'LINK'], { errorMap: () => ({ message: 'Canal inválido' }) }).optional(),
+      // S11 (P2-4): lo que eligió usar, la MISMA forma que al cotizar; sólo cuenta con sesión (lo decide el servicio).
+      beneficios: beneficios.optional(),
     })
     .superRefine((b, ctx) => {
       if (b.paymentMode === 'CARD_ONLINE' && !b.customer.phone) {

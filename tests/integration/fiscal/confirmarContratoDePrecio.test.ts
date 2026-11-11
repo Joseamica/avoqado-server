@@ -18,30 +18,22 @@ import { confirmPriceContractSchema } from '@/schemas/dashboard/cfdi.schema'
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-/**
- * Espera, con tope, a que PostgreSQL MUESTRE el UPDATE de la confirmación esperando un candado que tiene el racer
- * (`pg_blocking_pids` del proceso bloqueado contiene el PID del racer, y su consulta es el UPDATE de "Order").
- *
- * 🔴 Codex (B3b, código r1, P2 #3): antes había `delay(75)` + «la promesa sigue pendiente». Eso también es cierto si
- * la confirmación todavía esperaba conexión y NO había leído la orden: el racer hacía COMMIT antes de esa lectura, la
- * comparación previa de la huella devolvía CAMBIO_DESDE_LA_VISTA y la carrera quedaba verde aunque faltara la igualdad
- * del WHERE que decía probar (reproducido: sin `total` en el WHERE y la confirmación 300 ms tarde, la fila pasaba).
- * Sólo con el UPDATE bloqueado por el racer el COMMIT obliga a Postgres a re-evaluar el WHERE.
- */
-async function esperarConfirmacionBloqueadaPor(racerPid: number, topeMs = 20_000): Promise<void> {
+/** R11: observa el candado COBRO real ANTES de la foto; el CAS ancho se prueba aparte con inyección intratx. */
+async function esperarConfirmacionBloqueadaPor(racerPid: number, topeMs = 5_000): Promise<void> {
   const limite = Date.now() + topeMs
   while (Date.now() < limite) {
     const bloqueados = await prisma.$queryRawUnsafe<Array<{ pid: number }>>(
       `SELECT pid FROM pg_stat_activity
         WHERE $1::int = ANY(pg_blocking_pids(pid))
           AND wait_event_type = 'Lock'
-          AND query ILIKE 'UPDATE %"Order"%'`,
+          AND query LIKE '%WITH RECURSIVE input AS (%'
+          AND query LIKE '%"Order"%'`,
       racerPid,
     )
     if (bloqueados.length > 0) return
     await delay(10)
   }
-  throw new Error(`La confirmación nunca quedó bloqueada por el racer (pid ${racerPid}): la carrera no probaría el WHERE.`)
+  throw new Error(`La confirmación no mostró su candado COBRO esperando al racer (pid ${racerPid}).`)
 }
 
 describe('confirmarContratoDePrecio (integración)', () => {
@@ -120,6 +112,74 @@ describe('confirmarContratoDePrecio (integración)', () => {
 
   async function logDe(orderId: string) {
     return prisma.activityLog.findMany({ where: { action: 'ORDER_PRICE_CONTRACT_CONFIRMED', entityId: orderId } })
+  }
+
+  type Confirmacion = Awaited<ReturnType<typeof confirmarContratoIvaIncluido>>
+  type Vista = NonNullable<Awaited<ReturnType<typeof vistaPreviaContrato>>>
+  // Constructor nativo de Node; el proyecto compila con target ES2020.
+  const NativeAggregateError = (
+    globalThis as unknown as {
+      AggregateError: new (errors: unknown[], message: string) => Error
+    }
+  ).AggregateError
+
+  async function carreraExternaDeConfirmacion(vista: Vista, sql: string): Promise<PromiseSettledResult<Confirmacion>> {
+    const racer = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    let conectado = false,
+      abierta = false,
+      fallo: unknown,
+      huboFallo = false
+    let participante: Promise<PromiseSettledResult<Confirmacion>> | undefined
+    let resuelta = false
+    let resultado: PromiseSettledResult<Confirmacion> | undefined
+    const secundarios: unknown[] = []
+    try {
+      await racer.connect()
+      conectado = true
+      const racerPid = (await racer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await racer.query('BEGIN')
+      abierta = true
+      await racer.query(sql, [vista.orderId])
+      // Captura desde el nacimiento; el rechazo se afirma por el caller o se propaga junto al fallo de la barrera.
+      participante = confirmarContratoIvaIncluido({
+        venueId,
+        orderId: vista.orderId,
+        versionVista: vista.version,
+        huellaVista: vista.huella,
+        staffId,
+        motivo: 'carrera externa real',
+      }).then(
+        value => {
+          resuelta = true
+          return { status: 'fulfilled' as const, value }
+        },
+        reason => {
+          resuelta = true
+          return { status: 'rejected' as const, reason }
+        },
+      )
+      await esperarConfirmacionBloqueadaPor(racerPid)
+      expect(resuelta).toBe(false)
+      await racer.query('COMMIT')
+      abierta = false
+      resultado = await participante
+    } catch (error) {
+      huboFallo = true
+      fallo = error
+    } finally {
+      const liberacion = abierta ? await Promise.allSettled([racer.query('ROLLBACK')]) : []
+      const participantes = await Promise.allSettled(participante ? [participante] : [])
+      const cierre = conectado ? await Promise.allSettled([racer.end()]) : []
+      secundarios.push(...[...liberacion, ...cierre].flatMap(r => (r.status === 'rejected' ? [r.reason] : [])))
+      for (const r of participantes) {
+        if (r.status === 'rejected') secundarios.push(r.reason)
+        else if (huboFallo && r.value.status === 'rejected') secundarios.push(r.value.reason)
+      }
+    }
+    if (secundarios.length)
+      throw new NativeAggregateError([...(huboFallo ? [fallo] : []), ...secundarios], 'Carrera fiscal: fallo y participantes recogidos')
+    if (huboFallo) throw fallo
+    return resultado!
   }
 
   it('1. DESCONOCIDO + taxAmount 0 + source TPV ⇒ confirmable; confirmar sube la versión y deja rastro de auditoría', async () => {
@@ -307,24 +367,23 @@ describe('confirmarContratoDePrecio (integración)', () => {
   })
 
   // ─── F3: una venta cancelada o borrada nunca se confirma ───────────────────────────────────
-  it('9. (F3) orden CANCELLED ⇒ NO_CONFIRMABLE, «Esta venta está cancelada; no se factura.»', async () => {
-    const orden = await nuevaOrden({ status: 'CANCELLED' })
-
+  it.each(['CANCELLED', 'DELETED'] as const)('9. (F3) orden %s: vista no confirmable y edición rechazada sin escritura', async status => {
+    const orden = await nuevaOrden({ status })
     const preview = await vistaPreviaContrato(venueId, orden.id)
-    expect(preview!.confirmable).toBe(false)
-    expect(preview!.motivo).toBe('Esta venta está cancelada; no se factura.')
-    expect(preview!.status).toBe('CANCELLED')
-
-    const r = await confirmarContratoIvaIncluido({
-      venueId,
-      orderId: orden.id,
-      versionVista: preview!.version,
-      huellaVista: preview!.huella,
-      staffId,
-      motivo: 'motivo',
-    })
-    expect(r).toMatchObject({ ok: false, code: 'NO_CONFIRMABLE', message: 'Esta venta está cancelada; no se factura.' })
-    expect(await ordenActual(orden.id)).toMatchObject({ contratoDePrecio: 'DESCONOCIDO' })
+    expect(preview).toMatchObject({ confirmable: false, status, motivo: 'Esta venta está cancelada; no se factura.' })
+    const antes = await ordenActual(orden.id)
+    await expect(
+      confirmarContratoIvaIncluido({
+        venueId,
+        orderId: orden.id,
+        versionVista: preview!.version,
+        huellaVista: preview!.huella,
+        staffId,
+        motivo: 'motivo',
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' })
+    expect(await ordenActual(orden.id)).toEqual(antes)
+    expect(await logDe(orden.id)).toHaveLength(0)
   })
 
   // ─── F3: la vista previa nunca dice «cobrada» de una venta que no se ha cobrado ────────────
@@ -382,60 +441,19 @@ describe('confirmarContratoDePrecio (integración)', () => {
     })
   })
 
-  // ─── F2 (TOCTOU): el CAS se re-comprueba contra el dato COMMITEADO, no contra el que se leyó ──
-  //
-  // Reproduce con una carrera de Postgres REAL (no un mock): un segundo cliente toma el candado
-  // de la fila ANTES de arrancar la confirmación, así que el SELECT de `confirmarContratoIvaIncluido`
-  // lee taxAmount=0 (todavía no comprometido el cambio) y decide "confirmable", pero su propio
-  // UPDATE se queda BLOQUEADO esperando el candado — exactamente la ventana entre la vista previa
-  // y el CAS que el motor de descuentos viejo (que no toca `version`) puede colar un taxAmount
-  // distinto de cero. Al soltar el candado, Postgres vuelve a evaluar el WHERE del UPDATE contra
-  // el dato YA comprometido (EvalPlanQual bajo READ COMMITTED): si el WHERE no incluye taxAmount,
-  // el viejo CAS lo deja pasar de todas formas.
-  it('13. (F2) el motor de descuentos cambia taxAmount SIN tocar version, exactamente entre la lectura y el CAS ⇒ no confirma', async () => {
-    const orden = await nuevaOrden({})
-    const preview = await vistaPreviaContrato(venueId, orden.id)
-    expect(preview!.confirmable).toBe(true)
-
-    const racer = new Client({ connectionString: process.env.TEST_DATABASE_URL })
-    await racer.connect()
-    let confirmSettled = false
-    try {
-      const racerPid = (await racer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
-      await racer.query('BEGIN')
-      // Toma el candado de la fila y deja taxAmount=16 SIN COMMITEAR — y sin tocar `version`,
-      // que es justo el bug del motor de descuentos viejo (F1).
-      await racer.query('UPDATE "Order" SET "taxAmount" = 16 WHERE id = $1', [orden.id])
-
-      const confirmPromise = confirmarContratoIvaIncluido({
-        venueId,
-        orderId: orden.id,
-        versionVista: preview!.version,
-        huellaVista: preview!.huella,
-        staffId,
-        motivo: 'motivo',
-      }).finally(() => {
-        confirmSettled = true
-      })
-
-      // La confirmación de verdad está BLOQUEADA esperando el candado de la fila — lo dice Postgres, no un reloj.
-      // Si esto no fuera cierto, la carrera no estaría probando nada.
-      await esperarConfirmacionBloqueadaPor(racerPid)
-      expect(confirmSettled).toBe(false)
-
-      // Suelta el candado: taxAmount=16 pasa a ser el valor COMMITEADO justo cuando el UPDATE
-      // de la confirmación por fin se ejecuta.
-      await racer.query('COMMIT')
-
-      const r = await confirmPromise
-      expect(r.ok).toBe(false)
-      expect((r as { code: string }).code).toBe('CAMBIO_DESDE_LA_VISTA')
-    } finally {
-      await racer.end()
-    }
-
-    const row = await ordenActual(orden.id)
-    expect(row.contratoDePrecio).toBe('DESCONOCIDO')
+  // R2: la espera externa termina ANTES de la lectura; no se presenta esta carrera como prueba del WHERE.
+  it('13. (F2) impuesto16 comprometido mientras espera COBRO se relee y no permite confirmar', async () => {
+    const orden = await nuevaOrden({}),
+      vista = await vistaPreviaContrato(venueId, orden.id)
+    expect(vista!.confirmable).toBe(true)
+    const r = await carreraExternaDeConfirmacion(vista!, 'UPDATE "Order" SET "taxAmount" = 16 WHERE id = $1')
+    if (r.status === 'rejected') throw r.reason
+    expect(r.value).toMatchObject({ ok: false, code: 'NO_CONFIRMABLE' })
+    expect(await ordenActual(orden.id)).toMatchObject({
+      contratoDePrecio: 'DESCONOCIDO',
+      taxAmount: new Prisma.Decimal(16),
+      version: orden.version,
+    })
     expect(await logDe(orden.id)).toHaveLength(0)
   })
 
@@ -594,12 +612,8 @@ describe('confirmarContratoDePrecio (integración)', () => {
 
   // ─── B3b, Tarea 2: la carrera REAL de Postgres, un campo a la vez ──────────────────────────
   //
-  // El `it.each` de arriba lo atrapa la comparación PREVIA de la huella. Ésta prueba las
-  // igualdades del WHERE: el escritor toma el candado de la fila y cambia un campo SIN commitear
-  // (y sin subir `version`), así que la confirmación LEE la fila sin el cambio — la huella
-  // coincide — y su UPDATE se bloquea. Al hacer COMMIT, Postgres vuelve a evaluar el WHERE
-  // contra el dato ya comprometido (EvalPlanQual bajo READ COMMITTED): sin la igualdad de ESE
-  // campo en el WHERE, la confirmación pasaría. Mismo arnés que el caso 13.
+  // Aquí se observa la espera externa y la relectura de la huella. La igualdad del CAS se comprueba aparte,
+  // con una foto conservada y una mutación controlada dentro de la transacción real.
   const CARRERAS: Array<[string, string]> = [
     ['discountAmount', 'UPDATE "Order" SET "discountAmount" = 10 WHERE id = $1'],
     ['total', 'UPDATE "Order" SET "total" = 90 WHERE id = $1'],
@@ -607,53 +621,115 @@ describe('confirmarContratoDePrecio (integración)', () => {
     ['paymentStatus', `UPDATE "Order" SET "paymentStatus" = 'PARTIAL' WHERE id = $1`],
     ['orderNumber', 'UPDATE "Order" SET "orderNumber" = "orderNumber" || \'-x\' WHERE id = $1'],
     ['createdAt', `UPDATE "Order" SET "createdAt" = "createdAt" - interval '1 day' WHERE id = $1`],
-    // Un estado NO terminal (PENDING → COMPLETED, como lo escribe el editor del dashboard sin subir `version`): el
-    // filtro viejo `status notIn [CANCELLED, DELETED]` lo dejaba pasar; sólo la igualdad `status: o.status` lo atrapa.
+    // Ambos estados se reutilizan en CAS_MUTACIONES: la igualdad de status protege también el cambio no terminal,
+    // que un filtro sólo notIn [CANCELLED, DELETED] dejaría pasar.
     ['status', `UPDATE "Order" SET "status" = 'COMPLETED' WHERE id = $1`],
     ['status a cancelada', `UPDATE "Order" SET "status" = 'CANCELLED' WHERE id = $1`],
   ]
 
-  it.each(CARRERAS)('carrera real: otro escritor cambia %s entre la lectura y el UPDATE ⇒ no confirma', async (_campo, sql) => {
-    const orden = await nuevaOrden({})
-    const vista = await vistaPreviaContrato(venueId, orden.id)
+  it.each(CARRERAS)('carrera externa real: otro escritor cambia %s mientras espera COBRO ⇒ no confirma', async (campo, sql) => {
+    const orden = await nuevaOrden({}),
+      vista = await vistaPreviaContrato(venueId, orden.id)
     expect(vista!.confirmable).toBe(true)
-
-    const racer = new Client({ connectionString: process.env.TEST_DATABASE_URL })
-    await racer.connect()
-    let confirmSettled = false
-    try {
-      const racerPid = (await racer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
-      await racer.query('BEGIN')
-      // Toma el candado de la fila y deja el cambio SIN COMMITEAR, sin tocar `version`.
-      await racer.query(sql, [orden.id])
-
-      const confirmPromise = confirmarContratoIvaIncluido({
-        venueId,
-        orderId: orden.id,
-        versionVista: vista!.version,
-        huellaVista: vista!.huella,
-        staffId,
-        motivo: 'motivo',
-      }).finally(() => {
-        confirmSettled = true
-      })
-
-      // Codex B3b r1 P2 #3: Postgres tiene que MOSTRAR el UPDATE de la confirmación esperando el candado del racer
-      // (la lectura ya pasó, con la huella intacta). Sólo entonces el COMMIT prueba la igualdad del WHERE.
-      await esperarConfirmacionBloqueadaPor(racerPid)
-      expect(confirmSettled).toBe(false)
-
-      await racer.query('COMMIT')
-
-      const r = await confirmPromise
-      expect(r).toMatchObject({ ok: false, code: 'CAMBIO_DESDE_LA_VISTA' })
-    } finally {
-      await racer.end()
+    const r = await carreraExternaDeConfirmacion(vista!, sql)
+    if (campo === 'status a cancelada')
+      expect(r).toMatchObject({ status: 'rejected', reason: { statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' } })
+    else {
+      if (r.status === 'rejected') throw r.reason
+      expect(r.value).toMatchObject({ ok: false, code: 'CAMBIO_DESDE_LA_VISTA' })
     }
-
-    expect((await ordenActual(orden.id)).contratoDePrecio).toBe('DESCONOCIDO')
+    const despues = await ordenActual(orden.id)
+    expect(despues.contratoDePrecio).toBe('DESCONOCIDO')
+    const key = campo.startsWith('status') ? 'status' : campo
+    expect(despues[key as keyof typeof despues]).not.toEqual(orden[key as keyof typeof orden])
+    expect(despues.version).toBe(orden.version)
     expect(await logDe(orden.id)).toHaveLength(0)
   })
+
+  // R11: inyección controlada INTRATX, no carrera externa ni resultados SQL simulados.
+  const CAS_MUTACIONES: Array<[string, string, string]> = [
+    ['taxAmount', 'taxAmount', 'UPDATE "Order" SET "taxAmount" = 16 WHERE id = $1'],
+    ...CARRERAS.map(([campo, sql]) => [campo, campo.startsWith('status') ? 'status' : campo, sql] as [string, string, string]),
+    ['version', 'version', 'UPDATE "Order" SET version = version + 1 WHERE id = $1'],
+    ['source', 'source', `UPDATE "Order" SET source = 'POS' WHERE id = $1`],
+    ['contratoDePrecio', 'contratoDePrecio', `UPDATE "Order" SET "contratoDePrecio" = 'IVA_APARTE' WHERE id = $1`],
+  ]
+  it.each(CAS_MUTACIONES.flatMap(([campo, predicado, sql]) => [false, true].map(omitir => ({ campo, predicado, sql, omitir }))))(
+    'CAS real intratx $campo; omitir sólo su predicado=$omitir discrimina la protección',
+    async ({ predicado, sql, omitir }) => {
+      const orden = await nuevaOrden({}),
+        vista = await vistaPreviaContrato(venueId, orden.id)
+      let inyectada = false,
+        count: number | undefined,
+        esperada: Awaited<ReturnType<typeof ordenActual>> | undefined
+      const transaccion = prisma.$transaction.bind(prisma)
+      const espia = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((callback: any, options: any) =>
+        transaccion(async tx => {
+          const proxyOrden = new Proxy(tx.order, {
+            get(delegate, key) {
+              if (key === 'findFirst')
+                return async (args: Prisma.OrderFindFirstArgs) => {
+                  const foto = await delegate.findFirst(args)
+                  if (!inyectada && args.where?.id === orden.id && args.select?.contratoDePrecio) {
+                    await tx.$executeRawUnsafe(sql, orden.id)
+                    esperada = await tx.order.findUniqueOrThrow({ where: { id: orden.id } })
+                    inyectada = true
+                  }
+                  return foto
+                }
+              if (key === 'updateMany')
+                return async (args: Prisma.OrderUpdateManyArgs) => {
+                  const where = { ...args.where }
+                  if (omitir) delete (where as Record<string, unknown>)[predicado]
+                  const r = await delegate.updateMany({ ...args, where })
+                  count = r.count
+                  return r
+                }
+              const value = Reflect.get(delegate, key)
+              return typeof value === 'function' ? value.bind(delegate) : value
+            },
+          })
+          const proxy = new Proxy(tx, {
+            get(target, key) {
+              if (key === 'order') return proxyOrden
+              const value = Reflect.get(target, key)
+              return typeof value === 'function' ? value.bind(target) : value
+            },
+          })
+          return callback(proxy)
+        }, options)) as any)
+      let r: Confirmacion
+      try {
+        r = await confirmarContratoIvaIncluido({
+          venueId,
+          orderId: orden.id,
+          versionVista: vista!.version,
+          huellaVista: vista!.huella,
+          staffId,
+          motivo: 'inyección CAS real intratx',
+        })
+      } finally {
+        espia.mockRestore()
+      }
+      expect(inyectada).toBe(true)
+      expect(count).toBe(omitir ? 1 : 0)
+      const despues = await ordenActual(orden.id)
+      if (omitir) {
+        expect(r!).toEqual({ ok: true })
+        expect(despues).toEqual({
+          ...esperada!,
+          contratoDePrecio: 'IVA_INCLUIDO',
+          version: esperada!.version + 1,
+          updatedAt: expect.any(Date),
+        })
+        expect(await logDe(orden.id)).toHaveLength(1)
+      } else {
+        expect(r!).toMatchObject({ ok: false, code: 'CAMBIO_DESDE_LA_VISTA' })
+        expect(despues).toEqual(esperada)
+        expect(await logDe(orden.id)).toHaveLength(0)
+      }
+    },
+  )
 
   it('caso Mavericks: venta de $6,040 con $2,958 de descuento ⇒ confirmar con la huella deja IVA_INCLUIDO y ya no es confirmable', async () => {
     const orden = await prisma.order.create({

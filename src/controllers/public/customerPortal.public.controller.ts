@@ -4,6 +4,8 @@ import { NotFoundError } from '../../errors/AppError'
 import type { CustomerAuthContext } from '../../middlewares/customerAuth.middleware'
 import prisma from '../../utils/prismaClient'
 import { computeBookingAccess, withBookingAccess } from '../../services/public/bookingAccess.service'
+import { guardarTarjetaEnMiCuenta } from '../../services/giftCards/giftCardClaim.service'
+import { ipDelCliente } from '../../utils/clientIp'
 
 async function resolveVenueBySlug(venueSlug: string) {
   const venue = await prisma.venue.findFirst({
@@ -50,9 +52,11 @@ export async function login(req: Request, res: Response, next: NextFunction) {
  */
 export async function getPortal(req: Request, res: Response, next: NextFunction) {
   try {
-    const { customerId, venueId } = (req as any).customerAuth as CustomerAuthContext
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    const { customerId, venueId } = auth
 
-    const result = await customerPortalService.getCustomerPortal(venueId, customerId)
+    // S7: las reservas de invitada dependen de los contactos que probó ESTA sesión.
+    const result = await customerPortalService.getCustomerPortal(venueId, customerId, auth)
 
     const bookingAccess = await computeBookingAccess(venueId, customerId)
     res.json({ ...result, ...withBookingAccess(bookingAccess) })
@@ -77,6 +81,78 @@ export async function updateProfile(req: Request, res: Response, next: NextFunct
     })
 
     res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /public/venues/:venueSlug/customer/phone/request — S8: pide el código al número NUEVO.
+ */
+export async function requestPhoneChange(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.pedirCambioDeTelefono(auth.venueId, auth, req.body.phone, req.ip))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /public/venues/:venueSlug/customer/phone/verify — S8: confirma el código; responde la sesión nueva.
+ */
+export async function verifyPhoneChange(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.confirmarCambioDeTelefono(auth.venueId, auth, req.body.phone, req.body.code))
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ---- S13 (P2-6): «Mi cuenta» por páginas y «Guardar en mi cuenta» ----
+
+/** `?cursor=&limit=` ya validados por la ruta; el tamaño lo recorta el servicio (1 a 50). */
+const pedirPagina = (req: Request) => ({
+  cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+  limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
+})
+
+/** GET /public/venues/:venueSlug/customer/orders — sus pedidos en línea, por páginas. */
+export async function listMyOrders(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { customerId, venueId } = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.listarMisPedidos(venueId, customerId, pedirPagina(req)))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /public/venues/:venueSlug/customer/gift-cards — las tarjetas que ella guardó, por páginas (código sólo con contacto probado). */
+export async function listMyGiftCards(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.listarMisTarjetas(auth.venueId, auth.customerId, auth, pedirPagina(req)))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /public/venues/:venueSlug/customer/discounts — sus descuentos vigentes (asignados y de su grupo), por páginas. */
+export async function listMyDiscounts(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { customerId, venueId } = (req as any).customerAuth as CustomerAuthContext
+    res.json(await customerPortalService.listarMisDescuentos(venueId, customerId, pedirPagina(req)))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /public/venues/:venueSlug/customer/gift-cards/claim — «Guardar en mi cuenta» con el código de la tarjeta. */
+export async function claimGiftCard(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    res.json(await guardarTarjetaEnMiCuenta(auth.venueId, auth, req.body.code, { ip: ipDelCliente(req) ?? null }))
   } catch (error) {
     next(error)
   }

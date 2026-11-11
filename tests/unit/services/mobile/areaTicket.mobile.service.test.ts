@@ -316,10 +316,22 @@ describe('vales por área — claim de la caja (§5.4)', () => {
   it('una segunda caja NO puede robar un claim VIVO de otra', async () => {
     mockAreaTerminal({ id: 'terminal-caja-2', fulfillmentAreaId: null })
     prismaMock.order.findUnique.mockResolvedValue(ticketRow({ claimedByTerminalId: 'terminal-caja-1', claimedAt: new Date() }))
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue(ticketRow({ claimedByTerminalId: 'terminal-caja-1', claimedAt: new Date() }))
 
     await expect(claimAreaTicket(VENUE, CODE, { deviceUid: DEVICE, staffId: 'staff-1' })).rejects.toMatchObject({
       code: 'AREA_TICKET_CLAIMED_BY_OTHER',
     })
+  })
+
+  it.each(['CANCELLED', 'DELETED'])('reclamar %s se rechaza bajo candado y no cambia el claim', async _status => {
+    mockAreaTerminal({ id: 'terminal-caja', fulfillmentAreaId: null })
+    prismaMock.order.findUnique.mockResolvedValue(ticketRow())
+    prismaMock.order.count.mockResolvedValueOnce(1)
+    await expect(claimAreaTicket(VENUE, CODE, { deviceUid: DEVICE, staffId: 'staff-1' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_EDIT',
+    })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
   })
 
   it('reclamar dos veces desde la MISMA caja renueva el claim (idempotente)', async () => {
@@ -674,11 +686,12 @@ describe('area tickets — addAreaTicketItems decides on the locked Order (Plan 
     const model = (...names: string[]) => Object.fromEntries(names.map(name => [name, jest.fn()]))
     tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }]),
-      order: model('findFirstOrThrow', 'findUniqueOrThrow', 'updateMany', 'update'),
+      order: model('count', 'findFirstOrThrow', 'findUniqueOrThrow', 'updateMany', 'update'),
       orderItem: model('create', 'findMany'),
       orderDiscount: model('findMany'),
     }
     // The locked read (the photo that decides) and the response read are different calls.
+    tx.order.count.mockResolvedValue(0)
     tx.order.findFirstOrThrow.mockResolvedValue(locked())
     tx.order.findUniqueOrThrow.mockResolvedValue(ticketRow())
     tx.order.updateMany.mockResolvedValue({ count: 1 })
@@ -743,11 +756,12 @@ describe('area tickets — addAreaTicketItems decides on the locked Order (Plan 
       'AREA_TICKET_CLAIMED_BY_OTHER',
       'La caja está cobrando esta cuenta. Espera a que termine.',
     ],
-    ['a cancellation', { status: 'CANCELLED' }, 'AREA_TICKET_CANCELLED', 'Esta cuenta fue cancelada.'],
+    ['a cancellation', { status: 'CANCELLED' }, 'ORDER_CANCELLED_NO_EDIT', 'Esta cuenta está cancelada, abre una nueva.'],
   ])('%s seen only by the locked read is rejected and no line or total is written', async (_case, change, code, message) => {
     tx.order.findFirstOrThrow.mockResolvedValue(locked(change))
+    tx.order.count.mockResolvedValue(code === 'ORDER_CANCELLED_NO_EDIT' ? 1 : 0)
 
-    await expect(add()).rejects.toMatchObject({ code, message, statusCode: 409 })
+    await expect(add()).rejects.toMatchObject({ code, message, statusCode: code === 'ORDER_CANCELLED_NO_EDIT' ? 400 : 409 })
 
     expect(committed).toBe(false)
     expect(tx.orderItem.create).not.toHaveBeenCalled()

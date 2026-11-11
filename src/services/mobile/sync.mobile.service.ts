@@ -46,6 +46,7 @@ import * as orderMobileService from './order.mobile.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 
@@ -1508,6 +1509,7 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    createdAtLocal: clampSoldAt(intent.createdAtLocal, new Date()).getTime(),
     // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
     ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
     ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),
@@ -1895,7 +1897,6 @@ function invalid(intent: SyncIntentInput, message: string): SyncIntentAck {
  * cobros encolados detrás de ella. El servidor la conoce ANTES que las apps (orden de despliegue: backend primero);
  * Android e iOS la agregan en sus fases 3.4 y 3.5.
  */
-const FOLIO_VALIDO = /^(sale|round|order):\S{1,200}$/
 
 async function applyKdsTicketMark(venueId: string, intent: SyncIntentInput): Promise<SyncIntentAck> {
   const p = intent.payload ?? {}

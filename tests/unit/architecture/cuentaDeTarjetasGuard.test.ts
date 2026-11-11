@@ -37,7 +37,8 @@ const SITIOS_MEDIDOS = [
   'services/tpv/order.tpv.service.ts#applyDiscount',
   'services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
   'services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
-  'services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts',
+  // S10: el cuerpo de applyAutomaticDiscounts se extrajo, con sus dos guardias, a aplicarDescuentosDelMotorEnTx.
+  'services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx',
   'services/dashboard/discountEngine.service.ts#applyManualDiscount',
   'services/promotions/promotion.service.ts#applyPromotionInTransaction',
   'services/promotions/promotion.service.ts#removePromotionFromOrder',

@@ -139,7 +139,18 @@ describe('listInbox', () => {
 
   it('inbox items: un renglón sin producto (borrado o libre) da productId y categoryId null', async () => {
     const z: any = row('Z', 'ACCEPTED')
-    z.order.items = [{ productName: 'Libre', productId: null, product: null, quantity: 1, notes: null, unitPrice: new Prisma.Decimal('5'), total: new Prisma.Decimal('5'), modifiers: [] }]
+    z.order.items = [
+      {
+        productName: 'Libre',
+        productId: null,
+        product: null,
+        quantity: 1,
+        notes: null,
+        unitPrice: new Prisma.Decimal('5'),
+        total: new Prisma.Decimal('5'),
+        modifiers: [],
+      },
+    ]
     prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [z])) as any)
     const r = await listInbox({ venueId: 'v1', now: NOW })
     expect(r.orders[0].items[0]).toMatchObject({ productId: null, categoryId: null })
@@ -469,7 +480,21 @@ describe('fase 2: cardStatus en la bandeja', () => {
     unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
     const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
     for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
-    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel', 'paidAt'].sort())
+    expect(Object.keys(o).sort()).toEqual(
+      // S14: `cliente`, `beneficios` y `beneficiosTotal` son aditivos (opcionales para las apps viejas).
+      [
+        ...LLAVES_ANTES,
+        'cardStatus',
+        'card',
+        'rejectReason',
+        'requiresAcceptance',
+        'channel',
+        'paidAt',
+        'cliente',
+        'beneficios',
+        'beneficiosTotal',
+      ].sort(),
+    )
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()
@@ -518,5 +543,113 @@ describe('fase 2: cardStatus en la bandeja', () => {
       row('A', 'ACCEPTED', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }) as any,
     )
     expect((await getInboxOrder({ venueId: 'v1', orderId: 'ord-A', now: NOW }))?.card).toMatchObject({ status: 'AUTHORIZED', amount: 186 })
+  })
+})
+
+describe('S14: la Bandeja dice de qué clienta es cada folio y qué beneficios trae (P2-3, R1, R2)', () => {
+  // La ficha trae contacto A PROPÓSITO: aunque una lectura lo trajera, la respuesta nunca lo deja salir.
+  const ANA = { id: 'cus-ana', firstName: 'Ana', lastName: 'López', phone: '+525511112222', email: 'ana@correo.test' }
+  const fila = (name: string, amount: string) => ({ name, amount: new Prisma.Decimal(amount), isComp: false, compReason: null })
+  const conCuenta = (id: string, status: string, cuenta: Record<string, unknown>) => {
+    const r = row(id, status)
+    return { ...r, order: { ...r.order, ...cuenta } }
+  }
+  const soloLista = (o: any) =>
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [o])) as any)
+
+  it('un folio con premio trae cliente y beneficios en la Bandeja (y en el detalle por id)', async () => {
+    const folio = conCuenta('B', 'ACCEPTED', { customer: ANA, orderDiscounts: [fila('Premio', '45.00')], _count: { orderDiscounts: 1 } })
+    soloLista(folio)
+    const r = await listInbox({ venueId: 'v1', filter: 'active', now: NOW })
+    expect(r.orders[0]).toMatchObject({ beneficios: [{ nombre: 'Premio', monto: 45 }], beneficiosTotal: 1 })
+    // R2: nombre de pila e inicial del apellido; de la ficha, sólo eso y su id.
+    expect(r.orders[0].cliente).toEqual({ id: 'cus-ana', nombre: 'Ana L.' })
+    expect(r.orders[0].beneficios).toEqual([{ nombre: 'Premio', monto: 45 }])
+    expect(JSON.stringify(r)).not.toMatch(/5511112222|ana@correo\.test|López/)
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(folio as any)
+    await expect(getInboxOrder({ venueId: 'v1', orderId: 'ord-B', now: NOW })).resolves.toMatchObject({
+      cliente: { id: 'cus-ana', nombre: 'Ana L.' },
+      beneficios: [{ nombre: 'Premio', monto: 45 }],
+    })
+  })
+
+  it('Codex r1 #1: la clienta ligada desde la TPV (primario, sin `customerId`) es la dueña; con las dos, gana el primario como en la lealtad', async () => {
+    const BETO = { id: 'cus-beto', firstName: 'Beto', lastName: 'Ruiz', phone: '+525533334444', email: 'beto@correo.test' }
+    soloLista(
+      conCuenta('B', 'ACCEPTED', {
+        customer: null,
+        orderCustomers: [{ customer: ANA }],
+        orderDiscounts: [],
+        _count: { orderDiscounts: 0 },
+      }),
+    )
+    expect((await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0].cliente).toEqual({ id: 'cus-ana', nombre: 'Ana L.' })
+    soloLista(
+      conCuenta('B', 'ACCEPTED', {
+        customer: BETO,
+        orderCustomers: [{ customer: ANA }],
+        orderDiscounts: [],
+        _count: { orderDiscounts: 0 },
+      }),
+    )
+    const r = await listInbox({ venueId: 'v1', filter: 'active', now: NOW })
+    expect(r.orders[0].cliente).toEqual({ id: 'cus-ana', nombre: 'Ana L.' })
+    expect(JSON.stringify(r)).not.toMatch(/5533334444|beto@correo\.test|5511112222|ana@correo\.test/)
+    // Sin primario, la heredada (la de la sesión).
+    soloLista(conCuenta('B', 'ACCEPTED', { customer: BETO, orderCustomers: [], orderDiscounts: [], _count: { orderDiscounts: 0 } }))
+    expect((await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0].cliente).toEqual({
+      id: 'cus-beto',
+      nombre: 'Beto R.',
+    })
+  })
+
+  it('sin cliente ⇒ cliente null (y sin beneficios, la lista vacía con su total 0)', async () => {
+    soloLista(conCuenta('A', 'ACCEPTED', { customer: null, orderDiscounts: [], _count: { orderDiscounts: 0 } }))
+    const o = (await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0]
+    expect(o.cliente).toBeNull()
+    expect(o).toMatchObject({ beneficios: [], beneficiosTotal: 0 })
+  })
+
+  it('R2: sin apellido sale sólo el nombre de pila; el nombre compuesto se respeta; sin nombre, «Sin nombre»', async () => {
+    const nombres: Array<[Record<string, unknown>, string]> = [
+      [{ id: 'c1', firstName: 'Ana', lastName: null }, 'Ana'],
+      [{ id: 'c2', firstName: ' Ana Sofía ', lastName: ' ñúñez Paz' }, 'Ana Sofía Ñ.'],
+      [{ id: 'c3', firstName: null, lastName: 'López' }, 'Sin nombre'],
+      [{ id: 'c4', firstName: '  ', lastName: null }, 'Sin nombre'],
+    ]
+    for (const [customer, nombre] of nombres) {
+      soloLista(conCuenta('A', 'ACCEPTED', { customer, orderDiscounts: [], _count: { orderDiscounts: 0 } }))
+      expect((await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0].cliente).toEqual({ id: customer.id, nombre })
+    }
+  })
+
+  it('R1: con más de 10 beneficios publica 10 (en el orden en que se aplicaron) y dice cuántos son: nunca recorta en silencio', async () => {
+    const diez = Array.from({ length: 10 }, (_, i) => fila(`Descuento ${i + 1}`, '1.00'))
+    soloLista(conCuenta('A', 'ACCEPTED', { customer: ANA, orderDiscounts: diez, _count: { orderDiscounts: 13 } }))
+    const o = (await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0]
+    expect(o.beneficios).toHaveLength(10)
+    expect(o.beneficiosTotal).toBe(13)
+  })
+
+  it('R1/R2 en la consulta: tope de 10 con orden estable y su conteo en la MISMA lectura (sin N+1); de la ficha sólo id y nombre', async () => {
+    await listInbox({ venueId: 'v1', now: NOW })
+    const listas = (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).filter(a => !esSincronizacion(a))
+    expect(listas).toHaveLength(3)
+    for (const a of listas) {
+      const cuenta = a.select.order.select
+      expect(cuenta.customer).toEqual({ select: { id: true, firstName: true, lastName: true } })
+      // Codex r1 #1: el primario de las ligas (lo que escribe la TPV), en la misma lectura y con la misma ficha mínima.
+      expect(cuenta.orderCustomers).toEqual({
+        where: { isPrimary: true },
+        orderBy: [{ addedAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { customer: { select: { id: true, firstName: true, lastName: true } } },
+      })
+      expect(cuenta.orderDiscounts).toMatchObject({ take: 10, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      expect(cuenta.orderDiscounts.select).toMatchObject({ name: true, amount: true })
+      expect(cuenta._count).toEqual({ select: { orderDiscounts: true } })
+    }
+    expect(prismaMock.orderDiscount.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findMany).not.toHaveBeenCalled()
   })
 })

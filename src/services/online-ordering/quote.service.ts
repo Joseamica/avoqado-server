@@ -15,6 +15,7 @@ import {
   type VisibleProduct,
 } from './menu.service'
 import { getSettings } from './settings.service'
+import type { BeneficioAplicado, BeneficioElegido, OfertaDeBeneficios, QuoteConBeneficios } from './beneficios.service'
 
 export interface CartModifierInput {
   modifierId: string
@@ -243,14 +244,37 @@ export interface PublicQuote {
     lineTotal: number
   }>
   subtotal: number
+  /** S10: con sesión y beneficios calculados, el total CON beneficios (el que la caja cobraría); si no, el de siempre. */
   total: number
   minOrderAmount: number
   issues: QuoteIssue[]
+  // ── S10 (P2-4), opcionales para quien ya lee esta respuesta. Sólo con sesión.
+  /** `calculados: false` = con mucha carga no se simularon; la tienda dice que se calculan al pedir. */
+  beneficios?: { calculados: boolean }
+  aplicados?: Array<{ tipo: BeneficioAplicado['tipo']; nombre: string; monto: number }>
+  oferta?: OfertaDeBeneficios
+  /** Lo que la clienta eligió y ya no está disponible (premio canjeado, puntos de más, cupón agotado). */
+  descartados?: BeneficioElegido[]
 }
 
 const n = (d: Prisma.Decimal): number => Number(d.toFixed(2))
 
-export function toPublicQuote(q: QuoteResult): PublicQuote {
+export function toPublicQuote(q: QuoteResult | QuoteConBeneficios): PublicQuote {
+  const b = q as QuoteConBeneficios
+  // S11 (Codex r8): un desglose que la cadena SABE recortado (más de `MAX_APLICADOS` filas) nunca sale como completo, venga de donde
+  // venga: la cotización entera degrada como en S10 (o todo o nada), sin desglose ni oferta y con el total de lista. Quien necesita el
+  // total estricto para autorizar lo manda aparte (`totalEstricto` del borrador de tarjeta).
+  if (b.aplicadosCompletos === false) return { beneficios: { calculados: false }, ...toPublicQuoteBase(q, q.total) }
+  return {
+    ...(b.beneficios ? { beneficios: b.beneficios } : {}),
+    ...(b.aplicados ? { aplicados: b.aplicados.map(a => ({ tipo: a.tipo, nombre: a.nombre, monto: n(a.monto) })) } : {}),
+    ...(b.oferta ? { oferta: b.oferta } : {}),
+    ...(b.descartados ? { descartados: b.descartados } : {}),
+    ...toPublicQuoteBase(q, b.totalConBeneficios ?? q.total),
+  }
+}
+
+function toPublicQuoteBase(q: QuoteResult, total: Prisma.Decimal): PublicQuote {
   return {
     ok: q.ok,
     lines: q.lines.map(l => ({
@@ -263,7 +287,7 @@ export function toPublicQuote(q: QuoteResult): PublicQuote {
       lineTotal: n(l.lineTotal),
     })),
     subtotal: n(q.subtotal),
-    total: n(q.total),
+    total: n(total),
     minOrderAmount: n(q.minOrderAmount),
     issues: q.issues,
   }

@@ -23,7 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
-import { enqueueLoyaltyPointsReversalInTx } from '@/services/tpv/paymentEffects.service'
+import { enqueueLoyaltyReversalsInTx } from '@/services/tpv/paymentEffects.service'
 
 export type RefundOutcome = 'APPLIED' | 'ALREADY_APPLIED' | 'ORDER_NOT_FOUND' | 'NOTHING_TO_APPLY'
 
@@ -125,7 +125,7 @@ export async function applyDeliveryRefund(params: {
       },
       select: { id: true },
     })
-    await enqueueLoyaltyPointsReversalInTx(tx, { venueId: order.venueId, refundPaymentId: escrito.id, orderId: order.id })
+    await enqueueLoyaltyReversalsInTx(tx, { venueId: order.venueId, refundPaymentId: escrito.id, orderId: order.id })
     if (ajustes.length > 0) {
       await tx.activityLog.create({
         data: {

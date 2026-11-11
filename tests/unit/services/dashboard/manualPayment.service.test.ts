@@ -37,6 +37,12 @@ jest.mock('@/services/shared/paymentShiftClaim', () => {
 
 import { Prisma } from '@prisma/client'
 
+// S9 v5 (U10): la nota del dinero tardío (folio «Nadie» anulado) se prueba en `cuentaCancelada.onlineOrder.test.ts` y
+// `manualPayment.folioCancelado.test.ts`; los `tx` a mano de esta suite no traen `onlineOrder` y aquí no hay folios.
+jest.mock('@/services/shared/cuentaCancelada', () => ({
+  ...jest.requireActual('@/services/shared/cuentaCancelada'),
+  notarDineroEnFolioCerradoEnTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -53,6 +59,11 @@ jest.mock('@/utils/prismaClient', () => ({
 // doble sin `$queryRaw` revienta a propósito (ya no devuelve `false` en silencio): cada tx a mano
 // de este archivo simula la fila de la orden bloqueada.
 const filaDeOrdenBloqueada = () => jest.fn().mockResolvedValue([{ id: 'orden-bloqueada' }])
+
+const awardLoyaltyMock = jest.fn().mockResolvedValue({ complete: true, errors: [] })
+jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
+  awardLoyaltyForPaidOrder: (...args: any[]) => awardLoyaltyMock(...args),
+}))
 
 const earnPointsMock = jest.fn().mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
 jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
@@ -647,6 +658,8 @@ describe('manualPayment.service', () => {
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
           paymentAllocation: { create: jest.fn() },
+          // S9: una cuenta anulada pregunta si es de un folio (`OnlineOrder`); aquí no lo es.
+          onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
           ...handlers,
         })
     }
@@ -1276,7 +1289,7 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).not.toHaveBeenCalled()
     })
 
-    it('FIX: Mode 1 fully-paid order with primary customer triggers earnPoints', async () => {
+    it('S3-1 regla común · FIX: Mode 1 fully-paid order with primary customer triggers earnPoints', async () => {
       const orderUpdate = jest.fn()
       const mockOrder = {
         id: ORDER_ID,
@@ -1302,10 +1315,14 @@ describe('manualPayment.service', () => {
         source: 'OTHER',
         externalSource: 'BUQ',
       })
-
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-loyal-7', 200, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 200 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
     it('FIX: Mode 1 PARTIAL payment does NOT call earnPoints (only on full settlement)', async () => {
       const mockOrder = {
         id: ORDER_ID,
@@ -1400,7 +1417,7 @@ describe('manualPayment.service', () => {
       expect(data.paymentStatus).toBe('PARTIAL')
     })
 
-    it('FIX: input.customerId override wins over order.customerId for loyalty', async () => {
+    it('S3-1 regla común · FIX: input.customerId override no sustituye el cliente persistido', async () => {
       // Edge case: order has a primary customer but admin attaches a different
       // one on this final payment. Loyalty should go to the override (admin's intent).
       const mockOrder = {
@@ -1428,10 +1445,14 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
         customerId: 'new-customer',
       })
-
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'new-customer', 100, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
     it('DESTRUCTIVE: loyalty disabled venue returns 0 points (no error, payment commits)', async () => {
       // earnPoints with loyalty disabled returns {pointsEarned:0, newBalance:0}.
       // Service must accept that gracefully (no false-positive log, payment OK).
@@ -1454,7 +1475,7 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).toHaveBeenCalledTimes(1)
     })
 
-    it('DESTRUCTIVE: earnPoints invoked exactly ONCE per fully-paid order (idempotency contract)', async () => {
+    it('S3-1 regla común · DESTRUCTIVE: earnPoints invoked exactly ONCE per fully-paid order (idempotency contract)', async () => {
       // The service must call earnPoints once. If called twice via retry, the
       // earnPoints function itself dedupes by (customerId, orderId). But the
       // SERVICE must not invoke it more than once per request.
@@ -1483,10 +1504,12 @@ describe('manualPayment.service', () => {
         source: 'OTHER',
         externalSource: 'BUQ',
       })
-
-      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID }))
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
     it('DESTRUCTIVE: empty-string customerId is treated as omitted (schema transform)', async () => {
       // Edge case: FE sends customerId="" instead of omitting. Schema transform
       // coerces to undefined so the service must NOT call earnPoints or validate.
@@ -1784,7 +1807,7 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).toHaveBeenCalled()
     })
 
-    it('FIX: fully-paid order with NO primary customer + no override + no legacy column updates metrics with FINAL total (not 0)', async () => {
+    it('S3-1 regla común · FIX: fully-paid order with NO primary customer + no override + no legacy column updates metrics with FINAL total (not 0)', async () => {
       // Edge case the previous review flagged: every OrderCustomer has
       // isPrimary=false, no input.customerId, no order.customerId. Loyalty
       // can't resolve a primary, BUT customer metrics must still increment
@@ -1823,11 +1846,14 @@ describe('manualPayment.service', () => {
 
       // Metrics must fire for both customers with the FINAL order total (300),
       // not 0. Order independent — assert each call individually.
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-A', 300, ORDER_ID, VENUE_ID)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-B', 300, ORDER_ID, VENUE_ID)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(2)
-      // No primary customer ⇒ loyalty must NOT fire.
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 300 }),
+      )
       expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
+      // No primary customer ⇒ loyalty must NOT fire.
     })
   })
 
@@ -1846,7 +1872,6 @@ describe('manualPayment.service', () => {
           ...handlers,
         })
     }
-
     it('CONCURRENCY: concurrent same-order payments — Serializable abort propagates as 40001', async () => {
       // When PostgreSQL aborts a Serializable tx with 40001, Prisma throws
       // PrismaClientKnownRequestError. The service should NOT swallow it —
@@ -1869,7 +1894,7 @@ describe('manualPayment.service', () => {
       ).rejects.toMatchObject({ code: 'P2034' })
     })
 
-    it('AUDIT: Mode 1 fully-paid loyalty matches TPV semantics (primary customer only)', async () => {
+    it('S3-1 regla común · AUDIT: Mode 1 fully-paid loyalty matches TPV semantics (primary customer only)', async () => {
       // TPV only awards points to oc.isPrimary. If an order has 3 customers
       // (1 primary + 2 secondary), only primary earns. Manual must match.
       const orderUpdate = jest.fn()
@@ -1899,12 +1924,16 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 150 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
       // Primary OrderCustomer wins over legacy Order.customerId
-      expect(earnPointsMock).toHaveBeenCalledTimes(1)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'primary-cust', 150, ORDER_ID, 'sv-1')
     })
-
-    it('AUDIT: Mode 1 falls back to legacy Order.customerId when no OrderCustomer exists', async () => {
+    it('S3-1 regla común · AUDIT: Mode 1 falls back to legacy Order.customerId when no OrderCustomer exists', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -1929,10 +1958,14 @@ describe('manualPayment.service', () => {
         source: 'OTHER',
         externalSource: 'BUQ',
       })
-
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'legacy-only', 100, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
     it('AUDIT: Mode 1 with no customer anywhere → no earnPoints, no error', async () => {
       const mockOrder = {
         id: ORDER_ID,
@@ -2000,7 +2033,7 @@ describe('manualPayment.service', () => {
       )
     })
 
-    it('AUDIT: Mode 1 input.customerId is SKIPPED when order already has OrderCustomer (avoid unique violation)', async () => {
+    it('S3-1 regla común · AUDIT: Mode 1 input.customerId is SKIPPED when order already has OrderCustomer (avoid unique violation)', async () => {
       const orderCustomerCreate = jest.fn()
       const mockOrder = {
         id: ORDER_ID,
@@ -2034,10 +2067,15 @@ describe('manualPayment.service', () => {
       // Order already had a primary customer — service must NOT try to create a
       // second OrderCustomer (would hit @@unique([orderId, customerId]) or just
       // create a competing primary). Loyalty still goes to input override though.
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
       expect(orderCustomerCreate).not.toHaveBeenCalled()
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'should-not-create-link', 100, ORDER_ID, 'sv-1')
     })
-
     it('AUDIT: Payment.processedById always staffId (admin who registered) regardless of waiterId', async () => {
       // processedById = admin who registered the payment (audit trail).
       // servedById = waiter who gets the tip credit (separate concept).
@@ -2238,7 +2276,7 @@ describe('manualPayment.service', () => {
       expect(data.remainingBalance.toString()).toBe('0')
     })
 
-    it('REVIEW P1: earnPoints receives StaffVenue.id (NOT raw Staff.id)', async () => {
+    it('S3-1 regla común · REVIEW P1: actor Staff se resuelve en la regla común', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -2265,11 +2303,16 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
       // earnPoints called with StaffVenue.id, NOT raw USER_ID (Staff.id)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-1', 100, ORDER_ID, 'sv-resolved-42')
     })
-
-    it('REVIEW P1: earnPoints receives undefined when StaffVenue not found (graceful)', async () => {
+    it('S3-1 regla común · REVIEW P1: sin StaffVenue también delega', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -2298,7 +2341,13 @@ describe('manualPayment.service', () => {
         }),
       ).resolves.toBeDefined()
 
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-1', 50, ORDER_ID, undefined)
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 50 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
 
     // 🔴 Fase 1 (2-sep-2026): esta prueba fijaba la regla CONTRARIA («filtra por staffId,
@@ -2381,7 +2430,7 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).toHaveBeenCalled()
     })
 
-    it('REVIEW v2: multi-customer order (1 primary + 2 secondary) → 3 metrics calls + 1 loyalty call', async () => {
+    it('S3-1 regla común · REVIEW v2: multi-customer order (1 primary + 2 secondary) → una delegación para los clientes ligados', async () => {
       // Reviewer's exact requirement: order has 3 OrderCustomer rows
       // (1 primary + 2 secondary). Manual payment fully settles it.
       // - updateCustomerMetrics must be called 3 times (one per customer)
@@ -2416,15 +2465,14 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
-      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(3)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('primary-1', 150, ORDER_ID, VENUE_ID)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-A', 150, ORDER_ID, VENUE_ID)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-B', 150, ORDER_ID, VENUE_ID)
-
-      expect(earnPointsMock).toHaveBeenCalledTimes(1)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'primary-1', 150, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 150 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
     it('REVIEW v3: PARTIAL payment does NOT increment customer metrics (matches TPV semantics)', async () => {
       // TPV updates metrics only on isFullyPaid. Per-payment metrics would
       // inflate totalVisits — a $200 order paid in 4 partials of $50 each must
@@ -2461,7 +2509,7 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).not.toHaveBeenCalled()
     })
 
-    it('REVIEW v3: 4 partials of $25 on $100 order → metrics fire ONCE on the 4th partial (with full $100)', async () => {
+    it('S3-1 regla común · REVIEW v3: 4 partials of $25 on $100 order → metrics fire ONCE on the 4th partial (with full $100)', async () => {
       // Simulate the LAST partial that completes the order. Mock has 3 prior
       // payments of $25 (total $75 already paid). 4th payment of $25 settles.
       // updateCustomerMetrics must be called ONCE per customer with $100 (not $25).
@@ -2493,13 +2541,15 @@ describe('manualPayment.service', () => {
         source: 'OTHER',
         externalSource: 'BUQ',
       })
-
-      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-once', 100, ORDER_ID, VENUE_ID)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-once', 100, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
-    it('REVIEW v2: input.customerId override added to metrics + wins for loyalty (documented contract)', async () => {
+    it('S3-1 regla común · REVIEW v2: input.customerId override no ligado no agrega métricas privadas', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -2527,14 +2577,16 @@ describe('manualPayment.service', () => {
       })
 
       // Both p-1 (primary) and "override" get metrics
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('p-1', 100, ORDER_ID, VENUE_ID)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('override', 100, ORDER_ID, VENUE_ID)
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 100 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
       // ONLY override gets loyalty (override wins for loyalty per contract)
-      expect(earnPointsMock).toHaveBeenCalledTimes(1)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'override', 100, ORDER_ID, 'sv-1')
     })
-
-    it('REVIEW v2: legacy Order.customerId only → metrics for that customer', async () => {
+    it('S3-1 regla común · REVIEW v2: legacy Order.customerId only → metrics for that customer', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -2559,13 +2611,15 @@ describe('manualPayment.service', () => {
         source: 'OTHER',
         externalSource: 'BUQ',
       })
-
-      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('legacy-only-cust', 75, ORDER_ID, VENUE_ID)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'legacy-only-cust', 75, ORDER_ID, 'sv-1')
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 75 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
-
-    it('REVIEW v2: dedupe — same customer in OrderCustomer + legacy column → 1 metrics call', async () => {
+    it('S3-1 regla común · REVIEW v2: dedupe — same customer in OrderCustomer + legacy column → 1 metrics call', async () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
@@ -2591,11 +2645,15 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
+      // S3-1: Modo1 delega selección, visitas y StaffVenue a la regla común; la integración prueba el beneficiario real.
+      expect(awardLoyaltyMock).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, orderTotal: 50 }),
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
       // Set dedupe ensures cust-X gets metrics ONCE not twice
-      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-X', 50, ORDER_ID, VENUE_ID)
     })
-
     it('REVIEW P2: updateCustomerMetrics NOT called when no customer attached', async () => {
       const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-no-cust-metrics' })
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(

@@ -104,6 +104,11 @@ export interface OrdenFoto extends OrderAmountsForBalance {
   items: Array<{ areaTicketLineId: string | null; releasedAreaTicketLineId?: string | null; giftCardId: string | null }>
   /** La mesa que se libera al saldar (Tarea 6d, M-1). */
   tableId: string | null
+  /**
+   * S9 (Codex r2 P3): la cuenta tiene pedido en línea (folio o «Mi equipo»). Su destino no se pre-reabre: lo reabre el cierre
+   * (`settleStandalonePaymentInTx` → `reabrirSiRecibeDinero`), por el mismo camino que el efectivo, que concilia su pedido y avisa.
+   */
+  pedidoEnLinea: boolean
   /** Cobros COMPLETED de la orden (reembolsos incluidos: el saldo los distingue por `type`). */
   cobros: CobroDeOrdenFoto[]
 }
@@ -290,7 +295,11 @@ export async function aplicarReasignacion(
     // La misma regla de la Tarea 6a: el cobro que se mueve ya está recibido y reabre la cancelada (de cualquier origen: es una
     // decisión explícita de una persona sobre un cobro concreto, no dinero que llega solo). Se lee de la validación (M-5): la
     // misma cantidad —importe + propina— con que midió el destino, así que no pueden divergir.
-    if (veredicto.resumen.destinoCambiaEstado) data.status = 'PENDING'
+    // S9 (Codex r2 P3): con pedido en línea, NO: el cierre la reabre por el camino del efectivo (`reabrirSiRecibeDinero`), que concilia
+    // su pedido —«Mi equipo» entregado, folio para el barrido que lo pasa a «Por entregar» y publica— y avisa al gerente. Pre-reabierta,
+    // la reapertura no la veía. `estadoParaCobrar` la reabre igual: un pedido de Rappi no llega aquí (`validarReasignacion`) y lo que
+    // pasa la validación cubre la cuenta medida viva, así que también como cancelada (`cubreComoCancelada`), de cualquier origen.
+    if (veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea) data.status = 'PENDING'
     if (!d.shiftId && c.shiftId) data.shiftId = c.shiftId
     if (Object.keys(data).length > 0) await escritor.prepararDestino(d.id, data)
 

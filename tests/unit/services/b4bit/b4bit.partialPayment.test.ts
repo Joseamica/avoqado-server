@@ -40,6 +40,9 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
   assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
   avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+  // S9: «¿es cuenta de folio?» también lee `onlineOrder`; aquí no lo es (se prueba en cortesiaDeFolio y b4bit.pedidoEnLinea).
+  esCuentaDeFolioEnTx: jest.fn(async () => false),
+  assertNotOnlineOrderInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
   lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
@@ -63,6 +66,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    // S9 v5 (U10): la nota del cobro lee el folio de la cuenta; en esta suite no hay folio.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },

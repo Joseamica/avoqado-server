@@ -191,6 +191,10 @@ function database(source: () => State, scope: 'global' | 'tx'): any {
     if (scope !== 'tx') throw new Error('GLOBAL WRITE outside the owned transaction')
   }
   const order = {
+    count: jest.fn(async (args: Row) => {
+      call('order', 'count', args)
+      return matches(source().order, args.where) ? 1 : 0
+    }),
     findUnique: jest.fn(async (args: Row) => {
       call('order', 'findUnique', args)
       const s = source()

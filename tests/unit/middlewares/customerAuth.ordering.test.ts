@@ -27,7 +27,15 @@ const mkRes = () => {
 }
 
 beforeEach(() => {
-  ;(prisma.customer.findFirst as jest.Mock).mockResolvedValue({ id: 'c1', venueId: 'venue_A', active: true })
+  ;(prisma.customer.findFirst as jest.Mock).mockResolvedValue({
+    id: 'c1',
+    venueId: 'venue_A',
+    active: true,
+    versionDeSesion: 0,
+    phone: '+525543453965',
+    email: null,
+    accountActivatedAt: null,
+  })
 })
 
 describe('middleware de pedidos (H1)', () => {
@@ -36,7 +44,14 @@ describe('middleware de pedidos (H1)', () => {
     const next = jest.fn() as NextFunction
     await authenticateOrderingCustomerOptional(req, mkRes(), next)
     expect(next).toHaveBeenCalledTimes(1)
-    expect((req as any).customerAuth).toEqual({ customerId: 'c1', venueId: 'venue_A', verifiedPhone: PHONE })
+    expect((req as any).customerAuth).toEqual({
+      customerId: 'c1',
+      venueId: 'venue_A',
+      verifiedPhone: PHONE,
+      tipo: 'PEDIDOS_DE_HOY',
+      contactos: [],
+      accountActivatedAt: null,
+    })
   })
 
   it('🔴 un token de cliente general en la ruta de pedidos es 401 CUSTOMER_TOKEN_INVALID', async () => {

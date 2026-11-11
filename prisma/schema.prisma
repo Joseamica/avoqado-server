@@ -4188,6 +4188,8 @@ model Order {
   // settles the order sets eligibleAt; inline processing sets processedAt, and
   // the bounded reconciler retries rows left behind by a crash/transient error.
   loyaltyEligibleAt   DateTime?
+  /// La hora en que se cobró en el aparato; la escribe la misma escritura que loyaltyEligibleAt. Null = loyaltyEligibleAt.
+  loyaltySaleAt       DateTime?
   loyaltyProcessingAt DateTime?
   loyaltyProcessedAt  DateTime?
   loyaltyAttempts     Int       @default(0)
@@ -8061,6 +8063,9 @@ model Customer {
   provider   AuthProvider @default(EMAIL)
   providerId String?
 
+  /// Sube al cambiar de número; corta toda sesión de la ficha.
+  versionDeSesion Int @default(0)
+
   // Multi-tenant
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -8677,6 +8682,27 @@ model WalletPass {
 
   @@index([venueId, updatedAt])
   @@index([customerId])
+}
+
+/// Bandeja de salida de los avisos a Apple y Google Wallet (tienda híbrida, parte 2; R55). Dentro de una transacción de dinero o de
+/// lealtad sólo se INSERTA (`encolarAvisoDeTarjetaEnTx`); nunca se actualiza ahí. Sin relaciones ni índice único A PROPÓSITO (como
+/// `Exchange`, :19795): una llave foránea tomaría FOR KEY SHARE de `Customer` y un único podría esperar otra inserción.
+model WalletPassOutbox {
+  id                 String    @id @default(cuid())
+  venueId            String
+  customerId         String
+  /// SELLO · SELLO_REVERTIDO · AJUSTE · PREMIO_CANJEADO · PREMIO_DEVUELTO · RELECTURA · REPARACION (sólo bitácora: el envío manda el
+  /// contenido vigente). REPARACION: el rastro que deja el enviador antes de mandar, con su hora a 2 min o más (S5, R65).
+  motivo             String    @db.VarChar(40)
+  createdAt          DateTime  @default(now())
+  /// Sólo el enviador (fuera de toda transacción de dinero) escribe estas cuatro.
+  reclamadoPor       String?   @db.VarChar(30)
+  reclamadoHasta     DateTime?
+  intentos           Int       @default(0)
+  siguienteIntentoAt DateTime  @default(now())
+
+  @@index([siguienteIntentoAt, id])
+  @@index([venueId, customerId, id])
 }
 
 // ==========================================

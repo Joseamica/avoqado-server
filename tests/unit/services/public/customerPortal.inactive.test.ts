@@ -1,8 +1,10 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 
+// S7: la contraseña firma la sesión única (`generateCustomerSession`); el token viejo queda en el doble para probar que ya no se usa.
 jest.mock('@/jwt.service', () => ({
   __esModule: true,
-  generateCustomerToken: jest.fn(() => 'signed.jwt.token'),
+  generateCustomerToken: jest.fn(() => 'token.viejo'),
+  generateCustomerSession: jest.fn(() => 'signed.jwt.token'),
 }))
 jest.mock('bcryptjs', () => ({
   __esModule: true,
@@ -11,7 +13,7 @@ jest.mock('bcryptjs', () => ({
 
 import bcrypt from 'bcryptjs'
 import { loginCustomer, registerCustomer } from '@/services/public/customerPortal.public.service'
-import { generateCustomerToken } from '@/jwt.service'
+import { generateCustomerSession, generateCustomerToken } from '@/jwt.service'
 
 const VENUE = 'venue-1'
 
@@ -22,7 +24,7 @@ const VENUE = 'venue-1'
 describe('customerPortal — Customer.active en emisores de token', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(generateCustomerToken as jest.Mock).mockReturnValue('signed.jwt.token')
+    ;(generateCustomerSession as jest.Mock).mockReturnValue('signed.jwt.token')
     ;(bcrypt.compare as jest.Mock).mockResolvedValue(true)
   })
 
@@ -40,6 +42,7 @@ describe('customerPortal — Customer.active en emisores de token', () => {
         statusCode: 401,
         code: 'CUSTOMER_INACTIVE',
       })
+      expect(generateCustomerSession).not.toHaveBeenCalled()
       expect(generateCustomerToken).not.toHaveBeenCalled()
     })
 
@@ -53,10 +56,14 @@ describe('customerPortal — Customer.active en emisores de token', () => {
         firstName: 'Ana',
         lastName: 'R',
         phone: null,
+        versionDeSesion: 4,
       } as any)
 
       const r = await loginCustomer(VENUE, 'a@b.com', 'secreto')
       expect(r.token).toBe('signed.jwt.token')
+      // S7: la contraseña prueba la ficha, no su correo: sesión SIN contactos probados.
+      expect(generateCustomerSession).toHaveBeenCalledWith({ sub: 'c1', venueId: VENUE, v: 4, contactos: [] })
+      expect(generateCustomerToken).not.toHaveBeenCalled()
       expect(bcrypt.compare).toHaveBeenCalledWith('secreto', 'hashed')
     })
 
@@ -72,6 +79,7 @@ describe('customerPortal — Customer.active en emisores de token', () => {
       ;(bcrypt.compare as jest.Mock).mockResolvedValue(false)
 
       await expect(loginCustomer(VENUE, 'a@b.com', 'otra')).rejects.toMatchObject({ statusCode: 401 })
+      expect(generateCustomerSession).not.toHaveBeenCalled()
       expect(generateCustomerToken).not.toHaveBeenCalled()
     })
 
@@ -80,6 +88,7 @@ describe('customerPortal — Customer.active en emisores de token', () => {
 
       await expect(loginCustomer(VENUE, 'a@b.com', 'cualquiera')).rejects.toMatchObject({ statusCode: 401 })
       expect(bcrypt.compare).not.toHaveBeenCalled()
+      expect(generateCustomerSession).not.toHaveBeenCalled()
       expect(generateCustomerToken).not.toHaveBeenCalled()
     })
   })
@@ -93,6 +102,7 @@ describe('customerPortal — Customer.active en emisores de token', () => {
       expect(() => registerCustomer()).toThrow(expect.objectContaining({ statusCode: 400, code: 'CUSTOMER_REGISTER_USE_CODE' }))
       expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
       expect(prismaMock.customer.update).not.toHaveBeenCalled()
+      expect(generateCustomerSession).not.toHaveBeenCalled()
       expect(generateCustomerToken).not.toHaveBeenCalled()
     })
   })

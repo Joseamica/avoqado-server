@@ -179,7 +179,12 @@ describe('online_orders_list', () => {
   })
 
   it('T16/R17: to_pay y to_deliver traen la lista de folios y siguen con el cursor (nunca se trunca en silencio)', async () => {
-    mockListFolios.mockResolvedValue({ counts: { toPay: 1, toDeliver: 101 }, nextCursors: { toPay: null, toDeliver: 'C1' } })
+    mockListFolios.mockResolvedValue({
+      counts: { toPay: 1, toDeliver: 101 },
+      toPay: [],
+      toDeliver: [],
+      nextCursors: { toPay: null, toDeliver: 'C1' },
+    })
     const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_pay' }))
     expect(mockListFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toPay' })
     expect(mockListInbox).not.toHaveBeenCalled()
@@ -198,6 +203,66 @@ describe('online_orders_list', () => {
   it('un venue fuera de scope se rechaza antes de leer', async () => {
     await expect(call('online_orders_list', { venueId: 'foreign' })).rejects.toThrow(/out of scope/)
     expect(mockListInbox).not.toHaveBeenCalled()
+  })
+})
+
+describe('S15: online_orders_list dice de quién es cada pedido y qué beneficios trae (MCP libre, sólo lectura)', () => {
+  const FOLIO = {
+    ...pending,
+    requiresAcceptance: false,
+    cliente: { id: 'cus-ana', nombre: 'Ana' },
+    beneficios: [{ nombre: 'Premio', monto: 45 }],
+    beneficiosTotal: 1,
+  }
+  const folios = (toPay: unknown[], toDeliver: unknown[] = []) => ({
+    counts: { toPay: toPay.length, toDeliver: toDeliver.length },
+    toPay,
+    toDeliver,
+    nextCursors: { toPay: null, toDeliver: null },
+  })
+
+  it('online_orders_list con to_pay muestra «Con cuenta: Ana · Premio −$45.00»', async () => {
+    mockListFolios.mockResolvedValue(folios([FOLIO]))
+    const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_pay' }))
+    expect(r.toPay[0].cuenta).toBe('Con cuenta: Ana · Premio −$45.00')
+    // Lo de siempre sigue igual (aditivo) y con el permiso de hoy.
+    expect(r.toPay[0]).toMatchObject({
+      orderId: 'ord1',
+      cliente: { id: 'cus-ana', nombre: 'Ana' },
+      beneficios: [{ nombre: 'Premio', monto: 45 }],
+    })
+    expect(mockRequirePermission).toHaveBeenCalledWith('orders:read', 'v1')
+  })
+
+  it('to_deliver y la Bandeja también; sin cuenta ⇒ «Sin cuenta»; con más beneficios de los publicados ⇒ «y N más»', async () => {
+    const muchos = {
+      ...FOLIO,
+      orderId: 'ord2',
+      cliente: { id: 'cus-luis', nombre: 'Luis M.' },
+      beneficios: [
+        { nombre: 'Cupón BIENVENIDA', monto: 1500.5 },
+        { nombre: 'Puntos', monto: 10 },
+      ],
+      beneficiosTotal: 4,
+    }
+    const sinCuenta = { ...FOLIO, orderId: 'ord3', cliente: null, beneficios: [], beneficiosTotal: 0 }
+    mockListFolios.mockResolvedValue(folios([], [muchos, sinCuenta]))
+    const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_deliver' }))
+    expect(r.toDeliver.map((o: { cuenta: string }) => o.cuenta)).toEqual([
+      'Con cuenta: Luis M. · Cupón BIENVENIDA −$1,500.50 · Puntos −$10.00 · y 2 más',
+      'Sin cuenta',
+    ])
+    mockListInbox.mockResolvedValue({ serverTime: 'x', counts: {}, orders: [FOLIO, sinCuenta], truncated: false, nextCursor: null })
+    const b = parse(await call('online_orders_list', { venueId: 'v1' }))
+    expect(b.orders.map((o: { cuenta: string }) => o.cuenta)).toEqual(['Con cuenta: Ana · Premio −$45.00', 'Sin cuenta'])
+  })
+
+  it('sólo lee: ninguna escritura ni auditoría, y la descripción lo cuenta sin nombrar internos', async () => {
+    mockListFolios.mockResolvedValue(folios([FOLIO]))
+    await call('online_orders_list', { venueId: 'v1', status: 'to_pay' })
+    expect(mockAudit).not.toHaveBeenCalled()
+    expect(mockAccept).not.toHaveBeenCalled()
+    expect(descriptions.get('online_orders_list')).toContain('Con cuenta: Ana L. · Premio −$45.00')
   })
 })
 

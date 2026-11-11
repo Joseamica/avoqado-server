@@ -1,5 +1,6 @@
 import express from 'express'
 import request from 'supertest'
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 import AppError, { ConflictError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
@@ -93,6 +94,7 @@ import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import * as beneficios from '@/services/online-ordering/beneficios.service'
 
 const app = express()
 app.use(express.json())
@@ -559,7 +561,7 @@ describe('cableado: qué candados corre cada ruta', () => {
     ['POST /quote', () => request(app).post('/venues/flautas/ordering/quote').send({ items: body.items })],
   ])('%s: venue operativo (sin demo) y candado de plan en modo cerrado (R10, R14)', async (_ruta, llamar) => {
     expect((await llamar()).status).toBe(200)
-    expect(mockRan).toEqual(NUEVOS)
+    expect(mockRan).toEqual(_ruta === 'POST /quote' ? ['operational', 'ordering-auth', 'strict:ONLINE_ORDERING'] : NUEVOS)
   })
 
   it('POST /orders: el venue por slug AUNQUE esté desactivado → token de PEDIDOS; activo, operativo y plan los pide el servicio (P1-06, Codex r3)', async () => {
@@ -767,5 +769,63 @@ describe('Codex r4: la decisión definitiva viaja como final:true', () => {
     expect(r404.status).toBe(404)
     expect(r404.body).toEqual({ message: 'Negocio no encontrado', code: 'VENUE_NOT_FOUND' })
     expect(createOnlineOrder).not.toHaveBeenCalled()
+  })
+})
+
+describe('S10 · POST /quote con la clienta (P2-4)', () => {
+  const PREMIO = 'cmgq0x0p30009abcd1234efgh'
+
+  it('con sesión pasa su customerId (de la sesión, nunca del cuerpo) y lo que eligió; sin sesión, null', async () => {
+    const cotiza = jest.spyOn(beneficios, 'cotizarConBeneficios').mockResolvedValue({ total: 80 } as any)
+    const eleccion = { cupon: 'DIEZ', puntos: 100, premioId: PREMIO }
+
+    const con = await request(app)
+      .post('/venues/flautas/ordering/quote')
+      .set('x-test-customer', '1')
+      .send({ items: body.items, beneficios: eleccion, customerId: 'otra' })
+    expect(con.status).toBe(200)
+    expect(con.body).toEqual({ success: true, data: { total: 80 } })
+    expect(cotiza).toHaveBeenLastCalledWith('v1', body.items, { customerId: 'cust1', eleccion })
+
+    await request(app).post('/venues/flautas/ordering/quote').send({ items: body.items })
+    expect(cotiza).toHaveBeenLastCalledWith('v1', body.items, { customerId: null, eleccion: null })
+    cotiza.mockRestore()
+  })
+
+  it('r5 #1: con el pool saturado (P2024) al leer la oferta responde 200 con la cotización base y calculados:false, nunca 500', async () => {
+    ;(quoteCart as jest.Mock).mockResolvedValue({ ok: true, lines: [], subtotal: 93, total: 93, issues: [] })
+    prismaMock.loyaltyConfig.findUnique.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the connection pool', {
+        code: 'P2024',
+        clientVersion: 'x',
+      }),
+    )
+    const r = await request(app)
+      .post('/venues/flautas/ordering/quote')
+      .set('x-test-customer', '1')
+      .send({ items: body.items, beneficios: { puntos: 100 } })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({
+      success: true,
+      data: { ok: true, lines: [], subtotal: 93, total: 93, issues: [], beneficios: { calculados: false } },
+    })
+  })
+
+  it.each([
+    [{ puntos: 1.5 }, 'Los puntos deben ser un número entero'],
+    [{ puntos: 0 }, 'Elige al menos 1 punto'],
+    [{ cupon: '   ' }, 'Escribe tu cupón'],
+    [{ cupon: 'x'.repeat(51) }, 'Cupón demasiado largo'],
+    [{ premioId: 'p 1' }, 'Premio inválido'],
+  ])('beneficios mal formados %j: 400 en español, sin cotizar', async (eleccion, texto) => {
+    const cotiza = jest.spyOn(beneficios, 'cotizarConBeneficios')
+    const r = await request(app)
+      .post('/venues/flautas/ordering/quote')
+      .set('x-test-customer', '1')
+      .send({ items: body.items, beneficios: eleccion })
+    expect(r.status).toBe(400)
+    expect(r.text).toContain(texto)
+    expect(cotiza).not.toHaveBeenCalled()
+    cotiza.mockRestore()
   })
 })

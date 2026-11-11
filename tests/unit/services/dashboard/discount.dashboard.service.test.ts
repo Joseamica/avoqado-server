@@ -617,10 +617,15 @@ describe('Discount Dashboard Service', () => {
         .mockResolvedValueOnce(8) // activeDiscounts
         .mockResolvedValueOnce(3) // automaticDiscounts
 
-      prismaMock.orderDiscount.findMany.mockResolvedValue([
-        { discountId: 'd1', amount: new Decimal(10), discount: { id: 'd1', name: 'Discount 1', type: 'PERCENTAGE' } },
-        { discountId: 'd1', amount: new Decimal(15), discount: { id: 'd1', name: 'Discount 1', type: 'PERCENTAGE' } },
-        { discountId: 'd2', amount: new Decimal(5), discount: { id: 'd2', name: 'Discount 2', type: 'FIXED_AMOUNT' } },
+      // S9: los totales salen de `aggregate` y el top de `groupBy` (ya no se traen las filas); ver discount.stats.test.ts.
+      prismaMock.orderDiscount.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { amount: new Decimal(30) } })
+      prismaMock.orderDiscount.groupBy.mockResolvedValue([
+        { discountId: 'd1', _count: { _all: 2 }, _sum: { amount: new Decimal(25) } },
+        { discountId: 'd2', _count: { _all: 1 }, _sum: { amount: new Decimal(5) } },
+      ])
+      prismaMock.discount.findMany.mockResolvedValue([
+        { id: 'd1', name: 'Discount 1', type: 'PERCENTAGE' },
+        { id: 'd2', name: 'Discount 2', type: 'FIXED_AMOUNT' },
       ])
 
       const result = await getDiscountStats('venue-123')
@@ -636,7 +641,8 @@ describe('Discount Dashboard Service', () => {
 
     it('should handle empty statistics', async () => {
       prismaMock.discount.count.mockResolvedValue(0)
-      prismaMock.orderDiscount.findMany.mockResolvedValue([])
+      prismaMock.orderDiscount.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { amount: null } })
+      prismaMock.orderDiscount.groupBy.mockResolvedValue([])
 
       const result = await getDiscountStats('venue-123')
 

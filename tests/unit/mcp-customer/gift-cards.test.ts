@@ -160,6 +160,8 @@ describe('gift_card_lookup', () => {
           expiresOn: null,
           expired: false,
           customer: 'Karla Q',
+          // S15: la tarjeta guardada en una cuenta dice de quién (el nombre como ya sale en `customer`).
+          savedToAccount: 'Guardada en la cuenta de Karla Q',
           recipient: 'Ana',
           buyer: 'Luis',
           saleTicket: 'ORD-1',
@@ -220,6 +222,28 @@ describe('gift_card_lookup', () => {
       'The delivery status is independent of the card status: delivery PENDING only means nothing has been sent yet, and a printed or handed-to-the-buyer card is never sent, so its delivery stays PENDING for good (there is nothing to send) — that does NOT mean the card is unpaid; only the card status says that.',
     )
     expect(d).not.toMatch(/deliveryErrorCode|deliveredAt|deliveryStatus|GiftCard\b|recipientPhone/)
+  })
+
+  it('S15: gift_card_lookup de una tarjeta guardada dice de quién («Guardada en la cuenta de …»); sin dueña o en un saldo a favor, null', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        FILA,
+        { ...FILA, last4: 'SINC', customer: null, storeCredit: null },
+        // Un sobre de saldo a favor también lleva su clienta, pero no se «guardó»: es suyo desde que nació.
+        { ...FILA, last4: 'SALD', storeCredit: { customerId: 'c1', customerName: 'Karla Q' } },
+      ],
+      page: 1,
+      pageSize: 10,
+      total: 3,
+    })
+    const r = await llamar('gift_card_lookup', { venueId: 'v1', customer: 'Karla' })
+    expect(r.cards.map((c: { last4: string; savedToAccount: string | null }) => [c.last4, c.savedToAccount])).toEqual([
+      ['K7QZ', 'Guardada en la cuenta de Karla Q'],
+      ['SINC', null],
+      ['SALD', null],
+    ])
+    expect(mockPermiso).toHaveBeenCalledWith('giftCards:read', 'v1')
+    expect(descripciones.get('gift_card_lookup')).toContain('if a customer saved it in her account, whose account it is')
   })
 
   it('por cliente; sin coincidencias → found:false con un texto para el usuario', async () => {

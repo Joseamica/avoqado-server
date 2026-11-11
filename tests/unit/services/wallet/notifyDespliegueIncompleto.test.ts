@@ -43,7 +43,15 @@ function errorDeEsquema(): Error {
 }
 
 describe('un despliegue incompleto no puede apagar los sellos en silencio', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$executeRaw.mockResolvedValue(0)
+    prismaMock.$queryRaw
+      .mockReset()
+      .mockResolvedValue([])
+      .mockResolvedValueOnce([{ ocupado: false }])
+      .mockResolvedValueOnce([{ id: 'aviso', intentos: 0 }])
+  })
 
   it('un cliente SIN tarjeta no es un fallo: notified 0 y failed falso', async () => {
     prismaMock.walletPass.findMany.mockResolvedValue([] as any)

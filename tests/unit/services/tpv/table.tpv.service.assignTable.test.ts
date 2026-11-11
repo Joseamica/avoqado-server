@@ -116,6 +116,7 @@ describe('assignTable — puntero a una cuenta cerrada (R2-TABLE-01)', () => {
 
     expect(result.isNewOrder).toBe(true)
     expect(result.order.id).toBe('cuenta-nueva')
+    expect(prismaMock.order.count).not.toHaveBeenCalled() // El puntero histórico no es un objetivo de edición.
   })
 
   it('regresión: puntero a una cuenta ABIERTA → la reutiliza sin buscar otra ni crear', async () => {

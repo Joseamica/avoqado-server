@@ -8,6 +8,7 @@ import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { conNegocio } from '../services/demo/candadoDemo'
+import { reintentarAvisosDeTarjeta } from '../services/wallet/notifyPassUpdated.service'
 import { barrerCuponesSinCanje } from '../services/shared/cuponDeLaVenta'
 
 const BATCH_LIMIT = 25
@@ -24,6 +25,7 @@ interface LoyaltyReconciliationDependencies {
   award: (args: Parameters<typeof awardLoyaltyForPaidOrder>[0]) => ReturnType<typeof awardLoyaltyForPaidOrder>
   /** D5: los cupones de ventas pagadas que se quedaron sin canje. */
   barrerCupones: () => Promise<number>
+  barrerWallet: typeof reintentarAvisosDeTarjeta
 }
 
 const defaults: LoyaltyReconciliationDependencies = {
@@ -34,6 +36,7 @@ const defaults: LoyaltyReconciliationDependencies = {
   // sobre una venta devuelta. El envoltorio no otorga a una venta reembolsada y revierte si el reembolso entra a media.
   award: otorgarLealtadRespetandoReembolsos,
   barrerCupones: () => barrerCuponesSinCanje(),
+  barrerWallet: () => reintentarAvisosDeTarjeta(),
 }
 
 /**
@@ -203,6 +206,7 @@ export class LoyaltyReconciliationJob {
 
       // D5: aparte de la lealtad y sin tumbarla: su fallo sólo queda en el log y la siguiente vuelta lo reintenta.
       await this.dependencies.barrerCupones().catch(error => logger.error('Coupon redemption sweep failed', { error }))
+      await this.dependencies.barrerWallet().catch(error => logger.error('Wallet notification sweep failed', { error }))
       return { scanned: candidates.length, applied, failed, skipped }
     } finally {
       this.running = false

@@ -435,7 +435,7 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
     expect(referidos).toHaveBeenCalledWith({ orderId: orden.id, venueId })
   })
 
-  it('si el status NO cambia la guarda no se activa: editar el nombre de una orden ya cancelada con un cobro vivo funciona', async () => {
+  it('una cancelada con cobro vivo rechaza cambiar nombre; el reenvío idéntico de anulación continúa', async () => {
     const orden = await nuevaOrden({ status: 'CANCELLED' })
     await prisma.terminalPaymentRequest.create({
       data: {
@@ -448,8 +448,14 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
         expiresAt: new Date(Date.now() + 60_000),
       },
     })
-    const res = await updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: 'Ana' } as any)
-    expect(res.customerName).toBe('Ana')
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orden.id }, include: { items: true, orderDiscounts: true } })
+    await expect(updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: 'Ana' } as any)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_EDIT',
+    })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orden.id }, include: { items: true, orderDiscounts: true } })).toEqual(antes)
+    const res = await updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: antes.customerName } as any)
+    expect(res).toMatchObject({ status: 'CANCELLED', customerName: antes.customerName, version: antes.version })
   })
 })
 
@@ -690,7 +696,11 @@ describe('Fusión de cuentas (mergeOrders)', () => {
     const stable = await resultadoDe(mergeOrders(venueId, a.id, b.id))
     expect(stable.ok).toBe(false)
     expect((stable as { e: unknown }).e).toBeInstanceOf(BadRequestError)
-    expect((stable as { e: unknown }).e).toMatchObject({ statusCode: 400, message: 'La cuenta destino ya está cerrada' })
+    expect((stable as { e: unknown }).e).toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_EDIT',
+      message: 'Esta cuenta está cancelada, abre una nueva.',
+    })
     expect(await estadoCompletoOrdenes([a.id, b.id])).toEqual(committed)
     expect(referrals).toHaveBeenCalledTimes(1)
     expect((logAction as jest.Mock).mock.calls).toHaveLength(auditCalls)

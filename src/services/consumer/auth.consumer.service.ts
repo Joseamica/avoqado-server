@@ -50,7 +50,8 @@ function splitName(name?: string | null): { firstName?: string; lastName?: strin
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') || undefined }
 }
 
-async function verifyGoogleIdToken(idToken: string): Promise<ProviderProfile> {
+/** S7 (P2-1): la tienda la reusa tal cual (mismas audiencias, mismo `emailTrusted`), sin otra política. */
+export async function verifyGoogleIdToken(idToken: string): Promise<ProviderProfile> {
   const ticket = await googleClient.verifyIdToken({
     idToken,
     audience: requireAudiences('CONSUMER_GOOGLE_CLIENT_IDS'),

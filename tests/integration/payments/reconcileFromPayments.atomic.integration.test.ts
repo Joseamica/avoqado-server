@@ -401,6 +401,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
           take: 10,
         },
         items: { select: { areaTicketLineId: true, giftCardId: true }, take: 10 },
+        onlineOrder: { select: { id: true } },
       },
     })
     return {
@@ -420,6 +421,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
       externalId: o.externalId,
       tableId: o.tableId,
       items: o.items,
+      pedidoEnLinea: o.onlineOrder !== null,
       cobros: o.payments,
     }
   }

@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 import { Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
@@ -6,7 +7,7 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/guards'
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
@@ -93,7 +94,7 @@ async function applyPromotionInTransaction(
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   const { venueId, orderId, promotionId, instanceId, selections, soldAt } = params
 
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
     throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -279,7 +280,7 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
   // deciden y escriben sobre la misma foto.
   const recorte = await withDeadlockRetry(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('No encontramos esa promoción en la cuenta.')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).

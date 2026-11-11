@@ -9,6 +9,7 @@ import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
 import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
+import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 
 const SUF = `kdsarmado-${Date.now()}`
 const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000)
@@ -179,18 +180,22 @@ describe('authorKitchenTickets', () => {
     expect(comandas.flatMap(c => c.items)).toHaveLength(2)
   })
 
-  it('una marca LISTO que llegó ANTES deja la comanda terminada aunque luego se arme (pegajosa)', async () => {
+  // 🔴 hz:dcc49fe5:D1 · Codex r4 B10 y r5: una marca que llegó ANTES del armado no dice qué cubría (la pantalla la recibió por la red
+  // local; la caja pudo cambiar la cuenta después). Se queda terminada y vacía, y lo de la venta sale en una comanda nueva y visible,
+  // aunque repita lo que la pantalla ya hizo («en duda, manda»). Antes se metía en la marca y lo cambiado quedaba escondido.
+  it('una marca LISTO que llegó ANTES del armado se queda terminada; lo de la venta sale en una comanda nueva y visible', async () => {
     const v = await nuevaVenta()
     const sourceKey = `sale:${v.externalId}:${barra}`
     await markKitchenTicket({ venueId, sourceKey, stationId: barra, action: 'BUMP', label: '47-001', at: new Date() })
     await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
-    const comanda = await prisma.kdsOrder.findUniqueOrThrow({
+    const marca = await prisma.kdsOrder.findUniqueOrThrow({
       where: { venueId_sourceKey: { venueId, sourceKey } },
       include: { items: true },
     })
-    expect(comanda.status).toBe('COMPLETED')
-    expect(comanda.orderId).toBe(v.id)
-    expect(comanda.items.map(i => i.productName)).toEqual(['Limonada'])
+    expect([marca.status, marca.orderId, marca.items]).toEqual(['COMPLETED', v.id, []])
+    const enBarra = (await comandasDe(v.id)).filter(c => c.printStationId === barra && c.id !== marca.id)
+    expect(enBarra.map(c => [c.status, c.items.map(i => i.productName)])).toEqual([['NEW', ['Limonada']]])
+    expect(enBarra[0].sourceKey).toMatch(new RegExp(`^order:${v.id}:mas:\\d+:${barra}$`))
   })
 
   it('«salió en papel» después del armado la saca del tablero si seguía nueva, y nunca a una ya empezada', async () => {
@@ -527,6 +532,223 @@ describe('authorKitchenTickets', () => {
       ]),
     )
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+})
+
+// 🔴 hz:dcc49fe5:D1 — la TPV funde la pieza nueva en el mismo renglón (cambia `quantity`, conserva el id). Antes la cobertura era por
+// renglón entero y el tercer café nunca llegaba a la pantalla; ahora la pantalla recibe sólo la diferencia, en su propia comanda.
+describe('cantidad que sube en un renglón que ya está en la pantalla', () => {
+  const tacosEnPantalla = async (orderId: string) =>
+    (await comandasDe(orderId)).map(c => [c.status, c.items.filter(i => i.productName === 'Taco').map(i => i.quantity)])
+
+  it('mostrador: 2 tacos en una comanda, la caja sube a 3 y cobra ⇒ una comanda nueva de 1; repetir no la duplica', async () => {
+    folio += 1
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `SUBE-${folio}-${SUF}`,
+        externalId: `ext-sube-${folio}-${SUF}`,
+        subtotal: 100,
+        taxAmount: 0,
+        total: 100,
+      },
+      select: { id: true, externalId: true, version: true },
+    })
+    await addItemsToOrder(venueId, v.id, [{ productId: taco, quantity: 2 }], v.version)
+    // Mostrador: lo arma un ROUND (aceptar un folio) — la TPV en mostrador no arma al agregar.
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+    await prisma.kdsOrder.updateMany({ where: { venueId, orderId: v.id }, data: { status: 'COMPLETED', completedAt: new Date() } })
+
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: v.id }, select: { version: true } })
+    await addItemsToOrder(venueId, v.id, [{ productId: taco, quantity: 3 }], version) // carrito completo: reemplaza 2 → 3
+    expect(await prisma.orderItem.count({ where: { orderId: v.id } })).toBe(1)
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toHaveLength(1)
+    expect((await tacosEnPantalla(v.id)).sort()).toEqual([
+      ['COMPLETED', [2]],
+      ['NEW', [1]],
+    ])
+    const nueva = (await comandasDe(v.id)).find(c => c.status === 'NEW')!
+    expect(nueva.sourceKey).toMatch(new RegExp(`^order:${v.id}:mas:\\d+:${cocina}$`))
+    // Su LISTO sin red se acepta y la termina (Codex r3 #2).
+    await markKitchenTicket({ venueId, sourceKey: nueva.sourceKey!, stationId: cocina, action: 'BUMP', label: null, at: new Date() })
+    expect((await prisma.kdsOrder.findUniqueOrThrow({ where: { id: nueva.id } })).status).toBe('COMPLETED')
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'LEGACY_POST' })).ticketIds).toEqual([])
+    expect(await comandasDe(v.id)).toHaveLength(2)
+  })
+
+  it('mesa por la ruta de la TPV: 2 → 3 manda 1; 3 → 2 → 3 no manda nada; 3 → 4 manda 1 más', async () => {
+    folio += 1
+    const tableId = (
+      await prisma.table.create({ data: { venueId, number: `MS-${folio}-${SUF}`, capacity: 4, qrCode: `qrs-${folio}-${SUF}` } })
+    ).id
+    const o = await prisma.order.create({
+      data: { venueId, orderNumber: `MESA-SUBE-${folio}-${SUF}`, tableId, subtotal: 0, taxAmount: 0, total: 0 },
+      select: { id: true },
+    })
+    const carrito = async (quantity: number) => {
+      const { version } = await prisma.order.findUniqueOrThrow({ where: { id: o.id }, select: { version: true } })
+      await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity }], version)
+    }
+
+    await carrito(2) // la ronda de mesa arma su comanda al guardar
+    expect(await tacosEnPantalla(o.id)).toEqual([['NEW', [2]]])
+
+    await carrito(3)
+    expect((await tacosEnPantalla(o.id)).map(([, q]) => q).sort()).toEqual([[1], [2]])
+
+    await carrito(2)
+    await carrito(3)
+    expect(await comandasDe(o.id)).toHaveLength(2)
+
+    await carrito(4)
+    const tacos = (await comandasDe(o.id)).flatMap(c => c.items).filter(i => i.productName === 'Taco')
+    expect(tacos.map(i => i.quantity).sort()).toEqual([1, 1, 2])
+    expect(new Set(tacos.map(i => i.orderItemId)).size).toBe(1) // siempre el mismo renglón de la cuenta
+  })
+
+  // Codex r3 #1: el autor nunca le suma platillos a la comanda de OTRA cuenta (terminada, saldrían escondidos).
+  it('si el folio ya es de otra cuenta, la comanda sale en uno propio; repetir no la duplica', async () => {
+    const a = await nuevaVenta()
+    const b = await nuevaVenta()
+    const ajena = await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        sourceKey: `sale:${b.externalId}:${cocina}`,
+        printStationId: cocina,
+        orderId: a.id,
+        orderNumber: 'A',
+        orderType: 'DINE_IN',
+        status: 'COMPLETED',
+      },
+    })
+    await authorKitchenTickets({ venueId, orderId: b.id, trigger: 'PAID' })
+    expect(await prisma.kdsOrderItem.count({ where: { kdsOrderId: ajena.id } })).toBe(0)
+    const deB = await comandasDe(b.id)
+    expect(deB.map(c => c.status)).toEqual(['NEW', 'NEW'])
+    expect(deB.map(c => c.sourceKey)).toEqual(
+      expect.arrayContaining([expect.stringMatching(new RegExp(`^order:${b.id}:otra:[0-9a-f]{16}$`))]),
+    )
+    await authorKitchenTickets({ venueId, orderId: b.id, trigger: 'SWEEP' })
+    expect((await comandasDe(b.id)).flatMap(c => c.items)).toHaveLength(2)
+  })
+
+  // Codex r2 #2: una comanda con preparación por producto la lleva para TODOS sus renglones; partir la diferencia de uno dejaría el
+  // mismo producto en dos mecanismos. Ahí la diferencia sigue como antes (anotado en la deuda).
+  it('comanda mixta con preparación por producto: subir un renglón no la parte en otra comanda', async () => {
+    folio += 1
+    const tableId = (
+      await prisma.table.create({ data: { venueId, number: `MX-${folio}-${SUF}`, capacity: 4, qrCode: `qrx-${folio}-${SUF}` } })
+    ).id
+    const conTiempos = { id: 'immediate', label: 'Inmediato', kind: 'IMMEDIATE', preparationVersion: 1 }
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MIXTA-${folio}-${SUF}`,
+        tableId,
+        subtotal: 150,
+        taxAmount: 0,
+        total: 150,
+        items: { create: [renglon(taco, 'Taco', 2), renglon(taco, 'Taco', 1, { notes: 'sin cebolla', serviceCourse: conTiempos })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+    const [antes] = await comandasDe(o.id)
+    expect(antes.preparationVersion).toBe(1)
+    const simple = await prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id, notes: null }, select: { id: true } })
+    await prisma.orderItem.update({ where: { id: simple.id }, data: { quantity: 3 } }) // la TPV funde la pieza nueva
+
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toEqual([])
+    expect((await comandasDe(o.id)).flatMap(c => c.items).filter(i => i.orderItemId === simple.id)).toHaveLength(1)
+  })
+
+  // Codex r4 B8 (regresión): el carrito completo con dos entradas iguales sin externalId SUMABA a la fila (2 + 1 + 1 = 4) y, con la
+  // cocina por unidades, salían 2 tacos que nadie pidió. El carrito completo es estado absoluto: la suma de sus entradas reemplaza.
+  it('🔴 B8: reenviar el carrito con dos entradas iguales (1 + 1) sobre 2 ya mandados no cobra de más ni manda nada', async () => {
+    folio += 1
+    const tableId = (
+      await prisma.table.create({ data: { venueId, number: `MB8-${folio}-${SUF}`, capacity: 4, qrCode: `qrb8-${folio}-${SUF}` } })
+    ).id
+    const o = await prisma.order.create({
+      data: { venueId, orderNumber: `MESA-B8-${folio}-${SUF}`, tableId, subtotal: 0, taxAmount: 0, total: 0 },
+      select: { id: true },
+    })
+    const carrito = async (items: Array<{ productId: string; quantity: number }>) => {
+      const { version } = await prisma.order.findUniqueOrThrow({ where: { id: o.id }, select: { version: true } })
+      await addItemsToOrder(venueId, o.id, items, version)
+    }
+
+    await carrito([{ productId: taco, quantity: 2 }])
+    expect(await tacosEnPantalla(o.id)).toEqual([['NEW', [2]]])
+
+    await carrito([
+      { productId: taco, quantity: 1 },
+      { productId: taco, quantity: 1 },
+    ])
+    const renglones = await prisma.orderItem.findMany({ where: { orderId: o.id }, select: { quantity: true, total: true }, take: 5 })
+    expect(renglones.map(r => [r.quantity, Number(r.total)])).toEqual([[2, 100]])
+    expect(await tacosEnPantalla(o.id)).toEqual([['NEW', [2]]])
+  })
+
+  // Codex r4 B13: lo nuevo de una venta de mostrador caía en la comanda de su folio aunque la cocina ya la hubiera TERMINADO (o la caja
+  // la hubiera mandado en papel): quedaba escondido. Una comanda cerrada nunca absorbe contenido nuevo; sale en una comanda nueva.
+  // Codex r5: también la ABIERTA. Una marca la cierra sin el candado del armado (y un LISTO sin red puede llegar tarde, después de que se
+  // le sumó algo): lo de otro armado nunca entra en una comanda que ya existía.
+  it.each([
+    ['terminada (LISTO)', 'BUMP' as const, 'antes'],
+    ['en papel', 'FALLBACK_PRINTED' as const, 'antes'],
+    ['abierta, y su LISTO sin red llega tarde', 'BUMP' as const, 'después'],
+  ])('🔴 B13: mostrador con su comanda %s; un taco nuevo al cobrar sale en una comanda nueva y visible', async (_como, action, marca) => {
+    const v = await nuevaVenta()
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'LEGACY_POST' })).ticketIds).toHaveLength(2)
+    const enCocina = `sale:${v.externalId}:${cocina}`
+    const marcar = () => markKitchenTicket({ venueId, sourceKey: enCocina, stationId: cocina, action, label: null, at: new Date() })
+    if (marca === 'antes') await marcar()
+    await prisma.orderItem.create({ data: { orderId: v.id, ...renglon(taco, 'Taco', 1, { notes: 'sin cebolla' }) } })
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toHaveLength(1)
+    if (marca === 'después') await marcar()
+    const cerrada = await prisma.kdsOrder.findUniqueOrThrow({
+      where: { venueId_sourceKey: { venueId, sourceKey: enCocina } },
+      include: { items: true },
+    })
+    expect(cerrada.items.map(i => [i.productName, i.quantity])).toEqual([['Taco', 2]])
+    const nuevas = (await comandasDe(v.id)).filter(c => c.id !== cerrada.id && c.printStationId === cocina)
+    expect(nuevas.map(c => [c.status, c.fallbackPrintedAt, c.items.map(i => [i.productName, i.quantity, i.notes])])).toEqual([
+      ['NEW', null, [['Taco', 1, 'sin cebolla']]],
+    ])
+    expect(nuevas[0].sourceKey).toMatch(new RegExp(`^order:${v.id}:mas:\\d+:${cocina}$`))
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(3)
+  })
+
+  // Codex r4 B10: la marca cubría 2 tacos (la pantalla los recibió por la red local); antes del primer armado la caja sube a 3. Ninguna
+  // marca recibe platillos: los 3 salen en una comanda nueva y visible («en duda, manda»: repetir 2 es mejor que perder el tercero), y lo
+  // que salió en papel también se vuelve a ver.
+  it('🔴 B10: una marca sin platillos que llegó antes del armado no esconde lo que cambió después', async () => {
+    const v = await nuevaVenta()
+    const enCocina = `sale:${v.externalId}:${cocina}`
+    const enBarra = `sale:${v.externalId}:${barra}`
+    await markKitchenTicket({ venueId, sourceKey: enCocina, stationId: cocina, action: 'BUMP', label: null, at: new Date() })
+    await markKitchenTicket({ venueId, sourceKey: enBarra, stationId: barra, action: 'FALLBACK_PRINTED', label: null, at: new Date() })
+    const renglonTaco = await prisma.orderItem.findFirstOrThrow({ where: { orderId: v.id, productId: taco }, select: { id: true } })
+    await prisma.orderItem.update({ where: { id: renglonTaco.id }, data: { quantity: 3 } }) // la caja funde la pieza nueva
+
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const marcas = await prisma.kdsOrder.findMany({ where: { venueId, sourceKey: { in: [enCocina, enBarra] } }, include: { items: true } })
+    expect(marcas.map(m => m.items)).toEqual([[], []])
+    const visibles = (await comandasDe(v.id)).filter(c => !marcas.some(m => m.id === c.id))
+    expect(visibles.map(c => [c.status, c.fallbackPrintedAt, c.items.map(i => [i.productName, i.quantity])]).sort()).toEqual([
+      ['NEW', null, [['Limonada', 1]]],
+      ['NEW', null, [['Taco', 3]]],
+    ])
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(2)
   })
 })
 
