@@ -38,7 +38,7 @@ jest.mock('@/utils/prismaClient', () => ({
     terminal: { findFirst: jest.fn() },
     shift: { findFirst: jest.fn() },
     payment: { findUnique: jest.fn() },
-    orderItem: { findMany: jest.fn(), count: jest.fn() },
+    orderItem: { findMany: jest.fn() },
     orderPromotion: { count: jest.fn() },
     kdsOrder: { findFirst: jest.fn() },
   },
@@ -50,7 +50,11 @@ jest.mock('@/services/tpv/table.tpv.service', () => ({
   assignOrderWaiter: jest.fn(),
   clearTable: jest.fn(),
 }))
-jest.mock('@/services/tpv/order.tpv.service', () => ({ addItemsToOrder: jest.fn() }))
+// La normalización es la REAL: el reconocimiento de una ronda ya guardada usa la misma que escribe (hz:5bda0b30:D3, Codex r3 #1).
+jest.mock('@/services/tpv/order.tpv.service', () => ({
+  addItemsToOrder: jest.fn(),
+  normalizeAddItems: (...args: unknown[]) => jest.requireActual('@/services/tpv/order.tpv.service').normalizeAddItems(...args),
+}))
 jest.mock('@/services/mobile/order.mobile.service', () => ({
   payCashOrder: jest.fn(),
   applyOrderDiscount: jest.fn(),
@@ -1829,7 +1833,7 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockReset().mockResolvedValue({ version: 4, total: 120 })
     ;(prisma.orderPromotion.count as jest.Mock).mockReset().mockResolvedValue(0)
-    ;(prisma.orderItem.count as jest.Mock).mockReset().mockResolvedValue(0)
+    ;(prisma.orderItem.findMany as jest.Mock).mockReset().mockResolvedValue([])
   })
 
   it('un rechazo de NEGOCIO leído bajo el candado → REJECTED, sin compensación (la transacción no dejó nada)', async () => {
@@ -1943,8 +1947,8 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
         .mockResolvedValueOnce({ version: 8, status: 'PENDING', total: 0 })
         .mockResolvedValueOnce({ version: 9, status: 'COMPLETED', total: 290 })
       ;(prisma.orderPromotion.count as jest.Mock).mockResolvedValue(2)
-      // Dos productos iguales de la ronda se guardan fusionados en UN renglón (Codex r2 #1): basta uno de sus renglones.
-      ;(prisma.orderItem.count as jest.Mock).mockResolvedValue(1)
+      // Están TODAS las llaves de la ronda tal como quedan tras normalizar (Codex r3 #1).
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ externalId: 'sync:i-ya:0' }, { externalId: 'sync:i-ya:1' }])
 
       const [ack] = await processIntents(
         baseParams([
@@ -1959,18 +1963,21 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
       expect(ack).toMatchObject({ id: 'i-ya', status: 'ACKED', result: { orderId: 'order-1', version: 9, total: 290 } })
       expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
       expect(prisma.orderPromotion.count).toHaveBeenCalledWith({ where: { orderId: 'order-1', instanceId: { in: ['uuid-1', 'uuid-2'] } } })
-      expect(prisma.orderItem.count).toHaveBeenCalledWith({
-        where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0', 'sync:i-ya:1'] } },
-      })
+      expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0', 'sync:i-ya:1'] } } }),
+      )
     })
 
-    it('ronda guardada a MEDIAS (falta un combo o un producto): va completa a la transacción de la ronda', async () => {
+    it('ronda guardada a MEDIAS (falta un combo o una de sus llaves): va completa a la transacción de la ronda', async () => {
       ;(prisma.orderPromotion.count as jest.Mock).mockResolvedValueOnce(1).mockResolvedValueOnce(2)
-      ;(prisma.orderItem.count as jest.Mock).mockResolvedValueOnce(1).mockResolvedValueOnce(0)
+      // Falta un combo; después falta UNA de las llaves (la otra ya estaba, Codex r3 #1): ninguna de las dos está guardada.
+      ;(prisma.orderItem.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ externalId: 'sync:i-falta-combo:0' }, { externalId: 'sync:i-falta-combo:1' }])
+        .mockResolvedValueOnce([{ externalId: 'sync:i-falta-producto:0' }])
       const ronda = (id: string) => ({
         id,
         type: 'ADD_ITEMS',
-        payload: { orderId: 'order-1', items: [promo, otro, { productId: 'p-1', quantity: 2 }] },
+        payload: { orderId: 'order-1', items: [promo, otro, { productId: 'p-1', quantity: 2 }, { productId: 'p-2', quantity: 1 }] },
       })
 
       await processIntents(baseParams([ronda('i-falta-combo')]))

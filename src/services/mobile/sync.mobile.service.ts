@@ -1290,20 +1290,30 @@ async function applyAddItems(
 }
 
 /**
- * ¿La ronda ya está en la cuenta? TODOS sus combos (por instancia) y, si trae productos, alguno de ellos por su llave: los productos
- * de una ronda se guardan juntos en una sola transacción, y dos iguales se fusionan en un renglón con la llave del primero (Codex
- * r2 #1), así que exigir todas las llaves no reconocería una ronda que sí se guardó.
+ * ¿La ronda ya está ENTERA en la cuenta? Todos sus combos (por instancia) y todas sus llaves tal como las guarda la ronda: después
+ * de la MISMA normalización que escribe (`normalizeAddItems`: dos importes libres iguales quedan en un renglón con la llave del
+ * primero, Codex r2 #1). Si falta cualquiera —una ronda vieja de varias transacciones que dejó el combo y no todos sus productos, o
+ * una llave repetida de otra ronda (Codex r3 #1)— no está guardada: sigue a la transacción de la ronda, que completa lo que falta
+ * sin duplicar (combos por instancia, productos por llave).
  */
-async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: Array<{ externalId: string }>): Promise<boolean> {
+async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: any[]): Promise<boolean> {
   const instancias = conPromocion.map(it => it.promotionRef?.promotionInstanceId)
   if (!instancias.every((id: unknown) => typeof id === 'string' && id.length > 0)) return false
   const unicas = [...new Set<string>(instancias)]
-  const llaves = [...new Set(normales.map(it => it.externalId))]
-  const [combos, renglones] = await Promise.all([
+  const llaves = [...new Set(orderTpvService.normalizeAddItems(normales).map(it => it.externalId))]
+  if (llaves.some(llave => !llave)) return false
+  const [combos, guardadas] = await Promise.all([
     prisma.orderPromotion.count({ where: { orderId, instanceId: { in: unicas } } }),
-    llaves.length > 0 ? prisma.orderItem.count({ where: { orderId, externalId: { in: llaves } } }) : Promise.resolve(0),
+    llaves.length > 0
+      ? prisma.orderItem.findMany({
+          where: { orderId, externalId: { in: llaves as string[] } },
+          select: { externalId: true },
+          take: llaves.length * 2,
+        })
+      : Promise.resolve([]),
   ])
-  return combos === unicas.length && (llaves.length === 0 || renglones > 0)
+  const presentes = new Set(guardadas.map(r => r.externalId))
+  return combos === unicas.length && llaves.every(llave => presentes.has(llave))
 }
 
 /**
