@@ -3981,7 +3981,11 @@ async function main() {
             const product = getRandomItem(sellableProducts)
             const quantity = faker.number.int({ min: 1, max: 2 })
             const itemTotal = parseFloat(product.price.toString()) * quantity
-            subtotal += itemTotal
+            // Higher modifier probability for Avoqado venues
+            const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
+            const modifier = Math.random() < modifierProbability ? getRandomItem(modifiers) : null
+            const modifierPrice = modifier ? parseFloat(modifier.price.toString()) : 0
+            subtotal += itemTotal + modifierPrice
 
             const orderItem = await prisma.orderItem.create({
               data: {
@@ -3990,20 +3994,18 @@ async function main() {
                 quantity,
                 unitPrice: product.price,
                 taxAmount: 0, // como las ventas nativas: el precio ya trae el IVA (D5)
-                total: itemTotal,
+                // El renglón trae su extra, como uno nativo: la cuenta = Σ renglones, que es lo que suman los recálculos
+                // (Codex r1 de D5: sin esto, una cortesía borraba los extras de los demás renglones).
+                total: itemTotal + modifierPrice,
                 createdAt: orderCreatedAt,
               },
             })
 
             const itemModifiers: any[] = []
-            // Higher modifier probability for Avoqado venues
-            const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
-            if (Math.random() < modifierProbability) {
-              const modifier = getRandomItem(modifiers)
+            if (modifier) {
               await prisma.orderItemModifier.create({
                 data: { orderItemId: orderItem.id, modifierId: modifier.id, quantity: 1, price: modifier.price },
               })
-              subtotal += parseFloat(modifier.price.toString())
               itemModifiers.push({
                 name: modifier.name,
                 price: parseFloat(modifier.price.toString()),
