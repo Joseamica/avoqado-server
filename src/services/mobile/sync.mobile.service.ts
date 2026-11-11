@@ -110,12 +110,18 @@ export interface SyncIntentAck {
 
 /**
  * ¿La ronda con promociones se deja tal cual para el reenvío? Sólo con un transitorio de la LISTA, como siempre: el replay es
- * idempotente por instanceId. Un choque que sale ENVUELTO (40P01/40001/55P03 en un P2010 o sin código) ahora también va a RETRY
- * (`esErrorTransitorio`), pero antes retira sus promos, como hacía cuando iba a cuarentena: así un reenvío que se rechace después
- * (otro dueño, permiso, la promo movida de cuenta) no deja la ronda a medias (hz:381780f0:D1, Codex r1 #1 y r2). La misma ventana
- * con P2034/P2028/VERSION_CONFLICT ya existía: deuda aparte (`docs/audit/deuda-encontrada.md`).
+ * idempotente por instanceId. Con cualquier otro error se retiran sus promos (`removeIntentPromotions`) y la ronda va a cuarentena,
+ * también con un choque ENVUELTO (40P01/40001/55P03 en un P2010 o sin código), que `esErrorTransitorio` ya manda a RETRY en los demás
+ * intents: reintentar una ronda con promos que chocó podía duplicar el combo si otra caja lo separaba a otro cheque antes de
+ * retirarlo (hz:381780f0:D1, Codex r3 #1). Queda como en develop. La ventana con P2034/VERSION_CONFLICT: deuda aparte.
  */
 const rondaSeQuedaParaElReenvio = (error: any): boolean => CODIGOS_TRANSITORIOS.has(error?.errorCode ?? error?.code)
+
+/** Tras retirar sus promos, la ronda que chocó envuelta queda REJECTED con el mismo `errorCode` que antes (no RETRY). */
+function rondaConPromosEnCuarentena(error: any): unknown {
+  if (esErrorTransitorio(error) && error && typeof error === 'object') error.errorCode = error.errorCode ?? error.code ?? 'BUSINESS_RULE'
+  return error
+}
 
 /**
  * Una reserva PROCESSING evita que dos replays concurrentes ejecuten el mismo
@@ -1281,6 +1287,7 @@ async function applyAddItems(
     // nada: el replay es idempotente por instanceId.
     if (!rondaSeQuedaParaElReenvio(error)) {
       await removeIntentPromotions(venueId, orderId, promoInstanceIds)
+      throw rondaConPromosEnCuarentena(error)
     }
     throw error
   }
@@ -1337,6 +1344,7 @@ async function applyAddItems(
     // (RETRY) no se toca nada: el replay es idempotente por instanceId.
     if (!rondaSeQuedaParaElReenvio(error) && promoInstanceIds.length > 0) {
       await removeIntentPromotions(venueId, orderId, promoInstanceIds)
+      throw rondaConPromosEnCuarentena(error)
     }
     throw error
   }

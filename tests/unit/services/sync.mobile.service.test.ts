@@ -2607,20 +2607,19 @@ describe('interbloqueo envuelto que agotó los reintentos (hz:381780f0:D1)', () 
     expect(acks[0]).toMatchObject({ id: 'i-cancel-42601', status: 'REJECTED', errorCode: 'P2010' })
   })
 
-  // Un choque envuelto en una ronda con promociones: `develop` retiraba sus promos y lo mandaba a cuarentena. Ahora las retira
-  // igual (la ronda vuelve limpia) y queda en RETRY: un reenvío que luego se rechace no deja la promo viva (Codex r1 #1 y r2).
-  it('ADD_ITEMS con promoción: P2010 con 40P01 adentro → retira las promos del intent y queda en RETRY', async () => {
+  // Una ronda CON promociones que choca envuelta queda como en develop: retira sus promos y va a cuarentena. Reintentarla podía
+  // duplicar el combo si otra caja lo separaba a otro cheque antes de la compensación (Codex r3 #1). Las demás rondas, a RETRY.
+  it('ADD_ITEMS con promoción: P2010 con 40P01 adentro → retira las promos y queda REJECTED, como en develop', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
     ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
     const acks = await processIntents(
       baseParams([{ id: 'i-promo-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } }]),
     )
-    expect(acks[0]).toMatchObject({ id: 'i-promo-40p01', status: 'RETRY', errorCode: 'P2010' })
+    expect(acks[0]).toMatchObject({ id: 'i-promo-40p01', status: 'REJECTED', errorCode: 'P2010' })
     expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
-    sinRechazoGuardado()
   })
 
-  it('ADD_ITEMS ronda mixta: el alta normal truena con 40P01 de modelo → retira las promos ya puestas y queda en RETRY', async () => {
+  it('ADD_ITEMS ronda mixta: el alta normal truena con 40P01 de modelo → retira las promos y queda REJECTED, como en develop', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
     ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(deModelo('40P01'))
@@ -2629,36 +2628,21 @@ describe('interbloqueo envuelto que agotó los reintentos (hz:381780f0:D1)', () 
         { id: 'i-mixta-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] } },
       ]),
     )
-    expect(acks[0]).toMatchObject({ id: 'i-mixta-40p01', status: 'RETRY' })
+    expect(acks[0]).toMatchObject({ id: 'i-mixta-40p01', status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
     expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
-    sinRechazoGuardado()
   })
 
-  it('ronda mixta con 40P01: si el reenvío lo rechaza otro dueño de la mesa, la promo ya se había retirado en el primer envío', async () => {
+  it('ADD_ITEMS sin promociones: P2010 con 40P01 adentro → RETRY, sin guardar rechazo', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
-    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
-    const ronda = {
-      id: 'i-mixta-reenvio',
-      type: 'ADD_ITEMS',
-      payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] },
-    }
-
-    const [primero] = await processIntents(baseParams([ronda]))
-    expect(primero).toMatchObject({ status: 'RETRY' })
-    expect(promotionService.removeIntentPromotions).toHaveBeenCalledTimes(1)
-    expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
-    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
-      version: 4,
-      status: 'PENDING',
-      tableId: 't1',
-      servedById: 'staff-otro',
-      servedBy: { firstName: 'Ana', lastName: 'Ruiz' },
-    })
-    const [segundo] = await processIntents(baseParams([ronda]))
-    expect(segundo).toMatchObject({ id: 'i-mixta-reenvio', status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
-    expect(promotionService.applyPromotionToOrder).toHaveBeenCalledTimes(1)
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i-normal-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p-1', quantity: 1 }] } },
+      ]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-normal-40p01', status: 'RETRY', errorCode: 'P2010' })
+    expect(promotionService.removeIntentPromotions).not.toHaveBeenCalled()
+    sinRechazoGuardado()
   })
 
   it('control — retirar las promos tras un 40P01 choca con un transitorio (P2028) → RETRY, sin guardar rechazo', async () => {

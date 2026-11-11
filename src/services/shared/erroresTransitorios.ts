@@ -2,7 +2,8 @@ import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError } from '@/
 
 /**
  * Errores que NO dicen nada del negocio: el intent offline se reintenta, nunca se pierde. Una sola lista para el reducer de la
- * cola (`sync.mobile.service`) y para quien compensa dentro de él (`removeIntentPromotions`, Codex r2 N5).
+ * cola (`sync.mobile.service`) y para quien compensa dentro de él (`removeIntentPromotions`, Codex r2 N5). La ronda con promociones
+ * decide con la LISTA; todo lo demás, con `esErrorTransitorio` (que además lee el SQLSTATE de choque envuelto).
  */
 export const CODIGOS_TRANSITORIOS: ReadonlySet<string> = new Set([
   'VERSION_CONFLICT',
