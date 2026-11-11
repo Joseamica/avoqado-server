@@ -333,4 +333,35 @@ describe('ronda de combos sin red: entera o nada', () => {
     expect(ack).toMatchObject({ status: 'ACKED', result: { orderId, version: cuenta.version, total: 90 } })
     expect(await combosDeLaRonda(orderId, [a])).toBe(1)
   })
+
+  // Codex r3 #1 (founder, opción A): la ronda sólo se da por guardada si están TODAS sus llaves (tal como quedan tras normalizar) y
+  // todos sus combos. Una ronda vieja de varias transacciones dejó su combo y el producto K, y su alta de productos falló antes de L:
+  // el reenvío tiene que completar L, sin duplicar K ni el combo.
+  it.each([
+    ['ronda vieja a medias (llaves de la cola)', (r: { id: string }) => [`sync:${r.id}:0`, `sync:${r.id}:1`]],
+    [
+      'llave del cliente repetida de otra ronda',
+      (_r: { id: string }) => ['k-cliente-' + randomUUID().slice(0, 6), 'l-cliente-' + randomUUID().slice(0, 6)],
+    ],
+  ] as const)('(8) %s: el combo y K ya estaban, falta L ⇒ el reenvío completa L sin duplicar nada', async (_caso, llaves) => {
+    const { orderId, localOrderId } = await cuentaDeMesa()
+    const a = randomUUID()
+    const r0 = ronda(localOrderId, [])
+    const [k, l] = llaves(r0)
+    const r = {
+      ...r0,
+      payload: { ...r0.payload, items: [combo(a), { productId, quantity: 1, externalId: k }, { productId, quantity: 1, externalId: l }] },
+    }
+    // Lo que dejó guardado el intento anterior: el combo (su transacción) y K (de otra ronda o de esta misma); L nunca llegó.
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    await addItemsToOrder(venueId, orderId, [combo(a), { productId, quantity: 1, externalId: k }] as any, version, true)
+
+    const [ack] = await processIntents(params([r]))
+
+    expect(ack).toMatchObject({ id: r.id, status: 'ACKED' })
+    expect(await combosDeLaRonda(orderId, [a])).toBe(1)
+    expect(await prisma.orderItem.count({ where: { orderId, externalId: k } })).toBe(1)
+    expect(await prisma.orderItem.count({ where: { orderId, externalId: l } })).toBe(1)
+    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(290) // combo $90 + 2 × $100
+  })
 })
