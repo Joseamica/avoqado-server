@@ -18,6 +18,7 @@ import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/serv
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
+import { despertarPasesTrasCommit } from './cortesiaDeFolio'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
@@ -99,6 +100,8 @@ export type CasResult =
       orderStatus: OrderStatus | null
       /** Fase 2: esta transición canceló y pasó el cargo AUTHORIZED → RELEASING; el llamador libera la tarjeta tras el commit. */
       releaseChargeId?: string
+      /** S9: clientas con premio regresado; tras el commit se despierta su pase de Wallet (si no, lo manda el barrido). */
+      clientasConPremio?: string[]
     }
   | {
       r: 'STALE'
@@ -231,7 +234,11 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
   // quitar el descuento. Después de ganar el CAS de la fila y antes de escribir la Order: si la Order no se escribe,
   // `OrderNotWritten` revierte también esta devolución (Codex r2).
-  if (cancela) await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
+  // S9 (P2-5): la cuenta es de folio, así que sus beneficios regresan y su fila se queda como cortesía. También con R44 (vence sin
+  // cancelar su cuenta, decisión 15): la clienta no espera a que alguien la anule para recuperar su premio.
+  const canjes = rule.cancels
+    ? await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
+    : null
   const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
   // R44: vencer sin cancelar no escribe la cuenta (queda como la dejó el reembolso).
   const written = venceSinCancelar
@@ -263,6 +270,7 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     orderWritten,
     orderStatus: orderWritten ? rule.order.to : null,
     ...(releaseChargeId ? { releaseChargeId } : {}),
+    ...(canjes?.clientasConPremio.length ? { clientasConPremio: canjes.clientasConPremio } : {}),
   }
 }
 
@@ -313,6 +321,7 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx, alConfirmar?: 
 
   // I-1: lo que cerró la sincronización de R2 se anuncia aquí, ya con la transacción confirmada y sólo si ganó el CAS de la fila.
   if (result.r === 'STALE' && result.cancelledElsewhere) announceCancelledElsewhere(result.cancelledElsewhere, result.now)
+  if (result.r === 'OK') despertarPasesTrasCommit(a.venueId, result.clientasConPremio)
   return result
 }
 
@@ -367,20 +376,35 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
   const minutes = await prepMinutes(i.venueId, i.estimatedMinutes)
   // Igual que el cobro: la marca de comanda sólo si hace falta (nunca lanza).
   const marcarCocina = await debeMarcarCocina(i.venueId, { orderId: i.orderId })
+  // S11 (P2-4, R6): un pedido de «Mi equipo» que un beneficio dejó en $0 se cierra pagado en la MISMA transacción que lo acepta (no en
+  // la que lo creó). Para cualquier otra cuenta, su CAS (`total = 0` y por pagar) no toca nada. Dinámico: `folios.service` importa esta
+  // máquina de estados.
+  const { cerrarFolioEnCeroEnTx, trasCerrarFolioEnCero } = await import('./folios.service')
+  const confirmado: { cierre: Awaited<ReturnType<typeof cerrarFolioEnCeroEnTx>> | null } = { cierre: null }
 
-  const r = await casTransition({
-    kind: 'ACCEPT',
-    venueId: i.venueId,
-    orderId: i.orderId,
-    now: i.now,
-    // Sin dinero, sólo antes de la hora límite (compite con el vencimiento por el mismo CAS). Un pedido ya cobrado no vence:
-    // el job no lo toca (R1) y queda en la bandeja para aceptarlo.
-    extraWhere: (now, hasMoney) => (hasMoney ? {} : { acceptDeadlineAt: { gt: now } }),
-    onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
-    // `kitchenPendingAt` es la marca que el barrido de comandas retoma si el armado de abajo falla; la pone la MISMA
-    // escritura que confirma la orden (contrato de la columna).
-    orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
-  })
+  const r = await casTransition(
+    {
+      kind: 'ACCEPT',
+      venueId: i.venueId,
+      orderId: i.orderId,
+      now: i.now,
+      // Sin dinero, sólo antes de la hora límite (compite con el vencimiento por el mismo CAS). Un pedido ya cobrado no vence:
+      // el job no lo toca (R1) y queda en la bandeja para aceptarlo.
+      extraWhere: (now, hasMoney) => (hasMoney ? {} : { acceptDeadlineAt: { gt: now } }),
+      onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
+      // `kitchenPendingAt` es la marca que el barrido de comandas retoma si el armado de abajo falla; la pone la MISMA
+      // escritura que confirma la orden (contrato de la columna).
+      orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
+    },
+    async (tx, cas) =>
+      cas.r === 'OK'
+        ? cerrarFolioEnCeroEnTx(tx, { venueId: i.venueId, orderId: i.orderId, marcarCocina, minutes, reloj: () => i.now ?? new Date() })
+        : null,
+    // Sólo el valor del intento que hizo commit (R65 b).
+    valor => {
+      confirmado.cierre = valor as typeof confirmado.cierre
+    },
+  )
   if (r.r === 'STALE' && r.status === OnlineOrderStatus.PENDING_ACCEPTANCE && r.deadlinePassed) {
     // R1: aceptar perdió por la hora. Se vence aquí mismo y se responde el estado real, no un confuso «por aceptar».
     const expired = await expireOnlineOrder({ venueId: i.venueId, orderId: i.orderId, now: r.now })
@@ -390,7 +414,11 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
     }
   }
   if (r.r !== 'OK') return settled(r)
-  return announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina }, r)
+  const aceptado = announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina }, r)
+  if (confirmado.cierre) {
+    trasCerrarFolioEnCero({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, marcarCocina, minutes }, confirmado.cierre)
+  }
+  return aceptado
 }
 
 /** Lo de después del commit de una aceptación (comandas, bandeja, aviso al comensal, bitácora); la comparte la captura. */

@@ -22,6 +22,7 @@ export type PaymentEffectKind =
   | 'TRANSACTION_COST'
   | 'AVISO_TURNO_CERRADO'
   | 'LOYALTY_POINTS_REVERSAL'
+  | 'STAMP_REVERSAL'
 export type PaymentEffectInput = {
   venueId: string
   paymentId: string
@@ -215,7 +216,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       id: claim.id,
       claimToken: claim.claimToken,
       status: 'PROCESSING',
-      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO', 'LOYALTY_POINTS_REVERSAL'] },
+      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO', 'LOYALTY_POINTS_REVERSAL', 'STAMP_REVERSAL'] },
     },
   })
   if (external) {
@@ -291,6 +292,20 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       } catch (error) {
         // La fila sólo guarda un código: sin esto, una reversa que falla seis veces queda en DEAD_LETTER sin que nadie se entere.
         logger.error('[LEALTAD] no se pudieron quitar los puntos de una venta reembolsada; se reintenta hasta DEAD_LETTER', {
+          venueId: external.venueId,
+          refundPaymentId: external.paymentId,
+          intento: claim.attempts,
+          ...rastroDelError(error),
+        })
+        throw error
+      }
+    } else if (external.kind === 'STAMP_REVERSAL') {
+      const { reverseStampForOrder } = await import('../wallet/stampLedger.service')
+      try {
+        if (!external.orderId) throw new Error('STAMP_REVERSAL_ORDER_REQUIRED')
+        await reverseStampForOrder(external.venueId, external.orderId)
+      } catch (error) {
+        logger.error('[LEALTAD] no se pudo quitar el sello de una venta reembolsada; se reintenta hasta DEAD_LETTER', {
           venueId: external.venueId,
           refundPaymentId: external.paymentId,
           intento: claim.attempts,
@@ -460,19 +475,33 @@ export async function enqueuePaymentCommissionInTx(
 }
 
 /**
- * D6 (5-nov): la reversa de los puntos que la venta dio nace en la MISMA transacción que el reembolso: si el proceso muere después del
- * commit, el trabajador la termina, y un fallo de lealtad nunca tumba un reembolso. Sin venta con puntos, no hace nada.
+ * Puntos y sello nacen en la MISMA transacción del reembolso: el trabajador los termina si el proceso muere tras el commit.
  */
-export function enqueueLoyaltyPointsReversalInTx(
+export async function enqueueLoyaltyReversalsInTx(
   tx: Prisma.TransactionClient,
   refund: { venueId: string; refundPaymentId: string; orderId: string | null },
 ): Promise<void> {
-  return enqueuePaymentEffect(tx, {
+  await enqueuePaymentEffect(tx, {
     venueId: refund.venueId,
     paymentId: refund.refundPaymentId,
     orderId: refund.orderId,
     kind: 'LOYALTY_POINTS_REVERSAL',
     dedupeKey: `loyalty-points-refund:${refund.refundPaymentId}:v1`,
+    payload: {},
+  })
+  if (refund.orderId) await enqueueStampReversalInTx(tx, { ...refund, orderId: refund.orderId })
+}
+
+export function enqueueStampReversalInTx(
+  tx: Prisma.TransactionClient,
+  refund: { venueId: string; refundPaymentId: string; orderId: string },
+): Promise<void> {
+  return enqueuePaymentEffect(tx, {
+    venueId: refund.venueId,
+    paymentId: refund.refundPaymentId,
+    orderId: refund.orderId,
+    kind: 'STAMP_REVERSAL',
+    dedupeKey: `stamp-refund:${refund.refundPaymentId}:v1`,
     payload: {},
   })
 }
@@ -540,5 +569,5 @@ export async function enqueueRefundPaymentEffectsInTx(
     dedupeKey: `referral-refund:${refundPaymentId}:v1`,
     payload: { operation: 'REFUND' },
   })
-  await enqueueLoyaltyPointsReversalInTx(tx, { venueId: payment.venueId, refundPaymentId, orderId: payment.orderId })
+  await enqueueLoyaltyReversalsInTx(tx, { venueId: payment.venueId, refundPaymentId, orderId: payment.orderId })
 }

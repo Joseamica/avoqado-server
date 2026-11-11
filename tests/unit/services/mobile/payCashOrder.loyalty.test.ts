@@ -98,6 +98,29 @@ describe('payCashOrder — lealtad al quedar pagada (paridad con la PAX)', () =>
     awardMock.mockResolvedValue(undefined)
   })
 
+  it('el replay que SALDA guarda la hora de venta con PAID; ni parcial ni en vivo inventan una marca', async () => {
+    const ayer = Date.now() - 3600000
+    seedOrder()
+    await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1', isOfflineReplay: true, createdAtLocal: ayer })
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ paymentStatus: 'PAID', loyaltySaleAt: new Date(ayer), loyaltyEligibleAt: expect.any(Date) }),
+      }),
+    )
+    jest.clearAllMocks()
+    seedOrder()
+    await payCashOrder('venue-1', 'order-1', { amount: 1000, tip: 0, staffId: 'staff-1', isOfflineReplay: true, createdAtLocal: ayer })
+    const parcial = prismaMock.order.updateMany.mock.calls.find(([a]: [any]) => a.data.paymentStatus === 'PARTIAL')![0].data
+    expect(parcial).not.toHaveProperty('loyaltySaleAt')
+    expect(parcial).not.toHaveProperty('loyaltyEligibleAt')
+    jest.clearAllMocks()
+    seedOrder()
+    await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1', createdAtLocal: ayer })
+    expect(prismaMock.order.updateMany.mock.calls.find(([a]: [any]) => a.data.paymentStatus === 'PAID')![0].data).not.toHaveProperty(
+      'loyaltySaleAt',
+    )
+  })
+
   it('🔴 un cobro en efectivo que SALDA la cuenta acredita lealtad con la misma base que la PAX', async () => {
     seedOrder()
 

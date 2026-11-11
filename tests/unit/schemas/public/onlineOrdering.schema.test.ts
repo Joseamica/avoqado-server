@@ -27,4 +27,14 @@ describe('createOrderSchema (público)', () => {
     expect(createOrderSchema.safeParse(pedido({ channel: 'LINK' })).success).toBe(true)
     expect(createOrderSchema.safeParse(pedido({ channel: 'WHATSAPP' })).success).toBe(false)
   })
+
+  it('S11: beneficios es opcional, con la MISMA forma que al cotizar (en español), y el cupón sale sin bytes de control', () => {
+    expect(createOrderSchema.safeParse(pedido({ beneficios: { premioId: 'r1', puntos: 50, cupon: 'DIEZ' } })).success).toBe(true)
+    expect(createOrderSchema.safeParse(pedido({ beneficios: {} })).success).toBe(true)
+    const puntos = createOrderSchema.safeParse(pedido({ beneficios: { puntos: 1.5 } }))
+    expect(puntos.success).toBe(false)
+    if (!puntos.success) expect(puntos.error.issues[0].message).toBe('Los puntos deben ser un número entero')
+    const cupon = createOrderSchema.safeParse(pedido({ beneficios: { cupon: 'DI\u001bEZ' } }))
+    expect(cupon.success && (cupon.data.body as { beneficios: { cupon: string } }).beneficios.cupon).toBe('DIEZ')
+  })
 })

@@ -6,6 +6,7 @@
  */
 import fs from 'fs'
 import path from 'path'
+import ts from 'typescript'
 
 const SRC = path.join(__dirname, '../../../src')
 const archivos = (dir: string): string[] =>
@@ -29,6 +30,8 @@ const LLAVE = 'salirSiLaLlaveYaTienePago('
 // Revisión de 6a-2, M-1: el cierre que da por saldada una cuenta pasa por la regla; sin ella una cancelada volvía a cerrarse.
 const CIERRE = 'cierreAutomaticoPermitido('
 const PROPIA = '.order.create('
+// S9 v5 (R12, B3): todo escritor que deja dinero en la cuenta de un folio deja la NOTA (aviso una vez por folio y renovación).
+const NOTA = 'notarDineroEnFolioCerradoEnTx('
 const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, string]> }> = {
   // Tarea A7: el `payment.create` vive en el núcleo extraído; las reglas de cuenta cancelada se movieron con él, intactas.
   'services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
@@ -39,6 +42,7 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['registrarAbonoEnTx', RECHAZA],
       ['registrarAbonoEnTx', REABRE],
       ['registrarAbonoEnTx', CIERRE],
+      ['registrarAbonoEnTx', NOTA],
     ],
   },
   'services/tpv/payment.tpv.service.ts#recordOrderPayment': {
@@ -51,6 +55,8 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['updateOrderTotalsForStandalonePayment', REABRE],
       ['settleStandalonePaymentInTx', CIERRE],
       ['updateOrderTotalsForStandalonePayment', CIERRE],
+      ['settleStandalonePaymentInTx', NOTA],
+      ['updateOrderTotalsForStandalonePayment', NOTA],
     ],
   },
   // PREVIO (Plan B7): la confirmación deja la cancelada como hoy; la iniciación ya rechaza.
@@ -61,16 +67,31 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['settleOrderForConfirmedCryptoPayment', 'UNA ORDEN CANCELADA NO SE RESUCITA'],
     ],
   },
-  // PREVIO (Plan B8): el registro manual rechaza una cancelada, como hoy.
+  // Plan B8: el registro manual rechaza una cancelada, como hoy, salvo la cuenta anulada de un FOLIO (tienda híbrida S9, P2-5): ahí es
+  // dinero ya capturado (una transferencia tardía) y la REABRE con la regla de siempre, en su transacción.
   'services/dashboard/manualPayment.service.ts#createManualPayment': {
-    clase: 'YA RECHAZA (PREVIO)',
-    marcadores: [['createManualPayment', 'No se puede registrar un pago en una orden cancelada']],
+    clase: 'RECHAZA otra cuenta cancelada / REABRE la de un folio (S9)',
+    marcadores: [
+      ['createManualPayment', 'No se puede registrar un pago en una orden cancelada'],
+      ['createManualPayment', 'esCuentaDeFolioEnTx('],
+      ['createManualPayment', REABRE],
+      ['createManualPayment', NOTA],
+    ],
   },
   // v14 (Codex r13 #3): «liquidar» crea un efectivo en ese momento: es un cobro nuevo y se rechaza.
-  'services/dashboard/order.dashboard.service.ts#settleOrder': { clase: 'RECHAZA (cobro nuevo)', marcadores: [['settleOrder', RECHAZA]] },
+  'services/dashboard/order.dashboard.service.ts#settleOrder': {
+    clase: 'RECHAZA (cobro nuevo)',
+    marcadores: [
+      ['settleOrder', RECHAZA],
+      ['settleOrder', NOTA],
+    ],
+  },
   'services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': {
     clase: 'YA RECHAZA',
-    marcadores: [['settleCustomerBalance', 'CUENTA_NO_CANCELADA']],
+    marcadores: [
+      ['settleCustomerBalance', 'CUENTA_NO_CANCELADA'],
+      ['settleCustomerBalance', NOTA],
+    ],
   },
   'services/tpv/payment.tpv.service.ts#recordFastPayment': {
     clase: 'ORDEN PROPIA (una existente la delega)',
@@ -124,22 +145,140 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
   'services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': { clase: 'REEMBOLSO', marcadores: [] },
 }
 
-it('🔴 todo `payment.create` de src/ está clasificado ante una cuenta CANCELADA y cada marcador sigue en su sitio', () => {
+// R-P2-S2-5: única clasificación de TODOS los métodos Payment; create conserva sus marcadores previos.
+Object.assign(ESCRITORES, {
+  'jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule': {
+    clase: 'ADMIN: reasigna el cobro al negocio de origen del evento SIM; no cambia importe ni reabre ventas.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#failB4BitPaymentInTx': {
+    clase: 'DINERO_TARDIO: marca fallido el intento B4Bit y su conciliación según evidencia del procesador.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#processWebhook': {
+    clase: 'DINERO_TARDIO: guarda evidencia/metadatos del webhook recibido, no inicia otro cobro.',
+    marcadores: [],
+  },
+  'services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx': {
+    clase: 'DINERO_TARDIO: confirma y atribuye dinero B4Bit ya capturado; conserva liquidación canónica. S9 v5: deja la nota (plan B).',
+    marcadores: [['completeAndAttributeB4BitPaymentInTx', NOTA]],
+  },
+  'services/b4bit/b4bit.service.ts#cancelCryptoPayment': {
+    clase: 'DINERO_TARDIO: cancela un intento B4Bit según el estado del procesador, no edita artículos ni beneficios.',
+    marcadores: [],
+  },
+  'services/cleanup/liveDemoCleanup.service.ts#deleteVenueDataTx': {
+    clase: 'ADMIN: limpieza transaccional acotada al negocio demo bajo su fence; sin edición del POS.',
+    marcadores: [],
+  },
+  'services/dashboard/payment.dashboard.service.ts#updatePayment': {
+    clase: 'REEMBOLSO: corrección del cobro con las restricciones actuales sobre dinero hecho, conservadas por S2.',
+    marcadores: [],
+  },
+  'services/dashboard/payment.dashboard.service.ts#deletePayment': {
+    clase: 'REEMBOLSO: borrado/corrección del registro con las restricciones actuales del cobro hecho, conservadas por S2.',
+    marcadores: [],
+  },
+  'services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': {
+    clase: 'REEMBOLSO: corrección auditada de importe/método del cobro SIM; la cuenta simple se verifica y relee bajo lock.',
+    marcadores: [],
+  },
+  'services/dashboard/testing.dashboard.service.ts#createTestPayment': {
+    clase: 'ADMIN: crea/corrige únicamente el cobro marcado de prueba del negocio de testing.',
+    marcadores: [],
+  },
+  'services/dashboard/testing.dashboard.service.ts#deleteTestPayment': {
+    clase: 'ADMIN: borra únicamente el registro de prueba seleccionado por el operador autorizado.',
+    marcadores: [],
+  },
+  'services/dashboard/venue.dashboard.service.ts#deleteVenue': {
+    clase: 'ADMIN: borrado del negocio entero autorizado; no es edición de una venta desde el POS.',
+    marcadores: [],
+  },
+  'services/onboarding/demoCleanup.service.ts#cleanDemoData': {
+    clase: 'ADMIN: elimina datos demo durante el onboarding, acotados al negocio correspondiente.',
+    marcadores: [],
+  },
+  'services/online-ordering/card/refund.service.ts#reverseRecordedRefund': {
+    clase: 'REEMBOLSO: revierte el registro de devolución fallida según evidencia de la tarjeta en línea.',
+    marcadores: [],
+  },
+  'services/payments/deferredTransactionCost.service.ts#proyectarCostoDelReembolso': {
+    clase: 'REEMBOLSO: proyecta costos de una devolución, sin tocar importe cobrado ni artículos.',
+    marcadores: [],
+  },
+  'services/payments/deferredTransactionCost.service.ts#convergerCostoDeTransaccion': {
+    clase: 'DINERO_TARDIO: concilia costos del procesador, sin iniciar cargo ni modificar artículos.',
+    marcadores: [],
+  },
+  'services/superadmin/rateCorrection/rateCorrectionApply.ts#applyRateCorrection': {
+    clase: 'ADMIN: corrección privilegiada y auditada de tasa/costos del procesador; no cambia dinero cobrado al cliente.',
+    marcadores: [],
+  },
+  'services/superadmin/rateCorrection/rateCorrectionReverse.ts#reverseRateCorrection': {
+    clase: 'ADMIN: revierte la corrección privilegiada de tasa/costos al valor auditado anterior.',
+    marcadores: [],
+  },
+  'services/terminal-payment.service.ts#closeRowFromPaymentTx': {
+    clase: 'DINERO_TARDIO: liga la procedencia de la solicitud al pago ya existente, sin cargo nuevo.',
+    marcadores: [],
+  },
+})
+
+// Siete métodos: create|createMany|update|updateMany|upsert|delete|deleteMany, incluidos callbacks y métodos de clase.
+function esEscrituraDePago(n: ts.Node): boolean {
+  return (
+    ts.isCallExpression(n) &&
+    ts.isPropertyAccessExpression(n.expression) &&
+    /^(create|createMany|update|updateMany|upsert|delete|deleteMany)$/.test(n.expression.name.text) &&
+    ts.isPropertyAccessExpression(n.expression.expression) &&
+    n.expression.expression.name.text === 'payment'
+  )
+}
+it('el detector financiero ve los siete métodos y no confunde lecturas u otro modelo', () => {
+  const sf = ts.createSourceFile(
+    'probe.ts',
+    'async function f(tx){' +
+      ['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany', 'findMany']
+        .map(method => `tx.payment.${method}({})`)
+        .join(';') +
+      ';tx.order.create({})}',
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  let writes = 0
+  function visit(n: ts.Node) {
+    if (esEscrituraDePago(n)) writes++
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  expect(writes).toBe(7)
+})
+
+it('🔴 todo escritor de Payment de src/ está clasificado ante una cuenta CANCELADA y cada marcador sigue en su sitio', () => {
   const vistos = new Set<string>()
   const faltan: string[] = []
   for (const archivo of archivos(SRC)) {
     const lineas = fs.readFileSync(archivo, 'utf8').split('\n')
-    lineas.forEach((linea, i) => {
-      if (!/\.payment\.create\(/.test(linea)) return
-      let j = i
-      while (j >= 0 && !INICIO.test(lineas[j])) j--
-      const clave = `${path.relative(SRC, archivo)}#${j >= 0 ? INICIO.exec(lineas[j])![1] : '(módulo)'}`
-      vistos.add(clave)
-      const escritor = ESCRITORES[clave]
-      if (!escritor) return void faltan.push(`${clave}: sin clasificar`)
-      for (const [funcion, texto] of escritor.marcadores)
-        if (!cuerpo(lineas, funcion)?.includes(texto)) faltan.push(`${clave}: falta «${texto}» en ${funcion}`)
-    })
+    const sf = ts.createSourceFile(archivo, lineas.join('\n'), ts.ScriptTarget.Latest, true)
+    function visit(n: ts.Node) {
+      if (esEscrituraDePago(n)) {
+        let owner = '(módulo)'
+        for (let p: ts.Node | undefined = n; p && !ts.isSourceFile(p); p = p.parent) {
+          if (ts.isFunctionDeclaration(p) && p.name && ts.isSourceFile(p.parent)) owner = p.name.text
+          if (ts.isMethodDeclaration(p)) owner = p.name.getText(sf)
+        }
+        const clave = `${path.relative(SRC, archivo)}#${owner}`
+        vistos.add(clave)
+        const escritor = ESCRITORES[clave]
+        if (!escritor) faltan.push(`${clave}: sin clasificar`)
+        else
+          for (const [funcion, texto] of escritor.marcadores)
+            if (!cuerpo(lineas, funcion)?.includes(texto)) faltan.push(`${clave}: falta «${texto}» en ${funcion}`)
+      }
+      ts.forEachChild(n, visit)
+    }
+    visit(sf)
   }
   expect(faltan).toEqual([])
   expect([...vistos].sort()).toEqual(Object.keys(ESCRITORES).sort()) // un escritor que se va también se nota
@@ -162,10 +301,30 @@ const COMO_HOY = [
 ]
 const REGLA_DE_REAPERTURA = [REABRE, 'estadoParaCobrar(', 'estadoAlRecibirDinero(']
 it('control — M-1: los escritores que siguen como hoy (PREVIO / VERDAD EXTERNA) no reabren una cuenta cancelada', () => {
-  expect(COMO_HOY.length).toBeGreaterThanOrEqual(6) // b4bit, manual, ingesta, pos-sync, cancelación externa, MCP
+  expect(COMO_HOY.length).toBeGreaterThanOrEqual(6) // b4bit, liberación de tarjeta, ingesta, pos-sync, cancelación externa, MCP
   const reabren = COMO_HOY.flatMap(rel => {
     const texto = fs.readFileSync(path.join(SRC, rel), 'utf8')
     return REGLA_DE_REAPERTURA.filter(t => texto.includes(t)).map(t => `${rel}: «${t}»`)
   })
   expect(reabren).toEqual([])
+})
+
+it('S9 v5 (U9): el embudo de la anulación sella; la conciliación de un folio «Nadie» sella y renueva pero no deja la nota', () => {
+  const leer = (rel: string) => fs.readFileSync(path.join(SRC, rel), 'utf8').split('\n')
+  expect(cuerpo(leer('services/shared/orderCancelGuard.ts'), 'devolverCanjesDeVentaAnuladaEnTx')).toContain('sellarFolioAnuladoEnTx(')
+  const conciliacion = cuerpo(leer('services/shared/cuentaCancelada.ts'), 'conciliarPedidoEnLinea') ?? ''
+  const ramaNadie = conciliacion.slice(
+    conciliacion.indexOf('if (esFolio) {'),
+    conciliacion.indexOf('return\n', conciliacion.indexOf('if (esFolio) {')),
+  )
+  expect(ramaNadie).toContain('sellarFolioAnuladoEnTx(')
+  expect(ramaNadie).toContain('renovarRecuperacionDeFolioEnTx(')
+  expect(ramaNadie).not.toContain(NOTA)
+  expect(ramaNadie).not.toContain('avisarDelCobroTardioEnTx(')
+  // La trampa de la v1: el `updateMany` de `OnlineOrder` nunca vive en el archivo de cripto.
+  expect(fs.readFileSync(path.join(SRC, 'services/b4bit/b4bit.service.ts'), 'utf8')).not.toMatch(/onlineOrder\.updateMany/)
+  // La conversión de cortesías no ganó una bitácora nueva con el sello.
+  expect(
+    (fs.readFileSync(path.join(SRC, 'services/online-ordering/cortesiaDeFolio.ts'), 'utf8').match(/activityLog\.create\(/g) ?? []).length,
+  ).toBe(1)
 })

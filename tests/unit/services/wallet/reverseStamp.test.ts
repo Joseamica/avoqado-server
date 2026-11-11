@@ -1,3 +1,5 @@
+// El despertador tiene su propia transacción y pruebas; aquí se cuentan sólo los reintentos de la reversa.
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 
 /**

@@ -40,6 +40,7 @@ function cuenta(over: Record<string, unknown> = {}, cobrado: string | null = nul
     taxAmount: '0.00',
     ...over,
   })
+  prismaMock.order.count.mockResolvedValue(['CANCELLED', 'DELETED'].includes(String(over.status)) ? 1 : 0)
   prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: cobrado, tipAmount: null } })
 }
 
@@ -73,7 +74,7 @@ describe('hueco 1 — el panel no cierra una cuenta que debe dinero', () => {
 
   it('anulada de $250 sin cobros ⇒ COMPLETED ⇒ 400', async () => {
     cuenta({ status: 'CANCELLED' })
-    await expect(falla({ status: 'COMPLETED' })).resolves.toMatchObject({ code: 'ORDER_CLOSE_WITH_BALANCE' })
+    await expect(falla({ status: 'COMPLETED' })).resolves.toMatchObject({ code: 'ORDER_CANCELLED_NO_EDIT' })
     expect(escribio()).toBe(false)
   })
 
@@ -130,7 +131,11 @@ describe('hueco 2 — el panel no le cambia la mesa a una cuenta que no está ce
     cuenta(actual)
     const error = await falla({ ...peticion, customerName: 'Ana' })
     expect(error).toBeInstanceOf(BadRequestError)
-    expect(error).toMatchObject({ statusCode: 400, code: 'ORDER_TABLE_CHANGE_NOT_ALLOWED', message: MENSAJE })
+    expect(error).toMatchObject(
+      actual.status === 'CANCELLED'
+        ? { statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' }
+        : { statusCode: 400, code: 'ORDER_TABLE_CHANGE_NOT_ALLOWED', message: MENSAJE },
+    )
     expect(escribio()).toBe(false)
   })
 

@@ -53,6 +53,8 @@ const SITIOS: Array<[string, string, string]> = [
   ['services/dashboard/paymentLink.service.ts', 'finalizeMercadoPagoCheckout', 'createSalePostingInTx('],
   ['services/delivery-channels/core/deliveryOrderIngestion.service.ts', 'ingestDeliveryOrder', 'createSalePostingInTx('],
   ['services/online-ordering/card/capture.service.ts', 'finishCapture', 'createSalePostingInTx('],
+  // S11 (P2-4): el folio que un beneficio deja en $0 queda pagado sin cobro: su vale y sus sobres, en esa misma transacción.
+  ['services/online-ordering/folios.service.ts', 'cerrarFolioEnCeroEnTx', 'createSalePostingInTx('],
 ]
 
 /**

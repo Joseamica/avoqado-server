@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
@@ -45,6 +46,7 @@ import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
+import { despertarPasesTrasCommit } from '../online-ordering/cortesiaDeFolio'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -80,7 +82,6 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import {
-  bloquearVentaParaLiga,
   clienteYaLigadoALaVenta,
   esChoqueDeUnico,
   etiquetaDeReintento,
@@ -166,6 +167,7 @@ import {
   cierreAutomaticoPermitido,
   esCobroCompletadoDeLaOrden,
   esCobroNuevo,
+  notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
@@ -2339,7 +2341,7 @@ export async function updateOrderDetailsInTransaction(
   input: OrderDetailsInput,
   opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: los comensales mueven los cargos automáticos; un pedido de tarjeta sin cobrar tiene un total fijo.
   if (input.covers != null) await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
@@ -2460,7 +2462,7 @@ export async function applyOrderDiscountInTransaction(
 
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2561,10 +2563,12 @@ export async function removeOrderDiscountInTransaction(
   orderDiscountId: string,
   staffId?: string,
   /**
-   * Sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA transacción, así que un canje de una
-   * cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
+   * `porAnulacion` (S9): lo pide quien anula (`devolverCanjesDeVentaAnuladaEnTx`); bloquea sin el rechazo de cuenta cancelada de
+   * `bloquearCuentaParaEditar`.
+   * `abonosDeSaldoSeRegresanEnEstaTx`: sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA
+   * transacción, así que un canje de una cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
    */
-  opciones: { abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
+  opciones: { porAnulacion?: true; abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
 ) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
@@ -2578,7 +2582,12 @@ export async function removeOrderDiscountInTransaction(
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (
+    !(await (opciones?.porAnulacion
+      ? lockExistingOrderForPayment(tx, { venueId, orderId })
+      : bloquearCuentaParaEditar(tx, { venueId, orderId })))
+  )
+    throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2701,6 +2710,7 @@ export async function splitOrderItemsInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -2898,6 +2908,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -3089,6 +3100,7 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: targetOrderId, additionalOrderIds: [sourceOrderId] })
   // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
@@ -3876,6 +3888,7 @@ export interface AbonoEnTxEntrada {
   method: NonNullable<CashPaymentInput['method']>
   idempotencyKey?: string
   isOfflineReplay?: boolean
+  createdAtLocal?: CashPaymentInput['createdAtLocal']
   externalSource?: string
   /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
   tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
@@ -4319,6 +4332,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+      ...(saldaAqui && entrada.isOfflineReplay ? { loyaltySaleAt: horaDeLaVenta(entrada, new Date()) } : {}),
       ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,
@@ -4451,6 +4465,21 @@ export async function registrarAbonoEnTx(
     channel: canalDeTurno,
     amountPesos: shiftAmount,
     tipPesos: shiftTip,
+  })
+
+  // 🔴 S9 v5 (B3): la nota del dinero que ENTRA, con lo mismo que se escribió en la fila, en PESOS (`amountDecimal` y `tipDecimal`,
+  // ya recortados y repartidos; `entrada.amountCents` son centavos). Un folio «Nadie» anulado avisa una vez y renueva su recuperación;
+  // fuera de `WEB` no consulta nada.
+  await notarDineroEnFolioCerradoEnTx(tx, {
+    venueId,
+    orderId,
+    entra: new Prisma.Decimal(amountDecimal).plus(tipDecimal),
+    source: fresh.source,
+    reabierta: reabiertaDeCancelada,
+    canal: canalDeReapertura,
+    paymentId: newPayment.id,
+    idempotencyKey: input.idempotencyKey ?? null,
+    staffId: effectiveStaffId ?? null,
   })
 
   // Create VenueTransaction for financial tracking
@@ -4869,6 +4898,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               method: paymentMethod,
               idempotencyKey: input.idempotencyKey,
               isOfflineReplay: input.isOfflineReplay,
+              createdAtLocal: input.createdAtLocal,
               externalSource: input.externalSource,
               tender: tenderRef,
               dentroDeLaTx: input.dentroDeLaTx,
@@ -6264,7 +6294,9 @@ export async function returnGiftBalanceAndCancelOrder(
       // 🔴 LEALTAD (deuda P1, 31-oct): el premio de sellos y los puntos vuelven al cliente, igual que al anular. Antes de los abonos: el
       // reembolso reclama el turno y Customer/StampReward van antes que él (Order → Customer/StampReward; premio → cobro → turno al
       // crear la venta). Si algo falla después, la transacción revierte también esto.
-      await devolverCanjesDeVentaAnuladaEnTx(tx, {
+      // S9 (P2-5, R55 b): en una cuenta de FOLIO no se borran: sus beneficios regresan a la clienta y su fila se queda como cortesía
+      // (beneficios → sobres, como las demás cancelaciones).
+      const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, {
         venueId,
         orderId,
         staffId,
@@ -6345,7 +6377,15 @@ export async function returnGiftBalanceAndCancelOrder(
         ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
         ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
       ]
-      return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+      return {
+        orderId,
+        table,
+        tables: reconciled.tables,
+        hadBoundTable: Boolean(boundTable),
+        tpvTableFreed,
+        affectedRefs,
+        clientasConPremio: canjes?.clientasConPremio,
+      }
     },
     { etiqueta: 'returnGiftBalanceAndCancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
@@ -6528,7 +6568,7 @@ export async function attachCustomerToOrder(
       // inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
-      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
       await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: normalizedCustomerId, ...opciones })
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
@@ -6697,7 +6737,8 @@ export async function cancelOrderInTransaction(
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-  await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
+  // S9: en una cuenta de folio, sus beneficios regresan y su fila queda como cortesía (`publishCancelledOrder` despierta el pase).
+  const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
@@ -6719,13 +6760,26 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
+  return {
+    orderId,
+    table,
+    tables: reconciled.tables,
+    hadBoundTable: Boolean(boundTable),
+    tpvTableFreed,
+    affectedRefs,
+    valesSoltados,
+    clientasConPremio: canjes?.clientasConPremio,
+  }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
   // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
-  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
+  // `clientasConPremio` (S9) también: quien no anula un folio no lo trae.
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados' | 'clientasConPremio'> & {
+    valesSoltados?: ValesSoltados | null
+    clientasConPremio?: string[]
+  },
   staffId?: string,
   reason?: string,
   /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
@@ -6769,6 +6823,8 @@ export async function publishCancelledOrder(
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
+  // S9: el pase de Wallet de cada clienta con premio regresado (si no, lo manda el barrido con la fila de la bandeja).
+  despertarPasesTrasCommit(venueId, result.clientasConPremio)
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.

@@ -22,7 +22,7 @@ jest.mock('@/services/shared/paymentShiftClaim', () => ({
   lockExistingOrderForPayment: jest.fn().mockResolvedValue(false),
 }))
 jest.mock('@/services/wallet/stampLedger.service', () => ({ __esModule: true, reverseStampForOrder: jest.fn() }))
-jest.mock('@/services/tpv/paymentEffects.service', () => ({ __esModule: true, enqueueLoyaltyPointsReversalInTx: jest.fn() }))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({ __esModule: true, enqueueLoyaltyReversalsInTx: jest.fn() }))
 
 import { reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'

@@ -7,7 +7,7 @@
  * r2 R1: si Stripe no la suelta porque el negocio ya la COBRÓ a mano (PaymentIntent `succeeded`), no se reintenta para siempre ni
  * se devuelve el dinero solo: se registra el cobro que ya pasó (`recordCapturedOutsideOnRelease`) y se avisa una vez.
  */
-import { OnlineOrderChargeStatus, PaymentStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -22,6 +22,12 @@ import { chargeMerchant } from './merchant'
 export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
 
 type ReleasableCharge = OnlineOrderCharge & { onlineOrder: { orderId: string } | null }
+const LIVE_ONLINE: OnlineOrderStatus[] = [
+  OnlineOrderStatus.PENDING_ACCEPTANCE,
+  OnlineOrderStatus.ACCEPTED,
+  OnlineOrderStatus.READY,
+  OnlineOrderStatus.COMPLETED,
+]
 
 export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STUCK' | 'CAPTURED_OUTSIDE'> {
   try {
@@ -109,14 +115,35 @@ async function recordCapturedOutsideOnRelease(charge: ReleasableCharge, state: A
     if (won.count !== 1) return null // otro liberador ya lo registró
     let paymentId: string | null = null
     if (orderId) {
-      const order = await tx.order.findUniqueOrThrow({ where: { id: orderId }, select: { paidAmount: true } })
-      paymentId = (await tx.payment.create({ data: cardPaymentData(charge, state, orderId, capturedAmount), select: { id: true } })).id
+      const order = await tx.order.findUniqueOrThrow({
+        where: { id: orderId },
+        select: {
+          total: true,
+          paidAmount: true,
+          status: true,
+          paymentStatus: true,
+          onlineOrder: { select: { venueId: true, status: true } },
+        },
+      })
+      const payment = await tx.payment.create({
+        data: cardPaymentData(charge, state, orderId, capturedAmount),
+        select: { id: true, processedById: true },
+      })
+      paymentId = payment.id
       await tx.order.update({
         where: { id: orderId },
         data: {
           paymentStatus: PaymentStatus.PAID,
           paidAmount: new Prisma.Decimal(order.paidAmount).plus(capturedAmount),
           remainingBalance: 0,
+          ...(order.paymentStatus !== PaymentStatus.PAID &&
+          new Prisma.Decimal(order.total).gt(0) &&
+          order.status !== OrderStatus.CANCELLED &&
+          order.status !== OrderStatus.DELETED &&
+          order.onlineOrder?.venueId === charge.venueId &&
+          LIVE_ONLINE.includes(order.onlineOrder.status)
+            ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: payment.processedById }
+            : {}),
         },
       })
     }

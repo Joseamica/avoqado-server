@@ -292,3 +292,17 @@ describe('🔴 B1: una vuelta del reconciliador que leyó «sin cliente» no bor
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
   })
 })
+
+it('S5: el barrido Wallet inyectado corre al final aunque el de cupones falle', async () => {
+  const wallet = jest.fn().mockResolvedValue({ avisados: 1, fallidos: 0, ocupados: 0 })
+  const cupon = jest.fn().mockRejectedValue(new Error('cupón caído'))
+  prismaMock.order.findMany.mockResolvedValue([])
+  const job = new LoyaltyReconciliationJob({
+    prisma: prismaMock as any,
+    cron: { start: jest.fn(), stop: jest.fn() },
+    barrerCupones: cupon,
+    barrerWallet: wallet,
+  } as any)
+  expect(await job.runNow()).toEqual({ scanned: 0, applied: 0, failed: 0, skipped: 0 })
+  expect(wallet).toHaveBeenCalledTimes(1)
+})

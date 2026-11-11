@@ -1,3 +1,4 @@
+import { rechazarSiCuentaAnuladaEnTx, bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 /**
  * Cobros por servicio ("Cobros por servicio" en el panel del cheque).
  *
@@ -18,7 +19,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
 import { esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -67,7 +68,7 @@ export async function listOrderServiceCharges(venueId: string, orderId: string) 
 
 /** Guard compartido: solo se toca una cuenta abierta. */
 async function requireOpenOrder(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -96,6 +97,7 @@ export async function applyServiceChargeInTransaction(
   staffId?: string,
 ) {
   const order = await requireOpenOrder(tx, venueId, orderId)
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
@@ -158,6 +160,7 @@ export async function removeServiceChargeInTransaction(
   orderServiceChargeId: string,
 ) {
   const order = await requireOpenOrder(tx, venueId, orderId)
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
@@ -205,7 +208,7 @@ export async function syncAutomaticServiceCharges(venueId: string, orderId: stri
   // controller calls are a separate atomic operation from prior addItems.
   if (tx) return syncAutomaticServiceChargesInTransaction(tx, venueId, orderId)
   return prisma.$transaction(async db => {
-    if (!(await lockExistingOrderForPayment(db, { venueId, orderId }))) return null
+    if (!(await bloquearCuentaParaEditar(db, { venueId, orderId }))) return null
     return syncAutomaticServiceChargesInTransaction(db, venueId, orderId)
   }, ORDER_LOCK_WAIT_BUDGET)
 }
@@ -218,6 +221,7 @@ export async function syncAutomaticServiceChargesInTransaction(
   orderId: string,
   capture?: AutomaticServiceChargeCapture,
 ) {
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   async function capturedAmounts() {
     const amounts = new Map<string, Prisma.Decimal>()
     let cursor: string | undefined

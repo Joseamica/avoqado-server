@@ -165,7 +165,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'Access-Control-Request-Method',
       'Access-Control-Request-Headers',
     ],
-    exposedHeaders: ['X-Client-Id', 'X-Total-Labels'],
+    exposedHeaders: ['X-Client-Id', 'X-Total-Labels', 'x-customer-session'],
     credentials: true,
     optionsSuccessStatus: 200,
     maxAge: 86400, // Cache preflight results for 24 hours

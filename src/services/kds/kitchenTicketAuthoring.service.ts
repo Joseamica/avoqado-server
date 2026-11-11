@@ -24,6 +24,11 @@ export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
 
 /** Renglones por página: recorrer la cuenta completa sin una lectura sin tope. */
 const MAX_RENGLONES = 500
+/**
+ * S9 v5 (B4): holgura del reloj al comparar «tocado desde T» en un folio sellado. Sólo empuja hacia MANDAR (lo de BASE), nunca hacia
+ * perder una unidad nueva: un empate, un renglón escrito en la misma transacción o un reloj que retrocede cuentan como «tocado».
+ */
+const HOLGURA_DE_RELOJ_MS = 5_000
 /** Los `OrderSource` que pone la ingesta de reparto (`deliveryOrderIngestion.service.ts`). */
 const ORIGENES_DE_AGREGADOR = new Set<string>(['UBER_EATS', 'RAPPI', 'DIDI_FOOD', 'DELIVERY_PLATFORM'])
 
@@ -85,8 +90,32 @@ export async function authorKitchenTickets(params: {
     // armado bloqueaba renglones y luego esperaba la orden, al revés de quien ya la tiene y espera esos renglones.
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return [] as string[]
     // Se relee DENTRO del candado: una anulación que ganó la carrera ya retiró sus comandas y no hay que revivirlas.
-    const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+    const vigente = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { status: true, onlineOrder: { select: { requiresAcceptance: true, expiredAt: true, cancelledAt: true, rejectedAt: true } } },
+    })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
+    // 🔴 S9 v5 (B4, D3 «en duda, manda»): un folio «Nadie» que se anuló alguna vez (el sello de A0) sólo NO se arma si ningún renglón se
+    // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
+    // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).
+    // Una edición después de T espera el candado de la orden que soltó la anulación; `@updatedAt` y T leen el mismo reloj (una instancia).
+    const oo = vigente.onlineOrder
+    const fechas = oo?.requiresAcceptance === false ? [oo.expiredAt, oo.cancelledAt, oo.rejectedAt].filter((d): d is Date => d != null) : []
+    if (fechas.length > 0) {
+      const desde = new Date(Math.min(...fechas.map(d => d.getTime())) - HOLGURA_DE_RELOJ_MS)
+      const tocado = await tx.orderItem.findFirst({
+        where: { orderId, OR: [{ createdAt: { gte: desde } }, { updatedAt: { gte: desde } }] }, // índice [orderId]
+        select: { id: true },
+      })
+      if (!tocado) {
+        // Nada que cocinar: la marca se limpia con la guarda de siempre (una ronda que entró en medio la conserva).
+        await tx.order.updateMany({
+          where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+          data: { kitchenPendingAt: null },
+        })
+        return [] as string[]
+      }
+    }
 
     let cursor: string | undefined
     let rondaSinComanda = false

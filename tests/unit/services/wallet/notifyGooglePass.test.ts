@@ -54,6 +54,12 @@ const GOOGLE = {
 describe('notifyCustomerPassUpdated con las dos plataformas', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$executeRaw.mockResolvedValue(0)
+    prismaMock.$queryRaw
+      .mockReset()
+      .mockResolvedValue([])
+      .mockResolvedValueOnce([{ ocupado: false }])
+      .mockResolvedValueOnce([{ id: 'aviso', intentos: 0 }])
     prismaMock.walletPass.update.mockResolvedValue({} as any)
     prismaMock.walletPassRegistration.findMany.mockResolvedValue([{ id: 'r1', pushToken: 't', deviceLibraryIdentifier: 'd' }] as any)
     prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ stampsRequired: 7, stampRewardLabel: 'Un café gratis' })
@@ -65,7 +71,7 @@ describe('notifyCustomerPassUpdated con las dos plataformas', () => {
     prismaMock.walletPass.findMany.mockResolvedValue([APPLE, GOOGLE] as any)
     await notifyCustomerPassUpdated('v1', 'c1')
     expect(sendSilentPush).toHaveBeenCalled()
-    expect(patchObject).toHaveBeenCalledWith(expect.objectContaining({ resourceId: '338.pass-wp-g' }))
+    expect(patchObject).toHaveBeenCalledWith(expect.objectContaining({ resourceId: '338.pass-wp-g' }), { timeout: 20000 })
   })
 
   it('🔴 la revisión sube: sin eso Google serviría la franja vieja', async () => {

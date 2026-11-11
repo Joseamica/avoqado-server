@@ -130,15 +130,62 @@ describe('acceptCardOnlineOrder', () => {
     expect(data.netAmount.toFixed(2)).toBe('247.10')
     expect(prismaMock.order.update).toHaveBeenCalledWith({
       where: { id: 'ord1' },
-      data: { paymentStatus: 'PAID', paidAmount: D('250.00'), remainingBalance: 0 },
+      data: {
+        paymentStatus: 'PAID',
+        paidAmount: D('250.00'),
+        remainingBalance: 0,
+        loyaltyEligibleAt: expect.any(Date),
+        loyaltyStaffId: 'staff1',
+      },
     })
     expect(casTransitionInTx).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ kind: 'ACCEPT', allowCapturing: true }))
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CARD_CAPTURED' }))
   })
 
+  it.each([new Date('2026-11-08T05:58:00Z'), null])(
+    'R-P2-S3-3: PAID durante Stripe conserva marca/actor previos (%s), sin backfill',
+    async loyaltyEligibleAt => {
+      prismaMock.order.findUniqueOrThrow.mockResolvedValue({
+        total: D('250.00'),
+        paidAmount: D('250.00'),
+        paymentStatus: 'PAID',
+        loyaltyEligibleAt,
+        loyaltyStaffId: 'otro-actor',
+        items: [],
+      } as any)
+      capture.mockResolvedValue(succeeded())
+      await expect(acceptCardOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK' })
+      const data = prismaMock.order.update.mock.calls[0][0].data
+      expect(data.paidAmount).toEqual(D('500.00'))
+      expect(data).not.toHaveProperty('loyaltyEligibleAt')
+      expect(data).not.toHaveProperty('loyaltyStaffId')
+    },
+  )
+
+  it('R-P2-S3-3: PARTIAL saldada por captura deja marca y actor junto a PAID', async () => {
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({
+      total: D('250.00'),
+      paidAmount: D('50.00'),
+      paymentStatus: 'PARTIAL',
+      items: [],
+    } as any)
+    capture.mockResolvedValue(succeeded())
+    await expect(acceptCardOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK' })
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ paymentStatus: 'PAID', loyaltyEligibleAt: expect.any(Date), loyaltyStaffId: 'staff1' }),
+      }),
+    )
+  })
+
   it('T8 fix r1: la cuenta ya tenía dinero de otro camino → se registra igual, lo cobrado suma los dos y deja ONLINE_ORDER_CARD_DOUBLE_PAYMENT', async () => {
     capture.mockResolvedValue(succeeded())
-    prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('250.00'), paidAmount: D('250.00'), items: [] } as any)
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({
+      total: D('250.00'),
+      paidAmount: D('250.00'),
+      paymentStatus: 'PAID',
+      items: [],
+    } as any)
     await expect(acceptCardOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK' })
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.order.update).toHaveBeenCalledWith({
@@ -146,7 +193,11 @@ describe('acceptCardOnlineOrder', () => {
       data: { paymentStatus: 'PAID', paidAmount: D('500.00'), remainingBalance: 0 },
     })
     expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT', entityId: 'ord1', data: expect.objectContaining({ source: 'ONLINE_CAPTURE' }) }),
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
+        entityId: 'ord1',
+        data: expect.objectContaining({ source: 'ONLINE_CAPTURE' }),
+      }),
     )
   })
 

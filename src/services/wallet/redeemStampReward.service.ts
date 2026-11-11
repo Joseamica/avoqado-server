@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 import cuid from 'cuid'
 import { Prisma, StampRewardStatus, StampRewardType, type StampReward } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -5,7 +6,8 @@ import { withDeadlockRetry, type TxConReintento } from '../../utils/serializable
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { encolarAvisoDeTarjetaEnTx } from './walletPassOutbox.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -103,7 +105,7 @@ export async function canjearPremioEnTx(
   orderId: string,
   rewardId: string,
 ): Promise<{ reward: StampRewardCanjeado; discountAmount: number; totals: TotalesDeOrden }> {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -189,6 +191,8 @@ export async function canjearPremioEnTx(
   if (quemado.count === 0) {
     throw new BadRequestError('Este premio ya fue canjeado.')
   }
+
+  await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'PREMIO_CANJEADO' })
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
@@ -325,5 +329,6 @@ export async function refundStampRewardForOrderDiscount(
     await tx.stampCard.update({ where: { id: cartilla.id }, data: { completedAt: null } })
   }
 
+  await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId: reward.customerId, motivo: 'PREMIO_DEVUELTO' })
   return { rewardId: reward.id, customerId: reward.customerId, rewardLabel: reward.rewardLabel }
 }

@@ -36,10 +36,7 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
-    order: {
-      findUnique: jest.fn(),
-      update: jest.fn(),
-    },
+    order: { count: jest.fn(async () => 0), findUnique: jest.fn(), update: jest.fn() },
     orderItem: {
       delete: jest.fn(),
       deleteMany: jest.fn(),
