@@ -13,7 +13,7 @@ import type { Request, Response } from 'express'
 import { getTerminalPaymentStatus, sendTerminalPayment } from '@/controllers/mobile/terminal-payment.mobile.controller'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import {
+import AppError, {
   BadRequestError,
   OrderAlreadyPaidError,
   TerminalBusyError,
@@ -150,6 +150,45 @@ describe('sendTerminalPayment — cada rechazo de admisión sale con su código 
       details: { requestId },
     })
   })
+
+  // hz:ce654971:D7: el 412 (no 400/409) es lo que hace que ANDROID ≥ 2.22 e iOS ≥ 1.13 muestren «falta $X» tal cual.
+  it('cobro mayor que lo que falta de una cuenta con abono ⇒ 412 AMOUNT_EXCEEDS_REMAINING_BALANCE con status/errorMessage', async () => {
+    const mensaje = 'La cuenta X ya tiene un abono: falta $84.00. Actualiza la cuenta y vuelve a intentar.'
+    const res = await responder(new AppError(mensaje, 412, true, 'AMOUNT_EXCEEDS_REMAINING_BALANCE', { requestId, remainingCents: 8400 }))
+    expect(res.statusCode).toBe(412)
+    expect(res.payload).toEqual({
+      success: false,
+      status: 'failed',
+      code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE',
+      message: mensaje,
+      errorMessage: mensaje,
+      details: { requestId, remainingCents: 8400 },
+    })
+  })
+
+  // hz:5bda0b30:D1: antes salían como 500 «Error interno del servidor» sin code. 412 por la misma razón que el «falta $X».
+  it.each([
+    {
+      code: 'RAPPI_CASH_ORDER_CASH_ONLY',
+      mensaje:
+        'Este pedido de Rappi lo paga el cliente en efectivo al repartidor: cóbralo con «Cobrar» en efectivo, que separa la venta, la propina y lo de Rappi.',
+    },
+    { code: 'ONLINE_ORDER_PAID_BY_CARD', mensaje: 'Este pedido ya se pagó con tarjeta en línea. No lo cobres en caja.' },
+  ])(
+    'pedido que no se cobra en la terminal ($code) ⇒ 412 con su motivo, status/errorMessage y details.requestId',
+    async ({ code, mensaje }) => {
+      const res = await responder(new AppError(mensaje, 412, true, code, { requestId }))
+      expect(res.statusCode).toBe(412)
+      expect(res.payload).toEqual({
+        success: false,
+        status: 'failed',
+        code,
+        message: mensaje,
+        errorMessage: mensaje,
+        details: { requestId },
+      })
+    },
+  )
 
   it('un conflicto de solicitud (BadRequest sin código) sigue saliendo como 400 con sólo su mensaje', async () => {
     const res = await responder(

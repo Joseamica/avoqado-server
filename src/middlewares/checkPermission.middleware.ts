@@ -459,6 +459,8 @@ export const checkPermission = (requiredPermission: string) => {
             venueId,
             permission: requiredPermission,
             route: `${req.method} ${rutaSinQuery(req)}`,
+            // Sólo el retiro de caja pone la llave (`ponerLlaveDelRetiro`); en las demás rutas es null.
+            operationKey: (req as any).llaveDeOperacion ?? null,
           })
 
           if (consumed) {

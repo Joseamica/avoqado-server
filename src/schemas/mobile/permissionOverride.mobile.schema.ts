@@ -17,5 +17,13 @@ export const createPermissionOverrideSchema = z.object({
       .string()
       .min(3, { message: 'El permiso es requerido.' })
       .regex(/^[a-z0-9-]+:[a-z0-9_-]+$/i, { message: 'Formato de permiso inválido.' }),
+    // Ata la autorización a UN retiro de caja ("pay-out:<localId>:<centavos>"). `validateRequest` reemplaza el cuerpo por lo
+    // validado: sin este campo la llave se perdía antes de llegar al controlador.
+    operationKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^pay-out:[^:\s]{1,64}:\d{1,12}$/)
+      .optional(),
   }),
 })

@@ -61,12 +61,8 @@ import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
-import {
-  cardOnlineOrderError,
-  isCardOnlineOrderInTx,
-  MENSAJE_PAGADO_CON_TARJETA,
-  ONLINE_ORDER_PAID_BY_CARD,
-} from './online-ordering/card/guards'
+import { computeOrderBalance, REFUND_PAYMENT_TYPE } from './shared/orderBalance'
+import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
@@ -1052,7 +1048,11 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     outcomeEvidence: desenlace.outcomeEvidence,
     evidenceClass: desenlace.evidenceClass,
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
-    ...(row.failureCode === 'BANK_DECLINED' ? { errorMessage: mensajeDelServidor(row.resultJson) } : {}),
+    // hz:ce654971:D7 (Codex r1 #2): el «falta $X» también sale aquí: si se perdió la respuesta del POST, la caja lo recupera con esta
+    // consulta y sin él decía «El cobro fue rechazado» (suena al banco) y reintentaba con el importe viejo.
+    ...(row.failureCode === 'BANK_DECLINED' || row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+      ? { errorMessage: mensajeDelServidor(row.resultJson) }
+      : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
@@ -1305,6 +1305,24 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_PAID_BY_CARD'
   | 'REJECTED_EXCHANGE_CHARGE_MISMATCH'
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
+  /** hz:ce654971:D7: la cuenta ya tiene un abono y el cobro (sin propina) pasa de lo que falta. */
+  | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+
+/**
+ * hz:ce654971:D7 · margen para los redondeos de la caja al repartir una cuenta (dividir «por producto» reparte su total local y
+ * puede diferir unos centavos del servidor). La copia vieja que se quiere frenar cobra de más el abono entero, que es mayor.
+ */
+const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
+/** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
+const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
+const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
+/**
+ * hz:5bda0b30:D1 · pedido que no se cobra en la terminal (Rappi en efectivo, pagado con tarjeta en línea). Las otras puertas los
+ * rechazan con 409; aquí va 412 por la misma razón que el «falta $X»: con 409 las apps vivas consultan el estado y sólo dicen
+ * «El cobro fue rechazado» (suena al banco); con 412 muestran este motivo. La lápida guarda el 412 y su réplica responde igual.
+ */
+const pedidoQueNoSeCobraEnLaTerminal = (mensaje: string, code: string, details?: unknown) =>
+  new AppError(mensaje, HTTP_COBRO_MAYOR_QUE_EL_SALDO, true, code, details)
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1372,6 +1390,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         'EXCHANGE_DIFFERENCE_ALREADY_CHARGED',
         details,
       )
+    case 'REJECTED_ORDER_AMOUNT_OVER_BALANCE':
+      return new AppError(
+        mensaje('La cuenta ya tiene un abono y este cobro pasa de lo que falta. Actualiza la cuenta y vuelve a intentar.'),
+        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+        true,
+        COBRO_MAYOR_QUE_EL_SALDO,
+        details,
+      )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
       return new TerminalUnavailableError(mensaje('La terminal no está conectada'), 404, 'TERMINAL_NOT_CONNECTED', details)
     case 'REJECTED_TERMINAL_NO_SOCKET':
@@ -1405,9 +1431,9 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         details,
       )
     case 'REJECTED_ORDER_RAPPI_CASH':
-      return new ConflictError(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
+      return pedidoQueNoSeCobraEnLaTerminal(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
     case 'REJECTED_ORDER_PAID_BY_CARD':
-      return new ConflictError(mensaje(MENSAJE_PAGADO_CON_TARJETA), ONLINE_ORDER_PAID_BY_CARD, details)
+      return pedidoQueNoSeCobraEnLaTerminal(mensaje(MENSAJE_PAGADO_CON_TARJETA), ONLINE_ORDER_PAID_BY_CARD, details)
     case 'REJECTED_ORDER_PAID':
       return new OrderAlreadyPaidError(mensaje('La cuenta ya está pagada por completo. Actualiza la lista de órdenes.'), details)
     case 'REJECTED_ORDER_NOT_FOUND':
@@ -1911,7 +1937,18 @@ class TerminalPaymentService {
         if (mine) return { tipo: 'replica', fila: mine }
         const order = await tx.order.findFirst({
           where: { id: request.orderId, venueId },
-          select: { paymentStatus: true, orderNumber: true, status: true, thirdPartyCashDue: true },
+          select: {
+            paymentStatus: true,
+            orderNumber: true,
+            status: true,
+            thirdPartyCashDue: true,
+            // D7: lo que falta, con la misma cuenta que el saldo que ven las apps (`computeOrderBalance`).
+            subtotal: true,
+            discountAmount: true,
+            serviceChargeAmount: true,
+            contratoDePrecio: true,
+            taxAmount: true,
+          },
         })
         if (!order) {
           return rechazar(
@@ -1938,12 +1975,15 @@ class TerminalPaymentService {
         if (esRappiEnEfectivo(order)) {
           return rechazar(
             'REJECTED_ORDER_RAPPI_CASH',
-            new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
+            pedidoQueNoSeCobraEnLaTerminal(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
         }
         // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a cobrar a la terminal. Mismo lock, sin dinero movido.
         if (await isCardOnlineOrderInTx(tx, { venueId, orderId: request.orderId })) {
-          return rechazar('REJECTED_ORDER_PAID_BY_CARD', cardOnlineOrderError(detalles))
+          return rechazar(
+            'REJECTED_ORDER_PAID_BY_CARD',
+            pedidoQueNoSeCobraEnLaTerminal(MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD, detalles),
+          )
         }
         const exchange = await tx.exchange.findUnique({
           where: { newOrderId: request.orderId, venueId },
@@ -1997,6 +2037,37 @@ class TerminalPaymentService {
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         })
         if (blocker) return rechazarPorOrdenOcupada(blocker)
+        if (exchange?.status !== 'PENDING_PAYMENT') {
+          // 🔴 hz:ce654971:D7 · una cuenta con un ABONO (efectivo, saldo, otra tarjeta) no se cobra por su total viejo: la caja que
+          // no vio el abono mandaba $134 de una cuenta que ya sólo debía $84 y el cliente pagaba de más. Bajo el MISMO candado de
+          // fila que el registro del pago, antes de tocar la terminal: no se mueve dinero. La propina va aparte y no cuenta. Una
+          // cuenta sin abono no cambia (el Cambio ya exige su diferencia exacta, arriba). Una suma y no la lista de cobros: los
+          // REFUND fuera, como `ligaDeClienteEnVenta`; la propina se cancela a los dos lados del saldo.
+          const cobrado = await tx.payment.aggregate({
+            where: {
+              venueId,
+              orderId: request.orderId,
+              status: 'COMPLETED',
+              OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }],
+            },
+            _sum: { amount: true, tipAmount: true },
+          })
+          const saldo = computeOrderBalance(order, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
+          const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+          if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
+            const falta = (faltaCents / 100).toFixed(2)
+            return rechazar(
+              'REJECTED_ORDER_AMOUNT_OVER_BALANCE',
+              new AppError(
+                `La cuenta ${order.orderNumber ?? request.orderId} ya tiene un abono: falta $${falta}. Actualiza la cuenta y vuelve a intentar.`,
+                HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                true,
+                COBRO_MAYOR_QUE_EL_SALDO,
+                { ...detalles, remainingCents: faltaCents },
+              ),
+            )
+          }
+        }
       } else {
         // 🔴 EL RODEO DEL PAGO RÁPIDO (P1-2 de la auditoría de Codex, 11-sep). El candado de arriba sólo corre
         // `if (request.orderId)`: un cobro SIN orden no pasa por él. Así que la venta cuya cuenta quedó protegida

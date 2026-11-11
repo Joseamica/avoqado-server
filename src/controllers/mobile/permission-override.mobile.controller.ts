@@ -21,7 +21,7 @@ import {
  */
 export const createOverride = async (req: Request, res: Response, next: NextFunction) => {
   const { venueId } = req.params
-  const { pin, permission } = req.body as { pin: string; permission: string }
+  const { pin, permission, operationKey } = req.body as { pin: string; permission: string; operationKey?: string }
 
   try {
     // Quién estaba bloqueado. Es sólo para la bitácora: si no se resuelve, el
@@ -35,7 +35,7 @@ export const createOverride = async (req: Request, res: Response, next: NextFunc
       requestedById = requester?.id ?? null
     }
 
-    const result = await createPermissionOverride({ venueId, pin, permission, requestedById })
+    const result = await createPermissionOverride({ venueId, pin, permission, requestedById, operationKey: operationKey ?? null })
 
     logger.info('Override de permiso concedido', {
       venueId,

@@ -6,6 +6,8 @@
 
 import { NextFunction, Request, Response } from 'express'
 import * as cashDrawerService from '../../services/mobile/cash-drawer.mobile.service'
+import { centavosDelRetiro } from '../../lib/llaveDelRetiro'
+import { BadRequestError } from '../../errors/AppError'
 
 /**
  * Get current open cash drawer session
@@ -116,7 +118,41 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
 }
 
 /**
+ * Atajo ANTES del permiso `cash-drawer:pay-out`: si el retiro de esta llave ya está registrado, se reconoce con 200
+ * (como siempre en un reintento) sin pedir autorización. Reconocer lo ya registrado no puede depender de que la
+ * autorización del gerente siga viva (venció, o apagaron el interruptor): el dinero ya salió del cajón y el POS
+ * tiene que poder cerrar su cola. `authorizedBy: null` porque aquí nadie autoriza nada.
+ */
+export const devolverRetiroYaRegistrado = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    let localId: string | null = null
+    try {
+      localId = cashDrawerService.normalizeLocalId(req.body?.localId)
+    } catch {
+      localId = null // llave inservible: sigue la cadena normal, que decide (403 o 400)
+    }
+    if (!localId) return next()
+
+    const event = await cashDrawerService.buscarRetiroPorLlave(venueId, localId)
+    if (!event) return next()
+
+    return res.status(200).json({ success: true, data: event, authorizedBy: null })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/**
  * Add pay-out event
+ *
+ * 🔴 Concepto (H12): el SERVIDOR lo exige SÓLO cuando el retiro viene autorizado con PIN de gerente
+ * (`authContext.overrideAuthorizedBy`): ahí la nota es lo que explica por qué un cajero sacó dinero. Sin autorizador
+ * (gerente o dueño con su propia sesión) sigue opcional: las apps viejas de gerentes mandan retiros sin nota (155 en
+ * 90 días) y rechazarlos les trabaría la cola. Va ANTES de crear la fila y después del consumo del token; el token
+ * atado es reusable, así que este 400 no lo quema.
+ *
+ * 🔴 Importe (H2): `cents` es el mismo número del que sale la llave atada (`ponerLlaveDelRetiro`); se guarda `cents / 100`.
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-out
  */
 export const payOut = async (req: Request, res: Response, next: NextFunction) => {
@@ -125,21 +161,28 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
     const staffId = req.authContext?.userId || ''
     const { amount, note, staffName, localId } = req.body
 
-    if (!amount || amount <= 0) {
+    const cents = centavosDelRetiro(amount)
+    if (cents === null) {
       return res.status(400).json({ success: false, message: 'amount es requerido y debe ser mayor a 0' })
     }
 
-    const { event, created } = await cashDrawerService.payOut({
+    const autorizo = (req as any).authContext?.overrideAuthorizedBy ?? null
+    if (autorizo && !(typeof note === 'string' && note.trim().length > 0)) {
+      throw new BadRequestError('El retiro necesita un concepto.', 'CONCEPTO_REQUERIDO')
+    }
+
+    const { event, created, authorizedBy } = await cashDrawerService.payOut({
       venueId,
       staffId,
       staffName: staffName || 'Staff',
-      amount: Number(amount),
+      amount: cents / 100,
       note,
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
+      authorizedByStaffVenueId: autorizo,
     })
 
-    return res.status(idempotentStatus(created)).json({ success: true, data: event })
+    return res.status(idempotentStatus(created)).json({ success: true, data: event, authorizedBy })
   } catch (error) {
     next(error)
   }
@@ -232,7 +275,7 @@ export const syncEvents = async (req: Request, res: Response, next: NextFunction
     const appVersion = (req.headers['x-app-version'] as string | undefined) ?? null
     // El autor autenticado: `/sync` ya no se cree a ciegas el `staffId` del cuerpo.
     const actorStaffId = (req as any).authContext?.userId ?? null
-    const result = await cashDrawerService.syncEvents(venueId, events, appVersion, actorStaffId)
+    const result = await cashDrawerService.syncEvents(venueId, events, appVersion, actorStaffId, (req as any).puedeRetirar === true)
 
     return res.json({ success: true, ...result })
   } catch (error) {

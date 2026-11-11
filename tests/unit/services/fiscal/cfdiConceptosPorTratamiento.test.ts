@@ -550,6 +550,12 @@ describe('rama mixta (algún renglón ≠ IVA_16)', () => {
     expect(bundle!.unsupportedReasons).toBeUndefined()
   })
 
+  it('los renglones se leen por id (orden único, como la global): los conceptos no cambian de lugar entre corridas', async () => {
+    orderMock.mockResolvedValue(null)
+    await loadOrderForCfdiFromDb('o1')
+    expect(orderMock.mock.calls.at(-1)![0].select.items.orderBy).toEqual({ id: 'asc' })
+  })
+
   it('EXENTO: concepto 02 con factor Exento, sin tasa', async () => {
     const r = await resultadoDe(orden(150, { items: [cafe(), conTratamiento('EXENTO', 'Libro', 50)] }))
     expect(r.motivos).toEqual([])

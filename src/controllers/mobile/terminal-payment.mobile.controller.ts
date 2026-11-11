@@ -226,7 +226,15 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
-    if (error instanceof AppError && error.code === 'EXCHANGE_DIFFERENCE_ALREADY_CHARGED') {
+    // hz:ce654971:D7: 412 con el texto («falta $X») que las apps vivas muestran tal cual; `status:'failed'` como TERMINAL_BUSY.
+    // hz:5bda0b30:D1: Rappi en efectivo y pagado con tarjeta en línea, también 412 (antes caían al 500 sin code).
+    if (
+      error instanceof AppError &&
+      (error.code === 'EXCHANGE_DIFFERENCE_ALREADY_CHARGED' ||
+        error.code === 'AMOUNT_EXCEEDS_REMAINING_BALANCE' ||
+        error.code === 'RAPPI_CASH_ORDER_CASH_ONLY' ||
+        error.code === 'ONLINE_ORDER_PAID_BY_CARD')
+    ) {
       return res.status(error.statusCode).json({
         success: false,
         status: 'failed',
