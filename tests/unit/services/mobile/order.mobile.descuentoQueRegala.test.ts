@@ -142,9 +142,18 @@ describe('D2: el «Descuento de la cuenta» que deja los productos en $0', () =>
   })
 
   it('🔴 un reintento de una venta ya creada recibe su orden: la regla va después de la búsqueda idempotente', async () => {
-    prismaMock.order.findUnique.mockResolvedValue(ordenDesdeLosDatos({
-      data: { orderNumber: 'ORD-1', subtotal: new Decimal(100), discountAmount: new Decimal(100), taxAmount: new Decimal(0), total: new Decimal(0), items: { create: [] } },
-    }))
+    prismaMock.order.findUnique.mockResolvedValue(
+      ordenDesdeLosDatos({
+        data: {
+          orderNumber: 'ORD-1',
+          subtotal: new Decimal(100),
+          discountAmount: new Decimal(100),
+          taxAmount: new Decimal(0),
+          total: new Decimal(0),
+          items: { create: [] },
+        },
+      }),
+    )
     await expect(crear()).resolves.toMatchObject({ id: 'order-1' })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
@@ -160,8 +169,22 @@ describe('D2: el «Descuento de la cuenta» que deja los productos en $0', () =>
 
 describe('D2 con promociones: la base es la cuenta CON el combo', () => {
   const comboDe = (pesos: number) => {
-    prismaMock.order.findFirst.mockResolvedValue({ subtotal: new Decimal(pesos), serviceChargeAmount: new Decimal(0), paidAmount: new Decimal(0) })
-    prismaMock.order.update.mockResolvedValue({ ...ordenDesdeLosDatos({ data: { subtotal: new Decimal(pesos), discountAmount: new Decimal(0), taxAmount: new Decimal(0), total: new Decimal(0), items: { create: [] } } }) })
+    prismaMock.order.findFirst.mockResolvedValue({
+      subtotal: new Decimal(pesos),
+      serviceChargeAmount: new Decimal(0),
+      paidAmount: new Decimal(0),
+    })
+    prismaMock.order.update.mockResolvedValue({
+      ...ordenDesdeLosDatos({
+        data: {
+          subtotal: new Decimal(pesos),
+          discountAmount: new Decimal(0),
+          taxAmount: new Decimal(0),
+          total: new Decimal(0),
+          items: { create: [] },
+        },
+      }),
+    })
   }
   const conCombo = (extra: Partial<CreateOrderInput> = {}) =>
     crear({ items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }] as any, ...extra })

@@ -1653,8 +1653,7 @@ export async function crearVentaDeMostradorEnTx(
   }
   // hz:e0b12f00:D2: sin promociones la base ya se conoce; se decide ANTES de escribir (después de la búsqueda idempotente de arriba).
   const regaloSinPromociones =
-    promocionesUnicas.length === 0 &&
-    descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)
+    promocionesUnicas.length === 0 && descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)
       ? autorizarRegaloDeCuenta(input)
       : null
   const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal

@@ -53,12 +53,15 @@ let productId: string
 beforeAll(async () => {
   const [db] = await prisma.$queryRaw<Array<{ name: string }>>`SELECT current_database() AS name`
   expect(db.name).toBe(decodeURIComponent(target.pathname.slice(1)))
-  organizationId = (await prisma.organization.create({ data: { name: `D2 ${suffix}`, email: `${suffix}@org.test`, phone: '5555555555' } })).id
+  organizationId = (await prisma.organization.create({ data: { name: `D2 ${suffix}`, email: `${suffix}@org.test`, phone: '5555555555' } }))
+    .id
   venueId = (
     await prisma.venue.create({ data: { organizationId, name: `D2 ${suffix}`, slug: suffix, type: 'RESTAURANT', seatCapExempt: true } })
   ).id
   await prisma.venueSettings.create({ data: { venueId, managerPinOverrideEnabled: true } })
-  meseroId = (await prisma.staff.create({ data: { email: `${suffix}@mesero.test`, firstName: 'Mesero', lastName: 'Sintético', active: true } })).id
+  meseroId = (
+    await prisma.staff.create({ data: { email: `${suffix}@mesero.test`, firstName: 'Mesero', lastName: 'Sintético', active: true } })
+  ).id
   gerenteId = (
     await prisma.staff.create({ data: { email: `${suffix}@gerente.test`, firstName: 'Gerente', lastName: 'Sintético', active: true } })
   ).id
