@@ -101,7 +101,8 @@ async function readCorte(db: Prisma.TransactionClient, venueId: string, shiftId:
 
 type Corte = Awaited<ReturnType<typeof readCorte>>
 
-const countCorrections = (db: Prisma.TransactionClient, venueId: string, shiftId: string) =>
+/** Cuántas correcciones lleva el corte. El detalle cuenta con ésta misma: así nunca ofrece la que el tope rechazaría. */
+export const countCashCountCorrections = (db: Prisma.TransactionClient, venueId: string, shiftId: string) =>
   db.activityLog.count({ where: { venueId, entity: 'Shift', entityId: shiftId, action: 'CASH_COUNT_CORRECTED' } })
 
 /** Paso 8: el esperado sale de los movimientos de la caja; la diferencia, de `computeCountCorrection` (Decimal a 2 decimales). */
@@ -137,7 +138,7 @@ export async function previewCashCountCorrection(
   // La vista previa no lleva motivo: se valida sólo el monto, con la misma regla que la corrección.
   const { countedCash: countedAfter } = normalizeCorrectionInput({ countedCash, reason: 'vista previa' })
   const corte = await readCorte(prisma, venueId, shiftId, false)
-  const correctionsBefore = await countCorrections(prisma, venueId, shiftId)
+  const correctionsBefore = await countCashCountCorrections(prisma, venueId, shiftId)
   if (correctionsBefore >= MAX_CORRECTIONS_PER_SHIFT) throw tooMany()
   return toResult(shiftId, corte, correctionsBefore, countedAfter, compute(corte, countedAfter))
 }
@@ -152,7 +153,7 @@ export async function correctCashCount(input: CorrectCashCountInput): Promise<Ca
     const corte = await readCorte(tx, venueId, shiftId, true) // 3–5.
 
     if (!sameMoney(corte.countedBefore, input.expectedCurrentCount)) throw changed() // 6.
-    const correctionsBefore = await countCorrections(tx, venueId, shiftId) // 7.
+    const correctionsBefore = await countCashCountCorrections(tx, venueId, shiftId) // 7.
     if (correctionsBefore !== input.expectedCorrectionCount) throw changed()
     if (correctionsBefore >= MAX_CORRECTIONS_PER_SHIFT) throw tooMany()
 

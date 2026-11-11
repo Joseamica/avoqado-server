@@ -127,7 +127,11 @@ export async function updateShift(
 }
 
 /** POST …/shifts/:shiftId/cash-count-correction — el gerente corrige el conteo de un corte cerrado. */
-export async function correctCashCount(req: Request<{ venueId: string; shiftId: string }>, res: Response, next: NextFunction): Promise<void> {
+export async function correctCashCount(
+  req: Request<{ venueId: string; shiftId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
   try {
     const { countedCash, reason, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount } = req.body
     const result = await cashCountCorrectionService.correctCashCount({
@@ -138,7 +142,7 @@ export async function correctCashCount(req: Request<{ venueId: string; shiftId: 
       expectedCurrentCount,
       expectedResultingDifference,
       expectedCorrectionCount,
-      // Sin actor el servicio falla solo; aquí no se inventa uno.
+      // Sin actor la fila de bitácora quedaría sin autor; detrás de la autenticación siempre hay uno, y aquí no se inventa.
       staffId: (req as any).authContext?.userId,
       source: 'DASHBOARD',
     })

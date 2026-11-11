@@ -94,6 +94,22 @@ describe('correctCashCount — CAS perdido', () => {
   })
 })
 
+describe('correctCashCount — orden de candados', () => {
+  it('ciclo del negocio (advisory) → fila de la caja → fila del turno, como el resto del código (evita el 40P01)', async () => {
+    prismaMock.cashDrawerSession.updateMany.mockResolvedValue({ count: 1 })
+
+    await expect(correctCashCount(entrada)).resolves.toMatchObject({ countedAfter: 2000, differenceAfter: 0 })
+
+    const [advisory] = prismaMock.$queryRaw.mock.invocationCallOrder
+    const [candadoDeLaCaja] = prismaMock.cashDrawerSession.updateMany.mock.invocationCallOrder
+    const [turno] = prismaMock.shift.updateMany.mock.invocationCallOrder
+    expect(prismaMock.$queryRaw.mock.calls[0][0].values).toContain(`avoqado:shift-lifecycle:v1:${VENUE}`)
+    expect(prismaMock.cashDrawerSession.updateMany.mock.calls[0][0]).toMatchObject({ where: { id: CAJA, venueId: VENUE } })
+    expect(advisory).toBeLessThan(candadoDeLaCaja)
+    expect(candadoDeLaCaja).toBeLessThan(turno)
+  })
+})
+
 describe('deleteShift — el candado del ciclo antes del borrado', () => {
   it('llama $queryRaw (el candado) ANTES que tx.shift.deleteMany, dentro de la misma $transaction', async () => {
     prismaMock.shift.findFirst.mockResolvedValue({ id: TURNO, venueId: VENUE, status: 'CLOSED', endTime: new Date('2020-01-01T00:00:00Z') })

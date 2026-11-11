@@ -3,8 +3,8 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import { listCashCountCorrections, CashCountCorrectionEntry } from './cashCountCorrection.service'
-import { countCorrectionBlock, CountCorrectionBlockCode } from './cashCountCorrection.rules'
+import { countCashCountCorrections, listCashCountCorrections, CashCountCorrectionEntry } from './cashCountCorrection.service'
+import { countCorrectionBlock, CountCorrectionBlockCode, MAX_CORRECTIONS_PER_SHIFT } from './cashCountCorrection.rules'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
@@ -653,6 +653,7 @@ export async function getShiftById(
 
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
   let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
+  let cashDrawerReadFailed = false
   try {
     // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un
     // `cashDifference` que se firmó contra la propia — dos números para el mismo dinero.
@@ -664,17 +665,27 @@ export async function getShiftById(
       shiftId,
     )
   } catch (err) {
+    cashDrawerReadFailed = true
     logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
       shiftId,
       error: err instanceof Error ? err.message : String(err),
     })
   }
 
-  // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500.
-  let countCorrection: { allowed: boolean; blockedReason: CountCorrectionBlockCode | null } = { allowed: false, blockedReason: null }
+  // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500. `TOO_MANY` sólo se muestra: la corrección la
+  // rechaza con su propio CASH_COUNT_TOO_MANY, contando igual que aquí.
+  let countCorrection: {
+    allowed: boolean
+    blockedReason: CountCorrectionBlockCode | 'TOO_MANY' | null
+    correctionCount?: number
+  } = { allowed: false, blockedReason: null }
   let countCorrections: CashCountCorrectionEntry[] = []
   try {
-    const blockedReason = countCorrectionBlock(
+    const [correctionCount, list] = await Promise.all([
+      countCashCountCorrections(prisma, venueId, shiftId),
+      listCashCountCorrections(venueId, shiftId),
+    ])
+    const block = countCorrectionBlock(
       shift as any,
       cashDrawer
         ? {
@@ -685,8 +696,10 @@ export async function getShiftById(
           }
         : null,
     )
-    countCorrection = { allowed: blockedReason === null, blockedReason }
-    countCorrections = await listCashCountCorrections(venueId, shiftId)
+    // Si la caja no se pudo leer, no se sabe si se puede: bloqueado sin razón, nunca «no tiene caja ligada».
+    const blockedReason = cashDrawerReadFailed ? null : (block ?? (correctionCount >= MAX_CORRECTIONS_PER_SHIFT ? 'TOO_MANY' : null))
+    countCorrection = { allowed: !cashDrawerReadFailed && blockedReason === null, blockedReason, correctionCount }
+    countCorrections = list
   } catch (err) {
     countCorrection = { allowed: false, blockedReason: null }
     countCorrections = []

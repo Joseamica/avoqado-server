@@ -171,7 +171,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'correct_cash_count',
-    'Corrects the counted cash (efectivo contado) of an ALREADY CLOSED cash closeout (corte). Writes signed money: the shift and its physical drawer change together and the old difference becomes the new one. Confirm-gated: call WITHOUT confirm first to get a preview, show it to the user, then call again with confirm:true and send back the preview\'s expectedCurrentCount, expectedResultingDifference and expectedCorrectionCount unchanged. Needs shifts:update. Fails with CASH_COUNT_CHANGED if the count moved since the preview.',
+    "Corrects the counted cash (efectivo contado) of an ALREADY CLOSED cash closeout (corte). Writes signed money: the shift and its physical drawer change together, and the difference is recalculated from the drawer's movements (counted − expected), the same way a late cash movement recalculates a closed drawer. Confirm-gated: call WITHOUT confirm first to get a preview, show it to the user, then call again with confirm:true and send back the preview's expectedCurrentCount, expectedResultingDifference and expectedCorrectionCount unchanged. Needs shifts:update. Fails with CASH_COUNT_CHANGED if the count moved since the preview.",
     {
       venueId: z.string().describe('Venue that owns the shift (must be in your scope)'),
       shiftId: z.string().describe('The closed shift (turno) whose counted cash to correct'),
@@ -182,7 +182,16 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
       expectedCorrectionCount: z.number().optional().describe('From the preview: how many corrections the shift already had'),
       confirm: z.boolean().optional().describe('true only after the user approved the preview'),
     },
-    async ({ venueId, shiftId, countedCash, reason, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount, confirm }) => {
+    async ({
+      venueId,
+      shiftId,
+      countedCash,
+      reason,
+      expectedCurrentCount,
+      expectedResultingDifference,
+      expectedCorrectionCount,
+      confirm,
+    }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('shifts:update', venueId)
       try {

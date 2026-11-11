@@ -252,12 +252,12 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
   it('cierre de la PAX con foto vieja: el resultado sale de los movimientos y un tardío no lo hace saltar', async () => {
     // La «foto» de la PAX firmó la diferencia contra un esperado de $2,000, pero la caja ya traía una venta de $100.
     const s = await sembrarCorte({ ventasEnCaja: 100, difference: 18000, overShort: 18000 })
+    // La vista previa del panel parte del esperado del detalle: tiene que ser el mismo con que la corrección calcula.
+    const detalle = await getShiftById(s.venueId, s.shiftId)
 
-    await expect(corregir(s, { countedCash: 2100, expectedResultingDifference: 0 })).resolves.toMatchObject({
-      countedAfter: 2100,
-      differenceAfter: 0,
-      expectedAmount: 2100,
-    })
+    const hecha = await corregir(s, { countedCash: 2100, expectedResultingDifference: 0 })
+    expect(hecha).toMatchObject({ countedAfter: 2100, differenceAfter: 0, expectedAmount: 2100 })
+    expect(detalle.cashDrawer.expectedAmount).toBe(hecha.expectedAmount)
     expect(await estado(s)).toMatchObject({ overShort: '0.00', cashDifference: '0.00' })
 
     await expect(tardio(s)).resolves.toBe('POSTED')
@@ -374,6 +374,12 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
     await expect(corregir(s, { expectedCorrectionCount: 50 })).rejects.toMatchObject({ statusCode: 409, code: 'CASH_COUNT_TOO_MANY' })
     await expect(previewCashCountCorrection(s.venueId, s.shiftId, 2000)).rejects.toMatchObject({ code: 'CASH_COUNT_TOO_MANY' })
     expect(await estado(s)).toEqual({ ...SIN_CORREGIR, bitacora: 50 })
+    // El detalle no ofrece la 51: cuenta igual que la corrección (las filas con `data` mal formada no salen en la lista, pero cuentan).
+    expect((await getShiftById(s.venueId, s.shiftId)).countCorrection).toEqual({
+      allowed: false,
+      blockedReason: 'TOO_MANY',
+      correctionCount: 50,
+    })
   })
 
   it('motivo de puros espacios o 1999.995 ⇒ 400 sin escribir', async () => {
@@ -419,7 +425,7 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
       const s = await sembrarCorte()
 
       const antes = await getShiftById(s.venueId, s.shiftId)
-      expect(antes.countCorrection).toEqual({ allowed: true, blockedReason: null })
+      expect(antes.countCorrection).toEqual({ allowed: true, blockedReason: null, correctionCount: 0 })
       expect(antes.countCorrections).toEqual([])
       expect(antes.cashDrawer.linkedToShift).toBe(true)
       expect(antes.cashDrawer.expectedAmount).toBe(2000)
@@ -441,7 +447,7 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
     it('un corte sin caja ligada sale bloqueado con su razón', async () => {
       const s = await sembrarCorte({ linked: false })
       const d = await getShiftById(s.venueId, s.shiftId)
-      expect(d.countCorrection).toEqual({ allowed: false, blockedReason: 'NO_LINKED_DRAWER' })
+      expect(d.countCorrection).toEqual({ allowed: false, blockedReason: 'NO_LINKED_DRAWER', correctionCount: 0 })
     })
 
     it('trae todas las correcciones, la más nueva primero', async () => {
@@ -453,6 +459,7 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
       const d = await getShiftById(s.venueId, s.shiftId)
       expect(d.countCorrections.map((c: any) => c.countedAfter)).toEqual([2000, 2001, 2000])
       expect(d.countCorrections.map((c: any) => c.countedBefore)).toEqual([2001, 2000, 20000])
+      expect(d.countCorrection).toEqual({ allowed: true, blockedReason: null, correctionCount: 3 })
     })
   })
 })
@@ -481,7 +488,10 @@ describe('por HTTP: la ruta «corregir conteo» y la puerta vieja cerrada', () =
       .set({ 'x-test-actor': s.staffId, 'x-test-role': role })
       .send(body)
   const estado = async (s: Corte) => ({
-    turno: await prisma.shift.findUniqueOrThrow({ where: { id: s.shiftId }, select: { endingCash: true, cashDeclared: true, cashDifference: true } }),
+    turno: await prisma.shift.findUniqueOrThrow({
+      where: { id: s.shiftId },
+      select: { endingCash: true, cashDeclared: true, cashDifference: true },
+    }),
     caja: await prisma.cashDrawerSession.findUniqueOrThrow({ where: { id: s.cajaId }, select: { actualAmount: true, overShort: true } }),
   })
 
@@ -489,7 +499,10 @@ describe('por HTTP: la ruta «corregir conteo» y la puerta vieja cerrada', () =
     const s = await sembrarCorte()
     const antes = await estado(s)
     // El rol sale del token cuando el venue coincide, pero la fila de la base manda: el actor sembrado es OWNER, así que se baja a CASHIER.
-    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } }, data: { role: StaffRole.CASHIER } })
+    await prisma.staffVenue.update({
+      where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } },
+      data: { role: StaffRole.CASHIER },
+    })
     const r = await post(s, 'CASHIER', cuerpo())
     expect(r.status).toBe(403)
     expect(await estado(s)).toEqual(antes)
@@ -513,7 +526,10 @@ describe('por HTTP: la ruta «corregir conteo» y la puerta vieja cerrada', () =
 
   it('MANAGER corrige ⇒ 200 con el resultado', async () => {
     const s = await sembrarCorte()
-    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } }, data: { role: StaffRole.MANAGER } })
+    await prisma.staffVenue.update({
+      where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } },
+      data: { role: StaffRole.MANAGER },
+    })
     const r = await post(s, 'MANAGER', cuerpo())
     expect(r.status).toBe(200)
     expect(r.body).toMatchObject({ shiftId: s.shiftId, countedBefore: 20000, countedAfter: 2000, differenceAfter: 0 })
@@ -558,7 +574,9 @@ describe('herramienta MCP correct_cash_count — la real, contra Postgres', () =
   })
   const llamar = async (s: Corte, args: Record<string, unknown>) => {
     scope.staffId = s.staffId // el autor de la bitácora es una persona real (FK)
-    return JSON.parse((await tool({ venueId: s.venueId, shiftId: s.shiftId, countedCash: 2000, reason: 'error de dedo', ...args }, {})).content[0].text)
+    return JSON.parse(
+      (await tool({ venueId: s.venueId, shiftId: s.shiftId, countedCash: 2000, reason: 'error de dedo', ...args }, {})).content[0].text,
+    )
   }
   const tres = { expectedCurrentCount: 20000, expectedResultingDifference: 0, expectedCorrectionCount: 0 }
 
