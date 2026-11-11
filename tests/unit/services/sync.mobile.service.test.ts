@@ -1938,20 +1938,30 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     // contesta sin escribir, como cuando cada combo contestaba `created:false`: una cuenta cobrada no la rechaza ni una reembolsada
     // se reabre.
     it('ronda YA guardada entera (combos por instancia y productos por llave): ACKED sin tocar la cuenta', async () => {
-      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 9, status: 'COMPLETED', total: 290 })
+      // La primera lectura es de antes de que la ruta con red guardara la ronda; el ACK trae la de después (Codex r2 #2).
+      ;(prisma.order.findFirst as jest.Mock)
+        .mockResolvedValueOnce({ version: 8, status: 'PENDING', total: 0 })
+        .mockResolvedValueOnce({ version: 9, status: 'COMPLETED', total: 290 })
       ;(prisma.orderPromotion.count as jest.Mock).mockResolvedValue(2)
+      // Dos productos iguales de la ronda se guardan fusionados en UN renglón (Codex r2 #1): basta uno de sus renglones.
       ;(prisma.orderItem.count as jest.Mock).mockResolvedValue(1)
 
       const [ack] = await processIntents(
         baseParams([
-          { id: 'i-ya', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, otro, { productId: 'p-1', quantity: 2 }] } },
+          {
+            id: 'i-ya',
+            type: 'ADD_ITEMS',
+            payload: { orderId: 'order-1', items: [promo, otro, { productId: 'p-1', quantity: 2 }, { productId: 'p-1', quantity: 1 }] },
+          },
         ]),
       )
 
       expect(ack).toMatchObject({ id: 'i-ya', status: 'ACKED', result: { orderId: 'order-1', version: 9, total: 290 } })
       expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
       expect(prisma.orderPromotion.count).toHaveBeenCalledWith({ where: { orderId: 'order-1', instanceId: { in: ['uuid-1', 'uuid-2'] } } })
-      expect(prisma.orderItem.count).toHaveBeenCalledWith({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0'] } } })
+      expect(prisma.orderItem.count).toHaveBeenCalledWith({
+        where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0', 'sync:i-ya:1'] } },
+      })
     })
 
     it('ronda guardada a MEDIAS (falta un combo o un producto): va completa a la transacción de la ronda', async () => {

@@ -1257,7 +1257,13 @@ async function applyAddItems(
   // respuesta): se contesta sin escribir, como antes contestaba cada combo `created:false`. Sin esto, una cuenta que ya se cobró
   // rechazaría una ronda que sí quedó guardada, y una reembolsada se reabriría (Codex r1 #2 de hz:5bda0b30:D3).
   if (combos.length > 0 && (await rondaYaGuardada(orderId, conPromocion, itemsWithKey))) {
-    return { id: intent.id, status: 'ACKED', result: { orderId, version: current.version, total: Number(current.total ?? 0) } }
+    // La cuenta se relee DESPUÉS de reconocer la ronda: la lectura de arriba pudo ser de antes de que se guardara (Codex r2 #2).
+    const ahora = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
+    return {
+      id: intent.id,
+      status: 'ACKED',
+      result: { orderId, version: ahora?.version ?? current.version, total: Number(ahora?.total ?? current.total ?? 0) },
+    }
   }
 
   // 🔴 hz:5bda0b30:D3 (Codex r4 F1–F4 de cocina-avisos-perdidos): la ronda ENTERA —combos y productos— es UNA transacción, la misma
@@ -1283,7 +1289,11 @@ async function applyAddItems(
   }
 }
 
-/** ¿Están ya en la cuenta TODOS los combos (por instancia) y todos los productos (por llave) de la ronda? */
+/**
+ * ¿La ronda ya está en la cuenta? TODOS sus combos (por instancia) y, si trae productos, alguno de ellos por su llave: los productos
+ * de una ronda se guardan juntos en una sola transacción, y dos iguales se fusionan en un renglón con la llave del primero (Codex
+ * r2 #1), así que exigir todas las llaves no reconocería una ronda que sí se guardó.
+ */
 async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: Array<{ externalId: string }>): Promise<boolean> {
   const instancias = conPromocion.map(it => it.promotionRef?.promotionInstanceId)
   if (!instancias.every((id: unknown) => typeof id === 'string' && id.length > 0)) return false
@@ -1293,7 +1303,7 @@ async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: A
     prisma.orderPromotion.count({ where: { orderId, instanceId: { in: unicas } } }),
     llaves.length > 0 ? prisma.orderItem.count({ where: { orderId, externalId: { in: llaves } } }) : Promise.resolve(0),
   ])
-  return combos === unicas.length && renglones >= llaves.length
+  return combos === unicas.length && (llaves.length === 0 || renglones > 0)
 }
 
 /**
