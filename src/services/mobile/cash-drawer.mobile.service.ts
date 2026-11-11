@@ -872,7 +872,13 @@ function rejectCashDrawerSync(venueId: string, reason: string, details: Record<s
  * descarte de abajo por DATO (N días con `droppedCashSales = 0`) y no por "ya están todos
  * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
  */
-export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null, actorStaffId?: string | null) {
+export async function syncEvents(
+  venueId: string,
+  events: SyncEvent[],
+  appVersion?: string | null,
+  actorStaffId?: string | null,
+  puedeRetirar: boolean = true,
+) {
   if (!events || events.length === 0) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
@@ -915,8 +921,19 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
     })
   }
 
+  // 🔴 Misma regla con y sin red: `/pay-out` pide `cash-drawer:pay-out`, así que el PAY_OUT que llega por aquí también.
+  // Sin permiso se descarta y se cuenta; el lote responde 200 (un 4xx haría reintentar para siempre).
+  const rechazadosSinPermiso = puedeRetirar ? 0 : events.filter(e => e.type === 'PAY_OUT').length
+  if (rechazadosSinPermiso > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó PAY_OUT: el autor no tiene permiso de retirar', {
+      venueId,
+      actorStaffId: actorStaffId ?? null,
+      rechazadosSinPermiso,
+    })
+  }
+
   const acceptedEvents = events
-    .filter(event => TIPOS_DEL_CLIENTE.has(event.type))
+    .filter(event => TIPOS_DEL_CLIENTE.has(event.type) && (puedeRetirar || event.type !== 'PAY_OUT'))
     .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
@@ -929,7 +946,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   if (acceptedEvents.length === 0) {
     // 200 con lote vacío, no error: el push del cliente es fire-and-forget y un 4xx
     // aquí lo haría reintentar para siempre algo que nunca vamos a aceptar.
-    return { syncedCount: 0, events: [] }
+    return { syncedCount: 0, events: [], rechazadosSinPermiso }
   }
   if (events.length > CASH_DRAWER_SYNC_EVENT_LIMIT) {
     rejectCashDrawerSync(venueId, 'REQUEST_LIMIT_EXCEEDED', {
@@ -1419,6 +1436,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   return {
     syncedCount: insertedCount,
     events: allRows.map(formatEvent),
+    rechazadosSinPermiso,
   }
 }
 

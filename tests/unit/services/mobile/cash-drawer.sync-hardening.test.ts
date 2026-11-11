@@ -137,6 +137,34 @@ describe('/sync sólo acepta lo que un POS puede haber hecho sin internet', () =
   })
 })
 
+describe('/sync no deja retirar sin el permiso del retiro (misma regla con y sin red)', () => {
+  const lote = () => [movimiento({ localId: 'in-1' }), movimiento({ type: 'PAY_OUT', amount: 50, localId: 'out-1' })] as never
+  const tiposGuardados = () =>
+    ((prismaMock as any).cashDrawerEvent.createManyAndReturn as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? []).map((f: any) => f.type)
+
+  it('sin permiso, el PAY_OUT del lote no se crea y se cuenta', async () => {
+    armarSesionAbierta()
+    const logger = require('@/config/logger').default
+    const r: any = await syncEvents(VENUE, lote(), null, CAJERO, false)
+    expect(tiposGuardados()).toEqual(['PAY_IN'])
+    expect(r.rechazadosSinPermiso).toBe(1)
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId: VENUE }))
+  })
+
+  it('con permiso, entra como hoy', async () => {
+    armarSesionAbierta()
+    const r: any = await syncEvents(VENUE, lote(), null, CAJERO, true)
+    expect(tiposGuardados().sort()).toEqual(['PAY_IN', 'PAY_OUT'])
+    expect(r.rechazadosSinPermiso).toBe(0)
+  })
+
+  it('un lote de puros PAY_OUT sin permiso responde 200 vacío', async () => {
+    armarSesionAbierta()
+    const r = await syncEvents(VENUE, [movimiento({ type: 'PAY_OUT', localId: 'out-2' })] as never, null, CAJERO, false)
+    expect(r).toEqual({ syncedCount: 0, events: [], rechazadosSinPermiso: 1 })
+  })
+})
+
 describe('el cierre lee el fondo de su columna', () => {
   it('🔴 usa CashDrawerSession.startingAmount, no el primer evento OPEN', async () => {
     armarSesionAbierta()

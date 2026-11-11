@@ -3605,6 +3605,7 @@ router.post(
   '/venues/:venueId/cash-drawer/sync',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  marcarPermiso('cash-drawer:pay-out', 'puedeRetirar'), // /sync es la otra puerta del PAY_OUT: misma regla con y sin red
   cashDrawerMobileController.syncEvents,
 )
 

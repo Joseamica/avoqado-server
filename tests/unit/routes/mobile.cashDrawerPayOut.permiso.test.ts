@@ -132,6 +132,22 @@ describe('POST /cash-drawer/pay-out con PIN de gerente', () => {
     expect(mockConsumeOverride).not.toHaveBeenCalled()
   })
 
+  it('/sync marca `puedeRetirar` según el permiso del retiro (cajero no, gerente sí)', async () => {
+    const h = cadena('/venues/:venueId/cash-drawer/sync')
+    const permisos = h.filter(x => typeof x.requiredPermission === 'string').map(x => x.requiredPermission)
+    expect(permisos).toEqual(['payments:create'])
+    const marca = h[h.findIndex(x => x.requiredPermission === 'payments:create') + 1] // la capa que sigue al permiso base
+    for (const [role, esperado] of [
+      [StaffRole.CASHIER, false],
+      [StaffRole.MANAGER, true],
+    ] as const) {
+      mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
+      const req: any = { params: { venueId: 'v1' }, authContext: { userId: 'u1', venueId: 'v1', role } }
+      await marca(req, {}, () => {})
+      expect(req.puedeRetirar).toBe(esperado)
+    }
+  })
+
   it('pay-in sigue con payments:create', () => {
     const permisos = cadena('/venues/:venueId/cash-drawer/pay-in')
       .filter(x => typeof x.requiredPermission === 'string')
