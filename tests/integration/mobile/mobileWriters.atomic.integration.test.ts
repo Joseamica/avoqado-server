@@ -27,6 +27,7 @@ import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { addAreaTicketItems, openAreaTicket } from '@/services/mobile/areaTicket.mobile.service'
 import { buildAreaTicketCode } from '@/lib/areaTicketCode'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
+import * as basePlan from '@/services/access/basePlan.service'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
 import * as activityLog from '@/services/dashboard/activity-log.service'
 import * as receiptService from '@/services/dashboard/receipt.dashboard.service'
@@ -1137,6 +1138,8 @@ describe('Plan7b zero payment admission uses the locked balance', () => {
 describe('the sync reducer classifies the locked writers as before', () => {
   beforeEach(() => {
     jest.spyOn(featureAccess, 'hasFeatureAccess').mockResolvedValue({ hasAccess: true } as any)
+    // hz:5bda0b30:D3: la ronda con combos entra a `addItemsToOrder`, que vuelve a pedir mesas y combos con la regla del plan.
+    jest.spyOn(basePlan, 'venueHasFeatureAccess').mockResolvedValue(true)
     jest.spyOn(tableOwnership, 'isTableOwnershipEnforced').mockResolvedValue(false)
   })
   const replay = (intent: { id: string; seq?: number; type: any; payload: Record<string, unknown> }) =>
@@ -1250,10 +1253,12 @@ describe('the sync reducer classifies the locked writers as before', () => {
     expect(await state(o)).toEqual(before)
   }, 60_000)
 
-  it('🔴 Codex r3 N5: el P2028 llega DESPUÉS de retirar el premio de la línea del combo ⇒ todo retrocede y el intent queda RETRY; el reintento real la termina (REJECTED)', async () => {
+  // hz:5bda0b30:D3 (antes Codex r3 N5): la ronda sin red repite un combo que YA estaba en la cuenta (mismo instanceId) y trae un
+  // artículo inexistente. Antes la ronda compensaba retirando ese combo —y con él el premio de cartilla dirigido a su línea—, aunque
+  // no lo había guardado ella. Ahora la ronda entera es una transacción: el rechazo no deja nada suyo y no toca lo que ya estaba.
+  it('🔴 una ronda con combos rechazada no toca lo que ya estaba en la cuenta: el combo de antes y su premio siguen igual', async () => {
     // La cuenta: Plato $100 + Bebida $50 y el combo del fixture (sus líneas de $60 y $30); un premio de cartilla DIRIGIDO a la
-    // línea del Plato del combo, ya canjeado. La ronda offline repite la promoción (mismo instanceId: idempotente) y trae un
-    // artículo inexistente: el alta normal falla en DEFINITIVO y el reducer compensa retirando la promoción del intent.
+    // línea del Plato del combo, ya canjeado.
     const o = await newOrder('promotion')
     const { instanceId } = await prisma.orderPromotion.findUniqueOrThrow({ where: { id: o.orderPromotionId } })
     const lineaDelCombo = await prisma.orderItem.findFirstOrThrow({
@@ -1273,7 +1278,9 @@ describe('the sync reducer classifies the locked writers as before', () => {
     o.rewardIds.push((await newReward({ status: 'REDEEMED', redeemedAt: new Date(), orderDiscountId: premio.id })).id)
     await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 60, total: 180, remainingBalance: 180 } })
     const antes = await state(o)
-    const ronda = (id: string) => ({
+    const id = randomUUID()
+
+    const [ack] = await replay({
       id,
       type: 'ADD_ITEMS' as const,
       payload: {
@@ -1285,57 +1292,9 @@ describe('the sync reducer classifies the locked writers as before', () => {
       },
     })
 
-    // 1) La falla transitoria entra al BORRAR las líneas del combo: después de `recortarDescuentosDeRenglones`, que ya retiró la
-    //    fila del premio y lo devolvió a PENDING dentro de la misma transacción.
-    let visto: Awaited<ReturnType<typeof state>> | undefined
-    const original = prisma.$transaction.bind(prisma)
-    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((cb: any, opts: any) =>
-      typeof cb !== 'function'
-        ? original(cb, opts)
-        : original(
-            async tx =>
-              cb(
-                new Proxy(tx, {
-                  get(target, key) {
-                    if (key !== 'orderItem') return Reflect.get(target, key)
-                    return new Proxy(target.orderItem, {
-                      get(model, method) {
-                        if (method !== 'deleteMany') return Reflect.get(model, method)
-                        return async (args: any) => {
-                          if (!args?.where?.orderPromotionId) return model.deleteMany(args)
-                          visto = await state(o, tx)
-                          throw Object.assign(new Error('Transaction API error'), { code: 'P2028' })
-                        }
-                      },
-                    })
-                  },
-                }),
-              ),
-            opts,
-          )) as any)
-    const id = randomUUID()
-    let primero: Awaited<ReturnType<typeof replay>>
-    try {
-      primero = await replay(ronda(id))
-    } finally {
-      espia.mockRestore()
-    }
-    expect(primero![0]).toMatchObject({ id, status: 'RETRY', errorCode: 'P2028' })
-    // La devolución SÍ había ocurrido dentro de la transacción…
-    expect(visto!.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
-    expect(visto!.order.discounts).toEqual([])
-    // …y retrocedió entera: premio REDEEMED con su fila, promoción, líneas y cabecera como antes. RETRY no se persiste: el
-    // aparato la reintenta.
-    expect(await state(o)).toEqual(antes)
-    expect(await persisted(id)).toBeNull()
-
-    // 2) El reintento REAL (sin falla) termina la compensación y entonces sí va a cuarentena.
-    const [segundo] = await replay(ronda(id))
-    expect(segundo).toMatchObject({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    expect(ack).toMatchObject({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
     expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
-    const despues = await state(o)
-    expect(despues.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
-    expect(despues.order).toMatchObject({ promotions: [], discounts: [], subtotal: 150, discount: 0, total: 150 })
+    expect(await state(o)).toEqual(antes)
   })
 })
 

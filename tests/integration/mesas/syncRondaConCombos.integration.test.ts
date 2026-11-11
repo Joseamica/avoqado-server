@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { BadRequestError } from '@/errors/AppError'
+import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
 jest.setTimeout(60_000)
@@ -28,7 +29,9 @@ const params = (intents: any[]) => ({ venueId, staffId, deviceId: device, intent
 beforeAll(async () => {
   const org = await prisma.organization.create({ data: { name: fixture, email: `${fixture}@example.test`, phone: '' } })
   // TRIAL = negocio de prueba: sin candados de plan (mesas, combos y pantalla de cocina).
-  const venue = await prisma.venue.create({ data: { organizationId: org.id, name: fixture, slug: fixture, type: 'RESTAURANT', status: 'TRIAL' } })
+  const venue = await prisma.venue.create({
+    data: { organizationId: org.id, name: fixture, slug: fixture, type: 'RESTAURANT', status: 'TRIAL' },
+  })
   venueId = venue.id
   await prisma.venueSettings.create({ data: { venueId, enableShifts: false, requirePinLogin: false } })
   const staff = await prisma.staff.create({ data: { email: `${fixture}@staff.test`, firstName: 'Combos', lastName: 'QA', active: true } })
@@ -79,7 +82,12 @@ async function cuentaDeMesa(): Promise<{ orderId: string; localOrderId: string }
 }
 
 const combo = (instanceId = randomUUID()) => ({ promotionRef: { promotionId, promotionInstanceId: instanceId, selections } })
-const ronda = (localOrderId: string, items: any[]) => ({ id: randomUUID(), seq: ++seq, type: 'ADD_ITEMS' as const, payload: { localOrderId, items } })
+const ronda = (localOrderId: string, items: any[]) => ({
+  id: randomUUID(),
+  seq: ++seq,
+  type: 'ADD_ITEMS' as const,
+  payload: { localOrderId, items },
+})
 
 /**
  * Intercepta el N-ésimo `orderPromotion.create` de cualquier transacción y corre `alLlegar` en ese instante (con la transacción
@@ -196,4 +204,70 @@ describe('ronda de combos sin red: entera o nada', () => {
     expect(await comandaDeCombos(orderId)).toBe(2)
     expect(await prisma.kdsOrderItem.count({ where: { kdsOrder: { orderId }, orderPromotionId: null } })).toBe(1)
   })
+
+  // Codex r1 #1: una retoma deja a dos ejecutores con la misma ronda. El lento NUNCA borra lo que guardó el que ganó.
+  it('(4) ejecutor lento: otro retomó y guardó la ronda mientras el lento estaba parado; el lento no toca nada del ganador', async () => {
+    const { orderId, localOrderId } = await cuentaDeMesa()
+    const [a, b] = [randomUUID(), randomUUID()]
+    const r = ronda(localOrderId, [combo(a), combo(b), { productId, quantity: 1 }])
+    const versionAntes = (await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).version
+
+    // El lento ya reservó y se queda parado 2 min justo antes de leer la cuenta: otro request retoma la reserva y guarda la ronda.
+    let ganador: any
+    const leerCuenta = prisma.order.findFirst.bind(prisma.order)
+    const espia = jest.spyOn(prisma.order, 'findFirst').mockImplementation((async (args: any) => {
+      if (ganador === undefined && args?.where?.id === orderId && args?.select?.version) {
+        ganador = null
+        await prisma.posSyncIntent.update({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: r.id } },
+          data: { createdAt: new Date(Date.now() - 120_000) },
+        })
+        ;[ganador] = await processIntents(params([r]))
+      }
+      return leerCuenta(args)
+    }) as any)
+    let lento: any
+    try {
+      ;[lento] = await processIntents(params([r]))
+    } finally {
+      espia.mockRestore()
+    }
+
+    expect(ganador).toMatchObject({ id: r.id, status: 'ACKED' })
+    expect(lento).toMatchObject({ id: r.id, status: 'ACKED' })
+    expect(await combosDeLaRonda(orderId, [a, b])).toBe(2)
+    expect(await prisma.orderItem.count({ where: { orderId, orderPromotionId: null } })).toBe(1)
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(Number(cuenta.total)).toBe(280) // 2 combos de $90 + $100
+    expect(cuenta.version).toBe(versionAntes + 1)
+    expect(await comandaDeCombos(orderId)).toBe(4)
+    expect(await reservaDe(r.id)).toMatchObject({ status: 'ACKED' })
+  })
+
+  // Codex r1 #2: la ruta con red guardó la ronda y perdió la respuesta; la caja la tenía también en su cola. Mientras, la cuenta se
+  // cobró (o se reembolsó). El reenvío se contesta sin tocarla, como cuando cada combo contestaba «ya estaba».
+  it.each(['PAID', 'REFUNDED'] as const)(
+    '(5) el reenvío de una ronda YA guardada entera sobre una cuenta %s: ACKED sin tocarla',
+    async paymentStatus => {
+      const { orderId, localOrderId } = await cuentaDeMesa()
+      const a = randomUUID()
+      const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+      await addItemsToOrder(venueId, orderId, [combo(a)] as any, version, true)
+      await prisma.order.update({
+        where: { id: orderId },
+        data: { paymentStatus, status: 'COMPLETED', paidAmount: 90, remainingBalance: 0 },
+      })
+      const antes = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+
+      const [ack] = await processIntents(params([ronda(localOrderId, [combo(a)])]))
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { orderId, version: antes.version } })
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({
+        version: antes.version,
+        status: 'COMPLETED',
+        paymentStatus,
+      })
+      expect(await combosDeLaRonda(orderId, [a])).toBe(1)
+    },
+  )
 })
