@@ -30,6 +30,11 @@ jest.mock('@/services/activityAudit.service', () => {
   }
 })
 
+// Guarda permisiva SÓLO para la herramienta MCP real de abajo (el permiso ya se prueba por HTTP): venue y permiso pasan.
+jest.mock('@/mcp/guard', () => ({
+  createGuard: () => ({ venueFilter: (venueId: string) => ({ venueId: { in: [venueId] } }), requirePermission: () => undefined }),
+}))
+
 // La identidad del token: quién (`x-test-actor`) y con qué rol (`x-test-role`). Permiso, validador y servicio, reales.
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
@@ -47,6 +52,7 @@ jest.mock('@/middlewares/registerDevice.middleware', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
+import { registerShiftTools } from '@/mcp/tools/shifts'
 import { correctCashCount, previewCashCountCorrection } from '@/services/dashboard/cashCountCorrection.service'
 import { deleteShift, getShiftById } from '@/services/dashboard/shift.dashboard.service'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
@@ -538,5 +544,50 @@ describe('por HTTP: la ruta «corregir conteo» y la puerta vieja cerrada', () =
     expect(r.status).toBe(200)
     expect(Number((await prisma.shift.findUniqueOrThrow({ where: { id: s.shiftId } })).totalSales)).toBe(123)
     expect(await estado(s)).toEqual(antes)
+  })
+})
+
+describe('herramienta MCP correct_cash_count — la real, contra Postgres', () => {
+  type Handler = (args: Record<string, unknown>, extra: unknown) => Promise<{ content: Array<{ text: string }> }>
+  let tool: Handler
+  const scope = { staffId: '', activeOrg: 'org', allowedVenueIds: [] as string[], perVenueAccess: new Map() }
+  beforeAll(() => {
+    const handlers = new Map<string, Handler>()
+    registerShiftTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as Handler) } as never, scope as never)
+    tool = handlers.get('correct_cash_count')!
+  })
+  const llamar = async (s: Corte, args: Record<string, unknown>) => {
+    scope.staffId = s.staffId // el autor de la bitácora es una persona real (FK)
+    return JSON.parse((await tool({ venueId: s.venueId, shiftId: s.shiftId, countedCash: 2000, reason: 'error de dedo', ...args }, {})).content[0].text)
+  }
+  const tres = { expectedCurrentCount: 20000, expectedResultingDifference: 0, expectedCorrectionCount: 0 }
+
+  it('1999.995 ⇒ CASH_COUNT_INVALID_AMOUNT y la base no cambia', async () => {
+    const s = await sembrarCorte()
+    expect(await llamar(s, { countedCash: 1999.995 })).toMatchObject({ ok: false, code: 'CASH_COUNT_INVALID_AMOUNT' })
+    expect(await estado(s)).toEqual(SIN_CORREGIR)
+  })
+
+  it('motivo de espacios ⇒ CASH_COUNT_INVALID_REASON en la vista previa y con confirm, sin escribir', async () => {
+    const s = await sembrarCorte()
+    expect(await llamar(s, { reason: '   ' })).toMatchObject({ ok: false, code: 'CASH_COUNT_INVALID_REASON' })
+    expect(await llamar(s, { reason: '   ', confirm: true, ...tres })).toMatchObject({ ok: false, code: 'CASH_COUNT_INVALID_REASON' })
+    expect(await estado(s)).toEqual(SIN_CORREGIR)
+  })
+
+  it('vista previa y luego confirm con sus tres valores ⇒ ok y una fila de bitácora con source MCP', async () => {
+    const s = await sembrarCorte()
+    const vista = await llamar(s, {})
+    expect(vista).toMatchObject({ requiresConfirmation: true, ...tres })
+    expect((await estado(s)).bitacora).toBe(0)
+    const { expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount } = vista
+    expect(await llamar(s, { confirm: true, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount })).toMatchObject({
+      ok: true,
+      countedAfter: 2000,
+    })
+    const filas = await prisma.activityLog.findMany({ where: { venueId: s.venueId, action: 'CASH_COUNT_CORRECTED' } })
+    expect(filas).toHaveLength(1)
+    expect(filas[0].staffId).toBe(s.staffId)
+    expect(filas[0].data).toMatchObject({ source: 'MCP', mcp: { source: 'customer-mcp' } })
   })
 })

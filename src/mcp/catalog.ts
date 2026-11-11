@@ -13,6 +13,7 @@ import { directoryInputSchema } from './directory/input'
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   review_pending_courtesy: 'write',
   cancel_unpaid_order: 'write',
+  correct_cash_count: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -618,6 +619,10 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedCourtesySnapshot',
             // Saldo a favor (`change_store_credit_phone`): el teléfono se cambia sobre los últimos 4 que el operador VIO.
             'expectedPhoneLast4',
+            // Corregir conteo (`correct_cash_count`): se confirma sobre el conteo, la diferencia y el nº de correcciones que se VIERON.
+            'expectedCurrentCount',
+            'expectedResultingDifference',
+            'expectedCorrectionCount',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

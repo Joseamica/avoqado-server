@@ -5,6 +5,10 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { mcpProvenance } from '../audit'
+import AppError from '@/errors/AppError'
+import { correctCashCount, previewCashCountCorrection } from '@/services/dashboard/cashCountCorrection.service'
+import { describeDifference, normalizeCorrectionInput } from '@/services/dashboard/cashCountCorrection.rules'
 import { getExpectedCashAmount, getCloseoutHistory } from '@/services/dashboard/cashCloseout.dashboard.service'
 import { getDrawerStatus, getDrawerSessions } from '@/services/dashboard/cashDrawer.dashboard.service'
 import { ventasSinTarjetasPorTurno } from '@/services/shared/ventasDelTurno'
@@ -160,6 +164,67 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           at: c.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  const mxn = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' })
+
+  server.tool(
+    'correct_cash_count',
+    'Corrects the counted cash (efectivo contado) of an ALREADY CLOSED cash closeout (corte). Writes signed money: the shift and its physical drawer change together and the old difference becomes the new one. Confirm-gated: call WITHOUT confirm first to get a preview, show it to the user, then call again with confirm:true and send back the preview\'s expectedCurrentCount, expectedResultingDifference and expectedCorrectionCount unchanged. Needs shifts:update. Fails with CASH_COUNT_CHANGED if the count moved since the preview.',
+    {
+      venueId: z.string().describe('Venue that owns the shift (must be in your scope)'),
+      shiftId: z.string().describe('The closed shift (turno) whose counted cash to correct'),
+      countedCash: z.number().min(0).max(99999999.99).describe('Efectivo realmente contado, en pesos (máximo 2 decimales)'),
+      reason: z.string().max(300).describe('Motivo de la corrección (de 3 a 300 caracteres); queda en la bitácora'),
+      expectedCurrentCount: z.number().optional().describe('From the preview: the counted cash before the correction'),
+      expectedResultingDifference: z.number().optional().describe('From the preview: the difference after the correction'),
+      expectedCorrectionCount: z.number().optional().describe('From the preview: how many corrections the shift already had'),
+      confirm: z.boolean().optional().describe('true only after the user approved the preview'),
+    },
+    async ({ venueId, shiftId, countedCash, reason, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('shifts:update', venueId)
+      try {
+        if (confirm !== true) {
+          normalizeCorrectionInput({ countedCash, reason }) // the preview has no reason: validate it here so a bad one fails early
+          const p = await previewCashCountCorrection(venueId, shiftId, countedCash)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            expectedCurrentCount: p.countedBefore,
+            expectedResultingDifference: p.differenceAfter,
+            expectedCorrectionCount: p.correctionsBefore,
+            preview: p,
+            message: `Contado ${mxn.format(p.countedBefore)} → ${mxn.format(p.countedAfter)} · ${describeDifference(p.differenceBefore)} → ${describeDifference(p.differenceAfter)}. Vuelve a llamar con confirm:true para guardar.`,
+          })
+        }
+        const missing = (
+          [
+            ['expectedCurrentCount', expectedCurrentCount],
+            ['expectedResultingDifference', expectedResultingDifference],
+            ['expectedCorrectionCount', expectedCorrectionCount],
+          ] as const
+        ).find(([, v]) => v === undefined)
+        if (missing) return text({ ok: false, needsInput: true, field: missing[0] })
+        const result = await correctCashCount({
+          venueId,
+          shiftId,
+          countedCash,
+          reason,
+          expectedCurrentCount: expectedCurrentCount!,
+          expectedResultingDifference: expectedResultingDifference!,
+          expectedCorrectionCount: expectedCorrectionCount!,
+          staffId: scope.staffId,
+          source: 'MCP',
+          provenance: await mcpProvenance(scope),
+        })
+        // No auditMcpWrite: the service already writes its own ActivityLog row (with the MCP provenance), as cancel_unpaid_order.
+        return text({ ok: true, ...result })
+      } catch (err) {
+        if (err instanceof AppError) return text({ ok: false, code: err.code, error: err.message })
+        throw err
+      }
     },
   )
 }
