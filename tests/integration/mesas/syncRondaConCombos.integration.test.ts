@@ -270,4 +270,67 @@ describe('ronda de combos sin red: entera o nada', () => {
       expect(await combosDeLaRonda(orderId, [a])).toBe(1)
     },
   )
+
+  // Codex r2 #1: dos importes libres iguales de la misma ronda se guardan FUSIONADOS en un renglón con la primera llave. El
+  // reconocimiento no puede exigir las dos llaves: la reembolsada se reabría y la cobrada rechazaba su propia ronda.
+  it('(6) ronda YA guardada con dos importes libres iguales (se fusionan) sobre una cuenta REFUNDED: ACKED sin reabrirla', async () => {
+    const { orderId, localOrderId } = await cuentaDeMesa()
+    const a = randomUUID()
+    const libre = { customName: 'Servicio de mesa', customUnitPriceCents: 500, quantity: 1 }
+    const r = ronda(localOrderId, [combo(a), libre, libre])
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    // La ruta con red la guardó con las mismas llaves de la cola y perdió la respuesta.
+    await addItemsToOrder(
+      venueId,
+      orderId,
+      [combo(a), { ...libre, externalId: `sync:${r.id}:0` }, { ...libre, externalId: `sync:${r.id}:1` }] as any,
+      version,
+      true,
+    )
+    expect(await prisma.orderItem.count({ where: { orderId, orderPromotionId: null } })).toBe(1)
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { paymentStatus: 'REFUNDED', status: 'COMPLETED', paidAmount: 100, remainingBalance: 0 },
+    })
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+
+    const [ack] = await processIntents(params([r]))
+
+    expect(ack).toMatchObject({ status: 'ACKED', result: { orderId, version: antes.version } })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({
+      version: antes.version,
+      status: 'COMPLETED',
+      paymentStatus: 'REFUNDED',
+    })
+  })
+
+  // Codex r2 #2: la cola lee la cuenta vacía; antes de reconocer la ronda, la ruta con red la guarda. El ACK no puede contestar el
+  // total y la versión de ANTES de la ronda (la caja reemplazaría una versión nueva por una vieja).
+  it('(7) la ruta con red guarda la ronda entre la lectura de la cola y su reconocimiento: el ACK trae el total y la versión de después', async () => {
+    const { orderId, localOrderId } = await cuentaDeMesa()
+    const a = randomUUID()
+    const r = ronda(localOrderId, [combo(a)])
+    let guardada = false
+    const leerCuenta = prisma.order.findFirst.bind(prisma.order)
+    const espia = jest.spyOn(prisma.order, 'findFirst').mockImplementation((async (args: any) => {
+      const leida = await leerCuenta(args)
+      if (!guardada && args?.where?.id === orderId && args?.select?.version) {
+        guardada = true
+        await addItemsToOrder(venueId, orderId, [combo(a)] as any, (leida as any).version, true)
+      }
+      return leida
+    }) as any)
+    let ack: any
+    try {
+      ;[ack] = await processIntents(params([r]))
+    } finally {
+      espia.mockRestore()
+    }
+
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(guardada).toBe(true)
+    expect(Number(cuenta.total)).toBe(90)
+    expect(ack).toMatchObject({ status: 'ACKED', result: { orderId, version: cuenta.version, total: 90 } })
+    expect(await combosDeLaRonda(orderId, [a])).toBe(1)
+  })
 })
