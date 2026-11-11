@@ -121,6 +121,8 @@ export async function authorKitchenTickets(params: {
     let cursor: string | undefined
     let rondaSinComanda = false
     const ids = new Set<string>()
+    /** Comandas que nacieron en ESTE armado: las únicas que reciben platillos (hz:dcc49fe5:D1 · Codex r4 B10/B13, r5). */
+    const creadas = new Set<string>()
     while (true) {
       const renglones = await tx.orderItem.findMany({
         where: { orderId },
@@ -133,7 +135,6 @@ export async function authorKitchenTickets(params: {
           externalId: true,
           sentToKitchenAt: true,
           createdAt: true,
-          updatedAt: true,
           serviceCourse: true,
           orderPromotionId: true,
           areaTicketLineId: true,
@@ -192,7 +193,6 @@ export async function authorKitchenTickets(params: {
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,
         createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
         serviceCourse: r.serviceCourse,
         orderPromotionId: r.orderPromotionId,
       }))
@@ -228,43 +228,36 @@ export async function authorKitchenTickets(params: {
           orderType: order.type,
           preparationVersion,
         }
-        const suya = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: plan.sourceKey })
-        const destinos: Array<[string, KitchenLine[]]> = [[suya.id, plan.lines.filter(suya.cubre)]]
-        // 🔴 hz:dcc49fe5:D1 · Codex r4 B10/B13: una comanda TERMINADA o «en papel» no absorbe lo que no cubrió; lo nuevo sale en una
-        // comanda nueva y visible (el mismo folio que la diferencia de este armado), aunque repita algo dudoso («en duda, manda»).
-        const aparte = plan.lines.filter(l => !suya.cubre(l))
-        if (aparte.length > 0) {
+        // 🔴 hz:dcc49fe5:D1 · Codex r4 B10/B13 y r5: una comanda que YA existía (de un armado anterior o de una marca que llegó antes)
+        // nunca recibe platillos nuevos. Pudo terminarse o salir en papel, y una marca (LISTO sin red, «salió en papel») la cierra sin
+        // este candado y sin decir qué cubría: lo agregado quedaría escondido. Lo de este armado sale en una comanda nueva y visible
+        // (el folio de su diferencia), aunque repita algo que la marca ya cubría («en duda, manda»). Así es cada envío en Square.
+        let kdsOrderId = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: plan.sourceKey }, creadas)
+        if (!creadas.has(kdsOrderId)) {
           const folioNuevo = `${origenDeLaDiferencia(order, startedAt)}:${plan.stationId ?? 'none'}`
-          const nueva = folioNuevo === plan.sourceKey ? null : await cabeceraPorFolio(tx, { ...cabecera, sourceKey: folioNuevo })
-          // Sólo si en este mismo milisegundo ya existía y se cerró: se revierte todo y el barrido lo reintenta con otro sello.
-          if (!nueva || !aparte.every(nueva.cubre)) throw new ConflictError('La comanda nueva ya estaba cerrada.', 'KDS_FOLIO_CONFLICT')
-          destinos.push([nueva.id, aparte])
+          kdsOrderId = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: folioNuevo }, creadas)
+          // Sólo si ese folio ya existía de otro armado en el mismo milisegundo: se revierte todo y el barrido reintenta con otro sello.
+          if (!creadas.has(kdsOrderId)) throw new ConflictError('La comanda nueva ya existía.', 'KDS_FOLIO_CONFLICT')
         }
-        for (const [kdsOrderId, lineas] of destinos) {
-          if (lineas.length === 0) continue
-          await tx.kdsOrderItem.createMany({
-            data: lineas.map(l => ({
-              kdsOrderId,
-              productName: l.productName,
-              quantity: l.quantity,
-              modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
-              notes: l.notes,
-              orderItemId: l.id,
-              productId: l.productId,
-              categoryId: l.categoryId,
-              externalLineId: l.externalId,
-              serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
-              orderPromotionId: l.orderPromotionId ?? null,
-              preparation: preparationVersion
-                ? (initialPreparation(
-                    l.quantity,
-                    parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE',
-                  ) as Prisma.InputJsonValue)
-                : Prisma.DbNull,
-            })),
-          })
-          ids.add(kdsOrderId)
-        }
+        await tx.kdsOrderItem.createMany({
+          data: plan.lines.map(l => ({
+            kdsOrderId,
+            productName: l.productName,
+            quantity: l.quantity,
+            modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
+            notes: l.notes,
+            orderItemId: l.id,
+            productId: l.productId,
+            categoryId: l.categoryId,
+            externalLineId: l.externalId,
+            serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
+            orderPromotionId: l.orderPromotionId ?? null,
+            preparation: preparationVersion
+              ? (initialPreparation(l.quantity, parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE') as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+          })),
+        })
+        ids.add(kdsOrderId)
         if (plan.toStamp.length > 0) {
           await tx.orderItem.updateMany({
             where: { id: { in: plan.toStamp }, sentToKitchenAt: null },
@@ -362,7 +355,8 @@ async function cabeceraPorFolio(
     orderType: string
     preparationVersion: number
   },
-): Promise<Cabecera> {
+  creadas: Set<string>,
+): Promise<string> {
   const [creada] = await tx.kdsOrder.createManyAndReturn({
     data: [
       {
@@ -379,10 +373,13 @@ async function cabeceraPorFolio(
     skipDuplicates: true,
     select: { id: true },
   })
-  if (creada) return { id: creada.id, cubre: () => true }
+  if (creada) {
+    creadas.add(creada.id)
+    return creada.id
+  }
   const existente = await tx.kdsOrder.findUniqueOrThrow({
     where: { venueId_sourceKey: { venueId: a.venueId, sourceKey: a.sourceKey } },
-    select: { id: true, orderId: true, preparationVersion: true, status: true, fallbackPrintedAt: true, createdAt: true },
+    select: { id: true, orderId: true },
   })
   // 🔴 Codex r3 #1: nunca se le suman platillos a la comanda de OTRA cuenta (si ya se terminó, saldrían escondidos). Pasa si un
   // renglón movido de cuenta trae el folio de su ronda, o con una marca rara. Se arma en un folio propio de esta cuenta, fijo para
@@ -395,7 +392,7 @@ async function cabeceraPorFolio(
       orderId: a.orderId,
       otraCuenta: existente.orderId,
     })
-    return cabeceraPorFolio(tx, { ...a, sourceKey: propio })
+    return cabeceraPorFolio(tx, { ...a, sourceKey: propio }, creadas)
   }
   // Una MARCA llegó antes: se le pone la venta. Su estado y su «en papel» son pegajosos y no se tocan.
   if (!existente.orderId) {
@@ -404,37 +401,9 @@ async function cabeceraPorFolio(
       data: { orderId: a.orderId, orderNumber: a.orderNumber, orderType: a.orderType, printStationId: a.stationId },
     })
   }
-  if (a.preparationVersion && !existente.preparationVersion) {
-    // An old offline mark may have arrived BEFORE this round. It cannot swallow held products.
-    await tx.kdsOrder.update({
-      where: { id: existente.id },
-      data: {
-        preparationVersion: a.preparationVersion,
-        status: 'NEW',
-        completedAt: null,
-        fallbackPrintedAt: null,
-      },
-    })
-    return { id: existente.id, cubre: () => true }
-  }
-  // Abierta (nueva, en preparación o lista sin terminar): todo lo de su folio se ve en ella, como siempre.
-  if (existente.status !== 'COMPLETED' && !existente.fallbackPrintedAt) return { id: existente.id, cubre: () => true }
-  // 🔴 hz:dcc49fe5:D1 · Codex r4 B13: TERMINADA o «en papel» con platillos: lo que la cocina terminó (o recibió en papel) es lo que tiene.
-  // Lo que todavía no está en ella nunca viajó: no la cubre, o quedaría escondido.
-  if (await tx.kdsOrderItem.findFirst({ where: { kdsOrderId: existente.id }, select: { id: true } })) {
-    return { id: existente.id, cubre: () => false }
-  }
-  // 🔴 B10: una MARCA sin platillos (LISTO sin red o «salió en papel» antes del armado) no dice qué cubría. Cubre lo que la cuenta ya
-  // tenía al llegar la marca, y nada creado ni tocado desde entonces (− 5 s, como S9: un empate cuenta como tocado). En duda, manda.
-  const desde = existente.createdAt.getTime() - HOLGURA_DE_RELOJ_MS
-  return {
-    id: existente.id,
-    cubre: l => l.createdAt.getTime() < desde && l.updatedAt != null && l.updatedAt.getTime() < desde,
-  }
+  // Ya no recibe platillos (ni se reabre por una ronda con tiempos): el armado los manda en una comanda nueva.
+  return existente.id
 }
-
-/** La cabecera de un folio y qué renglones puede absorber (`cubre`): lo demás va a una comanda nueva (B10/B13). */
-type Cabecera = { id: string; cubre: (l: KitchenLine) => boolean }
 
 async function limpiarMarca(venueId: string, orderId: string, startedAt: Date): Promise<void> {
   // `orderId` puede venir de un request del cliente (el POST legado, Tarea 8): siempre acotado al venue.
