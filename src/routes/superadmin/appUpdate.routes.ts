@@ -19,6 +19,8 @@ const router = Router()
 const listUpdatesSchema = z.object({
   query: z.object({
     environment: z.enum(['SANDBOX', 'PRODUCTION']).optional(),
+    // Sin esto zod lo borra de req.query (validateRequest reemplaza la query) y la lista mezclaría carriles.
+    platform: z.enum(['ANDROID_TPV', 'WINDOWS_DESKTOP', 'ANDROID_CAMPO']).optional(),
   }),
 })
 
@@ -31,6 +33,10 @@ const updateIdSchema = z.object({
 const environmentSchema = z.object({
   params: z.object({
     environment: z.enum(['sandbox', 'production', 'SANDBOX', 'PRODUCTION']),
+  }),
+  // «Última versión» del panel por carril; sin plataforma, la TPV como siempre.
+  query: z.object({
+    platform: z.enum(['ANDROID_TPV', 'WINDOWS_DESKTOP', 'ANDROID_CAMPO']).optional(),
   }),
 })
 
@@ -50,6 +56,8 @@ const createUpdateSchema = z.object({
     // minAndroidSdk is also auto-detected from APK if not provided
     minAndroidSdk: z.number({ coerce: true }).int().min(21).max(35).optional(),
     apkBase64: z.string().min(1, 'APK file is required (base64 encoded)'),
+    // Carril de la versión: la TPV (como siempre) o la app de campo del promotor.
+    platform: z.enum(['ANDROID_TPV', 'ANDROID_CAMPO']).optional().default('ANDROID_TPV'),
   }),
 })
 

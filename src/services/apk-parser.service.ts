@@ -169,6 +169,13 @@ export async function isValidApk(apkBuffer: Buffer): Promise<boolean> {
   }
 }
 
+export const PAQUETE_DE_CAMPO = 'com.jaac.avoqado_tpv.campo'
+
+/** Ambiente de un APK de la app de campo según su versionName («0.3.0-sandbox» = SANDBOX). */
+export function ambienteDeCampo(versionName: string): 'SANDBOX' | 'PRODUCTION' {
+  return versionName.toLowerCase().includes('sandbox') ? 'SANDBOX' : 'PRODUCTION'
+}
+
 /**
  * Validate APK package name matches expected pattern
  *
@@ -176,7 +183,25 @@ export async function isValidApk(apkBuffer: Buffer): Promise<boolean> {
  * @param environment - Target environment (SANDBOX or PRODUCTION)
  * @returns true if package name is valid for environment
  */
-export function validatePackageName(metadata: ApkMetadata, environment: 'SANDBOX' | 'PRODUCTION'): { valid: boolean; message?: string } {
+export function validatePackageName(
+  metadata: ApkMetadata,
+  environment: 'SANDBOX' | 'PRODUCTION',
+  platform: 'ANDROID_TPV' | 'ANDROID_CAMPO' = 'ANDROID_TPV',
+): { valid: boolean; message?: string } {
+  // App de campo: el mismo paquete en los dos ambientes; el ambiente sale del versionName (debug lleva «-sandbox»).
+  if (platform === 'ANDROID_CAMPO') {
+    if (metadata.packageName !== PAQUETE_DE_CAMPO) {
+      return { valid: false, message: `El APK es "${metadata.packageName}" y la app de campo es "${PAQUETE_DE_CAMPO}"` }
+    }
+    if (ambienteDeCampo(metadata.versionName) !== environment) {
+      return {
+        valid: false,
+        message: `La versión ${metadata.versionName} es de ${ambienteDeCampo(metadata.versionName)} y se está subiendo a ${environment}`,
+      }
+    }
+    return { valid: true }
+  }
+
   const expectedPackages = {
     SANDBOX: 'com.jaac.avoqado_tpv.sandbox',
     PRODUCTION: 'com.jaac.avoqado_tpv',
