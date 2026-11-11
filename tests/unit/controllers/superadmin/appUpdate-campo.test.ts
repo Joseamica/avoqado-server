@@ -50,7 +50,7 @@ it('campo en producción con su paquete, su nombre y su llave: 201 en su carril 
 
   expect(res.status).toHaveBeenCalledWith(201)
   expect((prisma.appUpdate.create as jest.Mock).mock.calls[0][0].data).toEqual(expect.objectContaining({ platform: 'ANDROID_CAMPO', versionCode: 3 }))
-  expect(bucket.file).toHaveBeenCalledWith('campo-updates/production/avoqado-campo-0.3.0-3.apk')
+  expect(bucket.file).toHaveBeenCalledWith(expect.stringMatching(/^campo-updates\/production\/avoqado-campo-0\.3\.0-3-[0-9a-f]{12}\.apk$/))
   expect((prisma.appUpdate.findUnique as jest.Mock).mock.calls[0][0].where).toEqual({
     versionCode_environment_platform: { versionCode: 3, environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' },
   })
@@ -102,7 +102,7 @@ it('campo en sandbox no exige la llave de producción', async () => {
   const res = await alta({ environment: 'SANDBOX', platform: 'ANDROID_CAMPO' })
 
   expect(res.status).toHaveBeenCalledWith(201)
-  expect(bucket.file).toHaveBeenCalledWith('campo-updates/sandbox/avoqado-campo-0.3.0-sandbox-3.apk')
+  expect(bucket.file).toHaveBeenCalledWith(expect.stringMatching(/^campo-updates\/sandbox\/avoqado-campo-0\.3\.0-sandbox-3-[0-9a-f]{12}\.apk$/))
 })
 
 it.each([{ versionCode: 9 }, { versionName: '0.9.0' }])('campo con números distintos a los del APK (%j): 400', async extra => {
@@ -142,4 +142,28 @@ it('el preview reconoce la app de campo y su ambiente por el nombre', async () =
   await previewApkMetadata({ body: { apkBase64: 'QUJD' } } as any, res)
 
   expect(res.json.mock.calls[0][0].data).toEqual(expect.objectContaining({ detectedPlatform: 'ANDROID_CAMPO', detectedEnvironment: 'SANDBOX' }))
+})
+
+it('dos altas simultáneas de builds distintos: archivos distintos, y la que pierde el INSERT es 409', async () => {
+  ;(extractApkMetadata as jest.Mock).mockResolvedValue(metadata('com.jaac.avoqado_tpv.campo', '0.3.0'))
+  ;(prisma.appUpdate.create as jest.Mock)
+    .mockImplementationOnce(async ({ data }: any) => ({ id: 'cupd', ...data }))
+    .mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
+  const [a, b] = await Promise.all([
+    createAppUpdate({ body: { apkBase64: 'QUFB', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()).then(() => null),
+    createAppUpdate({ body: { apkBase64: 'QkJC', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()).then(() => null),
+  ])
+  void a, void b
+  const nombres = (bucket.file as jest.Mock).mock.calls.map(([n]) => n)
+  expect(new Set(nombres).size).toBe(2)
+  const urls = (prisma.appUpdate.create as jest.Mock).mock.calls.map(([arg]) => arg.data.downloadUrl)
+  expect(urls[0]).toContain(nombres[0].split('/').pop())
+})
+
+it('si el INSERT choca con la llave única (otra alta ganó): 409, no 500', async () => {
+  ;(extractApkMetadata as jest.Mock).mockResolvedValue(metadata('com.jaac.avoqado_tpv.campo', '0.3.0'))
+  ;(prisma.appUpdate.create as jest.Mock).mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
+  const res = await alta({ environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' })
+
+  expect(res.status).toHaveBeenCalledWith(409)
 })

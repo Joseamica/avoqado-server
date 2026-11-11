@@ -264,8 +264,10 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     const bucket = storage.bucket()
+    // Campo: el nombre lleva el inicio del SHA-256, así que dos altas simultáneas de builds distintos nunca escriben el mismo
+    // archivo (la que pierde el INSERT deja su archivo huérfano, pero la fila ganadora siempre apunta a SUS bytes).
     const fileName = esCampo
-      ? `campo-updates/${environment.toLowerCase()}/avoqado-campo-${versionName}-${versionCode}.apk`
+      ? `campo-updates/${environment.toLowerCase()}/avoqado-campo-${versionName}-${versionCode}-${checksum.slice(0, 12)}.apk`
       : `tpv-updates/${environment.toLowerCase()}/avoqado-tpv-${versionName}-${environment.toLowerCase()}.apk`
     const file = bucket.file(fileName)
 
@@ -316,7 +318,7 @@ export async function createAppUpdate(req: Request, res: Response) {
       return res.status(400).json({ success: false, error: targeting.error })
     }
 
-    // Create database record
+    // Create database record (la llave única resuelve dos altas simultáneas: la que pierde es 409, no 500)
     const appUpdate = await prisma.appUpdate.create({
       data: {
         versionName,
@@ -395,6 +397,9 @@ export async function createAppUpdate(req: Request, res: Response) {
       ...(warnings.length > 0 && { warnings }),
     })
   } catch (error) {
+    if ((error as { code?: string })?.code === 'P2002') {
+      return res.status(409).json({ success: false, error: 'Esa versión ya existe en ese ambiente y plataforma (otra alta ganó)' })
+    }
     logger.error('Error creating app update:', error)
     return res.status(500).json({
       success: false,
