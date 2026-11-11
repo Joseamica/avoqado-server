@@ -64,9 +64,11 @@ async function permisosDeLaSesion(venueId: string, userId: string | undefined): 
   try {
     const sv = await prisma.staffVenue.findUnique({
       where: { staffId_venueId: { staffId: userId, venueId } },
-      select: { role: true, permissionSetId: true, permissionSet: true },
+      select: { role: true, permissionSetId: true, permissionSet: true, active: true, staff: { select: { active: true } } },
     })
     if (!sv) return undefined
+    // Membresía o cuenta dada de baja: el login ya no la deja entrar; una sesión viva sabe que aquí no puede nada ([] ≠ omitido).
+    if (!sv.active || sv.staff?.active === false) return []
     const custom = await prisma.venueRolePermission.findUnique({
       where: { venueId_role: { venueId, role: sv.role } },
       select: { permissions: true, deniedPermissions: true },

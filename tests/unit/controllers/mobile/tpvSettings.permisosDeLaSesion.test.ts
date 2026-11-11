@@ -5,6 +5,7 @@
 import type { Request, Response } from 'express'
 
 import { prismaMock } from '@tests/__helpers__/setup'
+import { resolveStaffVenuePermissions } from '@/lib/resolveEffectivePermissions'
 import { getTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
 
 jest.mock('@/services/dashboard/tpv.dashboard.service', () => ({ getTpvSettings: jest.fn() }))
@@ -41,18 +42,33 @@ describe('getVenueTpvSettings — permisosDeLaSesion', () => {
   })
 
   it('trae los permisos efectivos de quien pregunta', async () => {
-    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', permissionSetId: null, permissionSet: null })
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', active: true, staff: { active: true }, permissionSetId: null, permissionSet: null })
     prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
     expect((await pedir()).permisosDeLaSesion).toContain('cash-drawer:pay-out')
 
-    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'CASHIER', permissionSetId: null, permissionSet: null })
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'CASHIER', active: true, staff: { active: true }, permissionSetId: null, permissionSet: null })
     expect((await pedir()).permisosDeLaSesion).not.toContain('cash-drawer:pay-out')
   })
 
   it('si un negocio se lo quitó al gerente, no lo trae', async () => {
-    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', permissionSetId: null, permissionSet: null })
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', active: true, staff: { active: true }, permissionSetId: null, permissionSet: null })
     prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: [], deniedPermissions: ['cash-drawer:pay-out'] })
     expect((await pedir()).permisosDeLaSesion).not.toContain('cash-drawer:pay-out')
+  })
+
+  it('una membresía inactiva o una cuenta inactiva recibe [] (presente y vacío)', async () => {
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', active: false, staff: { active: true } })
+    expect((await pedir()).permisosDeLaSesion).toEqual([])
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ role: 'MANAGER', active: true, staff: { active: false } })
+    expect((await pedir()).permisosDeLaSesion).toEqual([])
+  })
+
+  it('con un Conjunto de Permisos asignado, la lista es la misma que da el login', async () => {
+    const permissionSet = { id: 'ps1', permissions: ['cash-drawer:pay-out', 'orders:read'] }
+    const sv = { role: 'CASHIER', active: true, staff: { active: true }, permissionSetId: 'ps1', permissionSet }
+    prismaMock.staffVenue.findUnique.mockResolvedValue(sv)
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
+    expect((await pedir()).permisosDeLaSesion).toEqual(resolveStaffVenuePermissions(sv as any, null))
   })
 
   it('si la lectura de permisos falla, se omite el campo y la respuesta sigue', async () => {
