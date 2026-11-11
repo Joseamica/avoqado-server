@@ -1575,6 +1575,11 @@ export async function addItemsToOrder(
   asNewRound: boolean = false,
   /** Huella del reducer offline: corre DENTRO de la transacción de la ronda (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: Prisma.TransactionClient, ronda: { orderId: string }) => Promise<void>,
+  /**
+   * Cola sin red (hz:5bda0b30:D3): cuándo se VENDIERON los combos de la ronda, ya acotado (`clampSoldAt`). Su vigencia y su envío a
+   * cocina se cuentan desde ahí, como cuando la cola los guardaba aparte. Sin él, la hora de esta ronda (la venta con red).
+   */
+  combosVendidosEn?: Date,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
   await assertPreparationAuthoringAccess(venueId, items)
@@ -1689,10 +1694,6 @@ export async function addItemsToOrder(
         )
       }
 
-      // Validate order is not paid
-      if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Cannot add items to a paid order')
-      }
       const reabrePorRonda = order.status === OrderStatus.COMPLETED
 
       // Etapa 3 del KDS: sólo una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). La marca viaja
@@ -1709,16 +1710,22 @@ export async function addItemsToOrder(
             promotionId: ref.promotionId,
             instanceId: ref.promotionInstanceId,
             selections: ref.selections,
-            soldAt: roundSentAt!,
+            soldAt: combosVendidosEn ?? roundSentAt!,
           },
           tx,
           {
             deferTotalsToCaller: true,
-            sentToKitchenAt: roundSentAt!,
+            sentToKitchenAt: combosVendidosEn ?? roundSentAt!,
             ...(item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? { componentExternalIdPrefix: item.externalId } : {}),
           },
         )
         if (applied.created) createdPromotionIds.push(applied.orderPromotionId)
+      }
+
+      // Validate order is not paid. Después de los combos (hz:5bda0b30:D3): un combo NUEVO sobre una cuenta pagada (o reembolsada)
+      // lo rechaza la promoción con su mensaje en español, el que la cola sin red mostraba cuando guardaba cada combo aparte.
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot add items to a paid order')
       }
 
       // Fetch products and validate

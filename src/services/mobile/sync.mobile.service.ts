@@ -30,7 +30,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
-import { CODIGOS_TRANSITORIOS, esErrorTransitorio } from '../shared/erroresTransitorios'
+import { esErrorTransitorio } from '../shared/erroresTransitorios'
 import { hayDineroQueSeGuarda } from '../shared/orderBalance'
 import { esCobroCompletadoDeLaOrden } from '../shared/cuentaCancelada'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
@@ -43,10 +43,8 @@ import {
 import * as tableService from '../tpv/table.tpv.service'
 import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
-import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { armarComandasTrasCommit, markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
-import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
@@ -110,21 +108,6 @@ export interface SyncIntentAck {
 }
 
 /**
- * ¿La ronda con promociones se deja tal cual para el reenvío? Sólo con un transitorio de la LISTA, como siempre: el replay es
- * idempotente por instanceId. Con cualquier otro error se retiran sus promos (`removeIntentPromotions`) y la ronda va a cuarentena,
- * también con un choque ENVUELTO (40P01/40001/55P03 en un P2010 o sin código), que `esErrorTransitorio` ya manda a RETRY en los demás
- * intents: reintentar una ronda con promos que chocó podía duplicar el combo si otra caja lo separaba a otro cheque antes de
- * retirarlo (hz:381780f0:D1, Codex r3 #1). Queda como en develop. La ventana con P2034/VERSION_CONFLICT: deuda aparte.
- */
-const rondaSeQuedaParaElReenvio = (error: any): boolean => CODIGOS_TRANSITORIOS.has(error?.errorCode ?? error?.code)
-
-/** Tras retirar sus promos, la ronda que chocó envuelta queda REJECTED con el mismo `errorCode` que antes (no RETRY). */
-function rondaConPromosEnCuarentena(error: any): unknown {
-  if (esErrorTransitorio(error) && error && typeof error === 'object') error.errorCode = error.errorCode ?? error.code ?? 'BUSINESS_RULE'
-  return error
-}
-
-/**
  * Una reserva PROCESSING evita que dos replays concurrentes ejecuten el mismo
  * efecto antes de que exista el ACK. Si el proceso muere después del efecto,
  * no se vuelve a ejecutar a ciegas: tras este plazo pasa a conciliación.
@@ -145,7 +128,10 @@ const RETOMA_MS = 60 * 1000
 
 export interface MarcaDeReserva {
   protocolo: typeof PROTOCOLO_HUELLA
-  /** Decidido con el payload ORIGINAL: una ronda con promoción commitea en varias transacciones y no se retoma. */
+  /**
+   * Hoy siempre `true`. Una reserva nacida antes de hz:5bda0b30:D3 (11-nov-2026) con una ronda con promoción trae `false`: esa ronda
+   * commiteaba en varias transacciones y no se retoma (queda como antes, `OUTCOME_UNKNOWN`).
+   */
   retomable: boolean
   huella?: Record<string, unknown>
 }
@@ -163,8 +149,7 @@ export class ReservaPerdida extends Error {
 
 function marcaInicial(intent: SyncIntentInput): MarcaDeReserva | null {
   if (!RETOMABLES.has(intent.type)) return null
-  const items = Array.isArray(intent.payload?.items) ? (intent.payload.items as any[]) : []
-  return { protocolo: PROTOCOLO_HUELLA, retomable: intent.type !== 'ADD_ITEMS' || !items.some(item => item?.promotionRef) }
+  return { protocolo: PROTOCOLO_HUELLA, retomable: true }
 }
 
 function leerMarca(resultJson: unknown): MarcaDeReserva | null {
@@ -1202,9 +1187,9 @@ export function clampSoldAt(createdAtLocal: string | number | undefined, syncAt:
  * baseVersion viejo del cliente offline (evitaría 409 fantasma en todo replay).
  *
  * `items[].promotionRef` es OPCIONAL: un item que lo traiga NO pasa por el alta
- * normal — su precio lo resuelve el server desde la definición de la promoción
- * (applyPromotionToOrder). Un cliente que no lo mande se comporta EXACTAMENTE
- * igual que hoy.
+ * normal — su precio lo resuelve el server desde la definición de la promoción,
+ * dentro de la MISMA transacción de la ronda (hz:5bda0b30:D3). Un cliente que no
+ * lo mande se comporta EXACTAMENTE igual que hoy.
  */
 async function applyAddItems(
   venueId: string,
@@ -1235,7 +1220,7 @@ async function applyAddItems(
   }
   await assertOwnership(venueId, staffId, orderId)
 
-  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, status: true } })
+  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, status: true, total: true } })
   if (!current) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'ORDER_NOT_FOUND', message: 'La orden ya no existe' }
   }
@@ -1253,62 +1238,6 @@ async function applyAddItems(
     // INTENT, igual que el resto (regla offline-first del repo).
     await assertPromotionsFeature(venueId)
   }
-  // 🔴 La compensación descubre por instanceId, NUNCA por "las creadas en esta
-  // llamada" (audit 2026-08-14): el replay tras un RETRY regresa created:false
-  // y un rastreo de recién-creadas quedaría vacío, dejando huérfanas las promos
-  // del intento anterior del MISMO intent.
-  const promoInstanceIds = conPromocion
-    .map(it => it.promotionRef?.promotionInstanceId)
-    .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
-  // 🔴 hz:ce654971:D4 (Codex r4 B9 y r1 #1): la marca de cocina de una ronda la pone `addItemsToOrder`, y una ronda de SÓLO combos
-  // no pasa por ahí: sus componentes nacen con `sentToKitchenAt`, el cobro salta lo «ya enviado» y el combo llegaba a la pantalla
-  // hasta la siguiente ronda o el cobro. La marca va DENTRO de la transacción que guarda el combo (no después): una ronda con
-  // combos no se retoma tras una caída (`retomable:false`), así que una marca escrita aparte se perdía si el proceso moría en medio.
-  // Aquí sólo se decide si el negocio tiene pantalla (fuera de toda transacción: nunca lanza); si la cuenta es de mesa lo decide la
-  // promoción bajo el candado de la cuenta (Codex r2 #2). Misma regla que la ronda normal: mostrador nace al pagar.
-  // Sólo en una ronda de SÓLO combos y sólo con el ÚLTIMO (Codex r3 #1): una marca puesta antes de que la ronda quede completa deja
-  // que el barrido cocine un combo que la compensación de abajo borra después (rechazo definitivo del producto normal o de otro
-  // combo). Con el último ya no queda nada que pueda fallar. La ronda mixta la marca `addItemsToOrder` al final, como siempre.
-  const marcarCocinaDeCombos =
-    conPromocion.length > 0 &&
-    normales.length === 0 &&
-    (await debeMarcarCocina(venueId, {
-      hasPreparation: conPromocion.some(it => it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1)),
-    }))
-
-  try {
-    for (const item of conPromocion) {
-      await applyPromotionToOrder(
-        {
-          venueId,
-          orderId,
-          promotionId: item.promotionRef.promotionId,
-          instanceId: item.promotionRef.promotionInstanceId,
-          selections: item.promotionRef.selections,
-          soldAt,
-        },
-        undefined,
-        {
-          sentToKitchenAt: soldAt,
-          componentExternalIdPrefix:
-            item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
-          marcarCocina: marcarCocinaDeCombos && item === conPromocion[conPromocion.length - 1],
-        },
-      )
-    }
-  } catch (error: any) {
-    // 🔴 El loop también compensa (audit 2026-08-14): si la promo #2 truena en
-    // DEFINITIVO, la #1 ya commiteó — sin esto, la excepción brincaba la
-    // compensación del alta normal y la cuarentena decía "no se aplicó nada"
-    // con el combo #1 vivo en la orden. En un error TRANSITORIO no se toca
-    // nada: el replay es idempotente por instanceId.
-    if (!rondaSeQuedaParaElReenvio(error)) {
-      await removeIntentPromotions(venueId, orderId, promoInstanceIds)
-      throw rondaConPromosEnCuarentena(error)
-    }
-    throw error
-  }
-
   // 🛡️ Idempotencia de la RONDA: un externalId determinista por item
   // (intent.id + índice) hace que un replay de este ADD_ITEMS actualice las
   // MISMAS filas en vez de crear duplicados (addItemsToOrder ya deduplica por
@@ -1317,60 +1246,74 @@ async function applyAddItems(
   // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
   // no mandó uno propio.
   const itemsWithKey = normales.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+  // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
+  // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
+  const combos = conPromocion.map(item => ({
+    promotionRef: item.promotionRef,
+    externalId: item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
+  }))
 
-  if (itemsWithKey.length === 0) {
-    // La ronda fue puras promociones: no hay alta normal que hacer.
-    const after = await prisma.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { version: true, total: true, kitchenPendingAt: true },
-    })
-    // D4: la marca ya quedó en la transacción del combo (si la cuenta era de mesa); esto sólo arma la comanda ya, lo mismo que haría el
-    // barrido con esa marca. Nunca lanza: si falla, el barrido la arma.
-    if (marcarCocinaDeCombos && after?.kitchenPendingAt) await armarComandasTrasCommit(venueId, orderId, 'ROUND')
+  // Reenvío de una ronda con combos que YA está entera en la cuenta (la guardó la ruta con red, o un intento anterior que perdió su
+  // respuesta): se contesta sin escribir, como antes contestaba cada combo `created:false`. Sin esto, una cuenta que ya se cobró
+  // rechazaría una ronda que sí quedó guardada, y una reembolsada se reabriría (Codex r1 #2 de hz:5bda0b30:D3).
+  if (combos.length > 0 && (await rondaYaGuardada(orderId, conPromocion, itemsWithKey))) {
+    // La cuenta se relee DESPUÉS de reconocer la ronda: la lectura de arriba pudo ser de antes de que se guardara (Codex r2 #2).
+    const ahora = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
     return {
       id: intent.id,
       status: 'ACKED',
-      result: { orderId, version: after?.version ?? current.version, total: Number(after?.total ?? 0) },
+      result: { orderId, version: ahora?.version ?? current.version, total: Number(ahora?.total ?? current.total ?? 0) },
     }
   }
 
-  try {
-    // 🔴 Aplicar promociones recalcula totales y BUMPEA Order.version dentro
-    // de su propia tx — la versión leída al inicio quedó VIEJA y el CAS de
-    // addItemsToOrder perdería siempre (ronda mixta imposible). Se relee.
-    const versionForAdd =
-      conPromocion.length > 0
-        ? ((await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true } }))?.version ?? current.version)
-        : current.version
-    // La huella sólo cuando la ronda es UNA transacción (sin promociones: ésas commitean aparte).
-    const updated = await orderTpvService.addItemsToOrder(
-      venueId,
-      orderId,
-      itemsWithKey,
-      versionForAdd,
-      true,
-      dejarHuella && conPromocion.length === 0 ? (tx, ronda) => dejarHuella(tx, ronda) : undefined,
-    )
-    return {
-      id: intent.id,
-      status: 'ACKED',
-      result: { orderId, version: (updated as any).version ?? current.version + 1, total: Number((updated as any).total ?? 0) },
-    }
-  } catch (error: any) {
-    // 🔴 Ronda mixta TODO-o-nada (audit max 2026-08-13): las promos ya
-    // commitearon cada una en su tx. Si el alta normal rechaza en DEFINITIVO,
-    // el intent va a cuarentena como "no aplicado" — dejar las líneas de promo
-    // vivas era una ronda a medias que la cuarentena negaba. Se compensan las
-    // promos del INTENT por instanceId (audit 2026-08-14: cubre el replay con
-    // created:false, que dejaba huérfanas las del intento anterior); el retiro
-    // ya recalcula totales dentro de su propia tx. En un error TRANSITORIO
-    // (RETRY) no se toca nada: el replay es idempotente por instanceId.
-    if (!rondaSeQuedaParaElReenvio(error) && promoInstanceIds.length > 0) {
-      await removeIntentPromotions(venueId, orderId, promoInstanceIds)
-      throw rondaConPromosEnCuarentena(error)
-    }
-    throw error
+  // 🔴 hz:5bda0b30:D3 (Codex r4 F1–F4 de cocina-avisos-perdidos): la ronda ENTERA —combos y productos— es UNA transacción, la misma
+  // de la ronda con red (`addItemsToOrder`): combos idempotentes por instanceId, productos por su llave, totales y versión una vez,
+  // la marca de cocina en su CAS (decidida con la cuenta bajo su candado) y la huella adentro. Antes cada combo commiteaba aparte:
+  // una caída a la mitad dejaba combos sin aviso a cocina y lo que faltaba nunca llegaba (la ronda no se retomaba), y el barrido
+  // podía cocinar un combo que la compensación borraba después. Si falla, la transacción revierte entera y no queda nada que
+  // compensar: ni un combo ajeno que borrar (el de un ejecutor que ganó la retoma, Codex r1 #1) ni una comanda de algo borrado.
+  // La hora de venta acotada viaja sólo con combos: sin ellos, la llamada de siempre byte a byte.
+  const updated = await orderTpvService.addItemsToOrder(
+    venueId,
+    orderId,
+    [...combos, ...itemsWithKey],
+    current.version,
+    true,
+    dejarHuella ? (tx, ronda) => dejarHuella(tx, ronda) : undefined,
+    ...(combos.length > 0 ? [soldAt] : []),
+  )
+  return {
+    id: intent.id,
+    status: 'ACKED',
+    result: { orderId, version: (updated as any).version ?? current.version + 1, total: Number((updated as any).total ?? 0) },
   }
+}
+
+/**
+ * ¿La ronda ya está ENTERA en la cuenta? Todos sus combos (por instancia) y todas sus llaves tal como las guarda la ronda: después
+ * de la MISMA normalización que escribe (`normalizeAddItems`: dos importes libres iguales quedan en un renglón con la llave del
+ * primero, Codex r2 #1). Si falta cualquiera —una ronda vieja de varias transacciones que dejó el combo y no todos sus productos, o
+ * una llave repetida de otra ronda (Codex r3 #1)— no está guardada: sigue a la transacción de la ronda, que completa lo que falta
+ * sin duplicar (combos por instancia, productos por llave).
+ */
+async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: any[]): Promise<boolean> {
+  const instancias = conPromocion.map(it => it.promotionRef?.promotionInstanceId)
+  if (!instancias.every((id: unknown) => typeof id === 'string' && id.length > 0)) return false
+  const unicas = [...new Set<string>(instancias)]
+  const llaves = [...new Set(orderTpvService.normalizeAddItems(normales).map(it => it.externalId ?? ''))]
+  if (llaves.some(llave => !llave)) return false
+  const [combos, guardadas] = await Promise.all([
+    prisma.orderPromotion.count({ where: { orderId, instanceId: { in: unicas } } }),
+    llaves.length > 0
+      ? prisma.orderItem.findMany({
+          where: { orderId, externalId: { in: llaves } },
+          select: { externalId: true },
+          take: llaves.length * 2,
+        })
+      : Promise.resolve([]),
+  ])
+  const presentes = new Set(guardadas.map(r => r.externalId))
+  return combos === unicas.length && llaves.every(llave => presentes.has(llave))
 }
 
 /**
