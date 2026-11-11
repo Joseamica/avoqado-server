@@ -3952,6 +3952,9 @@ async function main() {
               servedById: currentWaiter.staffId,
               subtotal: 0,
               taxAmount: 0,
+              // Como una venta nativa (D5, 10-nov): precio con IVA incluido. Sin contrato, `taxAmount > 0` se leía como IVA
+              // APARTE (`impuestoQueSeCobraAparte`, regla del 3-sep) y cualquier recálculo le sumaba el IVA encima.
+              contratoDePrecio: 'IVA_INCLUIDO',
               total: 0,
               status: orderStatus,
               paymentStatus: orderStatus === OrderStatus.COMPLETED ? PaymentStatus.PAID : PaymentStatus.PENDING,
@@ -3986,7 +3989,7 @@ async function main() {
                 productId: product.id,
                 quantity,
                 unitPrice: product.price,
-                taxAmount: itemTotal - itemTotal / 1.16, // Mexico: IVA already included in price
+                taxAmount: 0, // como las ventas nativas: el precio ya trae el IVA (D5)
                 total: itemTotal,
                 createdAt: orderCreatedAt,
               },
@@ -4016,9 +4019,8 @@ async function main() {
             })
           }
 
-          // Mexico model: prices INCLUDE IVA (16%)
-          // taxAmount is the IVA portion already included in subtotal, NOT added on top
-          // Formula: taxAmount = subtotal - (subtotal / 1.16)
+          // Mexico model: prices INCLUDE IVA (16%). This is only the breakdown for the receipt snapshot below:
+          // the Order keeps `taxAmount = 0` like every native sale, because `taxAmount > 0` means "IVA charged on top" (D5).
           const taxAmount = subtotal - subtotal / 1.16
 
           // Generate realistic tip based on customer cohort and service quality
@@ -4047,7 +4049,7 @@ async function main() {
 
           await prisma.order.update({
             where: { id: order.id },
-            data: { subtotal, taxAmount, tipAmount, total },
+            data: { subtotal, tipAmount, total },
           })
 
           // 👥 Create OrderCustomer records (multi-customer support)
