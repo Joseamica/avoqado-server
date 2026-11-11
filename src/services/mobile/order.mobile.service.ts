@@ -686,16 +686,13 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         _count: {
           select: { items: true },
         },
-        // ADITIVO — sólo para el carril del reembolso. Se acota a los COMPLETED
-        // y a tres columnas: en una lista paginada, traer el pago entero sería
-        // pagar por dato que nadie pinta. El array NO sale en la respuesta.
+        // ADITIVO (reembolso): sólo los COMPLETED y pocas columnas; el array NO sale en la respuesta.
         payments: {
           where: { status: 'COMPLETED' },
-          // 1b Q27: + la marca del tender, para contar los cobros con saldo de la página sin otra consulta por orden.
           select: { amount: true, tipAmount: true, type: true, status: true, thirdPartyCashAmount: true, tenderType: { select: { systemKind: true } } },
         },
-        // 1b S-1: la marca de la lista (un renglón de tarjeta basta: no se mezclan, A5).
-        items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
+        // Marcas de la lista (tarjeta 1b S-1; D12: vale por `areaTicketLineId`, el INMEDIATO no guarda código): 2 bastan, no se mezclan.
+        items: { where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }] }, select: { giftCardId: true, areaTicketLineId: true }, take: 2 },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -725,12 +722,12 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       createdAt: order.createdAt,
       refundState: refunds.refundState,
       refundedAmount: Number(refunds.refundedAmount),
-      esCuentaDeTarjetas: (order.items?.length ?? 0) > 0,
+      esCuentaDeTarjetas: (order.items ?? []).some((i: any) => i.giftCardId != null),
       cobrosConSaldo: cobrosConSaldoVivos(order, order.payments ?? []),
       esDeMesa: order.tableId != null,
       saldoPendienteCents: saldoPorCobrarCents(order, order.payments ?? []),
       pagosCompletados: (order.payments ?? []).length, // la consulta sólo trae los COMPLETED
-      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null,
+      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null || (order.items ?? []).some((i: any) => i.areaTicketLineId != null),
     }
   })
 

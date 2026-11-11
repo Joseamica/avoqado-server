@@ -59,10 +59,19 @@ describe('D12 · saldo por cobrar en la lista', () => {
   it.each([
     ['venta de vales v7', { areaDeliveryCode: 'X1' }, true],
     ['vale legado v3', { areaTicketCode: '9010000017' }, true],
+    ['vales de entrega INMEDIATA: sin códigos, renglones con areaTicketLineId', { items: [{ giftCardId: null, areaTicketLineId: 'atl1' }] }, true],
     ['venta normal', {}, false],
   ])('esDeVales: %s', async (_c, extra, esperado) => {
     prismaMock.order.findMany.mockResolvedValue([orden(extra)])
     expect((await listOrders('v1', { page: 1, pageSize: 20 })).data[0].esDeVales).toBe(esperado)
+  })
+
+  it('esDeVales no cuesta consultas por fila ni confunde tarjeta con vale', async () => {
+    prismaMock.order.findMany.mockResolvedValue([orden({ items: [{ giftCardId: 'g1', areaTicketLineId: null }] })])
+    const fila = (await listOrders('v1', { page: 1, pageSize: 20 })).data[0]
+    expect(fila.esCuentaDeTarjetas).toBe(true)
+    expect(fila.esDeVales).toBe(false)
+    expect(prismaMock.order.findMany).toHaveBeenCalledTimes(1)
   })
 
   it('no quita ni renombra ningún campo de la fila (apps viejas)', async () => {
