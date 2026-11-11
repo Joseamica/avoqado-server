@@ -60,7 +60,7 @@ export async function applyPromotionToOrder(
   params: ApplyPromotionParams,
   tx?: Prisma.TransactionClient,
   /** Internal: a mixed table round recalculates totals once, on its own tx. */
-  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string } = {},
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string; marcarCocina?: boolean } = {},
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   if (options.deferTotalsToCaller && !tx) throw new BadRequestError('El recálculo diferido requiere la transacción de la ronda')
   if (tx) return applyPromotionInTransaction(tx, params, options)
@@ -90,7 +90,7 @@ export async function applyPromotionToOrder(
 async function applyPromotionInTransaction(
   tx: Prisma.TransactionClient,
   params: ApplyPromotionParams,
-  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string },
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string; marcarCocina?: boolean },
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   const { venueId, orderId, promotionId, instanceId, selections, soldAt } = params
 
@@ -260,6 +260,11 @@ async function applyPromotionInTransaction(
   if (!options.deferTotalsToCaller) {
     const { recalculateOrderTotals } = await import('../mobile/comp-item.mobile.service')
     await recalculateOrderTotals(orderId, Number(order.discountAmount ?? 0), Number(order.paidAmount ?? 0), tx)
+  }
+  // hz:ce654971:D4: la marca de cocina de una ronda de combos que llega sin red cae o persiste JUNTO con el combo (la cola no
+  // retoma una ronda con combos tras una caída). Sólo la marca: el armado y la pantalla los decide el autor de comandas.
+  if (options.marcarCocina) {
+    await tx.order.updateMany({ where: { id: orderId, venueId }, data: { kitchenPendingAt: new Date() } })
   }
 
   return { orderPromotionId: created.id, netCents: resolved.netCents, created: true }

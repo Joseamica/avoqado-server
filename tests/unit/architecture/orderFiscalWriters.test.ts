@@ -949,12 +949,6 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'sets the kitchenPendingAt marker of an already-settled folio, under the order lock taken by casTransitionInTx',
     markers: ['data: { kitchenPendingAt: r.now }'],
   },
-  // hz:ce654971:D4 (10-nov): la ronda de SÓLO combos que llega sin red deja la marca de cocina, como la ronda normal.
-  'src/services/mobile/sync.mobile.service.ts#applyAddItems': {
-    class: 'METADATA',
-    why: 'only the kitchenPendingAt marker after a promotion-only offline round (its promotions committed in their own tx)',
-    markers: ['data: { kitchenPendingAt: new Date() }'],
-  },
   'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': { class: 'METADATA', why: 'claim fields under a CAS' },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',

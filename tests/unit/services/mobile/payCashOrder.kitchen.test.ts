@@ -30,7 +30,12 @@ jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({ awardLoyaltyForPaidOr
 jest.mock('@/services/tpv/table.tpv.service', () => ({ releaseTableIfSettled: jest.fn() }))
 
 const debeMarcarCocinaMock = jest.fn()
-jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: (...a: unknown[]) => debeMarcarCocinaMock(...a) }))
+/** Por default contesta lo mismo que `debeMarcarCocina` (con certeza); la duda (`null`) se prueba aparte. */
+const consultarCocinaMock = jest.fn((...a: unknown[]) => debeMarcarCocinaMock(...a))
+jest.mock('@/services/kds/kitchenDisplayStations', () => ({
+  debeMarcarCocina: (...a: unknown[]) => debeMarcarCocinaMock(...a),
+  consultarCocina: (...a: unknown[]) => consultarCocinaMock(...a),
+}))
 const armarMock = jest.fn()
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ armarComandasTrasCommit: (...a: unknown[]) => armarMock(...a) }))
 const logActionMock = jest.fn()
@@ -411,6 +416,24 @@ describe('payCashOrder — comanda de pantalla al saldar', () => {
             umbralMinutos: MINUTOS_PARA_COMANDA_DE_LA_COLA,
           }),
         })
+      })
+
+      it('hz:ce654971:D5 · si no se pudo saber si había pantalla (en duda) ⇒ no se afirma una comanda omitida', async () => {
+        seedOrder()
+        debeMarcarCocinaMock.mockResolvedValue(true) // en duda, `debeMarcarCocina` contesta true
+        consultarCocinaMock.mockResolvedValueOnce(null)
+
+        await payCashOrder('venue-1', 'order-1', {
+          amount: 9000,
+          tip: 0,
+          staffId: 'staff-1',
+          ...deLaTerminal,
+          createdAtLocal: haceMinutos(11),
+          edadDeLaVentaMs: edad(11),
+        } as any)
+
+        expect(omitida()).toHaveLength(0)
+        expect(armarMock).not.toHaveBeenCalled()
       })
 
       it('sin edad confiable (sólo createdAtLocal de hace 11 min) ⇒ no se omitió nada: sin fila', async () => {

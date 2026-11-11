@@ -1223,7 +1223,7 @@ async function applyAddItems(
   }
   await assertOwnership(venueId, staffId, orderId)
 
-  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, status: true } })
+  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, status: true, tableId: true } })
   if (!current) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'ORDER_NOT_FOUND', message: 'La orden ya no existe' }
   }
@@ -1248,6 +1248,17 @@ async function applyAddItems(
   const promoInstanceIds = conPromocion
     .map(it => it.promotionRef?.promotionInstanceId)
     .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+  // 🔴 hz:ce654971:D4 (Codex r4 B9 y r1 #1): la marca de cocina de una ronda la pone `addItemsToOrder`, y una ronda de SÓLO combos
+  // no pasa por ahí: sus componentes nacen con `sentToKitchenAt`, el cobro salta lo «ya enviado» y el combo llegaba a la pantalla
+  // hasta la siguiente ronda o el cobro. La marca va DENTRO de la transacción que guarda cada combo (no después): una ronda con
+  // combos no se retoma tras una caída (`retomable:false`), así que una marca escrita aparte se perdía si el proceso moría en medio.
+  // Misma regla que la ronda normal: mesa y pantalla (mostrador nace al pagar). Fuera de toda transacción: nunca lanza.
+  const marcarCocinaDeCombos =
+    conPromocion.length > 0 &&
+    Boolean(current.tableId) &&
+    (await debeMarcarCocina(venueId, {
+      hasPreparation: conPromocion.some(it => it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1)),
+    }))
 
   try {
     for (const item of conPromocion) {
@@ -1265,6 +1276,7 @@ async function applyAddItems(
           sentToKitchenAt: soldAt,
           componentExternalIdPrefix:
             item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
+          marcarCocina: marcarCocinaDeCombos,
         },
       )
     }
@@ -1292,20 +1304,9 @@ async function applyAddItems(
 
   if (itemsWithKey.length === 0) {
     // La ronda fue puras promociones: no hay alta normal que hacer.
-    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true, tableId: true } })
-    // 🔴 hz:ce654971:D4 (Codex r4 B9): la marca de cocina de una ronda la pone `addItemsToOrder`, y esta ronda no pasa por ahí. Sus
-    // componentes nacen con `sentToKitchenAt` y el cobro salta lo «ya enviado»: el combo llegaba a la pantalla hasta la siguiente
-    // ronda o hasta que la mesa pagaba. Misma regla que la ronda normal (sólo mesa; mostrador nace al pagar). La marca va ANTES del
-    // ACK: si el proceso muere aquí, la cola reenvía el intent, la promoción contesta `created:false` y se vuelve a llegar aquí.
-    if (after?.tableId) {
-      const hasPreparation = conPromocion.some(it =>
-        it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1),
-      )
-      if (await debeMarcarCocina(venueId, { hasPreparation })) {
-        await prisma.order.updateMany({ where: { id: orderId, venueId }, data: { kitchenPendingAt: new Date() } })
-        await armarComandasTrasCommit(venueId, orderId, 'ROUND') // nunca lanza: si falla, el barrido arma con la marca
-      }
-    }
+    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
+    // D4: la marca ya quedó en la transacción del combo; esto sólo arma la comanda ya (nunca lanza: si falla, el barrido la arma).
+    if (marcarCocinaDeCombos) await armarComandasTrasCommit(venueId, orderId, 'ROUND')
     return {
       id: intent.id,
       status: 'ACKED',

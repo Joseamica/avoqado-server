@@ -1871,37 +1871,33 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     expect(promotionService.removeIntentPromotions).toHaveBeenCalledTimes(2)
   })
 
-  // hz:ce654971:D4 (Codex r4 B9): la ronda NORMAL pone la marca de cocina en `addItemsToOrder`; la de SÓLO combos regresaba ACKED
-  // antes de llegar ahí. Sus renglones nacen con `sentToKitchenAt` y nadie armaba su comanda: el combo salía a la pantalla hasta
-  // la siguiente ronda o el cobro (el cobro salta lo «ya enviado» y lo deja al barrido).
+  // hz:ce654971:D4 (Codex r4 B9 y r1 #1): la ronda NORMAL pone la marca de cocina en `addItemsToOrder`; la de SÓLO combos regresaba
+  // ACKED antes de llegar ahí y el combo salía a la pantalla hasta la siguiente ronda o el cobro. La marca va DENTRO de la
+  // transacción de cada combo (`marcarCocina`): una ronda con combos no se retoma tras una caída, así que una marca escrita
+  // aparte se perdía si el proceso moría entre guardar el combo y marcarlo.
   describe('🔴 hz:ce654971:D4 · ronda de SÓLO combos y la pantalla de cocina', () => {
     const ronda = (id = 'i-combo') => ({ id, type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } })
+    const opcionesDelCombo = () => (promotionService.applyPromotionToOrder as jest.Mock).mock.calls.map(c => c[2])
 
     beforeEach(() => {
       ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
-      ;(prisma.order.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       armarComandasTrasCommitMock.mockReset().mockResolvedValue(undefined)
       debeMarcarCocinaMock.mockReset().mockResolvedValue(true)
     })
 
-    it('mesa con pantalla: deja la marca ANTES del ACK y arma la comanda de la ronda', async () => {
+    it('mesa con pantalla: el combo se guarda CON su marca (misma transacción) y la comanda se arma antes del ACK', async () => {
       ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', tableId: 'mesa-1', total: 120 })
 
       const [ack] = await processIntents(baseParams([ronda()]))
 
       expect(ack).toMatchObject({ id: 'i-combo', status: 'ACKED' })
-      expect(prisma.order.updateMany).toHaveBeenCalledWith({
-        where: { id: 'order-1', venueId: VENUE },
-        data: { kitchenPendingAt: expect.any(Date) },
-      })
+      expect(opcionesDelCombo()).toEqual([expect.objectContaining({ marcarCocina: true, sentToKitchenAt: expect.any(Date) })])
+      // La cola no escribe la marca aparte: va con el combo.
+      expect(prisma.order.updateMany).not.toHaveBeenCalled()
       expect(armarComandasTrasCommitMock).toHaveBeenCalledWith(VENUE, 'order-1', 'ROUND')
-      // La marca durable va antes del armado: si el armado falla, el barrido la encuentra.
-      expect((prisma.order.updateMany as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-        armarComandasTrasCommitMock.mock.invocationCallOrder[0],
-      )
     })
 
-    it('el replay de la misma ronda (combo ya aplicado) también marca: la marca no depende de que el combo sea nuevo', async () => {
+    it('el replay de la misma ronda (combo ya aplicado) también arma: la marca quedó con el combo la primera vez', async () => {
       ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: false })
       ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4, status: 'PENDING', tableId: 'mesa-1', total: 120 })
 
@@ -1918,7 +1914,10 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
       debeMarcarCocinaMock.mockResolvedValue(false)
       await processIntents(baseParams([ronda('i-sin-pantalla')]))
 
-      expect(prisma.order.updateMany).not.toHaveBeenCalled()
+      expect(opcionesDelCombo()).toEqual([
+        expect.objectContaining({ marcarCocina: false }),
+        expect.objectContaining({ marcarCocina: false }),
+      ])
       expect(armarComandasTrasCommitMock).not.toHaveBeenCalled()
     })
   })
