@@ -9,6 +9,7 @@ import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
 import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
+import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 
 const SUF = `kdsarmado-${Date.now()}`
 const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000)
@@ -527,5 +528,136 @@ describe('authorKitchenTickets', () => {
       ]),
     )
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+})
+
+// 🔴 hz:dcc49fe5:D1 — la TPV funde la pieza nueva en el mismo renglón (cambia `quantity`, conserva el id). Antes la cobertura era por
+// renglón entero y el tercer café nunca llegaba a la pantalla; ahora la pantalla recibe sólo la diferencia, en su propia comanda.
+describe('cantidad que sube en un renglón que ya está en la pantalla', () => {
+  const tacosEnPantalla = async (orderId: string) =>
+    (await comandasDe(orderId)).map(c => [c.status, c.items.filter(i => i.productName === 'Taco').map(i => i.quantity)])
+
+  it('mostrador: 2 tacos en una comanda, la caja sube a 3 y cobra ⇒ una comanda nueva de 1; repetir no la duplica', async () => {
+    folio += 1
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `SUBE-${folio}-${SUF}`,
+        externalId: `ext-sube-${folio}-${SUF}`,
+        subtotal: 100,
+        taxAmount: 0,
+        total: 100,
+      },
+      select: { id: true, externalId: true, version: true },
+    })
+    await addItemsToOrder(venueId, v.id, [{ productId: taco, quantity: 2 }], v.version)
+    // Mostrador: lo arma un ROUND (aceptar un folio) — la TPV en mostrador no arma al agregar.
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+    await prisma.kdsOrder.updateMany({ where: { venueId, orderId: v.id }, data: { status: 'COMPLETED', completedAt: new Date() } })
+
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: v.id }, select: { version: true } })
+    await addItemsToOrder(venueId, v.id, [{ productId: taco, quantity: 3 }], version) // carrito completo: reemplaza 2 → 3
+    expect(await prisma.orderItem.count({ where: { orderId: v.id } })).toBe(1)
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toHaveLength(1)
+    expect((await tacosEnPantalla(v.id)).sort()).toEqual([
+      ['COMPLETED', [2]],
+      ['NEW', [1]],
+    ])
+    const nueva = (await comandasDe(v.id)).find(c => c.status === 'NEW')!
+    expect(nueva.sourceKey).toMatch(new RegExp(`^order:${v.id}:mas:\\d+:${cocina}$`))
+    // Su LISTO sin red se acepta y la termina (Codex r3 #2).
+    await markKitchenTicket({ venueId, sourceKey: nueva.sourceKey!, stationId: cocina, action: 'BUMP', label: null, at: new Date() })
+    expect((await prisma.kdsOrder.findUniqueOrThrow({ where: { id: nueva.id } })).status).toBe('COMPLETED')
+
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'LEGACY_POST' })).ticketIds).toEqual([])
+    expect(await comandasDe(v.id)).toHaveLength(2)
+  })
+
+  it('mesa por la ruta de la TPV: 2 → 3 manda 1; 3 → 2 → 3 no manda nada; 3 → 4 manda 1 más', async () => {
+    folio += 1
+    const tableId = (
+      await prisma.table.create({ data: { venueId, number: `MS-${folio}-${SUF}`, capacity: 4, qrCode: `qrs-${folio}-${SUF}` } })
+    ).id
+    const o = await prisma.order.create({
+      data: { venueId, orderNumber: `MESA-SUBE-${folio}-${SUF}`, tableId, subtotal: 0, taxAmount: 0, total: 0 },
+      select: { id: true },
+    })
+    const carrito = async (quantity: number) => {
+      const { version } = await prisma.order.findUniqueOrThrow({ where: { id: o.id }, select: { version: true } })
+      await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity }], version)
+    }
+
+    await carrito(2) // la ronda de mesa arma su comanda al guardar
+    expect(await tacosEnPantalla(o.id)).toEqual([['NEW', [2]]])
+
+    await carrito(3)
+    expect((await tacosEnPantalla(o.id)).map(([, q]) => q).sort()).toEqual([[1], [2]])
+
+    await carrito(2)
+    await carrito(3)
+    expect(await comandasDe(o.id)).toHaveLength(2)
+
+    await carrito(4)
+    const tacos = (await comandasDe(o.id)).flatMap(c => c.items).filter(i => i.productName === 'Taco')
+    expect(tacos.map(i => i.quantity).sort()).toEqual([1, 1, 2])
+    expect(new Set(tacos.map(i => i.orderItemId)).size).toBe(1) // siempre el mismo renglón de la cuenta
+  })
+
+  // Codex r3 #1: el autor nunca le suma platillos a la comanda de OTRA cuenta (terminada, saldrían escondidos).
+  it('si el folio ya es de otra cuenta, la comanda sale en uno propio; repetir no la duplica', async () => {
+    const a = await nuevaVenta()
+    const b = await nuevaVenta()
+    const ajena = await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        sourceKey: `sale:${b.externalId}:${cocina}`,
+        printStationId: cocina,
+        orderId: a.id,
+        orderNumber: 'A',
+        orderType: 'DINE_IN',
+        status: 'COMPLETED',
+      },
+    })
+    await authorKitchenTickets({ venueId, orderId: b.id, trigger: 'PAID' })
+    expect(await prisma.kdsOrderItem.count({ where: { kdsOrderId: ajena.id } })).toBe(0)
+    const deB = await comandasDe(b.id)
+    expect(deB.map(c => c.status)).toEqual(['NEW', 'NEW'])
+    expect(deB.map(c => c.sourceKey)).toEqual(
+      expect.arrayContaining([expect.stringMatching(new RegExp(`^order:${b.id}:otra:[0-9a-f]{16}$`))]),
+    )
+    await authorKitchenTickets({ venueId, orderId: b.id, trigger: 'SWEEP' })
+    expect((await comandasDe(b.id)).flatMap(c => c.items)).toHaveLength(2)
+  })
+
+  // Codex r2 #2: una comanda con preparación por producto la lleva para TODOS sus renglones; partir la diferencia de uno dejaría el
+  // mismo producto en dos mecanismos. Ahí la diferencia sigue como antes (anotado en la deuda).
+  it('comanda mixta con preparación por producto: subir un renglón no la parte en otra comanda', async () => {
+    folio += 1
+    const tableId = (
+      await prisma.table.create({ data: { venueId, number: `MX-${folio}-${SUF}`, capacity: 4, qrCode: `qrx-${folio}-${SUF}` } })
+    ).id
+    const conTiempos = { id: 'immediate', label: 'Inmediato', kind: 'IMMEDIATE', preparationVersion: 1 }
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MIXTA-${folio}-${SUF}`,
+        tableId,
+        subtotal: 150,
+        taxAmount: 0,
+        total: 150,
+        items: { create: [renglon(taco, 'Taco', 2), renglon(taco, 'Taco', 1, { notes: 'sin cebolla', serviceCourse: conTiempos })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+    const [antes] = await comandasDe(o.id)
+    expect(antes.preparationVersion).toBe(1)
+    const simple = await prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id, notes: null }, select: { id: true } })
+    await prisma.orderItem.update({ where: { id: simple.id }, data: { quantity: 3 } }) // la TPV funde la pieza nueva
+
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toEqual([])
+    expect((await comandasDe(o.id)).flatMap(c => c.items).filter(i => i.orderItemId === simple.id)).toHaveLength(1)
   })
 })
