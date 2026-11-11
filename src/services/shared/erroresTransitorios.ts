@@ -1,3 +1,5 @@
+import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError } from '@/utils/serializableRetry'
+
 /**
  * Errores que NO dicen nada del negocio: el intent offline se reintenta, nunca se pierde. Una sola lista para el reducer de la
  * cola (`sync.mobile.service`) y para quien compensa dentro de él (`removeIntentPromotions`, Codex r2 N5).
@@ -17,9 +19,15 @@ export const CODIGOS_TRANSITORIOS: ReadonlySet<string> = new Set([
   'ETIMEDOUT',
 ])
 
-/** Misma derivación que el reducer: `errorCode ?? code`. */
+/**
+ * Misma derivación que el reducer: `errorCode ?? code`. Además, un error de la BASE sin código de dominio es transitorio si el
+ * SQLSTATE que Prisma deja ADENTRO es de choque —40P01, 40001 o 55P03 en el `meta.code` de un `P2010` (consulta cruda) o en el
+ * mensaje de un error de modelo sin código—: así sale un interbloqueo que agotó `withDeadlockRetry` (hz:381780f0:D1, Codex r4
+ * #2 de D25). Un `P2010` con otro SQLSTATE (un SQL roto) sigue siendo definitivo.
+ */
 export function esErrorTransitorio(error: unknown): boolean {
   const e = error as { errorCode?: unknown; code?: unknown } | null
   const codigo = e?.errorCode ?? e?.code
-  return typeof codigo === 'string' && CODIGOS_TRANSITORIOS.has(codigo)
+  if (typeof codigo === 'string' && CODIGOS_TRANSITORIOS.has(codigo)) return true
+  return e?.errorCode == null && (isDeadlockError(error) || isRetryableDbError(error) || isModelLockTimeoutError(error))
 }

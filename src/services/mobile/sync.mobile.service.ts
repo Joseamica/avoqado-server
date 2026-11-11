@@ -30,7 +30,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
-import { CODIGOS_TRANSITORIOS } from '../shared/erroresTransitorios'
+import { CODIGOS_TRANSITORIOS, esErrorTransitorio } from '../shared/erroresTransitorios'
 import { hayDineroQueSeGuarda } from '../shared/orderBalance'
 import { esCobroCompletadoDeLaOrden } from '../shared/cuentaCancelada'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
@@ -108,8 +108,14 @@ export interface SyncIntentAck {
   details?: unknown
 }
 
-/** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde (la lista vive en `shared/erroresTransitorios`). */
-const RETRYABLE_ERROR_CODES = CODIGOS_TRANSITORIOS
+/**
+ * ¿La ronda con promociones se deja tal cual para el reenvío? Sólo con un transitorio de la LISTA, como siempre: el replay es
+ * idempotente por instanceId. Un choque que sale ENVUELTO (40P01/40001/55P03 en un P2010 o sin código) ahora también va a RETRY
+ * (`esErrorTransitorio`), pero antes retira sus promos, como hacía cuando iba a cuarentena: así un reenvío que se rechace después
+ * (otro dueño, permiso, la promo movida de cuenta) no deja la ronda a medias (hz:381780f0:D1, Codex r1 #1 y r2). La misma ventana
+ * con P2034/P2028/VERSION_CONFLICT ya existía: deuda aparte (`docs/audit/deuda-encontrada.md`).
+ */
+const rondaSeQuedaParaElReenvio = (error: any): boolean => CODIGOS_TRANSITORIOS.has(error?.errorCode ?? error?.code)
 
 /**
  * Una reserva PROCESSING evita que dos replays concurrentes ejecuten el mismo
@@ -929,7 +935,7 @@ async function applyIntent(ctx: {
     const preparationDependency =
       intent.type === 'KDS_ITEM_PROGRESS' &&
       (errorCode === 'PREPARATION_DEPENDENCY_PENDING' || errorCode === 'PREPARATION_REVISION_PENDING')
-    if (error instanceof OrderTableTopologyChanged || RETRYABLE_ERROR_CODES.has(errorCode) || preparationDependency) {
+    if (error instanceof OrderTableTopologyChanged || esErrorTransitorio(error) || preparationDependency) {
       logger.info(`🔁 [POS SYNC] Intent ${intent.type} ${intent.id} transitorio (${errorCode}) — reintentar`)
       return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar', ...details }
     }
@@ -1273,8 +1279,7 @@ async function applyAddItems(
     // compensación del alta normal y la cuarentena decía "no se aplicó nada"
     // con el combo #1 vivo en la orden. En un error TRANSITORIO no se toca
     // nada: el replay es idempotente por instanceId.
-    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
-    if (!RETRYABLE_ERROR_CODES.has(errorCode)) {
+    if (!rondaSeQuedaParaElReenvio(error)) {
       await removeIntentPromotions(venueId, orderId, promoInstanceIds)
     }
     throw error
@@ -1330,8 +1335,7 @@ async function applyAddItems(
     // created:false, que dejaba huérfanas las del intento anterior); el retiro
     // ya recalcula totales dentro de su propia tx. En un error TRANSITORIO
     // (RETRY) no se toca nada: el replay es idempotente por instanceId.
-    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
-    if (!RETRYABLE_ERROR_CODES.has(errorCode) && promoInstanceIds.length > 0) {
+    if (!rondaSeQuedaParaElReenvio(error) && promoInstanceIds.length > 0) {
       await removeIntentPromotions(venueId, orderId, promoInstanceIds)
     }
     throw error
@@ -1918,7 +1922,7 @@ async function applyKdsTicketMark(venueId: string, intent: SyncIntentInput): Pro
     return { id: intent.id, status: 'ACKED', result: { sourceKey, action } }
   } catch (error: any) {
     const errorCode = error?.errorCode ?? error?.code ?? 'KDS_MARK_FAILED'
-    if (RETRYABLE_ERROR_CODES.has(errorCode)) throw error // applyIntent lo convierte en RETRY
+    if (esErrorTransitorio(error)) throw error // applyIntent lo convierte en RETRY
     logger.error(`[POS SYNC] KDS_TICKET_MARK no se aplicó (${errorCode}); se reconoce para no bloquear la cola (intent ${intent.id})`)
     return { id: intent.id, status: 'ACKED', result: { ignored: errorCode } }
   }
