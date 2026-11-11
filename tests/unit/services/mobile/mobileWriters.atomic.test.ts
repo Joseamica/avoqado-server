@@ -1098,18 +1098,15 @@ describe('createOrderWithItems writes the sale money inside its creation transac
   })
 
   it('a promotion failure rolls the sale back: no cancel, no compensation, no post-commit effects', async () => {
-    const compensate = jest.spyOn(promotionService, 'removeIntentPromotions')
     apply.mockRejectedValue(new Error('Esa promoción no está publicada.'))
     prismaMock.order.findUnique.mockResolvedValueOnce(null) // idempotency pre-check for the externalId
 
     await expect(createOrderWithItems('venue', { ...input, externalId: 'ticket-1' })).rejects.toThrow('Esa promoción no está publicada.')
 
     expect(committed).toBe(false)
-    expect(compensate).not.toHaveBeenCalled()
     expect(prismaMock.order.update).not.toHaveBeenCalled()
     expect(tx.order.update).not.toHaveBeenCalled()
     expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
-    compensate.mockRestore()
   })
 
   it('the stamp reward is redeemed only after the creation commits, through the locked service', async () => {

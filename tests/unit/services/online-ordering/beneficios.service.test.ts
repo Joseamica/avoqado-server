@@ -18,7 +18,7 @@ jest.mock('@/services/shared/cuponDeLaVenta', () => ({
   apartarCupon: jest.fn(),
   bloquearDescuentoDelCupon: jest.fn(),
 }))
-jest.mock('@/services/wallet/redeemStampReward.service', () => ({ canjearPremioEnTx: jest.fn() }))
+jest.mock('@/services/wallet/redeemStampReward.service', () => ({ canjearPremioEnTx: jest.fn(), renglonDelPremioEnTx: jest.fn() }))
 jest.mock('@/services/mobile/loyalty.mobile.service', () => ({ redeemPointsToOrderInTransaction: jest.fn() }))
 jest.mock('@/services/shared/repartoDescuentoTx', () => ({
   conservarDescuentoHistorico: jest.fn(),
@@ -39,7 +39,7 @@ jest.mock('@/services/online-ordering/quote.service', () => ({
 
 import { aplicarDescuentosDelMotorEnTx } from '@/services/dashboard/discountEngine.service'
 import { apartarCupon, bloquearDescuentoDelCupon, cuponDeLaVenta } from '@/services/shared/cuponDeLaVenta'
-import { canjearPremioEnTx } from '@/services/wallet/redeemStampReward.service'
+import { canjearPremioEnTx, renglonDelPremioEnTx } from '@/services/wallet/redeemStampReward.service'
 import { redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
 import { crearCuentaDelPedidoEnTx } from '@/services/online-ordering/order.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
@@ -713,6 +713,103 @@ describe('toPublicQuote con beneficios', () => {
       beneficios: { calculados: true },
     })
     expect(JSON.stringify(pub)).not.toContain('od-x')
+  })
+})
+
+/**
+ * D8 (11-nov): la tienda pinta «Va en tu Latte» (antes de elegir el premio) y «Café gratis en tu Latte» con su renglón «Gratis»
+ * (después). El renglón lo elige P11 al canjear; aquí se traduce al índice del carrito (`OrderItem.sequence` = el índice de `items`
+ * que mandó la tienda, como el `lineIndex` de los avisos) y se publica OPCIONAL.
+ */
+describe('D8 · en qué renglón del carrito cae el premio', () => {
+  beforeEach(() => {
+    prismaMock.orderItem.findFirst.mockResolvedValue({ sequence: 1 } as any)
+    ;(renglonDelPremioEnTx as jest.Mock).mockImplementation(anota('destinoDelPremio', 'oi-latte'))
+  })
+
+  it('lo aplicado de tipo PREMIO trae el índice del renglón premiado; los demás no traen renglón', async () => {
+    ;(canjearPremioEnTx as jest.Mock).mockImplementation(anota('premio', { renglonPremiadoId: 'oi-latte' }))
+
+    const r = await aplicarBeneficiosEnTx(tx, entrada(), { tolerante: true })
+
+    expect(prismaMock.orderItem.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'oi-latte', orderId: 'o-sim' } })
+    expect(r.aplicados.map(a => [a.tipo, a.lineIndex])).toEqual([
+      ['DESCUENTO', undefined],
+      ['CUPON', undefined],
+      ['PREMIO', 1],
+      ['PUNTOS', undefined],
+    ])
+    // Elegido, no se vuelve a calcular dónde caería.
+    expect(renglonDelPremioEnTx).not.toHaveBeenCalled()
+  })
+
+  it('un premio de cuenta (% o monto) no tiene renglón: PREMIO sin lineIndex y sin consulta', async () => {
+    ;(canjearPremioEnTx as jest.Mock).mockImplementation(anota('premio', { renglonPremiadoId: null }))
+    const r = await aplicarBeneficiosEnTx(tx, entrada(), { tolerante: true })
+    expect(r.aplicados.find(a => a.tipo === 'PREMIO')).not.toHaveProperty('lineIndex')
+    expect(prismaMock.orderItem.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('cotizar con el premio OFRECIDO y no elegido: dónde caería, en el MISMO punto de la cadena (tras el cupón, antes de los puntos), sin canjearlo', async () => {
+    const r = await aplicarBeneficiosEnTx(tx, entrada({ cupon: 'diez', puntos: 100 }), { tolerante: true, premioOfrecido: 'premio-1' })
+
+    expect(trazo.filter(p => p !== 'sql')).toEqual([
+      'motor',
+      'cupon',
+      'apartar',
+      'filaCupon',
+      'totalesDelCupon',
+      'destinoDelPremio',
+      'puntos',
+    ])
+    expect(renglonDelPremioEnTx).toHaveBeenCalledWith(tx, 'v1', 'o-sim', 'premio-1')
+    expect(canjearPremioEnTx).not.toHaveBeenCalled()
+    expect(r.premioOfrecidoEn).toBe(1)
+  })
+
+  it('en estricto (crear el folio) nunca se calcula dónde caería un premio no elegido', async () => {
+    const r = await aplicarBeneficiosEnTx(tx, entrada({}), { premioOfrecido: 'premio-1' } as any)
+    expect(renglonDelPremioEnTx).not.toHaveBeenCalled()
+    expect(r).not.toHaveProperty('premioOfrecidoEn')
+  })
+
+  describe('cotizarConBeneficios y lo público', () => {
+    beforeEach(() => {
+      // La oferta lee el premio con su etiqueta; la cadena, la fila de su descuento.
+      prismaMock.stampReward.findFirst.mockImplementation((async (a: any) =>
+        a?.select?.rewardLabel ? { id: 'premio-1', rewardLabel: 'Café gratis' } : { orderDiscountId: 'od-premio' }) as any)
+    })
+
+    it('antes de elegirlo: la oferta dice en qué renglón caería («Va en tu Latte»)', async () => {
+      const q = await cotizarConBeneficios('v1', ITEMS, { customerId: 'c1', eleccion: null })
+
+      expect(q.oferta?.premio).toEqual({ id: 'premio-1', etiqueta: 'Café gratis', lineIndex: 1 })
+      expect(renglonDelPremioEnTx).toHaveBeenCalledWith(tx, 'v1', 'o-sim', 'premio-1')
+      expect(toPublicQuote(q).oferta?.premio).toEqual({ id: 'premio-1', etiqueta: 'Café gratis', lineIndex: 1 })
+    })
+
+    it('ya elegido: lo aplicado y la oferta dicen el MISMO renglón; los demás beneficios, ninguno', async () => {
+      ;(canjearPremioEnTx as jest.Mock).mockImplementation(anota('premio', { renglonPremiadoId: 'oi-latte' }))
+
+      const pub = toPublicQuote(
+        await cotizarConBeneficios('v1', ITEMS, { customerId: 'c1', eleccion: { ...ELECCION, premioId: 'premio-1' } }),
+      )
+
+      expect(pub.aplicados).toEqual([
+        { tipo: 'DESCUENTO', nombre: 'Automático', monto: 10 },
+        { tipo: 'CUPON', nombre: 'Diez (DIEZ)', monto: 10 },
+        { tipo: 'PREMIO', nombre: 'Café gratis', monto: 1, lineIndex: 1 },
+        { tipo: 'PUNTOS', nombre: 'Recompensas — 100 puntos', monto: 1 },
+      ])
+      expect(pub.oferta?.premio).toEqual({ id: 'premio-1', etiqueta: 'Café gratis', lineIndex: 1 })
+      expect(renglonDelPremioEnTx).not.toHaveBeenCalled()
+    })
+
+    it('un premio de cuenta (% o monto): la oferta sale como hoy, sin lineIndex', async () => {
+      ;(renglonDelPremioEnTx as jest.Mock).mockResolvedValue(null)
+      const pub = toPublicQuote(await cotizarConBeneficios('v1', ITEMS, { customerId: 'c1', eleccion: null }))
+      expect(pub.oferta?.premio).toEqual({ id: 'premio-1', etiqueta: 'Café gratis' })
+    })
   })
 })
 

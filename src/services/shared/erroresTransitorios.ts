@@ -1,9 +1,9 @@
 import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError } from '@/utils/serializableRetry'
 
 /**
- * Errores que NO dicen nada del negocio: el intent offline se reintenta, nunca se pierde. Una sola lista para el reducer de la
- * cola (`sync.mobile.service`) y para quien compensa dentro de él (`removeIntentPromotions`, Codex r2 N5). La ronda con promociones
- * decide con la LISTA; todo lo demás, con `esErrorTransitorio` (que además lee el SQLSTATE de choque envuelto).
+ * Errores que NO dicen nada del negocio: el intent offline se reintenta, nunca se pierde. El reducer de la cola
+ * (`sync.mobile.service`) decide con `esErrorTransitorio`, que además lee el SQLSTATE de choque envuelto. Desde hz:5bda0b30:D3 la
+ * ronda con combos es una sola transacción: ya no hay compensación aparte que decida con la lista.
  */
 export const CODIGOS_TRANSITORIOS: ReadonlySet<string> = new Set([
   'VERSION_CONFLICT',

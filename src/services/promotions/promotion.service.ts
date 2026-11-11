@@ -3,7 +3,6 @@ import { Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
-import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
@@ -12,7 +11,6 @@ import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
-import { CODIGOS_TRANSITORIOS } from '@/services/shared/erroresTransitorios'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   parseServiceCourseSnapshot,
@@ -60,7 +58,7 @@ export async function applyPromotionToOrder(
   params: ApplyPromotionParams,
   tx?: Prisma.TransactionClient,
   /** Internal: a mixed table round recalculates totals once, on its own tx. */
-  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string; marcarCocina?: boolean } = {},
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string } = {},
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   if (options.deferTotalsToCaller && !tx) throw new BadRequestError('El recálculo diferido requiere la transacción de la ronda')
   if (tx) return applyPromotionInTransaction(tx, params, options)
@@ -90,7 +88,7 @@ export async function applyPromotionToOrder(
 async function applyPromotionInTransaction(
   tx: Prisma.TransactionClient,
   params: ApplyPromotionParams,
-  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string; marcarCocina?: boolean },
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string },
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   const { venueId, orderId, promotionId, instanceId, selections, soldAt } = params
 
@@ -261,13 +259,6 @@ async function applyPromotionInTransaction(
     const { recalculateOrderTotals } = await import('../mobile/comp-item.mobile.service')
     await recalculateOrderTotals(orderId, Number(order.discountAmount ?? 0), Number(order.paidAmount ?? 0), tx)
   }
-  // hz:ce654971:D4: la marca de cocina de una ronda de combos que llega sin red cae o persiste JUNTO con el combo (la cola no
-  // retoma una ronda con combos tras una caída). `marcarCocina` = «el negocio tiene pantalla»; si la cuenta es de MESA se decide
-  // aquí, con la cuenta ya bajo su candado (Codex r2 #2: otra caja pudo asignarle la mesa después de que la cola la leyó). Como la
-  // ronda normal: mostrador nace al pagar. Sólo la marca: el armado y la pantalla los decide el autor de comandas.
-  if (options.marcarCocina && order.tableId) {
-    await tx.order.updateMany({ where: { id: orderId, venueId }, data: { kitchenPendingAt: new Date() } })
-  }
 
   return { orderPromotionId: created.id, netCents: resolved.netCents, created: true }
 }
@@ -346,50 +337,4 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
       },
     })
   }
-}
-
-/**
- * Compensación de una ronda de sync rechazada: retira TODAS las promociones
- * que un intent dejó en la orden, buscándolas por su `instanceId`.
- *
- * 🔴 Por instanceId y no por "las creadas en esta llamada" (audit 2026-08-14):
- * el replay tras un RETRY entra por la guarda de idempotencia y regresa
- * `created:false`, así que un rastreo de recién-creadas queda VACÍO y las
- * promos del intento anterior del MISMO intent sobreviven huérfanas cuando la
- * ronda al final se rechaza en definitivo.
- *
- * Best-effort por promoción: un fallo DEFINITIVO se loguea y no detiene a las
- * demás ni tapa el error original de la ronda. Un TRANSITORIO tampoco detiene a
- * las demás, pero al final se relanza (Codex r2 N5): el intent queda en RETRY.
- * Devuelve cuántas retiró.
- */
-export async function removeIntentPromotions(venueId: string, orderId: string, instanceIds: string[]): Promise<number> {
-  if (instanceIds.length === 0) return 0
-
-  const orphans = await prisma.orderPromotion.findMany({
-    where: { orderId, instanceId: { in: instanceIds } },
-    select: { id: true },
-  })
-
-  let removed = 0
-  let transitorio: unknown = null
-  for (const orphan of orphans) {
-    try {
-      await removePromotionFromOrder({ venueId, orderId, orderPromotionId: orphan.id })
-      removed += 1
-    } catch (err) {
-      logger.error('❌ [PROMOS] No se pudo compensar una promoción de una ronda rechazada', {
-        orderId,
-        orderPromotionId: orphan.id,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      // Codex r2 N5: un error TRANSITORIO no se traga — la compensación quedó a medias y el intent debe reintentarse. Se sigue
-      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED. Sólo los de la LISTA:
-      // un choque envuelto (40P01 en un P2010) se registra y la ronda va a cuarentena como siempre (hz:381780f0:D1, Codex r3 #1).
-      const codigo = (err as { errorCode?: unknown; code?: unknown } | null)?.errorCode ?? (err as { code?: unknown } | null)?.code
-      if (transitorio === null && typeof codigo === 'string' && CODIGOS_TRANSITORIOS.has(codigo)) transitorio = err
-    }
-  }
-  if (transitorio !== null) throw transitorio
-  return removed
 }

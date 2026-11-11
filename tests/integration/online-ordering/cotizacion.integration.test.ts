@@ -360,6 +360,100 @@ describe("S10 · la cotización = el modo estricto, con la regla vigente de la c
   })
 })
 
+describe('D8 · en qué renglón del carrito cae el premio de producto gratis (contra Postgres)', () => {
+  /** La escena de siempre, con su premio cambiado a PRODUCTO GRATIS. */
+  async function cafeGratis() {
+    const e = await escena()
+    await prisma.stampReward.update({
+      where: { id: e.premioId },
+      data: { rewardType: 'FREE_PRODUCT', rewardValue: null, rewardLabel: 'Café gratis' },
+    })
+    return e
+  }
+  /** El MISMO camino del folio (S11) con un carrito de varios renglones. */
+  async function estrictoCon(items: Array<{ productId: string; quantity: number }>, clientaId: string, eleccion: EleccionDeBeneficios) {
+    const quote = await quoteCart(venueId, items)
+    const folio = `D8-${cuid()}`
+    return withDeadlockRetry(
+      async tx => {
+        const { orderId } = await crearCuentaDelPedidoEnTx(tx, {
+          venueId,
+          externalId: folio,
+          orderNumber: folio,
+          quote: toQuoteSnapshot(quote),
+          customer: { name: 'Ana', phone: null, email: null },
+          customerId: clientaId,
+          note: null,
+          paymentMode: 'PAY_AT_PICKUP',
+        })
+        return aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId: clientaId, eleccion })
+      },
+      { etiqueta: 'prueba:estricto-d8' },
+    )
+  }
+  const premioDe = <T extends { tipo: string }>(aplicados: T[]) => aplicados.find(a => a.tipo === 'PREMIO')
+
+  it('ofrecido: «Va en tu Combo» (renglón 1, el que más le regala) sin dejar rastro; elegido: lo aplicado y la oferta dicen el mismo, igual que el estricto', async () => {
+    const e = await cafeGratis()
+    const carro = [
+      { productId: cafe, quantity: 1 },
+      { productId: combo, quantity: 1 },
+    ]
+    const antes = await foto(e)
+
+    const ofrecido = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: null })
+    expect(ofrecido.beneficios).toEqual({ calculados: true })
+    expect(ofrecido.oferta?.premio).toEqual({ id: e.premioId, etiqueta: 'Café gratis', lineIndex: 1 })
+    expect(await foto(e)).toEqual(antes)
+
+    const elegido = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: { premioId: e.premioId } })
+    expect(premioDe(elegido.aplicados!)).toMatchObject({ nombre: 'Café gratis', lineIndex: 1 })
+    expect(PESOS(premioDe(elegido.aplicados!)!.monto)).toBe('100.00')
+    expect(elegido.oferta?.premio?.lineIndex).toBe(1)
+    expect(await foto(e)).toEqual(antes)
+
+    const real = await estrictoCon(carro, e.clientaId, { premioId: e.premioId })
+    expect(premioDe(real.aplicados)?.lineIndex).toBe(1)
+  })
+
+  it('el índice es el del carrito que mandó la tienda: con el Combo primero, renglón 0', async () => {
+    const e = await cafeGratis()
+    const q = await cotizarConBeneficios(
+      venueId,
+      [
+        { productId: combo, quantity: 1 },
+        { productId: cafe, quantity: 2 },
+      ],
+      {
+        customerId: e.clientaId,
+        eleccion: null,
+      },
+    )
+    expect(q.oferta?.premio?.lineIndex).toBe(0)
+  })
+
+  it('Codex r1: con la cuenta ya en cero (cupón de cuenta del 100 %), no se ofrece renglón: elegido, el canje lo descarta', async () => {
+    const e = await cafeGratis()
+    await prisma.discount.update({ where: { id: e.cuponId }, data: { value: 100 } })
+    const ofrecido = await cotizarConBeneficios(venueId, carrito(combo), { customerId: e.clientaId, eleccion: { cupon: e.codigo } })
+    expect(PESOS(ofrecido.totalConBeneficios!)).toBe('0.00')
+    expect(ofrecido.oferta?.premio).toEqual({ id: e.premioId, etiqueta: 'Café gratis' })
+    const elegido = await cotizarConBeneficios(venueId, carrito(combo), {
+      customerId: e.clientaId,
+      eleccion: { cupon: e.codigo, premioId: e.premioId },
+    })
+    expect(elegido.descartados).toEqual(['PREMIO'])
+  })
+
+  it('un premio de monto fijo (de cuenta) no trae renglón, ni ofrecido ni aplicado', async () => {
+    const e = await escena()
+    const ofrecido = await cotizarConBeneficios(venueId, carrito(combo), { customerId: e.clientaId, eleccion: null })
+    expect(ofrecido.oferta?.premio).toEqual({ id: e.premioId, etiqueta: 'Galleta gratis' })
+    const elegido = await cotizarConBeneficios(venueId, carrito(combo), { customerId: e.clientaId, eleccion: { premioId: e.premioId } })
+    expect(premioDe(elegido.aplicados!)).not.toHaveProperty('lineIndex')
+  })
+})
+
 describe('S10 · r5 #2: el desglose no se trunca en silencio', () => {
   it('51 filas (49 automáticos de $1 + premio + puntos) ⇒ las 51 en aplicados, igual que el estricto, y el total de la cuenta', async () => {
     // Una cuenta con muchas filas tarda más que el presupuesto de higiene: aquí se mide el desglose, no el tiempo.
