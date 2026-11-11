@@ -60,6 +60,7 @@ describe('D12 · saldo por cobrar en la lista', () => {
     ['venta de vales v7', { areaDeliveryCode: 'X1' }, true],
     ['vale legado v3', { areaTicketCode: '9010000017' }, true],
     ['vales de entrega INMEDIATA: sin códigos, renglones con areaTicketLineId', { items: [{ giftCardId: null, areaTicketLineId: 'atl1' }] }, true],
+    ['vale cancelado y recobrado (R12-1): sólo releasedAreaTicketLineId', { items: [{ giftCardId: null, areaTicketLineId: null, releasedAreaTicketLineId: 'atl0' }] }, true],
     ['venta normal', {}, false],
   ])('esDeVales: %s', async (_c, extra, esperado) => {
     prismaMock.order.findMany.mockResolvedValue([orden(extra)])

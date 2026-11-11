@@ -139,6 +139,7 @@ import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarj
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
   activarSobresDeCuentaPagadaEnTx,
@@ -692,7 +693,7 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
           select: { amount: true, tipAmount: true, type: true, status: true, thirdPartyCashAmount: true, tenderType: { select: { systemKind: true } } },
         },
         // Marcas de la lista (tarjeta 1b S-1; D12: vale por `areaTicketLineId`, el INMEDIATO no guarda código): 2 bastan, no se mezclan.
-        items: { where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }] }, select: { giftCardId: true, areaTicketLineId: true }, take: 2 },
+        items: { where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] }, select: { giftCardId: true, areaTicketLineId: true, releasedAreaTicketLineId: true }, take: 2 },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -727,7 +728,7 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       esDeMesa: order.tableId != null,
       saldoPendienteCents: saldoPorCobrarCents(order, order.payments ?? []),
       pagosCompletados: (order.payments ?? []).length, // la consulta sólo trae los COMPLETED
-      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null || (order.items ?? []).some((i: any) => i.areaTicketLineId != null),
+      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null || (order.items ?? []).some((i: any) => esRenglonDeVale(i)),
     }
   })
 
