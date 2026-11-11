@@ -113,7 +113,7 @@ async function applyPromotionInTransaction(
   // una cuenta ya pagada/cancelada (audit 2026-08-13).
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { paymentStatus: true, status: true, discountAmount: true, paidAmount: true, originSystem: true },
+    select: { paymentStatus: true, status: true, discountAmount: true, paidAmount: true, originSystem: true, tableId: true },
   })
   if (!order) {
     throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
@@ -262,8 +262,10 @@ async function applyPromotionInTransaction(
     await recalculateOrderTotals(orderId, Number(order.discountAmount ?? 0), Number(order.paidAmount ?? 0), tx)
   }
   // hz:ce654971:D4: la marca de cocina de una ronda de combos que llega sin red cae o persiste JUNTO con el combo (la cola no
-  // retoma una ronda con combos tras una caída). Sólo la marca: el armado y la pantalla los decide el autor de comandas.
-  if (options.marcarCocina) {
+  // retoma una ronda con combos tras una caída). `marcarCocina` = «el negocio tiene pantalla»; si la cuenta es de MESA se decide
+  // aquí, con la cuenta ya bajo su candado (Codex r2 #2: otra caja pudo asignarle la mesa después de que la cola la leyó). Como la
+  // ronda normal: mostrador nace al pagar. Sólo la marca: el armado y la pantalla los decide el autor de comandas.
+  if (options.marcarCocina && order.tableId) {
     await tx.order.updateMany({ where: { id: orderId, venueId }, data: { kitchenPendingAt: new Date() } })
   }
 

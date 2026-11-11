@@ -78,6 +78,14 @@ describe('combo components retain historical service courses without changing pr
   // hz:ce654971:D4 (Codex r1 #1): la marca de cocina de una ronda de combos sin red persiste JUNTO con el combo.
   it('marcarCocina: writes the kitchen marker inside the SAME transaction that stores the combo; without it, never', async () => {
     prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    // La mesa se lee BAJO el candado de la cuenta (Codex r2 #2): otra caja pudo asignarla después de que la cola la leyó.
+    prismaMock.order.findFirst.mockResolvedValue({
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      discountAmount: 0,
+      paidAmount: 0,
+      tableId: 'mesa-1',
+    })
     await applyPromotionToOrder(params(), prismaMock as any, {
       deferTotalsToCaller: true,
       sentToKitchenAt: new Date('2026-10-07T12:00:00Z'),
@@ -93,6 +101,12 @@ describe('combo components retain historical service courses without changing pr
 
     prismaMock.order.updateMany.mockClear()
     await applyPromotionToOrder({ ...params(), instanceId: 'otra' }, prismaMock as any, { deferTotalsToCaller: true })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('marcarCocina on a counter order (no table): no marker, the counter ticket is born at payment', async () => {
+    await applyPromotionToOrder(params(), prismaMock as any, { deferTotalsToCaller: true, marcarCocina: true })
+    expect(prismaMock.orderItem.createMany).toHaveBeenCalled()
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
   })
 
