@@ -42,13 +42,16 @@ export async function authorKitchenTickets(params: {
   const { venueId, orderId, trigger } = params
   const startedAt = new Date()
 
-  const { routing, screens } = await estacionesDelNegocio(venueId)
+  const { routing, screens, sinComanda } = await estacionesDelNegocio(venueId)
   const preparationLine = await prisma.orderItem.findFirst({
     where: { order: { id: orderId, venueId }, serviceCourse: { path: ['preparationVersion'], equals: PREPARATION_VERSION } },
     select: { id: true },
   })
   // New POS work persists its progress even when a station uses paper, without backfilling legacy sales.
-  const preparationScreens = preparationLine ? [...routing.activeStationIds].map(id => ({ id, since: new Date(0) })) : screens
+  // «No lleva comanda» nunca es pantalla, tampoco en la preparación por producto.
+  const preparationScreens = preparationLine
+    ? [...routing.activeStationIds].filter(id => !sinComanda.has(id)).map(id => ({ id, since: new Date(0) }))
+    : screens
   if (preparationScreens.length === 0 && !preparationLine) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
@@ -219,6 +222,7 @@ export async function authorKitchenTickets(params: {
         routing,
         screens: preparationScreens.length ? preparationScreens : [{ id: 'none', since: new Date(0) }],
         stampedAt: startedAt,
+        sinComanda,
       }
       const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
       // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
