@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as shiftDashboardService from '../../services/dashboard/shift.dashboard.service'
+import * as cashCountCorrectionService from '../../services/dashboard/cashCountCorrection.service'
 
 export async function getShifts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -119,6 +120,28 @@ export async function updateShift(
       return
     }
 
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST …/shifts/:shiftId/cash-count-correction — el gerente corrige el conteo de un corte cerrado. */
+export async function correctCashCount(req: Request<{ venueId: string; shiftId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { countedCash, reason, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount } = req.body
+    const result = await cashCountCorrectionService.correctCashCount({
+      venueId: req.params.venueId,
+      shiftId: req.params.shiftId,
+      countedCash,
+      reason,
+      expectedCurrentCount,
+      expectedResultingDifference,
+      expectedCorrectionCount,
+      // Sin actor el servicio falla solo; aquí no se inventa uno.
+      staffId: (req as any).authContext?.userId,
+      source: 'DASHBOARD',
+    })
     res.status(200).json(result)
   } catch (error) {
     next(error)

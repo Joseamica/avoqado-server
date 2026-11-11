@@ -92,6 +92,7 @@ function mundo(
     gavetaTrasScans?: any | null
     porVentana?: any | null
     hidratacionPerdida?: boolean
+    cajaLigadaParaGuarda?: boolean
   } = {},
 ) {
   const turno = turnoCerrado(opciones.turno)
@@ -119,6 +120,9 @@ function mundo(
       if (opciones.hidratacionPerdida) return null
       return args.where.id === porVentana?.id ? porVentana : null
     }
+    // La guarda de «Corregir conteo» (sólo `select: { id }`) no es la resolución del esperado: estas pruebas modelan la gaveta
+    // que se resuelve por liga/ventana, y la puerta cerrada se prueba aparte (más abajo).
+    if (args?.select?.id === true && args?.where?.shiftId !== undefined) return opciones.cajaLigadaParaGuarda ? { id: CAJA } : null
     if (args?.where?.shiftId !== undefined) {
       consultasExactas += 1
       return consultasExactas === 1 ? ligada : (ligadaTrasScans ?? ligada)
@@ -595,5 +599,24 @@ describe('un claim CLOSING es inmutable para el editor', () => {
     expect(prismaMock.shift.update).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
     expect(turno).toMatchObject({ status: 'CLOSING', endTime: null, updatedAt: CLAIMED_AT })
+  })
+})
+
+describe('🔴 la puerta vieja: un corte con caja ligada ya no cambia su conteo por aquí', () => {
+  it('endingCash (incluido null) con caja ligada ⇒ 409 CASH_COUNT_USE_CORRECTION y no escribe', async () => {
+    for (const endingCash of [1350, null]) {
+      mundo({ cajaLigadaParaGuarda: true })
+      await expect(updateShift(VENUE, TURNO, { endingCash }, DUENO)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CASH_COUNT_USE_CORRECTION',
+      })
+      expect(escrito).toBeUndefined()
+    }
+  })
+
+  it('sólo totalSales con caja ligada sigue funcionando', async () => {
+    mundo({ cajaLigadaParaGuarda: true })
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+    expect(escrito).toMatchObject({ totalSales: 1900 })
   })
 })

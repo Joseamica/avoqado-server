@@ -1365,6 +1365,13 @@ export async function updateShift(
     throw new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
   }
 
+  // 🔴 El conteo de un corte con caja ligada ya no se cambia por aquí: «Corregir conteo» mueve turno y caja juntos, con
+  // candado y bitácora. Sólo cuenta si el PUT trae `endingCash` (incluido `null`); `totalSales`/`totalTips` siguen igual.
+  if (data.endingCash !== undefined) {
+    const cajaLigada = await prisma.cashDrawerSession.findFirst({ where: { venueId, shiftId }, select: { id: true } })
+    if (cajaLigada) throw new ConflictError('Para corregir el conteo usa «Corregir conteo»', 'CASH_COUNT_USE_CORRECTION')
+  }
+
   // Build update data object, only including provided fields
   const updateData: any = {}
 

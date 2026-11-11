@@ -9,6 +9,7 @@
  *   AVQ_TREE=<worktree> ./scripts/avq-verify.sh avoqado-server npx jest --selectProjects=integration \
  *     --runTestsByPath tests/integration/shifts/corregirConteo.integration.test.ts --detectOpenHandles=false
  */
+import type { NextFunction, Request, Response } from 'express'
 import { Prisma, StaffRole } from '@prisma/client'
 
 jest.mock('@/communication/sockets', () => ({
@@ -28,6 +29,22 @@ jest.mock('@/services/activityAudit.service', () => {
     ),
   }
 })
+
+// La identidad del token: quién (`x-test-actor`) y con qué rol (`x-test-role`). Permiso, validador y servicio, reales.
+jest.mock('@/middlewares/authenticateToken.middleware', () => ({
+  authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
+    const actorId = req.get('x-test-actor')
+    if (!actorId) return res.status(401).json({ success: false, message: 'Autenticación requerida' })
+    Object.assign(req, {
+      authContext: { userId: actorId, venueId: req.params.venueId, orgId: req.params.venueId, role: req.get('x-test-role') ?? 'OWNER' },
+    })
+    next()
+  },
+}))
+jest.mock('@/middlewares/registerDevice.middleware', () => ({
+  registerDeviceMiddleware: (_req: Request, _res: Response, next: NextFunction) => next(),
+  capturarVenueDeLaRuta: (_req: Request, _res: Response, next: NextFunction) => next(),
+}))
 
 import prisma from '@/utils/prismaClient'
 import { correctCashCount, previewCashCountCorrection } from '@/services/dashboard/cashCountCorrection.service'
@@ -431,5 +448,95 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
       expect(d.countCorrections.map((c: any) => c.countedAfter)).toEqual([2000, 2001, 2000])
       expect(d.countCorrections.map((c: any) => c.countedBefore)).toEqual([2001, 2000, 20000])
     })
+  })
+})
+
+describe('por HTTP: la ruta «corregir conteo» y la puerta vieja cerrada', () => {
+  const express = require('express') as typeof import('express')
+  const request = require('supertest') as typeof import('supertest')
+  const app = express()
+  app.use(express.json())
+  app.use('/api/v1/dashboard', (require('@/routes/dashboard.routes') as typeof import('@/routes/dashboard.routes')).default)
+  app.use((error: { statusCode?: number; message?: string; code?: string }, _req: Request, res: Response, _next: NextFunction) => {
+    res.status(error.statusCode ?? 500).json({ success: false, message: error.message, code: error.code })
+  })
+
+  const cuerpo = (extra: Record<string, unknown> = {}) => ({
+    countedCash: 2000,
+    reason: 'error de dedo',
+    expectedCurrentCount: 20000,
+    expectedResultingDifference: 0,
+    expectedCorrectionCount: 0,
+    ...extra,
+  })
+  const post = (s: Corte, role: string, body: Record<string, unknown>) =>
+    request(app)
+      .post(`/api/v1/dashboard/venues/${s.venueId}/shifts/${s.shiftId}/cash-count-correction`)
+      .set({ 'x-test-actor': s.staffId, 'x-test-role': role })
+      .send(body)
+  const estado = async (s: Corte) => ({
+    turno: await prisma.shift.findUniqueOrThrow({ where: { id: s.shiftId }, select: { endingCash: true, cashDeclared: true, cashDifference: true } }),
+    caja: await prisma.cashDrawerSession.findUniqueOrThrow({ where: { id: s.cajaId }, select: { actualAmount: true, overShort: true } }),
+  })
+
+  it('CASHIER ⇒ 403 y nada cambia', async () => {
+    const s = await sembrarCorte()
+    const antes = await estado(s)
+    // El rol sale del token cuando el venue coincide, pero la fila de la base manda: el actor sembrado es OWNER, así que se baja a CASHIER.
+    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } }, data: { role: StaffRole.CASHIER } })
+    const r = await post(s, 'CASHIER', cuerpo())
+    expect(r.status).toBe(403)
+    expect(await estado(s)).toEqual(antes)
+  })
+
+  it('motivo de puros espacios ⇒ 400', async () => {
+    const s = await sembrarCorte()
+    const antes = await estado(s)
+    const r = await post(s, 'OWNER', cuerpo({ reason: '     ' }))
+    expect(r.status).toBe(400)
+    expect(await estado(s)).toEqual(antes)
+  })
+
+  it('2000.005 ⇒ 400', async () => {
+    const s = await sembrarCorte()
+    const antes = await estado(s)
+    const r = await post(s, 'OWNER', cuerpo({ countedCash: 2000.005 }))
+    expect(r.status).toBe(400)
+    expect(await estado(s)).toEqual(antes)
+  })
+
+  it('MANAGER corrige ⇒ 200 con el resultado', async () => {
+    const s = await sembrarCorte()
+    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: s.staffId, venueId: s.venueId } }, data: { role: StaffRole.MANAGER } })
+    const r = await post(s, 'MANAGER', cuerpo())
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ shiftId: s.shiftId, countedBefore: 20000, countedAfter: 2000, differenceAfter: 0 })
+    const d = await estado(s)
+    expect(Number(d.turno.endingCash)).toBe(2000)
+    expect(Number(d.caja.actualAmount)).toBe(2000)
+  })
+
+  it('PUT con endingCash sobre corte con caja ligada ⇒ 409 CASH_COUNT_USE_CORRECTION y nada cambia', async () => {
+    const s = await sembrarCorte()
+    const antes = await estado(s)
+    const r = await request(app)
+      .put(`/api/v1/dashboard/venues/${s.venueId}/shifts/${s.shiftId}`)
+      .set({ 'x-test-actor': s.staffId, 'x-test-role': 'OWNER' })
+      .send({ endingCash: 5 })
+    expect(r.status).toBe(409)
+    expect(r.body.code).toBe('CASH_COUNT_USE_CORRECTION')
+    expect(await estado(s)).toEqual(antes)
+  })
+
+  it('PUT con sólo totalSales sigue funcionando', async () => {
+    const s = await sembrarCorte()
+    const antes = await estado(s)
+    const r = await request(app)
+      .put(`/api/v1/dashboard/venues/${s.venueId}/shifts/${s.shiftId}`)
+      .set({ 'x-test-actor': s.staffId, 'x-test-role': 'OWNER' })
+      .send({ totalSales: 123 })
+    expect(r.status).toBe(200)
+    expect(Number((await prisma.shift.findUniqueOrThrow({ where: { id: s.shiftId } })).totalSales)).toBe(123)
+    expect(await estado(s)).toEqual(antes)
   })
 })

@@ -58,3 +58,21 @@ export const UpdateShiftSchema = z.object({
     startTime: rechazado('No se puede cambiar la hora de apertura del turno desde aquí'),
   }),
 })
+
+/**
+ * «Corregir conteo» de un corte cerrado. Zod es sólo la FORMA; la regla (monto y motivo válidos, candados, CAS) vive en
+ * `correctCashCount`, que se llama también desde el MCP sin pasar por aquí.
+ */
+export const CashCountCorrectionSchema = z.object({
+  body: z.object({
+    countedCash: pesos().min(0, 'El monto no puede ser negativo').max(99999999.99, 'El monto es demasiado grande para un corte').multipleOf(0.01, 'Usa máximo 2 decimales'),
+    reason: z
+      .string({ required_error: 'Escribe el motivo de la corrección' })
+      .trim()
+      .min(3, 'El motivo debe tener al menos 3 letras')
+      .max(300, 'El motivo puede tener hasta 300 caracteres'),
+    expectedCurrentCount: pesos(),
+    expectedResultingDifference: pesos(),
+    expectedCorrectionCount: z.number().int().min(0),
+  }),
+})
