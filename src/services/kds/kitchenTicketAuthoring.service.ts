@@ -447,7 +447,10 @@ export async function retirarComandasDeVentaAnulada(
   orderId: string,
   actor: { staffId?: string; reason?: string } = {},
 ): Promise<{ kdsOrderIds: string[]; kdsOrderItemIds: string[] }> {
-  await tomarCandadoDeComandas(tx, orderId)
+  // D3 (hz:381780f0, Codex r1 #1): con los de sus cuentas ligadas, en orden y de entrada. El borrado del panel llega aquí sin ningún
+  // candado; tomar el suyo y después el de la original cerraba un ciclo con unir, que ya los toma en orden. Quien ya los tiene
+  // (anular, «Anular todo») los vuelve a pedir sin esperar.
+  for (const id of (await cuentasDeSusComandas(tx, venueId, orderId)).sort()) await tomarCandadoDeComandas(tx, id)
   // D25: antes de retirar, cada platillo pendiente queda con la cuenta donde vive hoy su renglón (dividir y unir no lo mueven).
   const kdsOrderIds: string[] = await ponerComandasConSuCuenta(tx, venueId, orderId),
     kdsOrderItemIds: string[] = []
@@ -527,31 +530,9 @@ export async function retirarComandasDeVentaAnulada(
   return { kdsOrderIds, kdsOrderItemIds }
 }
 
-/**
- * 🔴 D25 (Codex r4 del D1 de cocina, B4 y B5): un platillo pendiente de la pantalla de cocina es de la cuenta donde vive HOY su
- * renglón, no de la cuenta que armó la comanda. Dividir y unir mueven renglones sin tocar sus comandas; por eso anular A borraba (o,
- * con preparación por producto, cancelaba) lo que ya vivía en B, y lo de A que estaba en la comanda de otra cuenta se quedaba.
- *
- * Pone bajo su cuenta cada fila pendiente que toca a `orderId`: la de una comanda de `orderId` cuyo renglón vive en OTRA cuenta viva
- * pasa a esa cuenta, y la de un renglón de `orderId` que está en la comanda de otra pasa a `orderId`. Lo último que queda de una
- * comanda se la lleva entera (mismo folio, mismo lugar en la pantalla); lo demás sale en un folio nuevo (`order:<cuenta>:de:<comanda>:<n>`)
- * con la estación, el estado y la hora de la original. Una fila sin renglón, o de un renglón de una cuenta anulada, se queda. Lo
- * terminado no se toca. Una «LISTO» sin red sobre el folio original no alcanza a lo que salió en uno nuevo: vuelve a verse pendiente
- * (en duda, manda).
- *
- * 🔴 Candados (Codex r1 #1, r2 #1, r3): la comanda de una cuenta sólo se toca con SU candado de comandas, el mismo que toman su armado,
- * su preparación y su anulación; y la cuenta que recibe la pieza, con el suyo. Si falta alguno se toma (en orden) y se vuelve a leer ya
- * bajo candado. Dos cajas que los toman al revés se interbloquean: Postgres corta una y `withDeadlockRetry` (o el RETRY de la cola sin
- * red) la repite. Las escrituras además exigen lo leído. CALLER_LOCKED: dentro de la transacción y con el candado de comandas de
- * `orderId`. Devuelve las comandas que cambiaron.
- */
-export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<string[]> {
-  const tocadas = new Set<string>()
-  const conPreparacion = new Set<string>()
-  const conCandado = new Set<string>([orderId]) // el de `orderId` lo tomó quien llama
-  // Por páginas y sin tope (Codex r2 #2): cada fila que se mueve queda con su cuenta y ya no vuelve a salir.
-  for (let sinAvanzar = 0; ; ) {
-    const filas = await tx.$queryRaw<Array<{ id: string; kdsOrderId: string; cabecera: string | null; dueno: string }>>`
+/** Una página de las filas pendientes de comanda que tocan a `orderId` y no están con su cuenta: lo que mueve `ponerComandasConSuCuenta`. */
+function filasFueraDeSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
+  return tx.$queryRaw<Array<{ id: string; kdsOrderId: string; cabecera: string | null; dueno: string }>>`
       SELECT ki.id, ki."kdsOrderId", k."orderId" AS cabecera, oi."orderId" AS dueno
         FROM "KdsOrder" k
         JOIN "KdsOrderItem" ki ON ki."kdsOrderId" = k.id
@@ -568,6 +549,46 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
          AND k."orderId" IS DISTINCT FROM ${orderId}
       ORDER BY 2, 4, 1
       LIMIT 1000`
+}
+
+/**
+ * 🔴 hz:381780f0:D3: `orderId` y las cuentas cuyo candado de comandas pedirá `ponerComandasConSuCuenta(orderId)`, leídas SIN candado.
+ * Quien une o anula los toma TODOS, en orden y antes que las filas de las cuentas (`lockTableOrderScope` con `kdsOrderIds`): pedirlos a
+ * media transacción, ya con las filas tomadas, cerraba un ciclo con otra caja que tenía ese candado y esperaba su fila (Postgres
+ * cortaba una con 40P01). Lo que cambie entre esta lectura y el candado lo relee ella bajo candado y lo toma (raro; se reintenta).
+ * ponytail: sólo la primera página (1,000 filas); las cuentas de las siguientes se toman a media transacción, como antes.
+ */
+export async function cuentasDeSusComandas(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<string[]> {
+  const filas = (await filasFueraDeSuCuenta(tx, venueId, orderId)) ?? []
+  return [...new Set([orderId, ...filas.flatMap(f => [f.cabecera, f.dueno])])].filter((id): id is string => Boolean(id))
+}
+
+/**
+ * 🔴 D25 (Codex r4 del D1 de cocina, B4 y B5): un platillo pendiente de la pantalla de cocina es de la cuenta donde vive HOY su
+ * renglón, no de la cuenta que armó la comanda. Dividir y unir mueven renglones sin tocar sus comandas; por eso anular A borraba (o,
+ * con preparación por producto, cancelaba) lo que ya vivía en B, y lo de A que estaba en la comanda de otra cuenta se quedaba.
+ *
+ * Pone bajo su cuenta cada fila pendiente que toca a `orderId`: la de una comanda de `orderId` cuyo renglón vive en OTRA cuenta viva
+ * pasa a esa cuenta, y la de un renglón de `orderId` que está en la comanda de otra pasa a `orderId`. Lo último que queda de una
+ * comanda se la lleva entera (mismo folio, mismo lugar en la pantalla); lo demás sale en un folio nuevo (`order:<cuenta>:de:<comanda>:<n>`)
+ * con la estación, el estado y la hora de la original. Una fila sin renglón, o de un renglón de una cuenta anulada, se queda. Lo
+ * terminado no se toca. Una «LISTO» sin red sobre el folio original no alcanza a lo que salió en uno nuevo: vuelve a verse pendiente
+ * (en duda, manda).
+ *
+ * 🔴 Candados (Codex r1 #1, r2 #1, r3): la comanda de una cuenta sólo se toca con SU candado de comandas, el mismo que toman su armado,
+ * su preparación y su anulación; y la cuenta que recibe la pieza, con el suyo. Quien une o anula ya los tomó antes que las filas
+ * (`cuentasDeSusComandas`, D3); si aun así falta alguno (otra caja cambió las ligas mientras), se toma (en orden) y se vuelve a leer ya
+ * bajo candado. Dos cajas que los toman al revés se interbloquean: Postgres corta una y `withDeadlockRetry` (o el RETRY de la cola sin
+ * red) la repite. Las escrituras además exigen lo leído. CALLER_LOCKED: dentro de la transacción y con el candado de comandas de
+ * `orderId`. Devuelve las comandas que cambiaron.
+ */
+export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<string[]> {
+  const tocadas = new Set<string>()
+  const conPreparacion = new Set<string>()
+  const conCandado = new Set<string>([orderId]) // el de `orderId` lo tomó quien llama
+  // Por páginas y sin tope (Codex r2 #2): cada fila que se mueve queda con su cuenta y ya no vuelve a salir.
+  for (let sinAvanzar = 0; ; ) {
+    const filas = await filasFueraDeSuCuenta(tx, venueId, orderId)
     if (!filas?.length) break
     const faltan = [...new Set(filas.flatMap(f => [f.cabecera, f.dueno]))]
       .filter((id): id is string => Boolean(id) && !conCandado.has(id!))

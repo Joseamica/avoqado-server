@@ -642,11 +642,13 @@ describe('Fusión de cuentas (mergeOrders)', () => {
       loser = resultadoDe(mergeOrders(venueId, a.id, b.id)).finally(() => (settled = true))
       let waiter: { pid: number; blockers: number[]; query: string } | undefined
       for (let i = 0; i < 200; i++) {
+        // hz:381780f0:D3: la perdedora espera ya en los candados de comandas de las dos cuentas, que unir toma en orden antes que las
+        // filas (antes llegaba a las filas y ahí esperaba). Sigue siendo una espera real detrás de la ganadora.
         const rows = await prisma.$queryRaw<Array<{ pid: number; blockers: number[]; query: string }>>`
           SELECT pid, pg_blocking_pids(pid) AS blockers, query FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
             AND ${holderPid} = ANY(pg_blocking_pids(pid))
-            AND query ILIKE '%"Order"%' AND query ILIKE '%ORDER BY "createdAt" DESC, id DESC FOR UPDATE%'`
+            AND query ILIKE '%pg_advisory_xact_lock%'`
         if (rows.length) {
           waiter = rows[0]
           break
