@@ -352,6 +352,8 @@ export async function verifyPasskeyAssertion(
           kycStatus: sv.venue.kycStatus,
           timezone: sv.venue.timezone,
           permissions,
+          // Esta lista es la efectiva de ESTE servidor e incluye los permisos nuevos (las apps la distinguen de una guardada vieja).
+          permisosVigentes: true,
         }
       }),
   }
@@ -741,6 +743,8 @@ export async function loginWithEmail(email: string, password: string, rememberMe
           kycStatus: sv.venue.kycStatus,
           timezone: sv.venue.timezone,
           permissions,
+          // Esta lista es la efectiva de ESTE servidor e incluye los permisos nuevos (las apps la distinguen de una guardada vieja).
+          permisosVigentes: true,
         }
       }),
   }

@@ -110,6 +110,14 @@ describe('loginWithEmail — la lista de permisos que reciben iPad y Android', (
     expect(permisos).toEqual(expect.arrayContaining(['orders:create', 'payments:create']))
   })
 
+  it('H3: el venue trae `permisosVigentes: true` junto a la misma lista de siempre', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue(staffConVenue({}))
+    const resultado = await loginWithEmail('heidi@amaena.com', 'la-contraseña')
+    const venue = resultado.staff.venues[0] as any
+    expect(venue.permisosVigentes).toBe(true)
+    expect(Array.isArray(venue.permissions)).toBe(true)
+  })
+
   it('respeta los permisos que el negocio le QUITÓ al rol', async () => {
     prismaMock.staff.findUnique.mockResolvedValue(staffConVenue({}))
     prismaMock.venueRolePermission.findMany.mockResolvedValue([

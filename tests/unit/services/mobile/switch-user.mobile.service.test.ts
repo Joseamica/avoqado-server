@@ -103,6 +103,7 @@ describe('switchUserByPin', () => {
     expect(r.user.id).toBe('staff_ana')
     expect(r.user.venues[0].role).toBe(StaffRole.WAITER)
     expect(Array.isArray(r.user.venues[0].permissions)).toBe(true)
+    expect((r.user.venues[0] as any).permisosVigentes).toBe(true) // H3: la lista es la efectiva de este servidor
   })
 
   it('crea la sesión entrante con authMethod PIN y colgada de la saliente', async () => {

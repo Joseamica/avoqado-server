@@ -36,7 +36,7 @@ const LOCAL_ID_MAX_LENGTH = 64
  * NO se recorta el valor: la llave la elige el cliente y tiene que poder reenviar EXACTAMENTE
  * la misma cadena para que el dedupe empareje. Sólo se rechaza la que no sirve como llave.
  */
-function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
+export function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
   if (raw === undefined || raw === null) return null
 
   if (typeof raw !== 'string') {
@@ -259,6 +259,11 @@ interface PayInOutParams {
    * fila que el arqueo da por buena (efectivo inventado, +$100 medido en Android).
    */
   localId?: string | null
+  /**
+   * StaffVenue del gerente cuyo PIN autorizó ESTE retiro (sólo `payOut`; lo pone el controlador desde
+   * `authContext.overrideAuthorizedBy`). Aditivo: sin él todo queda como siempre.
+   */
+  authorizedByStaffVenueId?: string | null
 }
 
 /**
@@ -272,6 +277,8 @@ export interface DrawerEventResult {
   event: ReturnType<typeof formatEvent>
   /** `false` = reintento: no se creó nada, se devolvió el movimiento que ya existía. */
   created: boolean
+  /** Quién autorizó el retiro (gerente), o `null` si nadie lo autorizó. Igual en creado y en reintento. */
+  authorizedBy: { id: string; name: string } | null
 }
 
 /**
@@ -306,6 +313,18 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
   const amountDecimal = dollarsToDecimal(amount)
 
+  // Quién autorizó (sólo retiros). El nombre sale de la membresía; se resuelve también en un reintento
+  // para que la respuesta sea la misma, pero la bitácora sólo se escribe al crear.
+  let authorizedBy: DrawerEventResult['authorizedBy'] = null
+  if (type === 'PAY_OUT' && params.authorizedByStaffVenueId) {
+    const sv = await prisma.staffVenue.findUnique({
+      where: { id: params.authorizedByStaffVenueId },
+      select: { staff: { select: { firstName: true, lastName: true } } },
+    })
+    const name = [sv?.staff?.firstName, sv?.staff?.lastName].filter(Boolean).join(' ').trim()
+    authorizedBy = { id: params.authorizedByStaffVenueId, name: name || 'Gerente' }
+  }
+
   const row = {
     sessionId: session.id,
     venueId,
@@ -326,7 +345,13 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       action,
       entity: 'CashDrawerEvent',
       entityId,
-      data: { sessionId: session.id, amount: Number(amountDecimal), note, source: 'MOBILE' },
+      data: {
+        sessionId: session.id,
+        amount: Number(amountDecimal),
+        note,
+        source: 'MOBILE',
+        ...(authorizedBy ? { authorizedByStaffVenueId: authorizedBy.id, authorizedByName: authorizedBy.name } : {}),
+      },
     })
 
   // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
@@ -377,7 +402,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       return { stored, created: inserted.count > 0 }
     })
     if (result.created) auditar(result.stored.id)
-    return { event: formatEvent(result.stored), created: result.created }
+    return { event: formatEvent(result.stored), created: result.created, authorizedBy }
   }
   // 🔴 P1 (Codex, 2ª auditoría): el movimiento MANUAL se colaba en una caja que el cierre acababa de
   // firmar. Mismo candado que la venta: dentro de la transacción se TOCA la fila con status='OPEN'
@@ -393,7 +418,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       return tx.cashDrawerEvent.create({ data: row })
     })
     auditar(event.id)
-    return { event: formatEvent(event), created: true }
+    return { event: formatEvent(event), created: true, authorizedBy }
   }
   const result = await prisma.$transaction(async tx => {
     await lockOrThrow(tx)
@@ -424,7 +449,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
     })
   }
 
-  return { event: formatEvent(stored), created }
+  return { event: formatEvent(stored), created, authorizedBy }
 }
 
 /**
@@ -438,6 +463,15 @@ export async function payIn(params: PayInOutParams): Promise<DrawerEventResult> 
 // ============================================================================
 // PAY OUT
 // ============================================================================
+
+/**
+ * ¿Ya está registrado el retiro con esta llave? (`@@unique([venueId, localId])`). Lo usa el atajo
+ * `devolverRetiroYaRegistrado`: reconocer un retiro ya guardado no depende de que la autorización siga viva.
+ */
+export async function buscarRetiroPorLlave(venueId: string, localId: string) {
+  const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId, type: CashDrawerEventType.PAY_OUT } })
+  return stored ? formatEvent(stored) : null
+}
 
 /**
  * Add a pay-out event (cash removed from drawer). Idempotente por `localId` — ver
@@ -838,7 +872,13 @@ function rejectCashDrawerSync(venueId: string, reason: string, details: Record<s
  * descarte de abajo por DATO (N días con `droppedCashSales = 0`) y no por "ya están todos
  * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
  */
-export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null, actorStaffId?: string | null) {
+export async function syncEvents(
+  venueId: string,
+  events: SyncEvent[],
+  appVersion?: string | null,
+  actorStaffId?: string | null,
+  puedeRetirar: boolean = true,
+) {
   if (!events || events.length === 0) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
@@ -881,8 +921,31 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
     })
   }
 
+  // 🔴 Misma regla con y sin red: `/pay-out` pide `cash-drawer:pay-out`, así que el PAY_OUT que llega por aquí también.
+  // Sin permiso se descarta y se cuenta; el lote responde 200 (un 4xx haría reintentar para siempre).
+  const rechazadosSinPermiso = puedeRetirar ? 0 : events.filter(e => e.type === 'PAY_OUT').length
+  if (rechazadosSinPermiso > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó PAY_OUT: el autor no tiene permiso de retirar', {
+      venueId,
+      actorStaffId: actorStaffId ?? null,
+      rechazadosSinPermiso,
+    })
+  }
+
+  // 🔴 Todo movimiento manual trae un importe finito y > 0 (H1, auditoría final): un PAY_IN de -50 bajaba el esperado
+  // de la caja y dejaba retirar sin permiso. Los inválidos no se crean, se cuentan y se loguea; 200, nunca 4xx.
+  const importeValido = (e: SyncEvent) => Number.isFinite(Number(e.amount)) && Number(e.amount) > 0
+  const rechazadosPorImporte = events.filter(e => TIPOS_DEL_CLIENTE.has(e.type) && !importeValido(e)).length
+  if (rechazadosPorImporte > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó movimientos con importe inválido (no finito o ≤ 0)', {
+      venueId,
+      actorStaffId: actorStaffId ?? null,
+      rechazadosPorImporte,
+    })
+  }
+
   const acceptedEvents = events
-    .filter(event => TIPOS_DEL_CLIENTE.has(event.type))
+    .filter(event => TIPOS_DEL_CLIENTE.has(event.type) && importeValido(event) && (puedeRetirar || event.type !== 'PAY_OUT'))
     .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
@@ -895,7 +958,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   if (acceptedEvents.length === 0) {
     // 200 con lote vacío, no error: el push del cliente es fire-and-forget y un 4xx
     // aquí lo haría reintentar para siempre algo que nunca vamos a aceptar.
-    return { syncedCount: 0, events: [] }
+    return { syncedCount: 0, events: [], rechazadosSinPermiso, rechazadosPorImporte }
   }
   if (events.length > CASH_DRAWER_SYNC_EVENT_LIMIT) {
     rejectCashDrawerSync(venueId, 'REQUEST_LIMIT_EXCEEDED', {
@@ -1385,6 +1448,8 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   return {
     syncedCount: insertedCount,
     events: allRows.map(formatEvent),
+    rechazadosSinPermiso,
+    rechazadosPorImporte,
   }
 }
 

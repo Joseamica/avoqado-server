@@ -15,6 +15,7 @@ import logger from '../../config/logger'
 import { type DeviceReceiptPayload, getDeviceReceiptPayloadWithStatus } from '../../services/dashboard/receiptLayout/devicePayload.service'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
 import { TpvSettings, getTpvSettings, updateTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
 import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../services/device-capabilities.service'
@@ -54,6 +55,32 @@ function mapDisplayModeRequestError(error: unknown): unknown {
 }
 
 /**
+ * Los permisos EFECTIVOS de quien pregunta en este venue: la MISMA regla que el login (`resolveStaffVenuePermissions`).
+ * Una sesión vieja guarda la lista del día que entró; esto le da la vigente. Dos lecturas acotadas (su StaffVenue y la
+ * personalización de su rol). Falla en blando: `undefined` = el campo se omite (nunca un 500 por esto).
+ */
+async function permisosDeLaSesion(venueId: string, userId: string | undefined): Promise<string[] | undefined> {
+  if (!userId) return undefined
+  try {
+    const sv = await prisma.staffVenue.findUnique({
+      where: { staffId_venueId: { staffId: userId, venueId } },
+      select: { role: true, permissionSetId: true, permissionSet: true, active: true, staff: { select: { active: true } } },
+    })
+    if (!sv) return undefined
+    // Membresía o cuenta dada de baja: el login ya no la deja entrar; una sesión viva sabe que aquí no puede nada ([] ≠ omitido).
+    if (!sv.active || sv.staff?.active === false) return []
+    const custom = await prisma.venueRolePermission.findUnique({
+      where: { venueId_role: { venueId, role: sv.role } },
+      select: { permissions: true, deniedPermissions: true },
+    })
+    return resolveStaffVenuePermissions(sv, custom)
+  } catch (error) {
+    logger.warn('Failed to resolve session permissions for mobile venue settings — omitting permisosDeLaSesion', { venueId, error })
+    return undefined
+  }
+}
+
+/**
  * Get venue terminals and merged settings for the requesting device's terminal
  * (with the first active terminal retained as a legacy fallback),
  * plus the venue's plan-tier info (optional `plan` field) so POS apps can
@@ -74,7 +101,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     //    venue's plan-tier info (additive `plan` field — POS apps gate UI by plan).
     //    RESILIENT: a plan-lookup failure must NEVER break venue-select on the POS — log it
     //    and return the settings WITHOUT the plan field (apps fail open).
-    const [terminals, plan, venueSettingsLeido, recibo, pantalla, venue] = await Promise.all([
+    const [terminals, plan, venueSettingsLeido, recibo, pantalla, venue, permisos] = await Promise.all([
       prisma.terminal.findMany({
         where: { venueId },
         select: {
@@ -140,6 +167,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       // Con `bindingStatus`: «no pude saberlo» sale `failed`, no `not_applicable` (Codex r1 #8). Nunca lanza.
       customerDisplayBlockFor(venueId, huella),
       prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }).catch(() => null),
+      permisosDeLaSesion(venueId, (req as any).authContext?.userId),
     ])
     const venueSettings = venueSettingsLeido.fila
 
@@ -226,6 +254,8 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
             }
           : null,
         ...(plan ? { plan } : {}),
+        // Aditivo y opcional: la lista vigente de quien pregunta (se omite si la lectura falló). Un POS viejo la ignora.
+        ...(permisos ? { permisosDeLaSesion: permisos } : {}),
         // Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo
         // ignora, uno nuevo sin este campo cae a estos mismos defaults.
         promotions: {

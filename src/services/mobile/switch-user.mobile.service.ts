@@ -293,6 +293,8 @@ export async function switchUserByPin(params: SwitchUserParams) {
           kycStatus: staffVenue.venue.kycStatus,
           timezone: staffVenue.venue.timezone,
           permissions,
+          // Esta lista es la efectiva de ESTE servidor e incluye los permisos nuevos (las apps la distinguen de una guardada vieja).
+          permisosVigentes: true,
         },
       ],
     },

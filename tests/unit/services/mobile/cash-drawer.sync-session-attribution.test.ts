@@ -589,7 +589,7 @@ describe('syncEvents — durable drawer identity', () => {
 
     const result = await syncEvents(VENUE, droppedOnly as any, '2.40.0', STAFF)
 
-    expect(result).toEqual({ syncedCount: 0, events: [] })
+    expect(result).toEqual({ syncedCount: 0, events: [], rechazadosSinPermiso: 0, rechazadosPorImporte: 0 })
     expect(w.rootSessionFindMany).not.toHaveBeenCalled()
     expect((prismaMock as any).cashDrawerSession.findFirst).not.toHaveBeenCalled()
     expect((prismaMock as any).$transaction).not.toHaveBeenCalled()
