@@ -555,7 +555,7 @@ export async function assignRouting(venueId: string, input: AssignRoutingInput, 
 export async function previewRouting(venueId: string, input: PreviewRoutingInput) {
   const config = await buildPrintConfig(venueId)
   const stationName = new Map(config.stations.map(s => [s.id, s.name]))
-  const sinComanda = new Set(config.stations.filter(s => !s.sendsComanda).map(s => s.id))
+  const sinComanda = new Set(config.stations.filter(s => s.sendsComanda === false).map(s => s.id))
 
   const productIds = [...new Set(input.items.map(i => i.productId))]
   const products = await prisma.product.findMany({

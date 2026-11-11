@@ -251,6 +251,36 @@ describe('printStation.dashboard.service', () => {
       expect(res.unrouted).toBe(false)
     })
 
+    it('preview_dice_no_lleva_comanda: el plan de una estación «No lleva comanda» lo dice; los demás y «Sin estación» no', async () => {
+      const TIENDA = 'st_tienda'
+      ;(buildPrintConfig as jest.Mock).mockResolvedValue({
+        stations: [
+          { id: COCINA, name: 'Cocina', sendsComanda: true },
+          { id: TIENDA, name: 'Tienda', sendsComanda: false },
+        ],
+      })
+      ;(routingConfigFrom as jest.Mock).mockReturnValue({ defaultStationId: null, activeStationIds: new Set([COCINA, TIENDA]) })
+      mockPrisma.product.findMany.mockResolvedValue([
+        { id: 'p_cafe', name: 'Café', printStationId: null, category: { printStationId: COCINA } },
+        { id: 'p_takis', name: 'Takis', printStationId: null, category: { printStationId: TIENDA } },
+        { id: 'p_suelto', name: 'Suelto', printStationId: null, category: { printStationId: null } },
+      ])
+
+      const res = await svc.previewRouting(VENUE, {
+        items: [
+          { productId: 'p_cafe', quantity: 1 },
+          { productId: 'p_takis', quantity: 2 },
+          { productId: 'p_suelto', quantity: 1 },
+        ],
+      })
+
+      const deEstacion = (id: string | null) => res.plans.find(p => p.stationId === id)!
+      expect(deEstacion(TIENDA)).toEqual(expect.objectContaining({ stationName: 'Tienda', sendsComanda: false }))
+      expect(deEstacion(TIENDA).lines).toEqual([{ productName: 'Takis', quantity: 2 }])
+      expect(deEstacion(COCINA).sendsComanda).toBe(true)
+      expect(deEstacion(null)).toEqual(expect.objectContaining({ unrouted: true, sendsComanda: true }))
+    })
+
     it('rejects a product that does not belong to the venue', async () => {
       ;(buildPrintConfig as jest.Mock).mockResolvedValue({ stations: [] })
       ;(routingConfigFrom as jest.Mock).mockReturnValue({ defaultStationId: null, activeStationIds: new Set() })
