@@ -82,4 +82,28 @@ describe('tpvVersionGate', () => {
     expect(next).toHaveBeenCalledTimes(1)
     expect(res.status).not.toHaveBeenCalled()
   })
+
+  // App de campo, bloque 3: la tabla de versiones tiene carriles. El mínimo FORCE de la TPV sólo cuenta filas de la TPV, y
+  // las rutas del celular de campo nunca reciben 426 (lo que suben ya pasó en la calle; la obligatoria la aplica la app).
+  it('el mínimo FORCE sólo cuenta versiones de la TPV', async () => {
+    await correr({ 'x-app-version-code': '50', 'x-app-version-name': '1.4.2-sandbox' })
+
+    expect(findFirst).toHaveBeenCalled()
+    for (const [arg] of findFirst.mock.calls) expect(arg.where.platform).toBe('ANDROID_TPV')
+  })
+
+  it('las rutas del celular de campo pasan aunque manden una versión menor al FORCE de la TPV', async () => {
+    const { res, next } = await correr({ 'x-app-version-code': '2', 'x-app-version-name': '0.3.0' }, '/campo/latido')
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(res.status).not.toHaveBeenCalled()
+    expect(findFirst).not.toHaveBeenCalled()
+  })
+
+  it('una ruta de la TPV que sólo CONTIENE «campo» no se excluye', async () => {
+    const { res, next } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '1.4.2-sandbox' }, '/venues/v1/campo-extra')
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(426)
+  })
 })

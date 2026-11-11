@@ -33,6 +33,7 @@ import prisma from '../utils/prismaClient'
 import { AppEnvironment, UpdateMode } from '@prisma/client'
 import logger from '../config/logger'
 
+// El mínimo es SÓLO del carril de la TPV (platform ANDROID_TPV): las versiones de la app de campo y de Windows no cuentan.
 // Cache the minimum version to avoid DB queries on every request
 // Invalidated every 60 seconds or when an update is published
 let cachedMinVersion: { sandbox: number | null; production: number | null } = {
@@ -60,6 +61,7 @@ async function getMinimumRequiredVersion(environment: AppEnvironment): Promise<n
       prisma.appUpdate.findFirst({
         where: {
           environment: 'SANDBOX',
+          platform: 'ANDROID_TPV',
           isActive: true,
           updateMode: UpdateMode.FORCE,
         },
@@ -69,6 +71,7 @@ async function getMinimumRequiredVersion(environment: AppEnvironment): Promise<n
       prisma.appUpdate.findFirst({
         where: {
           environment: 'PRODUCTION',
+          platform: 'ANDROID_TPV',
           isActive: true,
           updateMode: UpdateMode.FORCE,
         },
@@ -134,6 +137,12 @@ function isExcludedPath(path: string): boolean {
  */
 export async function tpvVersionGate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    // El celular de campo tiene su propio carril de versiones (ANDROID_CAMPO) y su «obligatoria» la aplica la app: lo que
+    // sube por aquí (ventas, checadas, fotos) ya pasó en la calle, y frenarlo sólo atoraría su cola.
+    if (req.path.startsWith('/campo/')) {
+      return next()
+    }
+
     // Skip excluded paths (unauthenticated endpoints)
     if (isExcludedPath(req.path)) {
       return next()
@@ -187,6 +196,7 @@ export async function tpvVersionGate(req: Request, res: Response, next: NextFunc
     const forceUpdate = await prisma.appUpdate.findFirst({
       where: {
         environment,
+        platform: 'ANDROID_TPV',
         isActive: true,
         updateMode: UpdateMode.FORCE,
         versionCode: minVersion,

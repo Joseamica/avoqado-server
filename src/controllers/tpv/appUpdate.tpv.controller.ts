@@ -62,10 +62,10 @@ export async function checkForUpdate(req: Request, res: Response) {
     // default ANDROID_TPV preserves their behavior exactly.
     const platformParam =
       req.query.platform === undefined ? 'ANDROID_TPV' : typeof req.query.platform === 'string' ? req.query.platform.toUpperCase() : ''
-    if (!['ANDROID_TPV', 'WINDOWS_DESKTOP'].includes(platformParam)) {
+    if (!['ANDROID_TPV', 'WINDOWS_DESKTOP', 'ANDROID_CAMPO'].includes(platformParam)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid platform: must be ANDROID_TPV or WINDOWS_DESKTOP',
+        error: 'Invalid platform: must be ANDROID_TPV, WINDOWS_DESKTOP or ANDROID_CAMPO',
       })
     }
 
@@ -140,12 +140,28 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
+    // La obligatoria PENDIENTE, aparte de la más nueva: con FORCE 4 y luego BANNER 5, quien está en 3 sigue obligado a
+    // llegar a 4 (la app de campo la aplica con esto; las TPV viejas ignoran el campo).
+    const forcePendiente = await prisma.appUpdate.findFirst({
+      where: {
+        environment: env as AppEnvironment,
+        platform: platformParam as AppPlatform,
+        isActive: true,
+        updateMode: 'FORCE',
+        versionCode: { gt: versionCode },
+        OR: audienceConditions,
+      },
+      orderBy: { versionCode: 'desc' },
+      select: { versionCode: true },
+    })
+
     // Update available
-    logger.info(`Update available for TPV: ${versionCode} -> ${latestUpdate.versionCode} (${env})`)
+    logger.info(`Update available for ${platformParam}: ${versionCode} -> ${latestUpdate.versionCode} (${env})`)
 
     return res.json({
       success: true,
       hasUpdate: true,
+      minVersionCode: forcePendiente?.versionCode ?? null,
       update: {
         id: latestUpdate.id,
         versionName: latestUpdate.versionName,

@@ -19,6 +19,8 @@ const router = Router()
 const listUpdatesSchema = z.object({
   query: z.object({
     environment: z.enum(['SANDBOX', 'PRODUCTION']).optional(),
+    // Sin esto zod lo borra de req.query (validateRequest reemplaza la query) y la lista mezclaría carriles.
+    platform: z.enum(['ANDROID_TPV', 'WINDOWS_DESKTOP', 'ANDROID_CAMPO']).optional(),
   }),
 })
 
@@ -31,6 +33,10 @@ const updateIdSchema = z.object({
 const environmentSchema = z.object({
   params: z.object({
     environment: z.enum(['sandbox', 'production', 'SANDBOX', 'PRODUCTION']),
+  }),
+  // «Última versión» del panel por carril; sin plataforma, la TPV como siempre.
+  query: z.object({
+    platform: z.enum(['ANDROID_TPV', 'WINDOWS_DESKTOP', 'ANDROID_CAMPO']).optional(),
   }),
 })
 

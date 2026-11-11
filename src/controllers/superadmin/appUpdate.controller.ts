@@ -1,6 +1,6 @@
 // src/controllers/superadmin/appUpdate.controller.ts
 import { Request, Response } from 'express'
-import { AppEnvironment, UpdateMode } from '@prisma/client'
+import { AppEnvironment, AppPlatform, UpdateMode } from '@prisma/client'
 import { getStorageBucket } from '../../config/firebase'
 import logger from '../../config/logger'
 import crypto from 'crypto'
@@ -28,9 +28,11 @@ import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../service
  */
 export async function listAppUpdates(req: Request, res: Response) {
   try {
-    const { environment } = req.query
+    const { environment, platform } = req.query
 
-    const where: any = {}
+    // Sin plataforma: sólo la TPV, como siempre («Instalar versión» de una terminal identifica la versión por su código,
+    // que ahora se repite entre carriles). El panel de versiones pide la de campo explícitamente.
+    const where: any = { platform: (platform as AppPlatform | undefined) ?? 'ANDROID_TPV' }
     if (environment && ['SANDBOX', 'PRODUCTION'].includes(environment as string)) {
       where.environment = environment as AppEnvironment
     }
@@ -548,6 +550,7 @@ export async function getLatestAppUpdate(req: Request, res: Response) {
     const latest = await prisma.appUpdate.findFirst({
       where: {
         environment: environment.toUpperCase() as AppEnvironment,
+        platform: (req.query.platform as AppPlatform | undefined) ?? 'ANDROID_TPV',
         isActive: true,
       },
       orderBy: { versionCode: 'desc' },
