@@ -2299,7 +2299,9 @@ async function main() {
       console.log('      - 💳 Creating pay-later order (completed but pending payment)...')
 
       // Create a completed order with pending payment (pay-later)
-      const payLaterTotal = 250.0
+      // La cuenta = Σ renglones (Codex r3 de D5): con $250 fijos y renglones de $447, regalar uno SUBÍA la cuenta.
+      const payLaterProducts = products.slice(0, 3) // First 3 products
+      const payLaterTotal = payLaterProducts.reduce((sum, p) => sum + Number(p.price), 0)
       const payLaterOrder = await prisma.order.create({
         data: {
           venueId: venue.id,
@@ -2320,7 +2322,6 @@ async function main() {
       })
 
       // Add items to pay-later order
-      const payLaterProducts = products.slice(0, 3) // First 3 products
       for (const product of payLaterProducts) {
         await prisma.orderItem.create({
           data: {
@@ -4717,6 +4718,8 @@ async function main() {
               venueId: venue.id,
               orderNumber: `TEST-INCIDENT-001`,
               status: OrderStatus.COMPLETED,
+              // Ya cobrada (tiene su pago COMPLETED): sin esto quedaba «por cobrar» con 0 renglones y un recálculo la vaciaba (D5).
+              paymentStatus: PaymentStatus.PAID,
               subtotal: 5000,
               taxAmount: 800,
               discountAmount: 0,
@@ -4797,6 +4800,8 @@ async function main() {
               venueId: venue.id,
               orderNumber: `TEST-INCIDENT-002`,
               status: OrderStatus.COMPLETED,
+              // Ya cobrada (tiene su pago COMPLETED): sin esto quedaba «por cobrar» con 0 renglones y un recálculo la vaciaba (D5).
+              paymentStatus: PaymentStatus.PAID,
               subtotal: 8500,
               taxAmount: 1360,
               discountAmount: 0,
