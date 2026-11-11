@@ -22,9 +22,8 @@ import {
   terminalPaymentService,
   UNPROVEN_NEGATIVE_WINDOW_MS,
 } from '@/services/terminal-payment.service'
-import {
+import AppError, {
   BadRequestError,
-  ConflictError,
   OrderAlreadyPaidError,
   TerminalBusyError,
   TerminalPaymentAdmissionRetryError,
@@ -1686,19 +1685,19 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('🔴 Rappi 2b: un pedido de Rappi en efectivo no se manda a la terminal (409 RAPPI_CASH_ORDER_CASH_ONLY), antes de tocarla', async () => {
+  it('🔴 Rappi 2b: un pedido de Rappi en efectivo no se manda a la terminal (412 RAPPI_CASH_ORDER_CASH_ONLY, hz:5bda0b30:D1), antes de tocarla', async () => {
     order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'R-1', status: 'CONFIRMED', thirdPartyCashDue: '10.00' })
 
     const error = await terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-RAPPI', orderId: 'order-rappi' })).then(
       () => null,
       (e: any) => e,
     )
-    expect(error).toMatchObject({ statusCode: 409, code: 'RAPPI_CASH_ORDER_CASH_ONLY' })
+    expect(error).toMatchObject({ statusCode: 412, code: 'RAPPI_CASH_ORDER_CASH_ONLY' })
     expect(tpr().create).not.toHaveBeenCalled()
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a la terminal (409 ONLINE_ORDER_PAID_BY_CARD), con lápida', async () => {
+  it('Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a la terminal (412 ONLINE_ORDER_PAID_BY_CARD, hz:5bda0b30:D1), con lápida', async () => {
     order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'WEB-1', status: 'PENDING', thirdPartyCashDue: null })
     prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({
       paymentMode: 'CARD_ONLINE',
@@ -1711,7 +1710,9 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
         () => null,
         (e: any) => e,
       )
-    expect(error).toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD', details: { requestId: 'REQ-WEB' } })
+    expect(error).toMatchObject({ statusCode: 412, code: 'ONLINE_ORDER_PAID_BY_CARD', details: { requestId: 'REQ-WEB' } })
+    // La lápida guarda el mismo estado que viajó: su réplica responde igual.
+    expect(tpr().create.mock.calls[0][0].data.resultJson).toMatchObject({ httpStatus: 412, code: 'ONLINE_ORDER_PAID_BY_CARD' })
     // Sólo la lápida (FAILED): ningún cobro PENDING nace y la terminal no se entera.
     expect(tpr().create).toHaveBeenCalledTimes(1)
     expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_PAID_BY_CARD' })
@@ -2151,8 +2152,8 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
     { failureCode: 'REJECTED_ORDER_CANCELLED', httpStatus: 400, code: 'ORDER_CANCELLED_NO_NEW_CHARGE', clase: BadRequestError },
     { failureCode: 'REJECTED_ORDER_PAID', httpStatus: 409, code: 'ORDER_ALREADY_PAID', clase: OrderAlreadyPaidError },
     { failureCode: 'REJECTED_ORDER_NOT_FOUND', httpStatus: 400, code: 'ORDER_NOT_FOUND', clase: BadRequestError },
-    { failureCode: 'REJECTED_ORDER_RAPPI_CASH', httpStatus: 409, code: 'RAPPI_CASH_ORDER_CASH_ONLY', clase: ConflictError },
-    { failureCode: 'REJECTED_ORDER_PAID_BY_CARD', httpStatus: 409, code: 'ONLINE_ORDER_PAID_BY_CARD', clase: ConflictError },
+    { failureCode: 'REJECTED_ORDER_RAPPI_CASH', httpStatus: 412, code: 'RAPPI_CASH_ORDER_CASH_ONLY', clase: AppError },
+    { failureCode: 'REJECTED_ORDER_PAID_BY_CARD', httpStatus: 412, code: 'ONLINE_ORDER_PAID_BY_CARD', clase: AppError },
   ])(
     'la réplica de una lápida $failureCode reproduce el rechazo ($httpStatus $code) aunque su respuesta guardada no se pueda leer',
     async ({ failureCode, httpStatus, code, clase }) => {

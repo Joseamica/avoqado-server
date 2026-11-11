@@ -62,12 +62,7 @@ import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTer
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { computeOrderBalance, REFUND_PAYMENT_TYPE } from './shared/orderBalance'
-import {
-  cardOnlineOrderError,
-  isCardOnlineOrderInTx,
-  MENSAJE_PAGADO_CON_TARJETA,
-  ONLINE_ORDER_PAID_BY_CARD,
-} from './online-ordering/card/guards'
+import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
@@ -1321,6 +1316,13 @@ const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
 /** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
 const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
 const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
+/**
+ * hz:5bda0b30:D1 · pedido que no se cobra en la terminal (Rappi en efectivo, pagado con tarjeta en línea). Las otras puertas los
+ * rechazan con 409; aquí va 412 por la misma razón que el «falta $X»: con 409 las apps vivas consultan el estado y sólo dicen
+ * «El cobro fue rechazado» (suena al banco); con 412 muestran este motivo. La lápida guarda el 412 y su réplica responde igual.
+ */
+const pedidoQueNoSeCobraEnLaTerminal = (mensaje: string, code: string, details?: unknown) =>
+  new AppError(mensaje, HTTP_COBRO_MAYOR_QUE_EL_SALDO, true, code, details)
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1429,9 +1431,9 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         details,
       )
     case 'REJECTED_ORDER_RAPPI_CASH':
-      return new ConflictError(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
+      return pedidoQueNoSeCobraEnLaTerminal(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
     case 'REJECTED_ORDER_PAID_BY_CARD':
-      return new ConflictError(mensaje(MENSAJE_PAGADO_CON_TARJETA), ONLINE_ORDER_PAID_BY_CARD, details)
+      return pedidoQueNoSeCobraEnLaTerminal(mensaje(MENSAJE_PAGADO_CON_TARJETA), ONLINE_ORDER_PAID_BY_CARD, details)
     case 'REJECTED_ORDER_PAID':
       return new OrderAlreadyPaidError(mensaje('La cuenta ya está pagada por completo. Actualiza la lista de órdenes.'), details)
     case 'REJECTED_ORDER_NOT_FOUND':
@@ -1973,12 +1975,15 @@ class TerminalPaymentService {
         if (esRappiEnEfectivo(order)) {
           return rechazar(
             'REJECTED_ORDER_RAPPI_CASH',
-            new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
+            pedidoQueNoSeCobraEnLaTerminal(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
         }
         // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a cobrar a la terminal. Mismo lock, sin dinero movido.
         if (await isCardOnlineOrderInTx(tx, { venueId, orderId: request.orderId })) {
-          return rechazar('REJECTED_ORDER_PAID_BY_CARD', cardOnlineOrderError(detalles))
+          return rechazar(
+            'REJECTED_ORDER_PAID_BY_CARD',
+            pedidoQueNoSeCobraEnLaTerminal(MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD, detalles),
+          )
         }
         const exchange = await tx.exchange.findUnique({
           where: { newOrderId: request.orderId, venueId },
