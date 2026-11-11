@@ -751,3 +751,32 @@ describe('cantidad que sube en un renglón que ya está en la pantalla', () => {
     expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(2)
   })
 })
+
+// Estación «No lleva comanda» (plan 2026-11-10, Task 2). Va al final: crea su estación y no cambia a las de arriba.
+describe('estación «No lleva comanda»', () => {
+  it('preparacion_v1_no_arma_kds_para_sin_comanda: con preparación por producto, lo de la tienda no arma comanda y la marca se limpia', async () => {
+    const tienda = (await prisma.printStation.create({ data: { venueId, name: 'Tienda', sendsComanda: false } })).id
+    const abarrotes = (
+      await prisma.menuCategory.create({ data: { venueId, name: 'Abarrotes', slug: `abarrotes-${SUF}`, printStationId: tienda } })
+    ).id
+    const takis = (
+      await prisma.product.create({
+        data: { venueId, sku: `Takis-${SUF}`, name: 'Takis', categoryId: abarrotes, price: new Prisma.Decimal(25) },
+      })
+    ).id
+    const preparacion = { serviceCourse: { id: 'immediate', label: 'Inmediato', kind: 'IMMEDIATE', preparationVersion: 1, sortOrder: 0 } }
+    const v = await nuevaVenta({
+      items: { create: [renglon(taco, 'Taco', 1, preparacion), renglon(takis, 'Takis', 2, preparacion)] },
+    })
+
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+
+    const comandas = await comandasDe(v.id)
+    expect(comandas.map(c => [c.printStationId, c.preparationVersion, c.items.map(i => i.productName)])).toEqual([[cocina, 1, ['Taco']]])
+    const renglonTakis = await prisma.orderItem.findFirstOrThrow({ where: { orderId: v.id, productId: takis } })
+    expect(await prisma.kdsOrderItem.count({ where: { orderItemId: renglonTakis.id } })).toBe(0)
+    expect(await prisma.kdsOrder.count({ where: { venueId, printStationId: tienda } })).toBe(0)
+    // La marca se limpia: lo que no lleva comanda no deja la venta «pendiente de cocina» para el barrido.
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+})

@@ -98,6 +98,8 @@ export function planKitchenTickets(input: {
    * renglón que YA tiene comanda sí sale al pagar: nunca viajó.
    */
   soloSinEnviar: boolean
+  /** Estaciones «No lleva comanda»: lo ruteado ahí nunca arma comanda de pantalla (aunque viniera entre las pantallas). */
+  sinComanda?: ReadonlySet<string>
 }): KitchenTicketPlan[] {
   const desdePorEstacion = new Map(input.screens.map(s => [s.id, s.since.getTime()]))
   if (desdePorEstacion.size === 0) return []
@@ -133,6 +135,7 @@ export function planKitchenTickets(input: {
       },
       input.routing,
     )
+    if (estacion !== null && input.sinComanda?.has(estacion)) continue
     let destino: string | null
     if (estacion === null) destino = null
     else if (desdePorEstacion.has(estacion)) destino = estacion

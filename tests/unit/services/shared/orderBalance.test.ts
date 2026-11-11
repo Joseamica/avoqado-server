@@ -297,6 +297,13 @@ describe('P12 — el IVA que va aparte entra al total y al saldo (Codex r2; foun
   it('🔴 DESCONOCIDO con IVA > 0 (SoftRestaurant de antes del contrato): también suma', () => {
     expect(Number(computeOrderBalance(orden('DESCONOCIDO', 16), pagos).total)).toBe(116)
   })
+  it('D5 (M13 sembrada, 10-nov): $120 − cortesía $20 = $100.00 como venta nativa; con el IVA incluido escrito y sin contrato salía 116.55', () => {
+    const m13 = { subtotal: 120, discountAmount: 20, serviceChargeAmount: 0, tipAmount: 0, status: 'PENDING' }
+    // Así la escribía la siembra (taxAmount = 120 − 120/1.16, sin contrato): la regla del 3-sep lo lee como IVA aparte.
+    expect(computeStoredOrderTotal({ ...m13, contratoDePrecio: 'DESCONOCIDO', taxAmount: 16.55 }).toFixed(2)).toBe('116.55')
+    // Así la escribe ahora (`prisma/seed.ts`, guardado por `seedSinIvaEncima.test.ts`), igual que toda venta nativa.
+    expect(computeStoredOrderTotal({ ...m13, contratoDePrecio: 'IVA_INCLUIDO', taxAmount: 0 }).toFixed(2)).toBe('100.00')
+  })
   it('control: IVA_INCLUIDO nunca suma el IVA aunque venga escrito; un IVA negativo nunca baja lo que se debe', () => {
     expect(Number(computeOrderBalance(orden('IVA_INCLUIDO', 16), pagos).total)).toBe(100)
     expect(Number(computeOrderBalance(orden('IVA_APARTE', -5), pagos).total)).toBe(100)

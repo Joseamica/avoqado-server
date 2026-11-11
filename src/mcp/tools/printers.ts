@@ -1,10 +1,10 @@
 /**
  * PRINT_STATIONS — MCP read tools (feature gratis/core, sin plan gate).
  *
- * Lectura (list_printers · list_print_stations · print_routing_preview · list_kitchen_tickets) + UNA escritura: la
- * casilla de pantalla de cocina (set_print_station_kitchen_display), con la MISMA puerta que el dashboard (sólo
- * Avoqado hasta la fase 3.6; después, dueños con Pro) y en 2 pasos (invariante MCP #4).
- * El resto de la configuración (impresoras/estaciones/ruteo) se hace desde el dashboard.
+ * Lectura (list_printers · list_print_stations · print_routing_preview · list_kitchen_tickets) + DOS escrituras, en 2
+ * pasos (invariante MCP #4): la casilla de pantalla de cocina (set_print_station_kitchen_display), con la MISMA puerta
+ * que el dashboard (sólo Avoqado hasta la fase 3.6; después, dueños con Pro), y crear una estación «No lleva comanda»
+ * (create_no_comanda_print_station, plan 2026-11-10). El resto de la configuración se hace desde el dashboard.
  * Todo scoped al venue del operador (guard.venueFilter) + requirePermission('printers:read').
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -13,6 +13,7 @@ import { ForbiddenError } from '@/errors/AppError'
 import { PANTALLA_ABIERTA_A_CLIENTES } from '@/services/kds/kitchenDisplayRelease'
 import { countKdsOrders, listKdsOrders } from '@/services/mobile/kds.mobile.service'
 import {
+  createStation,
   getGateway,
   getRouting,
   KITCHEN_DISPLAY_NOT_READY_NOTICE,
@@ -196,6 +197,47 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         station: { id: guardada.id, name: guardada.name, hasKitchenDisplay: guardada.hasKitchenDisplay },
         aviso: avisoPantalla,
       })
+    },
+  )
+
+  server.tool(
+    'create_no_comanda_print_station',
+    'Create a print station of type "No lleva comanda" (no kitchen ticket) for products that do not go to the kitchen (store, groceries) (PRINT_STATIONS). On updated POS devices, whatever is routed to it (by category or product) prints no kitchen ticket, never shows on the kitchen display and raises no "kitchen ticket did not print" warning; POS devices not yet updated keep sending the ticket. It is created without printer, packing, default or kitchen display, and its type never changes (to undo it, delete the station). Next step: assign its categories in the dashboard Routing tab. Two steps: the first call only previews; call again with confirm:true to save. Requires printers:manage.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      name: z.string().trim().min(1).max(60).describe('Station name, unique in the venue (e.g. "Tienda"), up to 60 characters'),
+      confirm: z.boolean().optional().describe('Set true on the SECOND call to actually save'),
+    },
+    async ({ venueId, name, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('printers:manage', venueId)
+      requireWriteScopeAlways(scope, 'printers:manage', 'crea una estación «No lleva comanda»: lo que se le asigne deja de mandar comanda')
+
+      // `@@unique([venueId, name])`: se explica antes de que la base lo rechace.
+      if ((await listStations(venueId)).some(s => s.name === name)) {
+        return text({ ok: false, error: `Ya existe una estación «${name}» en este negocio. Usa otro nombre.` })
+      }
+      const siguiente = `Asígnale sus categorías (o productos) en la pestaña Ruteo de «Impresoras y estaciones» del DASHBOARD. Las cajas sin actualizar siguen mandando la comanda de esos productos.`
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          mensaje: `Vas a crear la estación «${name}» de tipo «No lleva comanda»: lo que se le asigne no imprime comanda, no sale en la pantalla de cocina y no avisa. El tipo no se cambia después (para quitarla, se borra). Vuelve a llamar con confirm:true para crearla.`,
+          seCrea: { name, sendsComanda: false, impresora: null, empaque: false, predeterminada: false, pantallaDeCocina: false },
+          despues: siguiente,
+        })
+      }
+
+      const creada = await createStation(venueId, { name, sendsComanda: false }, scope.staffId)
+      await auditMcpWrite(scope, {
+        action: 'PRINT_STATION_CREATED',
+        entity: 'PrintStation',
+        entityId: creada.id,
+        venueId,
+        data: { name: creada.name, sendsComanda: false },
+      })
+      return text({ ok: true, station: { id: creada.id, name: creada.name, sendsComanda: creada.sendsComanda }, siguiente })
     },
   )
 

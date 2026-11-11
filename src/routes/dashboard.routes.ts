@@ -237,6 +237,7 @@ import {
 import { GetPrivacyNoticeSchema, UpsertPrivacyNoticeSchema } from '../schemas/dashboard/privacyNotice.schema'
 import { CancelarCuentaSinCobrarSchema, SettleOrderSchema } from '../schemas/dashboard/order.schema'
 import { UpdateShiftSchema } from '../schemas/dashboard/shift.schema'
+import { CashCountCorrectionSchema } from '../schemas/dashboard/shift.schema'
 import {
   CreateCustomerGroupSchema,
   UpdateCustomerGroupSchema,
@@ -9001,6 +9002,46 @@ router.put(
   // `shifts:update` a secas y un `PUT {"endingCash":0}` para leer el esperado en `cashDifference`.
   marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   shiftController.updateShift,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/shifts/{shiftId}/cash-count-correction:
+ *   post:
+ *     tags: [Shifts]
+ *     summary: Corregir el conteo de efectivo de un corte cerrado (gerente para arriba)
+ *     description: Cambia juntos el conteo del turno y de su caja ligada, recalcula la diferencia y deja bitácora. Con candado optimista (expected*).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [countedCash, reason, expectedCurrentCount, expectedResultingDifference, expectedCorrectionCount]
+ *             properties:
+ *               countedCash: { type: number, minimum: 0, description: 'Nuevo conteo en pesos (máx. 2 decimales)' }
+ *               reason: { type: string, minLength: 3, maxLength: 300 }
+ *               expectedCurrentCount: { type: number }
+ *               expectedResultingDifference: { type: number }
+ *               expectedCorrectionCount: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Conteo corregido }
+ *       400: { description: Monto o motivo inválido }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       409: { description: El conteo cambió, el corte no se puede corregir o ya tiene demasiadas correcciones }
+ */
+router.post(
+  '/venues/:venueId/shifts/:shiftId/cash-count-correction',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:update'),
+  validateRequest(CashCountCorrectionSchema),
+  shiftController.correctCashCount,
 )
 
 // ==========================================

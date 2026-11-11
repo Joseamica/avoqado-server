@@ -40,8 +40,15 @@ const RENGLON = {
   modifiers: [],
 }
 
-type Folio = { requiresAcceptance: boolean; expiredAt?: Date | null; cancelledAt?: Date | null; rejectedAt?: Date | null } | null
-function base(o: { folio?: Folio; status?: string; tocado?: boolean } = {}) {
+type Folio = {
+  requiresAcceptance: boolean
+  createdAt?: Date
+  expiredAt?: Date | null
+  cancelledAt?: Date | null
+  cancelledBy?: string | null
+  rejectedAt?: Date | null
+} | null
+function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobro?: Date | null; tardios?: number } = {}) {
   const folio = o.folio === undefined ? { requiresAcceptance: false, expiredAt: T } : o.folio
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async () => [{ id: ORDER }])
@@ -49,7 +56,17 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean } = {}) {
     select?.onlineOrder
       ? {
           status: o.status ?? 'COMPLETED',
-          onlineOrder: folio ? { expiredAt: null, cancelledAt: null, rejectedAt: null, ...folio } : null,
+          ...(o.horaDelCobro !== undefined ? { loyaltySaleAt: o.horaDelCobro } : {}),
+          onlineOrder: folio
+            ? {
+                createdAt: new Date('2026-11-10T11:30:00.000Z'),
+                expiredAt: null,
+                cancelledAt: null,
+                cancelledBy: null,
+                rejectedAt: null,
+                ...folio,
+              }
+            : null,
         }
       : {
           id: ORDER,
@@ -67,6 +84,7 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean } = {}) {
   // hz:dcc49fe5:D1: la cobertura se lee como unidades ya mandadas por renglón (Σ por `groupBy`).
   prismaMock.kdsOrderItem.groupBy.mockResolvedValue([] as any)
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+  prismaMock.payment.count.mockResolvedValue(o.tardios ?? 1) // regla C: los cobros que llegaron desde el cierre
 }
 const tocadoLeido = () => prismaMock.orderItem.findFirst.mock.calls.map((c: any[]) => c[0]).find((a: any) => a.where.OR)
 
@@ -116,6 +134,67 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
     expect(tocadoLeido()).toEqual({
       where: { orderId: ORDER, OR: [{ createdAt: { gte: desde } }, { updatedAt: { gte: desde } }] },
       select: { id: true },
+    })
+  })
+
+  it.each<KitchenTrigger>(['PAID', 'ROUND', 'SWEEP', 'LEGACY_POST'])(
+    'regla C (founder, 10-nov): sellado y nada tocado, pero cobrado en la caja ANTES de T (%s) ⇒ arma como sin sello, sin preguntar por renglones',
+    async trigger => {
+      prismaMock.orderItem.findFirst.mockReset()
+      base({ horaDelCobro: new Date('2026-11-10T11:55:00.000Z') }) // folio de las 11:30, cobrado a las 11:55, venció a las 12:00
+      await authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger })
+      expect(planKitchenTickets).toHaveBeenCalled()
+      expect(tocadoLeido()).toBeUndefined()
+    },
+  )
+
+  it.each([
+    ['después de T', new Date('2026-11-10T12:15:00.000Z'), undefined],
+    ['justo en T', T, undefined],
+    ['sin hora', null, undefined],
+    ['antes de que existiera el folio (reloj sin hora)', new Date('2026-11-10T11:00:00.000Z'), undefined],
+    // La fecha del sello (la conciliación la pone al llegar el dinero) y la de «cancelado por otra vía» se escriben DESPUÉS de anular.
+    ['antes del sello sin quién (no es fecha exacta)', new Date('2026-11-10T11:55:00.000Z'), { cancelledAt: T, cancelledBy: null }],
+    [
+      'antes de «cancelado por otra vía» (no es fecha exacta)',
+      new Date('2026-11-10T11:55:00.000Z'),
+      { cancelledAt: T, cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' },
+    ],
+  ])('regla C: cobrado %s ⇒ la supresión de B4 sigue (0 comandas, la marca se limpia)', async (_c, hora, cierre) => {
+    prismaMock.orderItem.findFirst.mockReset()
+    base({ horaDelCobro: hora as Date | null, ...(cierre ? { folio: { requiresAcceptance: false, ...cierre } } : {}) })
+    await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'ROUND' })).resolves.toEqual({ ticketIds: [] })
+    expect(planKitchenTickets).not.toHaveBeenCalled()
+    expect(tocadoLeido()).toBeDefined()
+  })
+
+  it('regla C (Codex r1 #2): cobrado antes de T, pero DOS cobros llegaron desde el cierre ⇒ la supresión de B4 sigue', async () => {
+    prismaMock.orderItem.findFirst.mockReset()
+    base({ horaDelCobro: new Date('2026-11-10T11:55:00.000Z'), tardios: 2 })
+    await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })).resolves.toEqual({ ticketIds: [] })
+    expect(planKitchenTickets).not.toHaveBeenCalled()
+    expect(prismaMock.payment.count).toHaveBeenCalledWith({
+      where: {
+        venueId: VENUE,
+        orderId: ORDER,
+        status: 'COMPLETED',
+        amount: { gt: 0 },
+        OR: [{ createdAt: { gte: T } }, { updatedAt: { gte: T } }],
+      },
+    })
+  })
+
+  it('la relectura bajo el candado trae la hora del cobro y la creación del folio (una consulta, sin otra lectura)', async () => {
+    prismaMock.orderItem.findFirst.mockReset()
+    base()
+    await authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })
+    const relectura = prismaMock.order.findFirst.mock.calls.map((c: any[]) => c[0]).find((a: any) => a.select?.onlineOrder)
+    expect(relectura.select).toEqual({
+      status: true,
+      loyaltySaleAt: true,
+      onlineOrder: {
+        select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
+      },
     })
   })
 

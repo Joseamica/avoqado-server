@@ -9,6 +9,7 @@ import type { RoutingConfig } from '../printing/printRouting.engine'
 import type { ScreenStation } from './kitchenTicketPlanning'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { ForbiddenError } from '../../errors/AppError'
+import { esSinComanda } from '../printing/printConfig.service'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -46,24 +47,37 @@ export interface EstacionesDelNegocio {
   routing: RoutingConfig
   /** Estaciones activas con pantalla, con su «cuenta nueva». */
   screens: ScreenStation[]
+  /** Estaciones «No lleva comanda»: siguen en `activeStationIds` (su ruteo resuelve ahí) pero nunca son pantalla ni default. */
+  sinComanda: Set<string>
 }
 
 /** Las estaciones en UNA consulta. Un negocio real tiene 1-5; el tope es defensa. */
 export async function estacionesDelNegocio(venueId: string, db: Db = prisma): Promise<EstacionesDelNegocio> {
   const filas = await db.printStation.findMany({
     where: { venueId },
-    select: { id: true, active: true, isDefault: true, hasKitchenDisplay: true, kitchenDisplaySince: true, createdAt: true },
+    select: {
+      id: true,
+      active: true,
+      isDefault: true,
+      hasKitchenDisplay: true,
+      kitchenDisplaySince: true,
+      createdAt: true,
+      sendsComanda: true,
+    },
     orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
     take: 100,
   })
   const activas = filas.filter(f => f.active)
+  // Mismo dominio que `buildPrintConfig`: una «No lleva comanda» nunca es default ni pantalla, aunque la fila diga otra cosa.
+  const conComanda = activas.filter(f => !esSinComanda(f))
   return {
     routing: {
-      defaultStationId: activas.find(f => f.isDefault)?.id ?? null,
+      defaultStationId: conComanda.find(f => f.isDefault)?.id ?? null,
       activeStationIds: new Set(activas.map(f => f.id)),
     },
     // Sin sello (no debería pasar tras el relleno de la migración): cuenta desde que se creó la estación.
-    screens: activas.filter(f => f.hasKitchenDisplay).map(f => ({ id: f.id, since: f.kitchenDisplaySince ?? f.createdAt })),
+    screens: conComanda.filter(f => f.hasKitchenDisplay).map(f => ({ id: f.id, since: f.kitchenDisplaySince ?? f.createdAt })),
+    sinComanda: new Set(activas.filter(f => esSinComanda(f)).map(f => f.id)),
   }
 }
 

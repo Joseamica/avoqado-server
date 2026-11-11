@@ -72,4 +72,28 @@ describe('removeIntentPromotions — compensación de una ronda rechazada, por i
     })
     expect(prismaMock.orderItem.deleteMany).toHaveBeenCalledTimes(1)
   })
+
+  // hz:381780f0:D1 (Codex r3 #1): la ronda con promociones conserva el criterio de develop. Un choque ENVUELTO al compensar
+  // (P2010 con 40P01, que el reducer ya reintenta en los demás intents) se registra y no se relanza: la ronda va a cuarentena
+  // como antes; reintentarla podía duplicar el combo si otra caja lo separaba a otro cheque antes del reenvío.
+  it('un 40P01 envuelto (P2010) al compensar se registra y NO se relanza, como en develop', async () => {
+    const { Prisma } = jest.requireActual('@prisma/client')
+    const { REINTENTO_POR_INTERBLOQUEO } = jest.requireActual('@/utils/serializableRetry')
+    const intentosDeHoy = REINTENTO_POR_INTERBLOQUEO.intentos
+    REINTENTO_POR_INTERBLOQUEO.intentos = 1 // el 40P01 agota el reintento del retiro y llega a la compensación
+    try {
+      prismaMock.orderPromotion.findFirst
+        .mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError('Raw query failed. Code: `40P01`.', {
+            code: 'P2010',
+            clientVersion: '6.19.3',
+            meta: { code: '40P01', message: 'deadlock detected' },
+          }),
+        )
+        .mockResolvedValueOnce({ id: 'op-2', order: { paymentStatus: 'PENDING', discountAmount: 0, paidAmount: 0 } })
+      await expect(removeIntentPromotions('venue-1', 'order-1', ['inst-a', 'inst-b'])).resolves.toBe(1)
+    } finally {
+      REINTENTO_POR_INTERBLOQUEO.intentos = intentosDeHoy
+    }
+  })
 })

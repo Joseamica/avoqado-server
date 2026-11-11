@@ -206,6 +206,41 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
     expect(r.cashDeclared).toBe(1000)
   })
 
+  describe('«Corregir conteo»: una lectura fallida de la caja no es «sin caja»', () => {
+    const corteContado = () => {
+      ;(prismaMock as any).shift = { findFirst: jest.fn().mockResolvedValue({ ...turno(), originSystem: 'AVOQADO', cashDifference: -10 }) }
+      prismaMock.activityLog.count.mockResolvedValue(0)
+      prismaMock.activityLog.findMany.mockResolvedValue([])
+    }
+
+    it('si la consulta de la caja truena, no culpa a la caja: bloqueado y sin razón', async () => {
+      corteContado()
+      ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockRejectedValue(new Error('db down')) }
+      const r = await getShiftById(VENUE, 'shift-1')
+      expect(r.countCorrection).toEqual({ allowed: false, blockedReason: null, correctionCount: 0 })
+    })
+
+    it('con 50 correcciones contadas (aunque la lista omita las mal formadas) no ofrece la 51: TOO_MANY', async () => {
+      corteContado()
+      prismaMock.activityLog.count.mockResolvedValue(50)
+      ;(prismaMock as any).cashDrawerSession = {
+        findFirst: jest.fn().mockResolvedValue(caja({ shiftId: 'shift-1', actualAmount: 1000, overShort: -300 })),
+      }
+      const r = await getShiftById(VENUE, 'shift-1')
+      expect(prismaMock.activityLog.count).toHaveBeenCalledWith({
+        where: { venueId: VENUE, entity: 'Shift', entityId: 'shift-1', action: 'CASH_COUNT_CORRECTED' },
+      })
+      expect(r.countCorrection).toEqual({ allowed: false, blockedReason: 'TOO_MANY', correctionCount: 50 })
+    })
+
+    it('si de verdad no hay caja, sí dice NO_LINKED_DRAWER', async () => {
+      corteContado()
+      ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) }
+      const r = await getShiftById(VENUE, 'shift-1')
+      expect(r.countCorrection).toEqual({ allowed: false, blockedReason: 'NO_LINKED_DRAWER', correctionCount: 0 })
+    })
+  })
+
   it('🔴 una caja cerrada SIN conteo trae counted=false y overShort=null — nunca "cuadró"', async () => {
     ;(prismaMock as any).cashDrawerSession = {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),

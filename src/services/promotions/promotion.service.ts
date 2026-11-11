@@ -12,7 +12,7 @@ import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
-import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
+import { CODIGOS_TRANSITORIOS } from '@/services/shared/erroresTransitorios'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   parseServiceCourseSnapshot,
@@ -384,8 +384,10 @@ export async function removeIntentPromotions(venueId: string, orderId: string, i
         error: err instanceof Error ? err.message : String(err),
       })
       // Codex r2 N5: un error TRANSITORIO no se traga — la compensación quedó a medias y el intent debe reintentarse. Se sigue
-      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED.
-      if (transitorio === null && esErrorTransitorio(err)) transitorio = err
+      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED. Sólo los de la LISTA:
+      // un choque envuelto (40P01 en un P2010) se registra y la ronda va a cuarentena como siempre (hz:381780f0:D1, Codex r3 #1).
+      const codigo = (err as { errorCode?: unknown; code?: unknown } | null)?.errorCode ?? (err as { code?: unknown } | null)?.code
+      if (transitorio === null && typeof codigo === 'string' && CODIGOS_TRANSITORIOS.has(codigo)) transitorio = err
     }
   }
   if (transitorio !== null) throw transitorio

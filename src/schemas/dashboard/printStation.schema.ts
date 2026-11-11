@@ -120,6 +120,8 @@ export const createStationSchema = z.object({
       /** ¿Aquí se empaca? Recibe el ticket consolidado del pedido de reparto. UNA por venue. */
       isPacking: z.boolean().optional(),
       displayOrder: z.number().int().min(0).optional(),
+      /** `false` = «No lleva comanda». Sólo al crear: al editar no se acepta (una estación nunca cambia de tipo). */
+      sendsComanda: z.boolean({ invalid_type_error: 'sendsComanda debe ser verdadero o falso' }).optional(),
     })
     .strict(),
   params: z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough(),

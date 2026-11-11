@@ -3,6 +3,8 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { countCashCountCorrections, listCashCountCorrections, CashCountCorrectionEntry } from './cashCountCorrection.service'
+import { countCorrectionBlock, CountCorrectionBlockCode, MAX_CORRECTIONS_PER_SHIFT } from './cashCountCorrection.rules'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
@@ -308,6 +310,8 @@ export async function resolveShiftCashDrawer(
     counted,
     actualAmount: counted ? money(session.actualAmount) : null,
     overShort: counted && session.overShort != null ? money(session.overShort) : null,
+    // Sólo la caja ligada por `shiftId` permite corregir el conteo; la de la ventana de tiempo no.
+    linkedToShift: !!shiftId && session.shiftId === shiftId,
   }
 }
 
@@ -649,6 +653,7 @@ export async function getShiftById(
 
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
   let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
+  let cashDrawerReadFailed = false
   try {
     // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un
     // `cashDifference` que se firmó contra la propia — dos números para el mismo dinero.
@@ -660,7 +665,45 @@ export async function getShiftById(
       shiftId,
     )
   } catch (err) {
+    cashDrawerReadFailed = true
     logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
+      shiftId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500. `TOO_MANY` sólo se muestra: la corrección la
+  // rechaza con su propio CASH_COUNT_TOO_MANY, contando igual que aquí.
+  let countCorrection: {
+    allowed: boolean
+    blockedReason: CountCorrectionBlockCode | 'TOO_MANY' | null
+    correctionCount?: number
+  } = { allowed: false, blockedReason: null }
+  let countCorrections: CashCountCorrectionEntry[] = []
+  try {
+    const [correctionCount, list] = await Promise.all([
+      countCashCountCorrections(prisma, venueId, shiftId),
+      listCashCountCorrections(venueId, shiftId),
+    ])
+    const block = countCorrectionBlock(
+      shift as any,
+      cashDrawer
+        ? {
+            linkedToShift: cashDrawer.linkedToShift,
+            status: cashDrawer.status,
+            actualAmount: cashDrawer.actualAmount,
+            overShort: cashDrawer.overShort,
+          }
+        : null,
+    )
+    // Si la caja no se pudo leer, no se sabe si se puede: bloqueado sin razón, nunca «no tiene caja ligada».
+    const blockedReason = cashDrawerReadFailed ? null : (block ?? (correctionCount >= MAX_CORRECTIONS_PER_SHIFT ? 'TOO_MANY' : null))
+    countCorrection = { allowed: !cashDrawerReadFailed && blockedReason === null, blockedReason, correctionCount }
+    countCorrections = list
+  } catch (err) {
+    countCorrection = { allowed: false, blockedReason: null }
+    countCorrections = []
+    logger.warn('[COUNT-CORRECTION] No se pudo adjuntar la corrección de conteo al detalle del turno', {
       shiftId,
       error: err instanceof Error ? err.message : String(err),
     })
@@ -685,6 +728,8 @@ export async function getShiftById(
     updatedAt: (shift as any).updatedAt,
     // Fase 5 de la unificación de caja: el arqueo del cajón que cubrió el turno (aditivo, puede ser null)
     cashDrawer,
+    countCorrection,
+    countCorrections,
     // NEW: Detailed breakdowns
     payments: formattedPayments,
     orders: formattedOrders,
@@ -883,8 +928,13 @@ export async function deleteShift(venueId: string, shiftId: string, performedBy?
     // 🔴 S3 «Efectivo sin red en el turno correcto» (Codex r8 código #1): borrar un turno SUELTA la liga de su caja (`SetNull`). Si la
     // caja sigue ABIERTA (el cierre va en dos pasos y el segundo falló), queda «abierta sin turno» y la venta tardía de la cola de un
     // aparato cae en el turno vivo. El turno se borra sólo cuando su caja ya cerró, y en el MISMO `DELETE` (atómico, sin ventana).
-    const borrados = await prisma.shift.deleteMany({
-      where: { id: shiftId, venueId, NOT: { cashDrawerSession: { is: { status: 'OPEN' } } } },
+    // «Corregir conteo» (Codex r1 F2): el borrado va turno → caja (su `SET NULL`) y la corrección va caja → turno. Sin coordinarlos se
+    // traban (40P01): los dos toman primero el candado del ciclo del negocio.
+    const borrados = await prisma.$transaction(async tx => {
+      await lockShiftLifecycleForVenue(tx, venueId)
+      return tx.shift.deleteMany({
+        where: { id: shiftId, venueId, NOT: { cashDrawerSession: { is: { status: 'OPEN' } } } },
+      })
     })
     if (borrados.count === 0) {
       logger.warn('Cannot delete a shift whose cash drawer is still open', { venueId, shiftId })
@@ -1326,6 +1376,13 @@ export async function updateShift(
   // snapshot con el instante anterior.
   if (existingShift.status === 'CLOSING') {
     throw new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
+  }
+
+  // 🔴 El conteo de un corte con caja ligada ya no se cambia por aquí: «Corregir conteo» mueve turno y caja juntos, con
+  // candado y bitácora. Sólo cuenta si el PUT trae `endingCash` (incluido `null`); `totalSales`/`totalTips` siguen igual.
+  if (data.endingCash !== undefined) {
+    const cajaLigada = await prisma.cashDrawerSession.findFirst({ where: { venueId, shiftId }, select: { id: true } })
+    if (cajaLigada) throw new ConflictError('Para corregir el conteo usa «Corregir conteo»', 'CASH_COUNT_USE_CORRECTION')
   }
 
   // Build update data object, only including provided fields

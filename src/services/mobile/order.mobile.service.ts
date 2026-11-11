@@ -26,7 +26,7 @@ import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, Paymen
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError, RegaloSinPermisoError } from '../../errors/AppError'
 import { operationHash } from '../../utils/operationHash'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
@@ -174,7 +174,12 @@ import {
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { consultarCocina, debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import {
+  armarComandasTrasCommit,
+  cuentasDeSusComandas,
+  ponerComandasConSuCuenta,
+  retirarComandasDeVentaAnulada,
+} from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import {
@@ -278,6 +283,14 @@ export interface CreateOrderInput {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
+  /** hz:e0b12f00:D2 (server-owned): la membresía de quien autorizó el descuento de cuenta que regala (el gerente del PIN o quien llama). */
+  regaloAutorizadoPor?: string
+  /**
+   * hz:e0b12f00:D2: la app pide el PIN de gerente ANTES de mandar un descuento de cuenta que regala (ANDROID/WINDOWS nuevos). Sólo a
+   * ella se le exige `orders:comp` en línea; sin la marca (app vieja, iOS) o desde una cola, la venta se registra con bitácora y aviso.
+   * Como `stampRewardAware`: una marca de capacidad del cuerpo, porque WINDOWS no manda el número de compilación de Play.
+   */
+  cortesiaDeCuentaConPin?: boolean
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -842,6 +855,62 @@ function avisarPrecioNoReconocido(venueId: string, input: CreateOrderInput, orde
   })
 }
 
+/**
+ * hz:e0b12f00:D2 (como `descuentoLibreRegala` de `/tpv/with-items`, D1): un descuento de cuenta LIBRE (sin catálogo ni cupón en línea)
+ * que, con el importe y la base del SERVIDOR y en centavos, deja en $0 lo que queda de los productos. La propina, el cargo por servicio
+ * y los abonos no cuentan (D1 r1 #2). Base en $0 (todo regalado por renglón, que ya pidió su permiso) no es esto. Ojo: ANDROID manda
+ * su descuento de cuenta SIEMPRE como `discount` libre, también el del catálogo.
+ */
+function descuentoDeCuentaRegala(esLibre: boolean, montoPesos: number, basePesos: number): boolean {
+  return esLibre && montoPesos > 0 && basePesos > 0 && Math.round(montoPesos * 100) >= Math.round(basePesos * 100)
+}
+
+/** `SIN_PERMISO`: se registra sin autorizador, con bitácora y aviso. */
+type AutorizacionDelRegalo = { authorizedById?: string } | 'SIN_PERMISO'
+
+/**
+ * hz:e0b12f00:D2: quién autoriza ese regalo. Con `orders:comp` (o el PIN) de la SESIÓN, la fila lleva al autorizador. La app que pide
+ * el PIN antes (`cortesiaDeCuentaConPin`) y llega EN LÍNEA sin él recibe `RegaloSinPermisoError` (el controlador pide el PIN). Una venta
+ * de la cola, o de una app que no sabe pedir el PIN (vieja, iOS), «ya ocurrió»: se registra igual, sin autorizador, con bitácora en la
+ * transacción y aviso al dueño (como «A24»). Rechazarla la dejaría sin registrar en el servidor (D1 r1 #4).
+ */
+function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo {
+  if (input.canCompItems === true && input.performedBy) {
+    return input.regaloAutorizadoPor ? { authorizedById: input.regaloAutorizadoPor } : {}
+  }
+  if (input.isOfflineReplay === true || input.cortesiaDeCuentaConPin !== true) return 'SIN_PERMISO'
+  throw new RegaloSinPermisoError()
+}
+
+const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
+
+/** hz:e0b12f00:D2: el rastro de un regalo sin permiso, en la MISMA transacción. `avisarVentaSinRed` lo encuentra y no lo repite. */
+async function anotarRegaloSinPermisoEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+  montoPesos: number,
+): Promise<void> {
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_DESCUENTO_SIN_PERMISO}`,
+    entity: 'VentaSinRed',
+    entityId: normalizeExternalId(input.externalId) ?? orderId,
+    data: {
+      orderId,
+      montoCents: Math.round(montoPesos * 100),
+      origen: input.isOfflineReplay === true ? 'COLA_SIN_RED' : 'APP_SIN_PIN',
+      subidaPor: input.performedBy ?? null,
+      source: input.source ?? null,
+    },
+  })
+}
+
+const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
+
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
 
@@ -1336,7 +1405,13 @@ export interface TotalesDePromocion {
 /** `existente`: la llave de la venta ya tenía su orden (el reintento sale con ella). */
 export type VentaDeMostradorEnTx =
   | { existente: OrdenCreada }
-  | { order: OrdenCreada; promotionTotals: TotalesDePromocion | null; venta: VentaCalculada }
+  | {
+      order: OrdenCreada
+      promotionTotals: TotalesDePromocion | null
+      venta: VentaCalculada
+      /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
+      regaloSinPermisoPesos?: number
+    }
 
 /**
  * La parte de `createOrderWithItems` de ANTES de su transacción (extraída sin cambiarla, S2b): valida, resuelve el personal, la
@@ -1595,6 +1670,11 @@ export async function crearVentaDeMostradorEnTx(
       catalogoPesos: orderLevelDiscountDecimal,
     })
   }
+  // hz:e0b12f00:D2: sin promociones la base ya se conoce; se decide ANTES de escribir (después de la búsqueda idempotente de arriba).
+  const regaloSinPromociones =
+    promocionesUnicas.length === 0 && descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)
+      ? autorizarRegaloDeCuenta(input)
+      : null
   const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal
   const total = subtotal - discountDecimal + tipDecimal
   const venta = {
@@ -1781,10 +1861,19 @@ export async function crearVentaDeMostradorEnTx(
                 ? Number(orderDiscount.maxDiscountAmount)
                 : null,
           })
-        : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById })
+        : filaDeDescuentoDeCuenta({
+            orderId: createdOrder.id,
+            montoPesos: orderLevelDiscountDecimal,
+            appliedById,
+            ...autorizadorDelRegalo(regaloSinPromociones),
+          })
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
+    if (regaloSinPromociones === 'SIN_PERMISO') {
+      await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, orderLevelDiscountDecimal)
+      return { order: createdOrder, promotionTotals: null, venta, regaloSinPermisoPesos: orderLevelDiscountDecimal }
+    }
     return { order: createdOrder, promotionTotals: null, venta }
   }
 
@@ -1853,6 +1942,10 @@ export async function crearVentaDeMostradorEnTx(
   const descuentoDeOrdenFinal = cupon
     ? montoDelCupon(cupon.discount, topeDescuentoDeOrden)
     : Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+  // hz:e0b12f00:D2: con combos la base es la cuenta CON promociones; si regala sin permiso, todo lo de arriba se revierte.
+  const regaloConPromociones = descuentoDeCuentaRegala(!orderDiscount, descuentoDeOrdenFinal, topeDescuentoDeOrden)
+    ? autorizarRegaloDeCuenta(input)
+    : null
   const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
 
   const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
@@ -1863,9 +1956,13 @@ export async function crearVentaDeMostradorEnTx(
       orderId: createdOrder.id,
       montoPesos: descuentoDeOrdenFinal,
       appliedById: appliedByStaffVenue?.id ?? null,
+      ...autorizadorDelRegalo(regaloConPromociones),
     })
     await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
     await sincronizarRepartos(tx, createdOrder.id)
+  }
+  if (regaloConPromociones === 'SIN_PERMISO') {
+    await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, descuentoDeOrdenFinal)
   }
   const reafirmada = await tx.order.update({
     where: { id: createdOrder.id },
@@ -1881,6 +1978,7 @@ export async function crearVentaDeMostradorEnTx(
     order: reafirmada,
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
+    ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
   }
 }
 
@@ -2043,6 +2141,15 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
+  // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
+  if (created.regaloSinPermisoPesos != null) {
+    void avisarVentaSinRed(venueId, AVISO_DESCUENTO_SIN_PERMISO, {
+      externalId: normalizeExternalId(input.externalId) ?? order.id,
+      orderId: order.id,
+      montoCents: Math.round(created.regaloSinPermisoPesos * 100),
+      staffId: input.performedBy,
+    })
+  }
 
   // Flatten and return response
   return {
@@ -2719,7 +2826,9 @@ export async function splitOrderItemsInTransaction(
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
@@ -2743,6 +2852,7 @@ export async function splitOrderItemsInTransaction(
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -2840,6 +2950,9 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: source.contratoDePrecio,
       // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
       payLater: source.payLater,
+      // D25: lo que estaba por llegar a la pantalla de cocina sigue a sus renglones; el barrido la arma en la cuenta nueva. Con la
+      // hora de ahora: heredar la vieja podía hacer que el barrido se rindiera sin armarla (GIVE_UP a los 15 min, Codex r1 #6).
+      kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
       ...clienteDeLaParteSeparada(source),
     },
     select: { id: true, orderNumber: true, version: true },
@@ -2917,7 +3030,9 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
@@ -2941,6 +3056,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -3025,6 +3141,8 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
         contratoDePrecio: source.contratoDePrecio,
         // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
         payLater: source.payLater,
+        // D25: la marca de cocina sigue a los renglones (mismo criterio que separar cheque).
+        kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
         ...clienteDeLaParteSeparada(source),
       },
       select: { id: true, orderNumber: true },
@@ -3103,7 +3221,11 @@ export async function mergeOrdersInTransaction(
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+    // D25: los candados de comandas van antes que los de las cuentas (el orden del armado): las comandas del origen pasan al destino.
+    // D3 (hz:381780f0): TODOS los que pedirá `ponerComandasConSuCuenta` (el destino y las cuentas ligadas al origen), de entrada y en
+    // orden; pedir el del destino a media transacción se interbloqueaba con anular el destino a la vez.
+    const kdsOrderIds = [targetOrderId, ...(await cuentasDeSusComandas(tx, venueId, sourceOrderId))]
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId], kdsOrderIds })
   } catch (error) {
     // Failed topology discovery performs no mutation; identify the original missing-side DTO.
     if (error instanceof NotFoundError) {
@@ -3201,6 +3323,7 @@ export async function mergeOrdersInTransaction(
       source: true,
       posRawData: true,
       taxAmount: true,
+      kitchenPendingAt: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
       serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
@@ -3328,10 +3451,14 @@ export async function mergeOrdersInTransaction(
     }
   }
   const priorTargetCharges = await targetChargeAmounts()
+  // D25: primero lo del origen que está en comandas ajenas vuelve a las suyas (una cuenta ya dividida antes, Codex r1 #5); después de
+  // mover los renglones, sus comandas pendientes pasan al destino, que es donde viven ahora (el origen se cancela abajo).
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   await tx.orderItem.updateMany({
     where: { orderId: source.id },
     data: { orderId: target.id },
   })
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   // Los cobros automáticos del origen se van con él: el destino re-evalúa
   // los suyos por comensales en el recálculo.
   await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
@@ -3351,6 +3478,8 @@ export async function mergeOrdersInTransaction(
       payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
       ...(duenoQueQueda && !freshTarget.customerId ? { customerId: duenoQueQueda } : {}),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
+      // D25: lo del origen que estaba por llegar a la pantalla de cocina lo arma ahora el barrido del destino (hora de ahora: ver separar).
+      ...(freshSource.kitchenPendingAt ? { kitchenPendingAt: new Date() } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
         : {}),
@@ -6226,7 +6355,9 @@ export async function returnGiftBalanceAndCancelOrder(
     async tx => {
       let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
       try {
-        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+        // D3 (hz:381780f0): los candados de comandas que pedirá el retiro, de entrada (como `cancelOrderInTransaction`).
+        const kdsOrderIds = await cuentasDeSusComandas(tx, venueId, orderId)
+        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds })
       } catch (error) {
         if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
         throw error
@@ -6741,8 +6872,9 @@ export async function cancelOrderInTransaction(
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    // Existing kitchen advisory precedes all shared Order locks, including captured siblings.
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+    // Existing kitchen advisory precedes all shared Order locks, including captured siblings. D3 (hz:381780f0): también los de las
+    // cuentas ligadas por comandas, que el retiro de comandas pedía a media transacción (ciclo con unir esa cuenta a la vez).
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: await cuentasDeSusComandas(tx, venueId, orderId) })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
