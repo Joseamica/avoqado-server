@@ -529,6 +529,34 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       expect(await prisma.kdsOrder.count({ where: { orderId: ing.orderId! } })).toBe(1)
     })
 
+    it('🔴 hz:ce654971:D3 · RELEASE de un programado YA CANCELADO no manda comanda a la cocina', async () => {
+      // Uber no ordena sus webhooks, y un RELEASE que llegó antes que el pedido queda FAILED y la reconciliación lo reintenta
+      // después: el «ya es hora» puede llegar cuando el pedido ya se canceló. Antes, sin comanda previa, la creaba.
+      const programado = {
+        ...pedidoReal,
+        id: `prog4-${Date.now()}`,
+        status: 'SCHEDULED',
+        scheduled_order_target_delivery_time_range: { start_time: '2026-08-21T02:00:00Z', end_time: '2026-08-21T02:30:00Z' },
+      }
+      const idP = `ev-prog4-${Date.now()}`
+      const ing = await processUberEvent(await nuevoEvento(idP, avisoTipo(idP, 'orders.scheduled.notification', programado.id)), {
+        ...deps,
+        fetchOrder: async () => programado,
+      })
+      const idC = `ev-prog4-cancel-${Date.now()}`
+      const c = await processUberEvent(await nuevoEvento(idC, avisoTipo(idC, 'orders.cancel', programado.id)), deps)
+      expect(c.outcome).toBe('CANCELLED')
+
+      const idR = `ev-prog4-rel-${Date.now()}`
+      const filaR = await nuevoEvento(idR, avisoTipo(idR, 'orders.release', programado.id))
+      const r = await processUberEvent(filaR, deps)
+
+      expect(r.outcome).toBe('CANCELLED')
+      expect(await prisma.kdsOrder.count({ where: { orderId: ing.orderId! } })).toBe(0)
+      // Se marca PROCESADO: reintentarlo daría lo mismo.
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: filaR } })).status).toBe(DeliveryOrderEventStatus.PROCESSED)
+    })
+
     it('🔴 el comercio nos QUITA la tienda ⇒ el canal se deshabilita', async () => {
       // Sin esto seguiríamos creyendo que el canal está vivo y reintentando escrituras que
       // van a fallar siempre. Es exactamente el síntoma del canal muerto que encontramos:

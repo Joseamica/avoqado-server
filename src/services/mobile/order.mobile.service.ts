@@ -173,7 +173,7 @@ import {
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
-import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
+import { consultarCocina, debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import {
   armarComandasTrasCommit,
   cuentasDeSusComandas,
@@ -5402,7 +5402,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     await armarComandasTrasCommit(venueId, orderId, 'PAID')
   }
   // S6 (ronda 1): «¿por qué no salió la comanda?» queda en ActivityLog, sólo cuando de verdad se omitió una (había cocina y se saldó).
-  if (orderFullyPaid && cocinaDelNegocio && comandaTardia && edadMs !== null) {
+  // hz:ce654971:D5 (Codex r1 #2): `debeMarcarCocina` contesta `true` en duda; aquí se AFIRMA que había cocina, así que se pregunta con
+  // certeza (sólo en este caso raro: venta tardía de la terminal ya saldada).
+  if (orderFullyPaid && cocinaDelNegocio && comandaTardia && edadMs !== null && (await consultarCocina(venueId, { orderId })) === true) {
     logger.info('[ORDER.MOBILE] Venta de la cola de la terminal que sube tarde: sin comanda de cocina', {
       venueId,
       orderId,

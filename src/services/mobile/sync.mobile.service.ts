@@ -45,7 +45,8 @@ import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
@@ -1259,6 +1260,21 @@ async function applyAddItems(
   const promoInstanceIds = conPromocion
     .map(it => it.promotionRef?.promotionInstanceId)
     .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+  // 🔴 hz:ce654971:D4 (Codex r4 B9 y r1 #1): la marca de cocina de una ronda la pone `addItemsToOrder`, y una ronda de SÓLO combos
+  // no pasa por ahí: sus componentes nacen con `sentToKitchenAt`, el cobro salta lo «ya enviado» y el combo llegaba a la pantalla
+  // hasta la siguiente ronda o el cobro. La marca va DENTRO de la transacción que guarda el combo (no después): una ronda con
+  // combos no se retoma tras una caída (`retomable:false`), así que una marca escrita aparte se perdía si el proceso moría en medio.
+  // Aquí sólo se decide si el negocio tiene pantalla (fuera de toda transacción: nunca lanza); si la cuenta es de mesa lo decide la
+  // promoción bajo el candado de la cuenta (Codex r2 #2). Misma regla que la ronda normal: mostrador nace al pagar.
+  // Sólo en una ronda de SÓLO combos y sólo con el ÚLTIMO (Codex r3 #1): una marca puesta antes de que la ronda quede completa deja
+  // que el barrido cocine un combo que la compensación de abajo borra después (rechazo definitivo del producto normal o de otro
+  // combo). Con el último ya no queda nada que pueda fallar. La ronda mixta la marca `addItemsToOrder` al final, como siempre.
+  const marcarCocinaDeCombos =
+    conPromocion.length > 0 &&
+    normales.length === 0 &&
+    (await debeMarcarCocina(venueId, {
+      hasPreparation: conPromocion.some(it => it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1)),
+    }))
 
   try {
     for (const item of conPromocion) {
@@ -1276,6 +1292,7 @@ async function applyAddItems(
           sentToKitchenAt: soldAt,
           componentExternalIdPrefix:
             item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
+          marcarCocina: marcarCocinaDeCombos && item === conPromocion[conPromocion.length - 1],
         },
       )
     }
@@ -1303,7 +1320,13 @@ async function applyAddItems(
 
   if (itemsWithKey.length === 0) {
     // La ronda fue puras promociones: no hay alta normal que hacer.
-    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
+    const after = await prisma.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { version: true, total: true, kitchenPendingAt: true },
+    })
+    // D4: la marca ya quedó en la transacción del combo (si la cuenta era de mesa); esto sólo arma la comanda ya, lo mismo que haría el
+    // barrido con esa marca. Nunca lanza: si falla, el barrido la arma.
+    if (marcarCocinaDeCombos && after?.kitchenPendingAt) await armarComandasTrasCommit(venueId, orderId, 'ROUND')
     return {
       id: intent.id,
       status: 'ACKED',

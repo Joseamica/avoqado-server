@@ -160,6 +160,11 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
       return { outcome: 'NOT_AN_ORDER' }
     }
     const r = await releaseScheduledOrder(`${DeliveryProvider.UBER_EATS}:${identidad.orderId}`)
+    // hz:ce654971:D3: un programado ya cancelado no va a la cocina; queda PROCESSED (reintentarlo daría lo mismo).
+    if (r.outcome === 'ORDER_CANCELLED') {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, r.orderId)
+      return { outcome: 'CANCELLED', orderId: r.orderId }
+    }
     // Si la orden no existe todavía (el release se adelantó a la notificación), queda FAILED
     // para que la reconciliación lo reintente: enterrarlo dejaría el pedido sin comanda.
     const ok = r.outcome !== 'ORDER_NOT_FOUND'

@@ -75,6 +75,48 @@ describe('combo components retain historical service courses without changing pr
     expect(lines.map((line: any) => line.externalId)).toEqual(['sync:round-1:0:g:g1', 'sync:round-1:0:g:g2'])
     expect(lines.every((line: any) => line.sentToKitchenAt.toISOString() === '2026-10-07T12:00:00.000Z')).toBe(true)
   })
+  // hz:ce654971:D4 (Codex r1 #1): la marca de cocina de una ronda de combos sin red persiste JUNTO con el combo.
+  it('marcarCocina: writes the kitchen marker inside the SAME transaction that stores the combo; without it, never', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    // La mesa se lee BAJO el candado de la cuenta (Codex r2 #2): otra caja pudo asignarla después de que la cola la leyó.
+    prismaMock.order.findFirst.mockResolvedValue({
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      discountAmount: 0,
+      paidAmount: 0,
+      tableId: 'mesa-1',
+    })
+    await applyPromotionToOrder(params(), prismaMock as any, {
+      deferTotalsToCaller: true,
+      sentToKitchenAt: new Date('2026-10-07T12:00:00Z'),
+      marcarCocina: true,
+    })
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order', venueId: 'venue' },
+      data: { kitchenPendingAt: expect.any(Date) },
+    })
+    expect(prismaMock.order.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.orderItem.createMany.mock.invocationCallOrder[0],
+    )
+
+    prismaMock.order.updateMany.mockClear()
+    await applyPromotionToOrder({ ...params(), instanceId: 'otra' }, prismaMock as any, { deferTotalsToCaller: true })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('marcarCocina on a counter order (no table): no marker, the counter ticket is born at payment', async () => {
+    await applyPromotionToOrder(params(), prismaMock as any, { deferTotalsToCaller: true, marcarCocina: true })
+    expect(prismaMock.orderItem.createMany).toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('marcarCocina on a replay (combo already applied): nothing new to cook, no marker write', async () => {
+    prismaMock.orderPromotion.findUnique.mockResolvedValue({ id: 'instance', netCents: 9900 })
+    const r = await applyPromotionToOrder(params(), prismaMock as any, { deferTotalsToCaller: true, marcarCocina: true })
+    expect(r.created).toBe(false)
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
   it('adds group/option identity and the operator choice to the sale snapshot', async () => {
     await applyPromotionToOrder(params())
     expect(prismaMock.orderPromotion.create.mock.calls[0][0].data.snapshotJson.selections).toEqual([
