@@ -4,10 +4,12 @@
  * docs/audit/2026-11-10-cocina-dueno-al-mover/promesa.md (workspace).
  */
 import { Prisma } from '@prisma/client'
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { authorKitchenTickets, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
 import { initialPreparation, parsePreparation, PREPARATION_VERSION } from '@/services/kds/kitchenPreparation'
 import { cancelOrder, mergeOrders, splitOrderBySeat, splitOrderItems } from '@/services/mobile/order.mobile.service'
+import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
 import { aTiempo, aparcarLaSiguienteTransaccion, esperarBloqueado } from '../../__helpers__/candadosDePostgres'
 
 const SUF = `kdsdueno-${Date.now()}`
@@ -369,5 +371,137 @@ describe('anular sólo retira lo que es de la cuenta anulada (B4, B5)', () => {
     await cancelOrder(venueId, a.id, 'Se fue')
     expect((await filaDe(a.tacoId))?.kdsOrder.id).toBe(cabecera.id)
     expect((await filaDe(a.limonadaId))?.kdsOrder.id).toBe(cabecera.id)
+  })
+})
+
+/**
+ * hz:381780f0:D3: unir y anular la misma cuenta a la vez ya no se interbloquea. Antes unir tomaba el candado de comandas del
+ * destino A MEDIA transacción (ya con las cuentas tomadas) y anular el de sus cuentas ligadas también; Postgres cortaba una (40P01)
+ * y `withDeadlockRetry` la repetía. Promesa: docs/audit/2026-11-10-unir-sin-interbloqueo/promesa.md (workspace).
+ */
+describe('unir y anular a la vez, sin interbloqueo (hz:381780f0:D3, contra Postgres)', () => {
+  /** Cuántas veces `withDeadlockRetry` repitió por 40P01 (se cuenta ANTES de `mockRestore`, que borra las llamadas). */
+  const interbloqueos = (avisos: jest.SpyInstance) => avisos.mock.calls.filter(([m]) => String(m).includes('40P01')).length
+
+  it('unir A en B mientras se anula B: la anulación se forma detrás de la unión y las dos terminan', async () => {
+    const a = await cuenta()
+    await authorKitchenTickets({ venueId, orderId: a.id, trigger: 'ROUND' })
+    const b = await cuenta()
+    const avisos = jest.spyOn(logger, 'warn')
+    let repetidas = -1
+
+    // Otra caja tiene apartado el taco de A: la unión se detiene al mover los renglones, ya con las dos cuentas tomadas.
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let unir: Promise<unknown> | undefined
+    let anular: Promise<unknown> | undefined
+    try {
+      const otraCaja = prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "OrderItem" WHERE id = ${a.tacoId} FOR NO KEY UPDATE`)
+      const pidOtraCaja = await aTiempo(aparcada.pid, 10_000, 'la otra caja no apartó el taco')
+      unir = mergeOrders(venueId, b.id, a.id)
+      const unirEspera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtraCaja], consulta: /OrderItem/ })
+      expect(unirEspera).not.toBeNull()
+      anular = cancelOrder(venueId, b.id, 'Se fueron')
+      expect(await esperarBloqueado(prisma, { bloqueadoPor: [unirEspera!.pid], consulta: /./, excepto: [pidOtraCaja] })).not.toBeNull()
+      aparcada.soltar()
+      await otraCaja
+      const [u, c] = await aTiempo(Promise.allSettled([unir, anular]), 20_000, 'unir o anular no terminó')
+      expect(u.status).toBe('fulfilled')
+      expect(c.status).toBe('fulfilled')
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+      await Promise.allSettled([unir, anular])
+      repetidas = interbloqueos(avisos)
+      avisos.mockRestore()
+    }
+    expect(repetidas).toBe(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: a.id } })).status).toBe('CANCELLED')
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: b.id } })).status).toBe('CANCELLED')
+    expect(await filaDe(a.tacoId)).toBeNull()
+    expect(await filaDe(a.limonadaId)).toBeNull()
+  })
+
+  it('anular la hija mientras se une de vuelta en la original: sin ciclo nuevo cuando la original va primero', async () => {
+    const a = await cuenta()
+    await authorKitchenTickets({ venueId, orderId: a.id, trigger: 'ROUND' })
+    const { created } = await splitOrderItems(venueId, a.id, [a.tacoId]) // el taco de la hija sigue en la comanda de A
+    const hija = created.id
+    expect(a.id < hija).toBe(true) // la original va primero en el orden de los candados (cuid crece con el tiempo)
+    const avisos = jest.spyOn(logger, 'warn')
+    let repetidas = -1
+
+    // Otra caja tiene tomada la fila de la hija: la anulación se detiene ahí, ya con sus candados de comandas.
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let unir: Promise<unknown> | undefined
+    let anular: Promise<unknown> | undefined
+    try {
+      const otraCaja = prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${hija} FOR UPDATE`)
+      const pidOtraCaja = await aTiempo(aparcada.pid, 10_000, 'la otra caja no tomó la hija')
+      anular = cancelOrder(venueId, hija, 'Se fue')
+      const anularEspera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtraCaja], consulta: /"Order"/ })
+      expect(anularEspera).not.toBeNull()
+      unir = mergeOrders(venueId, a.id, hija)
+      expect(
+        await esperarBloqueado(prisma, { bloqueadoPor: [anularEspera!.pid], consulta: /pg_advisory_xact_lock/, excepto: [pidOtraCaja] }),
+      ).not.toBeNull()
+      aparcada.soltar()
+      await otraCaja
+      const [u, c] = await aTiempo(Promise.allSettled([unir, anular]), 20_000, 'unir o anular no terminó')
+      expect(c.status).toBe('fulfilled')
+      // La hija ya está anulada cuando le toca a unir: lo de siempre (503 «la cuenta cambió» o 400 «cuenta anulada»), no un interbloqueo.
+      expect(u.status).toBe('rejected')
+      expect([400, 503]).toContain((u as PromiseRejectedResult).reason?.statusCode)
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+      await Promise.allSettled([unir, anular])
+      repetidas = interbloqueos(avisos)
+      avisos.mockRestore()
+    }
+    expect(repetidas).toBe(0)
+    expect(await filaDe(a.tacoId)).toBeNull() // lo de la hija sale de cocina
+    expect((await filaDe(a.limonadaId))?.kdsOrder.orderId).toBe(a.id) // lo de la original se queda
+  })
+
+  it('borrar la hija desde el panel mientras se une en otra cuenta: el borrado toma sus candados de comandas en orden (Codex r1 #1)', async () => {
+    const a = await cuenta()
+    await authorKitchenTickets({ venueId, orderId: a.id, trigger: 'ROUND' })
+    const t = await cuenta() // la cuenta que recibe; su id queda entre la original y la hija
+    const { created } = await splitOrderItems(venueId, a.id, [a.tacoId]) // el taco de la hija sigue en la comanda de A
+    const hija = created.id
+    expect(a.id < t.id && t.id < hija).toBe(true) // unir toma comandas:A, comandas:T y comandas:hija, en ese orden
+    const avisos = jest.spyOn(logger, 'warn')
+    let repetidas = -1
+
+    // Otra caja tiene el candado de comandas de T: la unión se detiene ahí, ya con el de A.
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let unir: Promise<unknown> | undefined
+    let borrar: Promise<unknown> | undefined
+    try {
+      const otraCaja = prisma.$transaction(async tx => tomarCandadoDeComandas(tx, t.id))
+      const pidOtraCaja = await aTiempo(aparcada.pid, 10_000, 'la otra caja no tomó el candado de T')
+      unir = mergeOrders(venueId, t.id, hija)
+      const unirEspera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtraCaja], consulta: /pg_advisory_xact_lock/ })
+      expect(unirEspera).not.toBeNull()
+      borrar = deleteOrder(venueId, hija)
+      // El borrado espera a la unión (en el candado de comandas de A); antes tomaba el de la hija y después pedía el de A.
+      expect(
+        await esperarBloqueado(prisma, { bloqueadoPor: [unirEspera!.pid], consulta: /pg_advisory_xact_lock/, excepto: [pidOtraCaja] }),
+      ).not.toBeNull()
+      aparcada.soltar()
+      await otraCaja
+      const [u, b] = await aTiempo(Promise.allSettled([unir, borrar]), 20_000, 'unir o borrar no terminó')
+      expect(u.status).toBe('fulfilled')
+      expect(b.status).toBe('fulfilled') // la hija ya quedó anulada por la unión: borrarla otra vez es idempotente (Codex r2 #1)
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+      await Promise.allSettled([unir, borrar])
+      repetidas = interbloqueos(avisos)
+      avisos.mockRestore()
+    }
+    expect(repetidas).toBe(0)
+    expect((await filaDe(a.tacoId))?.kdsOrder.orderId).toBe(t.id) // el taco se fue con la unión
+    expect((await filaDe(a.limonadaId))?.kdsOrder.orderId).toBe(a.id)
   })
 })

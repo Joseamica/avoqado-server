@@ -173,7 +173,12 @@ import {
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit, ponerComandasConSuCuenta, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import {
+  armarComandasTrasCommit,
+  cuentasDeSusComandas,
+  ponerComandasConSuCuenta,
+  retirarComandasDeVentaAnulada,
+} from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import {
@@ -3100,8 +3105,11 @@ export async function mergeOrdersInTransaction(
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    // D25: el candado de comandas del origen va antes que los de las cuentas (el orden del armado): sus comandas pasan al destino.
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId], kdsOrderIds: [sourceOrderId] })
+    // D25: los candados de comandas van antes que los de las cuentas (el orden del armado): las comandas del origen pasan al destino.
+    // D3 (hz:381780f0): TODOS los que pedirá `ponerComandasConSuCuenta` (el destino y las cuentas ligadas al origen), de entrada y en
+    // orden; pedir el del destino a media transacción se interbloqueaba con anular el destino a la vez.
+    const kdsOrderIds = [targetOrderId, ...(await cuentasDeSusComandas(tx, venueId, sourceOrderId))]
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId], kdsOrderIds })
   } catch (error) {
     // Failed topology discovery performs no mutation; identify the original missing-side DTO.
     if (error instanceof NotFoundError) {
@@ -6229,7 +6237,9 @@ export async function returnGiftBalanceAndCancelOrder(
     async tx => {
       let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
       try {
-        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+        // D3 (hz:381780f0): los candados de comandas que pedirá el retiro, de entrada (como `cancelOrderInTransaction`).
+        const kdsOrderIds = await cuentasDeSusComandas(tx, venueId, orderId)
+        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds })
       } catch (error) {
         if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
         throw error
@@ -6744,8 +6754,9 @@ export async function cancelOrderInTransaction(
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    // Existing kitchen advisory precedes all shared Order locks, including captured siblings.
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+    // Existing kitchen advisory precedes all shared Order locks, including captured siblings. D3 (hz:381780f0): también los de las
+    // cuentas ligadas por comandas, que el retiro de comandas pedía a media transacción (ciclo con unir esa cuenta a la vez).
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: await cuentasDeSusComandas(tx, venueId, orderId) })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
