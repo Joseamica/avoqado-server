@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
+import { descuentosDeLosClientes, type DescuentoDelCliente } from '@/services/shared/descuentoDelCliente.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -30,6 +31,8 @@ export interface CustomerSearchResult {
     name: string
     color: string | null
   } | null
+  /** Opcional: terminales viejas lo ignoran. */
+  descuentoDelCliente: DescuentoDelCliente | null
 }
 
 interface QuickCreateCustomerData {
@@ -37,6 +40,18 @@ interface QuickCreateCustomerData {
   lastName?: string
   phone?: string
   email?: string
+}
+
+/** Agrega el descuento de cada cliente con UNA sola consulta para toda la lista. */
+async function conDescuentoDelCliente(
+  venueId: string,
+  clientes: Omit<CustomerSearchResult, 'descuentoDelCliente'>[],
+): Promise<CustomerSearchResult[]> {
+  const descuentos = await descuentosDeLosClientes(
+    venueId,
+    clientes.map(c => c.id),
+  )
+  return clientes.map(c => ({ ...c, descuentoDelCliente: descuentos.get(c.id) ?? null }))
 }
 
 // ==========================================
@@ -93,10 +108,10 @@ export async function findCustomerByPhone(venueId: string, phone: string, limit:
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -145,10 +160,10 @@ export async function findCustomerByEmail(venueId: string, email: string, limit:
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -206,10 +221,10 @@ export async function searchCustomers(venueId: string, query: string, limit: num
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -249,10 +264,8 @@ export async function getCustomerForCheckout(venueId: string, customerId: string
     throw new NotFoundError(`Customer ${customerId} not found`)
   }
 
-  return {
-    ...customer,
-    totalSpent: customer.totalSpent.toNumber(),
-  }
+  const [conDescuento] = await conDescuentoDelCliente(venueId, [{ ...customer, totalSpent: customer.totalSpent.toNumber() }])
+  return conDescuento
 }
 
 // ==========================================
@@ -304,6 +317,7 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         totalVisits: existingByPhone.totalVisits,
         totalSpent: existingByPhone.totalSpent.toNumber(),
         customerGroup: null,
+        descuentoDelCliente: null,
       }
     }
   }
@@ -336,6 +350,7 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         totalVisits: existingByEmail.totalVisits,
         totalSpent: existingByEmail.totalSpent.toNumber(),
         customerGroup: null,
+        descuentoDelCliente: null,
       }
     }
   }
@@ -442,9 +457,11 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
   // Strip referralCode from response (kept above only for the hook check)
   const { referralCode: _referralCode, ...customerResponse } = customer
 
+  // Cliente recién creado: aún no tiene descuento asignado.
   return {
     ...customerResponse,
     totalSpent: customer.totalSpent.toNumber(),
+    descuentoDelCliente: null,
   }
 }
 
@@ -486,8 +503,8 @@ export async function getRecentCustomers(venueId: string, limit: number = 10): P
     },
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
