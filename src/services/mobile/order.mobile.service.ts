@@ -472,6 +472,12 @@ export interface OrderSummaryResponse {
   cobrosConSaldo?: number
   /** 1b Q49 (aditivo): la cuenta tiene mesa (`tableId`). `Order.type` no sirve: su default es DINE_IN también en mostrador. */
   esDeMesa?: boolean
+  /** D12, aditivo: lo que falta, en CENTAVOS (≥ 0), la misma cuenta que `preBillBalance.remainingBalanceCents`. */
+  saldoPendienteCents?: number
+  /** D12, aditivo: cuántos pagos COMPLETED tiene la cuenta, devoluciones incluidas (espejo de la compuerta de abonos de ANDROID). */
+  pagosCompletados?: number
+  /** D12, aditivo: la cuenta es de vales por área (`areaDeliveryCode` o `areaTicketCode`). */
+  esDeVales?: boolean
 }
 
 export interface OrderDetailResponse {
@@ -617,6 +623,13 @@ function cobrosConSaldoVivos(
 
 // MARK: - Service Functions
 
+/** D12: la ÚNICA cuenta del saldo por cobrar (centavos, ≥ 0); la usan `getOrder` y `listOrders`. */
+function saldoPorCobrarCents(orden: any, completados: any[]): number {
+  const reparto = esVentaCerrada(orden.paymentStatus) ? null : saldoDeCobroDeReparto(orden, completados)
+  const saldo = reparto ? reparto.totalACobrar : computeOrderBalance(orden, completados).remainingBalance
+  return Math.max(0, pesosToCents(saldo.toNumber()))
+}
+
 /**
  * List orders for a venue with pagination, search, and filters
  *
@@ -679,7 +692,7 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         payments: {
           where: { status: 'COMPLETED' },
           // 1b Q27: + la marca del tender, para contar los cobros con saldo de la página sin otra consulta por orden.
-          select: { amount: true, tipAmount: true, type: true, status: true, tenderType: { select: { systemKind: true } } },
+          select: { amount: true, tipAmount: true, type: true, status: true, thirdPartyCashAmount: true, tenderType: { select: { systemKind: true } } },
         },
         // 1b S-1: la marca de la lista (un renglón de tarjeta basta: no se mezclan, A5).
         items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
@@ -715,6 +728,9 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       esCuentaDeTarjetas: (order.items?.length ?? 0) > 0,
       cobrosConSaldo: cobrosConSaldoVivos(order, order.payments ?? []),
       esDeMesa: order.tableId != null,
+      saldoPendienteCents: saldoPorCobrarCents(order, order.payments ?? []),
+      pagosCompletados: (order.payments ?? []).length, // la consulta sólo trae los COMPLETED
+      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null,
     }
   })
 
@@ -2199,7 +2215,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     preBillBalance: {
       orderTotalCents: pesosToCents(balance.total.toNumber()),
       totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
-      remainingBalanceCents: pesosToCents((reparto ? reparto.totalACobrar : balance.remainingBalance).toNumber()),
+      remainingBalanceCents: saldoPorCobrarCents(flattenedOrder, completados),
       tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
       ...(reparto
         ? {
