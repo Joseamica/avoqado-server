@@ -347,6 +347,74 @@ describe('Discount Engine Service', () => {
 
       expect(result).toHaveLength(0)
     })
+
+    // hz:dcc49fe5:D3 — los tres huecos del lector en caja (y el contador de la asignación que nadie sube).
+    const asignacion = (discount: Record<string, any>, extra: Record<string, any> = {}) => ({
+      id: 'cd-1',
+      customerId: 'customer-123',
+      discountId: 'discount-1',
+      active: true,
+      validFrom: null,
+      validUntil: null,
+      maxUses: null,
+      usageCount: 0,
+      discount: createMockDbDiscount({ id: 'discount-1', ...discount }),
+      ...extra,
+    })
+
+    it('D3 (1): pide a la base que el CATÁLOGO también esté vigente, no sólo la asignación', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([])
+
+      await getCustomerDiscounts('venue-123', 'customer-123')
+
+      const where = prismaMock.customerDiscount.findMany.mock.calls[0][0].where
+      const vigencia = expect.objectContaining({
+        AND: [
+          { OR: [{ validFrom: null }, { validFrom: { lte: expect.any(Date) } }] },
+          { OR: [{ validUntil: null }, { validUntil: { gte: expect.any(Date) } }] },
+        ],
+      })
+      expect(where).toEqual(vigencia) // la asignación
+      expect(where.discount).toEqual(vigencia) // el catálogo
+      expect(where.discount).toMatchObject({ venueId: 'venue-123', active: true })
+    })
+
+    it('D3 (2): excluye el catálogo agotado (currentUses ≥ maxTotalUses)', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxTotalUses: 5, currentUses: 5 })])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(0)
+    })
+
+    it('D3 (3): sin tope propio hereda maxUsesPerCustomer del catálogo y cuenta sus ventas en esta sucursal', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxUsesPerCustomer: 1 })])
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ discountId: 'discount-1', ventas: 1 }])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(0)
+      const [sql, ...valores] = prismaMock.$queryRaw.mock.calls[0]
+      // Una por venta y sin las anuladas: el conteo real lo prueba la integración contra PostgreSQL.
+      expect(sql.join('?')).toMatch(/count\(DISTINCT o\.id\)[\s\S]*NOT IN \('CANCELLED', 'DELETED'\)/)
+      expect(valores).toEqual([['discount-1'], 'customer-123', 'venue-123'])
+    })
+
+    it('D3: el tope propio de la asignación se cumple con sus usos reales (usageCount nunca sube) y manda sobre el catálogo', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([
+        asignacion({ id: 'd-agotado', maxUsesPerCustomer: null }, { discountId: 'd-agotado', maxUses: 2 }),
+        asignacion({ id: 'd-extendido', maxUsesPerCustomer: 1 }, { discountId: 'd-extendido', maxUses: 3 }),
+      ])
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        { discountId: 'd-agotado', ventas: 2 },
+        { discountId: 'd-extendido', ventas: 2 },
+      ])
+
+      expect((await getCustomerDiscounts('venue-123', 'customer-123')).map(d => d.id)).toEqual(['d-extendido'])
+    })
+
+    it('D3: sin ningún tope no consulta usos y deja pasar el vigente', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxTotalUses: 5, currentUses: 4 })])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(1)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    })
   })
 
   // ==========================================

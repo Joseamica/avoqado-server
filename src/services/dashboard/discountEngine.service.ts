@@ -290,26 +290,55 @@ export async function getCustomerDiscounts(
   const now = new Date()
   const venue = await db.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone || DEFAULT_TIMEZONE
+  // Instantes contra instantes (Prisma guarda UTC real), igual que `getEligibleDiscounts`.
+  const vigenteAhora = () => ({
+    AND: [{ OR: [{ validFrom: null }, { validFrom: { lte: now } }] }, { OR: [{ validUntil: null }, { validUntil: { gte: now } }] }],
+  })
 
   const customerDiscounts = await db.customerDiscount.findMany({
     where: {
       customerId,
       active: true,
-      discount: {
-        venueId,
-        active: true,
-      },
-      AND: [{ OR: [{ validFrom: null }, { validFrom: { lte: now } }] }, { OR: [{ validUntil: null }, { validUntil: { gte: now } }] }],
+      // hz:dcc49fe5:D3 (1): vigentes la asignación Y el catálogo (la intersección, como «Mi cuenta»). Antes sólo se miraban las
+      // fechas de la asignación, y una sin fechas propias seguía aplicando un descuento cuyo catálogo ya venció.
+      discount: { venueId, active: true, ...vigenteAhora() },
+      ...vigenteAhora(),
     },
     include: {
       discount: true,
     },
   })
 
+  // D3 (3): el tope por clienta es el de la asignación (el esquema lo llama override) o, si no trae, el del catálogo. `usageCount`
+  // no lo sube nadie desde que nació la tabla, así que sus usos se cuentan: las ventas suyas de esta sucursal con ese descuento,
+  // una por venta (un descuento de artículo deja una fila por renglón; `currentUses` también sube una vez por venta) y sin las
+  // anuladas o borradas (anular sin cobrar no gasta, como el cupón). `usageCount` queda como piso. Un agregado, sin N+1.
+  // Parte de SUS órdenes (el `OFFSET 0` impide que Postgres recorra las aplicaciones del descuento, que son de todas), como S13.
+  // ponytail: recorre el historial de UNA clienta; si alguna pasa de ~10,000 ventas, índice `Order(venueId, customerId)`.
+  const topeDe = (cd: (typeof customerDiscounts)[number]) => cd.maxUses ?? cd.discount.maxUsesPerCustomer
+  const conTope = customerDiscounts.filter(cd => topeDe(cd) !== null).map(cd => cd.discountId)
+  const usos = new Map<string, number>()
+  if (conTope.length > 0) {
+    const filas = await db.$queryRaw<Array<{ discountId: string; ventas: number }>>`
+      SELECT x."discountId", count(DISTINCT o.id)::int AS ventas
+      FROM "Order" o
+      CROSS JOIN LATERAL (
+        SELECT od."discountId" FROM "OrderDiscount" od
+        WHERE od."orderId" = o.id AND od."discountId" = ANY(${conTope}::text[]) OFFSET 0
+      ) x
+      WHERE o."customerId" = ${customerId} AND o."venueId" = ${venueId} AND o.status::text NOT IN ('CANCELLED', 'DELETED')
+      GROUP BY x."discountId"`
+    for (const f of filas) usos.set(f.discountId, f.ventas)
+  }
+
   return customerDiscounts
     .filter(cd => {
-      // Check usage limit for this assignment
-      if (cd.maxUses !== null && cd.usageCount >= cd.maxUses) {
+      // D3 (2): agotado entre todas las clientas.
+      if (cd.discount.maxTotalUses !== null && cd.discount.currentUses >= cd.discount.maxTotalUses) {
+        return false
+      }
+      const tope = topeDe(cd)
+      if (tope !== null && Math.max(cd.usageCount, usos.get(cd.discountId) ?? 0) >= tope) {
         return false
       }
       // 🔴 Esta ruta NO evaluaba día ni hora: un happy hour asignado a un
