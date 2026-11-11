@@ -27,12 +27,12 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
 
     expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'entry-1', clockOutTime: null } }))
     expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
-    expect(prismaMock.timeEntryBreak.update).not.toHaveBeenCalled()
+    expect(prismaMock.timeEntryBreak.updateMany).not.toHaveBeenCalled()
   })
 
   it('sin carrera: escribe los mismos datos de siempre y cierra el descanso con el mismo instante', async () => {
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
-    prismaMock.timeEntryBreak.update.mockResolvedValue({} as any)
+    prismaMock.timeEntryBreak.updateMany.mockResolvedValue({ count: 1 })
 
     expect(await run()).toBe(true)
 
@@ -49,9 +49,10 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
       autoClockOut: true,
       autoClockOutNote: '[Sistema] Salida automática: prueba',
     })
-    expect(prismaMock.timeEntryBreak.update).toHaveBeenCalledTimes(1)
-    const breakArg = prismaMock.timeEntryBreak.update.mock.calls[0][0] as any
-    expect(breakArg.where).toEqual({ id: 'b-open' })
+    expect(prismaMock.timeEntryBreak.updateMany).toHaveBeenCalledTimes(1)
+    const breakArg = prismaMock.timeEntryBreak.updateMany.mock.calls[0][0] as any
+    // Sólo si sigue abierto: si la persona lo terminó entre la lectura y aquí, conserva su hora real (D2, 10-nov).
+    expect(breakArg.where).toEqual({ id: 'b-open', endTime: null })
     expect(breakArg.data.endTime).toBe(now)
   })
 
@@ -67,7 +68,7 @@ describe('AutoClockOutJob.clockOutEntry: no pisa la salida', () => {
       { ...entry, id: 'abierta', staff: { firstName: 'Luis', lastName: 'Paz' } },
     ])
     prismaMock.timeEntry.updateMany.mockImplementation(async ({ where }: any) => ({ count: where.id === 'abierta' ? 1 : 0 }))
-    prismaMock.timeEntryBreak.update.mockResolvedValue({} as any)
+    prismaMock.timeEntryBreak.updateMany.mockResolvedValue({ count: 1 })
     ;(job as any).isWithinClockOutWindow = jest.fn().mockReturnValue(true)
 
     const r = await (job as any)[metodo]()
