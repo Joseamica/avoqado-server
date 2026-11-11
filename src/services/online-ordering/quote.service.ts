@@ -251,7 +251,9 @@ export interface PublicQuote {
   // ── S10 (P2-4), opcionales para quien ya lee esta respuesta. Sólo con sesión.
   /** `calculados: false` = con mucha carga no se simularon; la tienda dice que se calculan al pedir. */
   beneficios?: { calculados: boolean }
-  aplicados?: Array<{ tipo: BeneficioAplicado['tipo']; nombre: string; monto: number }>
+  /** D8: `lineIndex` sólo en el PREMIO de producto gratis: el índice (desde 0) del renglón del carrito donde cae. Opcional. */
+  aplicados?: Array<{ tipo: BeneficioAplicado['tipo']; nombre: string; monto: number; lineIndex?: number }>
+  /** D8: `premio.lineIndex` (opcional) = el renglón donde caería si lo usa («Va en tu Latte»). */
   oferta?: OfertaDeBeneficios
   /** Lo que la clienta eligió y ya no está disponible (premio canjeado, puntos de más, cupón agotado). */
   descartados?: BeneficioElegido[]
@@ -267,7 +269,16 @@ export function toPublicQuote(q: QuoteResult | QuoteConBeneficios): PublicQuote 
   if (b.aplicadosCompletos === false) return { beneficios: { calculados: false }, ...toPublicQuoteBase(q, q.total) }
   return {
     ...(b.beneficios ? { beneficios: b.beneficios } : {}),
-    ...(b.aplicados ? { aplicados: b.aplicados.map(a => ({ tipo: a.tipo, nombre: a.nombre, monto: n(a.monto) })) } : {}),
+    ...(b.aplicados
+      ? {
+          aplicados: b.aplicados.map(a => ({
+            tipo: a.tipo,
+            nombre: a.nombre,
+            monto: n(a.monto),
+            ...(a.lineIndex !== undefined ? { lineIndex: a.lineIndex } : {}),
+          })),
+        }
+      : {}),
     ...(b.oferta ? { oferta: b.oferta } : {}),
     ...(b.descartados ? { descartados: b.descartados } : {}),
     ...toPublicQuoteBase(q, b.totalConBeneficios ?? q.total),

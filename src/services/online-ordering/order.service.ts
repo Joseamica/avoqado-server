@@ -63,9 +63,11 @@ import { PRECIO_CAMBIO_AL_CONFIRMAR } from './card/confirm.service'
 import {
   BENEFICIOS_SELECT,
   CLIENTA_ID_SELECT,
+  HORA_DEL_PAGO_SELECT,
   beneficioRegresado,
   beneficiosDeLaCuenta,
   clientaIdDeLaCuenta,
+  horaDelPago,
   lealtadDeLaCuenta,
   type LealtadDeLaCuenta,
 } from './beneficiosDeLaCuenta'
@@ -1053,7 +1055,7 @@ export interface PublicTracking {
   paid: boolean
   /** T18b: el nombre con que se hizo el pedido (nunca teléfono ni correo). */
   customerName?: string | null
-  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. */
+  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. D10: la del aparato si la saldó la cola sin red. */
   paidAt?: string | null
   /** R79: lo cobrado (cobros COMPLETED que no son REFUND) y lo que falta, en pesos; con abono el folio no vence (R18). Opcionales. */
   amountPaid?: number
@@ -1270,13 +1272,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           // misma lectura.
           ...CLIENTA_ID_SELECT,
           ...BENEFICIOS_SELECT,
-          payments: {
-            // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
-            where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            select: { createdAt: true },
-          },
+          // T18b + D10: la hora del pago (la del aparato si la saldó la cola sin red), con la misma función de la caja.
+          ...HORA_DEL_PAGO_SELECT,
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
@@ -1328,7 +1325,7 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     amountPaid: Number(new Prisma.Decimal(row.order.paidAmount).toFixed(2)),
     remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.remainingBalance), 0).toDecimalPlaces(2).toNumber(),
     customerName: row.order.customerName ?? null,
-    paidAt: row.order.paymentStatus === PaymentStatus.PAID ? (row.order.payments[0]?.createdAt.toISOString() ?? null) : null,
+    paidAt: horaDelPago(row.order, row.createdAt),
     estimatedReadyAt: row.estimatedReadyAt ? row.estimatedReadyAt.toISOString() : null,
     acceptDeadlineAt: row.acceptDeadlineAt.toISOString(),
     rejectReason: row.rejectReason ?? null,

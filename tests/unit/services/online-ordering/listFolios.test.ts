@@ -3,6 +3,7 @@
  * orden de las sincronizaciones previas (R43) y el filtro de R16/R41/R42. El camino con dinero real va en la integración.
  */
 import { Prisma } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 
@@ -129,9 +130,55 @@ describe('listFolios', () => {
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
       where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
       orderBy: { createdAt: 'desc' },
-      take: 1,
+      take: 5, // D10: los cobros que deciden la hora (`MAX_COBROS_DE_LA_HORA`)
     })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
+  })
+
+  it('D10: un folio que la caja cobró SIN RED dice la hora del aparato (00:26 en CDMX), no la de cuando subió el cobro (00:29)', async () => {
+    // WP75J (11-nov): pedido 23:57, cobrado sin red 00:26:36, el cobro sube 00:29:40 (hora de la Ciudad de México).
+    const pedido = new Date('2026-11-11T05:57:00.000Z')
+    const enElAparato = new Date('2026-11-11T06:26:36.724Z')
+    const llegada = new Date('2026-11-11T06:29:40.000Z')
+    const pagado = (n: number, loyaltySaleAt: Date | null) => {
+      const r = row(n, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })
+      return { ...r, createdAt: pedido, order: { ...r.order, loyaltySaleAt, payments: [{ createdAt: llegada }] } }
+    }
+    POR_ENTREGAR = [
+      pagado(1, enElAparato),
+      pagado(2, null), // con red, TPV o tarjeta: la llegada, como hoy
+      pagado(3, new Date('2026-11-11T05:00:00.000Z')), // reloj del aparato sin hora (antes del folio): la llegada
+    ]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+
+    expect(r.toDeliver.map(o => o.paidAt)).toEqual([enElAparato.toISOString(), llegada.toISOString(), llegada.toISOString()])
+    expect(formatInTimeZone(r.toDeliver[0].paidAt!, 'America/Mexico_City', 'HH:mm')).toBe('00:26')
+    // En la MISMA lectura de la lista.
+    expect(listas()[0].select.order.select).toMatchObject({ loyaltySaleAt: true })
+  })
+
+  it('D10 (Codex r2): sólo se le cree a la hora del aparato si desde ella sólo UN cobro nació o cambió (el que saldó), como la regla C', async () => {
+    const pedido = new Date('2026-11-11T05:57:00.000Z')
+    const enElAparato = new Date('2026-11-11T06:10:00.000Z') // la caja A cobra su mitad sin red
+    const a = new Date('2026-11-11T06:30:00.000Z') // y sube al último, saldando
+    const conCobros = (n: number, payments: Array<{ createdAt: Date; updatedAt: Date }>) => {
+      const r = row(n, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })
+      return { ...r, createdAt: pedido, order: { ...r.order, loyaltySaleAt: enElAparato, payments } }
+    }
+    const cobro = (createdAt: Date, updatedAt = createdAt) => ({ createdAt, updatedAt })
+    POR_ENTREGAR = [
+      // B cobró la otra mitad a las 06:20 y subió antes: la cuenta quedó pagada después de las 06:10 ⇒ la llegada, como hoy.
+      conCobros(1, [cobro(a), cobro(new Date('2026-11-11T06:20:00.000Z'))]),
+      // Un cripto que nació antes y se confirmó a las 06:25 ⇒ lo mismo.
+      conCobros(2, [cobro(a), cobro(new Date('2026-11-11T06:00:00.000Z'), new Date('2026-11-11T06:25:00.000Z'))]),
+      // Un abono con red ANTES de la hora del aparato ⇒ la del aparato.
+      conCobros(3, [cobro(a), cobro(new Date('2026-11-11T06:00:00.000Z'))]),
+      // 5 cobros (el tope de la lectura): no se sabe si hay más ⇒ la llegada.
+      conCobros(4, [cobro(a), ...Array.from({ length: 4 }, () => cobro(new Date('2026-11-11T06:00:00.000Z')))]),
+    ]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toDeliver.map(o => o.paidAt)).toEqual([a, a, enElAparato, a].map(d => d.toISOString()))
+    expect(listas()[0].select.order.select.payments.select).toEqual({ createdAt: true, updatedAt: true })
   })
 
   it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados, y las 4 lecturas van por el `tx` (ninguna por el prisma global)', async () => {

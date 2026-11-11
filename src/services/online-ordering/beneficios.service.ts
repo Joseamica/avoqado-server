@@ -25,7 +25,7 @@ import { buildDatasourceUrl } from '@/utils/datasourceUrl'
 import { isDeadlockError, isModelLockTimeoutError, withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { aplicarDescuentosDelMotorEnTx } from '@/services/dashboard/discountEngine.service'
 import { apartarCupon, bloquearDescuentoDelCupon, cuponDeLaVenta, ligarCupon, montoDelCupon } from '@/services/shared/cuponDeLaVenta'
-import { canjearPremioEnTx } from '@/services/wallet/redeemStampReward.service'
+import { canjearPremioEnTx, renglonDelPremioEnTx } from '@/services/wallet/redeemStampReward.service'
 import { redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
 import { comoJson, nuevoRepartoDeCuenta } from '@/services/shared/repartoDescuento'
 import { conservarDescuentoHistorico, sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
@@ -46,9 +46,12 @@ export interface BeneficioAplicado {
   nombre: string
   monto: Prisma.Decimal
   orderDiscountId: string
+  /** D8: sólo PREMIO de producto gratis: el índice (desde 0) del renglón del carrito donde cae, como `lineIndex` de los avisos. */
+  lineIndex?: number
 }
 export interface OfertaDeBeneficios {
-  premio: { id: string; etiqueta: string } | null
+  /** D8: `lineIndex` = el renglón del carrito donde caería si lo usa («Va en tu Latte»); sólo de producto gratis, y sólo al cotizar. */
+  premio: { id: string; etiqueta: string; lineIndex?: number } | null
   puntos: { saldo: number; minimo: number; valorPorPunto: number; maxPuntos: number } | null
   cupon: boolean
 }
@@ -251,7 +254,7 @@ async function aplicarCuponEnTx(
 export async function aplicarBeneficiosEnTx(
   tx: TxConReintento,
   i: { venueId: string; orderId: string; customerId: string; eleccion: EleccionDeBeneficios },
-  opciones: { tolerante?: true } = {},
+  opciones: { tolerante?: true; premioOfrecido?: string } = {},
 ): Promise<{
   total: Prisma.Decimal
   aplicados: BeneficioAplicado[]
@@ -261,6 +264,8 @@ export async function aplicarBeneficiosEnTx(
   aplicadosTotal?: number
   /** S11 (Codex r8): el premio elegido quedó canjeado en esta cuenta. Se sabe por su fila, no por el desglose (que puede ir recortado). */
   premio: boolean
+  /** D8: sólo al cotizar con `premioOfrecido` y sin premio elegido: el renglón del carrito donde caería ese premio. */
+  premioOfrecidoEn?: number
   /**
    * S11 (R7): sólo en estricto, la bitácora de cada canje real (la del motor y las de los envoltorios públicos del cupón, el premio y
    * los puntos). Quien crea el folio la escribe con su `tx`: un intento revertido se lleva sus filas.
@@ -313,6 +318,10 @@ export async function aplicarBeneficiosEnTx(
       auditorias.push(auditoria('DISCOUNT_APPLIED', 'Order', orderId, data))
     }
   }
+  // D8: el renglón donde cae el premio (el que P11 eligió al canjearlo) o, al cotizar sin elegirlo, donde caería: en ESTE punto de la
+  // cadena (tras motor y cupón, antes de los puntos), sólo leyendo.
+  let renglonDelPremio: string | null = null
+  let renglonOfrecido: string | null = null
   if (eleccion.premioId) {
     const premioId = eleccion.premioId
     const r = await canjear(tx, 'PREMIO', simulacion, async () => {
@@ -321,6 +330,7 @@ export async function aplicarBeneficiosEnTx(
     })
     if (r === DESCARTADO) descartados.push('PREMIO')
     else {
+      renglonDelPremio = r.renglonPremiadoId ?? null
       // La misma de `avisarPremioCanjeado` (redeemStampReward.service.ts).
       const data = {
         orderId,
@@ -331,6 +341,8 @@ export async function aplicarBeneficiosEnTx(
       }
       auditorias.push(auditoria('STAMP_REWARD_REDEEMED', 'StampReward', premioId, data))
     }
+  } else if (simulacion && opciones.premioOfrecido) {
+    renglonOfrecido = await renglonDelPremioEnTx(tx, venueId, orderId, opciones.premioOfrecido)
   }
   if (eleccion.puntos) {
     const puntos = eleccion.puntos
@@ -366,6 +378,8 @@ export async function aplicarBeneficiosEnTx(
       ? ((await tx.stampReward.findFirst({ where: { id: eleccion.premioId, venueId }, select: { orderDiscountId: true } }))
           ?.orderDiscountId ?? null)
       : null
+  const lineaDelPremio = filaDelPremio ? await indiceEnElCarrito(tx, orderId, renglonDelPremio) : undefined
+  const premioOfrecidoEn = await indiceEnElCarrito(tx, orderId, renglonOfrecido)
   const aplicados = filas.map(f => ({
     tipo: (f.couponCodeId
       ? 'CUPON'
@@ -377,15 +391,26 @@ export async function aplicarBeneficiosEnTx(
     nombre: f.name ?? '',
     monto: new Prisma.Decimal(f.amount),
     orderDiscountId: f.id,
+    ...(f.id === filaDelPremio && lineaDelPremio !== undefined ? { lineIndex: lineaDelPremio } : {}),
   }))
   return {
     total: new Prisma.Decimal(cuenta.total),
     aplicados,
     descartados,
     premio: filaDelPremio !== null,
+    ...(premioOfrecidoEn !== undefined ? { premioOfrecidoEn } : {}),
     ...incompleto,
     ...(simulacion ? {} : { auditorias }),
   }
+}
+
+/**
+ * D8: el índice del renglón en el carrito que mandó la tienda. La cuenta de un pedido en línea nace con `sequence` = índice de la línea
+ * cotizada (`crearCuentaDelPedidoEnTx`), y una cotización con `ok` tiene una línea por cada artículo de `items`, en su orden.
+ */
+async function indiceEnElCarrito(tx: TxConReintento, orderId: string, renglonId: string | null): Promise<number | undefined> {
+  if (!renglonId) return undefined
+  return (await tx.orderItem.findFirst({ where: { id: renglonId, orderId }, select: { sequence: true } }))?.sequence
 }
 
 // ── oferta ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -542,7 +567,13 @@ type CarritoCotizado = Pick<QuoteResult, 'subtotal' | 'total' | 'lines'>
  * primero, R6) + `aplicarBeneficiosEnTx` tolerante, y se deshace lanzando `Simulada`. El lugar del semáforo lo toma quien llama.
  * ponytail: una escritura deshecha por simulación (≈ 20–40 sentencias); si pesa, una por clienta cada N s.
  */
-async function simularLaCadena(venueId: string, quote: CarritoCotizado, customerId: string, eleccion: EleccionDeBeneficios) {
+async function simularLaCadena(
+  venueId: string,
+  quote: CarritoCotizado,
+  customerId: string,
+  eleccion: EleccionDeBeneficios,
+  premioOfrecido?: string,
+) {
   const folio = `COTIZACION-${cuid()}`
   return withDeadlockRetry(
     async tx => {
@@ -559,7 +590,7 @@ async function simularLaCadena(venueId: string, quote: CarritoCotizado, customer
         note: null,
         paymentMode: 'PAY_AT_PICKUP',
       })
-      throw new Simulada(await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true }))
+      throw new Simulada(await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true, premioOfrecido }))
     },
     { etiqueta: 'simularLaCadena', ...SIMULACION.transaccion },
   ).catch((error: unknown) => {
@@ -614,7 +645,7 @@ export async function cotizarConBeneficios(
   let calculados = false
   try {
     const oferta = await ofertaDeBeneficios(venueId, customerId)
-    const r = await simularLaCadena(venueId, quote, customerId, o.eleccion ?? {})
+    const r = await simularLaCadena(venueId, quote, customerId, o.eleccion ?? {}, oferta.premio?.id)
     // r6: o se calcula todo o no se calcula. Con más filas que el tope del desglose, no se anuncian beneficios con detalle incompleto.
     if (r.aplicadosCompletos === false) {
       logger.warn('[OnlineOrdering] la cotización sale sin beneficios: el desglose pasa del tope', {
@@ -625,11 +656,15 @@ export async function cotizarConBeneficios(
       return { ...quote, beneficios: { calculados: false } }
     }
     calculados = true
+    // D8: donde cae el premio ofrecido: el de lo aplicado si es el que eligió; si no lo eligió, donde caería.
+    const ofrecido = oferta.premio
+    const lineIndex =
+      ofrecido && o.eleccion?.premioId === ofrecido.id ? r.aplicados.find(a => a.tipo === 'PREMIO')?.lineIndex : r.premioOfrecidoEn
     return {
       ...quote,
       totalConBeneficios: r.total,
       aplicados: r.aplicados,
-      oferta,
+      oferta: ofrecido && lineIndex !== undefined ? { ...oferta, premio: { ...ofrecido, lineIndex } } : oferta,
       descartados: r.descartados,
       beneficios: { calculados: true },
     }

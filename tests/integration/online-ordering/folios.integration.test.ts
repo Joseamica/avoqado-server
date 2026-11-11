@@ -35,7 +35,8 @@ import {
 import { createKdsOrder } from '@/services/mobile/kds.mobile.service'
 import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 import { processWebhook } from '@/services/b4bit/b4bit.service'
-import { listInbox } from '@/services/online-ordering/inbox.service'
+import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import {
   acceptOnlineOrder,
   markOnlineOrderDelivered,
@@ -793,6 +794,65 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
       await porEntregar(onlineOrderId)
       expect(rondasProgramadas(orderId)).toHaveLength(0)
       await ningunDisparadorArma(orderId)
+    })
+
+    /** D10: «Pagado a las…» en los 4 lugares que lo enseñan (Bandeja, listas de la caja, un pedido para el MCP y el seguimiento). */
+    async function horasDePago(orderId: string, onlineOrderId: string) {
+      const { trackingToken } = await pedido(onlineOrderId)
+      return [
+        (await listInbox({ venueId: f.venueId })).orders.find(o => o.orderId === orderId)?.paidAt,
+        (await listFolios({ venueId: f.venueId })).toDeliver.find(o => o.orderId === orderId)?.paidAt,
+        (await getInboxOrder({ venueId: f.venueId, orderId }))?.paidAt,
+        (await getTrackingByToken(trackingToken))?.paidAt,
+      ]
+    }
+    const llegadaDelCobro = async (orderId: string) =>
+      (await exigir(prisma.payment.findFirst({ where: { orderId, status: 'COMPLETED' }, orderBy: { createdAt: 'desc' } }))).createdAt
+
+    it('D10 (WP75J): cobrado sin red a los 25 y subido a los 40 ⇒ «Pagado a las…» dice la hora del aparato en los 4 lugares', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      const enElAparato = new Date(Date.now() - 15 * MIN)
+      await colaSinRed(orderId, CIEN, enElAparato)
+      await pasada()
+      await porEntregar(onlineOrderId)
+
+      expect((await llegadaDelCobro(orderId)).getTime()).toBeGreaterThan(enElAparato.getTime() + 10 * MIN)
+      expect(await horasDePago(orderId, onlineOrderId)).toEqual(Array(4).fill(enElAparato.toISOString()))
+    })
+
+    it('D10 (Codex r2, como K17): B cobra su mitad después de vencer y sube primero; A cobró antes y sube al último, saldando ⇒ la llegada, no la hora de A', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() + 1_000)) // B
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN)) // A: la que salda, con su hora de antes
+      expect((await cuenta(orderId)).loyaltySaleAt).not.toBeNull()
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(await horasDePago(orderId, onlineOrderId)).toEqual(Array(4).fill((await llegadaDelCobro(orderId)).toISOString()))
+    })
+
+    it('D10 control: con red (efectivo del POS sobre un folio vigente) ⇒ la hora en que llegó el cobro, como hoy', async () => {
+      const { orderId, onlineOrderId } = await nuevoFolio()
+      await efectivoDelPos(orderId)
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(await horasDePago(orderId, onlineOrderId)).toEqual(Array(4).fill((await llegadaDelCobro(orderId)).toISOString()))
+    })
+
+    it.each([
+      ['con el reloj del aparato sin hora (antes del folio)', () => new Date(Date.now() - 60 * MIN)],
+      ['sin hora del cobro', () => undefined],
+    ])('D10 control: de la cola %s ⇒ la hora en que llegó el cobro, como hoy', async (_c, cobradoEn) => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CIEN, cobradoEn())
+      await pasada()
+      await porEntregar(onlineOrderId)
+      // Sin hora, la cola fecha la venta al sincronizar (`clampSoldAt`), milisegundos antes del cobro: la misma hora a la vista.
+      const horas = await horasDePago(orderId, onlineOrderId)
+      expect(new Set(horas).size).toBe(1)
+      expect(Math.abs(new Date(horas[0]!).getTime() - (await llegadaDelCobro(orderId)).getTime())).toBeLessThan(5_000)
     })
 
     it('K14 (c) sin pantalla de cocina ⇒ revive sin marca ni comanda', async () => {
