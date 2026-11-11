@@ -10,8 +10,12 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 jest.mock('@/utils/serializableRetry', () => ({ withDeadlockRetry: jest.fn() }))
-jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), debug: jest.fn(), error: jest.fn() } }))
+jest.mock('@/config/logger', () => ({
+  __esModule: true,
+  default: { info: jest.fn(), debug: jest.fn(), error: jest.fn(), warn: jest.fn() },
+}))
 
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { searchCustomers, getCustomerForCheckout, quickCreateCustomer, getRecentCustomers } from '@/services/tpv/customer.tpv.service'
@@ -57,11 +61,30 @@ describe('descuentoDelCliente en los clientes de la TPV', () => {
     expect(r.descuentoDelCliente).toEqual(d)
   })
 
-  it('quickCreateCustomer: existente por teléfono trae null', async () => {
+  it('quickCreateCustomer: existente por teléfono trae SU descuento', async () => {
     p.customer.findFirst.mockResolvedValue(fila('a'))
+    mockDescuentos.mockResolvedValue(new Map([['a', d]]))
     const r = await quickCreateCustomer('v1', { phone: '555' })
-    expect(r.descuentoDelCliente).toBeNull()
+    expect(mockDescuentos).toHaveBeenCalledWith('v1', ['a'])
+    expect(r.descuentoDelCliente).toEqual(d)
     expect(r.id).toBe('a')
+  })
+
+  it('quickCreateCustomer: existente por correo trae SU descuento', async () => {
+    p.customer.findFirst.mockResolvedValue(fila('a'))
+    mockDescuentos.mockResolvedValue(new Map([['a', d]]))
+    const r = await quickCreateCustomer('v1', { email: 'a@b.com' })
+    expect(r.descuentoDelCliente).toEqual(d)
+    expect(r.id).toBe('a')
+  })
+
+  it('si la consulta del descuento truena, la búsqueda sigue y avisa', async () => {
+    p.customer.findMany.mockResolvedValue([fila('a'), fila('b')])
+    mockDescuentos.mockRejectedValue(new Error('db caída'))
+    const r = await searchCustomers('v1', 'ab')
+    expect(r.map(x => x.id)).toEqual(['a', 'b'])
+    expect(r.every(x => x.descuentoDelCliente === null)).toBe(true)
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId: 'v1', error: 'db caída' }))
   })
 
   it('quickCreateCustomer: nuevo trae null', async () => {

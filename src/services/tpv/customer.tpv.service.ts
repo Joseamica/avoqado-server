@@ -31,7 +31,7 @@ export interface CustomerSearchResult {
     name: string
     color: string | null
   } | null
-  /** Opcional: terminales viejas lo ignoran. */
+  /** Siempre presente en las respuestas nuevas; null si el cliente no tiene descuento. Las terminales viejas lo ignoran. */
   descuentoDelCliente: DescuentoDelCliente | null
 }
 
@@ -47,11 +47,20 @@ async function conDescuentoDelCliente(
   venueId: string,
   clientes: Omit<CustomerSearchResult, 'descuentoDelCliente'>[],
 ): Promise<CustomerSearchResult[]> {
-  const descuentos = await descuentosDeLosClientes(
-    venueId,
-    clientes.map(c => c.id),
-  )
-  return clientes.map(c => ({ ...c, descuentoDelCliente: descuentos.get(c.id) ?? null }))
+  try {
+    const descuentos = await descuentosDeLosClientes(
+      venueId,
+      clientes.map(c => c.id),
+    )
+    return clientes.map(c => ({ ...c, descuentoDelCliente: descuentos.get(c.id) ?? null }))
+  } catch (err) {
+    // Elegir cliente está en la ruta de cobro: si falla la consulta, se degrada (la cajera aplica el descuento a mano).
+    logger.warn('[tpv-customer] no se pudo consultar el descuento de los clientes', {
+      venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return clientes.map(c => ({ ...c, descuentoDelCliente: null }))
+  }
 }
 
 // ==========================================
@@ -306,19 +315,20 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         customerId: existingByPhone.id,
       })
 
-      // Return existing customer instead of error (better UX for cashiers)
-      return {
-        id: existingByPhone.id,
-        firstName: existingByPhone.firstName,
-        lastName: existingByPhone.lastName,
-        email: existingByPhone.email,
-        phone: existingByPhone.phone,
-        loyaltyPoints: existingByPhone.loyaltyPoints,
-        totalVisits: existingByPhone.totalVisits,
-        totalSpent: existingByPhone.totalSpent.toNumber(),
-        customerGroup: null,
-        descuentoDelCliente: null,
-      }
+      const [conDescuento] = await conDescuentoDelCliente(venueId, [
+        {
+          id: existingByPhone.id,
+          firstName: existingByPhone.firstName,
+          lastName: existingByPhone.lastName,
+          email: existingByPhone.email,
+          phone: existingByPhone.phone,
+          loyaltyPoints: existingByPhone.loyaltyPoints,
+          totalVisits: existingByPhone.totalVisits,
+          totalSpent: existingByPhone.totalSpent.toNumber(),
+          customerGroup: null,
+        },
+      ])
+      return conDescuento
     }
   }
 
@@ -340,18 +350,20 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         customerId: existingByEmail.id,
       })
 
-      return {
-        id: existingByEmail.id,
-        firstName: existingByEmail.firstName,
-        lastName: existingByEmail.lastName,
-        email: existingByEmail.email,
-        phone: existingByEmail.phone,
-        loyaltyPoints: existingByEmail.loyaltyPoints,
-        totalVisits: existingByEmail.totalVisits,
-        totalSpent: existingByEmail.totalSpent.toNumber(),
-        customerGroup: null,
-        descuentoDelCliente: null,
-      }
+      const [conDescuento] = await conDescuentoDelCliente(venueId, [
+        {
+          id: existingByEmail.id,
+          firstName: existingByEmail.firstName,
+          lastName: existingByEmail.lastName,
+          email: existingByEmail.email,
+          phone: existingByEmail.phone,
+          loyaltyPoints: existingByEmail.loyaltyPoints,
+          totalVisits: existingByEmail.totalVisits,
+          totalSpent: existingByEmail.totalSpent.toNumber(),
+          customerGroup: null,
+        },
+      ])
+      return conDescuento
     }
   }
 
