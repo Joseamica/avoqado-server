@@ -168,12 +168,12 @@ describe('PUT del panel — autoridad histórica e inmutabilidad del cliente cob
     },
   )
 
-  it('regresión: una venta cobrada a la que sólo se le cambia el nombre (sin `customerId`) ⇒ como hoy, sin candado nuevo', async () => {
+  it('regresión: una venta cobrada a la que sólo se le cambia el nombre (sin `customerId`) ⇒ como hoy, bajo el modo débil de edición', async () => {
     prismaMock.order.findFirst.mockResolvedValue(orden())
     await updateOrder(VENUE, ORDER, { customerName: 'Kev' } as any)
     expect(prismaMock.order.update.mock.calls[0][0].data).toEqual({ customerName: 'Kev' })
-    expect(sentencias).toEqual([])
-    // S5b (red por traba): `updateOrder` va SIEMPRE por withDeadlockRetry (una `$transaction` de un solo paso, sin candado nuevo: `sentencias` sigue vacío).
+    expect(sentencias[0]).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
+    // S2/R9: también editar sólo el nombre se decide bajo el candado débil y withDeadlockRetry.
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 

@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 /**
  * Vales por área (AREA_TICKETS) — cuenta compartida entre áreas emisoras.
  *
@@ -47,7 +48,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { buildItemDiscountRow } from '../shared/discount.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { importesDeLasFilas, leerReparto } from '../shared/repartoDescuento'
 import { RENGLON_PARA_REPARTO_SELECT, filasDeLaOrden, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
@@ -685,7 +686,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   const updated = await prisma.$transaction(async tx => {
     // Plan 3b: lock the Order (route venue) before reading what decides the write. A claim, a partial payment, a tip,
     // a service charge or a cancellation does not bump `version`, so they are reread here with the row locked.
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) {
+    if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId: order.id }))) {
       throw new NotFoundError(messageForState('NOT_FOUND', null))
     }
     const locked = await tx.order.findFirstOrThrow({
@@ -811,36 +812,41 @@ export async function claimAreaTicket(venueId: string, rawCode: string, input: C
     throw new NotFoundError(messageForState('NOT_FOUND', null))
   }
 
-  const state = deriveAreaTicketState(order as any)
-  if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
-  if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
-    throw new ConflictError('Este vale ya está pagado.', 'AREA_TICKET_ALREADY_PAID')
-  }
-  if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminal.id) {
-    throw new ConflictError('Otra caja está cobrando esta cuenta.', 'AREA_TICKET_CLAIMED_BY_OTHER')
-  }
+  const orderId = order.id
+  return prisma.$transaction(async tx => {
+    if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError(messageForState('NOT_FOUND', null))
+    const order = await tx.order.findUniqueOrThrow({ where: { id: orderId, venueId }, include: areaTicketInclude })
+    const state = deriveAreaTicketState(order as any)
+    if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
+    if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
+      throw new ConflictError('Este vale ya está pagado.', 'AREA_TICKET_ALREADY_PAID')
+    }
+    if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminal.id) {
+      throw new ConflictError('Otra caja está cobrando esta cuenta.', 'AREA_TICKET_CLAIMED_BY_OTHER')
+    }
 
-  const now = new Date()
-  const claimCutoff = new Date(now.getTime() - AREA_TICKET_CLAIM_TTL_MS)
+    const now = new Date()
+    const claimCutoff = new Date(now.getTime() - AREA_TICKET_CLAIM_TTL_MS)
 
-  // Transición condicional: sólo se lleva el claim quien lo tenía, o quien llega
-  // cuando ya caducó / no había ninguno. Dos cajas escaneando a la vez: una gana.
-  const claimed = await prisma.order.updateMany({
-    where: {
-      id: order.id,
-      venueId,
-      paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-      OR: [{ claimedAt: null }, { claimedAt: { lt: claimCutoff } }, { claimedByTerminalId: terminal.id }],
-    },
-    data: { claimedByTerminalId: terminal.id, claimedAt: now },
-  })
-  if (claimed.count === 0) {
-    throw new ConflictError('Otra caja acaba de tomar esta cuenta. Vuelve a escanear el vale.', 'AREA_TICKET_CLAIMED_BY_OTHER')
-  }
+    // Transición condicional: sólo se lleva el claim quien lo tenía, o quien llega
+    // cuando ya caducó / no había ninguno. Dos cajas escaneando a la vez: una gana.
+    const claimed = await tx.order.updateMany({
+      where: {
+        id: order.id,
+        venueId,
+        paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+        OR: [{ claimedAt: null }, { claimedAt: { lt: claimCutoff } }, { claimedByTerminalId: terminal.id }],
+      },
+      data: { claimedByTerminalId: terminal.id, claimedAt: now },
+    })
+    if (claimed.count === 0) {
+      throw new ConflictError('Otra caja acaba de tomar esta cuenta. Vuelve a escanear el vale.', 'AREA_TICKET_CLAIMED_BY_OTHER')
+    }
 
-  logger.info(`🎟️ [AREA TICKETS] Vale ${parsed.code} reclamado por la caja | terminal=${terminal.id}`)
-  const fresh = await prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: areaTicketInclude })
-  return toAreaTicketView(fresh, now)
+    logger.info(`🎟️ [AREA TICKETS] Vale ${parsed.code} reclamado por la caja | terminal=${terminal.id}`)
+    const fresh = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: areaTicketInclude })
+    return toAreaTicketView(fresh, now)
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 // MARK: - §6 · POST /mobile/orders/:id/fulfill

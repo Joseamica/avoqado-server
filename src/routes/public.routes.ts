@@ -48,7 +48,12 @@ import {
   limiteDiarioDeIntentosDeCodigoEnAlta,
 } from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
-import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
+import {
+  authenticateCustomer,
+  authenticateCustomerOptional,
+  authenticateCustomerParaCambioDeNumero,
+  activarReservasSiFalta,
+} from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { kioskCheckInCors } from '../middlewares/kioskCheckInCors.middleware'
@@ -81,7 +86,14 @@ import {
   customerUpdateProfileSchema,
   otpRequestSchema,
   otpVerifySchema,
+  sessionNuevaFichaSchema,
+  googleSessionSchema,
+  customerPhoneChangeRequestSchema,
+  customerPhoneChangeVerifySchema,
+  customerMyListSchema,
+  customerGiftCardClaimSchema,
 } from '../schemas/dashboard/creditPack.schema'
+import { giftCardClaimRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
   publicShortCodeSchema,
@@ -164,7 +176,9 @@ const tokenQueNoSeDecodifica: ErrorRequestHandler = (err, req, res, next) => {
 router.use('/gift-cards', tokenQueNoSeDecodifica)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
-router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
+router.use(
+  cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'], exposedHeaders: ['x-customer-session'] }),
+)
 
 // Rate limiting: read endpoints (60 req/min), write (5 req/min), cancel (10 req/min)
 //
@@ -256,6 +270,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
@@ -277,6 +292,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
   reservationPublicController.createHold,
@@ -326,6 +342,7 @@ router.post(
   cancelLimit, // same rate envelope — destructive-ish public mutation
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: publicRescheduleBodySchema })),
   reservationPublicController.rescheduleReservation,
 )
@@ -346,6 +363,7 @@ router.get(
   readLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   validateRequest(publicBalanceQuerySchema),
   creditPackPublicController.getCustomerBalance,
 )
@@ -360,6 +378,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomerOptional,
+  activarReservasSiFalta,
   requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
@@ -377,6 +396,7 @@ router.post(
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   kioskCheckInController.consumeChallenge,
 )
 
@@ -388,15 +408,79 @@ router.post('/venues/:venueSlug/customer/register', authLimit, customerPortalCon
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 
 // Fase 0.B: el slug manda. Antes el portal usaba sólo el venue del JWT e ignoraba la URL.
-router.get('/venues/:venueSlug/customer/portal', readLimit, resolveVenueBySlug, authenticateCustomer, customerPortalController.getPortal)
+router.get(
+  '/venues/:venueSlug/customer/portal',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  activarReservasSiFalta,
+  customerPortalController.getPortal,
+)
 
 router.patch(
   '/venues/:venueSlug/customer/profile',
   writeLimit,
   resolveVenueBySlug,
   authenticateCustomer,
+  activarReservasSiFalta,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
+)
+
+// S8 (P2-1): cambiar de número. Nunca editando el campo (`customer/profile` lo sigue prohibiendo): se prueba el nuevo con su código.
+router.post(
+  '/venues/:venueSlug/customer/phone/request',
+  writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerParaCambioDeNumero,
+  validateRequest(customerPhoneChangeRequestSchema),
+  customerPortalController.requestPhoneChange,
+)
+router.post(
+  '/venues/:venueSlug/customer/phone/verify',
+  authLimit,
+  resolveVenueBySlug,
+  authenticateCustomerParaCambioDeNumero,
+  validateRequest(customerPhoneChangeVerifySchema),
+  customerPortalController.verifyPhoneChange,
+)
+
+// S13 (P2-6): «Mi cuenta» por páginas (el portal trae la primera de cada una) y «Guardar en mi cuenta». El slug manda, como el portal.
+router.get(
+  '/venues/:venueSlug/customer/orders',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyOrders,
+)
+router.get(
+  '/venues/:venueSlug/customer/gift-cards',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyGiftCards,
+)
+router.get(
+  '/venues/:venueSlug/customer/discounts',
+  readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  validateRequest(customerMyListSchema),
+  customerPortalController.listMyDiscounts,
+)
+// R2 (codex-s13-r2 #1, r3 #2): sus límites propios reemplazan a `writeLimit` (sólo IP, compartido entre negocios y en inglés). Antes de
+// tocar la base, un cupo de FALLOS por IP real (los slugs inventados se suman ahí); luego negocio + IP y negocio + clienta.
+router.post(
+  '/venues/:venueSlug/customer/gift-cards/claim',
+  giftCardClaimRateLimiters.fallosPorIp,
+  resolveVenueBySlug,
+  giftCardClaimRateLimiters.porIp,
+  authenticateCustomer,
+  giftCardClaimRateLimiters.porClienta,
+  validateRequest(customerGiftCardClaimSchema),
+  customerPortalController.claimGiftCard,
 )
 
 // ---- Passwordless OTP login (WhatsApp / email) ----
@@ -412,6 +496,19 @@ router.post(
   authLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
   otpAuthController.verifyOtp,
+)
+// S7 (P2-1): «no, soy nueva» con la prueba del contacto, y Google de respaldo. El slug manda (el controller resuelve el venue).
+router.post(
+  '/venues/:venueSlug/auth/session/nueva-ficha',
+  authLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: sessionNuevaFichaSchema })),
+  otpAuthController.crearFichaNueva,
+)
+router.post(
+  '/venues/:venueSlug/auth/google',
+  authLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: googleSessionSchema })),
+  otpAuthController.entrarConGoogle,
 )
 
 // ---- Public Payment Link Routes (unauthenticated) ----

@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
@@ -44,7 +45,7 @@ import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
-import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import {
   conservarDescuentoHistorico,
@@ -57,7 +58,6 @@ import {
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import {
-  bloquearVentaParaLiga,
   clienteYaLigadoALaVenta,
   esChoqueDeUnico,
   etiquetaDeReintento,
@@ -73,7 +73,13 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
-import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import {
+  FOLIO_SE_CANCELA_COMO_PEDIDO,
+  MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO,
+  assertCardOrderMoneyFrozenInTx,
+  assertNotCardOnlineOrderInTx,
+  esCuentaDeFolioEnTx,
+} from '../online-ordering/card/guards'
 import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 /**
@@ -1636,7 +1642,7 @@ export async function addItemsToOrder(
 
   const { updatedOrder, newOrderItems, marcarCocina } = await prisma.$transaction(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -2468,7 +2474,7 @@ export async function updateGuestInfo(
       // pagada con la lealtad pendiente y SIN primario, el reconciliador premia a ese cliente. Por eso, en una venta COBRADA
       // (PAID/REFUNDED), quien no tiene `payments:create` edita los datos del invitado pero NO fija ni cambia `Order.customerId`
       // (decisión «A»); con permiso, como hoy. Decidido bajo el candado de la venta, como las ligas (`bloquearVentaParaLiga`).
-      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
       const order = await tx.order.findUnique({ where: { id: orderId, venueId } })
       if (!order) {
         throw new NotFoundError('Order not found')
@@ -2586,7 +2592,7 @@ export async function removeOrderItem(
 
   const { updatedOrder, itemToRemove, recorte } = await withDeadlockRetry(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -2630,7 +2636,7 @@ export async function removeOrderItem(
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
-          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, usa Reembolso.',
+          'Esta cuenta ya está pagada y ya no se le pueden quitar artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
         )
       }
 
@@ -2865,7 +2871,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
   const { updatedOrder, compAmount, itemCount, newTotal, recorte } = await withDeadlockRetry(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -2888,7 +2894,9 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
-        throw new BadRequestError('Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, usa Reembolso.')
+        throw new BadRequestError(
+          'Esta cuenta ya está pagada y ya no admite cortesías. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
 
       // Validate staff exists
@@ -3165,7 +3173,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
       // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso.
       await tomarCandadoDeComandas(tx, orderId)
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -3207,7 +3215,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Validate order is not paid
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
-          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, usa Reembolso.',
+          'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
         )
       }
 
@@ -3224,6 +3232,13 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // vuelven al cliente ANTES de los cálculos de abajo (como al quitar el descuento: la fila del canje se borra y la orden se
       // recalcula), y la orden se relee: esos cálculos y el CAS de versión van con la orden SIN las filas del canje.
       if (order.items.every(item => input.itemIds.includes(item.id))) {
+        // S9 (P2-5): en un folio, anular todo dejaría la cuenta en $0 DESPUÉS de convertir sus beneficios (recorta los descuentos y
+        // borra los renglones), y el dinero tardío llegaría a una cuenta vacía. Se cancela como pedido, que sí conserva su precio.
+        // 400 y no 409, como el de Rappi de arriba (Codex S16): toda TPV lee un 409 de voidItems como «la modificó otra terminal»;
+        // con 400 la 2.18+ muestra este texto (la 2.10–2.17, su texto fijo de 400).
+        if (await esCuentaDeFolioEnTx(tx, { venueId, orderId })) {
+          throw new BadRequestError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
+        }
         await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
         order = await leerOrden()
         if (!order) throw new NotFoundError('Order not found')
@@ -3287,7 +3302,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Anular TODO cancela la orden: con dinero ya cobrado (PARTIAL) se rechaza, igual que `cancelOrder`. Una anulación
       // parcial sobre una PARTIAL sigue permitida (no cancela nada).
       if (isVoidingAllItems && order.paymentStatus === 'PARTIAL') {
-        throw new BadRequestError('Esta cuenta ya tiene pagos registrados. Reembólsalos antes de anular todos sus artículos.')
+        // D21: sin «Reembólsalos antes de…»; un reembolso no baja lo cobrado (`orderBalance.ts`).
+        throw new BadRequestError(
+          'Esta cuenta ya tiene pagos registrados y ya no se pueden anular todos sus artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
       }
       if (anulacionExigeOrdenSinCobroVivo({ isVoidingAllItems })) {
         await assertNoLiveTerminalCharge(
@@ -3390,7 +3408,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
-          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Reembolsa primero la diferencia o anula menos artículos.`,
+          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Anula menos artículos; si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.`,
           'ORDER_VOID_BELOW_PAID',
           { paidAmount: pagado.toFixed(2), newTotal: totalNuevo.toFixed(2) },
         )
@@ -3591,7 +3609,7 @@ export async function applyDiscount(
 
   const { updatedOrder, discountAmount, newTotal } = await prisma.$transaction(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -3965,7 +3983,7 @@ async function leerVentaBajoCandado(
   orderId: string,
 ): Promise<{ paymentStatus: PaymentStatus | null; cobrada: boolean }> {
   // R3-2: `FOR NO KEY UPDATE` (ver `bloquearVentaParaLiga`): serializa contra el cobro sin interbloquearse con sus métricas.
-  if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
   // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente— o reembolsada; R11-2: o con
   // cobros capturados que ya la cubren aunque su estado se haya atrasado).
   const vigente = await ventaYaCobradaBajoCandado(tx, { venueId, orderId })
@@ -3995,6 +4013,7 @@ async function ligarClienteBajoCandado(
   reabrirLealtad: ReabrirLealtad,
 ): Promise<{ ligaNueva: boolean; esPrimario: boolean }> {
   const { venueId, orderId, customerId, otorgarLealtad } = args
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   const puedeSerPrimario = !venta.cobrada || otorgarLealtad
   const existente = await tx.orderCustomer.findUnique({ where: { orderId_customerId: { orderId, customerId } } })
   const primario = await tx.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { id: true, customerId: true } })
@@ -4473,7 +4492,7 @@ export async function addSerializedItemToOrder(
         SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE
       `
       if (!venues.length) throw new NotFoundError('Order not found')
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).

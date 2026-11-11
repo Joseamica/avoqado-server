@@ -4,7 +4,8 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
-import { findCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
@@ -116,11 +117,14 @@ export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desd
 
 /** 🔴 `cancelExchange` reconoce estos dos rechazos por su texto exacto: usa las constantes, no copies la frase. */
 /**
- * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID, `orderBalance.ts`), así que cancelarla después
- * tampoco se podría (Codex D18 r1 #1, 9-nov). La salida honesta es Reembolso, como «Corregir un cobro ya hecho» (23-oct).
+ * Sin «reembólsala antes de»: un reembolso no reabre la cuenta (sigue PAID o PARTIAL, `orderBalance.ts`), así que
+ * cancelarla después tampoco se podría (Codex D18 r1 #1 y D21, 9 y 10-nov). La salida honesta es Reembolso, como
+ * «Corregir un cobro ya hecho» (23-oct).
  */
-export const MENSAJE_CUENTA_PAGADA = 'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, usa Reembolso.'
-export const MENSAJE_CUENTA_CON_PAGOS = 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'
+export const MENSAJE_CUENTA_PAGADA =
+  'Esta cuenta ya está pagada y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
+export const MENSAJE_CUENTA_CON_PAGOS =
+  'Esta cuenta ya tiene pagos registrados y ya no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
@@ -150,7 +154,7 @@ export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawD
 
 /**
  * Candado de la orden → relectura → 400 si ya tiene dinero (PAID/PARTIAL) → 409 si hay un cobro de terminal vivo.
- * El orden importa: con dinero adentro la respuesta es «reembolsa primero», y no se consulta la terminal.
+ * El orden importa: con dinero adentro la respuesta es «no se puede; usa Reembolso», y no se consulta la terminal.
  * Devuelve la fila releída bajo el candado; la escritura de la cancelación va inmediatamente después, en la misma tx.
  */
 export async function assertOrderCancellableUnderLock(
@@ -207,8 +211,13 @@ export async function assertOrderCancellableUnderLock(
 export interface CanjesDevueltos {
   pointsRefunded: number
   stampRewardsReturned: string[]
-  /** Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). */
+  /**
+   * Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). En una cuenta de folio (S9) son las que se
+   * convirtieron en cortesía: no salen, pero la venta sí tenía beneficios (la limpieza de abandonadas la anula en vez de borrarla).
+   */
   filasQuitadas: number
+  /** S9: las clientas con premio regresado en una cuenta de folio; quien anula despierta su pase después del commit. */
+  clientasConPremio: string[]
 }
 
 /** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
@@ -227,6 +236,10 @@ const PAGINA_DE_CANJES = 100
  *
  * Va dentro de la transacción del que anula, con la orden YA bloqueada (Order → Customer/StampReward, el orden de siempre).
  * Los descuentos que no son canje se quedan como historia de la venta anulada.
+ *
+ * 🔴 Tienda híbrida (S9, P2-5): en una cuenta de FOLIO (toda cuenta con `OnlineOrder`) no se borra nada: los beneficios regresan y su
+ * fila se queda como cortesía (`convertirBeneficiosEnCortesiaEnTx`), así la cuenta conserva el precio que vio la clienta si después
+ * llega dinero. «Regresar el saldo y cancelar» también pasa por aquí (deuda P1, 31-oct): un folio convierte y otra cuenta devuelve.
  */
 export async function devolverCanjesDeVentaAnuladaEnTx(
   tx: TxConReintento,
@@ -239,7 +252,13 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     abonosDeSaldoSeRegresanEnEstaTx?: boolean
   },
 ): Promise<CanjesDevueltos> {
-  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }
+  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] }
+  if (await esCuentaDeFolioEnTx(tx, input)) {
+    // S9 (v5, B1): el sello va ANTES de convertir y también sin beneficios: es lo que dice después «este folio se anuló».
+    await sellarFolioAnuladoEnTx(tx, input)
+    const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
+    return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
+  }
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
   for (;;) {
@@ -256,6 +275,7 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     const { removeOrderDiscountInTransaction } = await import('../mobile/order.mobile.service')
     for (const fila of canjes) {
       const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined, {
+        porAnulacion: true,
         abonosDeSaldoSeRegresanEnEstaTx: input.abonosDeSaldoSeRegresanEnEstaTx,
       })
       devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0

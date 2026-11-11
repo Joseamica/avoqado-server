@@ -48,6 +48,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    // S9 v5 (U10): la nota del cobro lee el folio de la cuenta; en esta suite no hay folio.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },
@@ -441,5 +443,47 @@ describe('b4bit — webhooks fuera de orden (`edited_at`)', () => {
 
     expect(result.action).toBe('CONFIRMED')
     expect(mockPrisma.order.updateMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('S3-4 · CO pendiente anterior sobre folio con cliente', () => {
+  const preparar = (over: Record<string, unknown> = {}, amount = '200.00') => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment({ amount: d(amount), processedById: 'actor-del-cobro' }))
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ onlineOrder: { venueId: VENUE_ID }, ...over }))
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d(amount), tipAmount: d(0), type: 'REGULAR' }])
+  }
+  it('al saldar pone obligación y actor en la MISMA escritura PAID', async () => {
+    preparar()
+    await processWebhook(webhook())
+    expect(mockPrisma.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ paymentStatus: 'PAID', loyaltyEligibleAt: expect.any(Date), loyaltyStaffId: 'actor-del-cobro' }),
+      }),
+    )
+    expect(mockPrisma.order.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: ORDER_ID, venueId: VENUE_ID },
+        select: expect.objectContaining({ onlineOrder: expect.any(Object) }),
+      }),
+    )
+  })
+  it.each([null, { venueId: 'otro-venue' }])('genérico o relación de otra sucursal (%s) conserva no marcar', async onlineOrder => {
+    preparar({ onlineOrder })
+    await processWebhook(webhook())
+    expect(mockPrisma.order.updateMany.mock.calls[0][0].data).not.toHaveProperty('loyaltyEligibleAt')
+  })
+  it('parcial no marca', async () => {
+    preparar({}, '50.00')
+    await processWebhook(webhook({ fiat_amount: 50 }))
+    expect(mockPrisma.order.updateMany.mock.calls[0][0].data.paymentStatus).toBe('PARTIAL')
+    expect(mockPrisma.order.updateMany.mock.calls[0][0].data).not.toHaveProperty('loyaltyEligibleAt')
+  })
+  it('reentrega sobre PAID no resetea marca ni actor', async () => {
+    preparar({ paymentStatus: 'PAID', loyaltyEligibleAt: new Date(Date.now() - 86400000), loyaltyStaffId: 'anterior' })
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment({ status: 'COMPLETED' }))
+    await processWebhook(webhook())
+    const data = mockPrisma.order.updateMany.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('loyaltyEligibleAt')
+    expect(data).not.toHaveProperty('loyaltyStaffId')
   })
 })

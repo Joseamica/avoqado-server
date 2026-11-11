@@ -63,6 +63,13 @@ describe('payment effect operator tool', () => {
     expect(descripcion).toContain('COMMISSION_AWAITS_ORIGINAL (')
     expect(descripcion).toContain('COMMISSION_AWAITS_ORIGINAL_OVERDUE (')
   })
+  it('S15: list_payment_effects nombra STAMP_REVERSAL en español («Quitar el sello de una venta devuelta»), sin cambiar su entrada', () => {
+    handler()
+    expect(descripcion).toContain('STAMP_REVERSAL')
+    expect(descripcion).toContain('Quitar el sello de una venta devuelta')
+    // El filtro es el mismo de hoy: la herramienta está en el directorio certificado y su entrada no cambia.
+    expect(esquema!.kind.safeParse('STAMP_REVERSAL').success).toBe(false)
+  })
   it('exposes page metadata and passes the exact status, payment and cursor filters to the bounded service', async () => {
     const input = { venueId: 'own', status: 'DEAD_LETTER', paymentId: 'payment', limit: 1000000, cursor: 'cursor' }
     const response = await handler()(input)

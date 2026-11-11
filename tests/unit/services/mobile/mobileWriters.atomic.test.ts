@@ -144,6 +144,7 @@ const MODELS = [
   'staffVenue',
   'stampReward',
   'stampCard',
+  'walletPassOutbox',
   'shift',
 ]
 const WRITES = ['create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany']
@@ -197,7 +198,7 @@ const NOT_FOUND_MESSAGE: Record<Writer, string> = {
 
 function model() {
   return Object.fromEntries(
-    ['findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
+    ['count', 'findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
   ) as Record<string, jest.Mock>
 }
 function txCallOrders(except: jest.Mock[] = []): number[] {
@@ -299,7 +300,7 @@ beforeEach(() => {
   prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 4000 })
   // Every Order/child/reward read or write on the GLOBAL client is an escape from the lock.
   for (const [name, ops] of Object.entries({
-    order: ['findFirst', 'findUnique', 'update', 'updateMany', 'create'],
+    order: ['count', 'findFirst', 'findUnique', 'update', 'updateMany', 'create'],
     orderItem: ['findMany', 'updateMany', 'createMany', 'deleteMany'],
     orderDiscount: ['findFirst', 'findMany', 'create', 'update', 'delete'],
     orderPromotion: ['findUnique', 'findFirst', 'create', 'delete', 'updateMany'],
@@ -309,6 +310,7 @@ beforeEach(() => {
     loyaltyTransaction: ['create'],
     staffVenue: ['findUnique'],
     stampReward: ['findFirst', 'updateMany', 'update'],
+    walletPassOutbox: ['create'],
   })) {
     for (const op of ops) prismaMock[name][op].mockRejectedValue(new Error(`GLOBAL ${name}.${op}`))
   }
@@ -351,7 +353,9 @@ describe('locked mobile writers', () => {
       expect(buscarFiado).toBeLessThan(venueLock)
       expect(venueLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findFirst]), ...lecturasDeLaCuenta))
       expect(orderLock).toBeLessThan(tableLock)
-      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta))
+      expect(orderLock).toBeLessThan(
+        Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta),
+      )
       const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
       const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
       expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
@@ -524,6 +528,16 @@ describe('writer-specific fresh decisions', () => {
       expect.objectContaining({ where: { id: 'rw-od' }, data: expect.objectContaining({ status: 'PENDING' }) }),
     )
     expect(tx.stampReward.update.mock.invocationCallOrder[0]).toBeGreaterThan(lock)
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_DEVUELTO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od' } })
   })
 
@@ -770,6 +784,16 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_CANJEADO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
     expect(tx.stampReward.update).not.toHaveBeenCalled()
     // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).

@@ -13,6 +13,7 @@ jest.mock('@/communication/sockets', () => ({
 }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
+  reintentarAvisosDeTarjeta: jest.fn().mockResolvedValue({ avisados: 0, fallidos: 0, ocupados: 0 }),
 }))
 jest.mock('@/services/shared/cashDrawerPosting', () => ({
   ...jest.requireActual('@/services/shared/cashDrawerPosting'),
@@ -25,6 +26,11 @@ jest.mock('@/services/access/basePlan.service', () => ({
 }))
 
 import { Prisma } from '@prisma/client'
+import cuid from 'cuid'
+import * as loyalty from '@/services/shared/loyaltyOnPaidOrder'
+import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
+
+jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 import prisma from '@/utils/prismaClient'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
@@ -971,5 +977,66 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
       // Una sola bitácora, la del cobro de A: el reintento (replay) no escribe otra.
       expect(bitacorasDe(a.paymentId).map(b => [b.staffId, b.data.iniciadoPorSegunElAparato])).toEqual([[staffId, undefined]])
     })
+  })
+})
+
+describe('S3 · folio pagado con saldo/tarjeta de regalo, no liquidación de deuda', () => {
+  it('PAID deja obligación y actor; caída después del pago se recupera con un sello y una visita', async () => {
+    await prisma.loyaltyConfig.create({
+      data: { venueId, active: true, pointsPerDollar: 0, stampsEnabled: true, stampsRequired: 100, maxStampsPerDay: 1 },
+    })
+    const customer = await prisma.customer.create({ data: { venueId, firstName: 'Lucía S3' } })
+    const orderId = await cuentaDeMercancia(100)
+    await prisma.order.update({ where: { id: orderId }, data: { customerId: customer.id } })
+    await prisma.orderCustomer.create({ data: { orderId, customerId: customer.id, isPrimary: true } })
+    await prisma.onlineOrder.create({
+      data: {
+        venueId,
+        orderId,
+        trackingToken: cuid(),
+        paymentMode: 'PAY_AT_PICKUP',
+        requiresAcceptance: false,
+        acceptDeadlineAt: new Date(Date.now() + 30 * 60000),
+      },
+    })
+    const t = await tarjeta(100)
+    const fail = jest.spyOn(loyalty, 'awardLoyaltyForPaidOrder').mockRejectedValueOnce(new Error('S3 caída postcommit'))
+    try {
+      await payGiftCardBalanceOnOrder(venueId, orderId, {
+        idempotencyKey: cuid(),
+        proof: { kind: 'CODE', code: t.codigo },
+        amount: D(100),
+        tip: D(0),
+        staffId,
+        deviceId: null,
+      })
+    } finally {
+      fail.mockRestore()
+    }
+    const row = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(row.paymentStatus).toBe('PAID')
+    expect(row.loyaltyEligibleAt).toBeInstanceOf(Date)
+    expect(row.loyaltyStaffId).toBe(staffId)
+    expect(await prisma.stampEvent.count({ where: { orderId } })).toBe(0)
+    const scope = (a: any) => ({ ...a, where: { AND: [a.where, { id: orderId, venueId }] } })
+    const job = new LoyaltyReconciliationJob({
+      prisma: {
+        ...prisma,
+        order: {
+          ...prisma.order,
+          findMany: (a: any) => prisma.order.findMany(scope(a)),
+          updateMany: (a: any) => prisma.order.updateMany(scope(a)),
+        },
+      } as unknown as typeof prisma,
+      cron: { start: jest.fn(), stop: jest.fn() },
+      barrerCupones: async () => 0,
+    })
+    await job.runNow()
+    await job.runNow()
+    expect(await prisma.stampEvent.count({ where: { orderId, type: 'EARN' } })).toBe(1)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: customer.id } })).totalVisits).toBe(1)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).loyaltyProcessedAt).toBeInstanceOf(Date)
+    expect(await saldoDe(t.id)).toBe('0.00')
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
   })
 })

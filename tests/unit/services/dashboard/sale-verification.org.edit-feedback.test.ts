@@ -34,6 +34,7 @@ jest.mock('@/utils/prismaClient', () => {
       count: jest.fn(async () => 0),
     },
     order: {
+      count: jest.fn(async () => 0),
       findFirst: jest.fn(async () => ({
         id: 'ord-1',
         version: 1,

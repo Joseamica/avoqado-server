@@ -13,7 +13,7 @@ import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from './reglasDeDescuento'
 import logger from '@/config/logger'
-import { DiscountType, DiscountScope, Prisma } from '@prisma/client'
+import { DiscountType, DiscountScope, OrderStatus, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { esCompatibleConLigas } from './paymentLinkDiscount'
 
@@ -705,67 +705,42 @@ export async function cloneDiscount(venueId: string, discountId: string, created
  * @param venueId - Venue ID (multi-tenant filter)
  */
 export async function getDiscountStats(venueId: string): Promise<DiscountStatsResponse> {
-  // Get aggregate stats
-  const [totalDiscounts, activeDiscounts, automaticDiscounts, orderDiscounts] = await Promise.all([
+  // S9 (P2-5, codex-faseA-r6 #6): sólo las cuentas vivas. Una cancelada o borrada no dio el descuento (la cortesía de un folio que nunca
+  // se pagó sumaba un canje y su ahorro); un folio revivido y pagado sí cuenta. Totales y top en la base (decisión 28 del plan): antes
+  // se traían todas las filas del negocio para sumarlas en memoria.
+  const vivas = {
+    order: { venueId, status: { notIn: ['CANCELLED', 'DELETED'] as OrderStatus[] } },
+  } satisfies Prisma.OrderDiscountWhereInput
+  const [totalDiscounts, activeDiscounts, automaticDiscounts, totales, top] = await Promise.all([
     prisma.discount.count({ where: { venueId } }),
     prisma.discount.count({ where: { venueId, active: true } }),
     prisma.discount.count({ where: { venueId, isAutomatic: true, active: true } }),
-    prisma.orderDiscount.findMany({
-      where: {
-        order: { venueId },
-      },
-      select: {
-        discountId: true,
-        amount: true,
-        discount: {
-          select: {
-            id: true,
-            name: true,
-            type: true,
-          },
-        },
-      },
+    prisma.orderDiscount.aggregate({ where: vivas, _count: { _all: true }, _sum: { amount: true } }),
+    prisma.orderDiscount.groupBy({
+      by: ['discountId'],
+      where: { ...vivas, discountId: { not: null } },
+      _count: { _all: true },
+      _sum: { amount: true },
+      orderBy: [{ _count: { discountId: 'desc' } }, { discountId: 'asc' }],
+      take: 5,
     }),
   ])
 
-  // Calculate totals from order discounts
-  const totalRedemptions = orderDiscounts.length
-  const totalSaved = orderDiscounts.reduce((sum, od) => sum + Number(od.amount), 0)
-
-  // Group by discount for top discounts
-  const discountStats = new Map<
-    string,
-    {
-      id: string
-      name: string
-      type: DiscountType
-      redemptions: number
-      totalSaved: number
-    }
-  >()
-
-  for (const od of orderDiscounts) {
-    if (od.discount) {
-      const existing = discountStats.get(od.discount.id)
-      if (existing) {
-        existing.redemptions += 1
-        existing.totalSaved += Number(od.amount)
-      } else {
-        discountStats.set(od.discount.id, {
-          id: od.discount.id,
-          name: od.discount.name,
-          type: od.discount.type,
-          redemptions: 1,
-          totalSaved: Number(od.amount),
-        })
-      }
-    }
-  }
-
-  // Sort by redemptions and get top 5
-  const topDiscounts = Array.from(discountStats.values())
-    .sort((a, b) => b.redemptions - a.redemptions)
-    .slice(0, 5)
+  const ids = top.map(t => t.discountId).filter((id): id is string => id !== null)
+  const catalogo = ids.length
+    ? await prisma.discount.findMany({
+        where: { venueId, id: { in: ids } },
+        select: { id: true, name: true, type: true },
+        take: ids.length,
+      })
+    : []
+  const porId = new Map(catalogo.map(d => [d.id, d]))
+  const topDiscounts = top.flatMap(t => {
+    const d = t.discountId ? porId.get(t.discountId) : undefined
+    return d ? [{ id: d.id, name: d.name, type: d.type, redemptions: t._count._all, totalSaved: Number(t._sum.amount ?? 0) }] : []
+  })
+  const totalRedemptions = totales._count._all
+  const totalSaved = Number(totales._sum.amount ?? 0)
 
   return {
     totalDiscounts,

@@ -1,9 +1,12 @@
-import { WalletPlatform } from '@prisma/client'
+import cuid from 'cuid'
+import { WalletPlatform, type WalletPass } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { apnsAvailable, sendSilentPush } from './apnsClient'
 import { getStampCardStatus } from './stampLedger.service'
 import { buildLoyaltyObject } from './googleObjectBuilder.service'
+import { encolarAvisoDeTarjetaEnTx } from './walletPassOutbox.service'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { googleWalletAvailable, issuerId, walletBaseUrl, walletClient } from './googleWalletClient'
 
 /**
@@ -22,6 +25,7 @@ export interface NotifyResult {
    * es el negocio— pero quien llame puede ahora distinguirlas.
    */
   failed?: boolean
+  ocupado?: boolean
 }
 
 /**
@@ -75,14 +79,14 @@ export async function notifyPassUpdated(walletPassId: string): Promise<NotifyRes
       logger.info('Aparatos que ya no tienen la tarjeta, olvidados', { walletPassId, cuantos: muertos.length })
     }
 
-    return { notified: resultados.filter(x => x.res.ok).length }
+    return { notified: resultados.filter(x => x.res.ok).length, failed: resultados.some(x => !x.res.ok && !x.res.gone && !x.res.omitido) }
   } catch (error) {
     // El aviso es un extra; el cobro es el negocio.
     logger.error('No se pudo avisar de la actualización de una tarjeta', {
       walletPassId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { notified: 0 }
+    return { notified: 0, failed: true }
   }
 }
 
@@ -95,115 +99,174 @@ export async function notifyPassUpdated(walletPassId: string): Promise<NotifyRes
  * 🔴 La revisión sube ANTES de armar el objeto: la URL de la franja la lleva dentro, y
  * es lo único que obliga a Google a redescargar la imagen en vez de servir la vieja.
  */
-async function notifyGooglePass(pass: {
-  id: string
-  venueId: string
-  customerId: string
-  serialNumber: string
-  qrToken: string
-  revision: number
-  googleObjectId: string | null
-}): Promise<boolean> {
+const PLAZO_GOOGLE_MS = 20_000
+const LIMITE_DE_ENVIO_MS = 60_000
+
+type Pase = Pick<WalletPass, 'id' | 'venueId' | 'customerId' | 'serialNumber' | 'qrToken' | 'googleObjectId'>
+
+function objetoGoogle(pass: Pase, stamps: Awaited<ReturnType<typeof getStampCardStatus>>, revision: number) {
+  return buildLoyaltyObject({
+    issuerId: issuerId(),
+    venueId: pass.venueId,
+    walletPassId: pass.id,
+    serialNumber: pass.serialNumber,
+    qrToken: pass.qrToken,
+    revision,
+    baseUrl: walletBaseUrl()!,
+    content: stamps,
+  })
+}
+
+async function notifyGooglePass(pass: Pase): Promise<{ ok: boolean; huella?: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    // 🔴 `walletBaseUrl()` puede ser null aunque `googleWalletAvailable()` diga que sí
-    // hay credenciales: un cast `as string` sobre `env.BASE_URL` (optional en el schema
-    // de env) reventaba aquí con un TypeError críptico en un servidor recién
-    // desplegado sin configurar — atrapado por el try/catch de abajo, así que el
-    // cliente se quedaba SIN su sello, en silencio. Se sale temprano, igual que sin
-    // credencial.
-    const urlBase = walletBaseUrl()
-    if (!googleWalletAvailable() || !pass.googleObjectId || !urlBase) return false
-
-    const actualizado = await prisma.walletPass.update({
-      where: { id: pass.id },
-      data: { revision: { increment: 1 } },
-      select: { revision: true },
-    })
-
-    const stamps = await getStampCardStatus(pass.venueId, pass.customerId)
-    const client = await walletClient(pass.venueId)
-
-    await client.loyaltyobject.patch({
-      resourceId: pass.googleObjectId,
-      requestBody: buildLoyaltyObject({
-        issuerId: issuerId(),
-        venueId: pass.venueId,
-        walletPassId: pass.id,
-        serialNumber: pass.serialNumber,
-        qrToken: pass.qrToken,
-        revision: actualizado.revision,
-        baseUrl: urlBase,
-        content: stamps,
-      }) as any,
-    })
-
-    return true
+    if (!googleWalletAvailable() || !pass.googleObjectId || !walletBaseUrl()) return { ok: false }
+    // El race abarca también la credencial. Sólo deja de esperar: la petición puede publicar después.
+    return await Promise.race([
+      (async () => {
+        const actualizado = await prisma.walletPass.update({
+          where: { id: pass.id },
+          data: { revision: { increment: 1 } },
+          select: { revision: true },
+        })
+        const stamps = await getStampCardStatus(pass.venueId, pass.customerId)
+        const huella = JSON.stringify(objetoGoogle(pass, stamps, 0)) // incluye heroImage, sin su revisión variable
+        const client = await walletClient(pass.venueId)
+        await client.loyaltyobject.patch(
+          { resourceId: pass.googleObjectId!, requestBody: objetoGoogle(pass, stamps, actualizado.revision) as any },
+          { timeout: PLAZO_GOOGLE_MS },
+        )
+        return { ok: true, huella }
+      })(),
+      new Promise<{ ok: false }>(resolve => {
+        timer = setTimeout(() => resolve({ ok: false }), 25_000)
+      }),
+    ])
   } catch (error) {
-    // Igual que APNs: el aviso es un extra, el cobro es el negocio.
     logger.error('No se pudo avisarle a Google de la actualización de una tarjeta', {
       walletPassId: pass.id,
       error: error instanceof Error ? error.message : String(error),
     })
-    return false
+    return { ok: false }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
-/**
- * Avisa a los teléfonos de UN cliente en UN negocio.
- *
- * 🔴 Es el punto que llaman el sellado, el canje y la reversión. Cada uno de esos
- * cambia lo que la tarjeta debe mostrar, y sin este aviso el cliente sigue viendo el
- * número anterior hasta que vuelva a descargarla — que en la práctica no ocurre nunca.
- *
- * Como todo en este archivo: nunca lanza. Se llama desde el camino del cobro.
- */
+async function reclamarAvisos(venueId: string, customerId: string, token: string) {
+  return prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:aviso-tarjeta:v1:' + venueId + ':' + customerId}, 0))`
+    const [estado] = await tx.$queryRaw<{ ocupado: boolean }[]>`
+      SELECT EXISTS (SELECT 1 FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${customerId}
+        AND "reclamadoHasta" > (clock_timestamp() AT TIME ZONE 'UTC')) AS ocupado`
+    if (estado?.ocupado) return null
+    return tx.$queryRaw<{ id: string; intentos: number }[]>`
+      UPDATE "WalletPassOutbox" SET "reclamadoPor" = ${token}, "reclamadoHasta" = (clock_timestamp() AT TIME ZONE 'UTC') + interval '2 minutes'
+      WHERE id IN (SELECT id FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${customerId}
+        AND ("reclamadoHasta" IS NULL OR "reclamadoHasta" <= (clock_timestamp() AT TIME ZONE 'UTC'))
+        AND "siguienteIntentoAt" <= (clock_timestamp() AT TIME ZONE 'UTC') ORDER BY id LIMIT 200)
+      RETURNING id, intentos`
+  })
+}
+
+/** Único enviador por clienta. Dinero sólo inserta; aquí, después del commit, se habla a los proveedores. Nunca lanza. */
 export async function notifyCustomerPassUpdated(venueId: string, customerId: string): Promise<NotifyResult> {
-  try {
-    // 🔴 findMany y no findFirst, y se atiende cada pase POR SU PLATAFORMA. Con
-    // findFirst sin filtro, un cliente con las dos tarjetas podía recibir el pase de
-    // Google donde se esperaba el de Apple: APNs no encontraba aparatos y devolvía 0
-    // en silencio, y el iPhone dejaba de recibir sellos sin que nada fallara.
-    const passes = await prisma.walletPass.findMany({
-      where: { venueId, customerId, active: true },
-      select: {
-        id: true,
-        platform: true,
-        venueId: true,
-        customerId: true,
-        serialNumber: true,
-        qrToken: true,
-        revision: true,
-        googleObjectId: true,
-      },
-    })
-    if (passes.length === 0) return { notified: 0 }
-
-    let notified = 0
-
-    for (const pass of passes) {
-      if (pass.platform === WalletPlatform.APPLE) {
-        if (!apnsAvailable()) continue
-        const r = await notifyPassUpdated(pass.id)
-        notified += r.notified
-      } else if (pass.platform === WalletPlatform.GOOGLE) {
-        if (await notifyGooglePass(pass)) notified += 1
+  let notified = 0
+  for (let vuelta = 0; vuelta < 3; vuelta++) {
+    const token = cuid()
+    let idReparacion: string | null = null
+    try {
+      const filas = await reclamarAvisos(venueId, customerId, token)
+      if (filas === null) return { notified, ocupado: true }
+      if (filas.length === 0) return { notified }
+      const limite = Date.now() + LIMITE_DE_ENVIO_MS
+      const passes = await prisma.walletPass.findMany({
+        where: { venueId, customerId, active: true },
+        select: {
+          id: true,
+          platform: true,
+          venueId: true,
+          customerId: true,
+          serialNumber: true,
+          qrToken: true,
+          revision: true,
+          googleObjectId: true,
+        },
+      })
+      if (passes.length > 0) {
+        idReparacion = cuid()
+        const intentos = Math.max(...filas.map(f => f.intentos)) + 1
+        // R65: sin este rastro ANTES del proveedor, un PATCH abandonado podría dejar el pase viejo sin obligación pendiente.
+        await prisma.$executeRaw`
+          INSERT INTO "WalletPassOutbox" (id, "venueId", "customerId", motivo, "createdAt", intentos, "siguienteIntentoAt")
+          VALUES (${idReparacion}, ${venueId}, ${customerId}, 'REPARACION', (clock_timestamp() AT TIME ZONE 'UTC'), ${intentos},
+            (clock_timestamp() AT TIME ZONE 'UTC') + greatest(interval '2 minutes', least(2 ^ ${Math.min(intentos, 6)}, 60) * interval '1 minute'))`
+        const enviados: { pass: Pase; huella: string }[] = []
+        for (const pass of passes) {
+          if (Date.now() > limite) throw new Error('Se agotó el presupuesto del aviso de Wallet')
+          if (pass.platform === WalletPlatform.APPLE) {
+            const r = await notifyPassUpdated(pass.id)
+            notified += r.notified
+            if (r.failed) throw new Error('Falló un aviso de Apple Wallet')
+          } else if (pass.platform === WalletPlatform.GOOGLE) {
+            const r = await notifyGooglePass(pass)
+            if (!r.ok || !r.huella) throw new Error('Falló un aviso de Google Wallet')
+            notified++
+            enviados.push({ pass, huella: r.huella })
+          }
+        }
+        for (const { pass, huella } of enviados) {
+          const vigente = await getStampCardStatus(venueId, customerId)
+          if (JSON.stringify(objetoGoogle(pass, vigente, 0)) !== huella)
+            await encolarAvisoDeTarjetaEnTx(prisma, { venueId, customerId, motivo: 'RELECTURA' })
+        }
       }
+      // Sólo SUS filas y SU rastro: lo nuevo y lo reclamado por otro token sobreviven.
+      await prisma.$executeRaw`DELETE FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${customerId}
+        AND ("reclamadoPor" = ${token} OR id = ${idReparacion})`
+    } catch (error) {
+      await prisma.$executeRaw`UPDATE "WalletPassOutbox" SET "reclamadoPor" = NULL, "reclamadoHasta" = NULL,
+        "intentos" = "intentos" + 1,
+        "siguienteIntentoAt" = (clock_timestamp() AT TIME ZONE 'UTC') + least(2 ^ least("intentos", 6), 60) * interval '1 minute'
+        WHERE "venueId" = ${venueId} AND "customerId" = ${customerId} AND "reclamadoPor" = ${token}`.catch(soltarError =>
+        logger.warn('No se pudo soltar el reclamo de Wallet; vencerá solo', { venueId, customerId, error: String(soltarError) }),
+      )
+      const despliegueIncompleto = esDespliegueIncompleto(error)
+      logger.error(
+        despliegueIncompleto
+          ? '🔴 DESPLIEGUE INCOMPLETO: el esquema de la base no coincide con el código y los sellos NO están llegando a las tarjetas'
+          : 'No se pudo resolver la tarjeta de un cliente para avisarle',
+        { venueId, customerId, despliegueIncompleto, error: error instanceof Error ? error.message : String(error) },
+      )
+      return { notified, failed: true }
     }
-
-    return { notified }
-  } catch (error) {
-    const despliegueIncompleto = esDespliegueIncompleto(error)
-    logger.error(
-      despliegueIncompleto
-        ? '🔴 DESPLIEGUE INCOMPLETO: el esquema de la base no coincide con el código y los sellos NO están llegando a las tarjetas'
-        : 'No se pudo resolver la tarjeta de un cliente para avisarle',
-      {
-        venueId,
-        customerId,
-        despliegueIncompleto,
-        error: error instanceof Error ? error.message : String(error),
-      },
-    )
-    return { notified: 0, failed: true }
   }
+  return { notified }
+}
+
+/** Una página por pasada: un fallo no se vuelve a reclamar en esta misma vuelta. */
+export async function reintentarAvisosDeTarjeta(limite = 50): Promise<{ avisados: number; fallidos: number; ocupados: number }> {
+  const take = Number.isFinite(limite) ? Math.max(0, Math.min(50, Math.floor(limite))) : 50
+  const candidatos = await retry(
+    () => prisma.$queryRaw<{ venueId: string; customerId: string }[]>`
+    SELECT o."venueId", o."customerId" FROM "WalletPassOutbox" o
+    WHERE o."siguienteIntentoAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '60 seconds' AND o.intentos < 10
+      AND NOT EXISTS (SELECT 1 FROM "WalletPassOutbox" vivo WHERE vivo."venueId" = o."venueId" AND vivo."customerId" = o."customerId"
+        AND vivo."reclamadoHasta" > (clock_timestamp() AT TIME ZONE 'UTC'))
+    GROUP BY o."venueId", o."customerId" ORDER BY min(o."siguienteIntentoAt"), min(o.id) LIMIT ${take}`,
+    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'wallet-outbox.find' },
+  )
+  const [agotados] = await prisma.$queryRaw<
+    { cantidad: bigint }[]
+  >`SELECT count(*) AS cantidad FROM "WalletPassOutbox" WHERE intentos >= 10`
+  if (Number(agotados?.cantidad) > 0)
+    logger.warn('Avisos de Wallet sin confirmar tras diez intentos', { cantidad: Number(agotados.cantidad) })
+  const resultado = { avisados: 0, fallidos: 0, ocupados: 0 }
+  for (const c of candidatos) {
+    const r = await notifyCustomerPassUpdated(c.venueId, c.customerId)
+    if (r.ocupado) resultado.ocupados++
+    else if (r.failed) resultado.fallidos++
+    else resultado.avisados++
+  }
+  return resultado
 }

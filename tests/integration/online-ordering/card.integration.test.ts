@@ -1340,53 +1340,61 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PENDING')
   })
 
-  it('T8 fix r1: un cobro de la TPV cae mientras Stripe captura → se registra el de tarjeta igual y queda ONLINE_ORDER_CARD_DOUBLE_PAYMENT', async () => {
-    const { charge, orderId } = await authorizedOrder()
-    let tpvPaymentId = ''
-    captureSpy.mockImplementation(async (_m: any, p: any) => {
-      // La terminal registra un cobro YA hecho entre la primera transacción de la captura y su registro.
-      tpvPaymentId = (
-        await prisma.payment.create({
-          data: {
-            venueId: venueId!,
-            orderId,
-            amount: new Prisma.Decimal('250.00'),
-            tipAmount: 0,
-            method: 'CREDIT_CARD',
-            status: 'COMPLETED',
-            type: 'REGULAR',
-            source: 'TPV',
-            feePercentage: 0,
-            feeAmount: 0,
-            netAmount: new Prisma.Decimal('250.00'),
-          },
+  it.each([new Date('2026-11-08T05:58:00Z'), null])(
+    'T8/S3: TPV salda durante Stripe; conserva marca/actor (%s) y registra ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
+    async marca => {
+      const { charge, orderId } = await authorizedOrder()
+      let tpvPaymentId = ''
+      captureSpy.mockImplementation(async (_m: any, p: any) => {
+        // La terminal registra un cobro YA hecho entre la primera transacción de la captura y su registro.
+        tpvPaymentId = (
+          await prisma.payment.create({
+            data: {
+              venueId: venueId!,
+              orderId,
+              amount: new Prisma.Decimal('250.00'),
+              tipAmount: 0,
+              method: 'CREDIT_CARD',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              source: 'TPV',
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: new Prisma.Decimal('250.00'),
+            },
+          })
+        ).id
+        await prisma.order.update({
+          where: { id: orderId },
+          data: { paidAmount: new Prisma.Decimal('250.00'), paymentStatus: 'PAID', loyaltyEligibleAt: marca, loyaltyStaffId: null },
         })
-      ).id
-      await prisma.order.update({ where: { id: orderId }, data: { paidAmount: new Prisma.Decimal('250.00') } })
-      return capturedState(p)
-    })
-    ;(logAction as jest.Mock).mockClear()
-    await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+        return capturedState(p)
+      })
+      ;(logAction as jest.Mock).mockClear()
+      await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
 
-    const pagos = await paymentsOf(orderId)
-    expect(pagos).toHaveLength(2)
-    const deTarjeta = pagos.find(p => p.processorId === charge.paymentIntentId)!
-    expect(deTarjeta).toMatchObject({ status: 'COMPLETED', source: 'WEB' })
-    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
-    expect(order.paymentStatus).toBe('PAID')
-    // Lo cobrado dice la verdad: los dos cobros, no sólo el de la tarjeta.
-    expect(order.paidAmount.toFixed(2)).toBe('500.00')
-    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('CAPTURED')
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
-        entity: 'Order',
-        entityId: orderId,
-        data: expect.objectContaining({ paymentId: deTarjeta.id, chargeId: charge.id, source: 'ONLINE_CAPTURE' }),
-      }),
-    )
-    expect(tpvPaymentId).not.toBe('')
-  })
+      const pagos = await paymentsOf(orderId)
+      expect(pagos).toHaveLength(2)
+      const deTarjeta = pagos.find(p => p.processorId === charge.paymentIntentId)!
+      expect(deTarjeta).toMatchObject({ status: 'COMPLETED', source: 'WEB' })
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+      expect(order.paymentStatus).toBe('PAID')
+      // Lo cobrado dice la verdad: los dos cobros, no sólo el de la tarjeta.
+      expect(order.paidAmount.toFixed(2)).toBe('500.00')
+      expect(order.loyaltyEligibleAt).toEqual(marca)
+      expect(order.loyaltyStaffId).toBeNull()
+      expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('CAPTURED')
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
+          entity: 'Order',
+          entityId: orderId,
+          data: expect.objectContaining({ paymentId: deTarjeta.id, chargeId: charge.id, source: 'ONLINE_CAPTURE' }),
+        }),
+      )
+      expect(tpvPaymentId).not.toBe('')
+    },
+  )
 
   // ── Tarea 7: el conciliador termina lo que quedó en duda ──
   const NONFINAL = ['PENDING_AUTH', 'AUTHORIZED', 'CAPTURING', 'RELEASING'] as const

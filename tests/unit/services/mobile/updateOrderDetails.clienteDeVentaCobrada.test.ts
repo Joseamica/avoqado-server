@@ -23,6 +23,7 @@ function crearTx(orden: Record<string, unknown>, reembolsos = 0) {
     },
     orderCustomer: { findFirst: jest.fn().mockResolvedValue(null) },
     order: {
+      count: jest.fn(async () => 0),
       findFirst: jest.fn().mockResolvedValue({ id: 'order', status: 'CONFIRMED', customerName: null, ...orden }),
       update: jest.fn().mockImplementation(async (a: { data: Record<string, unknown> }) => ({
         customerName: a.data.customerName ?? null,

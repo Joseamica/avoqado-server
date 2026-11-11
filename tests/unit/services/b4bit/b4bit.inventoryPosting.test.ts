@@ -54,6 +54,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn() },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    // S9 v5 (U10): la nota del cobro lee el folio de la cuenta; en esta suite no hay folio.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     venueSettings: { findUnique: jest.fn() },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },
@@ -223,6 +225,7 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       shift: mockPrisma.shift,
       venueSettings: (prisma as any).venueSettings,
       activityLog: (prisma as any).activityLog,
+      onlineOrder: (prisma as any).onlineOrder, // S9 v5 (U10): la nota lee el folio de la cuenta
       $queryRaw: mockPrisma.$queryRaw,
     }
     mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))
@@ -266,6 +269,7 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       shift: mockPrisma.shift,
       venueSettings: (prisma as any).venueSettings,
       activityLog: (prisma as any).activityLog,
+      onlineOrder: (prisma as any).onlineOrder, // S9 v5 (U10): la nota lee el folio de la cuenta
       $queryRaw: mockPrisma.$queryRaw,
     }
     mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))

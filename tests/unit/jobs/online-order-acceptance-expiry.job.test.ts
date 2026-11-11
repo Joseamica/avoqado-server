@@ -113,6 +113,8 @@ describe('online-order-acceptance-expiry.job', () => {
     // R38: el fin del día va DESPUÉS de lo que mete folios a la lista y ANTES de vencer.
     expect(h.cerrarFoliosDelDia).toHaveBeenCalledWith(h.now, expect.any(Function)) // R52: decide el día con el reloj de su lectura
     expect(orden(h.syncPaidClosedFolios)).toBeLessThan(orden(h.cerrarFoliosDelDia))
+    // S9 v5 (U8): ya no hay paso V3 (el aviso del dinero tardío lo da la nota del cobro).
+    expect(Object.keys((h.job as any).dependencies)).not.toContain('avisarAbonosEnFoliosCerrados')
     expect(orden(h.cerrarFoliosDelDia)).toBeLessThan(orden(h.leerVencidos))
   })
 
@@ -289,6 +291,8 @@ describe('online-order-acceptance-expiry.job', () => {
         ? [{ id: 'oo-F', orderId: 'ord-F', venueId: 'v1', status: 'EXPIRED', order: { orderNumber: 'F-1' } }]
         : []) as any)
     prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+    // S9: el paso que revive relee el folio bajo el candado de la orden antes de su CAS.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo-F', status: 'EXPIRED' } as any)
     const expireOrder = jest.fn().mockResolvedValue({ outcome: 'OK', status: 'EXPIRED' })
     const leerVencidos = jest.fn().mockResolvedValue([CANDIDATES[0]])
     const job = new OnlineOrderAcceptanceExpiryJob({

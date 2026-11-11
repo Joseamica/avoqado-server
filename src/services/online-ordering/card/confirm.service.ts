@@ -7,13 +7,17 @@
 import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import AppError from '@/errors/AppError'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
 import { ACCEPT_TIMEOUT_MINUTES } from '../constants'
-import { TX_OPTIONS, emitOnlineOrderCreated, lockAdmission, pickOrderNumber, writeOnlineOrderInTx } from '../order.service'
+import { emitOnlineOrderCreated, fromQuoteSnapshot, lockAdmission, pickOrderNumber, writeOnlineOrderInTx } from '../order.service'
+import { BENEFIT_UNAVAILABLE, simularBeneficios, type BeneficioElegido } from '../beneficios.service'
+import { despertarPasesTrasCommit } from '../cortesiaDeFolio'
 import type { CardDraftRequest } from './draft.service'
 import { chargeMerchant } from './merchant'
 import { CAPTURED_OUTSIDE, releaseCharge } from './release.service'
@@ -23,15 +27,60 @@ export type ConfirmOutcome = 'CREATED' | 'ALREADY' | 'NOT_YET' | 'ABANDONED' | '
 /** Codex r1 C3: `lastError` de un borrador cuyo PaymentIntent ya se cobró fuera de Avoqado (lo ve una persona; nadie lo reintenta). */
 export { CAPTURED_OUTSIDE }
 
+/** S11 (R4): la acción de bitácora del cargo con el motivo de NEGOCIO de su liberación y el precio nuevo (lo lee el seguimiento). */
+export const PRECIO_CAMBIO_AL_CONFIRMAR = 'ONLINE_ORDER_CARD_PRICE_CHANGED'
+
+/** S11 (R2', R4'): por qué un apartado con beneficios no se volvió pedido, y el precio nuevo que la tienda vuelve a autorizar. */
+interface PrecioCambiado {
+  motivo: 'BENEFIT_GONE' | 'PRICE_CHANGED'
+  cual: BeneficioElegido | null
+  totalEstricto: Prisma.Decimal | null
+  descartados: BeneficioElegido[]
+}
+
+/** R2': el total estricto del folio no es lo autorizado; viaja como error para revertir el intento entero, con el total de la cuenta. */
+class TotalDistintoDelAutorizado extends Error {
+  constructor(readonly total: Prisma.Decimal) {
+    super('el total estricto no es lo autorizado')
+  }
+}
+
 /**
  * Apartado que no puede volverse pedido (monto distinto, o la llave ya tiene cuenta): se libera. CAS a `RELEASING` primero (un
  * solo liberador); si Stripe falla, el cargo queda `RELEASING` y el conciliador lo retoma.
+ * S11 (R4): con un motivo de negocio (`precio`), se guarda en la bitácora del cargo en la MISMA transacción del CAS: la liberación
+ * (`releaseCharge`, que limpia `lastError`) y la conciliación no lo tocan.
  */
-async function releaseLate(charge: OnlineOrderCharge, auth: AuthorizationState, why: string): Promise<ConfirmOutcome> {
-  const won = await prisma.onlineOrderCharge.updateMany({
-    where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
-    // Sale de PENDING_AUTH: un episodio nuevo para la alerta del conciliador.
-    data: { status: OnlineOrderChargeStatus.RELEASING, paymentIntentId: auth.paymentIntentId, lastError: why, stuckAlertedAt: null },
+async function releaseLate(
+  charge: OnlineOrderCharge,
+  auth: AuthorizationState,
+  why: string,
+  precio?: PrecioCambiado,
+): Promise<ConfirmOutcome> {
+  const won = await prisma.$transaction(async tx => {
+    const cas = await tx.onlineOrderCharge.updateMany({
+      where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
+      // Sale de PENDING_AUTH: un episodio nuevo para la alerta del conciliador.
+      data: { status: OnlineOrderChargeStatus.RELEASING, paymentIntentId: auth.paymentIntentId, lastError: why, stuckAlertedAt: null },
+    })
+    if (cas.count === 1 && precio) {
+      await tx.activityLog.create({
+        data: {
+          venueId: charge.venueId,
+          action: PRECIO_CAMBIO_AL_CONFIRMAR,
+          entity: 'OnlineOrderCharge',
+          entityId: charge.id,
+          data: {
+            motivo: precio.motivo,
+            cual: precio.cual,
+            totalEstricto: precio.totalEstricto?.toFixed(2) ?? null,
+            descartados: precio.descartados,
+            amount: new Prisma.Decimal(charge.amount).toFixed(2),
+          },
+        },
+      })
+    }
+    return cas
   })
   if (won.count === 0) return 'ALREADY'
   logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', {
@@ -119,7 +168,9 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
       return releaseLate(charge, auth, 'AMOUNT_MISMATCH')
     }
     const request = charge.request as unknown as CardDraftRequest
-    let created: { orderId: string; onlineOrderId: string; orderNumber: string } | null
+    // S11: un borrador de antes no trae clienta (C9) y nace como hoy; con ella, el pedido nace con su elección canjeada.
+    const customerId = request.customerId ?? null
+    let created: { orderId: string; onlineOrderId: string; orderNumber: string; premio: boolean } | null
     try {
       created = await withDeadlockRetry(
         async tx => {
@@ -143,7 +194,7 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
             orderNumber,
             quote: request.quote,
             customer: request.customer,
-            customerId: null, // C9: el teléfono de la tarjeta no se verificó
+            customerId,
             note: request.note,
             paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
             trackingToken: charge.trackingToken,
@@ -152,20 +203,43 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
             whatsappConsent: request.whatsappConsent,
             requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
             channel: null,
+            beneficios: customerId ? { customerId, eleccion: request.beneficios ?? null } : null,
           })
+          // R2': con tarjeta el folio nace SÓLO si el total estricto = lo AUTORIZADO (la captura exige esa igualdad); si no, se revierte.
+          if (customerId && !r.total.equals(new Prisma.Decimal(charge.amount))) throw new TotalDistintoDelAutorizado(r.total)
           await tx.onlineOrderCharge.update({ where: { id: charge.id }, data: { onlineOrderId: r.onlineOrderId } })
-          return { ...r, orderNumber }
+          return {
+            orderId: r.orderId,
+            onlineOrderId: r.onlineOrderId,
+            orderNumber,
+            premio: r.premio,
+          }
         },
-        { etiqueta: 'confirmCardAuthorization', ...TX_OPTIONS },
+        // S11: canjea en la cuenta nueva: el presupuesto único del candado de la orden (los mismos 15 s / 5 s de antes).
+        { etiqueta: 'confirmCardAuthorization', ...ORDER_LOCK_WAIT_BUDGET },
       )
     } catch (error) {
       // La llave ya tiene cuenta (no debería: la guarda de llaves de la tarea 4). Nada se creó: se libera la tarjeta.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         return releaseLate(charge, auth, 'EXTERNAL_ID_TAKEN')
       }
+      // S11 (R2', R4'): no nace el pedido; se libera con el motivo y el precio nuevo, durables para el seguimiento.
+      if (error instanceof TotalDistintoDelAutorizado) {
+        return releaseLate(charge, auth, 'PRICE_CHANGED', {
+          motivo: 'PRICE_CHANGED',
+          cual: null,
+          totalEstricto: error.total,
+          descartados: [],
+        })
+      }
+      if (customerId && error instanceof AppError && error.code === BENEFIT_UNAVAILABLE) {
+        const cual = (error.details as { cual?: BeneficioElegido } | undefined)?.cual ?? null
+        return releaseLate(charge, auth, 'BENEFIT_GONE', await precioSinElBeneficio(charge, request, customerId, cual))
+      }
       throw error
     }
     if (!created) return 'ALREADY'
+    if (created.premio && customerId) despertarPasesTrasCommit(charge.venueId, [customerId])
 
     emitOnlineOrderCreated(
       charge.venueId,
@@ -196,4 +270,31 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
     return r.count === 1 ? 'ABANDONED' : 'ALREADY'
   }
   return 'NOT_YET'
+}
+
+/**
+ * S11 (R4'): el beneficio ya no estaba al confirmar. El precio nuevo sale de la MISMA simulación del borrador (con su lugar del
+ * semáforo, R2'''), ya fuera de la transacción revertida. Sin lugar o con la base saturada, `totalEstricto: null`: la tienda recotiza.
+ */
+async function precioSinElBeneficio(
+  charge: OnlineOrderCharge,
+  request: CardDraftRequest,
+  customerId: string,
+  cual: BeneficioElegido | null,
+): Promise<PrecioCambiado> {
+  let total: Prisma.Decimal | null = null
+  let descartados: BeneficioElegido[] = cual ? [cual] : []
+  try {
+    const sim = await simularBeneficios(charge.venueId, fromQuoteSnapshot(request.quote), customerId, request.beneficios ?? {})
+    if (sim) {
+      total = sim.total
+      descartados = [...new Set([...descartados, ...sim.descartados])]
+    }
+  } catch (error) {
+    logger.warn('[OnlineOrderCard] no se pudo calcular el precio nuevo del beneficio perdido (la tienda recotiza)', {
+      chargeId: charge.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  return { motivo: 'BENEFIT_GONE', cual, totalEstricto: total, descartados }
 }

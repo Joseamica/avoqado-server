@@ -414,7 +414,8 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
   it('(b) rechaza la carrera PAID sin efectos y conserva el 400 con PAID estable', async () => {
     const orden = await nuevaOrden()
     await escenarioRegistroRetiene(orden.id, () => updateOrder(venueId, orden.id, { status: 'CANCELLED' } as any), {
-      stableMessage: 'Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.',
+      stableMessage:
+        'Esta orden tiene pagos registrados y no se puede eliminar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
     })
   })
 
@@ -434,7 +435,7 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
     expect(referidos).toHaveBeenCalledWith({ orderId: orden.id, venueId })
   })
 
-  it('si el status NO cambia la guarda no se activa: editar el nombre de una orden ya cancelada con un cobro vivo funciona', async () => {
+  it('una cancelada con cobro vivo rechaza cambiar nombre; el reenvío idéntico de anulación continúa', async () => {
     const orden = await nuevaOrden({ status: 'CANCELLED' })
     await prisma.terminalPaymentRequest.create({
       data: {
@@ -447,8 +448,14 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
         expiresAt: new Date(Date.now() + 60_000),
       },
     })
-    const res = await updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: 'Ana' } as any)
-    expect(res.customerName).toBe('Ana')
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orden.id }, include: { items: true, orderDiscounts: true } })
+    await expect(updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: 'Ana' } as any)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_EDIT',
+    })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orden.id }, include: { items: true, orderDiscounts: true } })).toEqual(antes)
+    const res = await updateOrder(venueId, orden.id, { status: 'CANCELLED', customerName: antes.customerName } as any)
+    expect(res).toMatchObject({ status: 'CANCELLED', customerName: antes.customerName, version: antes.version })
   })
 })
 
@@ -496,7 +503,12 @@ describe('Anular artículos en la TPV (voidItems)', () => {
 
   it('anular todo en una orden PARTIAL se rechaza como en cancelOrder: el dinero cobrado no se lleva a una orden cancelada', async () => {
     const orden = await nuevaOrdenConArticulos(2, { paymentStatus: 'PARTIAL', paidAmount: new Prisma.Decimal(40) })
-    await expect(anularTodo(orden)()).rejects.toMatchObject({ statusCode: 400 })
+    await expect(anularTodo(orden)()).rejects.toMatchObject({
+      statusCode: 400,
+      // D21: sin «Reembólsalos antes de…»; un reembolso no baja lo cobrado (`orderBalance.ts`).
+      message:
+        'Esta cuenta ya tiene pagos registrados y ya no se pueden anular todos sus artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    })
     const final = await estado(orden.id)
     expect(final.status).not.toBe('CANCELLED')
     expect(final.paymentStatus).toBe('PARTIAL')
@@ -684,7 +696,11 @@ describe('Fusión de cuentas (mergeOrders)', () => {
     const stable = await resultadoDe(mergeOrders(venueId, a.id, b.id))
     expect(stable.ok).toBe(false)
     expect((stable as { e: unknown }).e).toBeInstanceOf(BadRequestError)
-    expect((stable as { e: unknown }).e).toMatchObject({ statusCode: 400, message: 'La cuenta destino ya está cerrada' })
+    expect((stable as { e: unknown }).e).toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_EDIT',
+      message: 'Esta cuenta está cancelada, abre una nueva.',
+    })
     expect(await estadoCompletoOrdenes([a.id, b.id])).toEqual(committed)
     expect(referrals).toHaveBeenCalledTimes(1)
     expect((logAction as jest.Mock).mock.calls).toHaveLength(auditCalls)
@@ -857,7 +873,13 @@ describe('Anular artículos por debajo de lo ya cobrado (voidItems)', () => {
 
   it('PARTIAL con $80 cobrados: anular $50 de $100 dejaría $50 < $80 ⇒ 400 ORDER_VOID_BELOW_PAID y nada cambia', async () => {
     const orden = await nuevaOrdenConArticulos(2, { paymentStatus: 'PARTIAL', paidAmount: new Prisma.Decimal(80) })
-    await expect(anularUno(orden)()).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_VOID_BELOW_PAID' })
+    await expect(anularUno(orden)()).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_VOID_BELOW_PAID',
+      // D21: sin «Reembolsa primero la diferencia»; lo cobrado excluye los reembolsos, así que no destrabaría nada.
+      message:
+        'Anular estos artículos dejaría la cuenta en $50.00 y ya se cobraron $80.00. Anula menos artículos; si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+    })
     expect(await prisma.orderItem.count({ where: { orderId: orden.id } })).toBe(2)
     expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })).total)).toBe(100)
   })

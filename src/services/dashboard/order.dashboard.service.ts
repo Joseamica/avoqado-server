@@ -1,11 +1,6 @@
 import { loadExchangeLinksForOrders } from '../exchanges/exchangeDetail'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
-import {
-  asegurarCambioDeClienteBajoCandado,
-  bloquearVentaParaLiga,
-  esVentaYaCobrada,
-  ventaYaCobradaBajoCandado,
-} from '@/services/shared/ligaDeClienteEnVenta'
+import { asegurarCambioDeClienteBajoCandado, esVentaYaCobrada, ventaYaCobradaBajoCandado } from '@/services/shared/ligaDeClienteEnVenta'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
 import { assertNotCardOnlineOrderInTx } from '@/services/online-ordering/card/guards'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
@@ -45,7 +40,12 @@ import {
 // contradecir al saldo persistido.
 import { summarizeRefunds } from '../shared/orderBalance'
 import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
-import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
+import {
+  bloquearCuentaParaEditar,
+  notarDineroEnFolioCerradoEnTx,
+  rechazarSiCuentaAnuladaEnTx,
+  rechazarCobroNuevoSobreCancelada,
+} from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
@@ -596,13 +596,24 @@ export async function updateOrder(
     )
   }
 
+  // El mismo payload normalizado decide si un reenvío de anulación cambia algo y escribe los campos permitidos.
+  const camposEditados = {
+    ...(status !== undefined && { status }),
+    ...(customerId !== undefined && { customerId: customerId || null }),
+    ...(customerName !== undefined && { customerName }),
+    ...(tableId !== undefined && { tableId: tableId || null }),
+    ...(servedById !== undefined && { servedById: servedById || null }),
+    ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
+    ...(orderNumber !== undefined && { orderNumber }),
+    ...(type !== undefined && { type }),
+  }
   const topologyWrite = tableId !== undefined || status !== undefined
   // 🔴 R4-2: tocar el cliente se decide bajo el candado de la venta (como toda escritura de su atribución).
   const tocaCliente = customerId !== undefined
   const update = async (client: TxConReintento) => {
     // Con topología, `lockTableOrderScope` ya toma ESTA venta `FOR UPDATE` (más fuerte que el candado de la liga). Sin ella,
-    // si la petición toca el cliente, la PRIMERA sentencia es el candado de la liga (`bloquearVentaParaLiga`).
-    if (!topologyWrite && tocaCliente && !(await bloquearVentaParaLiga(client, { venueId, orderId })))
+    // toda edición de metadatos toma primero el modo débil de la liga, sin ampliar el conjunto topológico.
+    if (!topologyWrite && !(await bloquearCuentaParaEditar(client, { venueId, orderId }, 'ATRIBUCION')))
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     if (topologyWrite)
       await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
@@ -622,12 +633,34 @@ export async function updateOrder(
         id: orderId,
         venueId,
       },
-      select: { status: true, venueId: true, paymentStatus: true, customerId: true, tableId: true },
+      select: {
+        status: true,
+        venueId: true,
+        paymentStatus: true,
+        customerId: true,
+        customerName: true,
+        tableId: true,
+        servedById: true,
+        createdAt: true,
+        orderNumber: true,
+        type: true,
+      },
     })
 
     if (!currentOrder) {
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     }
+
+    // La excepción es sólo volver a pedir la MISMA anulación, sin cambiar ningún campo efectivo del formulario.
+    // El scope ya posee la Order: aquí sólo se relee; no se toma COBRO después de haber tomado las mesas.
+    const reintentoPuroDeAnulacion =
+      (status === 'CANCELLED' || status === 'DELETED') &&
+      status === currentOrder.status &&
+      Object.entries(camposEditados).every(([campo, valor]) => {
+        const actual = currentOrder[campo as keyof typeof currentOrder]
+        return valor instanceof Date ? actual instanceof Date && valor.getTime() === actual.getTime() : valor === actual
+      })
+    if (topologyWrite && !reintentoPuroDeAnulacion) await rechazarSiCuentaAnuladaEnTx(client, { venueId, orderId })
 
     // Cuentas fuera del plano (23-oct; founder «como Square»): el plano de mesas sólo pinta cuentas vivas CON mesa, así que este
     // PUT no puede esconder una cuenta que todavía debe dinero. El diálogo reenvía `status` y `tableId` siempre: cuenta el CAMBIO.
@@ -708,22 +741,21 @@ export async function updateOrder(
 
     // 🔴 Diseño §C.6: pasar a CANCELLED / DELETED por este PUT ES cancelar la orden, y va por la MISMA cancelación
     // protegida que el DELETE (candado de la orden → relectura → sin dinero → sin cobro de terminal vivo). Antes escribía
-    // cualquier `status` sin revisar nada, y `orders:update` lo traen roles de piso. Si el status NO cambia (el diálogo lo
-    // reenvía siempre) la guarda no se activa: editar el nombre de una orden ya cancelada no es cancelarla otra vez.
+    // cualquier `status` sin revisar nada. Una anulación repetida sólo llega aquí con los mismos datos normalizados.
     const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
     let valesSoltados: ValesSoltados | null = null
     const escribir = (client: Prisma.TransactionClient) =>
       client.order.update({
         where: { id: orderId },
         data: {
-          ...(status !== undefined && { status }),
-          ...(customerId !== undefined && { customerId: customerId || null }),
-          ...(customerName !== undefined && { customerName }),
-          ...(tableId !== undefined && { tableId: tableId || null }),
-          ...(servedById !== undefined && { servedById: servedById || null }),
-          ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
-          ...(orderNumber !== undefined && { orderNumber }),
-          ...(type !== undefined && { type }),
+          ...(status !== undefined && { status: camposEditados.status }),
+          ...(customerId !== undefined && { customerId: camposEditados.customerId }),
+          ...(customerName !== undefined && { customerName: camposEditados.customerName }),
+          ...(tableId !== undefined && { tableId: camposEditados.tableId }),
+          ...(servedById !== undefined && { servedById: camposEditados.servedById }),
+          ...(createdAt !== undefined && { createdAt: camposEditados.createdAt }),
+          ...(orderNumber !== undefined && { orderNumber: camposEditados.orderNumber }),
+          ...(type !== undefined && { type: camposEditados.type }),
           ...(status === 'COMPLETED' && { completedAt: new Date() }),
           // Los escritores con CAS de versión se enteran de que la orden se canceló.
           ...(cancelando && { version: { increment: 1 } }),
@@ -804,7 +836,9 @@ export async function updateOrder(
   return updatedOrder
 }
 
-const MENSAJE_ORDEN_CON_DINERO = 'Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.'
+// D21: sin «Reembolsa primero»; un reembolso no la vuelve eliminable (`orderBalance.ts`).
+const MENSAJE_ORDEN_CON_DINERO =
+  'Esta orden tiene pagos registrados y no se puede eliminar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 /**
  * Eliminar una orden.
@@ -910,7 +944,8 @@ export async function cancelarCuentaSinCobrar(
         contarPagosRegistrados: true,
         rechazarYaCancelada: true,
         rechazarCuentaDeMesa: true,
-        mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
+        mensajeConDinero:
+          'Esta cuenta tiene pagos registrados y no se puede cancelar. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
       })
     },
     { etiqueta: 'cancelarCuentaSinCobrar', ...ORDER_LOCK_WAIT_BUDGET },
@@ -1117,6 +1152,16 @@ export async function settleOrder(
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           reconciliationEnabled,
+        })
+        // 🔴 S9 v5 (B3): la nota del dinero que entra; «Liquidar» nunca reabre (la cancelada la rechaza arriba).
+        await notarDineroEnFolioCerradoEnTx(tx, {
+          venueId,
+          orderId,
+          entra: new Prisma.Decimal(toSettle),
+          reabierta: false,
+          canal: 'settleOrder',
+          paymentId: settlementPayment.id,
+          staffId: actorStaffId,
         })
 
         // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later

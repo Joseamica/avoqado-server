@@ -124,6 +124,7 @@ function differences(sites: Site[], decisions: Record<string, Review>): string[]
 const helpers = new Set([
   ...Object.keys(rawReview).map(key => key.split('#')[1].split('.').at(-1)!),
   'lockExistingOrderForPayment',
+  'bloquearCuentaParaEditar',
   'lockOrdersForUpdate',
   'lockTableOrderScope',
   'bloquearOrdenParaFacturar',

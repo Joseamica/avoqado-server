@@ -271,6 +271,36 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
     })
   })
 
+  // D3 (10-nov-2026): el cobro rápido también guarda el dato DEFINITIVO de internacionalidad.
+  it('D3: cobro rápido con tarjeta — la terminal dice «nacional», el chip dice Estados Unidos ⇒ se guarda internacional', async () => {
+    await recordFastPayment(
+      VENUE,
+      cobroRapido({ method: 'CREDIT_CARD', isInternational: false, issuerCountryCode: '0840', issuerCountrySource: 'EMV_5F28' }),
+      'user-1',
+    )
+
+    expect(payments).toHaveLength(1)
+    expect(payments[0].processorData).toMatchObject({
+      isInternational: true,
+      isInternationalFromTerminal: false,
+      issuerCountryEvidence: { code: '0840', source: 'EMV_5F28' },
+    })
+    expect(payments[0]).toMatchObject({
+      internationalityStatus: 'INTERNATIONAL',
+      internationalitySource: 'EMV_5F28',
+      issuerCountryCode: '840',
+    })
+  })
+
+  it('D3 · Codex r2: lo que NO es tarjeta no se clasifica — efectivo con un país colado conserva su dato y no guarda clasificación', async () => {
+    await recordFastPayment(VENUE, cobroRapido({ issuerCountryCode: '0840', issuerCountrySource: 'EMV_5F28' }), 'user-1')
+
+    expect(payments).toHaveLength(1)
+    expect(payments[0].processorData.isInternational).toBe(false)
+    expect(payments[0].processorData).not.toHaveProperty('isInternationalFromTerminal')
+    expect(payments[0].internationalityStatus).toBeUndefined()
+  })
+
   it('el cliente se busca SIEMPRE contra el venue del token (aislamiento de inquilino)', async () => {
     prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
 

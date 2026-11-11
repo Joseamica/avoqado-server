@@ -47,7 +47,18 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
     customerName: 'María',
     customerPhone: null,
     specialRequests: null,
-    items: [{ productName: 'Flautas', productId: 'p1', product: null, quantity: 2, notes: null, unitPrice: new Prisma.Decimal('93.00'), total: new Prisma.Decimal('186.00'), modifiers: [] }],
+    items: [
+      {
+        productName: 'Flautas',
+        productId: 'p1',
+        product: null,
+        quantity: 2,
+        notes: null,
+        unitPrice: new Prisma.Decimal('93.00'),
+        total: new Prisma.Decimal('186.00'),
+        modifiers: [],
+      },
+    ],
     payments: o.paymentStatus === 'PAID' ? [{ createdAt: PAGADO_A }] : [],
   },
 })
@@ -113,9 +124,13 @@ describe('listFolios', () => {
     expect(r.toPay[0].paidAt).toBeNull()
     expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
     const lista = listas()[0]
-    expect(lista.select.order.select.payments).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
+    expect(lista.select.order.select.payments).toMatchObject({
+      // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
-      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
   })
 
@@ -261,6 +276,8 @@ describe('listFolios', () => {
         return [{ id: orderId }]
       })
       prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+      // S9: el paso que revive relee el folio bajo el candado de la orden antes de su CAS.
+      prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo-A', status: 'EXPIRED' } as any)
       const listasYConteos = prismaMock.onlineOrder.findMany.getMockImplementation()!
       prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
         !esLista(a) && a.where.status?.in
@@ -278,5 +295,51 @@ describe('listFolios', () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+})
+
+describe('S14: «Por pagar» y «Por entregar» dicen de qué clienta es cada folio y qué beneficios trae (P2-3)', () => {
+  const conPremio = (r: ReturnType<typeof row>, customer: Record<string, unknown> | null) => ({
+    ...r,
+    order: {
+      ...r.order,
+      customer,
+      orderDiscounts: customer ? [{ name: 'Premio', amount: new Prisma.Decimal('45.00'), isComp: false, compReason: null }] : [],
+      _count: { orderDiscounts: customer ? 1 : 0 },
+    },
+  })
+
+  it('un folio con premio trae cliente y beneficios en toPay y toDeliver', async () => {
+    const ana = { id: 'cus-ana', firstName: 'Ana', lastName: 'López', phone: '+525511112222', email: 'ana@correo.test' }
+    POR_PAGAR = [conPremio(row(1), ana)]
+    POR_ENTREGAR = [conPremio(row(2, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' }), ana)]
+    CONTEOS = { toPay: 1, toDeliver: 1 }
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    for (const o of [r.toPay[0], r.toDeliver[0]]) {
+      expect(o.cliente).toEqual({ id: 'cus-ana', nombre: 'Ana L.' })
+      expect(o).toMatchObject({ beneficios: [{ nombre: 'Premio', monto: 45 }], beneficiosTotal: 1 })
+    }
+    expect(JSON.stringify(r)).not.toMatch(/5511112222|ana@correo\.test|López/)
+  })
+
+  it('Codex r1 #1: la clienta ligada desde la TPV (primario, sin `customerId`) sale en toPay y toDeliver', async () => {
+    const carla = { id: 'cus-carla', firstName: 'Carla', lastName: 'Soto' }
+    const ligada = (r: ReturnType<typeof row>) => ({
+      ...conPremio(r, null),
+      order: { ...conPremio(r, null).order, orderCustomers: [{ customer: carla }] },
+    })
+    POR_PAGAR = [ligada(row(1))]
+    POR_ENTREGAR = [ligada(row(2, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' }))]
+    CONTEOS = { toPay: 1, toDeliver: 1 }
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    for (const o of [r.toPay[0], r.toDeliver[0]]) expect(o.cliente).toEqual({ id: 'cus-carla', nombre: 'Carla S.' })
+  })
+
+  it('sin cliente ⇒ cliente null', async () => {
+    POR_PAGAR = [conPremio(row(1), null)]
+    CONTEOS = { toPay: 1, toDeliver: 0 }
+    const r = await listFolios({ venueId: 'v1', section: 'toPay', now: NOW })
+    expect(r.toPay[0].cliente).toBeNull()
+    expect(r.toPay[0]).toMatchObject({ beneficios: [], beneficiosTotal: 0 })
   })
 })

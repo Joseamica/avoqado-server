@@ -181,7 +181,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'gift_card_lookup',
-    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to, its sale ticket and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason). The delivery status is independent of the card status: delivery PENDING only means nothing has been sent yet, and a printed or handed-to-the-buyer card is never sent, so its delivery stays PENDING for good (there is nothing to send) — that does NOT mean the card is unpaid; only the card status says that. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
+    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to and, if a customer saved it in her account, whose account it is, its sale ticket and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason). The delivery status is independent of the card status: delivery PENDING only means nothing has been sent yet, and a printed or handed-to-the-buyer card is never sent, so its delivery stays PENDING for good (there is nothing to send) — that does NOT mean the card is unpaid; only the card status says that. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
     {
       venueId: z.string().describe('Venue that issued the cards (must be in your scope)'),
       last4: z
@@ -219,6 +219,9 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           // le diga a un cliente que una tarjeta vencida sirve.
           expired: t.expiresAt !== null && Date.parse(t.expiresAt) <= ahora,
           customer: t.customer?.name ?? null,
+          // S15 (P2-6): «Guardar en mi cuenta» la ligó a esa clienta; el nombre como ya sale en `customer` (R2). Un saldo a favor no se
+          // «guardó»: nace suyo y lo dice el panel. Nunca su contacto.
+          savedToAccount: t.customer && !t.storeCredit ? `Guardada en la cuenta de ${t.customer.name}` : null,
           recipient: t.recipientName,
           buyer: t.purchaserName,
           saleTicket: t.order?.orderNumber ?? null,

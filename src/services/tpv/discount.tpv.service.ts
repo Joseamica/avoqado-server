@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 /**
  * Discount TPV Service
  *
@@ -18,7 +19,7 @@ import { apartarCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
@@ -310,7 +311,7 @@ export async function applyCouponCode(
   // its per-customer usage — is read under the canonical Order lock, in the SAME transaction that writes it.
   const result = await withDeadlockRetry(
     async (tx): Promise<ApplyCouponResult> => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
