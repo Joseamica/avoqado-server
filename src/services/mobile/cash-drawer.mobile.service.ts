@@ -932,8 +932,20 @@ export async function syncEvents(
     })
   }
 
+  // 🔴 Todo movimiento manual trae un importe finito y > 0 (H1, auditoría final): un PAY_IN de -50 bajaba el esperado
+  // de la caja y dejaba retirar sin permiso. Los inválidos no se crean, se cuentan y se loguea; 200, nunca 4xx.
+  const importeValido = (e: SyncEvent) => Number.isFinite(Number(e.amount)) && Number(e.amount) > 0
+  const rechazadosPorImporte = events.filter(e => TIPOS_DEL_CLIENTE.has(e.type) && !importeValido(e)).length
+  if (rechazadosPorImporte > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó movimientos con importe inválido (no finito o ≤ 0)', {
+      venueId,
+      actorStaffId: actorStaffId ?? null,
+      rechazadosPorImporte,
+    })
+  }
+
   const acceptedEvents = events
-    .filter(event => TIPOS_DEL_CLIENTE.has(event.type) && (puedeRetirar || event.type !== 'PAY_OUT'))
+    .filter(event => TIPOS_DEL_CLIENTE.has(event.type) && importeValido(event) && (puedeRetirar || event.type !== 'PAY_OUT'))
     .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
@@ -946,7 +958,7 @@ export async function syncEvents(
   if (acceptedEvents.length === 0) {
     // 200 con lote vacío, no error: el push del cliente es fire-and-forget y un 4xx
     // aquí lo haría reintentar para siempre algo que nunca vamos a aceptar.
-    return { syncedCount: 0, events: [], rechazadosSinPermiso }
+    return { syncedCount: 0, events: [], rechazadosSinPermiso, rechazadosPorImporte }
   }
   if (events.length > CASH_DRAWER_SYNC_EVENT_LIMIT) {
     rejectCashDrawerSync(venueId, 'REQUEST_LIMIT_EXCEEDED', {
@@ -1437,6 +1449,7 @@ export async function syncEvents(
     syncedCount: insertedCount,
     events: allRows.map(formatEvent),
     rechazadosSinPermiso,
+    rechazadosPorImporte,
   }
 }
 

@@ -161,7 +161,7 @@ describe('/sync no deja retirar sin el permiso del retiro (misma regla con y sin
   it('un lote de puros PAY_OUT sin permiso responde 200 vacío', async () => {
     armarSesionAbierta()
     const r = await syncEvents(VENUE, [movimiento({ type: 'PAY_OUT', localId: 'out-2' })] as never, null, CAJERO, false)
-    expect(r).toEqual({ syncedCount: 0, events: [], rechazadosSinPermiso: 1 })
+    expect(r).toEqual({ syncedCount: 0, events: [], rechazadosSinPermiso: 1, rechazadosPorImporte: 0 })
   })
 })
 
