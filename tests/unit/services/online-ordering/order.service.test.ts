@@ -1840,6 +1840,22 @@ describe('getTrackingByToken', () => {
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
   })
 
+  it('D10: el seguimiento de la clienta dice «pagado» con la hora del aparato del cobro sin red, igual que la caja', async () => {
+    const pedido = new Date('2026-11-11T05:57:00.000Z')
+    const enElAparato = new Date('2026-11-11T06:26:36.724Z')
+    const llegada = new Date('2026-11-11T06:29:40.000Z')
+    const base = folioNadie({ createdAt: pedido, status: 'ACCEPTED' }, 'PAID')
+    const con = (loyaltySaleAt: Date | null) => ({ ...base, order: { ...base.order, loyaltySaleAt, payments: [{ createdAt: llegada }] } })
+
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(con(enElAparato))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: true, paidAt: enElAparato.toISOString() })
+    expect((prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select).toMatchObject({ loyaltySaleAt: true })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(con(null))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paidAt: llegada.toISOString() })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(con(new Date('2026-11-11T05:00:00.000Z')))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paidAt: llegada.toISOString() })
+  })
+
   it('R82: amountPaid y remaining son los CANÓNICOS de la cuenta (paidAmount/remainingBalance, con propina): $185 + abono $100 + propina $10 ⇒ pagó 110, falta 85, igual que to-pay; nunca negativo', async () => {
     const base = folioNadie({}, 'PARTIAL')
     const cuenta = (o: Record<string, any>) =>

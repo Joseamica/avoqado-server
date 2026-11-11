@@ -104,7 +104,7 @@ export async function canjearPremioEnTx(
   venueId: string,
   orderId: string,
   rewardId: string,
-): Promise<{ reward: StampRewardCanjeado; discountAmount: number; totals: TotalesDeOrden }> {
+): Promise<{ reward: StampRewardCanjeado; discountAmount: number; totals: TotalesDeOrden; renglonPremiadoId: string | null }> {
   if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
@@ -220,7 +220,28 @@ export async function canjearPremioEnTx(
   // cliente paga completo — que es la peor combinación posible. Va DENTRO de la
   // transacción: quemar sin recalcular (o al revés) nunca puede quedar escrito.
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount ?? 0), tx)
-  return { reward, discountAmount, totals }
+  // D8: el renglón que P11 premió (sólo FREE_PRODUCT), para que la tienda diga «Café gratis en tu Latte».
+  return { reward, discountAmount, totals, renglonPremiadoId: calculo.renglonPremiadoId }
+}
+
+/**
+ * D8 (tienda híbrida): el renglón donde caería este premio si se canjeara AHORA en esta cuenta, sin canjearlo: el MISMO cálculo de P11
+ * (`calcularDescuento`), sólo leyendo (ni candado, ni quemar, ni descuento, ni recálculo). `null` si no es de producto gratis (% y monto
+ * fijo son de cuenta), si no existe en este negocio o si ningún renglón cobra todavía. La cotización lo usa para «Va en tu Latte».
+ */
+export async function renglonDelPremioEnTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  rewardId: string,
+): Promise<string | null> {
+  const reward = await tx.stampReward.findFirst({
+    where: { id: rewardId, venueId },
+    select: { rewardType: true, rewardValue: true },
+  })
+  if (reward?.rewardType !== StampRewardType.FREE_PRODUCT) return null
+  const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, subtotal: true, discountAmount: true } })
+  return order ? (await calcularDescuento(tx, order, reward)).renglonPremiadoId : null
 }
 
 /**

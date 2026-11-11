@@ -3,6 +3,7 @@
  * orden de las sincronizaciones previas (R43) y el filtro de R16/R41/R42. El camino con dinero real va en la integración.
  */
 import { Prisma } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 
@@ -132,6 +133,28 @@ describe('listFolios', () => {
       take: 1,
     })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
+  })
+
+  it('D10: un folio que la caja cobró SIN RED dice la hora del aparato (00:26 en CDMX), no la de cuando subió el cobro (00:29)', async () => {
+    // WP75J (11-nov): pedido 23:57, cobrado sin red 00:26:36, el cobro sube 00:29:40 (hora de la Ciudad de México).
+    const pedido = new Date('2026-11-11T05:57:00.000Z')
+    const enElAparato = new Date('2026-11-11T06:26:36.724Z')
+    const llegada = new Date('2026-11-11T06:29:40.000Z')
+    const pagado = (n: number, loyaltySaleAt: Date | null) => {
+      const r = row(n, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })
+      return { ...r, createdAt: pedido, order: { ...r.order, loyaltySaleAt, payments: [{ createdAt: llegada }] } }
+    }
+    POR_ENTREGAR = [
+      pagado(1, enElAparato),
+      pagado(2, null), // con red, TPV o tarjeta: la llegada, como hoy
+      pagado(3, new Date('2026-11-11T05:00:00.000Z')), // reloj del aparato sin hora (antes del folio): la llegada
+    ]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+
+    expect(r.toDeliver.map(o => o.paidAt)).toEqual([enElAparato.toISOString(), llegada.toISOString(), llegada.toISOString()])
+    expect(formatInTimeZone(r.toDeliver[0].paidAt!, 'America/Mexico_City', 'HH:mm')).toBe('00:26')
+    // En la MISMA lectura de la lista.
+    expect(listas()[0].select.order.select).toMatchObject({ loyaltySaleAt: true })
   })
 
   it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados, y las 4 lecturas van por el `tx` (ninguna por el prisma global)', async () => {

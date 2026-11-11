@@ -1,7 +1,7 @@
 // src/services/online-ordering/beneficiosDeLaCuenta.ts
 /**
- * Tienda híbrida S14 (P2-3, P2-5, P2-8): de quién es la cuenta de un pedido en línea, qué beneficios trae y lo que le dio a su clienta.
- * Lo leen la Bandeja, «Por pagar» y «Por entregar», el seguimiento y el MCP. Sólo lee. 🔴 Nunca el teléfono ni el correo de la clienta:
+ * Tienda híbrida S14 (P2-3, P2-5, P2-8): de quién es la cuenta de un pedido en línea, qué beneficios trae y lo que le dio a su clienta;
+ * D10: a qué hora se pagó (`horaDelPago`). Lo leen la Bandeja, «Por pagar» y «Por entregar», el seguimiento y el MCP. Sólo lee. 🔴 Nunca el teléfono ni el correo de la clienta:
  * de su ficha salen su id y su nombre corto. Módulo hoja (sin servicios de pedidos) para que la bandeja y el seguimiento lo compartan
  * sin ciclos de importación.
  */
@@ -63,6 +63,25 @@ type Filas = Prisma.OrderGetPayload<{ select: typeof BENEFICIOS_SELECT }>
 export interface BeneficiosDeLaCuenta {
   beneficios: Array<{ nombre: string; monto: number }>
   beneficiosTotal: number
+}
+
+/**
+ * D10 (tienda híbrida, 11-nov): el «Pagado a las…» que se MUESTRA, igual en la Bandeja, «Por pagar»/«Por entregar» (TPV, POS y panel),
+ * el MCP y el seguimiento de la clienta. `llegada` = el último cobro COMPLETED (lo de siempre). Si la caja de las apps saldó la cuenta
+ * con un cobro de la cola sin red, `Order.loyaltySaleAt` guarda la hora del APARATO (acotada por arriba a su llegada, `horaDeLaVenta`):
+ * esa se muestra, para que un folio cobrado a tiempo no parezca cobrado tarde. Con piso: una hora anterior al folio (reloj del aparato
+ * sin hora) no se cree, como en la regla C. No pagada o sin cobro legible: `null`. Instante ISO en UTC; cada app lo pinta en la zona
+ * del negocio. Sólo se lee: cómo se guardan `loyaltySaleAt` y `Payment.createdAt` no cambia.
+ */
+export function horaDelPago(
+  o: { paymentStatus: string; loyaltySaleAt?: Date | null; payments?: Array<{ createdAt: Date }> },
+  folioCreadoEn: Date,
+): string | null {
+  const llegada = o.paymentStatus === 'PAID' ? o.payments?.[0]?.createdAt : undefined
+  if (!llegada) return null
+  const enElAparato = o.loyaltySaleAt
+  const creible = enElAparato && enElAparato >= folioCreadoEn && enElAparato <= llegada
+  return (creible ? enElAparato : llegada).toISOString()
 }
 
 /** En pesos. `?? []`: una lectura sin la relación (un doble viejo) no tumba la lista; en Prisma siempre llega. */

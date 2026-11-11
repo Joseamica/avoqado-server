@@ -13,7 +13,7 @@ import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './consta
 import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
-import { BENEFICIOS_SELECT, CLIENTA_SELECT, beneficiosDeLaCuenta, clientaDeLaCuenta } from './beneficiosDeLaCuenta'
+import { BENEFICIOS_SELECT, CLIENTA_SELECT, beneficiosDeLaCuenta, clientaDeLaCuenta, horaDelPago } from './beneficiosDeLaCuenta'
 import type { Reloj } from './types'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
@@ -50,7 +50,10 @@ export interface InboxOrder {
   requiresAcceptance: boolean
   /** Tienda híbrida: de dónde pidió (`QR` o `LINK`); `null` en los pedidos de antes. */
   channel: 'QR' | 'LINK' | null
-  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. Opcional para las apps viejas. */
+  /**
+   * T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. Opcional para las apps viejas. D10: si la
+   * saldó un cobro de la cola sin red, la hora del aparato (`horaDelPago`).
+   */
   paidAt?: string | null
   /** S14 (P2-3, R2): de qué clienta es la cuenta: su id y su nombre de pila con la inicial del apellido; `null` sin cuenta. Nunca su contacto. */
   cliente?: { id: string; nombre: string } | null
@@ -111,7 +114,9 @@ export const INBOX_SELECT = {
       // beneficios, con tope y conteo. Todo en esta misma lectura.
       ...CLIENTA_SELECT,
       ...BENEFICIOS_SELECT,
-      // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio).
+      // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio). D10: con la hora del
+      // aparato si la saldó la cola sin red.
+      loyaltySaleAt: true,
       payments: {
         where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] },
         orderBy: { createdAt: 'desc' as const },
@@ -173,7 +178,7 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     rejectReason: r.rejectReason ?? null,
     requiresAcceptance: r.requiresAcceptance,
     channel: (r.channel as InboxOrder['channel']) ?? null, // en el esquema es String? (T1): sólo 'QR' | 'LINK'
-    paidAt: r.order.paymentStatus === 'PAID' ? (r.order.payments?.[0]?.createdAt.toISOString() ?? null) : null,
+    paidAt: horaDelPago(r.order, r.createdAt),
     cliente: clientaDeLaCuenta(r.order),
     ...beneficiosDeLaCuenta(r.order),
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),

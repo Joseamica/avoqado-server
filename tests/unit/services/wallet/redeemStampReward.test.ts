@@ -3,7 +3,7 @@
  * producto regalado, y un doble canje es el mismo café gratis cobrado dos veces
  * contra la misma cartilla.
  */
-import { redeemStampReward } from '../../../../src/services/wallet/redeemStampReward.service'
+import { canjearPremioEnTx, redeemStampReward, renglonDelPremioEnTx } from '../../../../src/services/wallet/redeemStampReward.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 // 🔴 Crear la fila del descuento NO baja la cuenta: los totales de la orden son
@@ -250,5 +250,64 @@ describe('redeemStampReward', () => {
         staffId: 'staff9',
       }),
     )
+  })
+})
+
+/**
+ * D8 (tienda híbrida, 11-nov): la tienda pinta «Va en tu Latte» y el renglón «Gratis». El renglón lo elige UNA sola regla (P11, la de
+ * arriba); el canje lo devuelve y, para ofrecerlo antes de elegirlo, el mismo cálculo corre sin canjear.
+ */
+describe('D8 · en qué renglón cae el premio de producto gratis', () => {
+  const CAFE_GRATIS = {
+    ...PREMIO_MONTO,
+    rewardType: 'FREE_PRODUCT',
+    rewardValue: null,
+    rewardProductId: 'p-cafe',
+    rewardLabel: 'Café gratis',
+  }
+  const tx = prismaMock as any
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'o1' }])
+    prismaMock.order.findFirst.mockResolvedValue(ORDEN as any)
+    prismaMock.stampReward.findFirst.mockResolvedValue(CAFE_GRATIS as any)
+    prismaMock.stampReward.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od1' } as any)
+    prismaMock.orderDiscount.findMany.mockResolvedValue([])
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { id: 'oi1', unitPrice: 45, quantity: 1, total: 45, discountAmount: 0 },
+      { id: 'oi2', unitPrice: 90, quantity: 1, total: 90, discountAmount: 0 },
+    ] as any)
+  })
+
+  it('el canje devuelve el renglón que P11 premió; un premio de monto no tiene renglón', async () => {
+    expect((await canjearPremioEnTx(tx, 'v1', 'o1', 'rw1')).renglonPremiadoId).toBe('oi2')
+
+    prismaMock.stampReward.findFirst.mockResolvedValue(PREMIO_MONTO as any)
+    expect((await canjearPremioEnTx(tx, 'v1', 'o1', 'rw1')).renglonPremiadoId).toBeNull()
+  })
+
+  it('renglonDelPremioEnTx: el MISMO renglón, sin canjear: no bloquea, no quema, no crea descuento ni recalcula', async () => {
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBe('oi2')
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.stampReward.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
+    expect(recalculateOrderTotals).not.toHaveBeenCalled()
+    // El premio se busca en ESTE negocio.
+    expect(prismaMock.stampReward.findFirst.mock.calls[0][0]!.where).toMatchObject({ id: 'rw1', venueId: 'v1' })
+  })
+
+  it('renglonDelPremioEnTx: % o monto fijo (premio de cuenta), sin premio o sin renglón que todavía cobre ⇒ null', async () => {
+    prismaMock.stampReward.findFirst.mockResolvedValue({ ...PREMIO_MONTO, rewardType: 'PERCENTAGE', rewardValue: 20 } as any)
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
+    prismaMock.stampReward.findFirst.mockResolvedValue(PREMIO_MONTO as any)
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
+    prismaMock.stampReward.findFirst.mockResolvedValue(null)
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
+    prismaMock.stampReward.findFirst.mockResolvedValue(CAFE_GRATIS as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi1', unitPrice: 45, quantity: 1, total: 0, discountAmount: 0 }] as any)
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
   })
 })
