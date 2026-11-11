@@ -502,9 +502,6 @@ describe('X11 · applyAutomaticDiscounts contra hardDeleteTeamMember: el SET NUL
     const staff = await prisma.staff.create({ data: { email: `${n.venueId}-s@staff.test`, firstName: 'Borrable', lastName: 'S' } })
     emails.push(staff.email)
     const s = await prisma.staffVenue.create({ data: { venueId: n.venueId, staffId: staff.id, role: 'CASHIER' } })
-    const base = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.padEnd(23, '0').slice(0, 23)
-    const d1 = `${base}aa`
-    const d2 = `${base}bb`
     const comunes = {
       venueId: n.venueId,
       type: 'FIXED_AMOUNT' as const,
@@ -514,13 +511,26 @@ describe('X11 · applyAutomaticDiscounts contra hardDeleteTeamMember: el SET NUL
       active: true,
       createdById: s.id,
     }
-    await prisma.discount.create({ data: { ...comunes, id: d1, name: 'D1', value: 5 } })
-    await prisma.discount.create({ data: { ...comunes, id: d2, name: 'D2', value: 3 } })
-    await prisma.discount.update({ where: { id: d1 }, data: { description: 'mueve D1 detrás de D2' } })
-    const fisico = await prisma.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM "Discount" WHERE id IN (${d1}, ${d2}) AND "createdById" = ${s.id}`
-    // Sin ORDER BY: el orden de un recorrido secuencial es el físico (el del SET NULL). Se anota lo que se vio.
+    // 🔴 hz:5bda0b30:D7: el círculo pide que el SET NULL (recorrido SECUENCIAL: "Discount" no tiene índice en `createdById`) encuentre
+    // D2 ANTES que D1, y el motor suma por id (D1 < D2). Con otras pruebas escribiendo en "Discount" a la vez, D1 y D2 pueden caer en
+    // páginas distintas y actualizar D1 no lo pone detrás: sin círculo, el borrado no da 40P01 sino 40001 (rojo falso en el CI del
+    // #381, 11-nov). Se comprueba el orden físico REAL (ctid) y, si no es el bueno, se rehacen los dos descuentos.
+    let d1 = ''
+    let d2 = ''
+    let fisico: string[] = []
+    for (let intento = 0; intento < 20 && fisico[0] !== d2; intento++) {
+      if (d1) await prisma.discount.deleteMany({ where: { id: { in: [d1, d2] } } })
+      const base = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.padEnd(23, '0').slice(0, 23)
+      d1 = `${base}aa`
+      d2 = `${base}bb`
+      await prisma.discount.create({ data: { ...comunes, id: d1, name: 'D1', value: 5 } })
+      await prisma.discount.create({ data: { ...comunes, id: d2, name: 'D2', value: 3 } })
+      await prisma.discount.update({ where: { id: d1 }, data: { description: 'mueve D1 detrás de D2' } })
+      fisico = (await prisma.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Discount" WHERE id IN (${d1}, ${d2}) ORDER BY ctid`).map(
+        fila => fila.id,
+      )
+    }
+    if (fisico[0] !== d2) throw new Error(`D2 no quedó físicamente antes que D1 en 20 intentos: físico=${JSON.stringify(fisico)}`)
     const cuenta = await venta(n)
     // El motor suma D1 y se detiene antes de D2.
     const barrera = aparcar({ modelo: 'discount', operacion: 'update', nth: 2 })
