@@ -360,15 +360,18 @@ function nodos(plan: any, out: Nodo[] = []): Nodo[] {
  * Techo de tiempo de cada lista. Lo que de verdad cuida el costo son las otras aserciones: sin Seq Scan, sin leer filas de otras
  * clientas y sin ordenar más que SU historial. El tiempo depende de la máquina: la misma consulta midió 28 ms en la nube de referencia
  * y 71 ms en el runner de GitHub (S16, PR #362). 50 ms era el umbral de R5' en la nube; 150 ms deja margen en máquinas compartidas.
+ * Una sola corrida tibia pasó de 150 ms en GitHub (PR #364, que no toca estas consultas): el tiempo vale la MEJOR de las corridas
+ * tibias, que es lo que cuesta la consulta sin el ruido de la máquina; una regresión real (Seq Scan, filas ajenas) sube todas.
  * ponytail: recorre el historial de UNA clienta; si alguna llega a decenas de miles de pedidos, índice Order(venueId, customerId, createdAt).
  */
 const TOPE_MS = 150
+const CORRIDAS_TIBIAS = 5
 
-/** EXPLAIN (ANALYZE, BUFFERS) de la consulta REAL; se corre dos veces y vale la segunda (caché caliente, como en producción). */
+/** EXPLAIN (ANALYZE, BUFFERS) de la consulta REAL: una corrida en frío y luego CORRIDAS_TIBIAS con caché caliente (como en producción). */
 async function medir(nombre: string, sql: Prisma.Sql) {
   const corridas: number[] = []
   let plan: any
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i <= CORRIDAS_TIBIAS; i++) {
     const [fila] = await prisma.$queryRaw<any[]>(Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`)
     plan = fila['QUERY PLAN'][0]
     corridas.push(plan['Execution Time'])
@@ -377,7 +380,7 @@ async function medir(nombre: string, sql: Prisma.Sql) {
   const porTabla = (t: string) => lista.filter(x => x.tabla === t)
   return {
     nombre,
-    ms: corridas[1],
+    ms: Math.min(...corridas.slice(1)),
     msEnFrio: corridas[0],
     bufferes: { hit: plan.Plan['Shared Hit Blocks'], read: plan.Plan['Shared Read Blocks'] },
     nodos: lista.filter(x => x.tabla || x.tipo === 'Sort'),
