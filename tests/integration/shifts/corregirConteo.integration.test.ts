@@ -31,7 +31,7 @@ jest.mock('@/services/activityAudit.service', () => {
 
 import prisma from '@/utils/prismaClient'
 import { correctCashCount, previewCashCountCorrection } from '@/services/dashboard/cashCountCorrection.service'
-import { deleteShift } from '@/services/dashboard/shift.dashboard.service'
+import { deleteShift, getShiftById } from '@/services/dashboard/shift.dashboard.service'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 
 const cuid = require('cuid') as () => string
@@ -389,5 +389,47 @@ describe('corregir el conteo de un corte cerrado — contra Postgres', () => {
     expect(await estado(s)).toEqual(SIN_CORREGIR)
 
     expect(await corregir(s)).toEqual(vista)
+  })
+
+  describe('el detalle del corte', () => {
+    it('dice que se puede corregir y, tras corregir, enseña quién, antes y motivo', async () => {
+      const s = await sembrarCorte()
+
+      const antes = await getShiftById(s.venueId, s.shiftId)
+      expect(antes.countCorrection).toEqual({ allowed: true, blockedReason: null })
+      expect(antes.countCorrections).toEqual([])
+      expect(antes.cashDrawer.linkedToShift).toBe(true)
+      expect(antes.cashDrawer.expectedAmount).toBe(2000)
+
+      await corregir(s)
+      const despues = await getShiftById(s.venueId, s.shiftId)
+      expect(despues.countCorrections[0]).toMatchObject({
+        countedBefore: 20000,
+        countedAfter: 2000,
+        differenceBefore: 18000,
+        differenceAfter: 0,
+        reason: 'error de dedo',
+        staffName: 'Caja Turno',
+        source: 'DASHBOARD',
+      })
+      expect(typeof despues.countCorrections[0].createdAt).toBe('string')
+    })
+
+    it('un corte sin caja ligada sale bloqueado con su razón', async () => {
+      const s = await sembrarCorte({ linked: false })
+      const d = await getShiftById(s.venueId, s.shiftId)
+      expect(d.countCorrection).toEqual({ allowed: false, blockedReason: 'NO_LINKED_DRAWER' })
+    })
+
+    it('trae todas las correcciones, la más nueva primero', async () => {
+      const s = await sembrarCorte()
+      await corregir(s) // 20000 -> 2000
+      await corregir(s, { countedCash: 2001, expectedCurrentCount: 2000, expectedResultingDifference: 1, expectedCorrectionCount: 1 })
+      await corregir(s, { countedCash: 2000, expectedCurrentCount: 2001, expectedResultingDifference: 0, expectedCorrectionCount: 2 })
+
+      const d = await getShiftById(s.venueId, s.shiftId)
+      expect(d.countCorrections.map((c: any) => c.countedAfter)).toEqual([2000, 2001, 2000])
+      expect(d.countCorrections.map((c: any) => c.countedBefore)).toEqual([2001, 2000, 20000])
+    })
   })
 })

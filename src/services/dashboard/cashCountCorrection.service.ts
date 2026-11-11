@@ -198,3 +198,50 @@ export async function correctCashCount(input: CorrectCashCountInput): Promise<Ca
     return toResult(shiftId, corte, correctionsBefore, countedAfter, computed)
   })
 }
+
+export interface CashCountCorrectionEntry {
+  id: string
+  createdAt: string
+  staffName: string | null
+  countedBefore: number
+  countedAfter: number
+  differenceBefore: number
+  differenceAfter: number
+  reason: string
+  source: 'DASHBOARD' | 'MCP'
+}
+
+/** Todas las correcciones del corte (el tope de la corrección garantiza que caben), la más nueva primero. Sólo para mostrar:
+ *  una fila con `data` mal formada se omite en vez de tronar. */
+export async function listCashCountCorrections(venueId: string, shiftId: string): Promise<CashCountCorrectionEntry[]> {
+  const rows = await prisma.activityLog.findMany({
+    where: { venueId, entity: 'Shift', entityId: shiftId, action: 'CASH_COUNT_CORRECTED' },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: MAX_CORRECTIONS_PER_SHIFT,
+    select: { id: true, createdAt: true, data: true, staff: { select: { firstName: true, lastName: true } } },
+  })
+  const out: CashCountCorrectionEntry[] = []
+  for (const r of rows) {
+    const d = r.data as Record<string, unknown> | null
+    if (!d || typeof d !== 'object') continue
+    const [countedBefore, countedAfter, differenceBefore, differenceAfter] = [
+      d.countedBefore,
+      d.countedAfter,
+      d.differenceBefore,
+      d.differenceAfter,
+    ].map(v => (typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN))
+    if (![countedBefore, countedAfter, differenceBefore, differenceAfter].every(Number.isFinite)) continue
+    out.push({
+      id: r.id,
+      createdAt: r.createdAt.toISOString(),
+      staffName: r.staff ? `${r.staff.firstName} ${r.staff.lastName}`.trim() : null,
+      countedBefore,
+      countedAfter,
+      differenceBefore,
+      differenceAfter,
+      reason: typeof d.reason === 'string' ? d.reason : '',
+      source: d.source === 'MCP' ? 'MCP' : 'DASHBOARD',
+    })
+  }
+  return out
+}

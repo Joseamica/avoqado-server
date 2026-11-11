@@ -3,6 +3,8 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { listCashCountCorrections, CashCountCorrectionEntry } from './cashCountCorrection.service'
+import { countCorrectionBlock, CountCorrectionBlockCode } from './cashCountCorrection.rules'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
@@ -308,6 +310,8 @@ export async function resolveShiftCashDrawer(
     counted,
     actualAmount: counted ? money(session.actualAmount) : null,
     overShort: counted && session.overShort != null ? money(session.overShort) : null,
+    // Sólo la caja ligada por `shiftId` permite corregir el conteo; la de la ventana de tiempo no.
+    linkedToShift: !!shiftId && session.shiftId === shiftId,
   }
 }
 
@@ -666,6 +670,32 @@ export async function getShiftById(
     })
   }
 
+  // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500.
+  let countCorrection: { allowed: boolean; blockedReason: CountCorrectionBlockCode | null } = { allowed: false, blockedReason: null }
+  let countCorrections: CashCountCorrectionEntry[] = []
+  try {
+    const blockedReason = countCorrectionBlock(
+      shift as any,
+      cashDrawer
+        ? {
+            linkedToShift: cashDrawer.linkedToShift,
+            status: cashDrawer.status,
+            actualAmount: cashDrawer.actualAmount,
+            overShort: cashDrawer.overShort,
+          }
+        : null,
+    )
+    countCorrection = { allowed: blockedReason === null, blockedReason }
+    countCorrections = await listCashCountCorrections(venueId, shiftId)
+  } catch (err) {
+    countCorrection = { allowed: false, blockedReason: null }
+    countCorrections = []
+    logger.warn('[COUNT-CORRECTION] No se pudo adjuntar la corrección de conteo al detalle del turno', {
+      shiftId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
   return {
     id: shift.id,
     venueId: shift.venueId,
@@ -685,6 +715,8 @@ export async function getShiftById(
     updatedAt: (shift as any).updatedAt,
     // Fase 5 de la unificación de caja: el arqueo del cajón que cubrió el turno (aditivo, puede ser null)
     cashDrawer,
+    countCorrection,
+    countCorrections,
     // NEW: Detailed breakdowns
     payments: formattedPayments,
     orders: formattedOrders,
