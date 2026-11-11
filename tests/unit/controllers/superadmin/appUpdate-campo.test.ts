@@ -149,11 +149,10 @@ it('dos altas simultáneas de builds distintos: archivos distintos, y la que pie
   ;(prisma.appUpdate.create as jest.Mock)
     .mockImplementationOnce(async ({ data }: any) => ({ id: 'cupd', ...data }))
     .mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
-  const [a, b] = await Promise.all([
-    createAppUpdate({ body: { apkBase64: 'QUFB', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()).then(() => null),
-    createAppUpdate({ body: { apkBase64: 'QkJC', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()).then(() => null),
+  await Promise.all([
+    createAppUpdate({ body: { apkBase64: 'QUFB', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()),
+    createAppUpdate({ body: { apkBase64: 'QkJC', environment: 'PRODUCTION', platform: 'ANDROID_CAMPO' }, authContext: { userId: 'cstaff0000000000000000001' } } as any, response()),
   ])
-  void a, void b
   const nombres = (bucket.file as jest.Mock).mock.calls.map(([n]) => n)
   expect(new Set(nombres).size).toBe(2)
   const urls = (prisma.appUpdate.create as jest.Mock).mock.calls.map(([arg]) => arg.data.downloadUrl)
