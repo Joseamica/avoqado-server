@@ -19,7 +19,7 @@ import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.s
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
-import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
 import { mergeOrders, payCashOrder, splitOrderBySeat } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
@@ -209,13 +209,21 @@ const vencer = async (orderId: string) =>
 const efectivoDelPos = (orderId: string, centavos = CIEN) =>
   payCashOrder(f.venueId, orderId, { amount: centavos, tip: 0, staffId: f.staffId, idempotencyKey: randomUUID() })
 
-/** La cola sin red del POS: efectivo YA cobrado que llega tarde (nunca se rechaza). */
-async function colaSinRed(orderId: string, centavos = CIEN) {
+/** La cola sin red del POS: efectivo YA cobrado que llega tarde (nunca se rechaza). `cobradoEn`: la hora del aparato al cobrar. */
+async function colaSinRed(orderId: string, centavos = CIEN, cobradoEn?: Date) {
   const [ack] = await processIntents({
     venueId: f.venueId,
     staffId: f.staffId,
     deviceId: `aparato-${f.fixture}`,
-    intents: [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: centavos, tipCents: 0, method: 'CASH' } }],
+    intents: [
+      {
+        id: randomUUID(),
+        seq: ++seq,
+        type: 'PAY_CASH',
+        payload: { orderId, amountCents: centavos, tipCents: 0, method: 'CASH' },
+        ...(cobradoEn ? { createdAtLocal: cobradoEn.getTime() } : {}),
+      },
+    ],
     authorizeIntent: () => true,
   })
   expect(ack).toMatchObject({ status: 'ACKED' })
@@ -718,6 +726,118 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
     expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
     await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'SWEEP' })
     expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+  })
+
+  // ── Regla C (founder, 10-nov): la cajera cobró el folio sin red ANTES de que venciera; el dinero sube después ─────────────
+  describe('K12–K16 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
+    const MIN = 60_000
+    /** Un folio pedido hace 40 min, con sus renglones de entonces (nadie los vuelve a tocar). */
+    async function folioDeHace40() {
+      const folio = await nuevoFolio({ vencido: true })
+      const hace40 = new Date(Date.now() - 40 * MIN)
+      await prisma.onlineOrder.update({ where: { id: folio.onlineOrderId }, data: { createdAt: hace40 } })
+      await prisma.orderItem.updateMany({ where: { orderId: folio.orderId }, data: { createdAt: hace40, updatedAt: hace40 } })
+      return folio
+    }
+    const cerrar = {
+      vence: vencer,
+      'el personal lo cancela': async (orderId: string) =>
+        expect(await cancelOnlineOrderByStaff({ venueId: f.venueId, orderId, staffId: f.staffId })).toMatchObject({ outcome: 'OK' }),
+    }
+    /** Lo que hace el gancho de después del commit (simulado en este archivo): el armado ROUND. */
+    const ganchoRound = (orderId: string) => authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'ROUND' })
+    const rondasProgramadas = (orderId: string) =>
+      (armarComandasTrasCommit as jest.Mock).mock.calls.filter(([v, o, t]) => v === f.venueId && o === orderId && t === 'ROUND')
+
+    it.each(Object.keys(cerrar) as Array<keyof typeof cerrar>)(
+      'K12 (a, d) %s a los 30; la cajera lo cobró sin red a los 25 y sube a los 40 ⇒ revive con UNA comanda, aunque la pasada corra dos veces',
+      async como => {
+        const { orderId, onlineOrderId } = await folioDeHace40()
+        await cerrar[como](orderId) // T = ahora
+        expect((await cuenta(orderId)).status).toBe('CANCELLED')
+
+        await colaSinRed(orderId, CIEN, new Date(Date.now() - 15 * MIN)) // cobrado antes de T, sube ahora
+        expect(await cuenta(orderId)).toMatchObject({ paymentStatus: 'PAID', kitchenPendingAt: null }) // el que reabre no marca
+        expect((await pedido(onlineOrderId)).status).not.toBe('ACCEPTED')
+
+        await pasada()
+        await porEntregar(onlineOrderId)
+        expect((await cuenta(orderId)).kitchenPendingAt).not.toBeNull() // marcada en la transacción del revivir
+        expect(rondasProgramadas(orderId)).toHaveLength(1)
+        await ganchoRound(orderId)
+        expect(await comandas(orderId)).toBe(1)
+        expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+        expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+
+        // (d) La pasada otra vez (el trabajo y la bandeja), y el gancho y el barrido repetidos: sigue UNA comanda.
+        await pasada()
+        await pasada()
+        expect(rondasProgramadas(orderId)).toHaveLength(1)
+        await ganchoRound(orderId)
+        await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'SWEEP' })
+        expect(await comandas(orderId)).toBe(1)
+        expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+      },
+    )
+
+    it.each([
+      ['cobrado de verdad a los 45 (después de vencer)', () => new Date(Date.now() + 1_000)],
+      ['con una hora anterior a que existiera el folio (reloj del aparato sin hora)', () => new Date(Date.now() - 60 * MIN)],
+      ['sin hora del cobro', () => undefined],
+    ])('K13 (b) %s ⇒ como hoy: revive a «Por entregar» sin comanda con ningún disparador', async (_c, cobradoEn) => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CIEN, cobradoEn())
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K14 (c) sin pantalla de cocina ⇒ revive sin marca ni comanda', async () => {
+      await prisma.printStation.updateMany({ where: { venueId: f.venueId }, data: { hasKitchenDisplay: false } })
+      try {
+        const { orderId, onlineOrderId } = await folioDeHace40()
+        await vencer(orderId)
+        await colaSinRed(orderId, CIEN, new Date(Date.now() - 15 * MIN))
+
+        await pasada()
+        await porEntregar(onlineOrderId)
+        expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+        expect(rondasProgramadas(orderId)).toHaveLength(0)
+        expect(await comandas(orderId)).toBe(0)
+      } finally {
+        await prisma.printStation.updateMany({ where: { venueId: f.venueId }, data: { hasKitchenDisplay: true } })
+      }
+    })
+
+    it('K16 el panel anula la CUENTA y la sincronización cierra el folio («cancelado por otra vía»: su hora no es la de la anulación) ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      const antesDeAnular = new Date(Date.now() - 15 * MIN)
+      await updateOrder(f.venueId, orderId, { status: 'CANCELLED' } as any, { staffId: f.staffId })
+      await cerrarCanceladasReleyendo({ venueId: f.venueId }, () => new Date())
+      expect(await pedido(onlineOrderId)).toMatchObject({ status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' })
+      await colaSinRed(orderId, CIEN, antesDeAnular)
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K15 cobro a tiempo que sólo ABONA y el resto con red después de vencer ⇒ como hoy (la cuenta se terminó de pagar tarde)', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN))
+      await efectivoDelPos(orderId, CINCUENTA)
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      expect(await comandas(orderId)).toBeLessThanOrEqual(1) // la del cobro que saldó, como hoy (decisión 19)
+    })
   })
 })
 
