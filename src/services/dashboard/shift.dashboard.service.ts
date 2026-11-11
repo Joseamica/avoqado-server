@@ -883,8 +883,13 @@ export async function deleteShift(venueId: string, shiftId: string, performedBy?
     // 🔴 S3 «Efectivo sin red en el turno correcto» (Codex r8 código #1): borrar un turno SUELTA la liga de su caja (`SetNull`). Si la
     // caja sigue ABIERTA (el cierre va en dos pasos y el segundo falló), queda «abierta sin turno» y la venta tardía de la cola de un
     // aparato cae en el turno vivo. El turno se borra sólo cuando su caja ya cerró, y en el MISMO `DELETE` (atómico, sin ventana).
-    const borrados = await prisma.shift.deleteMany({
-      where: { id: shiftId, venueId, NOT: { cashDrawerSession: { is: { status: 'OPEN' } } } },
+    // «Corregir conteo» (Codex r1 F2): el borrado va turno → caja (su `SET NULL`) y la corrección va caja → turno. Sin coordinarlos se
+    // traban (40P01): los dos toman primero el candado del ciclo del negocio.
+    const borrados = await prisma.$transaction(async tx => {
+      await lockShiftLifecycleForVenue(tx, venueId)
+      return tx.shift.deleteMany({
+        where: { id: shiftId, venueId, NOT: { cashDrawerSession: { is: { status: 'OPEN' } } } },
+      })
     })
     if (borrados.count === 0) {
       logger.warn('Cannot delete a shift whose cash drawer is still open', { venueId, shiftId })
