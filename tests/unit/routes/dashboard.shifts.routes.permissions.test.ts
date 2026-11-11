@@ -213,3 +213,22 @@ describe('PUT /dashboard/venues/:venueId/shifts/:shiftId — el cuerpo pasa por 
     expect(bloque.indexOf("checkPermission('shifts:update')")).toBeLessThan(bloque.indexOf('validateRequest(UpdateShiftSchema)'))
   })
 })
+
+describe('POST /dashboard/venues/:venueId/shifts/:shiftId/cash-count-correction — corregir el conteo', () => {
+  const RUTA = `${SHIFT_PATH}/cash-count-correction`
+
+  it('está autenticada y gateada por shifts:update', () => {
+    const route = inspectRoute(dashboardRouter, 'post', RUTA)
+    expect(route).toBeDefined()
+    expect(route!.hasAuthenticateToken).toBe(true)
+    expect(route!.permission).toBe('shifts:update')
+  })
+
+  it.each([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER])('%s puede corregir el conteo', role => {
+    expect(hasPermission(role, null, 'shifts:update')).toBe(true)
+  })
+
+  it.each([StaffRole.CASHIER, StaffRole.WAITER])('%s NO puede corregir el conteo', role => {
+    expect(hasPermission(role, null, 'shifts:update')).toBe(false)
+  })
+})
