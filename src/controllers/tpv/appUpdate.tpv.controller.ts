@@ -140,20 +140,23 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
-    // La obligatoria PENDIENTE, aparte de la más nueva: con FORCE 4 y luego BANNER 5, quien está en 3 sigue obligado a
-    // llegar a 4 (la app de campo la aplica con esto; las TPV viejas ignoran el campo).
-    const forcePendiente = await prisma.appUpdate.findFirst({
-      where: {
-        environment: env as AppEnvironment,
-        platform: platformParam as AppPlatform,
-        isActive: true,
-        updateMode: 'FORCE',
-        versionCode: { gt: versionCode },
-        OR: audienceConditions,
-      },
-      orderBy: { versionCode: 'desc' },
-      select: { versionCode: true },
-    })
+    // App de campo: la obligatoria PENDIENTE, aparte de la más nueva (con FORCE 4 y luego BANNER 5, quien está en 3 sigue
+    // obligado a llegar a 4). La TPV no la usa (tiene el 426 y el heartbeat) y su respuesta queda igual que antes.
+    const forcePendiente =
+      platformParam !== 'ANDROID_CAMPO'
+        ? undefined
+        : await prisma.appUpdate.findFirst({
+            where: {
+              environment: env as AppEnvironment,
+              platform: platformParam as AppPlatform,
+              isActive: true,
+              updateMode: 'FORCE',
+              versionCode: { gt: versionCode },
+              OR: audienceConditions,
+            },
+            orderBy: { versionCode: 'desc' },
+            select: { versionCode: true },
+          })
 
     // Update available
     logger.info(`Update available for ${platformParam}: ${versionCode} -> ${latestUpdate.versionCode} (${env})`)
@@ -161,7 +164,7 @@ export async function checkForUpdate(req: Request, res: Response) {
     return res.json({
       success: true,
       hasUpdate: true,
-      minVersionCode: forcePendiente?.versionCode ?? null,
+      ...(forcePendiente !== undefined && { minVersionCode: forcePendiente?.versionCode ?? null }),
       update: {
         id: latestUpdate.id,
         versionName: latestUpdate.versionName,
