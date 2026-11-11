@@ -61,6 +61,7 @@ import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
+import { computeOrderBalance, REFUND_PAYMENT_TYPE } from './shared/orderBalance'
 import {
   cardOnlineOrderError,
   isCardOnlineOrderInTx,
@@ -1305,6 +1306,17 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_PAID_BY_CARD'
   | 'REJECTED_EXCHANGE_CHARGE_MISMATCH'
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
+  /** hz:ce654971:D7: la cuenta ya tiene un abono y el cobro (sin propina) pasa de lo que falta. */
+  | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+
+/**
+ * hz:ce654971:D7 · margen para los redondeos de la caja al repartir una cuenta (dividir «por producto» reparte su total local y
+ * puede diferir unos centavos del servidor). La copia vieja que se quiere frenar cobra de más el abono entero, que es mayor.
+ */
+const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
+/** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
+const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
+const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1370,6 +1382,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
       return new ConflictError(
         mensaje('La diferencia de este cambio ya tiene un cargo. Consulta su resultado.'),
         'EXCHANGE_DIFFERENCE_ALREADY_CHARGED',
+        details,
+      )
+    case 'REJECTED_ORDER_AMOUNT_OVER_BALANCE':
+      return new AppError(
+        mensaje('La cuenta ya tiene un abono y este cobro pasa de lo que falta. Actualiza la cuenta y vuelve a intentar.'),
+        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+        true,
+        COBRO_MAYOR_QUE_EL_SALDO,
         details,
       )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
@@ -1911,7 +1931,18 @@ class TerminalPaymentService {
         if (mine) return { tipo: 'replica', fila: mine }
         const order = await tx.order.findFirst({
           where: { id: request.orderId, venueId },
-          select: { paymentStatus: true, orderNumber: true, status: true, thirdPartyCashDue: true },
+          select: {
+            paymentStatus: true,
+            orderNumber: true,
+            status: true,
+            thirdPartyCashDue: true,
+            // D7: lo que falta, con la misma cuenta que el saldo que ven las apps (`computeOrderBalance`).
+            subtotal: true,
+            discountAmount: true,
+            serviceChargeAmount: true,
+            contratoDePrecio: true,
+            taxAmount: true,
+          },
         })
         if (!order) {
           return rechazar(
@@ -1981,6 +2012,36 @@ class TerminalPaymentService {
                 `Este cobro es la diferencia de un cambio: se cobran exactamente $${exchange.differenceAmount.toFixed(2)}, sin propina.`,
                 'EXCHANGE_CHARGE_MISMATCH',
                 { ...detalles, exchangeId: exchange.id, amountCents, tipCents: 0 },
+              ),
+            )
+          }
+        } else {
+          // 🔴 hz:ce654971:D7 · una cuenta con un ABONO (efectivo, saldo, otra tarjeta) no se cobra por su total viejo: la caja que
+          // no vio el abono mandaba $134 de una cuenta que ya sólo debía $84 y el cliente pagaba de más. Bajo el MISMO candado de
+          // fila que el registro del pago, antes de tocar la terminal: no se mueve dinero. La propina va aparte y no cuenta. Una
+          // cuenta sin abono no cambia (el Cambio ya exige su diferencia exacta, arriba). Una suma y no la lista de cobros: los
+          // REFUND fuera, como `ligaDeClienteEnVenta`; la propina se cancela a los dos lados del saldo.
+          const cobrado = await tx.payment.aggregate({
+            where: {
+              venueId,
+              orderId: request.orderId,
+              status: 'COMPLETED',
+              OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }],
+            },
+            _sum: { amount: true, tipAmount: true },
+          })
+          const saldo = computeOrderBalance(order, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
+          const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+          if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
+            const falta = (faltaCents / 100).toFixed(2)
+            return rechazar(
+              'REJECTED_ORDER_AMOUNT_OVER_BALANCE',
+              new AppError(
+                `La cuenta ${order.orderNumber ?? request.orderId} ya tiene un abono: falta $${falta}. Actualiza la cuenta y vuelve a intentar.`,
+                HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                true,
+                COBRO_MAYOR_QUE_EL_SALDO,
+                { ...detalles, remainingCents: faltaCents },
               ),
             )
           }

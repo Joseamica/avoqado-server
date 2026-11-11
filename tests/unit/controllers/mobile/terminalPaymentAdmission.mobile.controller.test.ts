@@ -13,7 +13,7 @@ import type { Request, Response } from 'express'
 import { getTerminalPaymentStatus, sendTerminalPayment } from '@/controllers/mobile/terminal-payment.mobile.controller'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import {
+import AppError, {
   BadRequestError,
   OrderAlreadyPaidError,
   TerminalBusyError,
@@ -148,6 +148,21 @@ describe('sendTerminalPayment — cada rechazo de admisión sale con su código 
       message: e.message,
       errorMessage: e.message,
       details: { requestId },
+    })
+  })
+
+  // hz:ce654971:D7: el 412 (no 400/409) es lo que hace que ANDROID ≥ 2.22 e iOS ≥ 1.13 muestren «falta $X» tal cual.
+  it('cobro mayor que lo que falta de una cuenta con abono ⇒ 412 AMOUNT_EXCEEDS_REMAINING_BALANCE con status/errorMessage', async () => {
+    const mensaje = 'La cuenta X ya tiene un abono: falta $84.00. Actualiza la cuenta y vuelve a intentar.'
+    const res = await responder(new AppError(mensaje, 412, true, 'AMOUNT_EXCEEDS_REMAINING_BALANCE', { requestId, remainingCents: 8400 }))
+    expect(res.statusCode).toBe(412)
+    expect(res.payload).toEqual({
+      success: false,
+      status: 'failed',
+      code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE',
+      message: mensaje,
+      errorMessage: mensaje,
+      details: { requestId, remainingCents: 8400 },
     })
   })
 

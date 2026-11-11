@@ -1720,6 +1720,7 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
 
   it('orden PENDING → el cobro procede normal (el candado no estorba cuentas abiertas)', async () => {
     order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'ORD-OPEN' })
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null } } as any)
 
     const p1 = terminalPaymentService.sendPaymentToTerminal(
       baseRequest({ terminalId: 'T-OPEN', orderId: 'order-open', requestId: 'REQ-G1' }),
@@ -1737,8 +1738,10 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect((await p1).status).toBe('success')
   })
 
-  it('orden PARTIAL → procede (los pagos divididos son legítimos)', async () => {
-    order().findFirst.mockResolvedValue({ paymentStatus: 'PARTIAL', orderNumber: 'ORD-SPLIT' })
+  it('orden PARTIAL → procede (los pagos divididos son legítimos) si el cobro no pasa de lo que falta (hz:ce654971:D7)', async () => {
+    // $200 con $50 abonados: faltan $150 y se cobran $100.
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PARTIAL', orderNumber: 'ORD-SPLIT', subtotal: '200', status: 'PENDING' })
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: '50', tipAmount: '0' } } as any)
 
     const p1 = terminalPaymentService.sendPaymentToTerminal(
       baseRequest({ terminalId: 'T-SPLIT', orderId: 'order-split', requestId: 'REQ-G2' }),

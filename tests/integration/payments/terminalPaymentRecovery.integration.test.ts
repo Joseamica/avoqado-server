@@ -2540,6 +2540,85 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
     },
   )
 
+  describe('🔴 hz:ce654971:D7 · cuenta con un abono: el cobro remoto no puede pasar de lo que falta', () => {
+    // Venta de $134; ya se abonaron $50 (en otra terminal, con saldo o en efectivo). Una caja con la vista vieja manda $134.
+    const cuentaConAbono = async () => {
+      const orden = await nuevaOrden({
+        subtotal: new Prisma.Decimal(134),
+        total: new Prisma.Decimal(134),
+        paidAmount: new Prisma.Decimal(50),
+        remainingBalance: new Prisma.Decimal(84),
+        paymentStatus: 'PARTIAL',
+      })
+      await prisma.payment.create({
+        data: {
+          venueId,
+          orderId: orden.id,
+          amount: new Prisma.Decimal(50),
+          method: 'CASH',
+          status: 'COMPLETED',
+          feePercentage: new Prisma.Decimal(0),
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: new Prisma.Decimal(50),
+        } as Prisma.PaymentUncheckedCreateInput,
+      })
+      return orden
+    }
+
+    it('$134 sobre una cuenta que debe $84 ⇒ rechazo con lápida ANTES de tocar la terminal; el mismo requestId lo repite', async () => {
+      const orden = await cuentaConAbono()
+      const terminalId = terminalDe('abono-de-mas')
+      const requestId = nextRequest()
+      const envio = { requestId, venueId, terminalId, orderId: orden.id, amountCents: 13400, requestedBy: fixture }
+      const primero = await enviar(envio)
+      const segundo = await enviar(envio)
+
+      expect(directEmit).not.toHaveBeenCalled()
+      const filas = await filasDe(requestId)
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_AMOUNT_OVER_BALANCE', orderId: orden.id })
+      // 412: las apps vivas muestran el texto tal cual (400/409 terminan en el genérico «El cobro fue rechazado»).
+      expect(primero).toMatchObject({
+        statusCode: 412,
+        code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE',
+        details: { requestId, remainingCents: 8400 },
+      })
+      expect((primero as Error).message).toContain('falta $84.00')
+      expect(segundo).toMatchObject({
+        statusCode: 412,
+        code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE',
+        message: (primero as Error).message,
+        details: { requestId, remainingCents: 8400 },
+      })
+    })
+
+    it.each([
+      { caso: 'exactamente lo que falta', amountCents: 8400, tipCents: 0 },
+      { caso: 'lo que falta más propina (la propina va aparte)', amountCents: 8400, tipCents: 1000 },
+      { caso: 'menos de lo que falta (otro abono)', amountCents: 4000, tipCents: 0 },
+      { caso: 'unos centavos de más por el redondeo de la caja (margen de $1)', amountCents: 8450, tipCents: 0 },
+    ])('control: $caso ⇒ se admite y se manda a la terminal', async ({ amountCents, tipCents }) => {
+      const orden = await cuentaConAbono()
+      const terminalId = terminalDe(`abono-ok-${amountCents}-${tipCents}`)
+      const requestId = nextRequest()
+      const admitido = await enviar({ requestId, venueId, terminalId, orderId: orden.id, amountCents, tipCents, requestedBy: fixture })
+
+      expect(directEmit).toHaveBeenCalledWith(
+        'terminal:payment_request',
+        expect.objectContaining({ requestId, orderId: orden.id }),
+        expect.any(Function),
+      )
+      expect(admitido).toMatchObject({ requestId })
+    })
+
+    it('control: una cuenta SIN abono cobra su total como hoy', async () => {
+      const orden = await nuevaOrden()
+      const requestId = nextRequest()
+      await enviar({ requestId, venueId, terminalId: terminalDe('sin-abono'), orderId: orden.id, amountCents: 10000, requestedBy: fixture })
+      expect(directEmit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId }), expect.any(Function))
+    })
+  })
+
   it('(d) orden inexistente en el venue ⇒ 400 ORDER_NOT_FOUND con lápida; aunque la orden aparezca, el MISMO requestId repite el 400', async () => {
     const ordenId = `${fixture}-orden-${randomUUID().slice(0, 8)}`
     const terminalId = terminalDe('orden-ausente')
