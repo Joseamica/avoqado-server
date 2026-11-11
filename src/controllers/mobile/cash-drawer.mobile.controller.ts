@@ -155,7 +155,7 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       return res.status(400).json({ success: false, message: 'amount es requerido y debe ser mayor a 0' })
     }
 
-    const { event, created } = await cashDrawerService.payOut({
+    const { event, created, authorizedBy } = await cashDrawerService.payOut({
       venueId,
       staffId,
       staffName: staffName || 'Staff',
@@ -163,9 +163,10 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       note,
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
+      authorizedByStaffVenueId: (req as any).authContext?.overrideAuthorizedBy ?? null,
     })
 
-    return res.status(idempotentStatus(created)).json({ success: true, data: event })
+    return res.status(idempotentStatus(created)).json({ success: true, data: event, authorizedBy })
   } catch (error) {
     next(error)
   }

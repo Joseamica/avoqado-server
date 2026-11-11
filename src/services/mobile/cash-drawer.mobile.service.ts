@@ -259,6 +259,11 @@ interface PayInOutParams {
    * fila que el arqueo da por buena (efectivo inventado, +$100 medido en Android).
    */
   localId?: string | null
+  /**
+   * StaffVenue del gerente cuyo PIN autorizó ESTE retiro (sólo `payOut`; lo pone el controlador desde
+   * `authContext.overrideAuthorizedBy`). Aditivo: sin él todo queda como siempre.
+   */
+  authorizedByStaffVenueId?: string | null
 }
 
 /**
@@ -272,6 +277,8 @@ export interface DrawerEventResult {
   event: ReturnType<typeof formatEvent>
   /** `false` = reintento: no se creó nada, se devolvió el movimiento que ya existía. */
   created: boolean
+  /** Quién autorizó el retiro (gerente), o `null` si nadie lo autorizó. Igual en creado y en reintento. */
+  authorizedBy: { id: string; name: string } | null
 }
 
 /**
@@ -306,6 +313,18 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
   const amountDecimal = dollarsToDecimal(amount)
 
+  // Quién autorizó (sólo retiros). El nombre sale de la membresía; se resuelve también en un reintento
+  // para que la respuesta sea la misma, pero la bitácora sólo se escribe al crear.
+  let authorizedBy: DrawerEventResult['authorizedBy'] = null
+  if (type === 'PAY_OUT' && params.authorizedByStaffVenueId) {
+    const sv = await prisma.staffVenue.findUnique({
+      where: { id: params.authorizedByStaffVenueId },
+      select: { staff: { select: { firstName: true, lastName: true } } },
+    })
+    const name = [sv?.staff?.firstName, sv?.staff?.lastName].filter(Boolean).join(' ').trim()
+    authorizedBy = { id: params.authorizedByStaffVenueId, name: name || 'Gerente' }
+  }
+
   const row = {
     sessionId: session.id,
     venueId,
@@ -326,7 +345,13 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       action,
       entity: 'CashDrawerEvent',
       entityId,
-      data: { sessionId: session.id, amount: Number(amountDecimal), note, source: 'MOBILE' },
+      data: {
+        sessionId: session.id,
+        amount: Number(amountDecimal),
+        note,
+        source: 'MOBILE',
+        ...(authorizedBy ? { authorizedByStaffVenueId: authorizedBy.id, authorizedByName: authorizedBy.name } : {}),
+      },
     })
 
   // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
@@ -377,7 +402,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       return { stored, created: inserted.count > 0 }
     })
     if (result.created) auditar(result.stored.id)
-    return { event: formatEvent(result.stored), created: result.created }
+    return { event: formatEvent(result.stored), created: result.created, authorizedBy }
   }
   // 🔴 P1 (Codex, 2ª auditoría): el movimiento MANUAL se colaba en una caja que el cierre acababa de
   // firmar. Mismo candado que la venta: dentro de la transacción se TOCA la fila con status='OPEN'
@@ -393,7 +418,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       return tx.cashDrawerEvent.create({ data: row })
     })
     auditar(event.id)
-    return { event: formatEvent(event), created: true }
+    return { event: formatEvent(event), created: true, authorizedBy }
   }
   const result = await prisma.$transaction(async tx => {
     await lockOrThrow(tx)
@@ -424,7 +449,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
     })
   }
 
-  return { event: formatEvent(stored), created }
+  return { event: formatEvent(stored), created, authorizedBy }
 }
 
 /**
