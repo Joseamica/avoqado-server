@@ -15,10 +15,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
  *   (permiso, sesión) y NUNCA «regístrala a mano» (Codex servidor r1 #4: al devolver el permiso la cola la subiría otra vez).
  * - `PRECIO_CAMBIADO`: se registró, pero el total del servidor ya no es lo cobrado (precio visto no reconocido, saldo o sobrepago).
  * - `TURNO_CERRADO`: se registró sin turno porque el suyo ya se cerró (`SALE_SHIFT_CLOSED`); se concilia contra SU corte.
+ * - `DESCUENTO_SIN_PERMISO` (hz:e0b12f00:D2): una venta del POS con un «Descuento de la cuenta» que deja los productos en $0, hecha sin
+ *   permiso de cortesía, que llegó de la cola o de una app que no pide el PIN: se registró (rechazarla la perdería) y se avisa.
  *
  * Sólo para la cola de una terminal: `isOfflineReplay` y un token con serial de terminal (la cola de Android no lo trae).
  */
-export type AvisoVentaSinRed = 'RECHAZADA' | 'REINTENTANDO' | 'PRECIO_CAMBIADO' | 'TURNO_CERRADO'
+export type AvisoVentaSinRed = 'RECHAZADA' | 'REINTENTANDO' | 'PRECIO_CAMBIADO' | 'TURNO_CERRADO' | 'DESCUENTO_SIN_PERMISO'
 
 export interface DatosDelAviso {
   /** La llave de la venta (`externalId` de la orden = `idempotencyKey` del pago): con ella se deduplica. */
@@ -60,6 +62,11 @@ const TEXTOS: Record<AvisoVentaSinRed, (d: DatosDelAviso) => { title: string; me
     title: 'Una venta sin conexión no cuadra con lo cobrado',
     message: `${deLaTerminal(d)} subió una venta${porMonto(d)} que hizo sin conexión, pero el total del sistema ya no es lo que se cobró${d.motivo ? `: ${d.motivo}` : ''}. Revisa la orden.`,
     priority: NotificationPriority.NORMAL,
+  }),
+  DESCUENTO_SIN_PERMISO: d => ({
+    title: 'Una venta quedó en $0 con un descuento sin permiso de cortesía',
+    message: `${deLaTerminal(d)} registró una venta con un «Descuento de la cuenta»${typeof d.montoCents === 'number' ? ` de ${MXN.format(d.montoCents / 100)}` : ''} que deja los productos en $0 (una cortesía), hecho por alguien sin permiso de cortesía. Llegó de la cola sin conexión o de una app sin actualizar, así que se registró para no perder la venta. Revísala con quien la hizo.`,
+    priority: NotificationPriority.HIGH,
   }),
   TURNO_CERRADO: d => ({
     title: 'Llegó una venta de un turno ya cerrado',
