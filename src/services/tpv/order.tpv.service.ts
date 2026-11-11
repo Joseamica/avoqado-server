@@ -2133,8 +2133,11 @@ export async function addItemsToOrder(
               })
 
         if (existingItemWithModifiers) {
-          // ⭐ UPDATE existing item instead of creating new one
-          const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+          // ⭐ UPDATE existing item instead of creating new one. El carrito completo es estado ABSOLUTO: varias entradas iguales
+          // sin externalId ya vienen sumadas por `normalizeAddItems`, y esa suma REEMPLAZA (hz:dcc49fe5:D1 · Codex r4 B8: sumarla a la
+          // fila convertía un reenvío de café×1 + café×1 sobre café×2 en 4, cobraba de más y mandaba 2 cafés a cocina). Agregar
+          // más es una ronda nueva (`asNewRound`) o una línea con su propio externalId; la TPV real (≥ 1.4) siempre lo manda.
+          const updatedQuantity = item.quantity
           const updatedTotal = lineTotalFor(updatedQuantity)
 
           logger.info(

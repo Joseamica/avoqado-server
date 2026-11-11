@@ -14,7 +14,7 @@ import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/p
 import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
-import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
+import { origenDeLaDiferencia, planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
 import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
@@ -133,6 +133,7 @@ export async function authorKitchenTickets(params: {
           externalId: true,
           sentToKitchenAt: true,
           createdAt: true,
+          updatedAt: true,
           serviceCourse: true,
           orderPromotionId: true,
           areaTicketLineId: true,
@@ -191,6 +192,7 @@ export async function authorKitchenTickets(params: {
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,
         createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
         serviceCourse: r.serviceCourse,
         orderPromotionId: r.orderPromotionId,
       }))
@@ -218,40 +220,57 @@ export async function authorKitchenTickets(params: {
         )
           ? PREPARATION_VERSION
           : 0
-        const kdsOrderId = await cabeceraPorFolio(tx, {
+        const cabecera = {
           venueId,
-          sourceKey: plan.sourceKey,
           stationId: plan.stationId,
           orderId,
           orderNumber: order.orderNumber,
           orderType: order.type,
           preparationVersion,
-        })
-        await tx.kdsOrderItem.createMany({
-          data: plan.lines.map(l => ({
-            kdsOrderId,
-            productName: l.productName,
-            quantity: l.quantity,
-            modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
-            notes: l.notes,
-            orderItemId: l.id,
-            productId: l.productId,
-            categoryId: l.categoryId,
-            externalLineId: l.externalId,
-            serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
-            orderPromotionId: l.orderPromotionId ?? null,
-            preparation: preparationVersion
-              ? (initialPreparation(l.quantity, parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE') as Prisma.InputJsonValue)
-              : Prisma.DbNull,
-          })),
-        })
+        }
+        const suya = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: plan.sourceKey })
+        const destinos: Array<[string, KitchenLine[]]> = [[suya.id, plan.lines.filter(suya.cubre)]]
+        // 🔴 hz:dcc49fe5:D1 · Codex r4 B10/B13: una comanda TERMINADA o «en papel» no absorbe lo que no cubrió; lo nuevo sale en una
+        // comanda nueva y visible (el mismo folio que la diferencia de este armado), aunque repita algo dudoso («en duda, manda»).
+        const aparte = plan.lines.filter(l => !suya.cubre(l))
+        if (aparte.length > 0) {
+          const folioNuevo = `${origenDeLaDiferencia(order, startedAt)}:${plan.stationId ?? 'none'}`
+          const nueva = folioNuevo === plan.sourceKey ? null : await cabeceraPorFolio(tx, { ...cabecera, sourceKey: folioNuevo })
+          // Sólo si en este mismo milisegundo ya existía y se cerró: se revierte todo y el barrido lo reintenta con otro sello.
+          if (!nueva || !aparte.every(nueva.cubre)) throw new ConflictError('La comanda nueva ya estaba cerrada.', 'KDS_FOLIO_CONFLICT')
+          destinos.push([nueva.id, aparte])
+        }
+        for (const [kdsOrderId, lineas] of destinos) {
+          if (lineas.length === 0) continue
+          await tx.kdsOrderItem.createMany({
+            data: lineas.map(l => ({
+              kdsOrderId,
+              productName: l.productName,
+              quantity: l.quantity,
+              modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
+              notes: l.notes,
+              orderItemId: l.id,
+              productId: l.productId,
+              categoryId: l.categoryId,
+              externalLineId: l.externalId,
+              serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
+              orderPromotionId: l.orderPromotionId ?? null,
+              preparation: preparationVersion
+                ? (initialPreparation(
+                    l.quantity,
+                    parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE',
+                  ) as Prisma.InputJsonValue)
+                : Prisma.DbNull,
+            })),
+          })
+          ids.add(kdsOrderId)
+        }
         if (plan.toStamp.length > 0) {
           await tx.orderItem.updateMany({
             where: { id: { in: plan.toStamp }, sentToKitchenAt: null },
             data: { sentToKitchenAt: startedAt },
           })
         }
-        ids.add(kdsOrderId)
       }
     }
 
@@ -343,7 +362,7 @@ async function cabeceraPorFolio(
     orderType: string
     preparationVersion: number
   },
-): Promise<string> {
+): Promise<Cabecera> {
   const [creada] = await tx.kdsOrder.createManyAndReturn({
     data: [
       {
@@ -360,10 +379,10 @@ async function cabeceraPorFolio(
     skipDuplicates: true,
     select: { id: true },
   })
-  if (creada) return creada.id
+  if (creada) return { id: creada.id, cubre: () => true }
   const existente = await tx.kdsOrder.findUniqueOrThrow({
     where: { venueId_sourceKey: { venueId: a.venueId, sourceKey: a.sourceKey } },
-    select: { id: true, orderId: true, preparationVersion: true },
+    select: { id: true, orderId: true, preparationVersion: true, status: true, fallbackPrintedAt: true, createdAt: true },
   })
   // 🔴 Codex r3 #1: nunca se le suman platillos a la comanda de OTRA cuenta (si ya se terminó, saldrían escondidos). Pasa si un
   // renglón movido de cuenta trae el folio de su ronda, o con una marca rara. Se arma en un folio propio de esta cuenta, fijo para
@@ -396,9 +415,26 @@ async function cabeceraPorFolio(
         fallbackPrintedAt: null,
       },
     })
+    return { id: existente.id, cubre: () => true }
   }
-  return existente.id
+  // Abierta (nueva, en preparación o lista sin terminar): todo lo de su folio se ve en ella, como siempre.
+  if (existente.status !== 'COMPLETED' && !existente.fallbackPrintedAt) return { id: existente.id, cubre: () => true }
+  // 🔴 hz:dcc49fe5:D1 · Codex r4 B13: TERMINADA o «en papel» con platillos: lo que la cocina terminó (o recibió en papel) es lo que tiene.
+  // Lo que todavía no está en ella nunca viajó: no la cubre, o quedaría escondido.
+  if (await tx.kdsOrderItem.findFirst({ where: { kdsOrderId: existente.id }, select: { id: true } })) {
+    return { id: existente.id, cubre: () => false }
+  }
+  // 🔴 B10: una MARCA sin platillos (LISTO sin red o «salió en papel» antes del armado) no dice qué cubría. Cubre lo que la cuenta ya
+  // tenía al llegar la marca, y nada creado ni tocado desde entonces (− 5 s, como S9: un empate cuenta como tocado). En duda, manda.
+  const desde = existente.createdAt.getTime() - HOLGURA_DE_RELOJ_MS
+  return {
+    id: existente.id,
+    cubre: l => l.createdAt.getTime() < desde && l.updatedAt != null && l.updatedAt.getTime() < desde,
+  }
 }
+
+/** La cabecera de un folio y qué renglones puede absorber (`cubre`): lo demás va a una comanda nueva (B10/B13). */
+type Cabecera = { id: string; cubre: (l: KitchenLine) => boolean }
 
 async function limpiarMarca(venueId: string, orderId: string, startedAt: Date): Promise<void> {
   // `orderId` puede venir de un request del cliente (el POST legado, Tarea 8): siempre acotado al venue.

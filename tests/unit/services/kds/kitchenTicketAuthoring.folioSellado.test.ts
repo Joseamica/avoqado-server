@@ -64,6 +64,8 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean } = {}) {
     where.OR ? (o.tocado ? { id: RENGLON.id } : null) : null) as any)
   prismaMock.orderItem.findMany.mockResolvedValueOnce([RENGLON] as any).mockResolvedValue([])
   prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+  // hz:dcc49fe5:D1: la cobertura se lee como unidades ya mandadas por renglón (Σ por `groupBy`).
+  prismaMock.kdsOrderItem.groupBy.mockResolvedValue([] as any)
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
 }
 const tocadoLeido = () => prismaMock.orderItem.findFirst.mock.calls.map((c: any[]) => c[0]).find((a: any) => a.where.OR)

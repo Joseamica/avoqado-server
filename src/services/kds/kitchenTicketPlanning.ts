@@ -24,6 +24,8 @@ export interface KitchenLine {
   externalId: string | null
   sentToKitchenAt: Date | null
   createdAt: Date
+  /** Última escritura del renglón: una comanda «marca» sin platillos sólo cubre lo que no se tocó desde que llegó (B10). */
+  updatedAt?: Date | null
   serviceCourse?: unknown
   orderPromotionId?: string | null
 }
@@ -75,9 +77,10 @@ export function originKeyFor(line: KitchenLine, order: KitchenOrderRef, stampedA
  * La pieza que se sumó a un renglón que ya tenía comanda sale en una comanda NUEVA, como un envío nuevo (Square: cada tanda es su
  * propio ticket con el mismo número de cuenta): la de antes pudo terminarse y ya no está en la pantalla. En mesa se junta con lo
  * nuevo de ese mismo armado (`round:<orden>:<sello>`, el folio de los renglones sin llave). Codex r3 #1 y #2: se arma con el id de
- * la cuenta (del servidor), nunca con su `externalId` (lo escribe el cliente): no choca con otra cuenta y su largo es fijo.
+ * la cuenta (del servidor), nunca con su `externalId` (lo escribe el cliente): no choca con otra cuenta y su largo es fijo. Lo nuevo
+ * que una comanda terminada o «en papel» no cubre sale en este mismo folio (Codex r4 B10/B13, `kitchenTicketAuthoring.service`).
  */
-function origenDeLaDiferencia(order: KitchenOrderRef, stampedAt: Date): string {
+export function origenDeLaDiferencia(order: KitchenOrderRef, stampedAt: Date): string {
   return order.tableId ? `round:${order.id}:${stampedAt.getTime()}` : `order:${order.id}:mas:${stampedAt.getTime()}`
 }
 
