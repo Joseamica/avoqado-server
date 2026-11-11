@@ -29,9 +29,13 @@ describe('preparation authoring without a kitchen screen', () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
     expect(await debeMarcarCocina('venue-a', { hasPreparation: true })).toBe(false)
   })
-  it('does not fail the financial operation if the capability lookup fails', async () => {
+  // hz:ce654971:D5 (Codex r4 B12): antes devolvía false y la venta se confirmaba sin marca ni aviso: se perdía el único aviso a
+  // cocina. «En duda, manda»: la marca queda y el autor decide cuando la base conteste (sin pantalla, la limpia sin armar nada).
+  it('does not fail the financial operation if the capability lookup fails, and keeps the kitchen mark («en duda, manda»)', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockRejectedValue(new Error('network'))
-    expect(await debeMarcarCocina('venue-a', { hasPreparation: true })).toBe(false)
+    expect(await debeMarcarCocina('venue-a', { hasPreparation: true })).toBe(true)
+    prismaMock.printStation.findFirst.mockRejectedValue(new Error('pool timeout'))
+    expect(await debeMarcarCocina('venue-a')).toBe(true)
   })
   it('blocks negotiated normal or combo snapshots before order creation for Free', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)

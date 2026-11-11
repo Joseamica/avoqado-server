@@ -92,6 +92,10 @@ export async function estacionDePantallaParaReparto(venueId: string): Promise<st
 /**
  * ¿Esta venta o ronda necesita comanda de pantalla? Se resuelve FUERA de la transacción de dinero y nunca
  * lanza: saber si hay pantalla no puede tumbar un cobro.
+ *
+ * 🔴 hz:ce654971:D5 (Codex r4 B12): si no se puede saber, contesta `true` («en duda, manda»). Antes contestaba `false` y la venta
+ * se confirmaba sin marca ni aviso: se perdía el único aviso a cocina. De más no cuesta nada: el autor relee las estaciones cuando
+ * la base conteste y, sin pantalla, limpia la marca sin armar nada.
  */
 export async function debeMarcarCocina(venueId: string, options: { hasPreparation?: boolean; orderId?: string } = {}): Promise<boolean> {
   try {
@@ -105,10 +109,10 @@ export async function debeMarcarCocina(venueId: string, options: { hasPreparatio
         })))
     return Boolean(hasPreparation) && (await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))
   } catch (error) {
-    logger.warn('[KDS] no se pudo saber si el negocio tiene pantalla; el cobro sigue sin marca de cocina', {
+    logger.warn('[KDS] no se pudo saber si el negocio tiene pantalla; la venta deja la marca de cocina y el armado decide después', {
       venueId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return false
+    return true
   }
 }

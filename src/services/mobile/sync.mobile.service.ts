@@ -45,7 +45,8 @@ import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
@@ -1291,7 +1292,20 @@ async function applyAddItems(
 
   if (itemsWithKey.length === 0) {
     // La ronda fue puras promociones: no hay alta normal que hacer.
-    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
+    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true, tableId: true } })
+    // 🔴 hz:ce654971:D4 (Codex r4 B9): la marca de cocina de una ronda la pone `addItemsToOrder`, y esta ronda no pasa por ahí. Sus
+    // componentes nacen con `sentToKitchenAt` y el cobro salta lo «ya enviado»: el combo llegaba a la pantalla hasta la siguiente
+    // ronda o hasta que la mesa pagaba. Misma regla que la ronda normal (sólo mesa; mostrador nace al pagar). La marca va ANTES del
+    // ACK: si el proceso muere aquí, la cola reenvía el intent, la promoción contesta `created:false` y se vuelve a llegar aquí.
+    if (after?.tableId) {
+      const hasPreparation = conPromocion.some(it =>
+        it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1),
+      )
+      if (await debeMarcarCocina(venueId, { hasPreparation })) {
+        await prisma.order.updateMany({ where: { id: orderId, venueId }, data: { kitchenPendingAt: new Date() } })
+        await armarComandasTrasCommit(venueId, orderId, 'ROUND') // nunca lanza: si falla, el barrido arma con la marca
+      }
+    }
     return {
       id: intent.id,
       status: 'ACKED',

@@ -9,7 +9,11 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 const BATCH_LIMIT = 50
 /** El gancho post-commit suele armarla en milisegundos: el barrido espera para no pisarlo. */
 const MIN_AGE_MS = 30_000
-/** Pasado este tiempo la comanda ya no sirve en la pantalla: la cubrió el papel o nadie la preparará. */
+/**
+ * Pasado este tiempo la marca recibe UN último intento y después se limpia. hz:ce654971:D5 (Codex r4 B11): antes se limpiaba sin
+ * llamar al autor, y tras una caída de 16 min una pieza todavía elegible (el autor decide con su ventana de 12 h y con lo que la
+ * cocina ya marcó en papel) se abandonaba sin un solo intento. Que la pieza sirva o no lo decide el autor, no este reloj.
+ */
 const GIVE_UP_MS = 15 * 60_000
 
 type CronHandle = Pick<CronJob, 'start' | 'stop'>
@@ -91,36 +95,37 @@ export class KitchenTicketsReconciliationJob {
       let rendidas = 0
       for (const orden of pendientes) {
         const marca = orden.kitchenPendingAt as Date
-        if (marca.getTime() < now.getTime() - GIVE_UP_MS) {
-          logger.error('🚨 [KDS] comanda de pantalla sin armar tras 15 min; se deja de intentar', {
-            venueId: orden.venueId,
-            orderId: orden.id,
-            desde: marca,
-          })
-          try {
-            // Ruling (aislamiento de tenant, igual que la Tarea 3): el `updateMany` de rendición se acota por
-            // venueId, no sólo por id — nunca limpiar la marca de una orden ajena.
-            await this.dependencies.prisma.order.updateMany({
-              where: { id: orden.id, venueId: orden.venueId, kitchenPendingAt: marca },
-              data: { kitchenPendingAt: null },
-            })
-            rendidas += 1
-          } catch (error) {
-            fallidas += 1
-            logger.error('[KDS] el barrido no pudo limpiar la marca de una comanda rendida; lo reintenta en el siguiente tick', {
-              venueId: orden.venueId,
-              orderId: orden.id,
-              error: error instanceof Error ? error.message : String(error),
-            })
-          }
-          continue
-        }
+        const ultimoIntento = marca.getTime() < now.getTime() - GIVE_UP_MS
+        let armada = false
         try {
           await this.dependencies.author({ venueId: orden.venueId, orderId: orden.id, trigger: 'SWEEP' })
           armadas += 1
+          armada = true
         } catch (error) {
-          fallidas += 1
-          logger.error('[KDS] el barrido no pudo armar la comanda; lo reintenta en el siguiente tick', {
+          const datos = { venueId: orden.venueId, orderId: orden.id, error: error instanceof Error ? error.message : String(error) }
+          if (!ultimoIntento) {
+            fallidas += 1
+            logger.error('[KDS] el barrido no pudo armar la comanda; lo reintenta en el siguiente tick', datos)
+            continue
+          }
+          logger.error('🚨 [KDS] comanda de pantalla sin armar tras 15 min y un último intento; se deja de intentar', {
+            ...datos,
+            desde: marca,
+          })
+        }
+        if (!ultimoIntento) continue
+        // Pase lo que pase en el último intento, ESA marca ya no se reintenta: así una marca que el autor no limpió no se repite cada
+        // minuto para siempre. Condicionada a su valor (la de una ronda nueva se conserva) y acotada al venue (ruling de aislamiento
+        // de tenant, igual que la Tarea 3): nunca limpiar la marca de una orden ajena.
+        try {
+          await this.dependencies.prisma.order.updateMany({
+            where: { id: orden.id, venueId: orden.venueId, kitchenPendingAt: marca },
+            data: { kitchenPendingAt: null },
+          })
+          if (!armada) rendidas += 1
+        } catch (error) {
+          if (!armada) fallidas += 1
+          logger.error('[KDS] el barrido no pudo limpiar una marca de más de 15 min; lo reintenta en el siguiente tick', {
             venueId: orden.venueId,
             orderId: orden.id,
             error: error instanceof Error ? error.message : String(error),

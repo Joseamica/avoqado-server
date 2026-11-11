@@ -1,6 +1,7 @@
 /**
- * El barrido de comandas (spec 2026-09-27 §2): arma las ventas/rondas con marca de más de 30 s, se rinde a los
- * 15 min con una alerta 🚨, y un armado (o un rendirse) que truena no detiene a los demás.
+ * El barrido de comandas (spec 2026-09-27 §2): arma las ventas/rondas con marca de más de 30 s; a los 15 min hace un
+ * último intento y, si truena, se rinde con una alerta 🚨 (hz:ce654971:D5); un armado (o un rendirse) que truena no
+ * detiene a los demás.
  */
 jest.mock('@/config/logger', () => ({
   __esModule: true,
@@ -39,17 +40,35 @@ it('pide sólo marcas de más de 30 s, acotadas, y arma cada una', async () => {
   expect(r).toEqual(expect.objectContaining({ scanned: 1, armadas: 1 }))
 })
 
-it('a los 15 min se rinde: alerta 🚨 y limpia la marca sin armar, acotado al venue', async () => {
+// hz:ce654971:D5 (Codex r4 B11): a los 15 min se rendía SIN llamar al autor. Tras una caída de 16 min, una cuenta con su pieza
+// todavía elegible (el autor decide con su ventana de 12 h) se abandonaba sin un solo intento. Ahora hace un ÚLTIMO intento.
+it('🔴 a los 15 min hace un último intento: si arma, cuenta como armada y no hay alerta', async () => {
   const marca = hace(16 * 60_000)
   const { job, prisma, author } = armar([{ id: 'o1', venueId: 'v1', kitchenPendingAt: marca }])
   const r = await job.runNow()
-  expect(author).not.toHaveBeenCalled()
+  expect(author).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'o1', trigger: 'SWEEP' })
+  // Esa misma marca vieja se limpia pase lo que pase (acotada al venue y a su valor): una marca que el autor no limpió no se
+  // reintenta cada minuto para siempre, y la de una ronda nueva (otro valor) se conserva.
+  expect(prisma.order.updateMany).toHaveBeenCalledWith({
+    where: { id: 'o1', venueId: 'v1', kitchenPendingAt: marca },
+    data: { kitchenPendingAt: null },
+  })
+  expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('🚨 [KDS]'), expect.anything())
+  expect(r).toEqual(expect.objectContaining({ armadas: 1, rendidas: 0 }))
+})
+
+it('a los 15 min, si el último intento truena, se rinde: alerta 🚨 y limpia la marca, acotado al venue', async () => {
+  const marca = hace(16 * 60_000)
+  const { job, prisma, author } = armar([{ id: 'o1', venueId: 'v1', kitchenPendingAt: marca }])
+  author.mockRejectedValueOnce(new Error('lock timeout'))
+  const r = await job.runNow()
+  expect(author).toHaveBeenCalledTimes(1)
   expect(prisma.order.updateMany).toHaveBeenCalledWith({
     where: { id: 'o1', venueId: 'v1', kitchenPendingAt: marca },
     data: { kitchenPendingAt: null },
   })
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨 [KDS]'), expect.anything())
-  expect(r.rendidas).toBe(1)
+  expect(r).toEqual(expect.objectContaining({ armadas: 0, rendidas: 1 }))
 })
 
 it('un armado que truena no detiene a los demás', async () => {
@@ -69,10 +88,11 @@ it('un rendirse que truena tampoco detiene a los demás', async () => {
     { id: 'o1', venueId: 'v1', kitchenPendingAt: marca },
     { id: 'o2', venueId: 'v1', kitchenPendingAt: hace(60_000) },
   ])
+  author.mockRejectedValueOnce(new Error('lock timeout'))
   prisma.order.updateMany.mockRejectedValueOnce(new Error('db down'))
   const r = await job.runNow()
-  expect(author).toHaveBeenCalledTimes(1)
-  expect(author).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'o2', trigger: 'SWEEP' })
+  expect(author).toHaveBeenCalledTimes(2)
+  expect(author).toHaveBeenLastCalledWith({ venueId: 'v1', orderId: 'o2', trigger: 'SWEEP' })
   expect(r).toEqual(expect.objectContaining({ armadas: 1, fallidas: 1, rendidas: 0 }))
 })
 

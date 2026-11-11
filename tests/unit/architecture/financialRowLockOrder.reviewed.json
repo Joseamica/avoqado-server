@@ -442,6 +442,11 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
+    "src/services/delivery-channels/core/releaseScheduledOrder.service.ts#releaseScheduledOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
     "src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
