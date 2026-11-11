@@ -26,7 +26,7 @@ import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, Paymen
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError, RegaloSinPermisoError } from '../../errors/AppError'
 import { operationHash } from '../../utils/operationHash'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
@@ -277,6 +277,14 @@ export interface CreateOrderInput {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
+  /** hz:e0b12f00:D2 (server-owned): la membresía de quien autorizó el descuento de cuenta que regala (el gerente del PIN o quien llama). */
+  regaloAutorizadoPor?: string
+  /**
+   * hz:e0b12f00:D2: la app pide el PIN de gerente ANTES de mandar un descuento de cuenta que regala (ANDROID/WINDOWS nuevos). Sólo a
+   * ella se le exige `orders:comp` en línea; sin la marca (app vieja, iOS) o desde una cola, la venta se registra con bitácora y aviso.
+   * Como `stampRewardAware`: una marca de capacidad del cuerpo, porque WINDOWS no manda el número de compilación de Play.
+   */
+  cortesiaDeCuentaConPin?: boolean
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -828,6 +836,62 @@ function avisarPrecioNoReconocido(venueId: string, input: CreateOrderInput, orde
   })
 }
 
+/**
+ * hz:e0b12f00:D2 (como `descuentoLibreRegala` de `/tpv/with-items`, D1): un descuento de cuenta LIBRE (sin catálogo ni cupón en línea)
+ * que, con el importe y la base del SERVIDOR y en centavos, deja en $0 lo que queda de los productos. La propina, el cargo por servicio
+ * y los abonos no cuentan (D1 r1 #2). Base en $0 (todo regalado por renglón, que ya pidió su permiso) no es esto. Ojo: ANDROID manda
+ * su descuento de cuenta SIEMPRE como `discount` libre, también el del catálogo.
+ */
+function descuentoDeCuentaRegala(esLibre: boolean, montoPesos: number, basePesos: number): boolean {
+  return esLibre && montoPesos > 0 && basePesos > 0 && Math.round(montoPesos * 100) >= Math.round(basePesos * 100)
+}
+
+/** `SIN_PERMISO`: se registra sin autorizador, con bitácora y aviso. */
+type AutorizacionDelRegalo = { authorizedById?: string } | 'SIN_PERMISO'
+
+/**
+ * hz:e0b12f00:D2: quién autoriza ese regalo. Con `orders:comp` (o el PIN) de la SESIÓN, la fila lleva al autorizador. La app que pide
+ * el PIN antes (`cortesiaDeCuentaConPin`) y llega EN LÍNEA sin él recibe `RegaloSinPermisoError` (el controlador pide el PIN). Una venta
+ * de la cola, o de una app que no sabe pedir el PIN (vieja, iOS), «ya ocurrió»: se registra igual, sin autorizador, con bitácora en la
+ * transacción y aviso al dueño (como «A24»). Rechazarla la dejaría sin registrar en el servidor (D1 r1 #4).
+ */
+function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo {
+  if (input.canCompItems === true && input.performedBy) {
+    return input.regaloAutorizadoPor ? { authorizedById: input.regaloAutorizadoPor } : {}
+  }
+  if (input.isOfflineReplay === true || input.cortesiaDeCuentaConPin !== true) return 'SIN_PERMISO'
+  throw new RegaloSinPermisoError()
+}
+
+const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
+
+/** hz:e0b12f00:D2: el rastro de un regalo sin permiso, en la MISMA transacción. `avisarVentaSinRed` lo encuentra y no lo repite. */
+async function anotarRegaloSinPermisoEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+  montoPesos: number,
+): Promise<void> {
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_DESCUENTO_SIN_PERMISO}`,
+    entity: 'VentaSinRed',
+    entityId: normalizeExternalId(input.externalId) ?? orderId,
+    data: {
+      orderId,
+      montoCents: Math.round(montoPesos * 100),
+      origen: input.isOfflineReplay === true ? 'COLA_SIN_RED' : 'APP_SIN_PIN',
+      subidaPor: input.performedBy ?? null,
+      source: input.source ?? null,
+    },
+  })
+}
+
+const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
+
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
 
@@ -1322,7 +1386,13 @@ export interface TotalesDePromocion {
 /** `existente`: la llave de la venta ya tenía su orden (el reintento sale con ella). */
 export type VentaDeMostradorEnTx =
   | { existente: OrdenCreada }
-  | { order: OrdenCreada; promotionTotals: TotalesDePromocion | null; venta: VentaCalculada }
+  | {
+      order: OrdenCreada
+      promotionTotals: TotalesDePromocion | null
+      venta: VentaCalculada
+      /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
+      regaloSinPermisoPesos?: number
+    }
 
 /**
  * La parte de `createOrderWithItems` de ANTES de su transacción (extraída sin cambiarla, S2b): valida, resuelve el personal, la
@@ -1581,6 +1651,12 @@ export async function crearVentaDeMostradorEnTx(
       catalogoPesos: orderLevelDiscountDecimal,
     })
   }
+  // hz:e0b12f00:D2: sin promociones la base ya se conoce; se decide ANTES de escribir (después de la búsqueda idempotente de arriba).
+  const regaloSinPromociones =
+    promocionesUnicas.length === 0 &&
+    descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)
+      ? autorizarRegaloDeCuenta(input)
+      : null
   const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal
   const total = subtotal - discountDecimal + tipDecimal
   const venta = {
@@ -1767,10 +1843,19 @@ export async function crearVentaDeMostradorEnTx(
                 ? Number(orderDiscount.maxDiscountAmount)
                 : null,
           })
-        : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById })
+        : filaDeDescuentoDeCuenta({
+            orderId: createdOrder.id,
+            montoPesos: orderLevelDiscountDecimal,
+            appliedById,
+            ...autorizadorDelRegalo(regaloSinPromociones),
+          })
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
+    if (regaloSinPromociones === 'SIN_PERMISO') {
+      await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, orderLevelDiscountDecimal)
+      return { order: createdOrder, promotionTotals: null, venta, regaloSinPermisoPesos: orderLevelDiscountDecimal }
+    }
     return { order: createdOrder, promotionTotals: null, venta }
   }
 
@@ -1839,6 +1924,10 @@ export async function crearVentaDeMostradorEnTx(
   const descuentoDeOrdenFinal = cupon
     ? montoDelCupon(cupon.discount, topeDescuentoDeOrden)
     : Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+  // hz:e0b12f00:D2: con combos la base es la cuenta CON promociones; si regala sin permiso, todo lo de arriba se revierte.
+  const regaloConPromociones = descuentoDeCuentaRegala(!orderDiscount, descuentoDeOrdenFinal, topeDescuentoDeOrden)
+    ? autorizarRegaloDeCuenta(input)
+    : null
   const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
 
   const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
@@ -1849,9 +1938,13 @@ export async function crearVentaDeMostradorEnTx(
       orderId: createdOrder.id,
       montoPesos: descuentoDeOrdenFinal,
       appliedById: appliedByStaffVenue?.id ?? null,
+      ...autorizadorDelRegalo(regaloConPromociones),
     })
     await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
     await sincronizarRepartos(tx, createdOrder.id)
+  }
+  if (regaloConPromociones === 'SIN_PERMISO') {
+    await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, descuentoDeOrdenFinal)
   }
   const reafirmada = await tx.order.update({
     where: { id: createdOrder.id },
@@ -1867,6 +1960,7 @@ export async function crearVentaDeMostradorEnTx(
     order: reafirmada,
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
+    ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
   }
 }
 
@@ -2029,6 +2123,15 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
+  // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
+  if (created.regaloSinPermisoPesos != null) {
+    void avisarVentaSinRed(venueId, AVISO_DESCUENTO_SIN_PERMISO, {
+      externalId: normalizeExternalId(input.externalId) ?? order.id,
+      orderId: order.id,
+      montoCents: Math.round(created.regaloSinPermisoPesos * 100),
+      staffId: input.performedBy,
+    })
+  }
 
   // Flatten and return response
   return {
