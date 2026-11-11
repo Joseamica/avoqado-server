@@ -768,6 +768,27 @@ describe('D5: la nota en addItemsToOrder — sin tope en el carrito completo ni 
     expect(cuenta.filas.map(fila => fila.notes)).toEqual([larga])
   })
 
+  // 🔴 hz:dcc49fe5:D1 · Codex r4 B8: el carrito completo es estado ABSOLUTO aunque traiga dos entradas iguales sin externalId. Sumarlas
+  // a la fila (2 + 1 + 1 = 4) cobraba de más y, con la cocina por unidades, mandaba dos cafés que nadie pidió.
+  it('🔴 B8: fila con 2 + carrito completo con DOS entradas iguales sin externalId (1 + 1) ⇒ queda 2 y $200, sin filas nuevas', async () => {
+    const cuenta = cuentaEnMemoria([{ ...vieja('cafe', ''), notes: null, quantity: 2, total: new Prisma.Decimal(200) }])
+
+    expect(await guardarYReenviar([linea(), linea()], cuenta)).toEqual([200, 200])
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([['cafe', 2]])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('B8 · regresión: el carrito completo con UNA entrada sigue reemplazando (2 → 3) y una ronda (asNewRound) sigue sumando filas', async () => {
+    const cuenta = cuentaEnMemoria([{ ...vieja('cafe', ''), notes: null, quantity: 2, total: new Prisma.Decimal(200) }])
+
+    await addItemsToOrder('venue', 'order', [{ ...linea(), quantity: 3 }], cuenta.version())
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([['cafe', 3]])
+
+    await addItemsToOrder('venue', 'order', [linea(), linea()], cuenta.version(), true)
+    expect(totalGuardado()).toBe(500)
+    expect(cuenta.filas.map(fila => fila.quantity)).toEqual([3, 2])
+  })
+
   // Codex r3: la fila la escribió OTRO camino (aquí el alta mobile, `buildOrderItemsData`; el vale v7 usa el mismo dato) y
   // después llega el carrito completo SIN `externalId` con la misma nota. Si el escritor la hubiera recortado, el match
   // por nota fallaba y nacía un segundo renglón ($100 → $200).
