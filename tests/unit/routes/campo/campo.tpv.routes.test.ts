@@ -14,6 +14,7 @@ import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.s
 import { registrarEntradaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
 import { recibirEnGracia } from '@/services/tpv/campo/celular/graciaDelCelular.service'
+import { recordPromoterPing } from '@/services/promoters/promoterLocation.service'
 
 /** La sesión de campo de mentira: la persona va en `x-persona`, su sucursal es v1 y su celular `cel-<persona>`. */
 jest.mock('@/middlewares/autenticarSesionDeCampo.middleware', () => ({
@@ -49,6 +50,7 @@ jest.mock('@/middlewares/validateVenueAccess.middleware', () => ({
 jest.mock('@/services/tpv/campo/checadaDeCampo.service', () => ({ registrarEntradaDeCampo: jest.fn(), registrarSalidaDeCampo: jest.fn() }))
 jest.mock('@/services/tpv/campo/ventaDeCampo.service', () => ({ registrarVentaDeCampo: jest.fn() }))
 jest.mock('@/services/tpv/campo/celular/graciaDelCelular.service', () => ({ recibirEnGracia: jest.fn() }))
+jest.mock('@/services/promoters/promoterLocation.service', () => ({ recordPromoterPing: jest.fn() }))
 
 const entrada = registrarEntradaDeCampo as jest.Mock
 const venta = registrarVentaDeCampo as jest.Mock
@@ -243,5 +245,49 @@ describe('POST /campo/gracia (bloque 1, Tarea 7)', () => {
     expect(r.status).toBe(429)
     expect(r.body).toMatchObject({ code: 'RATE_LIMIT' })
     expect((await enviar('cel-otro', cuerpo)).status).toBe(200)
+  })
+})
+
+describe('POST /campo/venues/:venueId/ubicacion (bloque 2: el GPS del turno)', () => {
+  const ping = recordPromoterPing as jest.Mock
+  beforeEach(() => ping.mockReset())
+
+  it('guarda el ping con la sucursal de la DIRECCIÓN, la persona del token y sin terminal', async () => {
+    ping.mockResolvedValue({ id: 'ping1' })
+
+    const r = await request(app)
+      .post('/campo/venues/v1/ubicacion')
+      .set('x-persona', 'p-gps')
+      .send({ latitude: 19.43, longitude: -99.13, accuracy: 12, capturedAt: '2026-11-10T16:00:00.000Z' })
+
+    expect(r.status).toBe(201)
+    expect(r.body).toEqual({ success: true, data: { id: 'ping1' } })
+    expect(ping).toHaveBeenCalledWith({
+      venueId: 'v1',
+      staffId: 'p-gps',
+      latitude: 19.43,
+      longitude: -99.13,
+      accuracy: 12,
+      capturedAt: new Date('2026-11-10T16:00:00.000Z'),
+      source: 'PERIODIC',
+      terminalId: null,
+      terminalTrackOverride: null,
+    })
+  })
+
+  it('latitud fuera de rango → 400 sin llamar al servicio', async () => {
+    const r = await request(app).post('/campo/venues/v1/ubicacion').set('x-persona', 'p-gps').send({ latitude: 200, longitude: 0 })
+
+    expect(r.status).toBe(400)
+    expect(ping).not.toHaveBeenCalled()
+  })
+
+  it('un error del servicio sale por el manejador de errores', async () => {
+    ping.mockRejectedValue(new ConflictError('apagado', 'TRACKING_DISABLED'))
+
+    const r = await request(app).post('/campo/venues/v1/ubicacion').set('x-persona', 'p-gps').send({ latitude: 19, longitude: -99 })
+
+    expect(r.status).toBe(409)
+    expect(r.body.code).toBe('TRACKING_DISABLED')
   })
 })

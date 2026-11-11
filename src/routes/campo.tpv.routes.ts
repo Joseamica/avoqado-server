@@ -14,6 +14,7 @@ import { validateRequest } from '@/middlewares/validation'
 import { aceptarCustodia, rechazarCustodia } from '@/controllers/tpv/campo/custodiaDeCampo.controller'
 import { createProofOfSale } from '@/controllers/tpv/sale-verification.tpv.controller'
 import { listMySims } from '@/controllers/tpv/simCustody.tpv.controller'
+import { recordPromoterPingSchema } from '@/schemas/promoterLocation.schema'
 import { createProofOfSaleSchema } from '@/schemas/tpv.schema'
 import {
   aceptarCustodiaSchema,
@@ -36,6 +37,7 @@ import { recibirEnGracia } from '@/services/tpv/campo/celular/graciaDelCelular.s
 import { registrarLatido } from '@/services/tpv/campo/celular/latidoDelCelular.service'
 import { registrarEntradaDeCampo, registrarSalidaDeCampo } from '@/services/tpv/campo/checadaDeCampo.service'
 import { registrarVentaDeCampo } from '@/services/tpv/campo/ventaDeCampo.service'
+import { recordPromoterPing } from '@/services/promoters/promoterLocation.service'
 import prisma from '@/utils/prismaClient'
 
 const router = Router()
@@ -323,5 +325,37 @@ router.post(
   createProofOfSale,
 )
 router.get('/venues/:venueId/mis-sims', autenticarSesionDeCampo, porPersona(), listMySims)
+
+/**
+ * POST /tpv/campo/venues/:venueId/ubicacion — el GPS del turno del celular (bloque 2), espejo de
+ * `POST /tpv/geolocation/promoter-ping` con su MISMO esquema y servicio. La sucursal sale de la dirección (el candado ya
+ * exige que sea la de la sesión) y la persona del token; el celular no es una terminal, así que no hay override por terminal.
+ */
+router.post(
+  '/venues/:venueId/ubicacion',
+  autenticarSesionDeCampo,
+  porPersona(),
+  requireVenueMembership,
+  validateRequest(recordPromoterPingSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { latitude, longitude, accuracy, capturedAt, source } = req.body
+      const ping = await recordPromoterPing({
+        venueId: req.params.venueId,
+        staffId: req.authContext!.userId,
+        latitude,
+        longitude,
+        accuracy: accuracy ?? null,
+        capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
+        source: source ?? 'PERIODIC',
+        terminalId: null,
+        terminalTrackOverride: null,
+      })
+      res.status(201).json({ success: true, data: { id: ping.id } })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 export default router

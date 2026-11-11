@@ -107,15 +107,28 @@ export async function verificadorDelPin(pin: string, salBase64: string): Promise
 
 /**
  * Sólo se entrega a quien ya demostró el PIN (activar, entrar) o tiene la credencial del celular vinculado (latido). Sólo
- * sus sucursales de promotora (S13): las mismas donde puede entrar.
+ * sus sucursales de promotora (S13): las mismas donde puede entrar. `seguimientoDeUbicacion` es el mismo ajuste que
+ * compuerta los pings (`VenueSettings.trackPromoterLocation`, sin fila = apagado): el celular sólo sigue la ubicación si
+ * es `true` (bloque 2, H-A1).
  */
 export async function sucursalesParaElCelular(celular: Pick<CelularDeCampo, 'staffId' | 'organizationId' | 'pinSal'>) {
   const sucursales = await sucursalesDeCampoDeLaPersona(celular.staffId, celular.organizationId)
+  const venueIds = sucursales.map(s => s.venueId)
+  const conSeguimiento = new Set(
+    (
+      await prisma.venueSettings.findMany({
+        where: { venueId: { in: venueIds }, trackPromoterLocation: true },
+        select: { venueId: true },
+        take: venueIds.length, // venueId es único: a lo más una fila por sucursal
+      })
+    ).map(a => a.venueId),
+  )
   return Promise.all(
     sucursales.map(async s => ({
       venueId: s.venueId,
       nombre: s.nombre,
       verificadorPin: s.pin ? await verificadorDelPin(s.pin, celular.pinSal) : null,
+      seguimientoDeUbicacion: conSeguimiento.has(s.venueId),
     })),
   )
 }
