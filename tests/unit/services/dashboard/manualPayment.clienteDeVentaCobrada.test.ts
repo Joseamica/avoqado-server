@@ -122,6 +122,7 @@ function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: strin
   }
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER }]),
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) }, // S9 v5 (U10): la nota del cobro
     order: {
       // Honra la proyección de quien pregunta: con `select` sólo el primario (como el `where: { isPrimary: true }` de Prisma).
       findFirst: jest.fn(async (args: any) => {

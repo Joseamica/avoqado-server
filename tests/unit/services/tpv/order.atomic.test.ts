@@ -83,7 +83,7 @@ function db() {
       findUniqueOrThrow: jest.fn(async () => order()),
       update: jest.fn(async () => order()),
       updateMany: jest.fn(async () => ({ count: 1 })),
-      count: jest.fn(async () => 1),
+      count: jest.fn(async ({ where }: any) => (where?.status?.in ? (where.status.in.includes(order().status) ? 1 : 0) : 1)),
       create: jest.fn(async () => order()),
     },
     orderItem: {
@@ -123,6 +123,8 @@ function db() {
     },
     // D2 (vales): anular TODOS los renglones pregunta si la venta tiene sesión de vales para dejarlos libres; aquí no la tiene.
     areaTicketCheckoutSession: { findFirst: jest.fn(async () => null) },
+    // S9: anular TODOS los renglones pregunta si la cuenta es de un folio (`OnlineOrder`); aquí no lo es.
+    onlineOrder: { findFirst: jest.fn(async () => null) },
   }
 }
 const serial = { id: 'serial', venueId: 'venue', serialNumber: 'SERIAL', status: 'AVAILABLE', category: { name: 'SIM' } }
@@ -851,5 +853,58 @@ describe('S5b — la red por traba (40P01): lo que sale tras el commit es del in
     } finally {
       soltar.mockRestore()
     }
+  })
+})
+
+describe('R10: anular renglones exige una cuenta viva, incluso cuando se anulan todos', () => {
+  it.each([
+    ['CANCELLED', false],
+    ['CANCELLED', true],
+    ['DELETED', false],
+    ['DELETED', true],
+  ] as const)('%s rechaza anular todos=%s antes de modificar filas o devolver canjes', async (status, todos) => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status, items: [line, { ...line, id: 'line-2' }] })
+    tx.order.count.mockResolvedValue(1)
+    const itemIds = todos ? ['line', 'line-2'] : ['line']
+    await expect(voidItems('venue', 'order', { itemIds, reason: 'error', staffId: 'staff', expectedVersion: 1 })).rejects.toMatchObject({
+      code: 'ORDER_CANCELLED_NO_EDIT',
+    })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
+  })
+})
+
+describe('S9 (P2-5): anular TODOS los artículos de un folio es cancelarlo como pedido', () => {
+  const dos = () => ({ ...order(), items: [line, { ...line, id: 'line-2' }] })
+
+  it('todos ⇒ 400 FOLIO_SE_CANCELA_COMO_PEDIDO (no 409: la TPV lee todo 409 como «la modificó otra terminal»), antes de devolver beneficios, borrar renglones o tocar la cuenta', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    tx.onlineOrder.findFirst.mockResolvedValue({ id: 'online-1' })
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line', 'line-2'], reason: 'error', staffId: 'staff', expectedVersion: 1 }),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'FOLIO_SE_CANCELA_COMO_PEDIDO',
+      message: 'Este es un pedido en línea: cancélalo como pedido',
+    })
+    expect(tx.onlineOrder.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { orderId: 'order', venueId: 'venue' } }))
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
+  })
+
+  it('algunos ⇒ como hoy (una decisión en caja): se anulan sin preguntar por el folio', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    tx.onlineOrder.findFirst.mockResolvedValue({ id: 'online-1' })
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+    expect(tx.onlineOrder.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('una cuenta que no es de folio: anular todos sigue como hoy', async () => {
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalled()
   })
 })

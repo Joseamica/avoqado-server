@@ -258,6 +258,26 @@ const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
 const CARD = 'tests/integration/online-ordering/card.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
+function marcadorDeCandadoFiscal(body: string, marker: string): boolean {
+  if (marker !== 'lockExistingOrderForPayment(') return body.includes(marker)
+  const sf = ts.createSourceFile('writer.ts', body, ts.ScriptTarget.Latest, true)
+  let fuerte = false
+  function visit(n: ts.Node) {
+    if (ts.isCallExpression(n)) {
+      const name = calleeName(n)
+      const modo = n.arguments[2] && unwrap(n.arguments[2])
+      if (
+        name === 'lockExistingOrderForPayment' ||
+        (name === 'bloquearCuentaParaEditar' && (n.arguments.length === 2 || (modo && ts.isStringLiteral(modo) && modo.text === 'COBRO')))
+      )
+        fuerte = true
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return fuerte
+}
+
 const LOCK = ['lockExistingOrderForPayment(']
 const VENUE_FENCE_THEN_LOCK = ['FOR KEY SHARE', 'lockExistingOrderForPayment(']
 const T2 = (mentions: string) =>
@@ -318,11 +338,23 @@ const WRITERS: Record<string, Writer> = {
     class: 'CALLER_LOCKED',
     callers: [
       'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder',
-      'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts',
+      // S10: el cuerpo de applyAutomaticDiscounts, extraído sin el candado (lo hereda: ver LOCK_HOLDERS y «S10 · la cadena»).
+      'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx',
     ],
     proof: T3('applyPredefinedDiscount'),
   },
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': { class: 'LOCKED', lock: LOCK, proof: T3('applyCouponCode') },
+  // Tienda híbrida S10 (P2-4): el cupón de la clienta sobre su cuenta NUEVA, dentro de la cadena de beneficios (que recibe el tx de
+  // quien la acaba de crear: la cotización; el folio en S11).
+  'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx'],
+    proof: proof(
+      'tests/integration/online-ordering/cotizacion.integration.test.ts',
+      'aplicarBeneficiosEnTx',
+      'automático de grupo $10 + cupón 10 % + premio $1 sobre $100 ⇒ $79, igual que el estricto',
+    ),
+  },
   // IVA por producto B2: la ÚNICA escritura de repartos, con el tx de quien ya tiene el candado. Cada tarea suma sus llamadores.
   'src/services/shared/repartoDescuentoTx.ts#sincronizarRepartos': {
     class: 'CALLER_LOCKED',
@@ -339,6 +371,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
       'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
@@ -376,6 +409,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
       'src/services/tpv/order.tpv.service.ts#removeOrderItem',
@@ -442,6 +476,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
       'src/services/tpv/order.tpv.service.ts#compItems',
@@ -713,6 +748,28 @@ const WRITERS: Record<string, Writer> = {
     creates: ['.order.create('],
     note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
   },
+  // Tienda híbrida S9 (P2-5): al anular un folio, sus filas de beneficio quedan como cortesía del MISMO importe, IVA y reparto.
+  'src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx': {
+    class: 'EXCLUDED',
+    reason:
+      'converts the benefit rows of an online-order account being cancelled into a same-amount courtesy (same amount, taxReduction and reparto; only type FIXED_AMOUNT, value = amount and the links change): no amount of the account moves, so the documentary capture reads the same totals',
+    residual:
+      'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
+  },
+  // Tienda híbrida S11 (P2-4): el folio que un beneficio dejó en $0 se cierra pagado sin cobro, en la transacción de quien YA tiene la
+  // cuenta: la que la acaba de crear (createOnlineOrder) o la aceptación de «Mi equipo» (casTransition, tras casTransitionInTx).
+  'src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/online-ordering/order.service.ts#createOnlineOrder',
+      'src/services/online-ordering/transitions.service.ts#acceptWithoutCapture',
+    ],
+    proof: proof(
+      'tests/integration/online-ordering/canjeEnElFolio.integration.test.ts',
+      'cerrarFolioEnCeroEnTx',
+      '«Nadie» en $0 por un premio ⇒ PAID sin Payment, «Por entregar», comanda marcada, vale, cupón canjeado y sin loyaltyEligibleAt',
+    ),
+  },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
   'src/services/online-ordering/transitions.service.ts#casTransitionInTx': {
     class: 'LOCKED',
@@ -808,6 +865,15 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
+  // S10 (P2-4): reciben el tx de quien YA tiene la cuenta: la bloqueó (applyAutomaticDiscounts, `lockDiscountOrder(`) o la acaba de
+  // crear en esa misma transacción (cotizarConBeneficios, `crearCuentaDelPedidoEnTx(`). Sin candado propio: la cadena de llamadores
+  // la fija «S10 · quien hereda la cuenta» (abajo).
+  'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx': [],
+  'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
+  // S11: el folio nace y se cierra en $0 en la MISMA transacción (la cuenta es nueva: nadie más la ve).
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': ['writeOnlineOrderInTx(', 'cerrarFolioEnCeroEnTx('],
+  // S11 (R6): la aceptación de «Mi equipo» cierra el $0 en su afterCas, después de casTransitionInTx (candado de la orden).
+  'src/services/online-ordering/transitions.service.ts#acceptWithoutCapture': ['casTransition(', 'cerrarFolioEnCeroEnTx('],
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': LOCK,
   'src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider': [
     'withDeliveryOrderLockConReintento(',
@@ -968,9 +1034,9 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
-  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
+  'src/services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx': {
     class: 'PRIVATE_CREATION',
-    why: 'online order: new Order, lines and modifiers in one admission transaction',
+    why: 'online order (S10: split out of writeOnlineOrderInTx): new Order, lines and modifiers in the admission transaction or the quote simulation',
     markers: NEW_ORDER,
   },
   'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
@@ -1028,11 +1094,31 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
     expect(nonFiscal.sort()).toEqual(Object.keys(NON_FISCAL_ORDER_WRITERS).sort())
   })
 
+  it.each([
+    ['lockExistingOrderForPayment(tx, input)', true],
+    ['bloquearCuentaParaEditar(tx, input)', true],
+    ["bloquearCuentaParaEditar(tx, input, 'COBRO')", true],
+    ["bloquearCuentaParaEditar(tx, input, 'ATRIBUCION')", false],
+    ['bloquearCuentaParaEditar(tx, input, modo)', false],
+    ['rechazarSiCuentaAnuladaEnTx(tx, input)', false],
+    ['bloquearVentaParaLiga(tx, input)', false],
+    ['/* lockExistingOrderForPayment(tx, input) */', false],
+  ])('el bloqueo fiscal conserva la fuerza COBRO: %s', (call, expected) => {
+    expect(marcadorDeCandadoFiscal(`async function editor(tx) { ${call} }`, 'lockExistingOrderForPayment(')).toBe(expected)
+  })
+
+  it('el modo omitido del wrapper sigue siendo COBRO y delega al candado financiero íntegro', () => {
+    const body = fs.readFileSync(path.join(SRC, 'services/shared/cuentaCancelada.ts'), 'utf8')
+    expect(body).toMatch(/modo[^=]*= 'COBRO'/)
+    expect(body).toContain('existe = await lockExistingOrderForPayment(tx, input)')
+  })
+
   it.each(Object.entries(WRITERS))('%s satisfies its class', (key, writer) => {
     const body = codeOf(key)
     expect(body.length).toBeGreaterThan(0)
     if (writer.class === 'LOCKED')
-      for (const marker of writer.lock) expect({ key, marker, present: body.includes(marker) }).toMatchObject({ present: true })
+      for (const marker of writer.lock)
+        expect({ key, marker, present: marcadorDeCandadoFiscal(body, marker) }).toMatchObject({ present: true })
     if (writer.class === 'PRIVATE_CREATION')
       for (const marker of writer.creates) expect({ key, marker, present: body.includes(marker) }).toMatchObject({ present: true })
     if (writer.class === 'METADATA') expect({ key, moneyToken: body.match(moneyToken)?.[0] ?? null }).toEqual({ key, moneyToken: null })
@@ -1049,7 +1135,10 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       for (const caller of callers) {
         const holder = LOCK_HOLDERS[caller]
         const cls = WRITERS[caller]?.class
-        expect({ caller, holdsLock: (!!cls && LOCKING.has(cls)) || (!!holder && holder.every(m => codeOf(caller).includes(m))) }).toEqual({
+        expect({
+          caller,
+          holdsLock: (!!cls && LOCKING.has(cls)) || (!!holder && holder.every(m => marcadorDeCandadoFiscal(codeOf(caller), m))),
+        }).toEqual({
           caller,
           holdsLock: true,
         })
@@ -1065,7 +1154,8 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       ].sort()
       expect(withTx).toEqual([...lockedCallers].sort())
       for (const caller of lockedCallers) {
-        const holdsLock = LOCKING.has(WRITERS[caller]?.class ?? '') || codeOf(caller).includes('lockExistingOrderForPayment(')
+        const holdsLock =
+          LOCKING.has(WRITERS[caller]?.class ?? '') || marcadorDeCandadoFiscal(codeOf(caller), 'lockExistingOrderForPayment(')
         expect({ caller, holdsLock }).toEqual({ caller, holdsLock: true })
       }
     },
@@ -1087,6 +1177,33 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       expect({ file: p.file, mentions: p.mentions, found: text.includes(p.mentions) }).toMatchObject({ found: true })
     },
   )
+
+  it('S10 · quien hereda la cuenta: sus llamadores son exactamente éstos, y cada uno la bloquea o la acaba de crear', () => {
+    // aplicarDescuentosDelMotorEnTx y aplicarBeneficiosEnTx no toman el candado: lo traen de su llamador (LOCK_HOLDERS sin marcas).
+    const HEREDAN: Record<string, Record<string, string[]>> = {
+      'src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx': {
+        'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
+        'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': [],
+      },
+      'src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx': {
+        // S11: la simulación (cotizar y el borrador de tarjeta) y el folio de verdad; los dos crean la cuenta antes.
+        'src/services/online-ordering/beneficios.service.ts#simularLaCadena': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
+        'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': ['crearCuentaDelPedidoEnTx(', 'aplicarBeneficiosEnTx('],
+      },
+    }
+    for (const [hereda, llamadores] of Object.entries(HEREDAN)) {
+      expect(LOCK_HOLDERS[hereda]).toEqual([])
+      const name = hereda.split('#')[1]
+      const actual = [...new Set(calls.filter(c => c.callee === name && c.owner !== hereda).map(c => c.owner))].sort()
+      expect({ hereda, actual }).toEqual({ hereda, actual: Object.keys(llamadores).sort() })
+      for (const [llamador, marcas] of Object.entries(llamadores)) {
+        const cuerpo = codeOf(llamador)
+        for (const m of marcas) expect({ llamador, m, present: cuerpo.includes(m) }).toMatchObject({ present: true })
+        // La cuenta se crea ANTES de aplicarle los beneficios, en la misma transacción.
+        if (marcas.length === 2) expect(cuerpo.indexOf(marcas[0])).toBeLessThan(cuerpo.indexOf(marcas[1]))
+      }
+    }
+  })
 
   it('C06/C09/C13 exchange recovery delegates to one budgeted opener and inherits its Order union', () => {
     const opener = 'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction'
@@ -1245,6 +1362,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/order.tpv.service.ts#updateGuestInfo': 1,
   'src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder': 1,
   // Already on the budget before the final wave
+  'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': 1,
+  'src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido': 1,
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,
   'src/services/tpv/order.tpv.service.ts#compItems': 1,
@@ -1271,6 +1390,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': 1,
+  'src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption': 1,
   'src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment': 2,
   'src/services/dashboard/refund.dashboard.service.ts#issueRefund': 1,
   'src/services/tpv/refund.tpv.service.ts#recordRefund': 1,
@@ -1283,6 +1403,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/online-ordering/folios.service.ts#prepararFolioPagado': 1,
   'src/services/online-ordering/folios.service.ts#syncPaidClosedFolios': 1,
   'src/services/online-ordering/cancelledOrderSync.ts#cerrarCanceladasReleyendo': 1,
+  // S11: crear el folio (y el pedido de tarjeta) canjea en la misma transacción: el premio bloquea la cuenta NUEVA
+  // (bloquearCuentaParaEditar) y el $0 de «Nadie» pasa a «Por entregar» (casTransitionInTx), con el presupuesto único.
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': 1,
+  'src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization': 1,
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
@@ -1302,6 +1426,11 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
 const OWN_BUDGET: Record<string, { options: string; reason: string }> = {
+  'src/services/online-ordering/beneficios.service.ts#simularLaCadena': {
+    options: 'SIMULACION.transaccion',
+    reason:
+      "S10 (R5''): the quote simulation only locks its own NEW Order (created in the same transaction) and the customer's own rows; it yields instead of waiting: { maxWait: 300, timeout: 800 } plus SET LOCAL lock_timeout 200ms / statement_timeout 500ms, and degrades to calculados:false",
+  },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     options: 'OPCIONES_DE_TRANSACCION_DEL_INTENTO',
     reason:
@@ -1475,6 +1604,8 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
     'src/services/dashboard/paymentLink.service.ts#completeCharge',
     'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
     'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
+    // S10: el cupón de la tienda va sobre la cuenta que la cotización (o el folio) acaba de crear en la misma transacción.
+    'src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx',
   ])
   const rearman = [
     ...new Set(calls.filter(c => c.callee === 'sincronizarRepartos' || c.callee === 'recalculateOrderTotals').map(c => c.owner)),

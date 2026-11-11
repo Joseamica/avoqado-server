@@ -3,6 +3,7 @@ import { EventEmitter } from 'events'
 const mockRequest = new EventEmitter() as EventEmitter & {
   end: jest.Mock
   resume: jest.Mock
+  close: jest.Mock
 }
 const mockClient = Object.assign(new EventEmitter(), {
   request: jest.fn(() => mockRequest),
@@ -38,12 +39,14 @@ jest.mock('@/config/logger', () => ({
 const mockOmitir = jest.fn()
 jest.mock('@/services/demo/candadoDemo', () => ({ omitirPorDemo: (...a: unknown[]) => mockOmitir(...a) }))
 
+import { env } from '@/config/env'
 import { sendSilentPush } from '@/services/wallet/apnsClient'
 
 describe('APNS wallet client', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockOmitir.mockResolvedValue(null)
+    mockRequest.close = jest.fn()
     mockRequest.removeAllListeners()
     mockClient.removeAllListeners()
 
@@ -78,8 +81,53 @@ describe('APNS wallet client', () => {
 
   it('🔴 negocio demo: no se conecta a Apple (Codex r6, 4)', async () => {
     mockOmitir.mockResolvedValue('negocio demo')
-    expect(await sendSilentPush('device-token', 'venue-demo')).toEqual({ ok: false })
+    expect(await sendSilentPush('device-token', 'venue-demo')).toEqual({ ok: false, omitido: true })
     expect(mockOmitir).toHaveBeenCalledWith('aviso de Apple Wallet', null, 'venue-demo')
     expect(mockConnect).not.toHaveBeenCalled()
   })
+})
+
+// Quitar el plazo dejaría la promesa viva; olvidar el cierre/timer mantendría el canal vivo.
+describe('APNs con reloj', () => {
+  beforeEach(() => {
+    jest.useFakeTimers()
+    mockRequest.removeAllListeners()
+    mockClient.removeAllListeners()
+    mockOmitir.mockResolvedValue(null)
+    mockRequest.end = jest.fn()
+    mockRequest.close = jest.fn()
+    mockClient.close.mockClear()
+  })
+  afterEach(() => jest.useRealTimers())
+  it('a los diez segundos resuelve fallo, cierra request/sesión y no deja timer', async () => {
+    const envio = sendSilentPush('token', 'venue')
+    await jest.advanceTimersByTimeAsync(9999)
+    expect(mockClient.close).not.toHaveBeenCalled()
+    await jest.advanceTimersByTimeAsync(1)
+    expect(await envio).toEqual({ ok: false, porTiempo: true })
+    expect(mockRequest.close).toHaveBeenCalledTimes(1)
+    expect(mockClient.close).toHaveBeenCalledTimes(1)
+    expect(jest.getTimerCount()).toBe(0)
+  })
+  it.each(['end', 'error'] as const)('limpia el timer y ambos recursos al recibir %s', async evento => {
+    const envio = sendSilentPush('token', 'venue')
+    await jest.advanceTimersByTimeAsync(0)
+    if (evento === 'end') mockRequest.emit('response', { ':status': 200 })
+    mockRequest.emit(evento, new Error('red'))
+    expect(await envio).toMatchObject({ ok: evento === 'end' })
+    expect(jest.getTimerCount()).toBe(0)
+    expect(mockClient.close).toHaveBeenCalledTimes(1)
+  })
+})
+
+it('sin certificado se omite de forma legítima sin abrir el canal; el candado demo que lanza tampoco se propaga', async () => {
+  const cert = env.APPLE_PASS_CERT_PEM_BASE64
+  try {
+    env.APPLE_PASS_CERT_PEM_BASE64 = undefined
+    expect(await sendSilentPush('t', 'v')).toEqual({ ok: false, omitido: true })
+  } finally {
+    env.APPLE_PASS_CERT_PEM_BASE64 = cert
+  }
+  mockOmitir.mockRejectedValueOnce(new Error('base caída'))
+  expect(await sendSilentPush('t', 'v')).toEqual({ ok: false })
 })

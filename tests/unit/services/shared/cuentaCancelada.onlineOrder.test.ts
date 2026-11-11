@@ -60,7 +60,7 @@ import { KitchenTicketsReconciliationJob } from '@/jobs/kitchen-tickets-reconcil
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { createNotification, sendBulkNotification, sendVenueNotification } from '@/services/dashboard/notification.dashboard.service'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
-import { reabrirSiRecibeDinero } from '@/services/shared/cuentaCancelada'
+import { notarDineroEnFolioCerradoEnTx, reabrirSiRecibeDinero, renovarRecuperacionDeFolioEnTx } from '@/services/shared/cuentaCancelada'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -103,6 +103,8 @@ interface Base {
     cancelledAt?: Date | null
     cancelledBy?: string | null
     acceptedAt?: Date | null
+    /** S9 v5: el sello de A0. */
+    expiredAt?: Date | null
     /** Tienda híbrida: `false` = folio de «Nadie». */
     requiresAcceptance: boolean
   } | null
@@ -110,6 +112,8 @@ interface Base {
   bitacora: any[]
   avisos: any[]
   pagos: any[]
+  /** S9: las filas de la cuenta (para la cortesía de un folio anulado). */
+  descuentos?: Array<{ amount: Decimal; isComp: boolean; compReason: string | null }>
 }
 
 function nuevaBase(
@@ -147,10 +151,25 @@ function nuevaBase(
 function txSobre(b: Base) {
   return {
     order: {
-      update: jest.fn(async ({ where, data }: any) => {
+      // S9 v5: la nota lee número, estado y la cortesía de la cuenta.
+      findFirst: jest.fn(async () => ({
+        orderNumber: b.order.orderNumber,
+        status: b.order.status,
+        orderDiscounts: (b.descuentos ?? []).filter(d => d.isComp).map(d => ({ amount: d.amount })),
+      })),
+      update: jest.fn(async ({ where, data, select }: any) => {
         if (where.id !== b.order.id || where.venueId !== b.order.venueId) throw new Error('order.update fuera de la orden')
         if (data.status) b.order.status = data.status
+        // S9: el doble aplica el filtro que la conciliación pide para las cortesías de un folio anulado.
+        const filtro = select?.orderDiscounts?.where
         return {
+          ...(filtro
+            ? {
+                orderDiscounts: (b.descuentos ?? [])
+                  .filter(d => d.isComp === filtro.isComp && d.compReason === filtro.compReason)
+                  .map(d => ({ amount: d.amount })),
+              }
+            : {}),
           orderNumber: b.order.orderNumber,
           contratoDePrecio: b.order.contratoDePrecio,
           taxAmount: new Decimal(b.order.taxAmount),
@@ -167,6 +186,18 @@ function txSobre(b: Base) {
     onlineOrder: {
       findUnique: jest.fn(async ({ where }: any) =>
         b.online && where.orderId === b.online.orderId ? { id: b.online.id, status: b.online.status } : null,
+      ),
+      // S9 v5: la lectura de la nota (folio «Nadie» de la cuenta, con su sello).
+      findFirst: jest.fn(async ({ where }: any) =>
+        b.online && where.orderId === b.online.orderId && where.requiresAcceptance === b.online.requiresAcceptance
+          ? {
+              id: b.online.id,
+              status: b.online.status,
+              expiredAt: b.online.expiredAt ?? null,
+              cancelledAt: b.online.cancelledAt ?? null,
+              rejectedAt: null,
+            }
+          : null,
       ),
       updateMany: jest.fn(async ({ where, data }: any) => {
         if (!b.online || where.id !== b.online.id || (where.status !== undefined && where.status !== b.online.status)) return { count: 0 }
@@ -198,6 +229,7 @@ function txSobre(b: Base) {
         b.bitacora.push(data)
         return data
       }),
+      count: jest.fn(async ({ where }: any) => b.bitacora.filter(d => d.action === where.action && d.entityId === where.entityId).length),
     },
     payment: {
       create: jest.fn(async ({ data }: any) => {
@@ -248,6 +280,53 @@ function nadaPorElClienteGlobal() {
   expect(sendBulkNotification).not.toHaveBeenCalled()
   expect(sendVenueNotification).not.toHaveBeenCalled()
 }
+
+const SELLO = {
+  where: { orderId: ORDER, venueId: VENUE, requiresAcceptance: false, expiredAt: null, cancelledAt: null, rejectedAt: null },
+  data: { cancelledAt: expect.any(Date) },
+}
+const RENUEVA = {
+  where: {
+    orderId: ORDER,
+    venueId: VENUE,
+    requiresAcceptance: false,
+    status: { in: ['EXPIRED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF', 'REJECTED'] },
+  },
+  data: { updatedAt: expect.any(Date) },
+}
+
+describe('S9 v5 (U4) — la conciliación de un folio «Nadie»: sella, renueva y NO avisa (el aviso es de la nota del escritor)', () => {
+  const MOTIVO = 'Beneficio regresado a la clienta al anular el folio'
+
+  it.each([
+    ['con cortesía', [{ amount: new Decimal('85.00'), isComp: true, compReason: MOTIVO }]],
+    ['sin cortesía', []],
+  ])('%s ⇒ sello y renovación en la transacción del dinero, sin bitácora del pedido ni aviso', async (_c, descuentos) => {
+    const b = nuevaBase({ folio: true, online: 'EXPIRED' })
+    b.descuentos = descuentos
+    const tx = txSobre(b)
+
+    expect(await reabrir(tx, { cobrado: 134, cubre: true })).toBe('PENDING')
+
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(SELLO)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(b.online?.status).toBe('EXPIRED') // R11: el dinero no mueve el folio cerrado
+    expect(delPedido(b)).toEqual([])
+    expect(b.avisos).toEqual([])
+    expect(reaperturas(b)).toHaveLength(1) // la reapertura de la cuenta sí deja su rastro, como hoy
+    nadaPorElClienteGlobal()
+  })
+
+  it('«Mi equipo» como hoy: sin sello ni renovación, y avisa en la conciliación', async () => {
+    const b = nuevaBase({ online: 'EXPIRED' })
+    const tx = txSobre(b)
+    await reabrir(tx, { cobrado: 150, cubre: true })
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalledWith(SELLO)
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalledWith(RENUEVA)
+    expect(delPedido(b)).toHaveLength(1)
+    expect(b.avisos.map(a => a.message)).toEqual([mensaje('WK7QX'), mensaje('WK7QX')])
+  })
+})
 
 describe('S1 — la regla dentro de `reabrirSiRecibeDinero` (transacción simulada)', () => {
   it('reopens a cancelled WEB order and completes its OnlineOrder when captured cash covers it', async () => {
@@ -477,24 +556,35 @@ describe('S1 — la regla dentro de `reabrirSiRecibeDinero` (transacción simula
   })
 })
 
-describe('Tienda híbrida T9 (decisión 18): el dinero tardío que SALDA un folio lo deja «Por entregar», nunca «Entregado»', () => {
-  it.each(['PENDING_ACCEPTANCE', 'EXPIRED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF', 'REJECTED'])(
-    'folio %s ⇒ ACCEPTED con acceptedAt, en la MISMA transacción del dinero; el CAS exige que sea folio',
+describe('Tienda híbrida T9 (decisión 18) y S9: el dinero tardío que SALDA un folio lo deja «Por entregar», nunca «Entregado»', () => {
+  it('folio PENDING_ACCEPTANCE ⇒ ACCEPTED con acceptedAt, en la MISMA transacción del dinero (como hoy); el CAS exige que sea folio', async () => {
+    const b = nuevaBase({ folio: true, online: 'PENDING_ACCEPTANCE' })
+    const tx = txSobre(b)
+
+    expect(await reabrir(tx, { cobrado: 150, cubre: true })).toBe('PENDING')
+
+    expect(b.online).toMatchObject({ status: 'ACCEPTED', acceptedAt: expect.any(Date), completedAt: null })
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: ONLINE, status: 'PENDING_ACCEPTANCE', requiresAcceptance: false },
+      data: { status: 'ACCEPTED', acceptedAt: expect.any(Date) },
+    })
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(SELLO) // el hueco anulado antes del despliegue queda sellado
+    expect(b.avisos).toEqual([]) // S9 v5: el aviso es de la nota del escritor
+    nadaPorElClienteGlobal()
+  })
+
+  // R11: un folio CERRADO no lo mueve el dinero; lo revive `syncPaidClosedFolios`, que publica. B2: el dinero le renueva la ventana.
+  it.each(['EXPIRED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF', 'REJECTED'])(
+    'folio %s ⇒ se queda como está; sello y renovación de la ventana del barrido, sin aviso',
     async desde => {
       const b = nuevaBase({ folio: true, online: desde })
       const tx = txSobre(b)
 
       expect(await reabrir(tx, { cobrado: 150, cubre: true })).toBe('PENDING')
 
-      expect(b.online).toMatchObject({ status: 'ACCEPTED', acceptedAt: expect.any(Date), completedAt: null })
-      expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: ONLINE, status: desde, requiresAcceptance: false },
-        data: { status: 'ACCEPTED', acceptedAt: expect.any(Date) },
-      })
-      // Se reporta igual que hoy: hay dinero en una cuenta que alguien canceló.
-      expect(delPedido(b)).toHaveLength(1)
-      expect(delPedido(b)[0].data.estadoAnterior).toBe(desde)
-      expect(b.avisos).toHaveLength(2)
+      expect(b.online).toMatchObject({ status: desde, acceptedAt: null, completedAt: null })
+      expect(tx.onlineOrder.updateMany.mock.calls.map((c: any[]) => c[0])).toEqual([SELLO, RENUEVA])
+      expect(b.avisos).toEqual([])
       nadaPorElClienteGlobal()
     },
   )
@@ -506,21 +596,21 @@ describe('Tienda híbrida T9 (decisión 18): el dinero tardío que SALDA un foli
     await reabrir(tx, { cobrado: 150, cubre: true })
 
     expect(b.online?.status).toBe(desde)
-    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(tx.onlineOrder.updateMany.mock.calls.map((c: any[]) => c[0])).toEqual([SELLO, RENUEVA])
   })
 
-  it('folio con un abono (no salda): sigue cerrado, como hoy; lo revivirá `syncPaidClosedFolios` cuando otro cobro salde', async () => {
+  it('folio con un abono (no salda): sigue cerrado, como hoy, y se renueva la ventana', async () => {
     const b = nuevaBase({ folio: true, online: 'EXPIRED' })
     const tx = txSobre(b)
 
     await reabrir(tx, { cobrado: 50, cubre: false })
 
     expect(b.online?.status).toBe('EXPIRED')
-    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
-    expect(delPedido(b)).toHaveLength(1)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(delPedido(b)).toEqual([])
   })
 
-  it('si una lectura vieja lo movió entre la lectura y el CAS, relee una vez y lo deja en «Por entregar»', async () => {
+  it('si una lectura vieja lo movió entre la lectura y el CAS, relee una vez: ya cerrado ⇒ se queda (lo revive el barrido)', async () => {
     const b = nuevaBase({ folio: true, online: 'PENDING_ACCEPTANCE' })
     const tx = txSobre(b)
     tx.order.update.mockImplementationOnce(async ({ data }: any) => {
@@ -532,8 +622,8 @@ describe('Tienda híbrida T9 (decisión 18): el dinero tardío que SALDA un foli
 
     await reabrir(tx)
 
-    expect(b.online?.status).toBe('ACCEPTED')
-    expect(tx.onlineOrder.updateMany).toHaveBeenCalledTimes(2)
+    expect(b.online?.status).toBe('CANCELLED_BY_STAFF')
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
   })
 })
 
@@ -724,7 +814,7 @@ describe('S1 — el camino del POS (`payCashOrder`)', () => {
 // C) El cierre transaccional de la terminal (`settleStandalonePaymentInTx`)
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════
 
-function txTerminal(b: Base, cobrado: number) {
+function txTerminal(b: Base, cobrado: number, source = 'WEB') {
   const base = txSobre(b)
   const escrituras: any[] = []
   return {
@@ -738,6 +828,7 @@ function txTerminal(b: Base, cobrado: number) {
         orderNumber: b.order.orderNumber,
         status: b.order.status,
         originSystem: 'AVOQADO',
+        source,
         paymentStatus: 'PENDING',
         subtotal: new Decimal(150),
         discountAmount: new Decimal(0),
@@ -887,5 +978,194 @@ describe('no kitchen tickets come back for a cancelled order reopened by capture
 
     expect(tx.escrituras.some((d: any) => d.kitchenPendingAt instanceof Date)).toBe(true)
     expect(r.reabiertaDeCancelada).toBe(false)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════
+// S9 v5 (U1): la nota de los 7 escritores de dinero
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('S9 v5 (U1) — notarDineroEnFolioCerradoEnTx: dinero que ENTRA a un folio «Nadie» sellado avisa UNA vez y renueva', () => {
+  type Folio = { requiresAcceptance: boolean; status: string; expiredAt?: Date | null; cancelledAt?: Date | null; rejectedAt?: Date | null }
+  function txNota(o: { folio?: Folio | null; cortesia?: number; cuentaStatus?: string; yaAvisado?: number } = {}) {
+    const folio = o.folio === undefined ? { requiresAcceptance: false, status: 'EXPIRED', expiredAt: new Date('2026-11-01') } : o.folio
+    const avisos: any[] = []
+    const bitacora: any[] = []
+    const tx = {
+      onlineOrder: {
+        findFirst: jest.fn(async ({ where }: any) =>
+          folio && where.requiresAcceptance === folio.requiresAcceptance
+            ? { id: ONLINE, expiredAt: null, cancelledAt: null, rejectedAt: null, ...folio }
+            : null,
+        ),
+        updateMany: jest.fn(async () => ({ count: 1 })),
+      },
+      order: {
+        findFirst: jest.fn(async () => ({
+          orderNumber: 'WK7QX',
+          status: o.cuentaStatus ?? 'COMPLETED',
+          orderDiscounts: o.cortesia ? [{ amount: new Decimal(o.cortesia) }] : [],
+        })),
+      },
+      activityLog: {
+        count: jest.fn(async () => o.yaAvisado ?? 0),
+        create: jest.fn(async ({ data }: any) => bitacora.push(data)),
+      },
+      staffVenue: { findMany: jest.fn(async () => [{ staffId: GERENTE }]) },
+      notification: { createMany: jest.fn(async ({ data }: any) => avisos.push(...data)) },
+    }
+    return { tx, avisos, bitacora }
+  }
+  const notar = (tx: any, extra: Partial<Parameters<typeof notarDineroEnFolioCerradoEnTx>[1]> = {}) =>
+    notarDineroEnFolioCerradoEnTx(tx, {
+      venueId: VENUE,
+      orderId: ORDER,
+      entra: new Decimal('34.00'),
+      source: 'WEB',
+      reabierta: false,
+      canal: 'prueba',
+      paymentId: 'cpay000000000000000000001',
+      staffId: GERENTE,
+      ...extra,
+    })
+  const S9 = 'Pedido #WK7QX: se cobró después de vencer y se respetó su precio; su beneficio de $85.00 ya había regresado a la clienta.'
+  const D2 =
+    'Pedido #WK7QX: llegó un cobro después de cancelarse y la cuenta sigue cancelada; su beneficio de $85.00 ya había regresado a la clienta. Decide si lo devuelves o reabres la cuenta.'
+
+  it('fuera de WEB: cero consultas (la ruta caliente de la terminal y el POS)', async () => {
+    const { tx } = txNota({ cortesia: 85 })
+    await notar(tx, { source: 'TPV' })
+    expect(tx.onlineOrder.findFirst).not.toHaveBeenCalled()
+    expect(tx.order.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('sin folio, o con un folio nunca anulado (sin sello): una sola lectura y nada más', async () => {
+    for (const folio of [null, { requiresAcceptance: false, status: 'PENDING_ACCEPTANCE' }]) {
+      const { tx, avisos } = txNota({ folio, cortesia: 85 })
+      await notar(tx)
+      expect(tx.onlineOrder.findFirst).toHaveBeenCalledTimes(1)
+      expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+      expect(tx.order.findFirst).not.toHaveBeenCalled()
+      expect(avisos).toEqual([])
+    }
+  })
+
+  it('sellado y cerrado, con cortesía: renueva la ventana y avisa con el texto S9 y el importe real que entró', async () => {
+    const { tx, avisos, bitacora } = txNota({ cortesia: 85 })
+    await notar(tx)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(bitacora).toEqual([
+      expect.objectContaining({
+        action: ACCION,
+        entity: 'OnlineOrder',
+        entityId: ONLINE,
+        data: expect.objectContaining({ estadoAnterior: 'EXPIRED', cobradoCents: 3400, canal: 'prueba' }),
+      }),
+    ])
+    expect(avisos.map(a => a.message)).toEqual([S9])
+  })
+
+  it('sellado y abierto (el hueco: cuenta anulada, folio por pagar con cancelledAt): avisa', async () => {
+    const { tx, avisos } = txNota({
+      folio: { requiresAcceptance: false, status: 'PENDING_ACCEPTANCE', cancelledAt: new Date('2026-11-01') },
+      cortesia: 85,
+      cuentaStatus: 'PENDING',
+    })
+    await notar(tx, { reabierta: true })
+    expect(avisos.map(a => a.message)).toEqual([S9])
+  })
+
+  it('ya avisado: renueva pero no repite', async () => {
+    const { tx, avisos } = txNota({ cortesia: 85, yaAvisado: 1 })
+    await notar(tx)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(avisos).toEqual([])
+  })
+
+  it('sin cortesía: sólo la reapertura avisa, con el texto S1 de hoy', async () => {
+    const sinReabrir = txNota()
+    await notar(sinReabrir.tx)
+    expect(sinReabrir.avisos).toEqual([])
+    const reabierta = txNota()
+    await notar(reabierta.tx, { reabierta: true })
+    expect(reabierta.avisos.map(a => a.message)).toEqual([mensaje('WK7QX')])
+  })
+
+  it('la cuenta sigue cancelada (el cripto no reabre): texto D2', async () => {
+    const { tx, avisos } = txNota({ cortesia: 85, cuentaStatus: 'CANCELLED' })
+    await notar(tx, { source: undefined })
+    expect(avisos.map(a => a.message)).toEqual([D2])
+  })
+
+  it('«Mi equipo»: nada (la lectura pide requiresAcceptance:false)', async () => {
+    const { tx, avisos } = txNota({ folio: { requiresAcceptance: true, status: 'EXPIRED', expiredAt: new Date() }, cortesia: 85 })
+    await notar(tx)
+    expect(avisos).toEqual([])
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('sin dinero que entra: nada', async () => {
+    const { tx } = txNota({ cortesia: 85 })
+    await notar(tx, { entra: new Decimal(0) })
+    expect(tx.onlineOrder.findFirst).not.toHaveBeenCalled()
+  })
+})
+
+describe('S9 v5 (B2) — renovarRecuperacionDeFolioEnTx', () => {
+  it('una sola sentencia: updatedAt de ahora en el folio «Nadie» CERRADO de la cuenta; nunca avisa', async () => {
+    const tx = { onlineOrder: { updateMany: jest.fn(async () => ({ count: 1 })) } }
+    await renovarRecuperacionDeFolioEnTx(tx as any, { venueId: VENUE, orderId: ORDER })
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+  })
+})
+
+describe('S9 v5 (U5) — los recálculos de la terminal: con dinero, la nota; sin dinero y saldada en WEB, renueva; fuera de WEB, nada', () => {
+  const MOTIVO = 'Beneficio regresado a la clienta al anular el folio'
+  const r44 = () => {
+    const b = nuevaBase({ folio: true, online: 'EXPIRED' })
+    b.order.status = 'PENDING'
+    b.online!.expiredAt = new Date('2026-11-01T12:00:00Z')
+    b.descuentos = [{ amount: new Decimal('85.00'), isComp: true, compReason: MOTIVO }]
+    return b
+  }
+  const cobrar = (tx: any, amount: number) =>
+    settleStandalonePaymentInTx(
+      tx,
+      VENUE,
+      ORDER,
+      { id: 'cpaymenttpv0000000000001a', amount: new Decimal(amount), tipAmount: new Decimal(0) },
+      CAJERA,
+      true,
+    )
+
+  it('con dinero en un folio «Nadie» sellado: renueva y avisa UNA vez (la nota), aunque la cuenta no se reabrió', async () => {
+    const b = r44()
+    const tx = txTerminal(b, 150)
+    await cobrar(tx, 34)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(delPedido(b)).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ cobradoCents: 3400, canal: 'recordOrderPayment' }) }),
+    ])
+    expect(b.avisos).toHaveLength(2) // un aviso por gerente
+    nadaPorElClienteGlobal()
+  })
+
+  it('sin dinero (el origen de una reasignación) y saldada en WEB: sólo renueva, sin nota ni aviso', async () => {
+    const b = r44()
+    const tx = txTerminal(b, 150)
+    await cobrar(tx, 0)
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(RENUEVA)
+    expect(tx.onlineOrder.findFirst).not.toHaveBeenCalled()
+    expect(b.avisos).toEqual([])
+  })
+
+  it('fuera de WEB: ni nota ni renovación', async () => {
+    const b = r44()
+    const tx = txTerminal(b, 150, 'TPV')
+    await cobrar(tx, 34)
+    await cobrar(txTerminal(b, 150, 'TPV'), 0)
+    expect(tx.onlineOrder.findFirst).not.toHaveBeenCalled()
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(b.avisos).toEqual([])
   })
 })

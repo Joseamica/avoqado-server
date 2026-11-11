@@ -25,6 +25,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    // S9 v5 (U10): la nota del cobro lee el folio de la cuenta; en esta suite no hay folio.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     venueSettings: { findUnique: jest.fn() },
     shift: { findFirst: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn() },
@@ -470,5 +472,40 @@ describe('B4Bit — the prior-payment count never answers silently', () => {
 
     expect(mockPrisma.payment.updateMany).not.toHaveBeenCalled()
     expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('S9 v5 (U6) — la nota del cripto: sólo quien gana la transición y tiene orden, después de Order, Payment y el CAS', () => {
+  const notaLeyo = () => (prisma as any).onlineOrder.findFirst as jest.Mock
+
+  it('CO que gana: la nota lee el folio de la cuenta DESPUÉS de los candados (Order, Payment) y del CAS del pago', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment())
+    await processWebhook(webhook())
+    expect(notaLeyo()).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderId: ORDER_ID, venueId: VENUE_ID, requiresAcceptance: false } }),
+    )
+    const nota = notaLeyo().mock.invocationCallOrder[0]
+    const candados = mockPrisma.$queryRaw.mock.invocationCallOrder
+    const cas = mockPrisma.payment.updateMany.mock.invocationCallOrder[0]
+    expect(Math.max(...candados.filter(c => c < cas))).toBeLessThan(cas)
+    expect(cas).toBeLessThan(nota)
+  })
+
+  it('una reentrega del CO (el pago ya COMPLETED) no deja nota', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment({ status: 'COMPLETED' }))
+    await processWebhook(webhook())
+    expect(notaLeyo()).not.toHaveBeenCalled()
+  })
+
+  it('un CO fuera de orden (edited_at más viejo que el guardado) no deja nota', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment({ processorData: { lastEditedAt: '2026-11-10T12:00:00.000Z' } }))
+    await processWebhook(webhook({ edited_at: '2026-11-10T11:00:00.000Z' } as any))
+    expect(notaLeyo()).not.toHaveBeenCalled()
+  })
+
+  it('un cobro suelto (sin orden) no deja nota', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment({ orderId: null, order: null }))
+    await processWebhook(webhook())
+    expect(notaLeyo()).not.toHaveBeenCalled()
   })
 })

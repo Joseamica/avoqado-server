@@ -358,9 +358,10 @@ export class AutoClockOutJob {
         },
       })
       if (count !== 1) return false
+      // Sólo si sigue abierto: si la persona lo terminó entre la lectura y aquí, conserva su hora real (hz:4c64c58b:D2).
       if (openBreak) {
-        await tx.timeEntryBreak.update({
-          where: { id: openBreak.id },
+        await tx.timeEntryBreak.updateMany({
+          where: { id: openBreak.id, endTime: null },
           data: { endTime: now },
         })
       }

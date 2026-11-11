@@ -5402,15 +5402,30 @@ test.each(['author', 'void', 'dashboard-delete'] as const)(
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       }),
     )
+    const lineasAntes = await prisma.orderItem.findMany({ where: { orderId: f.order.id }, orderBy: { id: 'asc' } })
     const gate = await task8NativeGate(
         'Order',
         'AFTER UPDATE',
         `NEW.id='${f.order.id}' AND NEW.status='CANCELLED' AND OLD.status<>'CANCELLED'`,
       ),
       pending: Promise<unknown>[] = []
+    const resultados: Array<Promise<PromiseSettledResult<unknown>>> = []
+    const esperados = new Set<unknown>()
+    let falloPrimario: unknown
+    let huboFallo = false
+    const inesperados: unknown[] = []
+    const capturar = <T>(p: Promise<T>) => {
+      const resultado = p.then(
+        value => ({ status: 'fulfilled' as const, value }),
+        reason => ({ status: 'rejected' as const, reason }),
+      )
+      pending.push(resultado)
+      resultados.push(resultado)
+      return resultado
+    }
     try {
       const cancellation = callHttp(i, 'delete', `/orders/${f.order.id}`, { reason: 'native race' })
-      pending.push(cancellation)
+      const cancelSettled = capturar(cancellation)
       const cancelPid = await task8ObserveWait(gate.key)
       const other =
         rival === 'author'
@@ -5427,16 +5442,24 @@ test.each(['author', 'void', 'dashboard-delete'] as const)(
                 expectedVersion: 1,
               })
             : (await import('@/services/dashboard/order.dashboard.service')).deleteOrder(venueId, f.order.id)
-      pending.push(other)
-      void other.catch(() => undefined)
+      const otherSettled = capturar<Awaited<typeof other>>(other)
       const waiter = await task8ObserveBlockedBy(cancelPid)
       expect(waiter.query).toContain('pg_advisory_xact_lock')
       evidence(`Task8-cancel-${rival}-native`, i, { cancelPid, waiter })
       gate.release()
-      expect((await cancellation).status).toBe(200)
+      const cancelResult = await cancelSettled
+      if (cancelResult.status === 'rejected') throw cancelResult.reason
+      expect(cancelResult.value.status).toBe(200)
       const receipt = (await stored(i))!.resultJson
-      const result = await other
-      if (rival === 'author') expect((result as { ticketIds: string[] }).ticketIds).toEqual([])
+      const result = await otherSettled
+      if (rival === 'void') {
+        expect(result).toMatchObject({ status: 'rejected', reason: { statusCode: 400, code: 'ORDER_CANCELLED_NO_EDIT' } })
+        if (result.status === 'rejected') esperados.add(result.reason)
+        expect(await prisma.orderItem.findMany({ where: { orderId: f.order.id }, orderBy: { id: 'asc' } })).toEqual(lineasAntes)
+      } else {
+        if (result.status === 'rejected') throw result.reason
+        if (rival === 'author') expect((result.value as { ticketIds: string[] }).ticketIds).toEqual([])
+      }
       expect(await prisma.kdsOrder.count({ where: { venueId, orderId: f.order.id, status: { not: 'COMPLETED' } } })).toBe(0)
       expect(await prisma.kdsOrder.findUniqueOrThrow({ where: { id: completed.id } })).toEqual(completed)
       expect(
@@ -5451,9 +5474,25 @@ test.each(['author', 'void', 'dashboard-delete'] as const)(
       ).toEqual(completedItems)
       expect((await prisma.order.findUniqueOrThrow({ where: { id: f.order.id } })).status).toBe('CANCELLED')
       expect(terminal(await resolveHttpOperation(i))).toEqual(receipt)
+    } catch (error) {
+      falloPrimario = error
+      huboFallo = true
     } finally {
-      await gate.cleanup(pending)
+      // cleanup libera el gate y recoge pending antes de retirar sus triggers.
+      const limpieza = await Promise.allSettled([gate.cleanup(pending)])
+      const vistos = await Promise.all(resultados)
+      inesperados.push(...vistos.flatMap(r => (r.status === 'rejected' && !esperados.has(r.reason) ? [r.reason] : [])))
+      for (const r of limpieza) if (r.status === 'rejected') inesperados.push(r.reason)
     }
+    if (inesperados.length) {
+      const NativeAggregateError = (globalThis as unknown as { AggregateError: new (errors: unknown[], message: string) => Error })
+        .AggregateError
+      throw new NativeAggregateError(
+        [...new Set([...(huboFallo ? [falloPrimario] : []), ...inesperados])],
+        'Carrera de cocina: participantes recogidos',
+      )
+    }
+    if (huboFallo) throw falloPrimario
   },
 )
 

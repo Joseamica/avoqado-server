@@ -73,6 +73,7 @@ const vecina = (over: Partial<OrdenFoto> = {}): OrdenFoto => ({
   externalId: null,
   items: [],
   tableId: null,
+  pedidoEnLinea: false,
   cobros: [
     { id: 'pay-a', status: 'COMPLETED', type: 'REGULAR', amount: D('46.75'), tipAmount: D('7.01') },
     { id: 'pay-b', status: 'COMPLETED', type: 'REGULAR', amount: D('46.75'), tipAmount: D('7.01') },
@@ -98,6 +99,7 @@ const cancelada = (over: Partial<OrdenFoto> = {}): OrdenFoto => ({
   externalId: null,
   items: [],
   tableId: null,
+  pedidoEnLinea: false,
   cobros: [],
   ...over,
 })
@@ -340,6 +342,22 @@ describe('aplicarReasignacion — el orden de las escrituras', () => {
     expect(escritor.prepararDestino).not.toHaveBeenCalled()
     expect(escritor.guardarTotales).not.toHaveBeenCalled()
     expect(escritor.bitacora).not.toHaveBeenCalled()
+  })
+
+  it('S9 (Codex r2 P3): el destino con pedido en línea NO se pre-reabre; lo reabre el cierre, por el camino del efectivo', async () => {
+    const { deps, escritor, llamadas } = depsFalsas()
+    const r = await aplicarReasignacion(deps, caso, cobro(), vecina(), cancelada({ pedidoEnLinea: true }))
+    expect(r).toMatchObject({ ok: true, resumen: { destinoCambiaEstado: true } })
+    // Sólo el turno del cobro: el estado lo decide `settleStandalonePaymentInTx` → `reabrirSiRecibeDinero` → la conciliación.
+    expect(escritor.prepararDestino).toHaveBeenCalledWith('ord-cancelada', { shiftId: 'shift-1' })
+    expect(llamadas.slice(2, 4)).toEqual(['mover', 'preparar'])
+    expect(escritor.guardarTotales).toHaveBeenNthCalledWith(1, 'ord-cancelada', expect.objectContaining({ id: 'pay-b' }), true)
+  })
+
+  it('S9: una cuenta sin pedido en línea se sigue pre-reabriendo como hoy', async () => {
+    const { deps, escritor } = depsFalsas()
+    await aplicarReasignacion(deps, caso, cobro(), vecina(), cancelada({ pedidoEnLinea: false }))
+    expect(escritor.prepararDestino).toHaveBeenCalledWith('ord-cancelada', { status: 'PENDING', shiftId: 'shift-1' })
   })
 
   it('el origen sin fecha de cierre previa no recibe una inventada', async () => {

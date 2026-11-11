@@ -108,12 +108,12 @@ describe('enqueueRefundPaymentEffectsInTx · tarjetas de regalo (R1)', () => {
   it('🔴 devolver una venta de tarjetas no encola reversas de comisión ni de referido (nada se acreditó)', async () => {
     const { tx, tipos } = devolucionFalsa(true)
     await enqueueRefundPaymentEffectsInTx(tx, 'ref1', 'pay1')
-    expect(tipos()).toEqual(['LOYALTY_POINTS_REVERSAL'])
+    expect(tipos()).toEqual(['LOYALTY_POINTS_REVERSAL', 'STAMP_REVERSAL'])
   })
 
   it('regresión: devolver mercancía (también la pagada con saldo) revierte comisión y referido como siempre', async () => {
     const { tx, tipos } = devolucionFalsa(false)
     await enqueueRefundPaymentEffectsInTx(tx, 'ref1', 'pay1')
-    expect(tipos()).toEqual(['COMMISSION', 'REFERRAL', 'LOYALTY_POINTS_REVERSAL'])
+    expect(tipos()).toEqual(['COMMISSION', 'REFERRAL', 'LOYALTY_POINTS_REVERSAL', 'STAMP_REVERSAL'])
   })
 })

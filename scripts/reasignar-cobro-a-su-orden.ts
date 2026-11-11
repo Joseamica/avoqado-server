@@ -143,6 +143,8 @@ const SELECT_ORDEN = {
   tableId: true,
   // ⭐ B6 M4 (cierre): `giftCardId` para rechazar una cuenta de tarjetas en los dos lados.
   items: { select: { areaTicketLineId: true, releasedAreaTicketLineId: true, giftCardId: true } },
+  // S9 (Codex r2 P3): una cuenta con pedido en línea la reabre el cierre, no el script (`aplicarReasignacion`).
+  onlineOrder: { select: { id: true } },
   payments: {
     where: { status: 'COMPLETED' as const },
     select: { id: true, status: true, type: true, amount: true, tipAmount: true },
@@ -168,6 +170,7 @@ type OrdenCruda = {
   externalId: string | null
   tableId: string | null
   items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
+  onlineOrder: { id: string } | null
   payments: Array<{ id: string; status: string; type: string | null; amount: Prisma.Decimal; tipAmount: Prisma.Decimal }>
 }
 
@@ -188,6 +191,7 @@ const aFoto = (o: OrdenCruda): OrdenFoto & { total: Prisma.Decimal; tipGuardado:
   externalId: o.externalId,
   tableId: o.tableId,
   items: o.items,
+  pedidoEnLinea: o.onlineOrder !== null,
   cobros: o.payments,
   total: o.total,
   tipGuardado: o.tipAmount,

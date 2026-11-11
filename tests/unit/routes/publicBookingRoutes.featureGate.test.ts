@@ -62,6 +62,7 @@ jest.mock('@/middlewares/validation', () => ({
 // Auth middlewares are not under test — passthrough that injects the expected context, so
 // "NOT gated" assertions on portal/consumer routes prove the PLAN gate, not a missing token.
 jest.mock('@/middlewares/customerAuth.middleware', () => ({
+  activarReservasSiFalta: (_req: any, _res: any, next: any) => next(),
   authenticateCustomer: (req: any, _res: any, next: any) => {
     req.customerAuth = { customerId: 'cust_1', venueId: 'venue_pub_1' }
     next()
@@ -74,6 +75,11 @@ jest.mock('@/middlewares/customerAuth.middleware', () => ({
   // Pedidos en línea (montados en public.routes.ts): sin esta variante el router no carga. Passthrough como invitado.
   authenticateOrderingCustomerOptional: (req: any, _res: any, next: any) => {
     req.customerAuth = null
+    next()
+  },
+  // S8 (cambiar de número): sin esta variante el router no carga. Passthrough como `authenticateCustomer`.
+  authenticateCustomerParaCambioDeNumero: (req: any, _res: any, next: any) => {
+    req.customerAuth = { customerId: 'cust_1', venueId: 'venue_pub_1' }
     next()
   },
 }))
@@ -363,13 +369,13 @@ describe('wiring — the gates are actually present in the route files (source r
     [/'\/venues\/:venueSlug\/availability',\s*readLimit,\s*requireReservationsPlan,/, 'availability GET'],
     // Fase 0.B: venue → identidad opcional → plan. El orden importa (401 de identidad gana a 403 de plan).
     [
-      /'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      /'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*activarReservasSiFalta,\s*requireReservationsPlan,/,
       'create POST',
     ],
     // Fase 1: el hold aparta capacidad ⇒ pasa por el gate de aprobación, y para eso necesita
     // identidad. Mismo orden que crear reserva: identidad ANTES del plan.
     [
-      /'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      /'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*activarReservasSiFalta,\s*requireReservationsPlan,/,
       'hold POST',
     ],
     [
@@ -381,7 +387,7 @@ describe('wiring — the gates are actually present in the route files (source r
       'reschedule hold POST',
     ],
     [
-      /'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      /'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*activarReservasSiFalta,\s*requireReservationsPlan,/,
       'pack checkout POST',
     ],
   ])('public.routes.ts gates the create surface: %s (%s)', fragment => {
@@ -397,11 +403,11 @@ describe('wiring — the gates are actually present in the route files (source r
     // Fase 0.B: reschedule sigue SIN gate de plan (manage-existing), pero monta el resolver
     // y la identidad opcional para rechazar un Authorization presente e inválido.
     expect(publicRoutesSrc).toMatch(
-      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*validateRequest/,
+      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*activarReservasSiFalta,\s*validateRequest/,
     )
     // Fase 0.B: el balance exige sesión (dato de cuenta) pero sigue SIN gate de plan.
     expect(publicRoutesSrc).toMatch(
-      /'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*resolveVenueBySlug,\s*authenticateCustomer,\s*validateRequest/,
+      /'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*resolveVenueBySlug,\s*authenticateCustomer,\s*activarReservasSiFalta,\s*validateRequest/,
     )
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/info',\s*readLimit,\s*validateRequest/)
   })

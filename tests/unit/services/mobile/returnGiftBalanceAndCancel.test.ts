@@ -44,6 +44,13 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
   revertirCanjeEnTx: (...a: unknown[]) => revertirMock(...a),
 }))
 
+// S9 (P2-5): el pase de Wallet de las clientas con premio regresado se despierta después del commit.
+const despertarMock = jest.fn()
+jest.mock('@/services/online-ordering/cortesiaDeFolio', () => ({
+  ...jest.requireActual('@/services/online-ordering/cortesiaDeFolio'),
+  despertarPasesTrasCommit: (...a: unknown[]) => despertarMock(...a),
+}))
+
 import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -78,7 +85,7 @@ beforeEach(() => {
     refundPaymentId: `ref-${p.originalPaymentId}`,
   }))
   revertirMock.mockResolvedValue([])
-  devolverCanjesMock.mockResolvedValue({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 })
+  devolverCanjesMock.mockResolvedValue({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] })
 })
 
 describe('returnGiftBalanceAndCancelOrder', () => {
@@ -306,5 +313,27 @@ describe('returnGiftBalanceAndCancelOrder — ronda 1', () => {
     const error = await llamar().catch(e => e)
     expect(error).toMatchObject({ code: 'GIFT_CARD_TENDER_NOT_ALLOWED' })
     expect(error.message).toContain('únicos pagos son con tarjeta de regalo')
+  })
+})
+
+/**
+ * S9 (P2-5, R55 b): en una cuenta de folio, `devolverCanjesDeVentaAnuladaEnTx` convierte sus beneficios en cortesía (lo prueba
+ * cortesiaDeFolio.test.ts); aquí, que las clientas con premio regresado despiertan su pase DESPUÉS del commit.
+ */
+describe('returnGiftBalanceAndCancelOrder — S9, cuenta de folio', () => {
+  it('🔴 despierta el pase de cada clienta con premio regresado tras cancelar, no antes', async () => {
+    devolverCanjesMock.mockResolvedValue({
+      pointsRefunded: 0,
+      stampRewardsReturned: ['sr-1'],
+      filasQuitadas: 1,
+      clientasConPremio: ['cust-1'],
+    })
+
+    await expect(returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })).resolves.toEqual({
+      replay: false,
+    })
+
+    expect(despertarMock).toHaveBeenCalledWith('venue-1', ['cust-1'])
+    expect(despertarMock.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.order.update.mock.invocationCallOrder[0])
   })
 })

@@ -31,6 +31,7 @@ import {
 } from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
+import { notarDineroEnFolioCerradoEnTx } from '../shared/cuentaCancelada'
 import {
   CUSTOMER_PAGE_SIZE_DEFAULT,
   CUSTOMER_PAGE_SIZE_MAX,
@@ -1070,6 +1071,16 @@ export async function settleCustomerBalance(
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           reconciliationEnabled,
+        })
+        // 🔴 S9 v5 (B3): la nota del dinero que entra en cada cuenta; «Liquidar todo» nunca reabre (rechaza las canceladas).
+        await notarDineroEnFolioCerradoEnTx(tx, {
+          venueId,
+          orderId,
+          entra: remainingBalance,
+          reabierta: false,
+          canal: 'settleCustomerBalance',
+          paymentId: settlementPayment.id,
+          staffId: actorStaffId,
         })
 
         settled[settled.length - 1].paymentId = settlementPayment.id

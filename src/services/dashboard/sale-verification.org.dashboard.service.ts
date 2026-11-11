@@ -1,3 +1,4 @@
+import { rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import {
   SaleVerificationStatus,
   SaleVerificationRejectionReason,
@@ -1428,9 +1429,11 @@ async function cuentaQueSigueAlCobro(tx: Prisma.TransactionClient, paymentId: st
     where: { id: cobro.orderId, venueId },
     select: {
       id: true,
+      venueId: true,
       version: true,
       status: true,
       paymentStatus: true,
+      onlineOrder: { select: { venueId: true } },
       contratoDePrecio: true,
       subtotal: true,
       discountAmount: true,
@@ -1489,7 +1492,9 @@ async function moverCuentaAlImporte(
   tx: Prisma.TransactionClient,
   { orden, articuloId, tipo }: Awaited<ReturnType<typeof cuentaQueSigueAlCobro>>,
   importe: number,
+  editedById: string,
 ) {
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId: orden.venueId, orderId: orden.id })
   const nuevo = new Prisma.Decimal(importe).toDecimalPlaces(2)
   const saldo = computeOrderBalance({ ...orden, subtotal: nuevo }, [{ amount: nuevo, tipAmount: 0, type: tipo }])
   await tx.orderItem.update({ where: { id: articuloId }, data: { unitPrice: nuevo, total: nuevo } })
@@ -1501,6 +1506,9 @@ async function moverCuentaAlImporte(
       paidAmount: saldo.paidAmount,
       remainingBalance: saldo.remainingBalance,
       ...(saldo.isFullyPaid ? { paymentStatus: 'PAID' as const } : {}),
+      ...(saldo.isFullyPaid && saldo.total.gt(0) && orden.paymentStatus !== 'PAID' && orden.onlineOrder?.venueId === orden.venueId
+        ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: editedById }
+        : {}),
       version: { increment: 1 },
     },
   })
@@ -1690,7 +1698,7 @@ export async function editOrgSaleVerification(
               : {}),
           },
         })
-        if (cuenta) cuentaMovida = await moverCuentaAlImporte(tx, cuenta, params.amount!)
+        if (cuenta) cuentaMovida = await moverCuentaAlImporte(tx, cuenta, params.amount!, params.editedById)
       }
     }
 

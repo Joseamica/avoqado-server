@@ -132,7 +132,8 @@
     },
     "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
       "clase": "EN_TX",
-      "etiqueta": "recordCouponRedemption"
+      "etiqueta": "recordCouponRedemption",
+      "nota": "R13: conserva esta raíz/transacción/retry; Order ATRIBUCION FOR NO KEY UPDATE primero, guard/duplicado y después canje/CouponCode/Discount. No espera Order con lock fuerte ni reordena los otros escritores."
     },
     "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
       "clase": "SENTENCIA",
@@ -186,13 +187,18 @@
       "clase": "SENTENCIA",
       "etiqueta": "updateDiscount"
     },
-    "src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
+    "src/services/dashboard/discountEngine.service.ts#aplicarDescuentosDelMotorEnTx": {
       "clase": "EN_TX",
-      "etiqueta": "applyAutomaticDiscounts"
+      "etiqueta": "aplicarDescuentosDelMotorEnTx",
+      "nota": "S10: el cuerpo de applyAutomaticDiscounts sin el candado de la cuenta (lo abre su llamador: applyAutomaticDiscounts o la cadena de beneficios). Pasada única ascendente de Discount (bloquearDescuentosEnOrdenEnTx con los usados + bloquearTambien) y contadores; en simulación (cotizar, R9) ni candado ni contador."
     },
     "src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount": {
       "clase": "EN_TX",
       "etiqueta": "applyEvaluatedDiscount"
+    },
+    "src/services/dashboard/discountEngine.service.ts#bloquearDescuentosEnOrdenEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "bloquearDescuentosEnOrdenEnTx"
     },
     "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
       "clase": "EN_TX",
@@ -326,6 +332,10 @@
       "clase": "SENTENCIA",
       "etiqueta": "seedCustomers"
     },
+    "src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "convertirBeneficiosEnCortesiaEnTx"
+    },
     "src/services/public/customerBookingAccess.service.ts#activateCustomerAccount": {
       "clase": "EN_TX",
       "etiqueta": "activateCustomerAccount"
@@ -369,6 +379,21 @@
     "src/services/referrals/referralRefund.service.ts#revokeTierRewardInTx": {
       "clase": "EN_TX",
       "etiqueta": "revokeTierRewardInTx"
+    },
+    "src/services/online-ordering/beneficios.service.ts#aplicarBeneficiosEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "aplicarBeneficiosEnTx",
+      "nota": "S10 (P2-4): corre en la transacción de quien crea la cuenta (simularLaCadena; el folio, writeOnlineOrderInTx en S11): no abre otra. Estricto: asesor del cupón (bloquearDescuentoDelCupon) → motor con la pasada única de Discount → cupón → premio → Customer (puntos), con el KEY SHARE de Customer de la cuenta antes (R6). Tolerante (simulación, R9): sin asesor ni pasada de Discount; sólo filas nuevas y de la propia clienta. Nunca WalletPass. S11 (R7): en estricto devuelve la bitácora de cada canje, que el folio escribe con su tx."
+    },
+    "src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "cerrarFolioEnCeroEnTx",
+      "nota": "S11 (P2-4): el cierre del folio en $0 canjea su cupón: asesor (bloquearDescuentoDelCupon) → su fila Discount (bloquearDescuentosEnOrdenEnTx) → canjearCuponEnTx (CouponCode, rango 6b). Corre en la transacción que crea el folio en «Nadie» (createOnlineOrder, donde la cadena ya los tomó) o en la que lo acepta en «Mi equipo» (casTransition). Nunca WalletPass."
+    },
+    "src/services/online-ordering/beneficios.service.ts#aplicarCuponEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "aplicarCuponEnTx",
+      "nota": "S10: el cupón dentro de aplicarBeneficiosEnTx; apartarCupon con candado en estricto y sin él (con los usos propios del motor, R9'') en la simulación."
     },
     "src/services/shared/cuponDeLaVenta.ts#apartarCupon": {
       "clase": "EN_TX",
@@ -433,6 +458,34 @@
     "src/services/wallet/stampLedger.service.ts#reverseStampForOrder": {
       "clase": "EN_TX",
       "etiqueta": "reverseStampForOrder"
+    },
+    "src/services/public/sesionDeCliente.service.ts#crearFichaConConsumer": {
+      "clase": "EN_TX",
+      "etiqueta": "crearFichaConConsumer"
+    },
+    "src/services/public/sesionDeCliente.service.ts#ligarContacto": {
+      "clase": "EN_TX",
+      "etiqueta": "ligarContacto"
+    },
+    "src/services/public/sesionDeCliente.service.ts#entrarConContacto": {
+      "clase": "EN_TX",
+      "etiqueta": "entrarConContacto"
+    },
+    "src/services/public/sesionDeCliente.service.ts#bloquearFicha": {
+      "clase": "EN_TX",
+      "etiqueta": "bloquearFicha"
+    },
+    "src/services/public/customerPortal.public.service.ts#cambiarTelefonoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "cambiarTelefonoEnTx"
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#revalidarSesionEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "revalidarSesionEnTx"
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta": {
+      "clase": "EN_TX",
+      "etiqueta": "guardarTarjetaEnMiCuenta"
     }
   },
   "aperturas": {
@@ -555,7 +608,8 @@
     },
     "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
       "etiqueta": "recordCouponRedemption",
-      "cantidad": 1
+      "cantidad": 1,
+      "nota": "R13: conserva esta raíz/transacción/retry; Order ATRIBUCION FOR NO KEY UPDATE primero, guard/duplicado y después canje/CouponCode/Discount. No espera Order con lock fuerte ni reordena los otros escritores."
     },
     "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
       "etiqueta": "updateCouponCode",
@@ -636,7 +690,7 @@
     "src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
       "etiqueta": "applyAutomaticDiscounts",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): audits, por parámetro (:1079; r5 #2)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): audits, que desde S10 nacen en aplicarDescuentosDelMotorEnTx y salen en su retorno; el log «Discount applied» va después del commit (R4)."
     },
     "src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder": {
       "etiqueta": "applyDiscountToOrder",
@@ -908,6 +962,16 @@
       "etiqueta": "prepararFolioPagado",
       "cantidad": 1
     },
+    "src/services/online-ordering/beneficios.service.ts#simularLaCadena": {
+      "etiqueta": "simularLaCadena",
+      "cantidad": 1,
+      "nota": "S10/S11: la simulación de la cotización y del borrador de tarjeta (R2''), que se deshace lanzando el centinela `Simulada` (no es una traba: sale al primer intento). Con lock_timeout 200 ms, statement_timeout 500 ms y { maxWait: 300, timeout: 800 }; su lugar del semáforo SIMULACION lo toman cotizarConBeneficios y simularBeneficios ANTES de pedir conexión (R2'''). 55P03 y el tiempo agotado no se repiten, el 40P01 sí."
+    },
+    "src/services/online-ordering/card/draft.service.ts#createCardOnlineDraft": {
+      "etiqueta": "createCardOnlineDraft",
+      "cantidad": 1,
+      "nota": "S11 (R3): llave → admisión como pagar al recoger, ahora con la red por traba. No escribe tablas de beneficios: lee y guarda la decisión de precio de la llave (R1') y crea el borrador."
+    },
     "src/services/online-ordering/order.service.ts#createOnlineOrder": {
       "etiqueta": "createOnlineOrder",
       "cantidad": 1
@@ -927,7 +991,7 @@
     },
     "src/services/public/otpAuth.public.service.ts#verifyOtp": {
       "etiqueta": "verifyOtp",
-      "cantidad": 1
+      "cantidad": 2
     },
     "src/services/referrals/referralProgram.service.ts#backfillLegacyReferralCodes": {
       "etiqueta": "backfillLegacyReferralCodes",
@@ -1026,6 +1090,30 @@
       "etiqueta": "withDeliveryOrderLockConReintento",
       "cantidad": 1,
       "nota": "Opener genérico del paso 8: lo usa sólo deliveryReconciliation; devuelve cerradoEnProveedor y selloPorRevertir en su retorno (R65 b)."
+    },
+    "src/middlewares/customerAuth.middleware.ts#activarReservasSiFalta": {
+      "etiqueta": "activarReservasSiFalta",
+      "cantidad": 1
+    },
+    "src/services/public/otpAuth.public.service.ts#entrarConGoogle": {
+      "etiqueta": "entrarConGoogle",
+      "cantidad": 1
+    },
+    "src/services/public/sesionDeCliente.service.ts#crearFichaConPrueba": {
+      "etiqueta": "crearFichaConPrueba",
+      "cantidad": 1
+    },
+    "src/services/public/customerPortal.public.service.ts#confirmarCambioDeTelefono": {
+      "etiqueta": "confirmarCambioDeTelefono",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta": {
+      "etiqueta": "guardarTarjetaEnMiCuenta",
+      "cantidad": 1
+    },
+    "src/services/public/customerPortal.public.service.ts#listarMisTarjetas": {
+      "etiqueta": "listarMisTarjetas",
+      "cantidad": 1
     }
   },
   "efectosRevisados": {

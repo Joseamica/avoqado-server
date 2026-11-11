@@ -70,10 +70,20 @@ export async function clienteYaLigadoALaVenta(orderId: string, customerId: strin
  */
 export async function bloquearVentaParaLiga(
   tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
-  input: { venueId: string; orderId: string },
+  input: { venueId: string; orderId: string; additionalOrderIds?: string[] },
 ): Promise<boolean> {
   if (typeof tx.$queryRaw !== 'function') {
     throw new Error('bloquearVentaParaLiga requiere una transacción con $queryRaw')
+  }
+  const ids = [...new Set([input.orderId, ...(input.additionalOrderIds ?? [])])]
+  if (ids.length > 1) {
+    const filas = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Order"
+      WHERE "venueId" = ${input.venueId} AND id = ANY(${ids}::text[])
+      ORDER BY "createdAt" DESC, id DESC
+      FOR NO KEY UPDATE
+    `
+    return filas.some(fila => fila.id === input.orderId)
   }
   const filas = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id

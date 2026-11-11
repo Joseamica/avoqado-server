@@ -652,6 +652,7 @@ describe('Founder 3-oct (Codex r8 #2, r9 #1-#3, r12 #5): el cierre transaccional
     },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Decimal(cobrado), tipAmount: new Decimal(0) }, _count: 1 }) },
     activityLog: { create: jest.fn().mockResolvedValue({}) },
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) }, // S9 v5 (U10): la nota del cobro
   })
   const cerrar = async (orden: Record<string, unknown>, cobrado: number) => {
     const tx = txCierre(orden, cobrado)
@@ -845,6 +846,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
           .mockResolvedValue({ _sum: { amount: new Decimal(cobros.acumulado), tipAmount: new Decimal(0) }, _count: cobros.cuantos }),
       },
       activityLog: { create: jest.fn().mockResolvedValue({}) },
+      onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) }, // S9 v5 (U10): la nota del cobro
     }
     const r = await (paymentService as any).settleStandalonePaymentInTx(
       tx,

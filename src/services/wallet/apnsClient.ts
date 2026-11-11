@@ -25,6 +25,8 @@ export interface PushResult {
   /** Apple dice que este aparato ya no tiene la tarjeta: hay que olvidarlo. */
   gone?: boolean
   status?: number
+  omitido?: true
+  porTiempo?: true
 }
 
 export function apnsAvailable(): boolean {
@@ -37,23 +39,43 @@ export function apnsAvailable(): boolean {
  * Nunca lanza: devuelve el resultado. Quien llama decide qué hacer, y lo que no puede
  * pasar es que un fallo de red tumbe el cobro desde el que se llamó.
  */
-export async function sendSilentPush(deviceToken: string, venueId: string): Promise<PushResult> {
-  if (!apnsAvailable()) return { ok: false }
+export const PLAZO_APNS_MS = 10_000
+
+export async function sendSilentPush(deviceToken: string, venueId: string, opciones?: { plazoMs?: number }): Promise<PushResult> {
+  if (!apnsAvailable()) return { ok: false, omitido: true }
   // Candado de negocios demo (capa 2; Codex r6, 4): un demo no le habla a Apple. Pide el negocio para que una llamada
   // nueva no se lo salte.
-  if (await omitirPorDemo('aviso de Apple Wallet', null, venueId)) return { ok: false }
+  try {
+    if (await omitirPorDemo('aviso de Apple Wallet', null, venueId)) return { ok: false, omitido: true }
+  } catch (error) {
+    logger.warn('No se pudo comprobar el destino del aviso', { error: error instanceof Error ? error.message : String(error) })
+    return { ok: false }
+  }
 
   const host = env.NODE_ENV === 'production' ? HOST_PROD : HOST_SANDBOX
 
   return new Promise<PushResult>(resolve => {
     let resuelto = false
+    let client: ReturnType<typeof connect> | null = null
+    let req: ReturnType<ReturnType<typeof connect>['request']> | null = null
     const terminar = (r: PushResult) => {
       if (resuelto) return
       resuelto = true
+      clearTimeout(timer)
+      try {
+        req?.close()
+      } catch {
+        /* el canal ya pudo cerrarse */
+      }
+      try {
+        client?.close()
+      } catch {
+        /* el canal ya pudo cerrarse */
+      }
       resolve(r)
     }
 
-    let client: ReturnType<typeof connect> | null = null
+    const timer = setTimeout(() => terminar({ ok: false, porTiempo: true }), opciones?.plazoMs ?? PLAZO_APNS_MS)
     try {
       client = connect(host, {
         cert: Buffer.from(env.APPLE_PASS_CERT_PEM_BASE64 as string, 'base64'),
@@ -66,7 +88,7 @@ export async function sendSilentPush(deviceToken: string, venueId: string): Prom
         terminar({ ok: false })
       })
 
-      const req = client.request({
+      req = client.request({
         [constants.HTTP2_HEADER_METHOD]: 'POST',
         [constants.HTTP2_HEADER_PATH]: `/3/device/${deviceToken}`,
         // 🔴 El tema es el identificador del PASE. Con el bundle de una app, Apple
@@ -83,14 +105,13 @@ export async function sendSilentPush(deviceToken: string, venueId: string): Prom
         // APNS devuelve un JSON con la razón cuando rechaza el push. En un
         // ClientHttp2Stream, `end` no llega mientras el readable quede pausado;
         // drenarlo evita dejar esta promesa viva para siempre en respuestas 4xx.
-        req.resume()
+        req?.resume()
       })
       req.on('error', error => {
         logger.warn('Falló el aviso a un aparato', { error: (error as Error).message })
         terminar({ ok: false })
       })
       req.on('end', () => {
-        client?.close()
         // 410 = el aparato ya no tiene esta tarjeta. Es la señal para olvidarlo.
         terminar({ ok: status === 200, gone: status === 410, status })
       })
@@ -99,7 +120,6 @@ export async function sendSilentPush(deviceToken: string, venueId: string): Prom
       req.end(JSON.stringify({ aps: {} }))
     } catch (error) {
       logger.warn('Falló el envío del aviso', { error: error instanceof Error ? error.message : String(error) })
-      client?.close()
       terminar({ ok: false })
     }
   })

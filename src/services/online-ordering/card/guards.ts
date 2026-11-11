@@ -13,8 +13,7 @@ type Db = Pick<Prisma.TransactionClient, 'onlineOrder' | 'payment'>
 export const ONLINE_ORDER_PAID_BY_CARD = 'ONLINE_ORDER_PAID_BY_CARD' as const
 export const MENSAJE_PAGADO_CON_TARJETA = 'Este pedido ya se pagó con tarjeta en línea. No lo cobres en caja.'
 
-export const cardOnlineOrderError = (details?: unknown) =>
-  new ConflictError(MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD, details)
+export const cardOnlineOrderError = (details?: unknown) => new ConflictError(MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD, details)
 
 /** El pedido en línea con tarjeta de esta cuenta y el estado de su cargo, o `null` (no es pedido en línea o paga al recoger). */
 export async function findCardOnlineOrderInTx(db: Db, i: { venueId: string; orderId: string }) {
@@ -41,10 +40,7 @@ export async function assertNotCardOnlineOrderInTx(db: Db, i: { venueId: string;
 export async function assertCardOrderMoneyFrozenInTx(db: Db, i: { venueId: string; orderId: string }): Promise<void> {
   const card = await findCardOnlineOrderInTx(db, i)
   if (card && card.charge?.status !== OnlineOrderChargeStatus.CAPTURED) {
-    throw new ConflictError(
-      'Este pedido se pagó con tarjeta en línea por un total fijo; no se puede modificar.',
-      ONLINE_ORDER_PAID_BY_CARD,
-    )
+    throw new ConflictError('Este pedido se pagó con tarjeta en línea por un total fijo; no se puede modificar.', ONLINE_ORDER_PAID_BY_CARD)
   }
 }
 
@@ -63,6 +59,36 @@ export async function assertNotFolioInTx(
   })
   if (folio) throw new ConflictError('Este es un pedido en línea: se cobra en su lista de folios.', ONLINE_ORDER_FOLIO_NO_SE_JUNTA)
 }
+
+/**
+ * Tienda híbrida (S9, decisión 14 del plan): «cuenta de folio» = toda cuenta con `OnlineOrder`, de los dos modos (tarjeta en línea y
+ * pagar al recoger; «Nadie» y «Mi equipo»). Es un dato que no cambia: la fila nace con la cuenta y nadie la quita.
+ */
+export async function esCuentaDeFolioEnTx(
+  db: Pick<Prisma.TransactionClient, 'onlineOrder'>,
+  i: { venueId: string; orderId: string },
+): Promise<boolean> {
+  return (await db.onlineOrder.findFirst({ where: { orderId: i.orderId, venueId: i.venueId }, select: { id: true } })) != null
+}
+
+export const ONLINE_ORDER_PAID_AT_REGISTER = 'ONLINE_ORDER_PAID_AT_REGISTER' as const
+export const MENSAJE_SE_COBRA_EN_CAJA = 'Este pedido se cobra en caja con efectivo, tarjeta o saldo.'
+
+/**
+ * S9 (P2-5): un INICIO nuevo de cripto (B4Bit) sobre cualquier pedido en línea ⇒ 409, antes de crear nada. B4Bit confirma minutos
+ * después y, si para entonces el folio venció, el dinero quedaba para conciliar a mano. Lo ya iniciado antes no pasa por aquí: su
+ * confirmación sigue registrando el dinero.
+ */
+export async function assertNotOnlineOrderInTx(
+  db: Pick<Prisma.TransactionClient, 'onlineOrder'>,
+  i: { venueId: string; orderId: string },
+): Promise<void> {
+  if (await esCuentaDeFolioEnTx(db, i)) throw new ConflictError(MENSAJE_SE_COBRA_EN_CAJA, ONLINE_ORDER_PAID_AT_REGISTER)
+}
+
+/** S9: anular TODOS los artículos de un folio es cancelarlo; se cancela por su camino, que regresa sus beneficios. */
+export const FOLIO_SE_CANCELA_COMO_PEDIDO = 'FOLIO_SE_CANCELA_COMO_PEDIDO' as const
+export const MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO = 'Este es un pedido en línea: cancélalo como pedido'
 
 /**
  * El cobro de Stripe de un cargo (su `processorId` es el PaymentIntent del cargo, como lo escribe la captura) sólo se devuelve
@@ -118,6 +144,9 @@ export async function avisarCobroDobleSobrePedidoConTarjeta(
       data: { paymentId: i.paymentId, chargeId: card.charge.id, source: i.source },
     })
   } catch (error) {
-    logger.error('[OnlineOrderCard] no se pudo revisar el cobro doble', { ...i, error: error instanceof Error ? error.message : String(error) })
+    logger.error('[OnlineOrderCard] no se pudo revisar el cobro doble', {
+      ...i,
+      error: error instanceof Error ? error.message : String(error),
+    })
   }
 }
