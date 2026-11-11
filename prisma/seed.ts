@@ -3984,8 +3984,9 @@ async function main() {
             // Higher modifier probability for Avoqado venues
             const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
             const modifier = Math.random() < modifierProbability ? getRandomItem(modifiers) : null
-            const modifierPrice = modifier ? parseFloat(modifier.price.toString()) : 0
-            subtotal += itemTotal + modifierPrice
+            // Un extra va en cada unidad, como en el escritor nativo (`lineBase + modifierTotal * quantity`, Codex r2 de D5).
+            const modifiersTotal = modifier ? parseFloat(modifier.price.toString()) * quantity : 0
+            subtotal += itemTotal + modifiersTotal
 
             const orderItem = await prisma.orderItem.create({
               data: {
@@ -3996,7 +3997,7 @@ async function main() {
                 taxAmount: 0, // como las ventas nativas: el precio ya trae el IVA (D5)
                 // El renglón trae su extra, como uno nativo: la cuenta = Σ renglones, que es lo que suman los recálculos
                 // (Codex r1 de D5: sin esto, una cortesía borraba los extras de los demás renglones).
-                total: itemTotal + modifierPrice,
+                total: itemTotal + modifiersTotal,
                 createdAt: orderCreatedAt,
               },
             })
@@ -4016,7 +4017,7 @@ async function main() {
               name: product.name,
               quantity,
               price: parseFloat(product.price.toString()),
-              totalPrice: itemTotal + itemModifiers.reduce((sum, mod) => sum + mod.price, 0),
+              totalPrice: itemTotal + modifiersTotal,
               modifiers: itemModifiers,
             })
           }
