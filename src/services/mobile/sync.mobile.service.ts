@@ -1300,13 +1300,13 @@ async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: a
   const instancias = conPromocion.map(it => it.promotionRef?.promotionInstanceId)
   if (!instancias.every((id: unknown) => typeof id === 'string' && id.length > 0)) return false
   const unicas = [...new Set<string>(instancias)]
-  const llaves = [...new Set(orderTpvService.normalizeAddItems(normales).map(it => it.externalId))]
+  const llaves = [...new Set(orderTpvService.normalizeAddItems(normales).map(it => it.externalId ?? ''))]
   if (llaves.some(llave => !llave)) return false
   const [combos, guardadas] = await Promise.all([
     prisma.orderPromotion.count({ where: { orderId, instanceId: { in: unicas } } }),
     llaves.length > 0
       ? prisma.orderItem.findMany({
-          where: { orderId, externalId: { in: llaves as string[] } },
+          where: { orderId, externalId: { in: llaves } },
           select: { externalId: true },
           take: llaves.length * 2,
         })
