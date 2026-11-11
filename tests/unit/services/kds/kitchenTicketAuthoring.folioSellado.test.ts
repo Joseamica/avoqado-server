@@ -81,6 +81,8 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobr
     where.OR ? (o.tocado ? { id: RENGLON.id } : null) : null) as any)
   prismaMock.orderItem.findMany.mockResolvedValueOnce([RENGLON] as any).mockResolvedValue([])
   prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+  // hz:dcc49fe5:D1: la cobertura se lee como unidades ya mandadas por renglón (Σ por `groupBy`).
+  prismaMock.kdsOrderItem.groupBy.mockResolvedValue([] as any)
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.payment.count.mockResolvedValue(o.tardios ?? 1) // regla C: los cobros que llegaron desde el cierre
 }
