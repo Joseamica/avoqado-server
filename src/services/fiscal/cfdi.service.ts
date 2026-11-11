@@ -2269,6 +2269,9 @@ export async function loadOrderForCfdiFromDb(
         },
       },
       items: {
+        // Orden único (como la global, `ORDER_SELECT`): sin él, Postgres entrega los renglones en el orden físico y los
+        // conceptos de la factura cambiaban de lugar entre corridas (una actualización mueve la fila).
+        orderBy: { id: 'asc' },
         select: {
           id: true,
           // NULL = sigue el tratamiento vivo del producto; con valor = sellado por un documento (manda).
