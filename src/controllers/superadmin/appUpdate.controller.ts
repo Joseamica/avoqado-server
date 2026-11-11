@@ -4,7 +4,8 @@ import { AppEnvironment, AppPlatform, UpdateMode } from '@prisma/client'
 import { getStorageBucket } from '../../config/firebase'
 import logger from '../../config/logger'
 import crypto from 'crypto'
-import { extractApkMetadata, validatePackageName } from '../../services/apk-parser.service'
+import { ambienteDeCampo, extractApkMetadata, PAQUETE_DE_CAMPO, validatePackageName } from '../../services/apk-parser.service'
+import { HUELLA_DE_FIRMA_DE_CAMPO, huellaDelCertificadoDeclarado } from '../../services/apk/certificadoDeclarado'
 import prisma from '../../utils/prismaClient'
 import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../services/appUpdate/audienceTargeting'
 
@@ -141,7 +142,9 @@ export async function createAppUpdate(req: Request, res: Response) {
       updateMode = 'NONE',
       minAndroidSdk: providedMinSdk,
       apkBase64,
+      platform = 'ANDROID_TPV',
     } = req.body
+    const esCampo = platform === 'ANDROID_CAMPO'
 
     // DEBUG: Log what we received
     logger.info(`📥 Received updateMode from request: ${req.body.updateMode}`)
@@ -181,12 +184,33 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     // Validate package name matches environment
-    const packageValidation = validatePackageName(apkMetadata, environment as 'SANDBOX' | 'PRODUCTION')
+    const packageValidation = validatePackageName(apkMetadata, environment as 'SANDBOX' | 'PRODUCTION', esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV')
     if (!packageValidation.valid) {
       return res.status(400).json({
         success: false,
         error: packageValidation.message,
       })
+    }
+
+    if (esCampo) {
+      // El celular compara el versionCode anunciado con el del APK: si no coinciden, pediría la misma versión para siempre.
+      const distinto =
+        (providedVersionCode !== undefined && Number(providedVersionCode) !== apkMetadata.versionCode) ||
+        (providedVersionName !== undefined && providedVersionName !== apkMetadata.versionName)
+      if (distinto) {
+        return res.status(400).json({
+          success: false,
+          error: `En la app de campo la versión es la del APK (${apkMetadata.versionName}, código ${apkMetadata.versionCode}); no se puede cambiar`,
+        })
+      }
+      // Freno de accidentes (no es verificación criptográfica, ver certificadoDeclarado.ts): un APK de producción con otra
+      // llave dejaría a los celulares nuevos con una firma que nunca podrá actualizarse.
+      if (environment === 'PRODUCTION' && huellaDelCertificadoDeclarado(apkBuffer) !== HUELLA_DE_FIRMA_DE_CAMPO) {
+        return res.status(400).json({
+          success: false,
+          error: 'El APK no está firmado con la llave de la app de campo (súbelo desde el release firmado de GitHub)',
+        })
+      }
     }
 
     // Use provided values or auto-detected values
@@ -215,7 +239,7 @@ export async function createAppUpdate(req: Request, res: Response) {
         versionCode_environment_platform: {
           versionCode: typeof versionCode === 'string' ? parseInt(versionCode) : versionCode,
           environment: environment as AppEnvironment,
-          platform: 'ANDROID_TPV',
+          platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
         },
       },
     })
@@ -223,7 +247,7 @@ export async function createAppUpdate(req: Request, res: Response) {
     if (existing) {
       return res.status(409).json({
         success: false,
-        error: `Version code ${versionCode} already exists for ${environment} environment`,
+        error: `Version code ${versionCode} already exists for ${environment} environment (${platform})`,
       })
     }
 
@@ -240,7 +264,9 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     const bucket = storage.bucket()
-    const fileName = `tpv-updates/${environment.toLowerCase()}/avoqado-tpv-${versionName}-${environment.toLowerCase()}.apk`
+    const fileName = esCampo
+      ? `campo-updates/${environment.toLowerCase()}/avoqado-campo-${versionName}-${versionCode}.apk`
+      : `tpv-updates/${environment.toLowerCase()}/avoqado-tpv-${versionName}-${environment.toLowerCase()}.apk`
     const file = bucket.file(fileName)
 
     await file.save(apkBuffer, {
@@ -292,6 +318,7 @@ export async function createAppUpdate(req: Request, res: Response) {
         versionName,
         versionCode: versionCodeInt,
         environment: environment as AppEnvironment,
+        platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
         releaseNotes,
         updateMode: updateMode as UpdateMode,
         minAndroidSdk,
@@ -331,6 +358,7 @@ export async function createAppUpdate(req: Request, res: Response) {
             versionName,
             versionCode: versionCodeInt,
             environment,
+            platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
             updateMode,
             targetType: targeting.targetType,
             targetVenueIds: targeting.targetVenueIds,
@@ -628,13 +656,16 @@ export async function previewApkMetadata(req: Request, res: Response) {
         versionName: metadata.versionName,
         packageName: metadata.packageName,
         minSdkVersion: metadata.minSdkVersion,
-        // Helper to determine environment based on package name
+        // Helper to determine environment based on package name (la app de campo: por su versionName)
         detectedEnvironment:
-          metadata.packageName === 'com.jaac.avoqado_tpv.sandbox'
-            ? 'SANDBOX'
-            : metadata.packageName === 'com.jaac.avoqado_tpv'
-              ? 'PRODUCTION'
-              : null,
+          metadata.packageName === PAQUETE_DE_CAMPO
+            ? ambienteDeCampo(metadata.versionName)
+            : metadata.packageName === 'com.jaac.avoqado_tpv.sandbox'
+              ? 'SANDBOX'
+              : metadata.packageName === 'com.jaac.avoqado_tpv'
+                ? 'PRODUCTION'
+                : null,
+        detectedPlatform: metadata.packageName === PAQUETE_DE_CAMPO ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
       },
     })
   } catch (error) {

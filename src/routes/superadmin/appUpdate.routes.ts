@@ -56,6 +56,8 @@ const createUpdateSchema = z.object({
     // minAndroidSdk is also auto-detected from APK if not provided
     minAndroidSdk: z.number({ coerce: true }).int().min(21).max(35).optional(),
     apkBase64: z.string().min(1, 'APK file is required (base64 encoded)'),
+    // Carril de la versión: la TPV (como siempre) o la app de campo del promotor.
+    platform: z.enum(['ANDROID_TPV', 'ANDROID_CAMPO']).optional().default('ANDROID_TPV'),
   }),
 })
 
