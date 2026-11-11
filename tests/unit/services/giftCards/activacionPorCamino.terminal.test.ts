@@ -56,6 +56,7 @@ function txDoble(pagado: number, conteo = 1) {
     },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: D(pagado), tipAmount: D(0) }, _count: conteo }) },
     activityLog: { create: jest.fn() },
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) }, // S9 v5 (U10): la nota del cobro
   } as any
 }
 

@@ -204,10 +204,67 @@ export const otpVerifySchema = z
     phone: z.string().min(8, 'Teléfono inválido').optional(),
     email: z.string().email('Correo inválido').optional(),
     code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
-    /** R7/H1 (pedidos en línea): verificar para PEDIR no activa la cuenta de reservas y devuelve el token de pedidos. */
-    purpose: z.enum(['ORDERING'], { errorMap: () => ({ message: 'Propósito inválido' }) }).optional(),
+    /**
+     * R7/H1 (pedidos en línea): verificar para PEDIR no activa la cuenta de reservas y devuelve el token de pedidos.
+     * S7: `SESSION` es la sesión única (pedidos y reservas), sin activar reservas.
+     */
+    purpose: z.enum(['ORDERING', 'SESSION'], { errorMap: () => ({ message: 'Propósito inválido' }) }).optional(),
+    /** S7: sin ficha, no crear nada y preguntar «¿ya eres cliente?». */
+    alNoEncontrar: z.enum(['PREGUNTAR'], { errorMap: () => ({ message: 'Opción inválida' }) }).optional(),
+    /** S7: la `pruebaPendiente` del primer contacto, para ligarlo a la ficha que encuentra este código. */
+    vincular: z.string().min(1).max(4096, 'Verificación inválida').optional(),
     // Nombre del alta en la página de la tarjeta (spec 2026-10-14 §3.3). Opcional para no romper clientes viejos; el widget
     // lo hace obligatorio. Sólo forma aquí: la regla «nunca pisa un nombre existente» vive en el servicio.
     firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
   })
   .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })
+
+/** S7: «no, soy nueva». Sólo la prueba firmada; un contacto escrito en el cuerpo se rechaza (no puede sustituir al probado). */
+export const sessionNuevaFichaSchema = z
+  .object({
+    pruebaPendiente: z.string().min(1, 'Falta la verificación').max(4096, 'Verificación inválida'),
+    firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
+  })
+  .strict()
+
+/** S7: entrar con Google. */
+export const googleSessionSchema = z
+  .object({
+    idToken: z.string().min(1, 'Falta el inicio de sesión de Google').max(8192, 'Inicio de sesión de Google inválido'),
+    alNoEncontrar: z.enum(['PREGUNTAR'], { errorMap: () => ({ message: 'Opción inválida' }) }).optional(),
+    vincular: z.string().min(1).max(4096, 'Verificación inválida').optional(),
+    firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
+  })
+  .strict()
+
+/** S8: cambiar de número (pedir el código y confirmarlo). */
+export const customerPhoneChangeRequestSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z.object({ phone: z.string().min(8, 'Teléfono inválido').max(32, 'El teléfono es muy largo') }).strict(),
+})
+export const customerPhoneChangeVerifySchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z
+    .object({
+      phone: z.string().min(8, 'Teléfono inválido').max(32, 'El teléfono es muy largo'),
+      code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
+    })
+    .strict(),
+})
+
+/** S13: `?cursor=&limit=` de las listas de «Mi cuenta». El tamaño lo recorta el servidor (1 a 50); el cursor lo valida el servicio. */
+export const customerMyListSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  query: z
+    .object({
+      cursor: z.string().max(80, 'Cursor inválido').optional(),
+      limit: z.coerce.number({ invalid_type_error: 'El límite debe ser un número' }).int('El límite debe ser un entero').optional(),
+    })
+    .passthrough(),
+})
+
+/** S13: «Guardar en mi cuenta». Sólo la forma; el código lo juzga el servicio (mal escrito o ajeno = el mismo 404). */
+export const customerGiftCardClaimSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  body: z.object({ code: z.string().min(1, 'Escribe el código de la tarjeta').max(64, 'Código inválido') }).strict(),
+})

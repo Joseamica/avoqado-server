@@ -55,6 +55,8 @@ jest.mock('@/services/venueSalesGuard', () => ({
 
 jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotCardOnlineOrderInTx: jest.fn().mockResolvedValue(undefined),
+  // S9: la guarda de cualquier pedido en línea se prueba en `b4bit.pedidoEnLinea.test.ts`.
+  assertNotOnlineOrderInTx: jest.fn().mockResolvedValue(undefined),
 }))
 
 jest.mock('@/services/inventory/inventoryPosting.service', () => ({

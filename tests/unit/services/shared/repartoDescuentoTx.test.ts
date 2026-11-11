@@ -699,6 +699,7 @@ describe('recortarDescuentosDeRenglones — B2c (P4, P5)', () => {
         delete: jest.fn().mockResolvedValue({}),
       },
       stampReward: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
+      walletPassOutbox: { create: jest.fn().mockResolvedValue({}) },
       // D3 (21-oct): devolver un premio canjeado bloquea su fila y lee su cartilla; llena = vuelve por cobrar.
       stampCard: { findUnique: jest.fn().mockResolvedValue({ id: 'sc', stampsEarned: 7, stampsRequired: 7 }), update: jest.fn() },
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'rw' }]),
@@ -737,6 +738,16 @@ describe('recortarDescuentosDeRenglones — B2c (P4, P5)', () => {
       where: { id: 'rw' },
       data: { status: 'PENDING', redeemedAt: null, orderDiscountId: null },
     })
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'v1',
+        customerId: 'c1',
+        motivo: 'PREMIO_DEVUELTO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'premio' } })
     expect(res).toMatchObject({
       recortadoPesos: 100,

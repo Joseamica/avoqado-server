@@ -1,8 +1,9 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 import { Prisma } from '@prisma/client'
 import { ConflictError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { bloquearVentaParaLiga, motivoDeReintentoDeLiga } from '../shared/ligaDeClienteEnVenta'
+import { motivoDeReintentoDeLiga } from '../shared/ligaDeClienteEnVenta'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 
@@ -357,7 +358,7 @@ export async function linkCustomerToExistingOrder(
           // 🔴 R3-2 (ronda 3; Codex recheck-7 P2-2, cruce A): PRIMERO el candado de la venta —el mismo modo que toman las ligas del
           // POS y de la TPV (`FOR NO KEY UPDATE`)— y DESPUÉS el vínculo. Antes escribía `OrderCustomer` y luego `Order` sin
           // candado: al revés que el POS (venta → vínculo), y con un acompañante sin primario los dos se esperaban (40P01).
-          if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) return { kind: 'gone' }
+          if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) return { kind: 'gone' }
           // La atribución se RELEE bajo el candado: la de afuera pudo cambiar mientras se esperaba.
           const vigente = await readOrderAttribution(venueId, orderId, customer.id, tx)
           if (!vigente) return { kind: 'gone' }

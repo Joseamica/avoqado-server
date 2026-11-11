@@ -882,6 +882,27 @@ describe('ingestDeliveryOrder', () => {
     expect(callArg.data.printStationId).toBe('st-pantalla')
   })
 
+  // Estación «No lleva comanda» (plan 2026-11-10, Task 2): Uber/Rappi es fase 2. Su comanda sigue igual que hoy —una
+  // sola, con TODOS los renglones, en la estación con pantalla— aunque un producto sea de una categoría «Sin comanda».
+  it('uber_no_cambia: un producto de una categoría «Sin comanda» sigue en la comanda de reparto, como hoy', async () => {
+    ;(prisma.kdsOrder.count as jest.Mock).mockResolvedValue(0)
+    estacionDePantallaParaRepartoMock.mockResolvedValue('st-pantalla')
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod1', categoryId: 'cat-tienda-sin-comanda' }])
+    ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([
+      { id: 'st-pantalla', active: true, isDefault: true, hasKitchenDisplay: true, sendsComanda: true },
+      { id: 'st-tienda', active: true, isDefault: false, hasKitchenDisplay: false, sendsComanda: false },
+    ])
+
+    await ingestDeliveryOrder(makeNormalized({ source: OrderSource.UBER_EATS }), link)
+
+    expect(prisma.kdsOrder.create).toHaveBeenCalledTimes(1)
+    const { data } = (prisma.kdsOrder.create as jest.Mock).mock.calls[0][0]
+    expect(data.printStationId).toBe('st-pantalla')
+    expect(data.items.create).toEqual([
+      expect.objectContaining({ productName: 'Taco', quantity: 2, productId: 'prod1', categoryId: 'cat-tienda-sin-comanda' }),
+    ])
+  })
+
   // ── Promociones ─────────────────────────────────────────────────────────────────────
   //
   // 🔴 Como en cualquier POS: la venta guarda el BRUTO y el descuento va en su propio campo

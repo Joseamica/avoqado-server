@@ -66,6 +66,8 @@ describe('mergeOrders frees the source table even when the source order came fro
         return [{ id: SPLIT_CHILD_SOURCE_ID }, { id: TARGET_ID }]
       }
       if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: SOURCE_TABLE_ID }]
+      // D25: unir toma el candado de comandas del origen y pasa sus comandas al destino; aquí no hay comandas.
+      if (sql.includes('pg_advisory_xact_lock') || sql.includes('"KdsOrderItem"')) return []
       throw new Error(`Unexpected raw statement: ${sql}`)
     })
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)

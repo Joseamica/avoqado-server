@@ -95,8 +95,11 @@ export function ligarCupon(
  */
 const APARTADO = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
-/** El candado es del DESCUENTO (Codex r2 #1): sus límites los comparten todos sus códigos. Lo toman apartar y canjear. */
-async function bloquearDescuento(tx: TxConReintento, discountId: string): Promise<void> {
+/**
+ * El candado es del DESCUENTO (Codex r2 #1): sus límites los comparten todos sus códigos. Lo toman apartar y canjear, y la tienda
+ * híbrida (S10) lo toma PRIMERO al crear un folio con cupón (rango 5 de «Orden de candados de la parte 2»).
+ */
+export async function bloquearDescuentoDelCupon(tx: TxConReintento, discountId: string): Promise<void> {
   await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:cupon-descuento:v1:${discountId}`}, 0))::text`)
 }
 
@@ -105,14 +108,20 @@ async function bloquearDescuento(tx: TxConReintento, discountId: string): Promis
  * cajas podían crear dos ventas con el último uso y cobrar las dos. Aquí, en la transacción que crea la venta y bajo el candado del
  * descuento, cuentan los canjes MÁS los usos apartados. Una venta abandonada lo aparta hasta que se cancela, como un apartado de Square.
  * El canje nunca rechaza: para entonces el dinero ya se cobró con la rebaja.
+ *
+ * Tienda híbrida (S10, R9/R9'): la cotización es una vista previa y no aparta nada compartido: `conCandado: false` lee los límites sin
+ * el candado del descuento, y `usosPropios` son los usos de ese descuento que la MISMA transacción ya hizo sin escribir su contador (el
+ * motor en simulación); se suman a `currentUses` como los habría sumado el contador. El default es el de la caja.
  */
 export async function apartarCupon(
   tx: TxConReintento,
   venueId: string,
   cupon: CuponDeLaVenta,
   customerId: string | null | undefined,
+  opciones: { conCandado?: boolean; usosPropios?: number } = {},
 ): Promise<void> {
-  await bloquearDescuento(tx, cupon.discount.id)
+  if (opciones.conCandado !== false) await bloquearDescuentoDelCupon(tx, cupon.discount.id)
+  const usosPropios = opciones.usosPropios ?? 0
   const fresco = await tx.couponCode.findFirst({
     where: { id: cupon.id, discount: { venueId } },
     select: {
@@ -132,7 +141,7 @@ export async function apartarCupon(
     const apartados = await tx.orderDiscount.count({
       where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...APARTADO } },
     })
-    if (fresco.discount.currentUses + apartados >= fresco.discount.maxTotalUses) throw agotado()
+    if (fresco.discount.currentUses + usosPropios + apartados >= fresco.discount.maxTotalUses) throw agotado()
   }
   const porCliente = fresco.maxUsesPerCustomer ?? fresco.discount.maxUsesPerCustomer
   if (porCliente != null && customerId) {
@@ -151,7 +160,7 @@ export async function canjearCuponEnTx(
   tx: TxConReintento,
   c: { orderId: string; couponCodeId: string; discountId: string; customerId: string | null; amountSaved: Prisma.Decimal | number },
 ): Promise<void> {
-  await bloquearDescuento(tx, c.discountId)
+  await bloquearDescuentoDelCupon(tx, c.discountId)
   await tx.couponRedemption.create({
     data: { couponCodeId: c.couponCodeId, orderId: c.orderId, customerId: c.customerId, amountSaved: c.amountSaved },
   })

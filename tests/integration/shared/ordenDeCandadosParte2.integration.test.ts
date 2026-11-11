@@ -1,5 +1,6 @@
 /**
- * S5b paso 10 · los cruces X5–X8, X10 y X11 contra Postgres real (dos transacciones reales, con barreras).
+ * S5b paso 10 · los cruces X5–X8, X10 y X11 contra Postgres real (dos transacciones reales, con barreras). S11 agrega X1–X4 y X9 (el
+ * folio de la tienda híbrida que canjea al crearse, al final del archivo).
  *
  * Una transacción se detiene en el punto exacto (con lo que ya tomó) hasta que la otra queda ESPERÁNDOLA en `pg_stat_activity`;
  * entonces se suelta y, si hay un círculo, Postgres lo corta con 40P01 a la que esperó primero.
@@ -15,7 +16,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ConflictError } from '@/errors/AppError'
 import { REINTENTO_POR_INTERBLOQUEO, REINTENTO_SERIALIZABLE, isDeadlockError } from '@/utils/serializableRetry'
-import { aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
+import { aTiempo, aparcarLaSiguienteTransaccion, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 import { createOrderWithItems as crearEnTerminal } from '@/services/tpv/order.tpv.service'
 import { createOrderWithItems as crearEnMovil } from '@/services/mobile/order.mobile.service'
 import { revokeTierReward } from '@/services/referrals/referralRefund.service'
@@ -24,6 +25,9 @@ import { recordCouponRedemption } from '@/services/dashboard/coupon.dashboard.se
 import { deleteDiscount } from '@/services/dashboard/discount.dashboard.service'
 import { applyAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
+import { createOnlineOrder } from '@/services/online-ordering/order.service'
+import { expireOnlineOrder } from '@/services/online-ordering/transitions.service'
+import { revertQualifiedReferral } from '@/services/referrals/referralRefund.service'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({
@@ -399,26 +403,54 @@ describe('X7 · recordCouponRedemption contra finalizeCouponsForOrder de otra ve
 // ───────────────────────── X8 ─────────────────────────
 describe('X8 · recordCouponRedemption contra applyAutomaticDiscounts sobre LA MISMA cuenta pendiente (prevención)', () => {
   it('con 1 intento terminan las dos y sin warn: el canje espera la cuenta sin retener nada', async () => {
-    const n = await negocio()
-    await prisma.discount.create({
-      data: { venueId: n.venueId, name: 'Auto', type: 'FIXED_AMOUNT', value: 5, scope: 'ORDER', isAutomatic: true, active: true },
+    await conIntentos(1, async () => {
+      const n = await negocio()
+      await prisma.discount.create({
+        data: { venueId: n.venueId, name: 'Auto', type: 'FIXED_AMOUNT', value: 5, scope: 'ORDER', isAutomatic: true, active: true },
+      })
+      const cuenta = await venta(n)
+      // El motor toma la cuenta y se detiene antes de sus contadores.
+      const barrera = aparcar({ modelo: 'discount', operacion: 'update' })
+      const motor = manejada(applyAutomaticDiscounts(cuenta.id, undefined, n.venueId))
+      let canje: Promise<unknown> | undefined
+      let fallo: unknown,
+        huboFallo = false
+      const secundarios: unknown[] = []
+      try {
+        const pid = await aTiempo(barrera.pid, 15_000, 'el motor detenido con la cuenta tomada')
+        canje = manejada(recordCouponRedemption(n.venueId, n.couponId, cuenta.id, 10))
+        const espera = await esperarBloqueado(prisma, {
+          bloqueadoPor: [pid],
+          consulta: /FROM\s+"Order"[\s\S]*FOR NO KEY UPDATE/,
+          ms: 10_000,
+        })
+        expect(espera).not.toBeNull() // el canje espera Order ANTES del INSERT y de consumir los cupos
+        expect(await usos(n)).toEqual({ cupon: 0, descuento: 0, canjes: 0 })
+        barrera.soltar()
+        const res = await aTiempo(Promise.allSettled([motor, canje]), 20_000, 'las dos operaciones terminan')
+        expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
+        expect(huboInterbloqueo()).toBe(false)
+        expect(await usos(n)).toEqual({ cupon: 1, descuento: 1, canjes: 1 })
+        expect(await prisma.orderDiscount.count({ where: { orderId: cuenta.id } })).toBe(1)
+      } catch (error) {
+        huboFallo = true
+        fallo = error
+      } finally {
+        barrera.soltar()
+        const resultados = await Promise.allSettled([motor, ...(canje ? [canje] : [])])
+        secundarios.push(...resultados.flatMap(r => (r.status === 'rejected' ? [r.reason] : [])))
+        try {
+          barrera.restaurar()
+        } catch (error) {
+          secundarios.push(error)
+        }
+      }
+      if (secundarios.length) {
+        const Constructor = (globalThis as unknown as { AggregateError: new (errors: unknown[], message: string) => Error }).AggregateError
+        throw new Constructor([...(huboFallo ? [fallo] : []), ...secundarios], 'X8: participantes recogidos')
+      }
+      if (huboFallo) throw fallo
     })
-    const cuenta = await venta(n)
-    // El motor toma la cuenta y se detiene antes de sus contadores.
-    const barrera = aparcar({ modelo: 'discount', operacion: 'update' })
-    const motor = manejada(applyAutomaticDiscounts(cuenta.id, undefined, n.venueId))
-    const pid = await aTiempo(barrera.pid, 15_000, 'el motor detenido con la cuenta tomada').catch(e => {
-      barrera.restaurar()
-      throw e
-    })
-    const canje = manejada(recordCouponRedemption(n.venueId, n.couponId, cuenta.id, 10))
-    const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /CouponRedemption/, ms: 10_000 })
-    expect(espera).not.toBeNull() // el canje espera el KEY SHARE de la cuenta
-    const res = await conIntentos(1, () => soltarYEsperar({ aparcada: { promesa: motor, barrera }, otra: canje }))
-    expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
-    expect(huboInterbloqueo()).toBe(false)
-    expect((await usos(n)).canjes).toBe(1)
-    expect(await prisma.orderDiscount.count({ where: { orderId: cuenta.id } })).toBe(1)
   })
 })
 
@@ -533,5 +565,370 @@ describe('X11 · applyAutomaticDiscounts contra hardDeleteTeamMember: el SET NUL
       { createdById: null, currentUses: 1 },
       { createdById: null, currentUses: 1 },
     ])
+  })
+})
+
+// ───────────────────────── S11 · el folio que canjea al crearse (X1–X4, X9) ─────────────────────────
+describe('S11 · los cruces del folio de la tienda híbrida que canjea al crearse', () => {
+  const ventasDe = new Set<string>()
+  afterAll(async () => {
+    for (const venueId of ventasDe) {
+      await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } }).catch(() => undefined)
+      await prisma.walletPassOutbox.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.walletPass.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.inventoryPosting.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.stampReward.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.stampCard.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.loyaltyTransaction.deleteMany({ where: { customer: { venueId } } }).catch(() => undefined)
+      await prisma.referralRewardGrant.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.referral.deleteMany({ where: { venueId } }).catch(() => undefined)
+      await prisma.customerDiscount.deleteMany({ where: { customer: { venueId } } }).catch(() => undefined)
+    }
+  })
+
+  /** Un negocio de los cruces con su tienda en «Nadie» abierta, el producto en línea y la lealtad prendida. */
+  async function tienda(): Promise<Negocio> {
+    const n = await negocio()
+    ventasDe.add(n.venueId)
+    await prisma.product.update({ where: { id: n.productId }, data: { availableOnline: true } })
+    await prisma.loyaltyConfig.create({
+      data: {
+        venueId: n.venueId,
+        active: true,
+        stampsEnabled: true,
+        pointsPerDollar: 1,
+        redemptionRate: 0.01,
+        minPointsRedeem: 1,
+        stampsRequired: 7,
+      },
+    })
+    await prisma.onlineOrderingSettings.create({
+      data: { venueId: n.venueId, enabled: true, requiresAcceptance: false, acceptsPayAtPickup: true, lastToPayPollAt: new Date() },
+    })
+    return n
+  }
+
+  /** La clienta con `puntos` y un premio de `valor` pesos por cada ciclo de `ciclos` (cada uno en su cartilla). */
+  async function clienta(n: Negocio, o: { puntos?: number; premios?: number[]; sinNombre?: boolean } = {}) {
+    const c = await prisma.customer.create({
+      data: { venueId: n.venueId, firstName: o.sinNombre ? null : 'Ana', loyaltyPoints: o.puntos ?? 0 },
+    })
+    const premios: string[] = []
+    for (const [i, valor] of (o.premios ?? []).entries()) {
+      const cartilla = await prisma.stampCard.create({
+        data: { customerId: c.id, venueId: n.venueId, cycle: i + 1, stampsRequired: 7, stampsEarned: 7, completedAt: new Date() },
+      })
+      premios.push(
+        (
+          await prisma.stampReward.create({
+            data: {
+              stampCardId: cartilla.id,
+              customerId: c.id,
+              venueId: n.venueId,
+              rewardType: 'FIXED_AMOUNT',
+              rewardValue: valor,
+              rewardLabel: `Premio ${i + 1}`,
+              status: 'PENDING',
+            },
+          })
+        ).id,
+      )
+    }
+    return { id: c.id, premios }
+  }
+
+  /** El folio de «Nadie» de la clienta (sesión de correo) con su elección. Nunca más caro que `expectedTotal` (R2). */
+  const folio = (
+    n: Negocio,
+    customerId: string,
+    beneficios: { premioId?: string; puntos?: number; cupon?: string } | null,
+    expectedTotal = '100.00',
+    nombre = 'Ana Folio',
+  ) =>
+    createOnlineOrder(
+      {
+        venueId: n.venueId,
+        idempotencyKey: `x11-${randomUUID()}`,
+        items: [{ productId: n.productId, quantity: 1 }],
+        paymentMode: 'PAY_AT_PICKUP',
+        expectedTotal,
+        customer: { name: nombre, phone: null, email: null },
+        customerId,
+        verifiedPhone: null,
+        beneficios,
+        note: null,
+        whatsappConsent: false,
+      },
+      { assertCanCreate: async () => {} },
+    )
+
+  /** Vencer un folio (S9: sus beneficios regresan en la MISMA transacción, bajo el candado de la orden). */
+  const vencer = async (n: Negocio, orderId: string) => {
+    await prisma.onlineOrder.updateMany({ where: { orderId }, data: { acceptDeadlineAt: new Date(Date.now() - 60_000) } })
+    return expireOnlineOrder({ venueId: n.venueId, orderId })
+  }
+
+  // ── X1 ──
+  it('X1 (prevención) · finalizeCouponsForOrder retiene el asesor de D mientras nace un folio con D automático y un cupón de D: con 1 intento terminan las dos, sin warn', async () => {
+    const n = await tienda()
+    const d = await prisma.discount.create({
+      data: {
+        venueId: n.venueId,
+        name: 'Auto D',
+        type: 'FIXED_AMOUNT',
+        value: 10,
+        scope: 'ORDER',
+        isAutomatic: true,
+        isStackable: true,
+        active: true,
+      },
+    })
+    const codigo = `X1${randomUUID().slice(0, 8).toUpperCase()}`
+    const cc = await prisma.couponCode.create({ data: { discountId: d.id, code: codigo } })
+    const pagada = await venta(n, {
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+      remainingBalance: 0,
+      orderDiscounts: {
+        create: {
+          discountId: d.id,
+          couponCodeId: cc.id,
+          name: 'Auto D',
+          type: 'FIXED_AMOUNT',
+          value: 10,
+          amount: 10,
+          taxReduction: 0,
+          isManual: false,
+        },
+      },
+    })
+    const c = await clienta(n)
+    await conIntentos(1, async () => {
+      // El canje: asesor de D y se detiene antes de su CouponRedemption (ya tiene el asesor).
+      const barrera = aparcar({ modelo: 'couponRedemption', operacion: 'create' })
+      const canje = manejada(finalizeCouponsForOrder(n.venueId, pagada.id))
+      const pid = await aTiempo(barrera.pid, 15_000, 'el canje detenido con el asesor de D').catch(e => {
+        barrera.restaurar()
+        throw e
+      })
+      const nuevo = manejada(folio(n, c.id, { cupon: codigo }))
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /pg_advisory_xact_lock/, ms: 10_000 })
+      expect(espera).not.toBeNull() // el folio espera en el asesor ANTES de tocar D
+      const res = await soltarYEsperar({ aparcada: { promesa: canje, barrera }, otra: nuevo })
+      expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
+    })
+    expect(huboInterbloqueo()).toBe(false)
+  })
+
+  // ── X2 ──
+  it('X2 (prevención) · anular una cuenta que devuelve el premio R1 y puntos contra la misma clienta creando un folio con R2 y puntos, con pase activo: con 1 intento terminan, sin warn y nadie toca WalletPass', async () => {
+    const n = await tienda()
+    const c = await clienta(n, { puntos: 1000, premios: [10, 10] })
+    const pase = await prisma.walletPass.create({
+      data: {
+        customerId: c.id,
+        venueId: n.venueId,
+        platform: 'APPLE',
+        serialNumber: `x2-${randomUUID()}`,
+        authToken: randomUUID(),
+        qrToken: `x2-${randomUUID()}`,
+      },
+    })
+    const primero = await folio(n, c.id, { premioId: c.premios[0], puntos: 300 })
+    await conIntentos(1, async () => {
+      // La anulación termina su cuerpo (premio R1 y los puntos regresan: ya tiene la Customer) y espera antes del commit.
+      const parada = aparcarLaSiguienteTransaccion(prisma)
+      const anular = manejada(vencer(n, primero.orderId))
+      const pid = await aTiempo(parada.pid, 15_000, 'la anulación detenida con R1 y la Customer').catch(e => {
+        parada.restaurar()
+        throw e
+      })
+      const nuevo = manejada(folio(n, c.id, { premioId: c.premios[1], puntos: 300 }))
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /"Customer"/, ms: 10_000 })
+      expect(espera).not.toBeNull() // el folio, con R2 tomado, espera la Customer de la anulación: serializan, no se cruzan
+      const res = await soltarYEsperar({ aparcada: { promesa: anular, barrera: parada }, otra: nuevo })
+      expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
+    })
+    expect(huboInterbloqueo()).toBe(false)
+    // Ninguna transacción de dinero o lealtad escribe WalletPass (R55 a): el pase sigue idéntico.
+    expect(await prisma.walletPass.findUniqueOrThrow({ where: { id: pase.id } })).toEqual(pase)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: c.id } })).loyaltyPoints).toBe(700)
+  })
+
+  // ── X3 ──
+  describe('X3 (círculo real) · la creación COMPLETA de un folio de $0 con D automático y su cupón C contra recordCouponRedemption de C en otra venta', () => {
+    async function armar() {
+      const n = await tienda()
+      const d = await prisma.discount.create({
+        data: {
+          venueId: n.venueId,
+          name: 'Mitad',
+          type: 'FIXED_AMOUNT',
+          value: 50,
+          scope: 'ORDER',
+          isAutomatic: true,
+          isStackable: true,
+          active: true,
+        },
+      })
+      const codigo = `X3${randomUUID().slice(0, 8).toUpperCase()}`
+      const cc = await prisma.couponCode.create({ data: { discountId: d.id, code: codigo } })
+      const otra = await venta(n)
+      const c = await clienta(n)
+      // El canje manual: toma C (CouponCode) y se detiene antes de pedir D.
+      const barrera = aparcar({ modelo: 'discount', operacion: 'update' })
+      const manual = manejada(recordCouponRedemption(n.venueId, cc.id, otra.id, 10))
+      const pid = await aTiempo(barrera.pid, 15_000, 'el canje manual detenido con C').catch(e => {
+        barrera.restaurar()
+        throw e
+      })
+      // El folio: D por el motor (50) + C de D (50) ⇒ $0; se cierra pagado y canjea C: con D tomado, pide C.
+      const nuevo = manejada(folio(n, c.id, { cupon: codigo }, '0.00'))
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /"CouponCode"/, ms: 10_000 })
+      expect(espera).not.toBeNull() // el cruce SÍ ocurrió: el folio, con D, espera C
+      return { d, cc, cruce: { aparcada: { promesa: manual, barrera }, otra: nuevo } as Cruce }
+    }
+
+    it('rojo · con 1 intento una aborta con 40P01', async () => {
+      const { cruce } = await conIntentos(1, armar)
+      const res = await conIntentos(1, () => soltarYEsperar(cruce))
+      expect(res.filter(caidoPor40P01)).toHaveLength(1)
+      expect(res.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    })
+
+    it('verde · con 4 intentos el log trae el warn y las dos terminan: el folio nace pagado en $0 y C cuenta sus dos canjes', async () => {
+      const { d, cc, cruce } = await armar()
+      const [manual, nuevo] = await soltarYEsperar(cruce)
+      expect([manual.status, nuevo.status]).toEqual(['fulfilled', 'fulfilled'])
+      expect(huboInterbloqueo()).toBe(true)
+      expect((nuevo as PromiseFulfilledResult<{ total: string; status: string }>).value).toMatchObject({
+        total: '0.00',
+        status: 'ACCEPTED',
+      })
+      expect(await prisma.couponRedemption.count({ where: { couponCodeId: cc.id } })).toBe(2)
+      expect((await prisma.couponCode.findUniqueOrThrow({ where: { id: cc.id } })).currentUses).toBe(2)
+      // El motor sumó su uso automático y cada canje el suyo: 1 + 2.
+      expect((await prisma.discount.findUniqueOrThrow({ where: { id: d.id } })).currentUses).toBe(3)
+    })
+  })
+
+  // ── X4 ──
+  it('X4 (prevención) · clienta SIN nombre crea un folio con R2 (sin puntos) y da su nombre mientras se anula otra cuenta suya con R1 y puntos: con 1 intento terminan y cada una deja su fila en la bandeja de Wallet', async () => {
+    const n = await tienda()
+    const c = await clienta(n, { puntos: 1000, premios: [10, 10], sinNombre: true })
+    const primero = await folio(n, c.id, { premioId: c.premios[0], puntos: 300 }, '100.00', 'Ana Primera')
+    // El primer folio ya le puso nombre: se lo quitamos para que el segundo lo dé (así llega a la MISMA Customer).
+    await prisma.customer.update({ where: { id: c.id }, data: { firstName: null, lastName: null } })
+    const filas = () =>
+      prisma.walletPassOutbox.findMany({ where: { venueId: n.venueId }, select: { id: true, motivo: true, customerId: true } })
+    const previas = new Set((await filas()).map(f => f.id))
+    await conIntentos(1, async () => {
+      const parada = aparcarLaSiguienteTransaccion(prisma)
+      const anular = manejada(vencer(n, primero.orderId))
+      const pid = await aTiempo(parada.pid, 15_000, 'la anulación detenida con R1 y la Customer').catch(e => {
+        parada.restaurar()
+        throw e
+      })
+      const nuevo = manejada(folio(n, c.id, { premioId: c.premios[1] }, '100.00', 'Ana Segunda'))
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /"Customer"/, ms: 10_000 })
+      expect(espera).not.toBeNull()
+      const res = await soltarYEsperar({ aparcada: { promesa: anular, barrera: parada }, otra: nuevo })
+      expect(res.map(r => r.status)).toEqual(['fulfilled', 'fulfilled'])
+    })
+    expect(huboInterbloqueo()).toBe(false)
+    // Codex r4: UNA fila por operación, sin duplicados: la anulación deja su PREMIO_DEVUELTO (R1) y el folio su PREMIO_CANJEADO (R2),
+    // las dos de la clienta. RELECTURA no es de ninguna de las dos (la escribe el aviso de después del commit) y no cuenta.
+    const nuevas = (await filas()).filter(f => !previas.has(f.id) && f.motivo !== 'RELECTURA')
+    const porMotivo = nuevas.reduce<Record<string, number>>((a, f) => ({ ...a, [f.motivo]: (a[f.motivo] ?? 0) + 1 }), {})
+    expect(porMotivo).toEqual({ PREMIO_DEVUELTO: 1, PREMIO_CANJEADO: 1 })
+    expect(nuevas.every(f => f.customerId === c.id)).toBe(true)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: c.id } })).firstName).toBe('Ana')
+  })
+
+  // ── X9 ──
+  describe('X9 (círculo real) · la reversa de otro referido retiene a la referidora U y encuentra D′, contra un folio que aplica D′ y canjea puntos', () => {
+    async function armar() {
+      const n = await tienda()
+      const u = await prisma.customer.create({
+        data: { venueId: n.venueId, firstName: 'Refe', loyaltyPoints: 1000, referralCount: 1, referralTier: 'TIER_1' },
+      })
+      const config = await prisma.referralProgramConfig.create({
+        data: { venueId: n.venueId, active: true, tier1ReferralsRequired: 1, tier2ReferralsRequired: 5, tier3ReferralsRequired: 10 },
+      })
+      const premioDelNivel = await prisma.referralTierReward.create({
+        data: { configId: config.id, tierLevel: 1, rewardType: 'PERMANENT_DISCOUNT', rewardPercent: 10 },
+      })
+      // D′: el premio permanente que la compra que calificó le emitió a U (un descuento asignado a ella).
+      const dPrima = await prisma.discount.create({
+        data: { venueId: n.venueId, name: 'Premio de referidos', type: 'PERCENTAGE', value: 10, scope: 'ORDER', active: true },
+      })
+      await prisma.customerDiscount.create({ data: { customerId: u.id, discountId: dPrima.id } })
+      await prisma.referralRewardGrant.create({
+        data: {
+          venueId: n.venueId,
+          customerId: u.id,
+          tierLevel: 1,
+          tierRewardId: premioDelNivel.id,
+          rewardType: 'PERMANENT_DISCOUNT',
+          rewardPercent: 10,
+          discountId: dPrima.id,
+          status: 'ISSUED',
+        },
+      })
+      // Otro referido de U cuya compra se anuló entera: su reversa le baja el nivel a U y revoca D′.
+      const referido = await prisma.customer.create({ data: { venueId: n.venueId, firstName: 'Referido' } })
+      const anulada = await venta(n, { status: 'CANCELLED' })
+      await prisma.referral.create({
+        data: {
+          venueId: n.venueId,
+          referrerCustomerId: u.id,
+          referredCustomerId: referido.id,
+          status: 'QUALIFIED',
+          qualifyingOrderId: anulada.id,
+        },
+      })
+      // La reversa: retiene U (referralCount − 1) y se detiene antes de leer el programa (después busca D′).
+      const barrera = aparcar({ modelo: 'referralProgramConfig', operacion: 'findUnique' })
+      const reversa = manejada(revertQualifiedReferral({ orderId: anulada.id, venueId: n.venueId, reason: 'ORDER_REFUNDED' as never }))
+      const pid = await aTiempo(barrera.pid, 15_000, 'la reversa detenida con U').catch(e => {
+        barrera.restaurar()
+        throw e
+      })
+      // El folio de U: D′ por el motor (lo retiene) y 100 puntos ($1): pide U. $100 − $10 − $1 = $89.
+      const nuevo = manejada(folio(n, u.id, { puntos: 100 }, '89.00'))
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /"Customer"/, ms: 10_000 })
+      expect(espera).not.toBeNull() // el cruce SÍ ocurrió: el folio, con D′, espera a U
+      return { u, dPrima, cruce: { aparcada: { promesa: reversa, barrera }, otra: nuevo } as Cruce }
+    }
+
+    it('rojo · con 1 intento una aborta con 40P01', async () => {
+      const { cruce } = await conIntentos(1, armar)
+      const res = await conIntentos(1, () => soltarYEsperar(cruce))
+      expect(res.filter(caidoPor40P01)).toHaveLength(1)
+      expect(res.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    })
+
+    it('verde · con 4 intentos las dos terminan: la reversa revoca D′ y el folio nace con D′ o responde PRICE_CHANGED sin D′ (nunca un 500)', async () => {
+      const { u, dPrima, cruce } = await armar()
+      const [reversa, nuevo] = await soltarYEsperar(cruce)
+      expect(reversa.status).toBe('fulfilled')
+      expect(huboInterbloqueo()).toBe(true)
+      expect((await prisma.discount.findUniqueOrThrow({ where: { id: dPrima.id } })).active).toBe(false)
+      if (nuevo.status === 'fulfilled') {
+        // El folio ganó: nació con D′ (lo revocado después ya no se le quita, como hoy).
+        const r = (nuevo as PromiseFulfilledResult<{ orderId: string; total: string }>).value
+        expect(r.total).toBe('89.00')
+        expect(await prisma.orderDiscount.count({ where: { orderId: r.orderId, discountId: dPrima.id } })).toBe(1)
+      } else {
+        // La reversa ganó: el folio repitió sin D′ y su respuesta normal es PRICE_CHANGED con la cotización sin D′.
+        const reason = (nuevo as PromiseRejectedResult).reason
+        expect(reason).toMatchObject({ statusCode: 409, code: 'PRICE_CHANGED' })
+        // Codex r4: la cotización del rechazo ya no trae D′; con beneficios calculados, $100 − $1 de puntos; degradada, la de lista.
+        const q = reason.details.quote as { total: number; aplicados?: Array<{ nombre: string }>; beneficios?: { calculados: boolean } }
+        expect(q.aplicados ?? []).not.toContainEqual(expect.objectContaining({ nombre: 'Premio de referidos' }))
+        expect(q.total).toBe(q.beneficios?.calculados === false ? 100 : 99)
+        expect((await prisma.customer.findUniqueOrThrow({ where: { id: u.id } })).loyaltyPoints).toBe(1000)
+      }
+    })
   })
 })

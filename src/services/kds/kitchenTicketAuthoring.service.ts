@@ -6,6 +6,7 @@
  * de una orden corre bajo un candado de Postgres por orden: dos armados a la vez (el gancho del cobro y el POST de
  * una app vieja) no duplican platillos.
  */
+import { createHash, randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -13,17 +14,23 @@ import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/p
 import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
-import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
-import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kitchenPreparation'
+import { origenDeLaDiferencia, planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
+import { initialPreparation, parsePreparation, PREPARATION_VERSION, preparationTicketStatus } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
+import { cobradoATiempoEnTx } from '../shared/cuentaCancelada'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
 
 /** Renglones por página: recorrer la cuenta completa sin una lectura sin tope. */
 const MAX_RENGLONES = 500
+/**
+ * S9 v5 (B4): holgura del reloj al comparar «tocado desde T» en un folio sellado. Sólo empuja hacia MANDAR (lo de BASE), nunca hacia
+ * perder una unidad nueva: un empate, un renglón escrito en la misma transacción o un reloj que retrocede cuentan como «tocado».
+ */
+const HOLGURA_DE_RELOJ_MS = 5_000
 /** Los `OrderSource` que pone la ingesta de reparto (`deliveryOrderIngestion.service.ts`). */
 const ORIGENES_DE_AGREGADOR = new Set<string>(['UBER_EATS', 'RAPPI', 'DIDI_FOOD', 'DELIVERY_PLATFORM'])
 
@@ -35,13 +42,16 @@ export async function authorKitchenTickets(params: {
   const { venueId, orderId, trigger } = params
   const startedAt = new Date()
 
-  const { routing, screens } = await estacionesDelNegocio(venueId)
+  const { routing, screens, sinComanda } = await estacionesDelNegocio(venueId)
   const preparationLine = await prisma.orderItem.findFirst({
     where: { order: { id: orderId, venueId }, serviceCourse: { path: ['preparationVersion'], equals: PREPARATION_VERSION } },
     select: { id: true },
   })
   // New POS work persists its progress even when a station uses paper, without backfilling legacy sales.
-  const preparationScreens = preparationLine ? [...routing.activeStationIds].map(id => ({ id, since: new Date(0) })) : screens
+  // «No lleva comanda» nunca es pantalla, tampoco en la preparación por producto.
+  const preparationScreens = preparationLine
+    ? [...routing.activeStationIds].filter(id => !sinComanda.has(id)).map(id => ({ id, since: new Date(0) }))
+    : screens
   if (preparationScreens.length === 0 && !preparationLine) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
@@ -85,12 +95,50 @@ export async function authorKitchenTickets(params: {
     // armado bloqueaba renglones y luego esperaba la orden, al revés de quien ya la tiene y espera esos renglones.
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return [] as string[]
     // Se relee DENTRO del candado: una anulación que ganó la carrera ya retiró sus comandas y no hay que revivirlas.
-    const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+    const vigente = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: {
+        status: true,
+        loyaltySaleAt: true,
+        onlineOrder: {
+          select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
+        },
+      },
+    })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
+    // 🔴 S9 v5 (B4, D3 «en duda, manda»): un folio «Nadie» que se anuló alguna vez (el sello de A0) sólo NO se arma si ningún renglón se
+    // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
+    // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).
+    // Una edición después de T espera el candado de la orden que soltó la anulación; `@updatedAt` y T leen el mismo reloj (una instancia).
+    // Regla C (founder, 10-nov): si la caja lo cobró ANTES de la fecha exacta de su cierre (`cobradoATiempoEnTx`), no es dinero tardío:
+    // se arma como un folio pagado a tiempo, sin preguntar por renglones.
+    const oo = vigente.onlineOrder
+    const fechas = oo?.requiresAcceptance === false ? [oo.expiredAt, oo.cancelledAt, oo.rejectedAt].filter((d): d is Date => d != null) : []
+    const aTiempo =
+      oo != null &&
+      fechas.length > 0 &&
+      (await cobradoATiempoEnTx(tx, { venueId, orderId, folio: oo, horaDelCobro: vigente.loyaltySaleAt }))
+    if (fechas.length > 0 && !aTiempo) {
+      const desde = new Date(Math.min(...fechas.map(d => d.getTime())) - HOLGURA_DE_RELOJ_MS)
+      const tocado = await tx.orderItem.findFirst({
+        where: { orderId, OR: [{ createdAt: { gte: desde } }, { updatedAt: { gte: desde } }] }, // índice [orderId]
+        select: { id: true },
+      })
+      if (!tocado) {
+        // Nada que cocinar: la marca se limpia con la guarda de siempre (una ronda que entró en medio la conserva).
+        await tx.order.updateMany({
+          where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+          data: { kitchenPendingAt: null },
+        })
+        return [] as string[]
+      }
+    }
 
     let cursor: string | undefined
     let rondaSinComanda = false
     const ids = new Set<string>()
+    /** Comandas que nacieron en ESTE armado: las únicas que reciben platillos (hz:dcc49fe5:D1 · Codex r4 B10/B13, r5). */
+    const creadas = new Set<string>()
     while (true) {
       const renglones = await tx.orderItem.findMany({
         where: { orderId },
@@ -128,11 +176,24 @@ export async function authorKitchenTickets(params: {
       const normales = renglones.filter(r => !esRenglonDeVale(r) && !r.giftCardId)
       if (normales.length === 0) continue
 
-      const cubiertos = await tx.kdsOrderItem.findMany({
+      // Cuántas unidades de cada renglón ya están en comandas (hz:dcc49fe5:D1): la caja puede subir la cantidad de un renglón ya
+      // mandado y sólo debe salir la diferencia. Un grupo por renglón: a lo más MAX_RENGLONES, sin truncar filas.
+      const enComandas = await tx.kdsOrderItem.groupBy({
+        by: ['orderItemId'],
         where: { orderItemId: { in: normales.map(r => r.id) }, kdsOrder: { venueId } },
-        select: { orderItemId: true },
-        take: MAX_RENGLONES * 4,
+        _sum: { quantity: true },
       })
+      const sentUnits = new Map<string, number>()
+      for (const g of enComandas) if (g.orderItemId && g._sum.quantity) sentUnits.set(g.orderItemId, g._sum.quantity)
+      // Una comanda con preparación por producto la lleva para TODOS sus renglones, aunque el renglón no la pida (Codex r2 #2).
+      const conPreparacion = sentUnits.size
+        ? await tx.kdsOrderItem.groupBy({
+            by: ['orderItemId'],
+            where: { orderItemId: { in: [...sentUnits.keys()] }, kdsOrder: { venueId, preparationVersion: PREPARATION_VERSION } },
+            _count: { _all: true },
+          })
+        : []
+      const preparationLineIds = new Set(conPreparacion.map(g => g.orderItemId).filter((id): id is string => Boolean(id)))
 
       const lines: KitchenLine[] = normales.map(r => ({
         id: r.id,
@@ -156,16 +217,19 @@ export async function authorKitchenTickets(params: {
       const entrada = {
         order: { id: order.id, externalId: order.externalId, tableId: order.tableId },
         lines,
-        coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
+        sentUnits,
+        preparationLineIds,
         routing,
         screens: preparationScreens.length ? preparationScreens : [{ id: 'none', since: new Date(0) }],
         stampedAt: startedAt,
+        sinComanda,
       }
       const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
       // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
       // sin ella el barrido ya no la ve nunca (Codex 3.6).
       rondaSinComanda ||=
-        soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
+        soloSinEnviar &&
+        planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt && !sentUnits.has(l.id)))
 
       for (const plan of plans) {
         const preparationVersion = plan.lines.some(
@@ -173,15 +237,25 @@ export async function authorKitchenTickets(params: {
         )
           ? PREPARATION_VERSION
           : 0
-        const kdsOrderId = await cabeceraPorFolio(tx, {
+        const cabecera = {
           venueId,
-          sourceKey: plan.sourceKey,
           stationId: plan.stationId,
           orderId,
           orderNumber: order.orderNumber,
           orderType: order.type,
           preparationVersion,
-        })
+        }
+        // 🔴 hz:dcc49fe5:D1 · Codex r4 B10/B13 y r5: una comanda que YA existía (de un armado anterior o de una marca que llegó antes)
+        // nunca recibe platillos nuevos. Pudo terminarse o salir en papel, y una marca (LISTO sin red, «salió en papel») la cierra sin
+        // este candado y sin decir qué cubría: lo agregado quedaría escondido. Lo de este armado sale en una comanda nueva y visible
+        // (el folio de su diferencia), aunque repita algo que la marca ya cubría («en duda, manda»). Así es cada envío en Square.
+        let kdsOrderId = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: plan.sourceKey }, creadas)
+        if (!creadas.has(kdsOrderId)) {
+          const folioNuevo = `${origenDeLaDiferencia(order, startedAt)}:${plan.stationId ?? 'none'}`
+          kdsOrderId = await cabeceraPorFolio(tx, { ...cabecera, sourceKey: folioNuevo }, creadas)
+          // Sólo si ese folio ya existía de otro armado en el mismo milisegundo: se revierte todo y el barrido reintenta con otro sello.
+          if (!creadas.has(kdsOrderId)) throw new ConflictError('La comanda nueva ya existía.', 'KDS_FOLIO_CONFLICT')
+        }
         await tx.kdsOrderItem.createMany({
           data: plan.lines.map(l => ({
             kdsOrderId,
@@ -200,13 +274,13 @@ export async function authorKitchenTickets(params: {
               : Prisma.DbNull,
           })),
         })
+        ids.add(kdsOrderId)
         if (plan.toStamp.length > 0) {
           await tx.orderItem.updateMany({
             where: { id: { in: plan.toStamp }, sentToKitchenAt: null },
             data: { sentToKitchenAt: startedAt },
           })
         }
-        ids.add(kdsOrderId)
       }
     }
 
@@ -298,6 +372,7 @@ async function cabeceraPorFolio(
     orderType: string
     preparationVersion: number
   },
+  creadas: Set<string>,
 ): Promise<string> {
   const [creada] = await tx.kdsOrder.createManyAndReturn({
     data: [
@@ -315,11 +390,27 @@ async function cabeceraPorFolio(
     skipDuplicates: true,
     select: { id: true },
   })
-  if (creada) return creada.id
+  if (creada) {
+    creadas.add(creada.id)
+    return creada.id
+  }
   const existente = await tx.kdsOrder.findUniqueOrThrow({
     where: { venueId_sourceKey: { venueId: a.venueId, sourceKey: a.sourceKey } },
-    select: { id: true, orderId: true, preparationVersion: true },
+    select: { id: true, orderId: true },
   })
+  // 🔴 Codex r3 #1: nunca se le suman platillos a la comanda de OTRA cuenta (si ya se terminó, saldrían escondidos). Pasa si un
+  // renglón movido de cuenta trae el folio de su ronda, o con una marca rara. Se arma en un folio propio de esta cuenta, fijo para
+  // que un reintento se junte con él y de largo fijo para que su LISTO sin red se acepte.
+  if (existente.orderId && existente.orderId !== a.orderId) {
+    const propio = `order:${a.orderId}:otra:${createHash('sha256').update(a.sourceKey).digest('hex').slice(0, 16)}`
+    if (a.sourceKey === propio) throw new ConflictError('La comanda choca con la de otra cuenta.', 'KDS_FOLIO_CONFLICT')
+    logger.warn('[KDS] el folio ya es de otra cuenta; la comanda sale en uno propio', {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      otraCuenta: existente.orderId,
+    })
+    return cabeceraPorFolio(tx, { ...a, sourceKey: propio }, creadas)
+  }
   // Una MARCA llegó antes: se le pone la venta. Su estado y su «en papel» son pegajosos y no se tocan.
   if (!existente.orderId) {
     await tx.kdsOrder.update({
@@ -327,18 +418,7 @@ async function cabeceraPorFolio(
       data: { orderId: a.orderId, orderNumber: a.orderNumber, orderType: a.orderType, printStationId: a.stationId },
     })
   }
-  if (a.preparationVersion && !existente.preparationVersion) {
-    // An old offline mark may have arrived BEFORE this round. It cannot swallow held products.
-    await tx.kdsOrder.update({
-      where: { id: existente.id },
-      data: {
-        preparationVersion: a.preparationVersion,
-        status: 'NEW',
-        completedAt: null,
-        fallbackPrintedAt: null,
-      },
-    })
-  }
+  // Ya no recibe platillos (ni se reabre por una ronda con tiempos): el armado los manda en una comanda nueva.
   return existente.id
 }
 
@@ -367,10 +447,14 @@ export async function retirarComandasDeVentaAnulada(
   orderId: string,
   actor: { staffId?: string; reason?: string } = {},
 ): Promise<{ kdsOrderIds: string[]; kdsOrderItemIds: string[] }> {
-  await tomarCandadoDeComandas(tx, orderId)
-  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const }, preparationVersion: 0 }
-  const kdsOrderIds: string[] = [],
+  // D3 (hz:381780f0, Codex r1 #1): con los de sus cuentas ligadas, en orden y de entrada. El borrado del panel llega aquí sin ningún
+  // candado; tomar el suyo y después el de la original cerraba un ciclo con unir, que ya los toma en orden. Quien ya los tiene
+  // (anular, «Anular todo») los vuelve a pedir sin esperar.
+  for (const id of (await cuentasDeSusComandas(tx, venueId, orderId)).sort()) await tomarCandadoDeComandas(tx, id)
+  // D25: antes de retirar, cada platillo pendiente queda con la cuenta donde vive hoy su renglón (dividir y unir no lo mueven).
+  const kdsOrderIds: string[] = await ponerComandasConSuCuenta(tx, venueId, orderId),
     kdsOrderItemIds: string[] = []
+  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const }, preparationVersion: 0 }
   let cursor: string | undefined
   for (;;) {
     const page = await tx.kdsOrder.findMany({
@@ -444,4 +528,161 @@ export async function retirarComandasDeVentaAnulada(
   }
   await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
   return { kdsOrderIds, kdsOrderItemIds }
+}
+
+/** Una página de las filas pendientes de comanda que tocan a `orderId` y no están con su cuenta: lo que mueve `ponerComandasConSuCuenta`. */
+function filasFueraDeSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
+  return tx.$queryRaw<Array<{ id: string; kdsOrderId: string; cabecera: string | null; dueno: string }>>`
+      SELECT ki.id, ki."kdsOrderId", k."orderId" AS cabecera, oi."orderId" AS dueno
+        FROM "KdsOrder" k
+        JOIN "KdsOrderItem" ki ON ki."kdsOrderId" = k.id
+        JOIN "OrderItem" oi ON oi.id = ki."orderItemId"
+        JOIN "Order" o ON o.id = oi."orderId"
+       WHERE k."venueId" = ${venueId} AND k."orderId" = ${orderId} AND k.status <> 'COMPLETED'
+         AND oi."orderId" <> ${orderId} AND o."venueId" = ${venueId} AND o.status NOT IN ('CANCELLED', 'DELETED')
+      UNION
+      SELECT ki.id, ki."kdsOrderId", k."orderId" AS cabecera, oi."orderId" AS dueno
+        FROM "OrderItem" oi
+        JOIN "KdsOrderItem" ki ON ki."orderItemId" = oi.id
+        JOIN "KdsOrder" k ON k.id = ki."kdsOrderId"
+       WHERE oi."orderId" = ${orderId} AND k."venueId" = ${venueId} AND k.status <> 'COMPLETED'
+         AND k."orderId" IS DISTINCT FROM ${orderId}
+      ORDER BY 2, 4, 1
+      LIMIT 1000`
+}
+
+/**
+ * 🔴 hz:381780f0:D3: `orderId` y las cuentas cuyo candado de comandas pedirá `ponerComandasConSuCuenta(orderId)`, leídas SIN candado.
+ * Quien une o anula los toma TODOS, en orden y antes que las filas de las cuentas (`lockTableOrderScope` con `kdsOrderIds`): pedirlos a
+ * media transacción, ya con las filas tomadas, cerraba un ciclo con otra caja que tenía ese candado y esperaba su fila (Postgres
+ * cortaba una con 40P01). Lo que cambie entre esta lectura y el candado lo relee ella bajo candado y lo toma (raro; se reintenta).
+ * ponytail: sólo la primera página (1,000 filas); las cuentas de las siguientes se toman a media transacción, como antes.
+ */
+export async function cuentasDeSusComandas(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<string[]> {
+  const filas = (await filasFueraDeSuCuenta(tx, venueId, orderId)) ?? []
+  return [...new Set([orderId, ...filas.flatMap(f => [f.cabecera, f.dueno])])].filter((id): id is string => Boolean(id))
+}
+
+/**
+ * 🔴 D25 (Codex r4 del D1 de cocina, B4 y B5): un platillo pendiente de la pantalla de cocina es de la cuenta donde vive HOY su
+ * renglón, no de la cuenta que armó la comanda. Dividir y unir mueven renglones sin tocar sus comandas; por eso anular A borraba (o,
+ * con preparación por producto, cancelaba) lo que ya vivía en B, y lo de A que estaba en la comanda de otra cuenta se quedaba.
+ *
+ * Pone bajo su cuenta cada fila pendiente que toca a `orderId`: la de una comanda de `orderId` cuyo renglón vive en OTRA cuenta viva
+ * pasa a esa cuenta, y la de un renglón de `orderId` que está en la comanda de otra pasa a `orderId`. Lo último que queda de una
+ * comanda se la lleva entera (mismo folio, mismo lugar en la pantalla); lo demás sale en un folio nuevo (`order:<cuenta>:de:<comanda>:<n>`)
+ * con la estación, el estado y la hora de la original. Una fila sin renglón, o de un renglón de una cuenta anulada, se queda. Lo
+ * terminado no se toca. Una «LISTO» sin red sobre el folio original no alcanza a lo que salió en uno nuevo: vuelve a verse pendiente
+ * (en duda, manda).
+ *
+ * 🔴 Candados (Codex r1 #1, r2 #1, r3): la comanda de una cuenta sólo se toca con SU candado de comandas, el mismo que toman su armado,
+ * su preparación y su anulación; y la cuenta que recibe la pieza, con el suyo. Quien une o anula ya los tomó antes que las filas
+ * (`cuentasDeSusComandas`, D3); si aun así falta alguno (otra caja cambió las ligas mientras), se toma (en orden) y se vuelve a leer ya
+ * bajo candado. Dos cajas que los toman al revés se interbloquean: Postgres corta una y `withDeadlockRetry` (o el RETRY de la cola sin
+ * red) la repite. Las escrituras además exigen lo leído. CALLER_LOCKED: dentro de la transacción y con el candado de comandas de
+ * `orderId`. Devuelve las comandas que cambiaron.
+ */
+export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<string[]> {
+  const tocadas = new Set<string>()
+  const conPreparacion = new Set<string>()
+  const conCandado = new Set<string>([orderId]) // el de `orderId` lo tomó quien llama
+  // Por páginas y sin tope (Codex r2 #2): cada fila que se mueve queda con su cuenta y ya no vuelve a salir.
+  for (let sinAvanzar = 0; ; ) {
+    const filas = await filasFueraDeSuCuenta(tx, venueId, orderId)
+    if (!filas?.length) break
+    const faltan = [...new Set(filas.flatMap(f => [f.cabecera, f.dueno]))]
+      .filter((id): id is string => Boolean(id) && !conCandado.has(id!))
+      .sort()
+    if (faltan.length > 0) {
+      for (const id of faltan) {
+        await tomarCandadoDeComandas(tx, id)
+        conCandado.add(id)
+      }
+      continue // se vuelve a leer ya bajo candado: lo leído antes pudo cambiar mientras se esperaba
+    }
+
+    const porComanda = new Map<string, Map<string, string[]>>()
+    for (const f of filas) {
+      const porDueno = porComanda.get(f.kdsOrderId) ?? new Map<string, string[]>()
+      porDueno.set(f.dueno, [...(porDueno.get(f.dueno) ?? []), f.id])
+      porComanda.set(f.kdsOrderId, porDueno)
+    }
+    const duenos = [...new Set(filas.map(f => f.dueno))]
+    const numeros = new Map(
+      (
+        await tx.order.findMany({ where: { id: { in: duenos }, venueId }, select: { id: true, orderNumber: true }, take: duenos.length })
+      ).map(o => [o.id, o.orderNumber]),
+    )
+    const comandas = await tx.kdsOrder.findMany({
+      where: { id: { in: [...porComanda.keys()] }, venueId },
+      select: {
+        id: true,
+        orderId: true,
+        orderType: true,
+        status: true,
+        startedAt: true,
+        preparationVersion: true,
+        printStationId: true,
+        fallbackPrintedAt: true,
+        printedAt: true,
+        customerName: true,
+        customerContact: true,
+        createdAt: true,
+        _count: { select: { items: true } },
+      },
+      take: porComanda.size,
+    })
+
+    let movidas = 0
+    for (const c of comandas) {
+      let quedan = c._count.items
+      for (const [dueno, ids] of porComanda.get(c.id) ?? []) {
+        const orderNumber = numeros.get(dueno) ?? '—'
+        let destino = c.id
+        let movidasAqui: number
+        if (ids.length === quedan) {
+          // La comanda entera cambia de dueño sólo si sigue siendo de quien se leyó (CAS).
+          const cambio = await tx.kdsOrder.updateMany({
+            where: { id: c.id, venueId, orderId: c.orderId, status: { not: 'COMPLETED' } },
+            data: { orderId: dueno, orderNumber },
+          })
+          movidasAqui = cambio.count ? ids.length : 0
+        } else {
+          // Folio nuevo en cada movimiento (Codex r1 #2): reusar uno viejo podía caer en la comanda de otra cuenta anulada.
+          const { _count, id, ...igual } = c
+          const sourceKey = `order:${dueno}:de:${id}:${randomUUID().slice(0, 8)}`
+          destino = (
+            await tx.kdsOrder.create({ data: { ...igual, venueId, sourceKey, orderId: dueno, orderNumber }, select: { id: true } })
+          ).id
+          // Sólo las filas que siguen en la comanda leída (CAS); si otra cuenta ya se las llevó, el folio nuevo sobra.
+          movidasAqui = (await tx.kdsOrderItem.updateMany({ where: { id: { in: ids }, kdsOrderId: c.id }, data: { kdsOrderId: destino } }))
+            .count
+          if (movidasAqui === 0) await tx.kdsOrder.delete({ where: { id: destino } })
+          quedan -= movidasAqui
+        }
+        if (movidasAqui === 0) continue
+        movidas += movidasAqui
+        tocadas.add(c.id).add(destino)
+        if (c.preparationVersion === PREPARATION_VERSION) conPreparacion.add(c.id).add(destino)
+      }
+      // Dos movimientos a la vez pueden vaciarla sin que ninguno se la lleve entera: una comanda vacía no se queda en la pantalla.
+      await tx.kdsOrder.deleteMany({ where: { id: c.id, venueId, status: { not: 'COMPLETED' }, items: { none: {} } } })
+    }
+    if (movidas > 0) sinAvanzar = 0
+    else if (++sinAvanzar >= 10) {
+      // Otra cuenta movía lo mismo una y otra vez: mejor que la operación se reintente a que la anulación borre algo ajeno.
+      throw new ConflictError('La comanda de cocina cambió mientras se movía. Vuelve a intentar.', 'KDS_ORDER_OWNER_CHANGED')
+    }
+  }
+  // Con preparación por producto el estado de una comanda sale de sus productos (`applyKitchenPreparation`): se recalcula en la de
+  // origen y en la nueva, las dos bajo el candado de su cuenta.
+  for (const id of conPreparacion) {
+    const items = await tx.kdsOrderItem.findMany({ where: { kdsOrderId: id }, select: { quantity: true, preparation: true }, take: 5000 })
+    const status = preparationTicketStatus(items.map(i => parsePreparation(i.preparation, i.quantity)))
+    await tx.kdsOrder.updateMany({
+      where: { id, venueId, preparationVersion: PREPARATION_VERSION },
+      data: { status, completedAt: status === 'COMPLETED' ? new Date() : null },
+    })
+  }
+  return [...tocadas]
 }

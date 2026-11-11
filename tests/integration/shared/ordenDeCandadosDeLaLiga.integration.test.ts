@@ -23,7 +23,10 @@ jest.mock('@/communication/sockets/managers/socketManager', () => {
   const sm = { getServer: jest.fn(), getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() }
   return { __esModule: true, default: sm, socketManager: sm }
 })
-jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn(),
+  reintentarAvisosDeTarjeta: jest.fn().mockResolvedValue({ avisados: 0, fallidos: 0, ocupados: 0 }),
+}))
 jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 jest.mock('@/services/access/basePlan.service', () => ({
   ...jest.requireActual('@/services/access/basePlan.service'),
@@ -74,6 +77,7 @@ afterAll(async () => {
   // 🔴 Sin fixture no se limpia NADA: un filtro con venueId undefined borraría tablas enteras.
   if (!venueId || !orgId) return
   await prisma.loyaltyTransaction.deleteMany({ where: { customer: { venueId } } })
+  await prisma.walletPassOutbox.deleteMany({ where: { venueId } })
   await prisma.stampReward.deleteMany({ where: { venueId } })
   await prisma.stampEvent.deleteMany({ where: { venueId } })
   await prisma.stampCard.deleteMany({ where: { venueId } })

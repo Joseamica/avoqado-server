@@ -91,7 +91,7 @@ describe('AutoClockOutJob', () => {
 
       prismaMock.timeEntry.findMany.mockResolvedValue(mockOpenEntries)
       prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
-      prismaMock.timeEntryBreak.update.mockResolvedValue({})
+      prismaMock.timeEntryBreak.updateMany.mockResolvedValue({ count: 1 })
 
       // Mock the time window check by making it always return true for this test
       ;(job as any).isWithinClockOutWindow = jest.fn().mockReturnValue(true)
@@ -114,10 +114,10 @@ describe('AutoClockOutJob', () => {
         }),
       )
 
-      // Second entry (on break) should have its break closed first
-      expect(prismaMock.timeEntryBreak.update).toHaveBeenCalledWith(
+      // Second entry (on break): its break is closed only if it is still open
+      expect(prismaMock.timeEntryBreak.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'break-1' },
+          where: { id: 'break-1', endTime: null },
           data: expect.objectContaining({
             endTime: expect.any(Date),
           }),

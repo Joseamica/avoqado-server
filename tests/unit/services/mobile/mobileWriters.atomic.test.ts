@@ -144,6 +144,7 @@ const MODELS = [
   'staffVenue',
   'stampReward',
   'stampCard',
+  'walletPassOutbox',
   'shift',
 ]
 const WRITES = ['create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany']
@@ -197,7 +198,7 @@ const NOT_FOUND_MESSAGE: Record<Writer, string> = {
 
 function model() {
   return Object.fromEntries(
-    ['findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
+    ['count', 'findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
   ) as Record<string, jest.Mock>
 }
 function txCallOrders(except: jest.Mock[] = []): number[] {
@@ -299,7 +300,7 @@ beforeEach(() => {
   prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 4000 })
   // Every Order/child/reward read or write on the GLOBAL client is an escape from the lock.
   for (const [name, ops] of Object.entries({
-    order: ['findFirst', 'findUnique', 'update', 'updateMany', 'create'],
+    order: ['count', 'findFirst', 'findUnique', 'update', 'updateMany', 'create'],
     orderItem: ['findMany', 'updateMany', 'createMany', 'deleteMany'],
     orderDiscount: ['findFirst', 'findMany', 'create', 'update', 'delete'],
     orderPromotion: ['findUnique', 'findFirst', 'create', 'delete', 'updateMany'],
@@ -309,6 +310,7 @@ beforeEach(() => {
     loyaltyTransaction: ['create'],
     staffVenue: ['findUnique'],
     stampReward: ['findFirst', 'updateMany', 'update'],
+    walletPassOutbox: ['create'],
   })) {
     for (const op of ops) prismaMock[name][op].mockRejectedValue(new Error(`GLOBAL ${name}.${op}`))
   }
@@ -326,7 +328,7 @@ describe('locked mobile writers', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(committed).toBe(true)
-    // Splits discover bounded topology after Venue KEY SHARE, then lock Order → Table
+    // Splits discover bounded topology after Venue KEY SHARE, then lock kitchen (D25) → Order → Table
     // before any domain read/write. The other six writers keep their exact original contract.
     const raw = tx.$queryRaw.mock.calls
     const fenced = name === 'split' || name === 'splitBySeat'
@@ -337,13 +339,16 @@ describe('locked mobile writers', () => {
       }))
       expect(statements).toEqual([
         { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
+        // D25 (Codex r4 #1): el candado de comandas de la cuenta, antes que el de la cuenta (el orden del armado).
+        { sql: 'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))::text', values: ['kds-order:order'] },
         {
           sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
           values: ['venue', ['order']],
         },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
-      const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
+      const [venueLock, kitchenLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
+      expect(kitchenLock).toBeLessThan(orderLock)
       // D2 (27-oct): lo único antes del candado es buscar si es fiado y, si lo es, apartar a su cliente (Cliente → mesa,
       // como las métricas del cobro). Esa búsqueda se vuelve a comprobar ya con la mesa apartada.
       const [buscarFiado, ...lecturasDeLaCuenta] = tx.order.findFirst.mock.invocationCallOrder
@@ -351,7 +356,9 @@ describe('locked mobile writers', () => {
       expect(buscarFiado).toBeLessThan(venueLock)
       expect(venueLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findFirst]), ...lecturasDeLaCuenta))
       expect(orderLock).toBeLessThan(tableLock)
-      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta))
+      expect(orderLock).toBeLessThan(
+        Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta),
+      )
       const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
       const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
       expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
@@ -524,6 +531,16 @@ describe('writer-specific fresh decisions', () => {
       expect.objectContaining({ where: { id: 'rw-od' }, data: expect.objectContaining({ status: 'PENDING' }) }),
     )
     expect(tx.stampReward.update.mock.invocationCallOrder[0]).toBeGreaterThan(lock)
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_DEVUELTO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od' } })
   })
 
@@ -640,11 +657,12 @@ describe('writer-specific fresh decisions', () => {
     await splitOrderItems('venue', 'order', ['i2'], 'staff')
 
     const sql = tx.$queryRaw.mock.calls.map(([q]: any[]) => (Array.isArray(q) ? q.join('?') : q.sql))
-    // Negocio → Cliente → (el candado de siempre) Negocio → Cuenta → Mesa.
-    expect(sql.slice(0, 4)).toEqual([
+    // Negocio → Cliente → (el candado de siempre) Negocio → Comandas (D25) → Cuenta → Mesa.
+    expect(sql.slice(0, 5)).toEqual([
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
       'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))::text',
       'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
     ])
     expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
@@ -770,6 +788,16 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    expect(tx.walletPassOutbox.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        customerId: 'customer',
+        motivo: 'PREMIO_CANJEADO',
+        createdAt: expect.any(Date),
+        siguienteIntentoAt: expect.any(Date),
+      },
+    })
+    expect(prismaMock.walletPassOutbox.create).not.toHaveBeenCalled()
     // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
     expect(tx.stampReward.update).not.toHaveBeenCalled()
     // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).

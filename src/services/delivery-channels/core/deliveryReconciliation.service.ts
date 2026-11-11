@@ -28,7 +28,7 @@ import { applyLineRemoval } from './lineRemoval.service'
 import { assertDeliveryMoneyInvariants } from './money'
 import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
-import { enqueueLoyaltyPointsReversalInTx } from '@/services/tpv/paymentEffects.service'
+import { enqueueLoyaltyReversalsInTx } from '@/services/tpv/paymentEffects.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 
 export type ResultadoReconciliacion = {
@@ -482,7 +482,7 @@ export async function reconcileDeliveryOrderFromProvider(
         })
         throw new Error(`reconciliación: la llave dlr:${orderId}:${generation} es un replay con Δ nuevo`)
       }
-      await enqueueLoyaltyPointsReversalInTx(tx, { venueId, refundPaymentId, orderId })
+      await enqueueLoyaltyReversalsInTx(tx, { venueId, refundPaymentId, orderId })
       // Plan 4b (Ruling 4b-R6): la marca de la regla C, en ESTA transacción. Filas ya tomadas (NKU arriba); no dispara ningún trigger.
       await tx.$executeRaw`UPDATE "Product" SET "ajusteDeliveryAlgunaVez" = true
       WHERE id = ANY(${productos.map(p => p.id)}::text[]) AND NOT "ajusteDeliveryAlgunaVez"`

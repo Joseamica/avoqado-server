@@ -16,6 +16,7 @@ import type { Request, Response } from 'express'
 import logger from '@/config/logger'
 import type { GiftCardErrorCode } from '@/services/giftCards/giftCardErrors'
 import { aparatoDe } from '@/utils/giftCardRequest'
+import { ipDelCliente } from '@/utils/clientIp'
 
 const isProd = process.env.NODE_ENV === 'production'
 const VENTANA_MS = 60 * 1000
@@ -108,6 +109,57 @@ export const giftCardRevealRateLimiters = crearLimitadoresDeConsulta(isProd ? 10
   prefijo: 'gift-card-reveal',
   mensaje: 'Demasiadas veces seguidas mostrando códigos. Espera un minuto.',
 })
+
+/**
+ * S13 (R2; codex-s13-r2 #1 y r3 #2): «Guardar en mi cuenta» desde la tienda (`POST /public/venues/:venueSlug/customer/gift-cards/claim`).
+ * Propio, no el de la consulta ni el `writeLimit` general de las rutas públicas (sólo IP, compartido entre negocios y operaciones, y en
+ * inglés). Tres cupos, con el 429 en español y la IP REAL del visitante (`ipDelCliente`, nunca `req.ip`, que es el borde de Cloudflare):
+ *  - `fallosPorIp`: va PRIMERO, antes de buscar el negocio. Cuenta sólo lo que sale mal (≥ 400: slug inexistente, sin sesión, código
+ *    equivocado, de otra cuenta, otro 429), en UN cupo por IP: inventar slugs ya no da un contador nuevo cada vez. Un guardado bueno
+ *    no lo gasta, así que guardar en dos negocios reales no se comparte aquí.
+ *  - `porIp`: negocio resuelto + IP, después de `resolveVenueBySlug`.
+ *  - `porClienta`: negocio resuelto + clienta de la sesión, después de `authenticateCustomer`.
+ * Cuenta todo intento (salvo `fallosPorIp`): guardar es raro (una tarjeta por regalo) y lo que frena es probar códigos.
+ */
+export function crearLimiteDeGuardadoDeTarjeta(
+  maxPorClienta: number,
+  maxPorIp: number,
+  maxFallosPorIp: number,
+  ventanaMs: number = 10 * 60 * 1000,
+): { fallosPorIp: RateLimitRequestHandler; porIp: RateLimitRequestHandler; porClienta: RateLimitRequestHandler } {
+  const prefijo = 'gift-card-claim'
+  const negocio = (req: Request): string => (req as any).publicVenue?.id ?? 'sin-negocio'
+  const ip = (req: Request): string => ipDelCliente(req) || 'desconocida'
+  const comun = {
+    windowMs: ventanaMs,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: rechazoDelLimite({
+      prefijo,
+      aviso: '🚨 Límite de intentos de guardar tarjetas de regalo excedido',
+      code: 'GIFT_CARD_CLAIM_RATE_LIMITED',
+      mensaje: 'Demasiados intentos de guardar tarjetas seguidos. Espera unos minutos y vuelve a intentar.',
+      ventanaMs,
+      datos: req => ({ venueId: negocio(req), venueSlug: req.params?.venueSlug }),
+    }),
+  }
+  return {
+    fallosPorIp: rateLimit({
+      ...comun,
+      max: maxFallosPorIp,
+      skipSuccessfulRequests: true,
+      keyGenerator: (req: Request) => `${prefijo}:fallos-ip:${ip(req)}`,
+    }),
+    porIp: rateLimit({ ...comun, max: maxPorIp, keyGenerator: (req: Request) => `${prefijo}:ip:${negocio(req)}:${ip(req)}` }),
+    porClienta: rateLimit({
+      ...comun,
+      max: maxPorClienta,
+      keyGenerator: (req: Request) => `${prefijo}:cliente:${negocio(req)}:${(req as any).customerAuth?.customerId ?? 'sin-sesion'}`,
+    }),
+  }
+}
+
+export const giftCardClaimRateLimiters = crearLimiteDeGuardadoDeTarjeta(isProd ? 10 : 1000, isProd ? 30 : 1000, isProd ? 30 : 1000)
 
 /**
  * 1b S5 (S-2): teléfono + código. Pedir y verificar llevan contadores PROPIOS (por aparato y por IP, ventana de 10 min) con el mismo

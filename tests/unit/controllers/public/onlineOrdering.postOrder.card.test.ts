@@ -55,6 +55,10 @@ describe('POST /orders despacha por paymentMode', () => {
         customer: { name: 'María', phone: '5543453965', email: null },
         note: null,
         whatsappConsent: true,
+        // S11: sin sesión, sin clienta ni beneficios (el borrador decide con su teléfono probado).
+        customerId: null,
+        verifiedPhone: null,
+        beneficios: null,
       },
       { assertCanCreate: expect.any(Function) },
     )

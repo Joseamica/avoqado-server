@@ -56,10 +56,13 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
   assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
   avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+  // S9: «¿es cuenta de folio?» también lee `onlineOrder`; aquí no lo es (se prueba en cortesiaDeFolio y b4bit.pedidoEnLinea).
+  esCuentaDeFolioEnTx: jest.fn(async () => false),
+  assertNotOnlineOrderInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
-    order: { findUnique: jest.fn(), update: jest.fn() },
+    order: { count: jest.fn(async () => 0), findUnique: jest.fn(), update: jest.fn() },
     // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
     orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
@@ -78,8 +81,9 @@ jest.mock('@/utils/prismaClient', () => {
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en esta venta de prueba.
+    // D25: tampoco hay platillos de comanda que vivan en otra cuenta (`"KdsOrderItem"`).
     $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) =>
-      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-sc' }],
+      q?.raw?.join('').includes('"OrderDiscount"') || q?.raw?.join('').includes('"KdsOrderItem"') ? [] : [{ id: 'order-sc' }],
     ),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.

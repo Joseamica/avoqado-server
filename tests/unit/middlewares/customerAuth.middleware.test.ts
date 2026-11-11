@@ -180,7 +180,15 @@ describe('authenticateCustomer (obligatorio)', () => {
   })
 
   it('ok → req.customerAuth = { customerId, venueId } y next()', async () => {
-    customerFindFirst.mockResolvedValue({ id: 'c1', venueId: 'venue_A', active: true })
+    customerFindFirst.mockResolvedValue({
+      id: 'c1',
+      venueId: 'venue_A',
+      active: true,
+      versionDeSesion: 0,
+      phone: '+525543453965',
+      email: null,
+      accountActivatedAt: null,
+    })
     const token = sign({ sub: 'c1', venueId: 'venue_A', type: 'customer' })
     const req = mkReq({ headers: { authorization: `Bearer ${token}` } } as any)
     const res = mkRes()
@@ -190,7 +198,13 @@ describe('authenticateCustomer (obligatorio)', () => {
 
     expect(res.status).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledTimes(1)
-    expect((req as any).customerAuth).toEqual({ customerId: 'c1', venueId: 'venue_A' })
+    expect((req as any).customerAuth).toEqual({
+      customerId: 'c1',
+      venueId: 'venue_A',
+      tipo: 'RESERVAS_DE_HOY',
+      contactos: [],
+      accountActivatedAt: null,
+    })
   })
 
   it('sin req.publicVenue (ruta mal cableada) → 500, nunca deja pasar', async () => {
@@ -258,7 +272,15 @@ describe('authenticateCustomerOptional', () => {
   })
 
   it('token válido → req.customerAuth poblado y next()', async () => {
-    customerFindFirst.mockResolvedValue({ id: 'c1', venueId: 'venue_A', active: true })
+    customerFindFirst.mockResolvedValue({
+      id: 'c1',
+      venueId: 'venue_A',
+      active: true,
+      versionDeSesion: 0,
+      phone: '+525543453965',
+      email: null,
+      accountActivatedAt: null,
+    })
     const token = sign({ sub: 'c1', venueId: 'venue_A', type: 'customer' })
     const req = mkReq({ headers: { authorization: `Bearer ${token}` } } as any)
     const res = mkRes()
@@ -267,7 +289,13 @@ describe('authenticateCustomerOptional', () => {
     await authenticateCustomerOptional(req, res, next)
 
     expect(next).toHaveBeenCalledTimes(1)
-    expect((req as any).customerAuth).toEqual({ customerId: 'c1', venueId: 'venue_A' })
+    expect((req as any).customerAuth).toEqual({
+      customerId: 'c1',
+      venueId: 'venue_A',
+      tipo: 'RESERVAS_DE_HOY',
+      contactos: [],
+      accountActivatedAt: null,
+    })
   })
 })
 

@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
@@ -25,7 +26,7 @@ import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, Paymen
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError, RegaloSinPermisoError } from '../../errors/AppError'
 import { operationHash } from '../../utils/operationHash'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
@@ -45,6 +46,7 @@ import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
+import { despertarPasesTrasCommit } from '../online-ordering/cortesiaDeFolio'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -80,7 +82,6 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import {
-  bloquearVentaParaLiga,
   clienteYaLigadoALaVenta,
   esChoqueDeUnico,
   etiquetaDeReintento,
@@ -138,6 +139,7 @@ import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarj
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
   activarSobresDeCuentaPagadaEnTx,
@@ -166,12 +168,18 @@ import {
   cierreAutomaticoPermitido,
   esCobroCompletadoDeLaOrden,
   esCobroNuevo,
+  notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import {
+  armarComandasTrasCommit,
+  cuentasDeSusComandas,
+  ponerComandasConSuCuenta,
+  retirarComandasDeVentaAnulada,
+} from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import {
@@ -275,6 +283,14 @@ export interface CreateOrderInput {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
+  /** hz:e0b12f00:D2 (server-owned): la membresía de quien autorizó el descuento de cuenta que regala (el gerente del PIN o quien llama). */
+  regaloAutorizadoPor?: string
+  /**
+   * hz:e0b12f00:D2: la app pide el PIN de gerente ANTES de mandar un descuento de cuenta que regala (ANDROID/WINDOWS nuevos). Sólo a
+   * ella se le exige `orders:comp` en línea; sin la marca (app vieja, iOS) o desde una cola, la venta se registra con bitácora y aviso.
+   * Como `stampRewardAware`: una marca de capacidad del cuerpo, porque WINDOWS no manda el número de compilación de Play.
+   */
+  cortesiaDeCuentaConPin?: boolean
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -470,6 +486,12 @@ export interface OrderSummaryResponse {
   cobrosConSaldo?: number
   /** 1b Q49 (aditivo): la cuenta tiene mesa (`tableId`). `Order.type` no sirve: su default es DINE_IN también en mostrador. */
   esDeMesa?: boolean
+  /** D12, aditivo: lo que falta, en CENTAVOS (≥ 0), la misma cuenta que `preBillBalance.remainingBalanceCents`. */
+  saldoPendienteCents?: number
+  /** D12, aditivo: cuántos pagos COMPLETED tiene la cuenta, devoluciones incluidas (espejo de la compuerta de abonos de ANDROID). */
+  pagosCompletados?: number
+  /** D12, aditivo: la cuenta es de vales por área (`areaDeliveryCode` o `areaTicketCode`). */
+  esDeVales?: boolean
 }
 
 export interface OrderDetailResponse {
@@ -615,6 +637,13 @@ function cobrosConSaldoVivos(
 
 // MARK: - Service Functions
 
+/** D12: la ÚNICA cuenta del saldo por cobrar (centavos, ≥ 0); la usan `getOrder` y `listOrders`. */
+function saldoPorCobrarCents(orden: any, completados: any[]): number {
+  const reparto = esVentaCerrada(orden.paymentStatus) ? null : saldoDeCobroDeReparto(orden, completados)
+  const saldo = reparto ? reparto.totalACobrar : computeOrderBalance(orden, completados).remainingBalance
+  return Math.max(0, pesosToCents(saldo.toNumber()))
+}
+
 /**
  * List orders for a venue with pagination, search, and filters
  *
@@ -671,16 +700,13 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         _count: {
           select: { items: true },
         },
-        // ADITIVO — sólo para el carril del reembolso. Se acota a los COMPLETED
-        // y a tres columnas: en una lista paginada, traer el pago entero sería
-        // pagar por dato que nadie pinta. El array NO sale en la respuesta.
+        // ADITIVO (reembolso): sólo los COMPLETED y pocas columnas; el array NO sale en la respuesta.
         payments: {
           where: { status: 'COMPLETED' },
-          // 1b Q27: + la marca del tender, para contar los cobros con saldo de la página sin otra consulta por orden.
-          select: { amount: true, tipAmount: true, type: true, status: true, tenderType: { select: { systemKind: true } } },
+          select: { amount: true, tipAmount: true, type: true, status: true, thirdPartyCashAmount: true, tenderType: { select: { systemKind: true } } },
         },
-        // 1b S-1: la marca de la lista (un renglón de tarjeta basta: no se mezclan, A5).
-        items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
+        // Marcas de la lista (tarjeta 1b S-1; D12: vale por `areaTicketLineId`, el INMEDIATO no guarda código): 2 bastan, no se mezclan.
+        items: { where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] }, select: { giftCardId: true, areaTicketLineId: true, releasedAreaTicketLineId: true }, take: 2 },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -710,9 +736,12 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       createdAt: order.createdAt,
       refundState: refunds.refundState,
       refundedAmount: Number(refunds.refundedAmount),
-      esCuentaDeTarjetas: (order.items?.length ?? 0) > 0,
+      esCuentaDeTarjetas: (order.items ?? []).some((i: any) => i.giftCardId != null),
       cobrosConSaldo: cobrosConSaldoVivos(order, order.payments ?? []),
       esDeMesa: order.tableId != null,
+      saldoPendienteCents: saldoPorCobrarCents(order, order.payments ?? []),
+      pagosCompletados: (order.payments ?? []).length, // la consulta sólo trae los COMPLETED
+      esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null || (order.items ?? []).some((i: any) => esRenglonDeVale(i)),
     }
   })
 
@@ -825,6 +854,62 @@ function avisarPrecioNoReconocido(venueId: string, input: CreateOrderInput, orde
     motivo: `${cambios.length === 1 ? 'un precio' : `${cambios.length} precios`} que vio el cliente no se reconoció y la orden quedó con el precio de hoy`,
   })
 }
+
+/**
+ * hz:e0b12f00:D2 (como `descuentoLibreRegala` de `/tpv/with-items`, D1): un descuento de cuenta LIBRE (sin catálogo ni cupón en línea)
+ * que, con el importe y la base del SERVIDOR y en centavos, deja en $0 lo que queda de los productos. La propina, el cargo por servicio
+ * y los abonos no cuentan (D1 r1 #2). Base en $0 (todo regalado por renglón, que ya pidió su permiso) no es esto. Ojo: ANDROID manda
+ * su descuento de cuenta SIEMPRE como `discount` libre, también el del catálogo.
+ */
+function descuentoDeCuentaRegala(esLibre: boolean, montoPesos: number, basePesos: number): boolean {
+  return esLibre && montoPesos > 0 && basePesos > 0 && Math.round(montoPesos * 100) >= Math.round(basePesos * 100)
+}
+
+/** `SIN_PERMISO`: se registra sin autorizador, con bitácora y aviso. */
+type AutorizacionDelRegalo = { authorizedById?: string } | 'SIN_PERMISO'
+
+/**
+ * hz:e0b12f00:D2: quién autoriza ese regalo. Con `orders:comp` (o el PIN) de la SESIÓN, la fila lleva al autorizador. La app que pide
+ * el PIN antes (`cortesiaDeCuentaConPin`) y llega EN LÍNEA sin él recibe `RegaloSinPermisoError` (el controlador pide el PIN). Una venta
+ * de la cola, o de una app que no sabe pedir el PIN (vieja, iOS), «ya ocurrió»: se registra igual, sin autorizador, con bitácora en la
+ * transacción y aviso al dueño (como «A24»). Rechazarla la dejaría sin registrar en el servidor (D1 r1 #4).
+ */
+function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo {
+  if (input.canCompItems === true && input.performedBy) {
+    return input.regaloAutorizadoPor ? { authorizedById: input.regaloAutorizadoPor } : {}
+  }
+  if (input.isOfflineReplay === true || input.cortesiaDeCuentaConPin !== true) return 'SIN_PERMISO'
+  throw new RegaloSinPermisoError()
+}
+
+const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
+
+/** hz:e0b12f00:D2: el rastro de un regalo sin permiso, en la MISMA transacción. `avisarVentaSinRed` lo encuentra y no lo repite. */
+async function anotarRegaloSinPermisoEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+  montoPesos: number,
+): Promise<void> {
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_DESCUENTO_SIN_PERMISO}`,
+    entity: 'VentaSinRed',
+    entityId: normalizeExternalId(input.externalId) ?? orderId,
+    data: {
+      orderId,
+      montoCents: Math.round(montoPesos * 100),
+      origen: input.isOfflineReplay === true ? 'COLA_SIN_RED' : 'APP_SIN_PIN',
+      subidaPor: input.performedBy ?? null,
+      source: input.source ?? null,
+    },
+  })
+}
+
+const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
@@ -1320,7 +1405,13 @@ export interface TotalesDePromocion {
 /** `existente`: la llave de la venta ya tenía su orden (el reintento sale con ella). */
 export type VentaDeMostradorEnTx =
   | { existente: OrdenCreada }
-  | { order: OrdenCreada; promotionTotals: TotalesDePromocion | null; venta: VentaCalculada }
+  | {
+      order: OrdenCreada
+      promotionTotals: TotalesDePromocion | null
+      venta: VentaCalculada
+      /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
+      regaloSinPermisoPesos?: number
+    }
 
 /**
  * La parte de `createOrderWithItems` de ANTES de su transacción (extraída sin cambiarla, S2b): valida, resuelve el personal, la
@@ -1579,6 +1670,11 @@ export async function crearVentaDeMostradorEnTx(
       catalogoPesos: orderLevelDiscountDecimal,
     })
   }
+  // hz:e0b12f00:D2: sin promociones la base ya se conoce; se decide ANTES de escribir (después de la búsqueda idempotente de arriba).
+  const regaloSinPromociones =
+    promocionesUnicas.length === 0 && descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)
+      ? autorizarRegaloDeCuenta(input)
+      : null
   const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal
   const total = subtotal - discountDecimal + tipDecimal
   const venta = {
@@ -1765,10 +1861,19 @@ export async function crearVentaDeMostradorEnTx(
                 ? Number(orderDiscount.maxDiscountAmount)
                 : null,
           })
-        : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById })
+        : filaDeDescuentoDeCuenta({
+            orderId: createdOrder.id,
+            montoPesos: orderLevelDiscountDecimal,
+            appliedById,
+            ...autorizadorDelRegalo(regaloSinPromociones),
+          })
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
+    if (regaloSinPromociones === 'SIN_PERMISO') {
+      await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, orderLevelDiscountDecimal)
+      return { order: createdOrder, promotionTotals: null, venta, regaloSinPermisoPesos: orderLevelDiscountDecimal }
+    }
     return { order: createdOrder, promotionTotals: null, venta }
   }
 
@@ -1837,6 +1942,10 @@ export async function crearVentaDeMostradorEnTx(
   const descuentoDeOrdenFinal = cupon
     ? montoDelCupon(cupon.discount, topeDescuentoDeOrden)
     : Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+  // hz:e0b12f00:D2: con combos la base es la cuenta CON promociones; si regala sin permiso, todo lo de arriba se revierte.
+  const regaloConPromociones = descuentoDeCuentaRegala(!orderDiscount, descuentoDeOrdenFinal, topeDescuentoDeOrden)
+    ? autorizarRegaloDeCuenta(input)
+    : null
   const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
 
   const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
@@ -1847,9 +1956,13 @@ export async function crearVentaDeMostradorEnTx(
       orderId: createdOrder.id,
       montoPesos: descuentoDeOrdenFinal,
       appliedById: appliedByStaffVenue?.id ?? null,
+      ...autorizadorDelRegalo(regaloConPromociones),
     })
     await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
     await sincronizarRepartos(tx, createdOrder.id)
+  }
+  if (regaloConPromociones === 'SIN_PERMISO') {
+    await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, descuentoDeOrdenFinal)
   }
   const reafirmada = await tx.order.update({
     where: { id: createdOrder.id },
@@ -1865,6 +1978,7 @@ export async function crearVentaDeMostradorEnTx(
     order: reafirmada,
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
+    ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
   }
 }
 
@@ -2027,6 +2141,15 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
+  // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
+  if (created.regaloSinPermisoPesos != null) {
+    void avisarVentaSinRed(venueId, AVISO_DESCUENTO_SIN_PERMISO, {
+      externalId: normalizeExternalId(input.externalId) ?? order.id,
+      orderId: order.id,
+      montoCents: Math.round(created.regaloSinPermisoPesos * 100),
+      staffId: input.performedBy,
+    })
+  }
 
   // Flatten and return response
   return {
@@ -2197,7 +2320,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     preBillBalance: {
       orderTotalCents: pesosToCents(balance.total.toNumber()),
       totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
-      remainingBalanceCents: pesosToCents((reparto ? reparto.totalACobrar : balance.remainingBalance).toNumber()),
+      remainingBalanceCents: saldoPorCobrarCents(flattenedOrder, completados),
       tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
       ...(reparto
         ? {
@@ -2339,7 +2462,7 @@ export async function updateOrderDetailsInTransaction(
   input: OrderDetailsInput,
   opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: los comensales mueven los cargos automáticos; un pedido de tarjeta sin cobrar tiene un total fijo.
   if (input.covers != null) await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
@@ -2460,7 +2583,7 @@ export async function applyOrderDiscountInTransaction(
 
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2561,10 +2684,12 @@ export async function removeOrderDiscountInTransaction(
   orderDiscountId: string,
   staffId?: string,
   /**
-   * Sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA transacción, así que un canje de una
-   * cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
+   * `porAnulacion` (S9): lo pide quien anula (`devolverCanjesDeVentaAnuladaEnTx`); bloquea sin el rechazo de cuenta cancelada de
+   * `bloquearCuentaParaEditar`.
+   * `abonosDeSaldoSeRegresanEnEstaTx`: sólo «Regresar saldo y cancelar» (deuda P1, 31-oct): sus abonos de saldo se regresan en ESTA
+   * transacción, así que un canje de una cuenta `PARTIAL` sí se puede quitar. `PAID` sigue rechazada siempre.
    */
-  opciones: { abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
+  opciones: { porAnulacion?: true; abonosDeSaldoSeRegresanEnEstaTx?: boolean } = {},
 ) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
@@ -2578,7 +2703,12 @@ export async function removeOrderDiscountInTransaction(
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  if (
+    !(await (opciones?.porAnulacion
+      ? lockExistingOrderForPayment(tx, { venueId, orderId })
+      : bloquearCuentaParaEditar(tx, { venueId, orderId })))
+  )
+    throw new NotFoundError('Order not found')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
@@ -2696,11 +2826,14 @@ export async function splitOrderItemsInTransaction(
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -2719,6 +2852,7 @@ export async function splitOrderItemsInTransaction(
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -2816,6 +2950,9 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: source.contratoDePrecio,
       // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
       payLater: source.payLater,
+      // D25: lo que estaba por llegar a la pantalla de cocina sigue a sus renglones; el barrido la arma en la cuenta nueva. Con la
+      // hora de ahora: heredar la vieja podía hacer que el barrido se rindiera sin armarla (GIVE_UP a los 15 min, Codex r1 #6).
+      kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
       ...clienteDeLaParteSeparada(source),
     },
     select: { id: true, orderNumber: true, version: true },
@@ -2893,11 +3030,14 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId })
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
@@ -2916,6 +3056,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -3000,6 +3141,8 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
         contratoDePrecio: source.contratoDePrecio,
         // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
         payLater: source.payLater,
+        // D25: la marca de cocina sigue a los renglones (mismo criterio que separar cheque).
+        kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
         ...clienteDeLaParteSeparada(source),
       },
       select: { id: true, orderNumber: true },
@@ -3078,7 +3221,11 @@ export async function mergeOrdersInTransaction(
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+    // D25: los candados de comandas van antes que los de las cuentas (el orden del armado): las comandas del origen pasan al destino.
+    // D3 (hz:381780f0): TODOS los que pedirá `ponerComandasConSuCuenta` (el destino y las cuentas ligadas al origen), de entrada y en
+    // orden; pedir el del destino a media transacción se interbloqueaba con anular el destino a la vez.
+    const kdsOrderIds = [targetOrderId, ...(await cuentasDeSusComandas(tx, venueId, sourceOrderId))]
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId], kdsOrderIds })
   } catch (error) {
     // Failed topology discovery performs no mutation; identify the original missing-side DTO.
     if (error instanceof NotFoundError) {
@@ -3089,6 +3236,7 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: targetOrderId, additionalOrderIds: [sourceOrderId] })
   // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
@@ -3175,6 +3323,7 @@ export async function mergeOrdersInTransaction(
       source: true,
       posRawData: true,
       taxAmount: true,
+      kitchenPendingAt: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
       serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
@@ -3302,10 +3451,14 @@ export async function mergeOrdersInTransaction(
     }
   }
   const priorTargetCharges = await targetChargeAmounts()
+  // D25: primero lo del origen que está en comandas ajenas vuelve a las suyas (una cuenta ya dividida antes, Codex r1 #5); después de
+  // mover los renglones, sus comandas pendientes pasan al destino, que es donde viven ahora (el origen se cancela abajo).
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   await tx.orderItem.updateMany({
     where: { orderId: source.id },
     data: { orderId: target.id },
   })
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   // Los cobros automáticos del origen se van con él: el destino re-evalúa
   // los suyos por comensales en el recálculo.
   await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
@@ -3325,6 +3478,8 @@ export async function mergeOrdersInTransaction(
       payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
       ...(duenoQueQueda && !freshTarget.customerId ? { customerId: duenoQueQueda } : {}),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
+      // D25: lo del origen que estaba por llegar a la pantalla de cocina lo arma ahora el barrido del destino (hora de ahora: ver separar).
+      ...(freshSource.kitchenPendingAt ? { kitchenPendingAt: new Date() } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
         : {}),
@@ -3876,6 +4031,7 @@ export interface AbonoEnTxEntrada {
   method: NonNullable<CashPaymentInput['method']>
   idempotencyKey?: string
   isOfflineReplay?: boolean
+  createdAtLocal?: CashPaymentInput['createdAtLocal']
   externalSource?: string
   /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
   tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
@@ -4319,6 +4475,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+      ...(saldaAqui && entrada.isOfflineReplay ? { loyaltySaleAt: horaDeLaVenta(entrada, new Date()) } : {}),
       ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,
@@ -4451,6 +4608,21 @@ export async function registrarAbonoEnTx(
     channel: canalDeTurno,
     amountPesos: shiftAmount,
     tipPesos: shiftTip,
+  })
+
+  // 🔴 S9 v5 (B3): la nota del dinero que ENTRA, con lo mismo que se escribió en la fila, en PESOS (`amountDecimal` y `tipDecimal`,
+  // ya recortados y repartidos; `entrada.amountCents` son centavos). Un folio «Nadie» anulado avisa una vez y renueva su recuperación;
+  // fuera de `WEB` no consulta nada.
+  await notarDineroEnFolioCerradoEnTx(tx, {
+    venueId,
+    orderId,
+    entra: new Prisma.Decimal(amountDecimal).plus(tipDecimal),
+    source: fresh.source,
+    reabierta: reabiertaDeCancelada,
+    canal: canalDeReapertura,
+    paymentId: newPayment.id,
+    idempotencyKey: input.idempotencyKey ?? null,
+    staffId: effectiveStaffId ?? null,
   })
 
   // Create VenueTransaction for financial tracking
@@ -4869,6 +5041,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               method: paymentMethod,
               idempotencyKey: input.idempotencyKey,
               isOfflineReplay: input.isOfflineReplay,
+              createdAtLocal: input.createdAtLocal,
               externalSource: input.externalSource,
               tender: tenderRef,
               dentroDeLaTx: input.dentroDeLaTx,
@@ -6180,7 +6353,9 @@ export async function returnGiftBalanceAndCancelOrder(
     async tx => {
       let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
       try {
-        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+        // D3 (hz:381780f0): los candados de comandas que pedirá el retiro, de entrada (como `cancelOrderInTransaction`).
+        const kdsOrderIds = await cuentasDeSusComandas(tx, venueId, orderId)
+        scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds })
       } catch (error) {
         if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
         throw error
@@ -6264,7 +6439,9 @@ export async function returnGiftBalanceAndCancelOrder(
       // 🔴 LEALTAD (deuda P1, 31-oct): el premio de sellos y los puntos vuelven al cliente, igual que al anular. Antes de los abonos: el
       // reembolso reclama el turno y Customer/StampReward van antes que él (Order → Customer/StampReward; premio → cobro → turno al
       // crear la venta). Si algo falla después, la transacción revierte también esto.
-      await devolverCanjesDeVentaAnuladaEnTx(tx, {
+      // S9 (P2-5, R55 b): en una cuenta de FOLIO no se borran: sus beneficios regresan a la clienta y su fila se queda como cortesía
+      // (beneficios → sobres, como las demás cancelaciones).
+      const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, {
         venueId,
         orderId,
         staffId,
@@ -6345,7 +6522,15 @@ export async function returnGiftBalanceAndCancelOrder(
         ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
         ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
       ]
-      return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+      return {
+        orderId,
+        table,
+        tables: reconciled.tables,
+        hadBoundTable: Boolean(boundTable),
+        tpvTableFreed,
+        affectedRefs,
+        clientasConPremio: canjes?.clientasConPremio,
+      }
     },
     { etiqueta: 'returnGiftBalanceAndCancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
@@ -6528,7 +6713,7 @@ export async function attachCustomerToOrder(
       // inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
-      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }, 'ATRIBUCION'))) throw new NotFoundError('Order not found')
       await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: normalizedCustomerId, ...opciones })
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
@@ -6685,8 +6870,9 @@ export async function cancelOrderInTransaction(
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    // Existing kitchen advisory precedes all shared Order locks, including captured siblings.
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+    // Existing kitchen advisory precedes all shared Order locks, including captured siblings. D3 (hz:381780f0): también los de las
+    // cuentas ligadas por comandas, que el retiro de comandas pedía a media transacción (ciclo con unir esa cuenta a la vez).
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: await cuentasDeSusComandas(tx, venueId, orderId) })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
@@ -6697,7 +6883,8 @@ export async function cancelOrderInTransaction(
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-  await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
+  // S9: en una cuenta de folio, sus beneficios regresan y su fila queda como cortesía (`publishCancelledOrder` despierta el pase).
+  const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
@@ -6719,13 +6906,26 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
+  return {
+    orderId,
+    table,
+    tables: reconciled.tables,
+    hadBoundTable: Boolean(boundTable),
+    tpvTableFreed,
+    affectedRefs,
+    valesSoltados,
+    clientasConPremio: canjes?.clientasConPremio,
+  }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
   // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
-  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
+  // `clientasConPremio` (S9) también: quien no anula un folio no lo trae.
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados' | 'clientasConPremio'> & {
+    valesSoltados?: ValesSoltados | null
+    clientasConPremio?: string[]
+  },
   staffId?: string,
   reason?: string,
   /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
@@ -6769,6 +6969,8 @@ export async function publishCancelledOrder(
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
+  // S9: el pase de Wallet de cada clienta con premio regresado (si no, lo manda el barrido con la fila de la bandeja).
+  despertarPasesTrasCommit(venueId, result.clientasConPremio)
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.

@@ -385,6 +385,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_merchant_routing_rule: 'write',
   set_prices_by_code: 'write',
   set_print_station_kitchen_display: 'write',
+  create_no_comanda_print_station: 'write',
   set_product_iva: 'write',
   set_promotion_group_status: 'write',
   set_raw_material_presentations: 'write',

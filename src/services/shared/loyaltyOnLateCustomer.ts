@@ -13,6 +13,7 @@ import { esVentaYaCobrada, ventaTieneReembolso } from './ligaDeClienteEnVenta'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
 import { esPedidoDePlataforma } from './ordenImportada'
+import { beneficiarioDeLaVenta } from './beneficiarioDeLaVenta'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
 export { MARCA_LEALTAD_REABIERTA }
@@ -363,7 +364,7 @@ async function fotoDelBeneficiario(args: AwardLoyaltyForPaidOrderArgs): Promise<
   if (!foto) return null
   // 🔴 F1 (ronda 1 post-QA): la MISMA regla que `awardLoyaltyForPaidOrder`: ligas sin primario (acompañantes de una liga sin
   // `payments:create` a una venta cobrada) no cuentan; el beneficiario es el de la venta sin ellas (el heredado, o nadie).
-  const beneficiario = foto.primario ?? args.legacyCustomer?.id ?? null
+  const beneficiario = beneficiarioDeLaVenta(foto.primario, args.legacyCustomer?.id)
   const duenos = [...(foto.sellos ?? []), ...(foto.puntos ?? [])]
   return { beneficiario, otroDueno: duenos.find(d => d !== beneficiario) ?? null, staffId: foto.staffId ?? null }
 }

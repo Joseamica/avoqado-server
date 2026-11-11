@@ -7,7 +7,10 @@ import {
   removeDiscountFromOrder,
   applyManualDiscount,
   getOrderDiscountsSummary,
+  applyAutomaticDiscounts,
+  aplicarDescuentosDelMotorEnTx,
 } from '../../../../src/services/dashboard/discountEngine.service'
+import logger from '../../../../src/config/logger'
 import { prismaMock } from '../../../__helpers__/setup'
 import { NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -343,6 +346,74 @@ describe('Discount Engine Service', () => {
       const result = await getCustomerDiscounts('venue-123', 'customer-123')
 
       expect(result).toHaveLength(0)
+    })
+
+    // hz:dcc49fe5:D3 — los tres huecos del lector en caja (y el contador de la asignación que nadie sube).
+    const asignacion = (discount: Record<string, any>, extra: Record<string, any> = {}) => ({
+      id: 'cd-1',
+      customerId: 'customer-123',
+      discountId: 'discount-1',
+      active: true,
+      validFrom: null,
+      validUntil: null,
+      maxUses: null,
+      usageCount: 0,
+      discount: createMockDbDiscount({ id: 'discount-1', ...discount }),
+      ...extra,
+    })
+
+    it('D3 (1): pide a la base que el CATÁLOGO también esté vigente, no sólo la asignación', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([])
+
+      await getCustomerDiscounts('venue-123', 'customer-123')
+
+      const where = prismaMock.customerDiscount.findMany.mock.calls[0][0].where
+      const vigencia = expect.objectContaining({
+        AND: [
+          { OR: [{ validFrom: null }, { validFrom: { lte: expect.any(Date) } }] },
+          { OR: [{ validUntil: null }, { validUntil: { gte: expect.any(Date) } }] },
+        ],
+      })
+      expect(where).toEqual(vigencia) // la asignación
+      expect(where.discount).toEqual(vigencia) // el catálogo
+      expect(where.discount).toMatchObject({ venueId: 'venue-123', active: true })
+    })
+
+    it('D3 (2): excluye el catálogo agotado (currentUses ≥ maxTotalUses)', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxTotalUses: 5, currentUses: 5 })])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(0)
+    })
+
+    it('D3 (3): sin tope propio hereda maxUsesPerCustomer del catálogo y cuenta sus ventas en esta sucursal', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxUsesPerCustomer: 1 })])
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ discountId: 'discount-1', ventas: 1 }])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(0)
+      const [sql, ...valores] = prismaMock.$queryRaw.mock.calls[0]
+      // Una por venta y sin las anuladas: el conteo real lo prueba la integración contra PostgreSQL.
+      expect(sql.join('?')).toMatch(/count\(DISTINCT o\.id\)[\s\S]*NOT IN \('CANCELLED', 'DELETED'\)/)
+      expect(valores).toEqual([['discount-1'], 'customer-123', 'venue-123'])
+    })
+
+    it('D3: el tope propio de la asignación se cumple con sus usos reales (usageCount nunca sube) y manda sobre el catálogo', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([
+        asignacion({ id: 'd-agotado', maxUsesPerCustomer: null }, { discountId: 'd-agotado', maxUses: 2 }),
+        asignacion({ id: 'd-extendido', maxUsesPerCustomer: 1 }, { discountId: 'd-extendido', maxUses: 3 }),
+      ])
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        { discountId: 'd-agotado', ventas: 2 },
+        { discountId: 'd-extendido', ventas: 2 },
+      ])
+
+      expect((await getCustomerDiscounts('venue-123', 'customer-123')).map(d => d.id)).toEqual(['d-extendido'])
+    })
+
+    it('D3: sin ningún tope no consulta usos y deja pasar el vigente', async () => {
+      prismaMock.customerDiscount.findMany.mockResolvedValue([asignacion({ maxTotalUses: 5, currentUses: 4 })])
+
+      expect(await getCustomerDiscounts('venue-123', 'customer-123')).toHaveLength(1)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
   })
 
@@ -1184,6 +1255,63 @@ describe('Discount Engine Service', () => {
       expect(result).toHaveLength(0)
     })
 
+    /**
+     * S9 · Codex r1 P1 (regresión): la anulación de un folio convierte su descuento limitado en cortesía SIN `discountId` y devuelve su
+     * uso. El motor ya no lo reconocía como aplicado y una cuenta revivida de $219 terminaba con DOS rebajas de $85. Ruling del
+     * controlador: una cuenta con esa cortesía conserva el precio que vio la clienta; sólo entra lo que el personal elige a mano.
+     */
+    describe('S9: una cuenta con la cortesía de un folio anulado conserva su precio', () => {
+      const MOTIVO = 'Beneficio regresado a la clienta al anular el folio'
+      const folioRevivido = (compReason = MOTIVO) => ({
+        id: 'order-123',
+        venueId: 'venue-123',
+        customerId: 'customer-123',
+        subtotal: new Decimal(219),
+        items: [],
+        orderDiscounts: [{ discountId: null, amount: new Decimal(85), isAutomatic: true, isComp: true, compReason }],
+      })
+      const limitado = createMockDbDiscount({ id: 'd-limitado', type: 'FIXED_AMOUNT', value: new Decimal(85), maxTotalUses: 1 })
+      const deLaClienta = {
+        id: 'cd-1',
+        customerId: 'customer-123',
+        discountId: 'd-clienta',
+        active: true,
+        validFrom: null,
+        validUntil: null,
+        maxUses: null,
+        usageCount: 0,
+        discount: createMockDbDiscount({ id: 'd-clienta', isAutomatic: false }),
+      }
+
+      it('no recibe descuentos automáticos ni los asignados a la clienta (el caso de Codex: sigue con UNA rebaja)', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido())
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([deLaClienta])
+
+        await expect(evaluateAutomaticDiscounts('order-123')).resolves.toEqual([])
+      })
+
+      it('el que el personal elige a mano (forceDiscountId) sí se evalúa: es una decisión en caja', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido())
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([deLaClienta])
+
+        const r = await evaluateAutomaticDiscounts('order-123', 'd-limitado')
+
+        expect(r.map(d => d.discountId)).toEqual(['d-limitado'])
+      })
+
+      it('regresión: una cortesía a mano con otro motivo no frena los automáticos (como hoy)', async () => {
+        prismaMock.order.findUnique.mockResolvedValue(folioRevivido('Cortesía de la casa'))
+        prismaMock.discount.findMany.mockResolvedValue([limitado])
+        prismaMock.customerDiscount.findMany.mockResolvedValue([])
+
+        const r = await evaluateAutomaticDiscounts('order-123')
+
+        expect(r.map(d => d.discountId)).toEqual(['d-limitado'])
+      })
+    })
+
     it('should respect stacking rules (non-stackable blocks others)', async () => {
       const mockOrder = {
         id: 'order-123',
@@ -1753,7 +1881,17 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
     prismaMock.order.findUnique.mockResolvedValue(orderAt(888, 500) as never)
 
     // hz:e0b12f00:D1: agota lo que queda, así que va con permiso de cortesía (9º argumento).
-    const result = await applyManualDiscount('order-neg', 'FIXED_AMOUNT', 888, 'birthdayexperience', 'staff-1', undefined, undefined, undefined, true)
+    const result = await applyManualDiscount(
+      'order-neg',
+      'FIXED_AMOUNT',
+      888,
+      'birthdayexperience',
+      'staff-1',
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )
 
     expect(result.amount).toBe(388) // no 888
     expect(Number(lastOrderUpdate().total)).toBe(0)
@@ -1814,5 +1952,130 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
 
     // 1000 − 100 + 50 + 80
     expect(Number(lastOrderUpdate().total)).toBe(1030)
+  })
+})
+
+/**
+ * S10 (P2-4): el cuerpo de `applyAutomaticDiscounts` se extrajo SIN el candado de la cuenta (`aplicarDescuentosDelMotorEnTx`) para que
+ * la cotización y el folio lo reusen dentro de SU transacción. Su pasada de contadores toma las filas `Discount` en UNA pasada
+ * ascendente, la del cupón incluida (prevención). En simulación (cotizar, R9) no toca `Discount`. Y no emite nada (R4).
+ */
+describe('S10 · aplicarDescuentosDelMotorEnTx', () => {
+  const pedido = {
+    id: 'o-1',
+    venueId: 'v1',
+    customerId: null,
+    subtotal: new Decimal(100),
+    taxAmount: new Decimal(0),
+    discountAmount: new Decimal(0),
+    tipAmount: new Decimal(0),
+    total: new Decimal(100),
+    paidAmount: new Decimal(0),
+    status: 'PENDING',
+    paymentStatus: 'PENDING',
+    originSystem: 'AVOQADO',
+    contratoDePrecio: 'IVA_INCLUIDO',
+    items: [
+      {
+        id: 'i1',
+        productId: 'p1',
+        product: { id: 'p1', categoryId: 'c1', taxRate: null },
+        quantity: 1,
+        unitPrice: new Decimal(100),
+        total: new Decimal(100),
+        taxAmount: new Decimal(0),
+        orderPromotionId: null,
+        modifiers: [],
+      },
+    ],
+    orderDiscounts: [],
+  }
+  let trazo: Array<[string, unknown]>
+  const sql = (s: unknown) => (Array.isArray(s) ? s.join('?') : String((s as any)?.sql ?? s))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    trazo = []
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+    prismaMock.order.findUnique.mockResolvedValue(pedido as never)
+    prismaMock.order.update.mockResolvedValue({} as never)
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-x' } as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as never)
+    prismaMock.customerDiscount.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      createMockDbDiscount({ id: 'z-auto', name: 'Z', type: 'FIXED_AMOUNT', value: new Decimal(5), isStackable: true }),
+      createMockDbDiscount({ id: 'a-auto', name: 'A', type: 'FIXED_AMOUNT', value: new Decimal(5), isStackable: true }),
+    ] as never)
+    prismaMock.$queryRaw.mockImplementation((async (s: unknown, ...v: unknown[]) => {
+      if (sql(s).includes('"Discount"')) {
+        trazo.push(['bloqueo', { texto: sql(s), ids: v[1] }])
+        return []
+      }
+      return [{ id: 'o-1' }]
+    }) as never)
+    prismaMock.discount.update.mockImplementation((async (a: any) => {
+      trazo.push(['contador', a.where.id])
+      return {}
+    }) as never)
+  })
+
+  it('con el descuento de un cupón: bloquearDescuentosEnOrdenEnTx recibe motor ∪ cupón, ordenados, y es la primera escritura de Discount', async () => {
+    const r = await aplicarDescuentosDelMotorEnTx(prismaMock as never, { venueId: 'v1', orderId: 'o-1', bloquearTambien: ['m-cupon'] })
+
+    expect(r.applied.map(d => d.discountId)).toEqual(['z-auto', 'a-auto'])
+    expect(trazo[0][0]).toBe('bloqueo')
+    expect(trazo[0][1]).toMatchObject({ ids: ['a-auto', 'm-cupon', 'z-auto'] })
+    expect((trazo[0][1] as any).texto).toMatch(/FOR NO KEY UPDATE/)
+    // Sólo los del motor suben su contador (el cupón se cuenta al pagar), en orden ascendente.
+    expect(trazo.slice(1)).toEqual([
+      ['contador', 'a-auto'],
+      ['contador', 'z-auto'],
+    ])
+    // R65 b: las bitácoras salen en el retorno (nacen dentro), una por descuento aplicado.
+    expect(r.audits.map(a => a.action)).toEqual(['DISCOUNT_APPLIED', 'DISCOUNT_APPLIED'])
+  })
+
+  it('R9: en simulación (cotizar) no hay pasada de contadores: ni FOR UPDATE/NO KEY UPDATE ni UPDATE sobre Discount', async () => {
+    const r = await aplicarDescuentosDelMotorEnTx(prismaMock as never, {
+      venueId: 'v1',
+      orderId: 'o-1',
+      bloquearTambien: ['m-cupon'],
+      simulacion: true,
+    })
+
+    expect(r.applied).toHaveLength(2)
+    expect(trazo).toEqual([])
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
+    for (const [s] of prismaMock.$queryRaw.mock.calls) expect(sql(s)).not.toMatch(/"Discount"[\s\S]*FOR (NO KEY )?UPDATE/)
+  })
+
+  it('R4: no emite «Discount applied» dentro de la transacción; applyAutomaticDiscounts lo emite DESPUÉS del commit', async () => {
+    await aplicarDescuentosDelMotorEnTx(prismaMock as never, { venueId: 'v1', orderId: 'o-1' })
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(0)
+
+    // La transacción corre el cuerpo y NO confirma: nada se anuncia.
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => {
+      await cb(prismaMock)
+      throw new Error('commit falló')
+    })
+    await expect(applyAutomaticDiscounts('o-1', undefined, 'v1')).rejects.toThrow('commit falló')
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(0)
+
+    const r = await applyAutomaticDiscounts('o-1', undefined, 'v1')
+    expect(r).toEqual({ applied: expect.any(Array), total: 10 })
+    expect((logger.info as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Discount applied'))).toHaveLength(2)
+  })
+
+  it('applyAutomaticDiscounts sigue igual: candado de la cuenta, el mismo retorno y los mismos UPDATE ascendentes (sin SELECT nuevo)', async () => {
+    const r = await applyAutomaticDiscounts('o-1', undefined, 'v1')
+
+    expect(r.total).toBe(10)
+    expect(r.applied.map(d => d.discountId)).toEqual(['z-auto', 'a-auto'])
+    expect(trazo).toEqual([
+      ['contador', 'a-auto'],
+      ['contador', 'z-auto'],
+    ])
   })
 })

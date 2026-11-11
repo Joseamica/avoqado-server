@@ -6,6 +6,7 @@ import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 import { WHERE_PAYMENT_IS_EXCHANGE_CREDIT, esVentaNuevaDeCambio } from '../exchanges/exchangeMarks'
+import { beneficiarioDeLaVenta } from './beneficiarioDeLaVenta'
 
 /**
  * Lealtad al quedar PAGADA una orden: métricas de visita y puntos/sellos.
@@ -196,8 +197,7 @@ export async function awardLoyaltyForPaidOrder(
 
     // H4 (segunda ola): con un beneficiario fijado, el que esta lectura resolvería tiene que ser ése, o no se acredita a nadie.
     const fijado = opciones.beneficiario !== undefined
-    const resuelto =
-      orderCustomers.length > 0 ? (orderCustomers.find(oc => oc.isPrimary)?.customerId ?? null) : (args.legacyCustomer?.id ?? null)
+    const resuelto = beneficiarioDeLaVenta(orderCustomers.find(oc => oc.isPrimary)?.customerId, args.legacyCustomer?.id)
 
     if (esVentaDeTarjetas) {
       logger.info('⏭️ Lealtad omitida: la cuenta es de tarjetas de regalo (se premia al usarlas)', { orderId, venueId })

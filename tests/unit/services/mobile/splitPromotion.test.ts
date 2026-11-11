@@ -33,6 +33,7 @@ beforeEach(() => {
     if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: 'venue-1' }]
     if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE') && Array.isArray(values[1])) return values[1].map(id => ({ id }))
     if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 't1' }]
+    if (sql.includes('pg_advisory_xact_lock')) return [] // D25: dividir toma el candado de comandas de la cuenta
     throw new Error(`Unexpected raw statement: ${sql}`)
   })
   prismaMock.order.create.mockResolvedValue({ id: 'order-2', orderNumber: 'ORD-2', version: 1 })

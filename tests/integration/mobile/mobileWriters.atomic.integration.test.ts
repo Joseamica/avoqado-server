@@ -1356,23 +1356,27 @@ describe('addAreaTicketItems decides and totals from the Order read under the lo
       'a live claim by another terminal',
       () => ({ claimedByTerminalId: cashTerminalId, claimedAt: new Date() }),
       'AREA_TICKET_CLAIMED_BY_OTHER',
+      409,
     ],
-    ['a cancellation', () => ({ status: 'CANCELLED' as const }), 'AREA_TICKET_CANCELLED'],
-  ])('%s committed while it waited (no version bump) is seen under the lock: 409 and no line', async (_case, change, code) => {
-    const t = await openTicket()
-    const before = await snapshot(t.id)
+    ['a cancellation', () => ({ status: 'CANCELLED' as const }), 'ORDER_CANCELLED_NO_EDIT', 400],
+  ])(
+    '%s committed while it waited (no version bump) is seen under the lock: canonical rejection and no line',
+    async (_case, change, code, statusCode) => {
+      const t = await openTicket()
+      const before = await snapshot(t.id)
 
-    const writer = await whileFiscalHolds(
-      t.id,
-      tx => tx.order.update({ where: { id: t.id }, data: change() }),
-      () => addLine(t.code),
-    )
+      const writer = await whileFiscalHolds(
+        t.id,
+        tx => tx.order.update({ where: { id: t.id }, data: change() }),
+        () => addLine(t.code),
+      )
 
-    expect(writer.error).toMatchObject({ code, statusCode: 409 })
-    const after = await snapshot(t.id)
-    expect(after.items).toEqual(before.items)
-    expect(after.version).toBe(before.version)
-  })
+      expect(writer.error).toMatchObject({ code, statusCode })
+      const after = await snapshot(t.id)
+      expect(after.items).toEqual(before.items)
+      expect(after.version).toBe(before.version)
+    },
+  )
 
   it('a partial payment with its tip (no version bump) committed while it waited: totals use the tip and paid read under the lock', async () => {
     const t = await openTicket()

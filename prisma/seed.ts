@@ -2299,7 +2299,9 @@ async function main() {
       console.log('      - 💳 Creating pay-later order (completed but pending payment)...')
 
       // Create a completed order with pending payment (pay-later)
-      const payLaterTotal = 250.0
+      // La cuenta = Σ renglones (Codex r3 de D5): con $250 fijos y renglones de $447, regalar uno SUBÍA la cuenta.
+      const payLaterProducts = products.slice(0, 3) // First 3 products
+      const payLaterTotal = payLaterProducts.reduce((sum, p) => sum + Number(p.price), 0)
       const payLaterOrder = await prisma.order.create({
         data: {
           venueId: venue.id,
@@ -2320,7 +2322,6 @@ async function main() {
       })
 
       // Add items to pay-later order
-      const payLaterProducts = products.slice(0, 3) // First 3 products
       for (const product of payLaterProducts) {
         await prisma.orderItem.create({
           data: {
@@ -3952,6 +3953,9 @@ async function main() {
               servedById: currentWaiter.staffId,
               subtotal: 0,
               taxAmount: 0,
+              // Como una venta nativa (D5, 10-nov): precio con IVA incluido. Sin contrato, `taxAmount > 0` se leía como IVA
+              // APARTE (`impuestoQueSeCobraAparte`, regla del 3-sep) y cualquier recálculo le sumaba el IVA encima.
+              contratoDePrecio: 'IVA_INCLUIDO',
               total: 0,
               status: orderStatus,
               paymentStatus: orderStatus === OrderStatus.COMPLETED ? PaymentStatus.PAID : PaymentStatus.PENDING,
@@ -3978,7 +3982,12 @@ async function main() {
             const product = getRandomItem(sellableProducts)
             const quantity = faker.number.int({ min: 1, max: 2 })
             const itemTotal = parseFloat(product.price.toString()) * quantity
-            subtotal += itemTotal
+            // Higher modifier probability for Avoqado venues
+            const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
+            const modifier = Math.random() < modifierProbability ? getRandomItem(modifiers) : null
+            // Un extra va en cada unidad, como en el escritor nativo (`lineBase + modifierTotal * quantity`, Codex r2 de D5).
+            const modifiersTotal = modifier ? parseFloat(modifier.price.toString()) * quantity : 0
+            subtotal += itemTotal + modifiersTotal
 
             const orderItem = await prisma.orderItem.create({
               data: {
@@ -3986,21 +3995,19 @@ async function main() {
                 productId: product.id,
                 quantity,
                 unitPrice: product.price,
-                taxAmount: itemTotal - itemTotal / 1.16, // Mexico: IVA already included in price
-                total: itemTotal,
+                taxAmount: 0, // como las ventas nativas: el precio ya trae el IVA (D5)
+                // El renglón trae su extra, como uno nativo: la cuenta = Σ renglones, que es lo que suman los recálculos
+                // (Codex r1 de D5: sin esto, una cortesía borraba los extras de los demás renglones).
+                total: itemTotal + modifiersTotal,
                 createdAt: orderCreatedAt,
               },
             })
 
             const itemModifiers: any[] = []
-            // Higher modifier probability for Avoqado venues
-            const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
-            if (Math.random() < modifierProbability) {
-              const modifier = getRandomItem(modifiers)
+            if (modifier) {
               await prisma.orderItemModifier.create({
                 data: { orderItemId: orderItem.id, modifierId: modifier.id, quantity: 1, price: modifier.price },
               })
-              subtotal += parseFloat(modifier.price.toString())
               itemModifiers.push({
                 name: modifier.name,
                 price: parseFloat(modifier.price.toString()),
@@ -4011,14 +4018,13 @@ async function main() {
               name: product.name,
               quantity,
               price: parseFloat(product.price.toString()),
-              totalPrice: itemTotal + itemModifiers.reduce((sum, mod) => sum + mod.price, 0),
+              totalPrice: itemTotal + modifiersTotal,
               modifiers: itemModifiers,
             })
           }
 
-          // Mexico model: prices INCLUDE IVA (16%)
-          // taxAmount is the IVA portion already included in subtotal, NOT added on top
-          // Formula: taxAmount = subtotal - (subtotal / 1.16)
+          // Mexico model: prices INCLUDE IVA (16%). This is only the breakdown for the receipt snapshot below:
+          // the Order keeps `taxAmount = 0` like every native sale, because `taxAmount > 0` means "IVA charged on top" (D5).
           const taxAmount = subtotal - subtotal / 1.16
 
           // Generate realistic tip based on customer cohort and service quality
@@ -4047,7 +4053,7 @@ async function main() {
 
           await prisma.order.update({
             where: { id: order.id },
-            data: { subtotal, taxAmount, tipAmount, total },
+            data: { subtotal, tipAmount, total },
           })
 
           // 👥 Create OrderCustomer records (multi-customer support)
@@ -4712,6 +4718,8 @@ async function main() {
               venueId: venue.id,
               orderNumber: `TEST-INCIDENT-001`,
               status: OrderStatus.COMPLETED,
+              // Ya cobrada (tiene su pago COMPLETED): sin esto quedaba «por cobrar» con 0 renglones y un recálculo la vaciaba (D5).
+              paymentStatus: PaymentStatus.PAID,
               subtotal: 5000,
               taxAmount: 800,
               discountAmount: 0,
@@ -4792,6 +4800,8 @@ async function main() {
               venueId: venue.id,
               orderNumber: `TEST-INCIDENT-002`,
               status: OrderStatus.COMPLETED,
+              // Ya cobrada (tiene su pago COMPLETED): sin esto quedaba «por cobrar» con 0 renglones y un recálculo la vaciaba (D5).
+              paymentStatus: PaymentStatus.PAID,
               subtotal: 8500,
               taxAmount: 1360,
               discountAmount: 0,

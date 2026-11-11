@@ -32,6 +32,7 @@ jest.mock('@/utils/prismaClient', () => ({
     celularDeCampo: { findFirst: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     staff: { findUnique: jest.fn() },
     session: { findMany: jest.fn(), updateMany: jest.fn() },
+    venueSettings: { findMany: jest.fn() },
     $transaction: jest.fn(),
   },
 }))
@@ -78,6 +79,7 @@ let sesiones: any[]
 let nSesion: number
 let nCelular: number
 let sucursales: any[]
+let ajustes: any[]
 
 const codigoVivo = (extra: Record<string, unknown> = {}) => ({
   id: 'cod1',
@@ -150,6 +152,8 @@ beforeEach(() => {
     return Promise.resolve({ ...c })
   })
   db.session.findMany.mockImplementation(({ where }: any) => Promise.resolve(sesiones.filter(s => coincide(s, where))))
+  ajustes = []
+  db.venueSettings.findMany.mockImplementation(({ where }: any) => Promise.resolve(ajustes.filter(a => coincide(a, where))))
   db.session.updateMany.mockImplementation(({ where, data }: any) => {
     const filas = sesiones.filter(s => coincide(s, where))
     filas.forEach(f => aplicar(f, data))
@@ -260,9 +264,29 @@ describe('verificadorDelPin y sucursalesParaElCelular', () => {
     // S13: sólo las sucursales de campo (la de gerente no viaja al celular).
     expect(sucursalesDeCampoDeLaPersona).toHaveBeenCalledWith('staff1', 'org1')
     expect(r).toEqual([
-      { venueId: 'v1', nombre: 'Tienda Uno', verificadorPin: null },
-      { venueId: 'v2', nombre: 'Tienda Dos', verificadorPin: await verificadorDelPin('4321', sal) },
+      { venueId: 'v1', nombre: 'Tienda Uno', verificadorPin: null, seguimientoDeUbicacion: false },
+      { venueId: 'v2', nombre: 'Tienda Dos', verificadorPin: await verificadorDelPin('4321', sal), seguimientoDeUbicacion: false },
     ])
+  })
+
+  it('seguimientoDeUbicacion = trackPromoterLocation de cada sucursal, en UNA consulta; sin fila de ajustes → false', async () => {
+    ajustes = [
+      { venueId: 'v1', trackPromoterLocation: true },
+      { venueId: 'otra', trackPromoterLocation: true },
+    ]
+    const r = await sucursalesParaElCelular({ staffId: 'staff1', organizationId: 'org1', pinSal: 'c2Fs' } as any)
+    expect(r.map(s => [s.venueId, s.seguimientoDeUbicacion])).toEqual([
+      ['v1', true],
+      ['v2', false],
+    ])
+    expect(db.venueSettings.findMany).toHaveBeenCalledTimes(1)
+    expect(db.venueSettings.findMany.mock.calls[0][0].where.venueId).toEqual({ in: ['v1', 'v2'] })
+  })
+
+  it('apagado en la sucursal → false', async () => {
+    ajustes = [{ venueId: 'v2', trackPromoterLocation: false }]
+    const r = await sucursalesParaElCelular({ staffId: 'staff1', organizationId: 'org1', pinSal: 'c2Fs' } as any)
+    expect(r.map(s => s.seguimientoDeUbicacion)).toEqual([false, false])
   })
 })
 

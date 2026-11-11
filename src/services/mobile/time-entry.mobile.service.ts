@@ -451,22 +451,21 @@ export async function endBreak(venueId: string, pin: string) {
     throw new BadRequestError('No estás en descanso')
   }
 
-  // End break and update entry status
-  await prisma.$transaction([
-    prisma.timeEntryBreak.updateMany({
-      where: {
-        timeEntryId: activeEntry.id,
-        endTime: null,
-      },
-      data: {
-        endTime: new Date(),
-      },
-    }),
-    prisma.timeEntry.update({
-      where: { id: activeEntry.id },
+  // Primero la checada y luego el descanso, como la salida automática y la de campo (al revés se trababan: hz:4c64c58b:D2).
+  // Condicional: si otra salida la cerró entre la lectura y aquí, no se revive como CLOCKED_IN. La hora se toma ANTES:
+  // esperar un candado no es descanso.
+  const fin = new Date()
+  await prisma.$transaction(async tx => {
+    const { count } = await tx.timeEntry.updateMany({
+      where: { id: activeEntry.id, status: TimeEntryStatus.ON_BREAK, clockOutTime: null },
       data: { status: TimeEntryStatus.CLOCKED_IN },
-    }),
-  ])
+    })
+    if (count !== 1) throw new BadRequestError('No estás en descanso')
+    await tx.timeEntryBreak.updateMany({
+      where: { timeEntryId: activeEntry.id, endTime: null },
+      data: { endTime: fin },
+    })
+  })
 
   logger.info(`✅ [TIME-ENTRY.MOBILE] Break ended | entryId=${activeEntry.id}`)
 

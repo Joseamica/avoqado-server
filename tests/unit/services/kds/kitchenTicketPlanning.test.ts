@@ -2,7 +2,13 @@
  * Etapa 3 del KDS (spec 2026-09-27 §1-§2): qué comandas de pantalla deben existir para una orden, y su FOLIO.
  * Pura: la misma cuenta que hará la caja antes de sincronizar tiene que dar el mismo folio aquí.
  */
-import { KITCHEN_STALENESS_MS, originKeyFor, planKitchenTickets, type KitchenLine } from '@/services/kds/kitchenTicketPlanning'
+import {
+  FOLIO_VALIDO,
+  KITCHEN_STALENESS_MS,
+  originKeyFor,
+  planKitchenTickets,
+  type KitchenLine,
+} from '@/services/kds/kitchenTicketPlanning'
 
 const T0 = new Date('2026-09-27T12:00:00Z')
 const since = new Date('2026-09-27T08:00:00Z')
@@ -31,7 +37,7 @@ function linea(p: Partial<KitchenLine> & { id: string }): KitchenLine {
 }
 const venta = { id: 'ord-1', externalId: 'ext-1', tableId: null }
 const mesa = { id: 'ord-2', externalId: null, tableId: 'mesa-7' }
-const base = { coveredLineIds: new Set<string>(), routing, screens, stampedAt: T0, soloSinEnviar: false }
+const base = { sentUnits: new Map<string, number>(), routing, screens, stampedAt: T0, soloSinEnviar: false }
 
 describe('planKitchenTickets', () => {
   it('a combo component shares the round folio of its wrapper and normal items', () => {
@@ -68,7 +74,7 @@ describe('planKitchenTickets', () => {
 
   it('renglones ya cubiertos, de importe libre o en cantidad 0 no se vuelven a armar', () => {
     const lines = [linea({ id: 'a' }), linea({ id: 'libre', productId: null }), linea({ id: 'cero', quantity: 0 })]
-    expect(planKitchenTickets({ ...base, coveredLineIds: new Set(['a']), order: venta, lines })).toEqual([])
+    expect(planKitchenTickets({ ...base, sentUnits: new Map([['a', 1]]), order: venta, lines })).toEqual([])
   })
 
   it('borrón y cuenta nueva: lo anterior a prender la pantalla, o de hace más de 12 h, no sale', () => {
@@ -105,6 +111,91 @@ describe('planKitchenTickets', () => {
     const plans = planKitchenTickets({ ...base, soloSinEnviar: true, order: mesa, lines })
     expect(plans.flatMap(p => p.lines.map(l => l.id))).toEqual(['nuevo'])
   })
+
+  // 🔴 hz:dcc49fe5:D1 — la caja funde la pieza nueva en el mismo renglón (2 cafés ya en cocina → 3): la pantalla recibe la diferencia
+  // en su PROPIA comanda (la de antes pudo terminarse y salir de la pantalla), como los envíos por tanda de Square.
+  describe('cantidad que sube en un renglón que ya está en una comanda', () => {
+    const enviado = new Date('2026-09-27T11:30:00Z')
+
+    it('mostrador: 2 ya en comanda y ahora 3 ⇒ una comanda nueva de 1, con su propio folio', () => {
+      const lines = [linea({ id: 'cafe', quantity: 3, sentToKitchenAt: enviado })]
+      const plans = planKitchenTickets({ ...base, sentUnits: new Map([['cafe', 2]]), order: venta, lines })
+      expect(plans.map(p => [p.sourceKey, p.lines.map(l => [l.id, l.quantity]), p.toStamp])).toEqual([
+        [`order:ord-1:mas:${T0.getTime()}:cocina`, [['cafe', 1]], []],
+      ])
+    })
+
+    it('mesa: la diferencia viaja junto con lo nuevo de ese mismo envío', () => {
+      const lines = [linea({ id: 'cafe', quantity: 3, sentToKitchenAt: enviado }), linea({ id: 'pan' })]
+      const plans = planKitchenTickets({ ...base, sentUnits: new Map([['cafe', 2]]), order: mesa, lines })
+      expect(plans.map(p => [p.sourceKey, p.lines.map(l => [l.id, l.quantity]), p.toStamp])).toEqual([
+        [
+          `round:ord-2:${T0.getTime()}:cocina`,
+          [
+            ['cafe', 1],
+            ['pan', 1],
+          ],
+          ['pan'],
+        ],
+      ])
+    })
+
+    it('al COBRAR la diferencia sí sale; la ronda enviada que no tiene comanda se sigue saltando', () => {
+      const lines = [linea({ id: 'cafe', quantity: 3, sentToKitchenAt: enviado }), linea({ id: 'ronda', sentToKitchenAt: enviado })]
+      const plans = planKitchenTickets({ ...base, soloSinEnviar: true, sentUnits: new Map([['cafe', 2]]), order: venta, lines })
+      expect(plans.flatMap(p => p.lines.map(l => [l.id, l.quantity]))).toEqual([['cafe', 1]])
+    })
+
+    it('bajar y volver a subir (3 → 2 → 3) no manda nada otra vez; subir de más manda sólo lo que falta', () => {
+      const conCantidad = (quantity: number) => [linea({ id: 'cafe', quantity, sentToKitchenAt: enviado })]
+      const yaTres = new Map([['cafe', 3]])
+      expect(planKitchenTickets({ ...base, sentUnits: yaTres, order: venta, lines: conCantidad(2) })).toEqual([])
+      expect(planKitchenTickets({ ...base, sentUnits: yaTres, order: venta, lines: conCantidad(3) })).toEqual([])
+      const [plan] = planKitchenTickets({ ...base, sentUnits: yaTres, order: venta, lines: conCantidad(5) })
+      expect(plan.lines.map(l => l.quantity)).toEqual([2])
+    })
+
+    // Codex r3 #1 y #2: el folio de la tanda sale del id de la cuenta, no del `externalId` que escribe el cliente: no choca con otra
+    // cuenta y siempre lo acepta el receptor de LISTO sin red, por largo que sea el identificador de la venta.
+    it('el folio de la tanda usa el id de la cuenta y siempre cabe en el receptor de marcas', () => {
+      const estacion = 'c'.repeat(25)
+      const larga = { id: 'ord-1', externalId: 'x'.repeat(160), tableId: null }
+      const lines = [linea({ id: 'cafe', quantity: 3, productStationId: estacion, sentToKitchenAt: enviado })]
+      const screensLargas = [{ id: estacion, since }]
+      const routingLargo = { defaultStationId: estacion, activeStationIds: new Set([estacion]) }
+      const entrada = { ...base, routing: routingLargo, screens: screensLargas, order: larga, lines }
+      const [nueva] = planKitchenTickets({ ...entrada, sentUnits: new Map([['cafe', 2]]) })
+      expect(nueva.sourceKey).toBe(`order:ord-1:mas:${T0.getTime()}:${estacion}`)
+      expect(FOLIO_VALIDO.test(nueva.sourceKey)).toBe(true)
+      const [original] = planKitchenTickets({ ...entrada, sentUnits: new Map() })
+      expect(FOLIO_VALIDO.test(original.sourceKey)).toBe(true)
+    })
+
+    it('la diferencia sigue la estación del producto (barra)', () => {
+      const barra = [linea({ id: 'limonada', quantity: 2, productStationId: 'barra', sentToKitchenAt: enviado })]
+      const [plan] = planKitchenTickets({ ...base, sentUnits: new Map([['limonada', 1]]), order: venta, lines: barra })
+      expect(plan.sourceKey).toBe(`order:ord-1:mas:${T0.getTime()}:barra`)
+    })
+
+    // Codex r2 #1: no se sabe cuándo se sumó la pieza (`updatedAt` cambia con cualquier reenvío del carrito): tiene la edad de su
+    // renglón, como hoy. La sumada a un renglón de más de 12 h, o anterior a prender la pantalla, no sale.
+    it('la pieza sumada tiene la edad de su renglón: renglón de hace 13 h o anterior a la pantalla ⇒ no sale', () => {
+      const desdeSiempre = [{ id: 'cocina', since: new Date(0) }]
+      const haceTrece = new Date(T0.getTime() - 13 * 60 * 60 * 1000)
+      const ya = new Map([['v', 1]])
+      const viejo = [linea({ id: 'v', quantity: 2, createdAt: haceTrece, sentToKitchenAt: haceTrece })]
+      expect(planKitchenTickets({ ...base, screens: desdeSiempre, sentUnits: ya, order: venta, lines: viejo })).toEqual([])
+      const antesDeLaPantalla = [linea({ id: 'v', quantity: 2, sentToKitchenAt: new Date(since.getTime() - 1000) })]
+      expect(planKitchenTickets({ ...base, sentUnits: ya, order: venta, lines: antesDeLaPantalla })).toEqual([])
+    })
+
+    // Codex r1 #1 y r2 #2: la preparación por producto supone una fila por renglón y estación; ahí la diferencia sigue como antes.
+    it('renglón con una comanda de preparación por producto: la diferencia no se parte en otra comanda', () => {
+      const cafe = [linea({ id: 'p', quantity: 3, sentToKitchenAt: enviado })]
+      const conTiempos = { ...base, sentUnits: new Map([['p', 2]]), preparationLineIds: new Set(['p']), order: mesa, lines: cafe }
+      expect(planKitchenTickets(conTiempos)).toEqual([])
+    })
+  })
 })
 
 describe('originKeyFor — el origen es el mismo en la caja y en el servidor', () => {
@@ -122,5 +213,32 @@ describe('originKeyFor — el origen es el mismo en la caja y en el servidor', (
   it('mostrador ⇒ sale:<externalId>, o order:<id> si no hay llave', () => {
     expect(originKeyFor(linea({ id: 'a' }), venta, T0)).toBe('sale:ext-1')
     expect(originKeyFor(linea({ id: 'a' }), { id: 'ord-3', externalId: null, tableId: null }, T0)).toBe('order:ord-3')
+  })
+})
+
+describe('estación «No lleva comanda» (sinComanda)', () => {
+  it('planeador_salta_sin_comanda: lo ruteado a una estación sin comanda no arma comanda, aunque venga entre las pantallas', () => {
+    const conTienda = { defaultStationId: 'cocina', activeStationIds: new Set(['cocina', 'barra', 'tienda']) }
+    const plans = planKitchenTickets({
+      ...base,
+      routing: conTienda,
+      screens: [...screens, { id: 'tienda', since }],
+      sinComanda: new Set(['tienda']),
+      order: venta,
+      lines: [linea({ id: 'takis', categoryStationId: 'tienda' }), linea({ id: 'cafe', categoryStationId: 'barra' })],
+    })
+    expect(plans.map(p => [p.stationId, p.lines.map(l => l.id)])).toEqual([['barra', ['cafe']]])
+  })
+
+  it('sin_estacion_sigue_saliendo: lo que no tiene estación sigue en «Sin estación»', () => {
+    const sinDefault = { defaultStationId: null, activeStationIds: new Set(['cocina', 'barra', 'tienda']) }
+    const plans = planKitchenTickets({
+      ...base,
+      routing: sinDefault,
+      sinComanda: new Set(['tienda']),
+      order: venta,
+      lines: [linea({ id: 'a' })],
+    })
+    expect(plans).toEqual([expect.objectContaining({ sourceKey: 'sale:ext-1:none', stationId: null })])
   })
 })

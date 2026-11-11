@@ -1,3 +1,4 @@
+import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
 import { Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
@@ -6,12 +7,12 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/guards'
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
-import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
+import { CODIGOS_TRANSITORIOS } from '@/services/shared/erroresTransitorios'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   parseServiceCourseSnapshot,
@@ -93,7 +94,7 @@ async function applyPromotionInTransaction(
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   const { venueId, orderId, promotionId, instanceId, selections, soldAt } = params
 
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
     throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -279,7 +280,7 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
   // deciden y escriben sobre la misma foto.
   const recorte = await withDeadlockRetry(
     async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('No encontramos esa promoción en la cuenta.')
       }
       // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -376,8 +377,10 @@ export async function removeIntentPromotions(venueId: string, orderId: string, i
         error: err instanceof Error ? err.message : String(err),
       })
       // Codex r2 N5: un error TRANSITORIO no se traga — la compensación quedó a medias y el intent debe reintentarse. Se sigue
-      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED.
-      if (transitorio === null && esErrorTransitorio(err)) transitorio = err
+      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED. Sólo los de la LISTA:
+      // un choque envuelto (40P01 en un P2010) se registra y la ronda va a cuarentena como siempre (hz:381780f0:D1, Codex r3 #1).
+      const codigo = (err as { errorCode?: unknown; code?: unknown } | null)?.errorCode ?? (err as { code?: unknown } | null)?.code
+      if (transitorio === null && typeof codigo === 'string' && CODIGOS_TRANSITORIOS.has(codigo)) transitorio = err
     }
   }
   if (transitorio !== null) throw transitorio

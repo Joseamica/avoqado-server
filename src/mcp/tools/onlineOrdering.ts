@@ -10,7 +10,8 @@ import { auditMcpWrite } from '../audit'
 import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confirmation'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
-import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { getInboxOrder, listInbox, type InboxOrder } from '@/services/online-ordering/inbox.service'
+import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
@@ -96,6 +97,21 @@ function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
   }
 }
 
+/**
+ * S15 (R1, R2): de quién es la cuenta y qué beneficios trae, en una línea: «Con cuenta: Ana L. · Premio −$45.00» o «Sin cuenta».
+ * Nunca recorta en silencio: si la cuenta trae más beneficios de los publicados, «y N más». El nombre ya viene corto (`cliente.nombre`).
+ */
+function lineaDeLaCuenta(o: Pick<InboxOrder, 'cliente' | 'beneficios' | 'beneficiosTotal'>): string {
+  const beneficios = o.beneficios ?? []
+  const mas = (o.beneficiosTotal ?? beneficios.length) - beneficios.length
+  return [
+    o.cliente ? `Con cuenta: ${o.cliente.nombre}` : 'Sin cuenta',
+    ...beneficios.map(b => `${b.nombre} −${formatoPesos(b.monto)}`),
+    ...(mas > 0 ? [`y ${mas} más`] : []),
+  ].join(' · ')
+}
+const conCuenta = (o: InboxOrder) => ({ ...o, cuenta: lineaDeLaCuenta(o) })
+
 /** Fase 2: el switch del pago con tarjeta se muestra como lo dice el panel: «Aceptar pago con tarjeta: no → sí». */
 const sino = (v: unknown) => (v ? 'sí' : 'no')
 const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
@@ -110,7 +126,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor).',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor).',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -132,7 +148,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       if (status === 'to_pay' || status === 'to_deliver') {
         try {
           const folios = await listFolios({ venueId, section: status === 'to_pay' ? 'toPay' : 'toDeliver', ...(cursor ? { cursor } : {}) })
-          return text({ ok: true, ...folios })
+          return text({ ok: true, ...folios, toPay: folios.toPay.map(conCuenta), toDeliver: folios.toDeliver.map(conCuenta) })
         } catch (e) {
           if (e instanceof AppError && e.code === 'INVALID_CURSOR') return text({ ok: false, code: 'INVALID_CURSOR', error: e.message })
           throw e
@@ -146,7 +162,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
       const inbox = await listInbox({ venueId, filter: status ?? 'all', ...(cursor ? { activeCursor: cursor } : {}) })
-      return text({ ok: true, ...inbox })
+      return text({ ok: true, ...inbox, orders: inbox.orders.map(conCuenta) })
     },
   )
 

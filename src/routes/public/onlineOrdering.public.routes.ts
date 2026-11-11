@@ -48,7 +48,15 @@ router.use(validateRequest(venueSlugGateSchema))
 // Superficie de pedidos NUEVOS: venue operativo (sin demo) → plan en modo cerrado → validación (R14: candado estricto).
 router.get('/info', readLimit, resolveOperationalVenueBySlug, requireOrdering, validateRequest(publicVenueSchema), ctrl.getInfo)
 router.get('/menu', readLimit, resolveOperationalVenueBySlug, requireOrdering, validateRequest(publicVenueSchema), ctrl.getMenu)
-router.post('/quote', readLimit, resolveOperationalVenueBySlug, requireOrdering, validateRequest(quoteSchema), ctrl.postQuote)
+router.post(
+  '/quote',
+  readLimit,
+  resolveOperationalVenueBySlug,
+  authenticateOrderingCustomerOptional,
+  requireOrdering,
+  validateRequest(quoteSchema),
+  ctrl.postQuote,
+)
 // P1-06: negocio activo y operativo y plan los exige el servicio a un pedido NUEVO, DESPUÉS de buscar la repetición: un reintento
 // de un pedido ya creado recibe SU pedido aunque el plan venza o el negocio deje de operar. Codex r3: aquí sólo quedan rechazos
 // que no sueltan la llave (429, 401, 5xx) o que dan lo mismo al mismo envío (cuerpo, cabecera, slug mientras no se renombre); los
@@ -57,7 +65,7 @@ router.post(
   '/orders',
   createLimit,
   resolveVenueBySlugIncludingInactive,
-  // H1: sólo el token de PEDIDOS (prueba el teléfono); el token de cliente general responde 401 aquí.
+  // Sesión única o token anterior de pedidos; el servicio conserva el requisito de teléfono probado.
   authenticateOrderingCustomerOptional,
   validateRequest(createOrderSchema),
   ctrl.postOrder,

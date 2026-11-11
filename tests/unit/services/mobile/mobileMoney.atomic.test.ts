@@ -51,6 +51,7 @@ beforeEach(() => {
   const model = () =>
     Object.fromEntries(
       [
+        'count',
         'findUnique',
         'findUniqueOrThrow',
         'findFirst',
@@ -77,6 +78,7 @@ beforeEach(() => {
   }
   tx.table.findMany.mockResolvedValue([])
   tx.table.findFirst.mockResolvedValue(null)
+  tx.order.count.mockResolvedValue(0)
   tx.order.findUnique.mockResolvedValue({ ...order })
   tx.order.findFirst.mockResolvedValue({ ...order })
   tx.orderItem.findFirst.mockResolvedValue({ ...item })
@@ -196,6 +198,8 @@ describe('mobile money writers own the lock and transaction', () => {
       const sql = query.join(' ')
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order' }, { id: 'source' }]
+      // D25: unir toma el candado de comandas del origen y pasa sus comandas al destino; aquí no hay comandas.
+      if (sql.includes('pg_advisory_xact_lock') || sql.includes('"KdsOrderItem"')) return []
       throw new Error('Unexpected merge fixture SQL')
     })
     tx.terminalPaymentRequest.findFirst.mockResolvedValue(null)

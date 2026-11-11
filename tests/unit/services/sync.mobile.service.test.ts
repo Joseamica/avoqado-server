@@ -460,6 +460,22 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
   })
 
+  it.each(['APPLY_DISCOUNT', 'ADD_ITEMS'])('%s pendiente sobre cuenta anulada queda REJECTED, nunca RETRY', async type => {
+    const error = new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
+    if (type === 'APPLY_DISCOUNT') (orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(error)
+    else (orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(error)
+    const payload =
+      type === 'APPLY_DISCOUNT'
+        ? { orderId: 'order-1', discountId: 'disc-1' }
+        : { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1 }] }
+    const [ack] = await processIntents(baseParams([{ id: `cancelled-${type}`, type, payload }]))
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ORDER_CANCELLED_NO_EDIT' })
+    expect(prisma.posSyncIntent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED' }) }),
+    )
+  })
+
   it('VERSION_CONFLICT en ADD_ITEMS → RETRY (no se pierde), corta el batch, no persiste', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
     const conflict: any = new Error('La orden cambió en otro dispositivo')
@@ -2516,5 +2532,169 @@ describe('PAY_CASH referencia de turno TPV autenticada', () => {
     const result = await processIntents({ ...baseParams(input()), terminalSerialNumber: 'AVQD-foreign' } as any)
     expect(result[0].status).toBe('REJECTED')
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * hz:381780f0:D1 (Codex r4 #2 de D25): un interbloqueo que agotó `withDeadlockRetry` sale envuelto — `P2010` con el 40P01 en
+ * `meta.code` (consulta cruda: `pg_advisory_xact_lock`, `FOR UPDATE`) o, en una consulta de modelo, sin código exterior. El
+ * reducer lo mandaba a cuarentena (REJECTED) aunque es pasajero; ahora lo trata como un `P2034`: RETRY, sin compensar, sin
+ * persistir. Un `P2010` con otro SQLSTATE (un SQL roto) sigue siendo REJECTED.
+ */
+describe('interbloqueo envuelto que agotó los reintentos (hz:381780f0:D1)', () => {
+  const { Prisma: P } = jest.requireActual('@prisma/client')
+  const crudo = (sqlState: string) =>
+    new P.PrismaClientKnownRequestError(`Raw query failed. Code: \`${sqlState}\`. Message: \`ERROR: deadlock detected\``, {
+      code: 'P2010',
+      clientVersion: '6.19.3',
+      meta: { code: sqlState, message: 'ERROR: deadlock detected' },
+    })
+  const deModelo = (sqlState: string) =>
+    new P.PrismaClientUnknownRequestError(
+      '\nInvalid `prisma.order.update()` invocation:\n\n\nError occurred during query execution:\n' +
+        `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "deadlock detected", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`,
+      { clientVersion: '6.19.3' },
+    )
+  const promo = { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }
+  const sinRechazoGuardado = () =>
+    expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED' }) }),
+    )
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.posSyncIntent.deleteMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, status: 'PENDING', tableId: 't1', servedById: STAFF })
+    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    markKitchenTicketMock.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('CANCEL_ORDER: P2010 con 40P01 adentro → RETRY, sin guardar rechazo y soltando la reserva', async () => {
+    ;(orderMobileService.cancelOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
+    const acks = await processIntents(
+      baseParams([{ id: 'i-cancel-40p01', type: 'CANCEL_ORDER', payload: { orderId: 'order-12', reason: 'x' } }]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-cancel-40p01', status: 'RETRY', errorCode: 'P2010' })
+    sinRechazoGuardado()
+    expect(prisma.posSyncIntent.deleteMany).toHaveBeenCalled()
+  })
+
+  it('MERGE_ORDERS: 40P01 de una consulta de modelo (sin código exterior) → RETRY y corta el carril', async () => {
+    ;(orderMobileService.mergeOrders as jest.Mock).mockRejectedValueOnce(deModelo('40P01'))
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i-merge-40p01', seq: 1, type: 'MERGE_ORDERS', payload: { orderId: 'order-12', sourceOrderId: 'order-13' } },
+        { id: 'i-despues', seq: 2, type: 'APPLY_DISCOUNT', payload: { orderId: 'order-12', discountId: 'd1' } },
+      ]),
+    )
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ id: 'i-merge-40p01', status: 'RETRY' })
+    sinRechazoGuardado()
+    expect(orderMobileService.applyOrderDiscount).not.toHaveBeenCalled()
+  })
+
+  it('control — CANCEL_ORDER: P2010 con un SQL roto (42601) sigue siendo REJECTED', async () => {
+    ;(orderMobileService.cancelOrder as jest.Mock).mockRejectedValueOnce(crudo('42601'))
+    const acks = await processIntents(
+      baseParams([{ id: 'i-cancel-42601', type: 'CANCEL_ORDER', payload: { orderId: 'order-12', reason: 'x' } }]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-cancel-42601', status: 'REJECTED', errorCode: 'P2010' })
+  })
+
+  // Una ronda CON promociones que choca envuelta queda como en develop: retira sus promos y va a cuarentena. Reintentarla podía
+  // duplicar el combo si otra caja lo separaba a otro cheque antes de la compensación (Codex r3 #1). Las demás rondas, a RETRY.
+  it('ADD_ITEMS con promoción: P2010 con 40P01 adentro → retira las promos y queda REJECTED, como en develop', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
+    const acks = await processIntents(
+      baseParams([{ id: 'i-promo-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } }]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-promo-40p01', status: 'REJECTED', errorCode: 'P2010' })
+    expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
+  })
+
+  it('ADD_ITEMS ronda mixta: el alta normal truena con 40P01 de modelo → retira las promos y queda REJECTED, como en develop', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(deModelo('40P01'))
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i-mixta-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] } },
+      ]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-mixta-40p01', status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
+  })
+
+  it('ADD_ITEMS sin promociones: P2010 con 40P01 adentro → RETRY, sin guardar rechazo', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i-normal-40p01', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p-1', quantity: 1 }] } },
+      ]),
+    )
+    expect(acks[0]).toMatchObject({ id: 'i-normal-40p01', status: 'RETRY', errorCode: 'P2010' })
+    expect(promotionService.removeIntentPromotions).not.toHaveBeenCalled()
+    sinRechazoGuardado()
+  })
+
+  it('control — retirar las promos tras un 40P01 choca con un transitorio (P2028) → RETRY, sin guardar rechazo', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(crudo('40P01'))
+    ;(promotionService.removeIntentPromotions as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Transaction API error'), { code: 'P2028' }),
+    )
+    const [ack] = await processIntents(
+      baseParams([
+        { id: 'i-mixta-p2028', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] } },
+      ]),
+    )
+    expect(ack).toMatchObject({ id: 'i-mixta-p2028', status: 'RETRY', errorCode: 'P2028' })
+    sinRechazoGuardado()
+  })
+
+  it('control — un transitorio de la LISTA (P2034) en ronda mixta sigue sin tocar las promos (igual que develop)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(Object.assign(new Error('write conflict'), { code: 'P2034' }))
+    const [ack] = await processIntents(
+      baseParams([
+        { id: 'i-mixta-p2034', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] } },
+      ]),
+    )
+    expect(ack).toMatchObject({ status: 'RETRY', errorCode: 'P2034' })
+    expect(promotionService.removeIntentPromotions).not.toHaveBeenCalled()
+  })
+
+  it('control — un REJECTED de ADD_ITEMS sin promociones no toca la compensación', async () => {
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(new BadRequestError('Producto inactivo'))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-normal', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p-1', quantity: 1 }] } }]),
+    )
+    expect(ack).toMatchObject({ status: 'REJECTED' })
+    expect(promotionService.removeIntentPromotions).not.toHaveBeenCalled()
+  })
+
+  it('KDS_TICKET_MARK: P2010 con 40P01 adentro → RETRY (antes se reconocía y la marca se perdía)', async () => {
+    markKitchenTicketMock.mockRejectedValue(crudo('40P01'))
+    const [ack] = await processIntents(
+      baseParams([
+        {
+          id: 'k-40p01',
+          type: 'KDS_TICKET_MARK',
+          payload: { sourceKey: 'sale:e1:none', action: 'BUMP' },
+          createdAtLocal: Date.now() - 5_000,
+        },
+      ]),
+    )
+    expect(ack).toMatchObject({ id: 'k-40p01', status: 'RETRY' })
   })
 })

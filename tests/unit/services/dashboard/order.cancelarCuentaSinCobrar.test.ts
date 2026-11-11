@@ -62,6 +62,8 @@ beforeEach(() => {
     const sql = Array.isArray(query) ? query.join(' ') : ''
     // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
     if (sql.includes('"OrderDiscount"')) return []
+    // D25: «¿qué platillos de comanda viven en otra cuenta?»; estas pruebas no traen comandas.
+    if (sql.includes('"KdsOrderItem"')) return []
     if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
     if (sql.includes('FROM "Order"')) return [{ id: ORDER }]
     if (sql.includes('pg_advisory_xact_lock')) return []

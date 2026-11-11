@@ -19,7 +19,7 @@ import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.s
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
-import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
 import { mergeOrders, payCashOrder, splitOrderBySeat } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
@@ -28,9 +28,13 @@ import {
   leerFoliosConAbonoDevuelto,
   leerPedidosVencidos,
   listFolios,
+  prepararFolioPagado,
   syncPaidFolios,
   type CursorDeVencer,
 } from '@/services/online-ordering/folios.service'
+import { createKdsOrder } from '@/services/mobile/kds.mobile.service'
+import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
+import { processWebhook } from '@/services/b4bit/b4bit.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import {
   acceptOnlineOrder,
@@ -74,6 +78,8 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
 
 let f: Fixture
 let productId: string
+/** S9 v5 (K6): un segundo producto del catálogo. */
+let otroProductoId: string
 let seq = 0
 
 beforeAll(async () => {
@@ -94,6 +100,11 @@ beforeAll(async () => {
   productId = (
     await prisma.product.create({
       data: { venueId: f.venueId, name: 'Flautas', sku: `FLA-${f.fixture}`, price: 100, categoryId: categoria.id, availableOnline: true },
+    })
+  ).id
+  otroProductoId = (
+    await prisma.product.create({
+      data: { venueId: f.venueId, name: 'Gorditas', sku: `GOR-${f.fixture}`, price: 50, categoryId: categoria.id, availableOnline: true },
     })
   ).id
 })
@@ -198,13 +209,21 @@ const vencer = async (orderId: string) =>
 const efectivoDelPos = (orderId: string, centavos = CIEN) =>
   payCashOrder(f.venueId, orderId, { amount: centavos, tip: 0, staffId: f.staffId, idempotencyKey: randomUUID() })
 
-/** La cola sin red del POS: efectivo YA cobrado que llega tarde (nunca se rechaza). */
-async function colaSinRed(orderId: string, centavos = CIEN) {
+/** La cola sin red del POS: efectivo YA cobrado que llega tarde (nunca se rechaza). `cobradoEn`: la hora del aparato al cobrar. */
+async function colaSinRed(orderId: string, centavos = CIEN, cobradoEn?: Date) {
   const [ack] = await processIntents({
     venueId: f.venueId,
     staffId: f.staffId,
     deviceId: `aparato-${f.fixture}`,
-    intents: [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: centavos, tipCents: 0, method: 'CASH' } }],
+    intents: [
+      {
+        id: randomUUID(),
+        seq: ++seq,
+        type: 'PAY_CASH',
+        payload: { orderId, amountCents: centavos, tipCents: 0, method: 'CASH' },
+        ...(cobradoEn ? { createdAtLocal: cobradoEn.getTime() } : {}),
+      },
+    ],
     authorizeIntent: () => true,
   })
   expect(ack).toMatchObject({ status: 'ACKED' })
@@ -324,14 +343,20 @@ describe('T9 · por cada camino de dinero el folio queda «Por entregar» con UN
 })
 
 describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca «Entregado»', () => {
-  it('efectivo de la cola sin red que SALDA un folio vencido ⇒ ACCEPTED en la MISMA transacción del dinero, sin comanda de cocina', async () => {
+  it('efectivo de la cola sin red que SALDA un folio vencido ⇒ ACCEPTED en la siguiente pasada (que publica), sin comanda de cocina', async () => {
     const { orderId, onlineOrderId } = await nuevoFolio({ vencido: true })
     await vencer(orderId)
 
     await colaSinRed(orderId)
 
-    // Sin ninguna pasada de por medio: lo hizo la conciliación, con el dinero.
+    // S9 (Codex r2): el dinero salda la cuenta y avisa; el folio cerrado lo revive `syncPaidClosedFolios` (en la bandeja o el trabajo de
+    // cada 30 s), que publica después del commit lo que la transacción del dinero no puede.
+    expect((await pedido(onlineOrderId)).status).toBe('EXPIRED')
+    await pasada()
     await porEntregar(onlineOrderId)
+    expect(aceptadosEnBitacora(onlineOrderId)).toEqual([
+      expect.objectContaining({ staffId: null, data: expect.objectContaining({ from: 'EXPIRED' }) }),
+    ])
     expect(await cuenta(orderId)).toMatchObject({ paymentStatus: 'PAID' })
     expect(await comandas(orderId)).toBe(0)
   })
@@ -342,6 +367,7 @@ describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca �
 
     await tarjetaDeLaTpv(orderId)
 
+    await pasada() // S9 (Codex r2): lo revive la pasada
     await porEntregar(onlineOrderId)
     expect(await comandas(orderId)).toBe(0)
     await pasada()
@@ -371,6 +397,7 @@ describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca �
       status: 'COMPLETED',
       paymentId: pago.id,
     })
+    await pasada() // S9 (Codex r2): lo revive la pasada
     await porEntregar(onlineOrderId)
     expect(await comandas(orderId)).toBe(0)
   })
@@ -453,6 +480,421 @@ describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca �
     await efectivoDelPos(abonado.orderId, CINCUENTA)
     await pasada()
     expect((await pedido(abonado.onlineOrderId)).status).toBe('EXPIRED')
+  })
+})
+
+describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)', () => {
+  const HACE_UNA_HORA = () => new Date(Date.now() - 3_600_000)
+  /** Lo que la cajera NO tocó: renglones de hace una hora (un folio real se arma minutos antes de vencer, no en el mismo milisegundo). */
+  const renglonesViejos = (orderId: string) =>
+    prisma.orderItem.updateMany({ where: { orderId }, data: { createdAt: HACE_UNA_HORA(), updatedAt: HACE_UNA_HORA() } })
+  const cobroDirecto = (orderId: string, pesos: number, type: 'REGULAR' | 'REFUND' = 'REGULAR') =>
+    prisma.payment.create({
+      data: {
+        venueId: f.venueId,
+        orderId,
+        amount: pesos,
+        tipAmount: 0,
+        method: 'CASH',
+        source: 'TPV',
+        status: 'COMPLETED',
+        type,
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: pesos,
+        processedById: f.staffId,
+      },
+    })
+  /** R44 reciente: su abono de $50 se devolvió completo y venció sin cancelar su cuenta (T = `expiredAt`). */
+  async function r44Reciente() {
+    const folio = await nuevoFolio({ vencido: true })
+    await cobroDirecto(folio.orderId, 50)
+    await cobroDirecto(folio.orderId, -50, 'REFUND')
+    await prisma.order.update({ where: { id: folio.orderId }, data: { paymentStatus: 'PARTIAL', paidAmount: 50, remainingBalance: 50 } })
+    await renglonesViejos(folio.orderId)
+    await vencer(folio.orderId)
+    expect((await cuenta(folio.orderId)).status).toBe('PENDING')
+    return folio
+  }
+  /** `KdsOrderItem` de la cuenta, por renglón y cantidad. */
+  const enCocina = async (orderId: string) =>
+    (
+      await prisma.kdsOrderItem.findMany({
+        where: { kdsOrder: { venueId: f.venueId, orderId } },
+        select: { orderItemId: true, quantity: true, productName: true },
+      })
+    ).map(i => ({ producto: i.productName, cantidad: i.quantity }))
+  const legado = (orderId: string) =>
+    createKdsOrder(f.venueId, { orderNumber: `legado-${orderId}`, orderId, items: [{ productName: 'Flautas', quantity: 1 }] })
+  /** Los cuatro disparadores del armado: el gancho del cobro, una ronda, el barrido y el POST legado. Ninguno arma. */
+  async function ningunDisparadorArma(orderId: string) {
+    for (const trigger of ['PAID', 'ROUND', 'SWEEP'] as const) {
+      await expect(authorKitchenTickets({ venueId: f.venueId, orderId, trigger })).resolves.toEqual({ ticketIds: [] })
+    }
+    await expect(legado(orderId)).resolves.toBeNull()
+    expect(await enCocina(orderId)).toEqual([])
+    expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+  }
+  const version = async (orderId: string) => (await cuenta(orderId)).version
+
+  it.each([
+    ['TPV', (orderId: string) => efectivoDeLaTpv(orderId, CINCUENTA)],
+    ['POS sin red', (orderId: string) => colaSinRed(orderId, CINCUENTA)],
+    ['POS en vivo', (orderId: string) => efectivoDelPos(orderId, CINCUENTA)],
+    [
+      'pago manual',
+      (orderId: string) =>
+        createManualPayment(f.venueId, f.staffId, { orderId, amount: '50.00', tipAmount: '0', method: 'BANK_TRANSFER', source: 'OTHER' }),
+    ],
+    [
+      'cripto',
+      async (orderId: string) => {
+        const p = await prisma.payment.create({
+          data: {
+            venueId: f.venueId,
+            orderId,
+            amount: 50,
+            tipAmount: 0,
+            method: 'CRYPTOCURRENCY',
+            source: 'TPV',
+            status: 'PENDING',
+            type: 'FAST',
+            processor: 'B4BIT',
+            processedById: f.staffId,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 50,
+          },
+        })
+        await processWebhook({
+          identifier: randomUUID(),
+          reference: p.id,
+          fiat_amount: 50,
+          fiat_currency: 'MXN',
+          crypto_amount: '0.001',
+          currency: 'BTC',
+          status: 'CO',
+          tx_hash: `tx-${p.id}`,
+          confirmations: 3,
+        })
+      },
+    ],
+  ] as const)(
+    'K1 (R44, sin tocar) por %s: el dinero tardío que la salda ⇒ 0 comandas con cada disparador; revivida, sigue en 0',
+    async (_c, pagar) => {
+      const { orderId, onlineOrderId } = await r44Reciente()
+      await pagar(orderId)
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+
+      await ningunDisparadorArma(orderId)
+      await pasada()
+      await porEntregar(onlineOrderId)
+      await ningunDisparadorArma(orderId)
+    },
+  )
+
+  it('K2 (el hueco, r6 #1): el panel anula; sin sincronizar, $100 sin red y la conciliación lo pasa a ACCEPTED ⇒ 0 con el POST legado, PAID y SWEEP', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await renglonesViejos(orderId)
+    await updateOrder(f.venueId, orderId, { status: 'CANCELLED' } as any, { staffId: f.staffId })
+    expect((await pedido(onlineOrderId)).cancelledAt).not.toBeNull() // B1
+
+    await colaSinRed(orderId)
+    await porEntregar(onlineOrderId)
+    await ningunDisparadorArma(orderId)
+  })
+
+  it('K3 (folio normal, sin sello): pagado por la TPV y preparado ⇒ su comanda de siempre, todos sus renglones, una vez', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await tarjetaDeLaTpv(orderId)
+    await prepararFolioPagado({ venueId: f.venueId, orderId, staffId: null })
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'PAID' })
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'SWEEP' })
+    await porEntregar(onlineOrderId)
+    expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+  })
+
+  it.each(['PAID', 'SWEEP'] as const)(
+    'K4 (1 → 2): vence; $50 sin red lo reabren; el carrito con el producto en 2 (se funde, mostrador); se cobra el resto ⇒ al cobrar (%s) se manda el renglón con 2',
+    async trigger => {
+      const { orderId } = await nuevoFolio({ vencido: true })
+      await renglonesViejos(orderId)
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA)
+      await addItemsToOrder(f.venueId, orderId, [{ productId, quantity: 2 }], await version(orderId))
+      expect(await prisma.orderItem.count({ where: { orderId } })).toBe(1) // se fundió en el mismo renglón
+
+      await efectivoDeLaTpv(orderId, 15_000)
+      const pagada = await cuenta(orderId)
+      expect(pagada.paymentStatus).toBe('PAID')
+      expect(pagada.kitchenPendingAt).not.toBeNull() // el cobro marcó la cocina: mostrador, sin ROUND
+      await authorKitchenTickets({ venueId: f.venueId, orderId, trigger })
+      expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 2 }])
+    },
+  )
+
+  it('K5 (2 → 1 → 2, r8 #1): dos en un renglón; vence; un abono; carrito con 1; carrito con 2; se cobra ⇒ se manda con 2', async () => {
+    const { orderId } = await nuevoFolio({ vencido: true })
+    await prisma.orderItem.updateMany({ where: { orderId }, data: { quantity: 2, total: 200 } })
+    await prisma.order.update({ where: { id: orderId }, data: { subtotal: 200, total: 200, remainingBalance: 200 } })
+    await renglonesViejos(orderId)
+    await vencer(orderId)
+    await colaSinRed(orderId, CINCUENTA)
+    await addItemsToOrder(f.venueId, orderId, [{ productId, quantity: 1 }], await version(orderId))
+    await addItemsToOrder(f.venueId, orderId, [{ productId, quantity: 2 }], await version(orderId))
+
+    await efectivoDeLaTpv(orderId, 15_000)
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'PAID' })
+    expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 2 }])
+  })
+
+  it('K6 (producto distinto, E14): como K4 pero se agrega otro producto ⇒ se manda como hoy, el nuevo y el original', async () => {
+    const { orderId } = await nuevoFolio({ vencido: true })
+    await renglonesViejos(orderId)
+    await vencer(orderId)
+    await colaSinRed(orderId, CINCUENTA)
+    await addItemsToOrder(
+      f.venueId,
+      orderId,
+      [
+        { productId, quantity: 1 },
+        { productId: otroProductoId, quantity: 1 },
+      ],
+      await version(orderId),
+    )
+    await efectivoDeLaTpv(orderId, 10_000)
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'PAID' })
+    expect((await enCocina(orderId)).sort((a, b) => a.producto.localeCompare(b.producto))).toEqual([
+      { producto: 'Flautas', cantidad: 1 },
+      { producto: 'Gorditas', cantidad: 1 },
+    ])
+  })
+
+  it('K7 (anulado antes del despliegue, r8 #2): R44 sólo con expiredAt; 1 → 2 y se cobra ⇒ se manda con 2', async () => {
+    const { orderId } = await r44Reciente()
+    await addItemsToOrder(f.venueId, orderId, [{ productId, quantity: 2 }], await version(orderId))
+    await efectivoDeLaTpv(orderId, 15_000)
+    expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'PAID' })
+    expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 2 }])
+  })
+
+  it('K8 (hueco viejo): sin su cancelledAt, $100 sin red ⇒ la conciliación lo sella y sin tocar da 0; con 1 → 2 y cobro, se manda', async () => {
+    const sinTocar = await nuevoFolio()
+    await renglonesViejos(sinTocar.orderId)
+    await updateOrder(f.venueId, sinTocar.orderId, { status: 'CANCELLED' } as any, { staffId: f.staffId })
+    await prisma.onlineOrder.update({ where: { id: sinTocar.onlineOrderId }, data: { cancelledAt: null } })
+    await colaSinRed(sinTocar.orderId)
+    expect((await pedido(sinTocar.onlineOrderId)).cancelledAt).not.toBeNull()
+    await ningunDisparadorArma(sinTocar.orderId)
+
+    const tocado = await nuevoFolio()
+    await renglonesViejos(tocado.orderId)
+    await updateOrder(f.venueId, tocado.orderId, { status: 'CANCELLED' } as any, { staffId: f.staffId })
+    await prisma.onlineOrder.update({ where: { id: tocado.onlineOrderId }, data: { cancelledAt: null } })
+    await colaSinRed(tocado.orderId, CINCUENTA)
+    await addItemsToOrder(f.venueId, tocado.orderId, [{ productId, quantity: 2 }], await version(tocado.orderId))
+    await efectivoDeLaTpv(tocado.orderId, 15_000)
+    await authorKitchenTickets({ venueId: f.venueId, orderId: tocado.orderId, trigger: 'PAID' })
+    expect(await enCocina(tocado.orderId)).toEqual([{ producto: 'Flautas', cantidad: 2 }])
+  })
+
+  it('K9 (holgura de 5 s): un renglón tocado en T − 2 s cuenta como tocado y se manda; uno de T − 10 s da 0', async () => {
+    const cerca = await r44Reciente()
+    const lejos = await r44Reciente()
+    for (const [folio, segundos] of [
+      [cerca, 2],
+      [lejos, 10],
+    ] as const) {
+      const T = (await pedido(folio.onlineOrderId)).expiredAt!
+      await prisma.orderItem.updateMany({
+        where: { orderId: folio.orderId },
+        data: { createdAt: HACE_UNA_HORA(), updatedAt: new Date(T.getTime() - segundos * 1_000) },
+      })
+      await efectivoDeLaTpv(folio.orderId, CINCUENTA)
+      await authorKitchenTickets({ venueId: f.venueId, orderId: folio.orderId, trigger: 'SWEEP' })
+    }
+    expect(await enCocina(cerca.orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+    expect(await enCocina(lejos.orderId)).toEqual([])
+  })
+
+  it('K10 («Mi equipo»): anulado, reabierto y cobrado ⇒ como hoy (sin marca al reabrir; un armado directo no se suprime)', async () => {
+    const { orderId } = await nuevoFolio({ equipo: true, vencido: true })
+    await renglonesViejos(orderId)
+    await vencer(orderId)
+    await colaSinRed(orderId)
+    expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+    await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'SWEEP' })
+    expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+  })
+
+  // ── Regla C (founder, 10-nov): la cajera cobró el folio sin red ANTES de que venciera; el dinero sube después ─────────────
+  describe('K12–K18 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
+    const MIN = 60_000
+    /** Un folio pedido hace 40 min, con sus renglones de entonces (nadie los vuelve a tocar). */
+    async function folioDeHace40() {
+      const folio = await nuevoFolio({ vencido: true })
+      const hace40 = new Date(Date.now() - 40 * MIN)
+      await prisma.onlineOrder.update({ where: { id: folio.onlineOrderId }, data: { createdAt: hace40 } })
+      await prisma.orderItem.updateMany({ where: { orderId: folio.orderId }, data: { createdAt: hace40, updatedAt: hace40 } })
+      return folio
+    }
+    const cerrar = {
+      vence: vencer,
+      'el personal lo cancela': async (orderId: string) =>
+        expect(await cancelOnlineOrderByStaff({ venueId: f.venueId, orderId, staffId: f.staffId })).toMatchObject({ outcome: 'OK' }),
+    }
+    /** Lo que hace el gancho de después del commit (simulado en este archivo): el armado ROUND. */
+    const ganchoRound = (orderId: string) => authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'ROUND' })
+    const rondasProgramadas = (orderId: string) =>
+      (armarComandasTrasCommit as jest.Mock).mock.calls.filter(([v, o, t]) => v === f.venueId && o === orderId && t === 'ROUND')
+
+    it.each(Object.keys(cerrar) as Array<keyof typeof cerrar>)(
+      'K12 (a, d) %s a los 30; la cajera lo cobró sin red a los 25 y sube a los 40 ⇒ revive con UNA comanda, aunque la pasada corra dos veces',
+      async como => {
+        const { orderId, onlineOrderId } = await folioDeHace40()
+        await cerrar[como](orderId) // T = ahora
+        expect((await cuenta(orderId)).status).toBe('CANCELLED')
+
+        await colaSinRed(orderId, CIEN, new Date(Date.now() - 15 * MIN)) // cobrado antes de T, sube ahora
+        expect(await cuenta(orderId)).toMatchObject({ paymentStatus: 'PAID', kitchenPendingAt: null }) // el que reabre no marca
+        expect((await pedido(onlineOrderId)).status).not.toBe('ACCEPTED')
+
+        await pasada()
+        await porEntregar(onlineOrderId)
+        expect((await cuenta(orderId)).kitchenPendingAt).not.toBeNull() // marcada en la transacción del revivir
+        expect(rondasProgramadas(orderId)).toHaveLength(1)
+        await ganchoRound(orderId)
+        expect(await comandas(orderId)).toBe(1)
+        expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+        expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+
+        // (d) La pasada otra vez (el trabajo y la bandeja), y el gancho y el barrido repetidos: sigue UNA comanda.
+        await pasada()
+        await pasada()
+        expect(rondasProgramadas(orderId)).toHaveLength(1)
+        await ganchoRound(orderId)
+        await authorKitchenTickets({ venueId: f.venueId, orderId, trigger: 'SWEEP' })
+        expect(await comandas(orderId)).toBe(1)
+        expect(await enCocina(orderId)).toEqual([{ producto: 'Flautas', cantidad: 1 }])
+      },
+    )
+
+    it.each([
+      ['cobrado de verdad a los 45 (después de vencer)', () => new Date(Date.now() + 1_000)],
+      ['con una hora anterior a que existiera el folio (reloj del aparato sin hora)', () => new Date(Date.now() - 60 * MIN)],
+      ['sin hora del cobro', () => undefined],
+    ])('K13 (b) %s ⇒ como hoy: revive a «Por entregar» sin comanda con ningún disparador', async (_c, cobradoEn) => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CIEN, cobradoEn())
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K14 (c) sin pantalla de cocina ⇒ revive sin marca ni comanda', async () => {
+      await prisma.printStation.updateMany({ where: { venueId: f.venueId }, data: { hasKitchenDisplay: false } })
+      try {
+        const { orderId, onlineOrderId } = await folioDeHace40()
+        await vencer(orderId)
+        await colaSinRed(orderId, CIEN, new Date(Date.now() - 15 * MIN))
+
+        await pasada()
+        await porEntregar(onlineOrderId)
+        expect((await cuenta(orderId)).kitchenPendingAt).toBeNull()
+        expect(rondasProgramadas(orderId)).toHaveLength(0)
+        expect(await comandas(orderId)).toBe(0)
+      } finally {
+        await prisma.printStation.updateMany({ where: { venueId: f.venueId }, data: { hasKitchenDisplay: true } })
+      }
+    })
+
+    it('K16 el panel anula la CUENTA y la sincronización cierra el folio («cancelado por otra vía»: su hora no es la de la anulación) ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      const antesDeAnular = new Date(Date.now() - 15 * MIN)
+      await updateOrder(f.venueId, orderId, { status: 'CANCELLED' } as any, { staffId: f.staffId })
+      await cerrarCanceladasReleyendo({ venueId: f.venueId }, () => new Date())
+      expect(await pedido(onlineOrderId)).toMatchObject({ status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' })
+      await colaSinRed(orderId, CIEN, antesDeAnular)
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K17 (Codex r1 #2): la caja B cobra su mitad DESPUÉS de vencer y sube primero; la A cobró la otra mitad antes y sube después ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() + 1_000)) // B: después del cierre
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN)) // A: antes, pero es la que salda
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+      expect((await cuenta(orderId)).loyaltySaleAt!.getTime()).toBeLessThan((await pedido(onlineOrderId)).expiredAt!.getTime())
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K18 (Codex r2 #1): un cripto de $50 nació antes del cierre y se confirmó después; el efectivo a tiempo de la otra mitad salda ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      // Un cripto PENDING de antes del bloqueo de S9 (como T5): nació antes del cierre y se confirma después.
+      const cripto = await prisma.payment.create({
+        data: {
+          venueId: f.venueId,
+          orderId,
+          amount: 50,
+          tipAmount: 0,
+          method: 'CRYPTOCURRENCY',
+          source: 'TPV',
+          status: 'PENDING',
+          type: 'FAST',
+          processor: 'B4BIT',
+          processedById: f.staffId,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 50,
+          createdAt: new Date(Date.now() - 20 * MIN),
+        },
+      })
+      await processWebhook({
+        identifier: randomUUID(),
+        reference: cripto.id,
+        fiat_amount: 50,
+        fiat_currency: 'MXN',
+        crypto_amount: '0.001',
+        currency: 'BTC',
+        status: 'CO',
+        tx_hash: `tx-${cripto.id}`,
+        confirmations: 3,
+      })
+      expect(await prisma.payment.findUniqueOrThrow({ where: { id: cripto.id } })).toMatchObject({ status: 'COMPLETED' })
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN))
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K15 cobro a tiempo que sólo ABONA y el resto con red después de vencer ⇒ como hoy (la cuenta se terminó de pagar tarde)', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN))
+      await efectivoDelPos(orderId, CINCUENTA)
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      expect(await comandas(orderId)).toBeLessThanOrEqual(1) // la del cobro que saldó, como hoy (decisión 19)
+    })
   })
 })
 

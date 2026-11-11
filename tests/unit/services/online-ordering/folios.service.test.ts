@@ -24,6 +24,15 @@ jest.mock('@/services/online-ordering/notifications.service', () => ({
   __esModule: true,
   notifyOrderEvent: jest.fn(async () => undefined),
 }))
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: jest.fn(async () => ({ id: 'post1' })),
+  applySalePosting: jest.fn(async () => undefined),
+}))
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardLedger'),
+  activarSobresDeCuentaPagadaEnTx: jest.fn(async () => ({ activated: [] })),
+}))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, getSettings: jest.fn() }))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -35,7 +44,9 @@ import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.s
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
+import { createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import {
+  cerrarFolioEnCeroEnTx,
   cerrarFoliosDelDiaTerminado,
   leerFoliosConAbonoDevuelto,
   leerPedidosVencidos,
@@ -233,6 +244,16 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     status,
     order: { orderNumber: `F-${id}` },
   })
+  // S9: el paso compartido (`revivirFolioSaldadoEnTx`) relee el folio bajo el candado de la orden; aquí devuelve lo que la lectura vio.
+  beforeEach(() => {
+    prismaMock.onlineOrder.findFirst.mockImplementation((async ({ where }: any) => {
+      const filas = (await (prismaMock.onlineOrder.findMany.getMockImplementation()?.({ where: {} } as any) ?? [])) as any[]
+      const f = filas.find(x => x.orderId === where.orderId)
+      return f ? { id: f.id, status: f.status } : null
+    }) as any)
+    prismaMock.order.findFirst.mockReset()
+    prismaMock.activityLog.count.mockReset()
+  })
 
   it('R4: lee sólo folios cerrados en los últimos 7 días con la cuenta saldada y viva, con tope y orden estable', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([])
@@ -297,11 +318,193 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     expect(logAction).not.toHaveBeenCalled()
   })
 
+  it('S9 v5 (U8): la revivida NO avisa (el aviso es de la nota del cobro): ni cuenta, ni bitácora del cobro, ni avisos', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.count).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(prismaMock.notification.createMany).not.toHaveBeenCalled()
+  })
+
+  it('R13 (U8): lee por páginas con cursor por id; 100 filas venenosas delante no tapan a la 101, y queda el conteo de las no revividas', async () => {
+    const venenosas = Array.from({ length: 100 }, (_, i) => cerrado(`P${String(i).padStart(3, '0')}`))
+    const buena = cerrado('Z')
+    prismaMock.onlineOrder.findMany.mockImplementation((async ({ where }: any) =>
+      where.id?.gt ? [buena].filter(r => r.id > where.id.gt) : venenosas) as any)
+    // El candado de la orden falla para las venenosas (su Order es de otro negocio): no revive y la pasada sigue.
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) =>
+      orderId === buena.orderId ? [{ id: orderId }] : [],
+    )
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: buena.id, status: 'EXPIRED' } as any)
+
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+
+    const lecturas = prismaMock.onlineOrder.findMany.mock.calls.map((c: any[]) => c[0].where)
+    expect(lecturas).toHaveLength(2)
+    expect(lecturas[0].id).toBeUndefined()
+    expect(lecturas[1].id).toEqual({ gt: 'oo-P099' })
+    expect(notifyOrderEvent).toHaveBeenCalledWith('ord-Z', 'ACCEPTED')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no revivieron'),
+      expect.objectContaining({ leidos: 101, sinRevivir: 100 }),
+    )
+  })
+
+  it('R13: a lo más 10 páginas por pasada', async () => {
+    let n = 0
+    prismaMock.onlineOrder.findMany.mockImplementation((async () =>
+      Array.from({ length: 100 }, () => cerrado(`X${String(n++).padStart(5, '0')}`))) as any)
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    await syncPaidClosedFolios({}, () => NOW)
+    expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledTimes(10)
+  })
+
   it('una fila que truena se registra y la pasada sigue', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A'), cerrado('B')] as any)
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('candado'))
     await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
+  })
+
+  describe('regla C (founder, 10-nov): el folio cobrado en la caja ANTES de cerrarse llega a la cocina al revivir', () => {
+    const T = new Date(NOW.getTime() - 10 * 60_000) // venció hace 10 min
+    const MARCA = { where: { id: 'ord-A', venueId: 'v1' }, data: { kitchenPendingAt: NOW } }
+    // Un solo cobro llegó después del cierre: el que saldó y trae la hora.
+    beforeEach(() => prismaMock.payment.count.mockResolvedValue(1))
+    const releido = (horaDelCobro: Date | null, cierre: Record<string, Date | string | null> = { expiredAt: T }) => ({
+      id: 'oo-A',
+      status: 'EXPIRED',
+      createdAt: new Date(T.getTime() - 30 * 60_000), // se pidió 30 min antes de vencer
+      expiredAt: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      rejectedAt: null,
+      ...cierre,
+      order: { loyaltySaleAt: horaDelCobro },
+    })
+
+    it('cobrado a los 25 de 30 (sube después de vencer): la MISMA transacción marca la cocina tras el CAS y el armado ROUND va después del commit', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      let enLaTransaccion = false
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+        enLaTransaccion = true
+        try {
+          return await fn(prismaMock)
+        } finally {
+          enLaTransaccion = false
+        }
+      })
+      const dentro: boolean[] = []
+      ;(prismaMock.order.updateMany as jest.Mock).mockImplementationOnce(async () => {
+        dentro.push(enLaTransaccion)
+        return { count: 1 }
+      })
+      ;(armarComandasTrasCommit as jest.Mock).mockImplementationOnce(async () => {
+        dentro.push(enLaTransaccion)
+      })
+
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+
+      expect(debeMarcarCocina).toHaveBeenCalledWith('v1', { orderId: 'ord-A' })
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(MARCA)
+      expect(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.order.updateMany.mock.invocationCallOrder[0],
+      )
+      expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord-A', 'ROUND')
+      expect(dentro).toEqual([true, false]) // la marca dentro de la transacción; el armado, ya fuera
+      // Los cobros con dinero que llegaron desde el cierre, bajo el mismo candado (los reembolsos son filas negativas).
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: {
+          venueId: 'v1',
+          orderId: 'ord-A',
+          status: 'COMPLETED',
+          amount: { gt: 0 },
+          OR: [{ createdAt: { gte: T } }, { updatedAt: { gte: T } }],
+        },
+      })
+    })
+
+    it('Codex r1 #2: DOS cobros llegaron después del cierre (otra caja pudo cobrar su parte después y subirla antes) ⇒ como hoy', async () => {
+      prismaMock.payment.count.mockResolvedValue(2)
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['la clienta lo canceló', 'CANCELLED_BY_CUSTOMER', 'CUSTOMER'],
+      ['el personal lo canceló', 'CANCELLED_BY_STAFF', 'cstaff00000000000000000001'],
+    ])('%s: T es su `cancelledAt` (fecha exacta del CAS)', async (_c, status, cancelledBy) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', status)] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), { status, cancelledAt: T, cancelledBy }) as any,
+      )
+      await syncPaidClosedFolios({}, () => NOW)
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(MARCA)
+      expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord-A', 'ROUND')
+    })
+
+    it.each([
+      ['«cancelado por otra vía» (la sincronización o la conciliación reescriben la hora)', { cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' }],
+      ['el sello sin quién (la conciliación lo pone al llegar el dinero)', { cancelledBy: null }],
+    ])('cobrado antes de un `cancelledAt` que NO es exacto: %s ⇒ como hoy', async (_c, quien) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', 'CANCELLED_BY_STAFF')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), { status: 'CANCELLED_BY_STAFF', cancelledAt: T, ...quien }) as any,
+      )
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('T es la MENOR de sus fechas exactas: cobrado después de rechazarse ⇒ como hoy', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A', 'REJECTED')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(
+        releido(new Date(T.getTime() - 60_000), {
+          status: 'REJECTED',
+          rejectedAt: new Date(T.getTime() - 2 * 60_000),
+          cancelledAt: T,
+          cancelledBy: 'CUSTOMER',
+        }) as any,
+      )
+      await syncPaidClosedFolios({}, () => NOW)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['cobrado DESPUÉS de cerrarse (a los 45)', new Date(T.getTime() + 15 * 60_000)],
+      ['cobrado justo en T (no es anterior)', T],
+      ['sin hora del cobro (TPV, panel, cripto, o el aparato no la mandó)', null],
+      ['hora anterior a que existiera el folio (reloj del aparato sin hora)', new Date(T.getTime() - 60 * 60_000)],
+    ])('%s ⇒ como hoy: revive sin marca ni armado', async (_c, hora) => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(hora as Date | null) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('sin pantalla de cocina (`debeMarcarCocina` dice que no) ⇒ revive sin marca ni armado', async () => {
+      ;(debeMarcarCocina as jest.Mock).mockResolvedValue(false)
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
+
+    it('si el CAS pierde (otro ya lo revivió) ⇒ ni marca ni armado: la comanda es de quien ganó', async () => {
+      prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A')] as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(releido(new Date(T.getTime() - 5 * 60_000)) as any)
+      prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+      await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(0)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+    })
   })
 })
 
@@ -514,5 +717,79 @@ describe('R52 · la hora se lee al escribir o decidir, no al empezar la pasada',
     // …y el día se compara contra ese mismo instante.
     expect(sql).toContain("TIMESTAMP '2026-11-07 10:00:01.000'")
     expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'COMPLETED', completedAt: ESCRIBE })
+  })
+})
+
+describe('S11 · cerrarFolioEnCeroEnTx: un folio que un beneficio deja en $0 se cierra pagado sin cobro (P2-4, E5)', () => {
+  const ITEMS = [{ id: 'oi1', productId: 'p1', quantity: 1, modifiers: [] }]
+  const cerrar = () =>
+    cerrarFolioEnCeroEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', marcarCocina: true, minutes: 15, reloj: () => NOW })
+
+  beforeEach(() => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.order.findFirst.mockResolvedValue({ customerId: 'cust1', items: ITEMS } as any)
+    prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
+    prismaMock.activityLog.create.mockResolvedValue({} as any)
+    prismaMock.couponRedemption.create.mockResolvedValue({} as any)
+    prismaMock.couponCode.update.mockResolvedValue({} as any)
+    prismaMock.discount.update.mockResolvedValue({} as any)
+  })
+
+  it('«Nadie»: PAID y COMPLETED sin Payment, horas al escribir, comanda marcada, vale de inventario y «Por entregar»; nunca loyaltyEligibleAt', async () => {
+    const r = await cerrar()
+    expect(prismaMock.order.updateMany.mock.calls[0][0]).toEqual({
+      where: { id: 'ord1', venueId: 'v1', total: 0, paymentStatus: 'PENDING', status: { notIn: ['CANCELLED', 'DELETED'] } },
+      data: { paymentStatus: 'PAID', status: 'COMPLETED', completedAt: NOW, kitchenPendingAt: NOW, remainingBalance: 0 },
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(createSalePostingInTx).toHaveBeenCalledWith(prismaMock, { venueId: 'v1', orderId: 'ord1', items: ITEMS, staffId: null })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ venueId: 'v1', action: 'ONLINE_ORDER_CLOSED_AT_ZERO', entity: 'Order', entityId: 'ord1' }),
+    })
+    // El paso de etapa 1 a «Por entregar» (CAS PENDING_ACCEPTANCE → ACCEPTED), sin volver a marcar la cocina.
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: { in: ['PENDING_ACCEPTANCE'] } }),
+        data: expect.objectContaining({ status: 'ACCEPTED' }),
+      }),
+    )
+    expect(r).toMatchObject({ cerrado: true, postingId: 'post1', cas: { r: 'OK' } })
+  })
+
+  it('con cupón: asesor del descuento → su fila Discount → el canje (CouponCode 6b con su Discount ya tomada)', async () => {
+    prismaMock.orderDiscount.findFirst.mockResolvedValue({
+      couponCodeId: 'cc1',
+      amount: D('100.00'),
+      couponCode: { discountId: 'd1' },
+    } as any)
+    await cerrar()
+    const raw = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([sql]) =>
+      Array.isArray(sql) ? sql.join('?') : String(sql?.sql ?? sql?.strings?.join('?') ?? sql),
+    )
+    const asesor = raw.findIndex(t => /pg_advisory_xact_lock/.test(t))
+    const fila = raw.findIndex(t => /FOR NO KEY UPDATE/.test(t))
+    expect(asesor).toBeGreaterThanOrEqual(0)
+    expect(fila).toBeGreaterThan(asesor)
+    expect(prismaMock.couponRedemption.create).toHaveBeenCalledWith({
+      data: { couponCodeId: 'cc1', orderId: 'ord1', customerId: 'cust1', amountSaved: D('100.00') },
+    })
+    expect(prismaMock.couponCode.update).toHaveBeenCalledWith({ where: { id: 'cc1' }, data: { currentUses: { increment: 1 } } })
+    expect(prismaMock.discount.update).toHaveBeenCalledWith({ where: { id: 'd1' }, data: { currentUses: { increment: 1 } } })
+  })
+
+  it('una cuenta que no está en $0 o ya no está por pagar no se toca (CAS en 0): ni vale, ni canje, ni bitácora', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 })
+    expect(await cerrar()).toEqual({ cerrado: false })
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+    expect(prismaMock.couponRedemption.create).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('«Mi equipo»: se cierra pagado y el pedido sigue su aceptación de hoy (no lo pasa a «Por entregar»)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(folio({ requiresAcceptance: true }) as any)
+    const r = await cerrar()
+    expect(r).toMatchObject({ cerrado: true, cas: { r: 'NOT_FOLIO' } })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 })
