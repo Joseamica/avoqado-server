@@ -172,7 +172,13 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
     await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })).resolves.toEqual({ ticketIds: [] })
     expect(planKitchenTickets).not.toHaveBeenCalled()
     expect(prismaMock.payment.count).toHaveBeenCalledWith({
-      where: { venueId: VENUE, orderId: ORDER, status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: T } },
+      where: {
+        venueId: VENUE,
+        orderId: ORDER,
+        status: 'COMPLETED',
+        amount: { gt: 0 },
+        OR: [{ createdAt: { gte: T } }, { updatedAt: { gte: T } }],
+      },
     })
   })
 

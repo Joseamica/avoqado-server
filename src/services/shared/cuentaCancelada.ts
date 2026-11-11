@@ -548,10 +548,13 @@ function cierreExacto(folio: FolioConCierre): number | null {
 }
 
 /**
- * 🔴 Regla C completa, bajo el candado de la orden de quien llama: `cobradoAntesDeCerrar` y, además, que el dinero que llegó después
- * del cierre sea UN solo cobro: el que saldó la cuenta y trae la hora. Con dos o más (Codex r1 #2: otra caja pudo cobrar su parte
- * DESPUÉS del cierre y subirla antes, y entonces la hora del que salda no es la de cuando quedó pagado), como hoy. Sólo consulta
- * cuando la hora ya dice «antes» (índice `[orderId]` de `Payment`; los reembolsos son filas negativas y no cuentan).
+ * 🔴 Regla C completa, bajo el candado de la orden de quien llama: `cobradoAntesDeCerrar` y, además, que desde el cierre sólo UN cobro
+ * con dinero haya nacido o cambiado: el que saldó la cuenta y trae la hora. Si hay otro, no sabemos cuándo se cobró su parte, y la hora
+ * del que salda no es la de cuando la cuenta quedó pagada (Codex r1 #2: otra caja cobró después del cierre y subió antes; r2 #1: un
+ * cripto que nació antes y se confirmó después). Por eso cuenta `createdAt` O `updatedAt` desde T: todo cambio de estado o de importe
+ * de un `Payment` pasa por Prisma y mueve `updatedAt` (los `UPDATE "Payment"` crudos sólo parchan `processorData` o datos de la
+ * tarjeta). Un cambio ajeno después de T sólo puede dejarlo como hoy. Sólo consulta cuando la hora ya dice «antes» (índice
+ * `[orderId]`; los reembolsos son filas negativas y no cuentan).
  */
 export async function cobradoATiempoEnTx(
   tx: Pick<Prisma.TransactionClient, 'payment'>,
@@ -560,7 +563,13 @@ export async function cobradoATiempoEnTx(
   const t = cierreExacto(a.folio)
   if (t == null || !cobradoAntesDeCerrar(a.folio, a.horaDelCobro)) return false
   const tardios = await tx.payment.count({
-    where: { venueId: a.venueId, orderId: a.orderId, status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: new Date(t) } },
+    where: {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      status: 'COMPLETED',
+      amount: { gt: 0 },
+      OR: [{ createdAt: { gte: new Date(t) } }, { updatedAt: { gte: new Date(t) } }],
+    },
   })
   return tardios === 1
 }

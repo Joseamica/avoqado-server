@@ -416,7 +416,13 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
       expect(dentro).toEqual([true, false]) // la marca dentro de la transacción; el armado, ya fuera
       // Los cobros con dinero que llegaron desde el cierre, bajo el mismo candado (los reembolsos son filas negativas).
       expect(prismaMock.payment.count).toHaveBeenCalledWith({
-        where: { venueId: 'v1', orderId: 'ord-A', status: 'COMPLETED', amount: { gt: 0 }, createdAt: { gte: T } },
+        where: {
+          venueId: 'v1',
+          orderId: 'ord-A',
+          status: 'COMPLETED',
+          amount: { gt: 0 },
+          OR: [{ createdAt: { gte: T } }, { updatedAt: { gte: T } }],
+        },
       })
     })
 

@@ -729,7 +729,7 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
   })
 
   // ── Regla C (founder, 10-nov): la cajera cobró el folio sin red ANTES de que venciera; el dinero sube después ─────────────
-  describe('K12–K17 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
+  describe('K12–K18 · regla C: el folio cobrado A TIEMPO en la caja que sube tarde llega a la cocina', () => {
     const MIN = 60_000
     /** Un folio pedido hace 40 min, con sus renglones de entonces (nadie los vuelve a tocar). */
     async function folioDeHace40() {
@@ -833,6 +833,49 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
       await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN)) // A: antes, pero es la que salda
       expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
       expect((await cuenta(orderId)).loyaltySaleAt!.getTime()).toBeLessThan((await pedido(onlineOrderId)).expiredAt!.getTime())
+
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(rondasProgramadas(orderId)).toHaveLength(0)
+      await ningunDisparadorArma(orderId)
+    })
+
+    it('K18 (Codex r2 #1): un cripto de $50 nació antes del cierre y se confirmó después; el efectivo a tiempo de la otra mitad salda ⇒ como hoy', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      // Un cripto PENDING de antes del bloqueo de S9 (como T5): nació antes del cierre y se confirma después.
+      const cripto = await prisma.payment.create({
+        data: {
+          venueId: f.venueId,
+          orderId,
+          amount: 50,
+          tipAmount: 0,
+          method: 'CRYPTOCURRENCY',
+          source: 'TPV',
+          status: 'PENDING',
+          type: 'FAST',
+          processor: 'B4BIT',
+          processedById: f.staffId,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 50,
+          createdAt: new Date(Date.now() - 20 * MIN),
+        },
+      })
+      await processWebhook({
+        identifier: randomUUID(),
+        reference: cripto.id,
+        fiat_amount: 50,
+        fiat_currency: 'MXN',
+        crypto_amount: '0.001',
+        currency: 'BTC',
+        status: 'CO',
+        tx_hash: `tx-${cripto.id}`,
+        confirmations: 3,
+      })
+      expect(await prisma.payment.findUniqueOrThrow({ where: { id: cripto.id } })).toMatchObject({ status: 'COMPLETED' })
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN))
+      expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
 
       await pasada()
       await porEntregar(onlineOrderId)
