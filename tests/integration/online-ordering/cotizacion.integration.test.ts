@@ -391,7 +391,7 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
       { etiqueta: 'prueba:estricto-d8' },
     )
   }
-  const premioDe = (aplicados: Array<{ tipo: string; lineIndex?: number }>) => aplicados.find(a => a.tipo === 'PREMIO')
+  const premioDe = <T extends { tipo: string }>(aplicados: T[]) => aplicados.find(a => a.tipo === 'PREMIO')
 
   it('ofrecido: «Va en tu Combo» (renglón 1, el que más le regala) sin dejar rastro; elegido: lo aplicado y la oferta dicen el mismo, igual que el estricto', async () => {
     const e = await cafeGratis()
@@ -430,6 +430,19 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
       },
     )
     expect(q.oferta?.premio?.lineIndex).toBe(0)
+  })
+
+  it('Codex r1: con la cuenta ya en cero (cupón de cuenta del 100 %), no se ofrece renglón: elegido, el canje lo descarta', async () => {
+    const e = await cafeGratis()
+    await prisma.discount.update({ where: { id: e.cuponId }, data: { value: 100 } })
+    const ofrecido = await cotizarConBeneficios(venueId, carrito(combo), { customerId: e.clientaId, eleccion: { cupon: e.codigo } })
+    expect(PESOS(ofrecido.totalConBeneficios!)).toBe('0.00')
+    expect(ofrecido.oferta?.premio).toEqual({ id: e.premioId, etiqueta: 'Café gratis' })
+    const elegido = await cotizarConBeneficios(venueId, carrito(combo), {
+      customerId: e.clientaId,
+      eleccion: { cupon: e.codigo, premioId: e.premioId },
+    })
+    expect(elegido.descartados).toEqual(['PREMIO'])
   })
 
   it('un premio de monto fijo (de cuenta) no trae renglón, ni ofrecido ni aplicado', async () => {

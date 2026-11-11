@@ -241,7 +241,11 @@ export async function renglonDelPremioEnTx(
   })
   if (reward?.rewardType !== StampRewardType.FREE_PRODUCT) return null
   const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, subtotal: true, discountAmount: true } })
-  return order ? (await calcularDescuento(tx, order, reward)).renglonPremiadoId : null
+  if (!order) return null
+  const calculo = await calcularDescuento(tx, order, reward)
+  // El mismo tope del canje (`canjearPremioEnTx`): sobre lo que queda de la cuenta; en cero el canje lo rechaza (Codex D8 r1).
+  const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount ?? 0))
+  return Math.min(calculo.monto, base) > 0 ? calculo.renglonPremiadoId : null
 }
 
 /**

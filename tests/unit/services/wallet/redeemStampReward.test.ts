@@ -310,4 +310,11 @@ describe('D8 · en qué renglón cae el premio de producto gratis', () => {
     prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi1', unitPrice: 45, quantity: 1, total: 0, discountAmount: 0 }] as any)
     await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
   })
+
+  it('Codex r1: con la cuenta ya descontada entera (un cupón de cuenta del 100 %), no se ofrece renglón: el canje lo rechazaría', async () => {
+    // P11 no resta las filas de CUENTA al elegir; el tope del canje sí (base = subtotal − descuentos = 0 ⇒ «nada sobre lo que aplicar»).
+    prismaMock.order.findFirst.mockResolvedValue({ ...ORDEN, subtotal: 135, discountAmount: 135 } as any)
+    await expect(renglonDelPremioEnTx(tx, 'v1', 'o1', 'rw1')).resolves.toBeNull()
+    await expect(canjearPremioEnTx(tx, 'v1', 'o1', 'rw1')).rejects.toThrow(/nada sobre lo que aplicar/)
+  })
 })
