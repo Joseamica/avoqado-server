@@ -1124,6 +1124,8 @@ describe('cancelOrder — guard against live terminal charges', () => {
       const sql = Array.isArray(query) ? query.join(' ') : ''
       // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
       if (sql.includes('"OrderDiscount"')) return []
+      // D25: «¿qué platillos de comanda viven en otra cuenta?»; estas pruebas no traen comandas.
+      if (sql.includes('"KdsOrderItem"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       if (sql.includes('pg_advisory_xact_lock')) return []
@@ -1389,6 +1391,8 @@ describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de
           : ''
       // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
       if (sql.includes('"OrderDiscount"')) return []
+      // D25: «¿qué platillos de comanda viven en otra cuenta?»; estas pruebas no traen comandas.
+      if (sql.includes('"KdsOrderItem"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"'))
         return rows()

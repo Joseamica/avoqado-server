@@ -168,6 +168,7 @@ describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () 
       if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: VENUE }]
       if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')) return values[1].map((id: string) => ({ id }))
       if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 'mesa-1' }]
+      if (sql.includes('pg_advisory_xact_lock')) return [] // D25: dividir toma el candado de comandas de la cuenta
       throw new Error(`Unexpected raw statement: ${sql}`)
     })
   })

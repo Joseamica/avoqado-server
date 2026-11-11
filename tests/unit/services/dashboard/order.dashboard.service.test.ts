@@ -161,8 +161,9 @@ describe('order.dashboard.service — deleteOrder guard de pagos', () => {
   const arrange = (order: Record<string, unknown>, completedPayments = 0) => {
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
     // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en estas órdenes de prueba.
+    // D25: tampoco hay platillos de comanda que vivan en otra cuenta (`"KdsOrderItem"`).
     prismaMock.$queryRaw.mockImplementation((async (q: { raw?: readonly string[] }) =>
-      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-1' }]) as any)
+      q?.raw?.join('').includes('"OrderDiscount"') || q?.raw?.join('').includes('"KdsOrderItem"') ? [] : [{ id: 'order-1' }]) as any)
     prismaMock.order.findFirst.mockResolvedValue(order as any)
     prismaMock.order.findUnique.mockResolvedValue(order as any)
     // No legacy or tracked kitchen tickets exist in these payment-guard fixtures.
@@ -368,6 +369,7 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
       const sql = (Array.isArray(query) ? query : ((query as { strings?: string[] }).strings ?? [])).join(' ')
       if (sql.includes('ancestors(id) AS')) return [{ id: 'order-1' }]
+      if (sql.includes('"KdsOrderItem"')) return [] // D25: sin platillos de comanda en otra cuenta
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       throw new Error('Unexpected dashboard topology SQL')
@@ -420,6 +422,7 @@ describe('order.dashboard.service — updateOrder ignora total/tipAmount/subtota
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
       const sql = (Array.isArray(query) ? query : ((query as { strings?: string[] }).strings ?? [])).join(' ')
       if (sql.includes('ancestors(id) AS')) return [{ id: 'order-1' }]
+      if (sql.includes('"KdsOrderItem"')) return [] // D25: sin platillos de comanda en otra cuenta
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       throw new Error('Unexpected dashboard topology SQL')
@@ -514,8 +517,9 @@ describe('order.dashboard.service — la red por traba (40P01)', () => {
   })
 
   it('[repetirNoDuplica:deleteOrder] cancelar: los vales que se avisan son los del intento ganador, una sola vez', async () => {
+    // D25: tampoco hay platillos de comanda que vivan en otra cuenta (`"KdsOrderItem"`).
     prismaMock.$queryRaw.mockImplementation((async (q: { raw?: readonly string[] }) =>
-      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-1' }]) as any)
+      q?.raw?.join('').includes('"OrderDiscount"') || q?.raw?.join('').includes('"KdsOrderItem"') ? [] : [{ id: 'order-1' }]) as any)
     prismaMock.order.findFirst.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING' } as any)
     prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING' } as any)
     prismaMock.kdsOrder.findMany.mockResolvedValue([])

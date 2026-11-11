@@ -174,7 +174,7 @@ import {
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, ponerComandasConSuCuenta, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import {
@@ -2719,7 +2719,9 @@ export async function splitOrderItemsInTransaction(
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
@@ -2743,6 +2745,7 @@ export async function splitOrderItemsInTransaction(
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -2840,6 +2843,9 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: source.contratoDePrecio,
       // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
       payLater: source.payLater,
+      // D25: lo que estaba por llegar a la pantalla de cocina sigue a sus renglones; el barrido la arma en la cuenta nueva. Con la
+      // hora de ahora: heredar la vieja podía hacer que el barrido se rindiera sin armarla (GIVE_UP a los 15 min, Codex r1 #6).
+      kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
       ...clienteDeLaParteSeparada(source),
     },
     select: { id: true, orderNumber: true, version: true },
@@ -2917,7 +2923,9 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
   // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
-    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+    // D25 (Codex r4 #1): el candado de comandas de la cuenta va primero (el orden del armado). Sin él, borrar la cuenta desde el panel
+    // podía leer sus comandas, esperar a que esta división terminara y borrar la pieza que ya vivía en la hija.
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
   } catch (error) {
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
@@ -2941,6 +2949,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      kitchenPendingAt: true,
       customerId: true,
       orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
@@ -3025,6 +3034,8 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
         contratoDePrecio: source.contratoDePrecio,
         // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
         payLater: source.payLater,
+        // D25: la marca de cocina sigue a los renglones (mismo criterio que separar cheque).
+        kitchenPendingAt: source.kitchenPendingAt ? new Date() : null,
         ...clienteDeLaParteSeparada(source),
       },
       select: { id: true, orderNumber: true },
@@ -3103,7 +3114,8 @@ export async function mergeOrdersInTransaction(
   const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
-    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+    // D25: el candado de comandas del origen va antes que los de las cuentas (el orden del armado): sus comandas pasan al destino.
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId], kdsOrderIds: [sourceOrderId] })
   } catch (error) {
     // Failed topology discovery performs no mutation; identify the original missing-side DTO.
     if (error instanceof NotFoundError) {
@@ -3201,6 +3213,7 @@ export async function mergeOrdersInTransaction(
       source: true,
       posRawData: true,
       taxAmount: true,
+      kitchenPendingAt: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
       serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
@@ -3328,10 +3341,14 @@ export async function mergeOrdersInTransaction(
     }
   }
   const priorTargetCharges = await targetChargeAmounts()
+  // D25: primero lo del origen que está en comandas ajenas vuelve a las suyas (una cuenta ya dividida antes, Codex r1 #5); después de
+  // mover los renglones, sus comandas pendientes pasan al destino, que es donde viven ahora (el origen se cancela abajo).
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   await tx.orderItem.updateMany({
     where: { orderId: source.id },
     data: { orderId: target.id },
   })
+  await ponerComandasConSuCuenta(tx, venueId, source.id)
   // Los cobros automáticos del origen se van con él: el destino re-evalúa
   // los suyos por comensales en el recálculo.
   await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
@@ -3351,6 +3368,8 @@ export async function mergeOrdersInTransaction(
       payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
       ...(duenoQueQueda && !freshTarget.customerId ? { customerId: duenoQueQueda } : {}),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
+      // D25: lo del origen que estaba por llegar a la pantalla de cocina lo arma ahora el barrido del destino (hora de ahora: ver separar).
+      ...(freshSource.kitchenPendingAt ? { kitchenPendingAt: new Date() } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
         : {}),

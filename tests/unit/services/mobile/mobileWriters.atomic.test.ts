@@ -328,7 +328,7 @@ describe('locked mobile writers', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(committed).toBe(true)
-    // Splits discover bounded topology after Venue KEY SHARE, then lock Order → Table
+    // Splits discover bounded topology after Venue KEY SHARE, then lock kitchen (D25) → Order → Table
     // before any domain read/write. The other six writers keep their exact original contract.
     const raw = tx.$queryRaw.mock.calls
     const fenced = name === 'split' || name === 'splitBySeat'
@@ -339,13 +339,16 @@ describe('locked mobile writers', () => {
       }))
       expect(statements).toEqual([
         { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
+        // D25 (Codex r4 #1): el candado de comandas de la cuenta, antes que el de la cuenta (el orden del armado).
+        { sql: 'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))::text', values: ['kds-order:order'] },
         {
           sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
           values: ['venue', ['order']],
         },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
-      const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
+      const [venueLock, kitchenLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
+      expect(kitchenLock).toBeLessThan(orderLock)
       // D2 (27-oct): lo único antes del candado es buscar si es fiado y, si lo es, apartar a su cliente (Cliente → mesa,
       // como las métricas del cobro). Esa búsqueda se vuelve a comprobar ya con la mesa apartada.
       const [buscarFiado, ...lecturasDeLaCuenta] = tx.order.findFirst.mock.invocationCallOrder
@@ -654,11 +657,12 @@ describe('writer-specific fresh decisions', () => {
     await splitOrderItems('venue', 'order', ['i2'], 'staff')
 
     const sql = tx.$queryRaw.mock.calls.map(([q]: any[]) => (Array.isArray(q) ? q.join('?') : q.sql))
-    // Negocio → Cliente → (el candado de siempre) Negocio → Cuenta → Mesa.
-    expect(sql.slice(0, 4)).toEqual([
+    // Negocio → Cliente → (el candado de siempre) Negocio → Comandas (D25) → Cuenta → Mesa.
+    expect(sql.slice(0, 5)).toEqual([
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
       'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))::text',
       'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
     ])
     expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
