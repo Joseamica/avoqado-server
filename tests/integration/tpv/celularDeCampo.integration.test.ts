@@ -152,6 +152,8 @@ describe('POST /tpv/campo/activar', () => {
         venueId,
         nombre: `Celular ${sufijo}`,
         verificadorPin: expect.objectContaining({ algoritmo: 'PBKDF2-SHA256', iteraciones: 100000 }),
+        // Sin fila de VenueSettings: el celular no sigue la ubicación (H-A1).
+        seguimientoDeUbicacion: false,
       },
     ])
     celularA = r.body.celularId

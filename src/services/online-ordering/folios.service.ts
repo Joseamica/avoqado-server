@@ -263,7 +263,9 @@ export async function syncPaidFolios(
  * Tabla 7b, regla 2: un abono tardío reabre la cuenta de un folio cerrado y el folio sigue cerrado; cuando OTRO cobro la salda (desde
  * las cuentas abiertas, que no pasa por `conciliarPedidoEnLinea`), esta pasada lo revive a «Por entregar» (`ACCEPTED`), nunca a
  * «Entregado». Una transacción por fila, bajo el candado de la orden, y un CAS que repite el estado leído y la cuenta saldada. No
- * marca la cocina (decisión 19: la comanda, si sale, es del cobro que saldó) ni toca la cuenta.
+ * marca la cocina (decisión 19: la comanda, si sale, es del cobro que saldó) ni toca la cuenta, salvo con la regla C (founder, 10-nov):
+ * si la caja lo cobró ANTES de que se cerrara (`cobradoAntesDeCerrar`) y hay pantalla, el revivir marca la cocina en su transacción y
+ * aquí se arma `ROUND` después del commit (si falla, el barrido de comandas lo retoma por la marca).
  * R52 (Codex f1 r4): `acceptedAt` es el reloj leído BAJO el candado. Con la hora de la pasada, una pasada de las 03:59:50 que revive a
  * las 04:00:10 un folio saldado a las 04:00:05 lo fechaba «ayer», y el fin del día lo sacaba de «Por entregar» en la siguiente.
  */
@@ -299,14 +301,16 @@ export async function syncPaidClosedFolios(
     leidos += rows.length
     for (const row of rows) {
       try {
-        const acceptedAt = await prisma.$transaction(async tx => {
+        const marcarCocina = await debeMarcarCocina(row.venueId, { orderId: row.orderId }) // fuera de la transacción; nunca lanza
+        const revivido = await prisma.$transaction(async tx => {
           if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId: row.orderId }))) return null
           const ahora = reloj() // R52: ya con el candado
-          // S9 v5: el paso compartido relee el folio y hace el CAS; no avisa (el aviso es de la nota del cobro).
-          const revivido = await revivirFolioSaldadoEnTx(tx, { venueId: row.venueId, orderId: row.orderId, ahora })
-          return revivido ? ahora : null
+          // S9 v5: el paso compartido relee el folio y hace el CAS; no avisa (el aviso es de la nota del cobro). Regla C: marca la cocina.
+          return revivirFolioSaldadoEnTx(tx, { venueId: row.venueId, orderId: row.orderId, ahora, marcarCocina })
         }, ORDER_LOCK_WAIT_BUDGET)
-        if (!acceptedAt) continue
+        if (!revivido) continue
+        const acceptedAt = revivido.acceptedAt
+        if (revivido.cocina) void armarComandasTrasCommit(row.venueId, row.orderId, 'ROUND')
         won += 1
         emitOnlineOrderUpdated({
           venueId: row.venueId,

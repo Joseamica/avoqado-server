@@ -342,6 +342,13 @@ describe('S14/S15 · la cuenta de la clienta en el folio, contra Postgres', () =
     expect((await getTrackingByToken(token))!.lealtad).toMatchObject({ sello: { ganados: 7, meta: 10 } })
 
     // #3: el plan de la MISMA consulta. Sin barrido secuencial, el planificador sólo puede usar los índices que su WHERE satisface.
+    // Con la tabla casi vacía, recorrer COMPLETO el índice (stampCardId, createdAt) con filtro le cuesta lo mismo que el parcial
+    // único y el CI elegía cualquiera de los dos (rojo intermitente del 10-nov, run 42960564002). Con un tamaño de producción
+    // (2,000 movimientos sin orden, que no entran a los índices parciales) y estadísticas al día, sólo el índice parcial es barato.
+    await prisma.stampEvent.createMany({
+      data: Array.from({ length: 2_000 }, () => ({ venueId: f.venueId, stampCardId: cartilla.id, type: 'ADJUST' as const, quantity: 0 })),
+    })
+    await prisma.$executeRawUnsafe('ANALYZE "StampEvent"')
     const plan = await prisma.$transaction(async tx => {
       await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
       return tx.$queryRaw<unknown[]>(Prisma.sql`EXPLAIN (FORMAT JSON) ${sqlSelloDeLaVenta(f.venueId, orderId)}`)

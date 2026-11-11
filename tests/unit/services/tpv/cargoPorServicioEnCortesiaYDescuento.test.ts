@@ -81,8 +81,9 @@ jest.mock('@/utils/prismaClient', () => {
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en esta venta de prueba.
+    // D25: tampoco hay platillos de comanda que vivan en otra cuenta (`"KdsOrderItem"`).
     $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) =>
-      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-sc' }],
+      q?.raw?.join('').includes('"OrderDiscount"') || q?.raw?.join('').includes('"KdsOrderItem"') ? [] : [{ id: 'order-sc' }],
     ),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.

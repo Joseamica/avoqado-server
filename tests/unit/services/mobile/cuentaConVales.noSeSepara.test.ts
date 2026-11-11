@@ -52,6 +52,9 @@ beforeEach(() => {
     if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: 'venue-1' }]
     if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE') && Array.isArray(values[1])) return values[1].map(id => ({ id }))
     if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 't1' }]
+    // D25: juntar toma el candado de comandas del origen y pasa sus comandas al destino; aquí no hay comandas.
+    if (sql.includes('pg_advisory_xact_lock')) return []
+    if (sql.includes('"KdsOrderItem"')) return []
     throw new Error(`Unexpected raw statement: ${sql}`)
   })
   prismaMock.order.findMany.mockImplementation(async (args: any) =>

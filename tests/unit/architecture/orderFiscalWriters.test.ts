@@ -949,6 +949,12 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'sets the kitchenPendingAt marker of an already-settled folio, under the order lock taken by casTransitionInTx',
     markers: ['data: { kitchenPendingAt: r.now }'],
   },
+  // Regla C (founder, 10-nov): el folio cobrado en la caja antes de cerrarse se marca para la cocina al revivir.
+  'src/services/shared/cuentaCancelada.ts#revivirFolioSaldadoEnTx': {
+    class: 'METADATA',
+    why: 'sets the kitchenPendingAt marker of a folio paid before it closed, under the order lock its caller (syncPaidClosedFolios) took',
+    markers: ['data: { kitchenPendingAt: a.ahora }'],
+  },
   'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': { class: 'METADATA', why: 'claim fields under a CAS' },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',

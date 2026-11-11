@@ -17,7 +17,8 @@ import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/serv
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { conCortesiaSiRegala, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { membresiaDeQuienLlama } from '@/services/tpv/discount.tpv.service'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 import { payLaterDesdeMetodoDePago } from '@/services/shared/porCobrar'
@@ -143,6 +144,7 @@ export function leerVentaDeMostrador(
     isOfflineReplay,
     createdAtLocal,
     paymentMethod,
+    cortesiaDeCuentaConPin,
   } = body
   const turnoDeLaVenta = turnoDeLaVentaDelCuerpo(body)
   if (!turnoDeLaVenta.valido) return { error: TURNO_DE_LA_VENTA_INVALIDO }
@@ -310,6 +312,8 @@ export function leerVentaDeMostrador(
       // «Se cobra el precio que vio el cliente»: la cola sin red («la venta ya ocurrió») nunca recibe el 409 de precio
       // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
       isOfflineReplay: isOfflineReplay === true,
+      // hz:e0b12f00:D2: «esta app pide el PIN de gerente antes de mandar un descuento de cuenta que regala». Sólo el `true` literal.
+      cortesiaDeCuentaConPin: cortesiaDeCuentaConPin === true,
       createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
       // «Cobrar sin red» (D4): el turno en que se vendió, sólo en un replay de la cola. Sólo puede dejar la orden sin turno.
       shiftIdDeLaVenta: turnoDeLaVenta.turno,
@@ -331,7 +335,13 @@ export async function autoridadDeLaVenta(
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
   // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
   // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
-  const needsCompAuthority = hasCortesias || !!venta.orderDiscountId || !!venta.couponCode || venta.items.some(item => !!item.discountId)
+  // hz:e0b12f00:D2: también el descuento de cuenta libre (puede dejar los productos en $0; sólo el servicio lo sabe).
+  const needsCompAuthority =
+    hasCortesias ||
+    !!venta.orderDiscountId ||
+    !!venta.couponCode ||
+    venta.items.some(item => !!item.discountId) ||
+    traeDescuentoDeCuentaLibre(venta)
   const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
   if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
   return {
@@ -339,6 +349,11 @@ export async function autoridadDeLaVenta(
     // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
     terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
   }
+}
+
+/** hz:e0b12f00:D2: `discount` libre (sin catálogo ni cupón validado en línea), como `traeDescuentoManual` del middleware. */
+function traeDescuentoDeCuentaLibre(venta: orderMobileService.CreateOrderInput): boolean {
+  return (venta.discount ?? 0) > 0 && !venta.orderDiscountId && !(venta.couponCode && venta.isOfflineReplay !== true)
 }
 
 /**
@@ -361,10 +376,23 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       })
     }
 
-    const order = await orderMobileService.createOrderWithItems(venueId, {
-      ...venta.input,
-      ...(await autoridadDeLaVenta(req, venta.input)),
-    })
+    const autoridad = await autoridadDeLaVenta(req, venta.input)
+    // hz:e0b12f00:D2: si el descuento de cuenta deja los productos en $0 sin permiso, el servicio lo dice y aquí se pide `orders:comp`
+    // (consume el `X-Permission-Override` o contesta el 403 canónico con `overridable`) y la venta se vuelve a crear entera.
+    const order = await conCortesiaSiRegala(req, res, async cortesia =>
+      orderMobileService.createOrderWithItems(venueId, {
+        ...venta.input,
+        ...autoridad,
+        ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}),
+        // El gerente del PIN o la membresía de QUIEN COBRA (nunca el vendedor elegido), sólo si hay descuento de cuenta libre.
+        regaloAutorizadoPor:
+          cortesia?.porPin ??
+          ((autoridad.canCompItems || cortesia) && traeDescuentoDeCuentaLibre(venta.input)
+            ? await membresiaDeQuienLlama(venueId, req.authContext?.userId)
+            : undefined),
+      }),
+    )
+    if (!order) return
 
     res.status(201).json({
       success: true,
