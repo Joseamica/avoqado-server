@@ -14287,6 +14287,7 @@ enum UpdateMode {
 enum AppPlatform {
   ANDROID_TPV // PAX terminal APK (legacy rows are all this)
   WINDOWS_DESKTOP // avoqado-desktop portable build
+  ANDROID_CAMPO // app de campo del promotor en su celular (módulo :campo de avoqado-tpv, com.jaac.avoqado_tpv.campo)
 }
 
 /// How an AppUpdate is targeted to terminals. Default ALL keeps old behavior
@@ -14344,7 +14345,8 @@ model AppUpdate {
 
   // Unique constraint: only one active version per environment
   // Allows multiple versions but queries filter by isActive
-  @@unique([versionCode, environment])
+  // Por plataforma: la app de campo numera sus versiones aparte (3, 4…) y no debe chocar con la TPV (129…).
+  @@unique([versionCode, environment, platform])
   @@index([environment, isActive])
   @@index([versionCode])
 }

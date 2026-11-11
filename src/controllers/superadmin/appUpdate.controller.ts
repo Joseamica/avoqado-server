@@ -210,9 +210,10 @@ export async function createAppUpdate(req: Request, res: Response) {
     // Check if version already exists for this environment
     const existing = await prisma.appUpdate.findUnique({
       where: {
-        versionCode_environment: {
+        versionCode_environment_platform: {
           versionCode: typeof versionCode === 'string' ? parseInt(versionCode) : versionCode,
           environment: environment as AppEnvironment,
+          platform: 'ANDROID_TPV',
         },
       },
     })
