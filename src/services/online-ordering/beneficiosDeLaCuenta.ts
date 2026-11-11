@@ -69,11 +69,11 @@ export interface BeneficiosDeLaCuenta {
 export const MAX_COBROS_DE_LA_HORA = 5
 
 /**
- * D10: lo que decide el «Pagado a las…», en la MISMA lectura de quien lista (sin consulta por folio): los cobros reales (COMPLETED que
- * no son REFUND; `type` es nullable y `<> 'REFUND'` también descartaría NULL, como en `orderBalance`), el más reciente primero.
+ * D10: lo que decide el «Pagado a las…», en la MISMA lectura de quien lista (sin consulta por folio; `paymentStatus` ya lo leen): los
+ * cobros reales (COMPLETED que no son REFUND; `type` es nullable y `<> 'REFUND'` también descartaría NULL, como en `orderBalance`), el
+ * más reciente primero.
  */
 export const HORA_DEL_PAGO_SELECT = {
-  paymentStatus: true,
   loyaltySaleAt: true,
   payments: {
     where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] },
