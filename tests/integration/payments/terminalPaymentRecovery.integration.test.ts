@@ -2617,6 +2617,47 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
       await enviar({ requestId, venueId, terminalId: terminalDe('sin-abono'), orderId: orden.id, amountCents: 10000, requestedBy: fixture })
       expect(directEmit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId }), expect.any(Function))
     })
+
+    // Codex r1 #1: si la cuenta ya tiene un cobro SIN desenlace en otra terminal, eso es lo que la cajera necesita saber primero
+    // («revisa ese cobro»), no «falta $X»: el saldo todavía no cuenta ese cobro que pudo pasar.
+    it('cuenta con abono Y un cobro pendiente en otra terminal ⇒ gana «cuenta ocupada» (409 ORDER), no el 412', async () => {
+      const orden = await cuentaConAbono()
+      const pendiente = await auditRequest({
+        terminalId: terminalDe('abono-otra'),
+        orderId: orden.id,
+        status: 'UNKNOWN',
+        amountCents: 8400,
+      })
+      const requestId = nextRequest()
+      const r = await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe('abono-ocupada'),
+        orderId: orden.id,
+        amountCents: 13400,
+        requestedBy: fixture,
+      })
+
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(r).toBeInstanceOf(TerminalBusyError)
+      expect((r as TerminalBusyError).details).toMatchObject({ scope: 'ORDER', blockingRequest: { requestId: pendiente.requestId } })
+    })
+
+    // Codex r1 #2: si se perdió la respuesta del POST, la caja recupera el resultado con el GET: también ahí dice «falta $X».
+    it('el GET de la lápida trae el «falta $X» (no el genérico «El cobro fue rechazado»)', async () => {
+      const orden = await cuentaConAbono()
+      const requestId = nextRequest()
+      await enviar({ requestId, venueId, terminalId: terminalDe('abono-get'), orderId: orden.id, amountCents: 13400, requestedBy: fixture })
+
+      expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+        requestId,
+        status: 'FAILED',
+        failureCode: 'REJECTED_ORDER_AMOUNT_OVER_BALANCE',
+        outcome: 'NOT_CHARGED',
+        paymentId: null,
+        errorMessage: expect.stringContaining('falta $84.00'),
+      })
+    })
   })
 
   it('(d) orden inexistente en el venue ⇒ 400 ORDER_NOT_FOUND con lápida; aunque la orden aparezca, el MISMO requestId repite el 400', async () => {

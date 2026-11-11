@@ -1053,7 +1053,11 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     outcomeEvidence: desenlace.outcomeEvidence,
     evidenceClass: desenlace.evidenceClass,
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
-    ...(row.failureCode === 'BANK_DECLINED' ? { errorMessage: mensajeDelServidor(row.resultJson) } : {}),
+    // hz:ce654971:D7 (Codex r1 #2): el «falta $X» también sale aquí: si se perdió la respuesta del POST, la caja lo recupera con esta
+    // consulta y sin él decía «El cobro fue rechazado» (suena al banco) y reintentaba con el importe viejo.
+    ...(row.failureCode === 'BANK_DECLINED' || row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+      ? { errorMessage: mensajeDelServidor(row.resultJson) }
+      : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
@@ -2015,7 +2019,20 @@ class TerminalPaymentService {
               ),
             )
           }
-        } else {
+        }
+        const blocker = await tx.terminalPaymentRequest.findFirst({
+          where: {
+            venueId,
+            orderId: request.orderId,
+            // 🔴 La ORDEN se juzga SIEMPRE con la lista blanca estricta, apagado el interruptor o no (decisión del
+            // founder, 11-sep, tras la auditoría de Codex). El interruptor existe para destrabar APARATOS, no para
+            // permitir un segundo cobro de la MISMA venta: el riesgo de que el primero sí haya cobrado no caduca.
+            ...UNRESOLVED_FINANCIAL_OUTCOME,
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        })
+        if (blocker) return rechazarPorOrdenOcupada(blocker)
+        if (exchange?.status !== 'PENDING_PAYMENT') {
           // 🔴 hz:ce654971:D7 · una cuenta con un ABONO (efectivo, saldo, otra tarjeta) no se cobra por su total viejo: la caja que
           // no vio el abono mandaba $134 de una cuenta que ya sólo debía $84 y el cliente pagaba de más. Bajo el MISMO candado de
           // fila que el registro del pago, antes de tocar la terminal: no se mueve dinero. La propina va aparte y no cuenta. Una
@@ -2046,18 +2063,6 @@ class TerminalPaymentService {
             )
           }
         }
-        const blocker = await tx.terminalPaymentRequest.findFirst({
-          where: {
-            venueId,
-            orderId: request.orderId,
-            // 🔴 La ORDEN se juzga SIEMPRE con la lista blanca estricta, apagado el interruptor o no (decisión del
-            // founder, 11-sep, tras la auditoría de Codex). El interruptor existe para destrabar APARATOS, no para
-            // permitir un segundo cobro de la MISMA venta: el riesgo de que el primero sí haya cobrado no caduca.
-            ...UNRESOLVED_FINANCIAL_OUTCOME,
-          },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        })
-        if (blocker) return rechazarPorOrdenOcupada(blocker)
       } else {
         // 🔴 EL RODEO DEL PAGO RÁPIDO (P1-2 de la auditoría de Codex, 11-sep). El candado de arriba sólo corre
         // `if (request.orderId)`: un cobro SIN orden no pasa por él. Así que la venta cuya cuenta quedó protegida
