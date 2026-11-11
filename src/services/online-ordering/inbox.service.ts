@@ -13,7 +13,14 @@ import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './consta
 import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
-import { BENEFICIOS_SELECT, CLIENTA_SELECT, beneficiosDeLaCuenta, clientaDeLaCuenta, horaDelPago } from './beneficiosDeLaCuenta'
+import {
+  BENEFICIOS_SELECT,
+  CLIENTA_SELECT,
+  HORA_DEL_PAGO_SELECT,
+  beneficiosDeLaCuenta,
+  clientaDeLaCuenta,
+  horaDelPago,
+} from './beneficiosDeLaCuenta'
 import type { Reloj } from './types'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
@@ -115,14 +122,8 @@ export const INBOX_SELECT = {
       ...CLIENTA_SELECT,
       ...BENEFICIOS_SELECT,
       // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio). D10: con la hora del
-      // aparato si la saldó la cola sin red.
-      loyaltySaleAt: true,
-      payments: {
-        where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] },
-        orderBy: { createdAt: 'desc' as const },
-        take: 1,
-        select: { createdAt: true },
-      },
+      // aparato si la saldó la cola sin red (`horaDelPago`).
+      ...HORA_DEL_PAGO_SELECT,
       // Topes que nunca recortan lo que pidió el comensal: la tienda crea la cuenta con ≤ MAX_CART_LINES renglones y ≤ 30
       // opciones por renglón (esquema público `onlineOrdering.schema.ts`). El doble de renglones deja lugar a lo que la caja
       // agregue después a la cuenta; 50 opciones cubren las 30 del pedido.

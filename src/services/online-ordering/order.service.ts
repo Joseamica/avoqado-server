@@ -63,6 +63,7 @@ import { PRECIO_CAMBIO_AL_CONFIRMAR } from './card/confirm.service'
 import {
   BENEFICIOS_SELECT,
   CLIENTA_ID_SELECT,
+  HORA_DEL_PAGO_SELECT,
   beneficioRegresado,
   beneficiosDeLaCuenta,
   clientaIdDeLaCuenta,
@@ -1271,15 +1272,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           // misma lectura.
           ...CLIENTA_ID_SELECT,
           ...BENEFICIOS_SELECT,
-          // D10: la hora del aparato si la cuenta la saldó un cobro de la cola sin red (`horaDelPago`, la misma de la caja).
-          loyaltySaleAt: true,
-          payments: {
-            // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
-            where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            select: { createdAt: true },
-          },
+          // T18b + D10: la hora del pago (la del aparato si la saldó la cola sin red), con la misma función de la caja.
+          ...HORA_DEL_PAGO_SELECT,
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,

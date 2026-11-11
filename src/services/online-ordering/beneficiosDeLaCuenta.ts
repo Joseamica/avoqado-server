@@ -65,23 +65,45 @@ export interface BeneficiosDeLaCuenta {
   beneficiosTotal: number
 }
 
+/** D10: hasta cuántos cobros se leen para decidir la hora; con más, no se sabe y se queda la llegada (como hoy). */
+export const MAX_COBROS_DE_LA_HORA = 5
+
+/**
+ * D10: lo que decide el «Pagado a las…», en la MISMA lectura de quien lista (sin consulta por folio): los cobros reales (COMPLETED que
+ * no son REFUND; `type` es nullable y `<> 'REFUND'` también descartaría NULL, como en `orderBalance`), el más reciente primero.
+ */
+export const HORA_DEL_PAGO_SELECT = {
+  paymentStatus: true,
+  loyaltySaleAt: true,
+  payments: {
+    where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] },
+    orderBy: { createdAt: 'desc' as const },
+    take: MAX_COBROS_DE_LA_HORA,
+    select: { createdAt: true, updatedAt: true },
+  },
+} satisfies Prisma.OrderSelect
+
 /**
  * D10 (tienda híbrida, 11-nov): el «Pagado a las…» que se MUESTRA, igual en la Bandeja, «Por pagar»/«Por entregar» (TPV, POS y panel),
  * el MCP y el seguimiento de la clienta. `llegada` = el último cobro COMPLETED (lo de siempre). Si la caja de las apps saldó la cuenta
  * con un cobro de la cola sin red, `Order.loyaltySaleAt` guarda la hora del APARATO (acotada por arriba a su llegada, `horaDeLaVenta`):
- * esa se muestra, para que un folio cobrado a tiempo no parezca cobrado tarde. Con piso: una hora anterior al folio (reloj del aparato
- * sin hora) no se cree, como en la regla C. No pagada o sin cobro legible: `null`. Instante ISO en UTC; cada app lo pinta en la zona
- * del negocio. Sólo se lee: cómo se guardan `loyaltySaleAt` y `Payment.createdAt` no cambia.
+ * esa se muestra, para que un folio cobrado a tiempo no parezca cobrado tarde. Sólo si se le puede creer, como en la regla C
+ * (`cobradoATiempoEnTx`): no es anterior al folio (reloj del aparato sin hora) y, desde esa hora, sólo UN cobro nació o cambió, el que
+ * saldó (Codex D10 r2: si otra caja cobró la otra mitad después y subió antes, la cuenta quedó pagada más tarde). Si no, la llegada. No
+ * pagada o sin cobro legible: `null`. Instante ISO en UTC; cada app lo pinta en la zona del negocio. Sólo lee: cómo se guardan
+ * `loyaltySaleAt` y los cobros no cambia.
  */
 export function horaDelPago(
-  o: { paymentStatus: string; loyaltySaleAt?: Date | null; payments?: Array<{ createdAt: Date }> },
+  o: { paymentStatus: string; loyaltySaleAt?: Date | null; payments?: Array<{ createdAt: Date; updatedAt?: Date }> },
   folioCreadoEn: Date,
 ): string | null {
-  const llegada = o.paymentStatus === 'PAID' ? o.payments?.[0]?.createdAt : undefined
+  const cobros = o.payments ?? []
+  const llegada = o.paymentStatus === 'PAID' ? cobros[0]?.createdAt : undefined
   if (!llegada) return null
-  const enElAparato = o.loyaltySaleAt
-  const creible = enElAparato && enElAparato >= folioCreadoEn && enElAparato <= llegada
-  return (creible ? enElAparato : llegada).toISOString()
+  const t = o.loyaltySaleAt
+  const despues = t ? cobros.filter(c => c.createdAt > t || (c.updatedAt ?? c.createdAt) > t).length : 0
+  const creible = t && t >= folioCreadoEn && t <= llegada && despues === 1 && cobros.length < MAX_COBROS_DE_LA_HORA
+  return (creible ? t : llegada).toISOString()
 }
 
 /** En pesos. `?? []`: una lectura sin la relación (un doble viejo) no tumba la lista; en Prisma siempre llega. */

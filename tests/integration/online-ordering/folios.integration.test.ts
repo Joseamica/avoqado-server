@@ -821,6 +821,17 @@ describe('S9 v5 · la cocina «en duda, manda» en un folio sellado (K1–K10)',
       expect(await horasDePago(orderId, onlineOrderId)).toEqual(Array(4).fill(enElAparato.toISOString()))
     })
 
+    it('D10 (Codex r2, como K17): B cobra su mitad después de vencer y sube primero; A cobró antes y sube al último, saldando ⇒ la llegada, no la hora de A', async () => {
+      const { orderId, onlineOrderId } = await folioDeHace40()
+      await vencer(orderId)
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() + 1_000)) // B
+      await colaSinRed(orderId, CINCUENTA, new Date(Date.now() - 15 * MIN)) // A: la que salda, con su hora de antes
+      expect((await cuenta(orderId)).loyaltySaleAt).not.toBeNull()
+      await pasada()
+      await porEntregar(onlineOrderId)
+      expect(await horasDePago(orderId, onlineOrderId)).toEqual(Array(4).fill((await llegadaDelCobro(orderId)).toISOString()))
+    })
+
     it('D10 control: con red (efectivo del POS sobre un folio vigente) ⇒ la hora en que llegó el cobro, como hoy', async () => {
       const { orderId, onlineOrderId } = await nuevoFolio()
       await efectivoDelPos(orderId)

@@ -1834,7 +1834,7 @@ describe('getTrackingByToken', () => {
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
       where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
       orderBy: { createdAt: 'desc' },
-      take: 1,
+      take: 5, // D10: los cobros que deciden la hora (`MAX_COBROS_DE_LA_HORA`)
     })
     prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: null, payments: [] } })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
@@ -1853,6 +1853,12 @@ describe('getTrackingByToken', () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(con(null))
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paidAt: llegada.toISOString() })
     prismaMock.onlineOrder.findUnique.mockResolvedValue(con(new Date('2026-11-11T05:00:00.000Z')))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paidAt: llegada.toISOString() })
+    // Codex r2: otra caja cobró la otra mitad DESPUÉS de la hora del aparato (06:28) y subió antes ⇒ la llegada, como hoy.
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...con(enElAparato),
+      order: { ...con(enElAparato).order, payments: [{ createdAt: llegada }, { createdAt: new Date('2026-11-11T06:28:00.000Z') }] },
+    })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paidAt: llegada.toISOString() })
   })
 
@@ -1873,7 +1879,7 @@ describe('getTrackingByToken', () => {
     const sel = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
     expect(sel).toMatchObject({ paidAmount: true, remainingBalance: true })
     expect(sel.payments).toMatchObject({
-      take: 1,
+      take: 5,
       select: { createdAt: true },
       where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     })
