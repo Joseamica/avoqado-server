@@ -36,7 +36,7 @@ const LOCAL_ID_MAX_LENGTH = 64
  * NO se recorta el valor: la llave la elige el cliente y tiene que poder reenviar EXACTAMENTE
  * la misma cadena para que el dedupe empareje. Sólo se rechaza la que no sirve como llave.
  */
-function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
+export function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
   if (raw === undefined || raw === null) return null
 
   if (typeof raw !== 'string') {
@@ -438,6 +438,15 @@ export async function payIn(params: PayInOutParams): Promise<DrawerEventResult> 
 // ============================================================================
 // PAY OUT
 // ============================================================================
+
+/**
+ * ¿Ya está registrado el retiro con esta llave? (`@@unique([venueId, localId])`). Lo usa el atajo
+ * `devolverRetiroYaRegistrado`: reconocer un retiro ya guardado no depende de que la autorización siga viva.
+ */
+export async function buscarRetiroPorLlave(venueId: string, localId: string) {
+  const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId, type: CashDrawerEventType.PAY_OUT } })
+  return stored ? formatEvent(stored) : null
+}
 
 /**
  * Add a pay-out event (cash removed from drawer). Idempotente por `localId` — ver

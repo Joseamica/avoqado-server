@@ -47,6 +47,7 @@ import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobi
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
+import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
 import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
@@ -3324,6 +3325,10 @@ router.post(
   '/venues/:venueId/cash-drawer/pay-out',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  // Un retiro ya registrado se reconoce sin pedir autorización (ver su JSDoc); la llave ata el PIN del gerente a ESTE retiro.
+  cashDrawerMobileController.devolverRetiroYaRegistrado,
+  ponerLlaveDelRetiro,
+  checkPermission('cash-drawer:pay-out'),
   cashDrawerMobileController.payOut,
 )
 

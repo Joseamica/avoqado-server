@@ -349,6 +349,7 @@ describe('consumePermissionOverride', () => {
         venueId: VENUE,
         permission: 'orders:merge',
         consumedAt: null,
+        operationKey: null, // una autorización atada a un retiro no sirve en otra ruta
         expiresAt: { gt: NOW },
       },
       data: { consumedAt: NOW, consumedRoute: 'POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge' },

@@ -20,6 +20,15 @@ import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 /** Vida del token. Suficiente para reintentar la request, corto para no dejar la terminal elevada. */
 export const OVERRIDE_TTL_MS = 60_000
 
+/**
+ * Vida de una autorización ATADA a una operación (`operationKey`).
+ *
+ * 🔴 7 días porque el retiro de caja se encola SIN RED: el gerente teclea su PIN en el aparato, el retiro sale
+ * del cajón y el POS puede tardar días en reconectar. La autorización tiene que seguir valiendo cuando el POST
+ * por fin llegue. Sólo sirve para SU llave, así que el riesgo de dejarla viva es el de esa única operación.
+ */
+export const OVERRIDE_TTL_ATADO_MS = 7 * 24 * 60 * 60 * 1000
+
 export class OverrideInvalidPinError extends Error {
   readonly code = 'OVERRIDE_INVALID_PIN' as const
   constructor() {
@@ -106,9 +115,11 @@ export async function createPermissionOverride(params: {
   pin: string
   permission: string
   requestedById?: string | null
+  /** `pay-out:<localId>:<centavos>`: ata la autorización a UNA operación (vive 7 días, ver `OVERRIDE_TTL_ATADO_MS`). */
+  operationKey?: string | null
   now?: Date
 }): Promise<{ token: string; expiresAt: Date; authorizedBy: { id: string; name: string } }> {
-  const { venueId, pin, permission, requestedById = null } = params
+  const { venueId, pin, permission, requestedById = null, operationKey = null } = params
   const now = params.now ?? new Date()
 
   // 🔴 La puerta va ANTES de mirar el PIN: si el negocio no activó la función,
@@ -158,7 +169,7 @@ export async function createPermissionOverride(params: {
   }
 
   const token = randomUUID()
-  const expiresAt = new Date(now.getTime() + OVERRIDE_TTL_MS)
+  const expiresAt = new Date(now.getTime() + (operationKey ? OVERRIDE_TTL_ATADO_MS : OVERRIDE_TTL_MS))
 
   await prisma.permissionOverride.create({
     data: {
@@ -167,6 +178,7 @@ export async function createPermissionOverride(params: {
       permission,
       authorizedById: staffVenue.id,
       requestedById,
+      operationKey,
       expiresAt,
     },
   })
@@ -182,9 +194,18 @@ export async function createPermissionOverride(params: {
 }
 
 /**
- * Consumo ATÓMICO. El `updateMany` con `consumedAt: null` en el WHERE es lo que
- * garantiza UN solo uso aunque dos requests lleguen a la vez: la base decide, y
- * sólo una recibe count 1. Nunca separes esto en un read + un write.
+ * Consumo del token.
+ *
+ * SIN llave (todas las rutas de siempre): ATÓMICO y de UN uso. El `updateMany` con `consumedAt: null` en el WHERE
+ * garantiza un solo uso aunque dos requests lleguen a la vez: la base decide, y sólo una recibe count 1. Nunca
+ * separes esto en un read + un write. Honra el interruptor del negocio y exige `operationKey: null`: una
+ * autorización atada a un retiro no sirve en otra ruta.
+ *
+ * CON llave (`operationKey`, hoy sólo el retiro de caja): sirve para ESA llave y ese permiso, vigente (7 días), y es
+ * REUTILIZABLE. Es seguro porque el `@@unique([venueId, localId])` de `CashDrawerEvent` garantiza un solo retiro por
+ * llave: reintentar el mismo POST no puede sacar dinero dos veces. `consumedAt` se marca la primera vez, sólo como rastro.
+ * NO mira el interruptor: el retiro se autorizó cuando estaba prendido, y apagarlo después no puede rechazar un retiro
+ * que ya salió del cajón (el POS lo reintenta desde su cola).
  *
  * 🔴 NUNCA lanza: corre dentro del camino de un 403 y un fallo de base no puede
  * convertir un "no tienes permiso" en un 500. Sin token válido → null → 403.
@@ -194,12 +215,30 @@ export async function consumePermissionOverride(params: {
   venueId: string
   permission: string
   route: string
+  operationKey?: string | null
   now?: Date
 }): Promise<{ authorizedById: string } | null> {
-  const { token, venueId, permission, route } = params
+  const { token, venueId, permission, route, operationKey = null } = params
   const now = params.now ?? new Date()
+  // A3 (cierre): sin query string, también si quien llama la mandara (un código de tarjeta viajaba en una).
+  const consumedRoute = route.split('?')[0]
 
   try {
+    if (operationKey) {
+      const row = await prisma.permissionOverride.findFirst({
+        where: { token, venueId, permission, operationKey, expiresAt: { gt: now } },
+        select: { authorizedById: true },
+      })
+      if (!row) return null
+
+      // Sólo la primera vez escribe (consumedAt: null en el where); las demás son un no-op.
+      await prisma.permissionOverride.updateMany({
+        where: { token, consumedAt: null },
+        data: { consumedAt: now, consumedRoute },
+      })
+      return { authorizedById: row.authorizedById }
+    }
+
     // 🔴 El switch también manda al CONSUMIR, no sólo al emitir: si el negocio
     // apagó la función, un token vivo emitido hace 40 s deja de servir. Va antes
     // del updateMany a propósito — apagar el switch no puede QUEMAR los tokens
@@ -210,9 +249,8 @@ export async function consumePermissionOverride(params: {
     }
 
     const claimed = await prisma.permissionOverride.updateMany({
-      where: { token, venueId, permission, consumedAt: null, expiresAt: { gt: now } },
-      // A3 (cierre): sin query string, también si quien llama la mandara (un código de tarjeta viajaba en una).
-      data: { consumedAt: now, consumedRoute: route.split('?')[0] },
+      where: { token, venueId, permission, consumedAt: null, operationKey: null, expiresAt: { gt: now } },
+      data: { consumedAt: now, consumedRoute },
     })
 
     if (claimed.count !== 1) return null

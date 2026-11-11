@@ -1524,6 +1524,7 @@ model PermissionOverride {
   expiresAt      DateTime /// createdAt + 60 s
   consumedAt     DateTime? /// null = sin usar. El consumo es un updateMany atómico.
   consumedRoute  String? /// "POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge"
+  operationKey   String? /// "pay-out:<localId>:<centavos>": la autorización sirve sólo para esa operación (null = suelta, 60 s, un uso)
   createdAt      DateTime  @default(now())
 
   @@index([venueId, createdAt])

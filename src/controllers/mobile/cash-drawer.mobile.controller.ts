@@ -116,6 +116,32 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
 }
 
 /**
+ * Atajo ANTES del permiso `cash-drawer:pay-out`: si el retiro de esta llave ya está registrado, se reconoce con 200
+ * (como siempre en un reintento) sin pedir autorización. Reconocer lo ya registrado no puede depender de que la
+ * autorización del gerente siga viva (venció, o apagaron el interruptor): el dinero ya salió del cajón y el POS
+ * tiene que poder cerrar su cola. `authorizedBy: null` porque aquí nadie autoriza nada.
+ */
+export const devolverRetiroYaRegistrado = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    let localId: string | null = null
+    try {
+      localId = cashDrawerService.normalizeLocalId(req.body?.localId)
+    } catch {
+      localId = null // llave inservible: sigue la cadena normal, que decide (403 o 400)
+    }
+    if (!localId) return next()
+
+    const event = await cashDrawerService.buscarRetiroPorLlave(venueId, localId)
+    if (!event) return next()
+
+    return res.status(200).json({ success: true, data: event, authorizedBy: null })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/**
  * Add pay-out event
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-out
  */
