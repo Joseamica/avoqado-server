@@ -440,6 +440,13 @@ export async function updateAppUpdate(req: Request, res: Response) {
     // Audience targeting is only touched if the caller sent targetType
     let targeting: { targetType: AppUpdateTargetTypeValue; targetVenueIds: string[]; targetTerminalIds: string[] } | undefined
     if (req.body.targetType !== undefined) {
+      // La app de campo no reporta sucursal ni serie: una fila limitada nunca le llegaría (el alta ya la fuerza a ALL).
+      if (existing.platform === 'ANDROID_CAMPO' && req.body.targetType !== 'ALL') {
+        return res.status(400).json({
+          success: false,
+          error: 'La app de campo siempre sale para todos los celulares: no reporta sucursal ni serie, así que no se puede limitar',
+        })
+      }
       const result = normalizeTargeting(req.body)
       if ('error' in result) {
         return res.status(400).json({ success: false, error: result.error })

@@ -16,6 +16,14 @@ const router = Router()
  */
 
 // Validation schemas
+
+// «Aplica a» del panel. Sin declararlo aquí, zod lo borraba de req.body y toda versión salía para todas (hz:11a33d12:D3).
+// La regla fina (VENUES pide sucursales, etc.) sigue en normalizeTargeting.
+const targetingFields = {
+  targetType: z.enum(['ALL', 'VENUES', 'TERMINALS']).optional(),
+  targetVenueIds: z.array(z.string().cuid('ID de sucursal inválido')).optional(),
+  targetTerminalIds: z.array(z.string().cuid('ID de terminal inválido')).optional(),
+}
 const listUpdatesSchema = z.object({
   query: z.object({
     environment: z.enum(['SANDBOX', 'PRODUCTION']).optional(),
@@ -58,6 +66,7 @@ const createUpdateSchema = z.object({
     apkBase64: z.string().min(1, 'APK file is required (base64 encoded)'),
     // Carril de la versión: la TPV (como siempre) o la app de campo del promotor.
     platform: z.enum(['ANDROID_TPV', 'ANDROID_CAMPO']).optional().default('ANDROID_TPV'),
+    ...targetingFields,
   }),
 })
 
@@ -70,6 +79,7 @@ const updateAppUpdateSchema = z.object({
     updateMode: z.enum(['NONE', 'BANNER', 'FORCE']).optional(),
     isActive: z.boolean().optional(),
     minAndroidSdk: z.number({ coerce: true }).int().min(21).max(35).optional(),
+    ...targetingFields,
   }),
 })
 
