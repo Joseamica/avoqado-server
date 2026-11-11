@@ -1250,12 +1250,16 @@ async function applyAddItems(
     .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
   // 🔴 hz:ce654971:D4 (Codex r4 B9 y r1 #1): la marca de cocina de una ronda la pone `addItemsToOrder`, y una ronda de SÓLO combos
   // no pasa por ahí: sus componentes nacen con `sentToKitchenAt`, el cobro salta lo «ya enviado» y el combo llegaba a la pantalla
-  // hasta la siguiente ronda o el cobro. La marca va DENTRO de la transacción que guarda cada combo (no después): una ronda con
+  // hasta la siguiente ronda o el cobro. La marca va DENTRO de la transacción que guarda el combo (no después): una ronda con
   // combos no se retoma tras una caída (`retomable:false`), así que una marca escrita aparte se perdía si el proceso moría en medio.
   // Aquí sólo se decide si el negocio tiene pantalla (fuera de toda transacción: nunca lanza); si la cuenta es de mesa lo decide la
   // promoción bajo el candado de la cuenta (Codex r2 #2). Misma regla que la ronda normal: mostrador nace al pagar.
+  // Sólo en una ronda de SÓLO combos y sólo con el ÚLTIMO (Codex r3 #1): una marca puesta antes de que la ronda quede completa deja
+  // que el barrido cocine un combo que la compensación de abajo borra después (rechazo definitivo del producto normal o de otro
+  // combo). Con el último ya no queda nada que pueda fallar. La ronda mixta la marca `addItemsToOrder` al final, como siempre.
   const marcarCocinaDeCombos =
     conPromocion.length > 0 &&
+    normales.length === 0 &&
     (await debeMarcarCocina(venueId, {
       hasPreparation: conPromocion.some(it => it.promotionRef.selections?.some((s: any) => s?.serviceCourse?.preparationVersion === 1)),
     }))
@@ -1276,7 +1280,7 @@ async function applyAddItems(
           sentToKitchenAt: soldAt,
           componentExternalIdPrefix:
             item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
-          marcarCocina: marcarCocinaDeCombos,
+          marcarCocina: marcarCocinaDeCombos && item === conPromocion[conPromocion.length - 1],
         },
       )
     }

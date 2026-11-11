@@ -1908,6 +1908,41 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
       expect(armarComandasTrasCommitMock).toHaveBeenCalledWith(VENUE, 'order-1', 'ROUND')
     })
 
+    // Codex r3 #1: una marca puesta antes de que la ronda quede completa dejaba que el barrido cocinara un combo que la
+    // compensación borraba después. Sólo el ÚLTIMO combo de una ronda de puros combos la lleva; la mixta la pone el alta normal.
+    it('ronda de DOS combos: sólo el último lleva la marca', async () => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 240, kitchenPendingAt: new Date() })
+      const dos = {
+        id: 'i-dos',
+        type: 'ADD_ITEMS',
+        payload: {
+          orderId: 'order-1',
+          items: [promo, { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-2', selections: [] } }],
+        },
+      }
+
+      await processIntents(baseParams([dos]))
+
+      expect(opcionesDelCombo().map(o => o.marcarCocina)).toEqual([false, true])
+    })
+
+    it('ronda MIXTA (combo + producto): el combo no lleva marca; la pone el alta normal al final', async () => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 240 })
+      ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 5, total: 240 })
+      const mixta = {
+        id: 'i-mixta-d4',
+        type: 'ADD_ITEMS',
+        payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] },
+      }
+
+      const [ack] = await processIntents(baseParams([mixta]))
+
+      expect(ack).toMatchObject({ status: 'ACKED' })
+      expect(opcionesDelCombo().map(o => o.marcarCocina)).toEqual([false])
+      expect(orderTpvService.addItemsToOrder).toHaveBeenCalled()
+      expect(armarComandasTrasCommitMock).not.toHaveBeenCalled()
+    })
+
     it('mostrador (el combo no dejó marca) o sin pantalla: no se arma nada, como la ronda normal', async () => {
       ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING', total: 120, kitchenPendingAt: null })
       await processIntents(baseParams([ronda('i-mostrador')]))
