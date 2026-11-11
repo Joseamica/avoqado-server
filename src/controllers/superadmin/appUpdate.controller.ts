@@ -307,7 +307,11 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     // Validate + normalize audience targeting (defaults to ALL = every terminal)
-    const targeting = normalizeTargeting(req.body)
+    // La app de campo no reporta sucursal ni serie al buscar versiones: una fila VENUES/TERMINALS nunca le llegaría.
+    // Su carril es siempre para todos los celulares.
+    const targeting = esCampo
+      ? { targetType: 'ALL' as const, targetVenueIds: [] as string[], targetTerminalIds: [] as string[] }
+      : normalizeTargeting(req.body)
     if ('error' in targeting) {
       return res.status(400).json({ success: false, error: targeting.error })
     }

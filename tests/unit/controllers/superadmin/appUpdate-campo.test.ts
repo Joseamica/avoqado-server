@@ -56,6 +56,16 @@ it('campo en producción con su paquete, su nombre y su llave: 201 en su carril 
   })
 })
 
+it('campo siempre queda para todos los celulares aunque pidan sucursales', async () => {
+  ;(extractApkMetadata as jest.Mock).mockResolvedValue(metadata('com.jaac.avoqado_tpv.campo', '0.3.0'))
+  const res = await alta({ environment: 'PRODUCTION', platform: 'ANDROID_CAMPO', targetType: 'VENUES', targetVenueIds: ['cvenue000000000000000001'] })
+
+  expect(res.status).toHaveBeenCalledWith(201)
+  expect((prisma.appUpdate.create as jest.Mock).mock.calls[0][0].data).toEqual(
+    expect.objectContaining({ targetType: 'ALL', targetVenueIds: [], targetTerminalIds: [] }),
+  )
+})
+
 it('campo en producción firmado con otra llave: 400 y no sube nada', async () => {
   ;(extractApkMetadata as jest.Mock).mockResolvedValue(metadata('com.jaac.avoqado_tpv.campo', '0.3.0'))
   ;(huellaDelCertificadoDeclarado as jest.Mock).mockReturnValue('c27a1420' + '0'.repeat(56))
