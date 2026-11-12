@@ -1330,7 +1330,7 @@ export async function createOrderWithItems(
   // (misma llave) regresa arriba y no vuelve a anotarse.
   if (filaDelCliente && orderDiscount && orderDiscountPesos > 0) {
     void logAction({
-      staffId: input.staffId ?? null,
+      staffId: input.performedBy ?? input.staffId ?? null,
       venueId,
       action: 'DISCOUNT_APPLIED',
       entity: 'Order',
@@ -1342,6 +1342,7 @@ export async function createOrderWithItems(
         customerId: input.customerId,
         descuentoDelCliente: true,
         ...(filaDelCliente.authorizedById ? { autorizadoPor: filaDelCliente.authorizedById } : {}),
+        ...vendedorSiNoEsLaSesion(input),
       },
     })
   }

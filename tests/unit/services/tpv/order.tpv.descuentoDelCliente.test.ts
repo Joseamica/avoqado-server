@@ -203,6 +203,19 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
     )
   })
 
+  // D5 (PR #392): el autor es quien tiene la sesión, no el vendedor que eligió el aparato; el vendedor queda como nota.
+  it('1b2. con otro vendedor elegido en el aparato, la auditoría va a nombre de la sesión y anota al vendedor', async () => {
+    await createOrderWithItems(VENUE, venta({ staffId: 'vendedor-1', performedBy: 'sesion-1' }))
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'sesion-1',
+        action: 'DISCOUNT_APPLIED',
+        data: expect.objectContaining({ descuentoDelCliente: true, vendedorSegunElAparato: 'vendedor-1' }),
+      }),
+    )
+  })
+
   it('1c. un descuento del catálogo que NO es del cliente no deja ese renglón (sigue como hoy)', async () => {
     await createOrderWithItems(VENUE, venta({ customerId: OTRO_CLIENTE }))
 
@@ -266,6 +279,8 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
 
   it('6. cortesía de artículo (orders:comp) + descuento del cliente con autorización ⇒ conviven', async () => {
     autorizaciones = [autorizacion()]
+    // D5 (PR #392): con otra sesión que el vendedor, la cortesía y el descuento los firma la membresía de la SESIÓN.
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-gerente-del-encabezado' } as any)
     await createOrderWithItems(
       VENUE,
       venta({
@@ -287,10 +302,15 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
       filaDeCortesias({
         orderId: 'order-1',
         renglones: [{ id: 'oi-2', brutoPesos: 50, motivo: 'Cliente frecuente' }],
-        appliedById: QUIEN_COBRA,
+        appliedById: 'sv-gerente-del-encabezado',
       }),
     )
-    expect(filaDelCatalogo()).toMatchObject({ isAutomatic: true, authorizedById: GERENTE, appliedToItemIds: ['oi-1'] })
+    expect(filaDelCatalogo()).toMatchObject({
+      isAutomatic: true,
+      appliedById: 'sv-gerente-del-encabezado',
+      authorizedById: GERENTE,
+      appliedToItemIds: ['oi-1'],
+    })
     expect(Number(filaDelCatalogo().amount)).toBe(10)
     expect((prismaMock as any).orderAction.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
