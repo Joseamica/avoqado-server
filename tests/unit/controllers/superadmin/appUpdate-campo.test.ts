@@ -166,3 +166,14 @@ it('si el INSERT choca con la llave única (otra alta ganó): 409, no 500', asyn
 
   expect(res.status).toHaveBeenCalledWith(409)
 })
+
+// Codex, apps viejas r4: una obligatoria dirigida se rechaza ANTES de subir el APK; si no, el archivo del mismo nombre
+// que ya estaba publicado quedaba reemplazado por uno sin fila.
+it('TPV obligatoria con sucursales: 400 sin subir nada', async () => {
+  ;(extractApkMetadata as jest.Mock).mockResolvedValue(metadata('com.jaac.avoqado_tpv', '2.18.0', 129))
+  const res = await alta({ environment: 'PRODUCTION', updateMode: 'FORCE', targetType: 'VENUES', targetVenueIds: ['cvenue000000000000000001'] })
+
+  expect(res.status).toHaveBeenCalledWith(400)
+  expect(archivo.save).not.toHaveBeenCalled()
+  expect(prisma.appUpdate.create).not.toHaveBeenCalled()
+})

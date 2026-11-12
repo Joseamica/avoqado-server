@@ -106,4 +106,25 @@ describe('tpvVersionGate', () => {
     expect(next).not.toHaveBeenCalled()
     expect(res.status).toHaveBeenCalledWith(426)
   })
+
+  // Codex, apps viejas antes de publicar (11-nov): «Aplica a» (D3) ya guarda versiones dirigidas a sucursales o terminales.
+  // El 426 no sabe qué terminal pregunta, así que sólo cuenta las obligatorias PARA TODAS; una obligatoria dirigida la exige
+  // el latido sólo a su audiencia. Antes, una obligatoria para una sucursal frenaba a todas las terminales.
+  it('una obligatoria dirigida a ciertas sucursales no frena a todas las terminales con 426', async () => {
+    findFirst.mockImplementation(async ({ where }: any) =>
+      where.targetType === 'ALL' ? null : { versionCode: FORCE_MINIMO, versionName: '1.5.0', downloadUrl: 'x', releaseNotes: null },
+    )
+
+    const { res, next } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '1.4.2-sandbox' })
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('una obligatoria para todas sigue frenando con 426 y manda su APK', async () => {
+    const { res } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '1.4.2-sandbox' })
+
+    expect(res.status).toHaveBeenCalledWith(426)
+    for (const [arg] of findFirst.mock.calls) expect(arg.where.targetType).toBe('ALL')
+  })
 })

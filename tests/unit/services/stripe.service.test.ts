@@ -769,6 +769,17 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
   describe('🔄 TEST 5: Feature Syncing to Stripe', () => {
     describe('syncFeaturesToStripe()', () => {
+      it('🔴 D5 · bloque P: nunca lee (ni le crea producto o precio a) un código de piloto como MESAS_SIN_RED', async () => {
+        ;(prisma.feature.findMany as jest.Mock).mockResolvedValue([])
+
+        await stripeService.syncFeaturesToStripe()
+
+        const filtros = (prisma.feature.findMany as jest.Mock).mock.calls.map(([arg]) => arg.where)
+        expect(filtros).toHaveLength(2) // las funciones por sincronizar y la relectura final
+        for (const where of filtros) expect(where).toEqual({ active: true, code: { notIn: ['MESAS_SIN_RED'] } })
+        expect(mockStripeInstance.products.create).not.toHaveBeenCalled()
+      })
+
       it('should create Stripe products and prices for features without them', async () => {
         const mockFeatures: Partial<Feature>[] = [
           {

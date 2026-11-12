@@ -10,6 +10,7 @@
 
 import prisma from '@/utils/prismaClient'
 import { syncFeaturesToStripe } from '@/services/stripe.service'
+import { CODIGOS_DE_PILOTO } from '@/services/access/basePlan.service'
 import logger from '@/config/logger'
 
 /**
@@ -25,13 +26,16 @@ export async function ensureFeaturesAreSyncedToStripe(): Promise<boolean> {
     }
 
     // Check current state
+    // Sin los códigos de piloto (D5 · bloque P: no se venden y nunca tienen precio), igual que `syncFeaturesToStripe`: contarlos
+    // haría resincronizar todo en cada arranque.
+    const vendibles = { active: true, code: { notIn: [...CODIGOS_DE_PILOTO] } }
     const totalFeatures = await prisma.feature.count({
-      where: { active: true },
+      where: vendibles,
     })
 
     const featuresWithPrices = await prisma.feature.count({
       where: {
-        active: true,
+        ...vendibles,
         stripePriceId: { not: null },
       },
     })

@@ -12,6 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { ForbiddenError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { DiscountType, Prisma } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
@@ -44,6 +45,8 @@ export interface AvailableDiscount {
 export interface ApplyCouponResult {
   success: boolean
   orderDiscountId?: string
+  /** Interno (bitácora de D5); el controlador no lo responde. */
+  discountId?: string
   couponId?: string
   discountName: string
   amount: number
@@ -247,6 +250,7 @@ export async function applyPredefinedDiscount(
  * @param authorizedById - Ignorado en una cortesía (D1)
  * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él): si usó el PIN de gerente, la membresía
  *   de quien lo tecleó. La cortesía la autoriza ese gerente o, sin PIN, quien la aplica (`staffVenueId`).
+ * @param quienLlama - `userId` de la sesión (Staff.id): firma la bitácora (hz:f34960c5:D5).
  */
 export async function applyManualDiscount(
   venueId: string,
@@ -257,6 +261,7 @@ export async function applyManualDiscount(
   staffVenueId: string | undefined,
   authorizedById?: string,
   cortesia?: { porPin?: string },
+  quienLlama?: string,
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
@@ -270,7 +275,7 @@ export async function applyManualDiscount(
   }
   // hz:e0b12f00:D1: un % o fijo que deja la cuenta en $0 también es cortesía; el motor lo decide bajo su candado.
   const autorizadorSiRegala = cortesia ? (cortesia.porPin ?? staffVenueId) : undefined
-  return discountEngine.applyManualDiscount(
+  const result = await discountEngine.applyManualDiscount(
     orderId,
     type,
     value,
@@ -282,6 +287,18 @@ export async function applyManualDiscount(
     !!cortesia,
     autorizadorSiRegala,
   )
+  // D5: el motor ya hizo commit; la bitácora sale después y sólo si quedó aplicado.
+  if (result.success) {
+    void logAction({
+      staffId: quienLlama ?? null,
+      venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: orderId,
+      data: { orderDiscountId: result.orderDiscountId, amount: result.amount, type, value, reason, source: 'manual' },
+    })
+  }
+  return result
 }
 
 // ==========================================
@@ -297,6 +314,7 @@ export async function applyManualDiscount(
  * @param couponCode - Coupon code to apply
  * @param staffVenueId - Staff venue ID applying the coupon
  * @param puedeRegalar - Quien llama tiene `orders:comp`. Falla cerrado: sin él, un cupón de cortesía (COMP) se rechaza con 403 (D14).
+ * @param quienLlama - `userId` de la sesión (Staff.id): firma la bitácora (hz:f34960c5:D5).
  */
 export async function applyCouponCode(
   venueId: string,
@@ -304,6 +322,7 @@ export async function applyCouponCode(
   couponCode: string,
   staffVenueId: string | undefined,
   puedeRegalar = false,
+  quienLlama?: string,
 ): Promise<ApplyCouponResult> {
   logger.info(`🎟️ TPV Applying coupon code`, { venueId, orderId, couponCode })
 
@@ -505,6 +524,7 @@ export async function applyCouponCode(
       return {
         success: true,
         orderDiscountId: orderDiscount.id,
+        discountId: discount.id,
         couponId: coupon.id,
         discountName: discount.name,
         amount: discountAmount,
@@ -514,7 +534,24 @@ export async function applyCouponCode(
     { etiqueta: 'applyCouponCode', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
-  if (result.success) logger.info(`✅ Coupon applied: ${couponCode} (-$${result.amount})`, { venueId, orderId })
+  if (result.success) {
+    logger.info(`✅ Coupon applied: ${couponCode} (-$${result.amount})`, { venueId, orderId })
+    // D5: fuera de `withDeadlockRetry`, ya con commit: un intento abortado no deja bitácora.
+    void logAction({
+      staffId: quienLlama ?? null,
+      venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: orderId,
+      data: {
+        orderDiscountId: result.orderDiscountId,
+        discountId: result.discountId,
+        couponCode: couponCode.toUpperCase(),
+        amount: result.amount,
+        source: 'coupon',
+      },
+    })
+  }
 
   return result
 }

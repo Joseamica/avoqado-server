@@ -175,3 +175,62 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
     expect(tableService.assignTable).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * D5 · bloque P (11-nov-2026): el `PAY_CASH` de una mesa cobrada sin red puede traer `expectedBalanceBeforeCents`, el saldo que la
+ * tablet creía que debía la cuenta ANTES de este cobro. Es sólo un rastro para la bitácora (`COBRO_SIN_RED_CON_DIFERENCIA`): nunca
+ * cambia ni rechaza el cobro. Las apps viejas no lo mandan y todo sigue igual; un valor que no sirve se ignora (el efectivo ya está
+ * en el cajón: rechazarlo por un dato de diagnóstico lo dejaría sin registrar).
+ */
+describe('PAY_CASH — saldo que la tablet esperaba (expectedBalanceBeforeCents)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.posSyncIntent.deleteMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-1', orderNumber: 'A-1', digitalReceipt: null })
+  })
+
+  const cobrar = (id: string, extra: Record<string, unknown>) =>
+    processIntents(baseParams([{ id, type: 'PAY_CASH', payload: { orderId: 'order-1', amountCents: 10000, ...extra } }]))
+
+  it('🔴 con el saldo esperado, payCashOrder lo recibe junto con el aparato del lote', async () => {
+    const acks = await cobrar('i-saldo', { expectedBalanceBeforeCents: 12345 })
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-1',
+      expect.objectContaining({ isOfflineReplay: true, saldoEsperadoSinRed: { antesCents: 12345, deviceId: 'device-a' } }),
+    )
+  })
+
+  it('$0 también es un saldo esperado válido (la tablet creía que ya no debía nada)', async () => {
+    await cobrar('i-cero', { expectedBalanceBeforeCents: 0 })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].saldoEsperadoSinRed).toEqual({ antesCents: 0, deviceId: 'device-a' })
+  })
+
+  it('sin el campo (apps viejas), payCashOrder recibe exactamente lo de hoy', async () => {
+    await cobrar('i-viejo', {})
+    expect('saldoEsperadoSinRed' in (orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]).toBe(false)
+  })
+
+  it.each([
+    ['negativo', -1],
+    ['con fracción de centavo', 100.5],
+    ['texto', '12345'],
+    ['objeto', { cents: 1 }],
+    ['arriba del tope del teclado', 100_000_001],
+    ['null', null],
+  ])('🔴 un saldo esperado %s se ignora: el cobro se registra igual (ACKED) y sin el dato', async (_caso, valor) => {
+    const acks = await cobrar(`i-malo-${String(_caso)}`, { expectedBalanceBeforeCents: valor })
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect('saldoEsperadoSinRed' in (orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]).toBe(false)
+  })
+})

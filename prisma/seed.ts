@@ -58,6 +58,7 @@ import crypto from 'crypto'
 import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
 import { calculatePaymentSettlement } from '../src/services/payments/settlementCalculation.service'
 import { setupModules } from '../scripts/setup-modules'
+import { CODIGOS_DE_PILOTO } from '../src/services/access/basePlan.service'
 
 const prisma = new PrismaClient()
 
@@ -1510,7 +1511,8 @@ async function main() {
         },
       })
       if (isFullVenue) {
-        for (const feature of allFeatures) {
+        // D5 · R5-2: los códigos de piloto (MESAS_SIN_RED) sólo los concede el superadmin, negocio por negocio.
+        for (const feature of allFeatures.filter(f => !(CODIGOS_DE_PILOTO as readonly string[]).includes(f.code))) {
           await prisma.venueFeature.create({
             data: {
               venueId: venue.id,
