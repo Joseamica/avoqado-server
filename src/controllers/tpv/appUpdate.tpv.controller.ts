@@ -251,13 +251,14 @@ export async function getSpecificVersion(req: Request, res: Response) {
       : null
     if (platform === 'ANDROID_TPV' && (req.headers['x-tpv-processor'] === 'NEXGO' || terminal?.brand?.toUpperCase().includes('NEXGO')))
       return res.status(200).json({ success: true, found: false, message: 'Nexgo se actualiza mediante TMS' })
-    // Apply the same platform and rollout audience as check-update.
+    // Apply the same platform and rollout audience as check-update. Una TPV menor a 2.12.2 no manda su serial: para ella
+    // se busca como antes de «Aplica a», sin audiencia, porque el comando INSTALL_VERSION ya eligió esta terminal.
     const update = await prisma.appUpdate.findFirst({
       where: {
         versionCode: targetVersionCode,
         environment: env as AppEnvironment,
         platform: platform as AppPlatform,
-        OR: buildAudienceConditions(terminal?.venueId, terminal?.id),
+        ...(serial ? { OR: buildAudienceConditions(terminal?.venueId, terminal?.id) } : {}),
       },
       select: {
         id: true,
