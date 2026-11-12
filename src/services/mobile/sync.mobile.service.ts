@@ -32,6 +32,7 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { esErrorTransitorio } from '../shared/erroresTransitorios'
 import { hayDineroQueSeGuarda } from '../shared/orderBalance'
+import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import { esCobroCompletadoDeLaOrden } from '../shared/cuentaCancelada'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
@@ -861,7 +862,7 @@ async function applyIntent(ctx: {
       case 'ADD_ITEMS':
         return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'PAY_CASH':
-        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella, ctx.terminalSerialNumber)
+        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella, ctx.terminalSerialNumber, ctx.deviceId)
       case 'APPLY_DISCOUNT':
       case 'APPLY_SERVICE_CHARGE':
       case 'COMP_ORDER':
@@ -1318,7 +1319,11 @@ async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: a
 
 /**
  * PAY_CASH — payload: { orderId | localOrderId, amountCents, tipCents?,
- * method?, externalSource? }
+ * method?, externalSource?, expectedBalanceBeforeCents? }
+ *
+ * `expectedBalanceBeforeCents` (D5 · bloque P, opcional): lo que la tablet creía que debía la cuenta ANTES de este cobro, en
+ * centavos enteros. Si al aplicarlo el servidor tiene otro saldo (más de 1 centavo), queda `COBRO_SIN_RED_CON_DIFERENCIA` en la
+ * bitácora; el cobro no cambia.
  *
  * El nombre dice CASH por historia: el tipo NO se renombra porque los 15 tipos
  * se espejan por nombre exacto entre server, Android e iOS y cambiarlo rompería
@@ -1340,6 +1345,7 @@ async function applyPayCash(
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
   terminalSerialNumber?: string,
+  deviceId?: string,
 ): Promise<SyncIntentAck> {
   let shiftIdDeLaVenta: string | undefined
   const declaredShift = intent.payload.shiftIdDeLaVenta
@@ -1412,6 +1418,17 @@ async function applyPayCash(
       errorCode: 'INVALID_PAYLOAD',
       message: 'PAY_CASH: cashDrawerSessionId debe ser texto de hasta 64 caracteres',
     }
+  }
+  // D5 · bloque P (11-nov-2026): el saldo que la tablet creía que debía la cuenta ANTES de este cobro (mesa cobrada sin red). Es
+  // sólo un rastro (`COBRO_SIN_RED_CON_DIFERENCIA`): nunca cambia ni rechaza el cobro. Centavos enteros entre 0 y el tope del
+  // teclado; otra cosa se ignora, porque el efectivo ya está en el cajón y un dato de diagnóstico no puede dejarlo sin registrar.
+  const saldoEsperado = intent.payload.expectedBalanceBeforeCents
+  const antesCents =
+    typeof saldoEsperado === 'number' && Number.isInteger(saldoEsperado) && saldoEsperado >= 0 && saldoEsperado <= MAX_TERMINAL_PAYMENT_CENTS
+      ? saldoEsperado
+      : undefined
+  if (saldoEsperado !== undefined && saldoEsperado !== null && antesCents === undefined) {
+    logger.warn('[POS SYNC] PAY_CASH: expectedBalanceBeforeCents inválido; se ignora y el cobro sigue', { venueId, intentId: intent.id })
   }
   // Espejo del guard HTTP: una propina negativa es un descuento disfrazado e
   // inconciliable. El reducer no lo validaba y era el hueco por donde entraba.
@@ -1492,6 +1509,7 @@ async function applyPayCash(
     ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
     ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),
     ...(terminalSerialNumber ? { terminalSerialNumber } : {}),
+    ...(antesCents !== undefined ? { saldoEsperadoSinRed: { antesCents, deviceId: deviceId ?? null } } : {}),
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
     ...(dejarHuella
