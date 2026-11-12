@@ -280,8 +280,13 @@ export function filaDeDescuentoDeCuenta(p: {
   orderId: string
   montoPesos: number
   appliedById: string | null
-  /** hz:e0b12f00:D1: sólo cuando el descuento deja la cuenta en $0 (una cortesía): quien la autorizó. */
+  /** hz:e0b12f00:D1: cuando el descuento deja la cuenta en $0 (una cortesía) o lo autorizó el PIN del descuento del cliente. */
   authorizedById?: string
+  /**
+   * Descuento del cliente (fase 2): el mismo descuento libre con su etiqueta. Sigue FIXED_AMOUNT (un recálculo conserva el monto
+   * que se cobró: nunca se re-deriva como % del catálogo); `discountId` sólo si existe en el negocio.
+   */
+  delCliente?: { discountId: string | null; name: string }
 }): Prisma.OrderDiscountUncheckedCreateInput {
   const monto = roundPesos(p.montoPesos)
   return {
@@ -294,6 +299,7 @@ export function filaDeDescuentoDeCuenta(p: {
     isManual: true,
     appliedById: p.appliedById,
     ...(p.authorizedById ? { authorizedById: p.authorizedById } : {}),
+    ...(p.delCliente ? { ...p.delCliente, isAutomatic: true, isManual: false } : {}),
     reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
   }
 }

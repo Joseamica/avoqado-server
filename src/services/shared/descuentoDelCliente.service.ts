@@ -72,3 +72,15 @@ export async function descuentosDeLosClientes(
 }
 
 export const llaveDelDescuentoDelCliente = (customerId: string, discountId: string) => `descuento-cliente:${customerId}:${discountId}`
+
+/**
+ * Fase 2: el 403 de una venta con el descuento del cliente sin `discounts:apply` propio ni un PIN del gerente que alcance el monto.
+ * `<Nombre>` es el del cliente (el que ve la cajera en el carrito); sin nombre, «del cliente».
+ */
+export function textoDelDescuentoSinPermiso(nombreDelCliente: string | null | undefined): string {
+  const nombre = nombreDelCliente?.trim()
+  return `Tu puesto no puede aplicar el descuento ${nombre ? `de ${nombre}` : 'del cliente'}. Pide autorización o quítalo.`
+}
+
+/** El `code` de ese 403: la app lo distingue del 403 de permiso de siempre (`required`/`overridable`). */
+export const DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION = 'DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION'

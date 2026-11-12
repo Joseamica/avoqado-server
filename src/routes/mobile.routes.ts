@@ -128,6 +128,8 @@ import {
   checkCortesiaEnDescuento,
   checkCortesiaPermissionIfPresent,
   checkCuponPermissionIfPresent,
+  checkDescuentoDelCliente,
+  traeDescuentoDelCliente,
   traeDescuentoManual,
 } from '../middlewares/cortesiaPidePermiso.middleware'
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
@@ -682,10 +684,16 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
   const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
   const hasPromotion = items.some((item: any) => item?.promotionRef)
   if (!hasPromotion && !(revisarDescuentoManual && traeDescuentoManual(req.body))) return afterPromotion()
+  const afterPermission = () => (hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion())
+  // Descuento del cliente (fase 2): su rebaja la autoriza el permiso propio o el PIN del cuerpo atado al monto (lo valida el
+  // servicio). Ese PIN no autoriza nada más: una promoción sigue pidiendo `discounts:apply` aquí mismo.
+  if (revisarDescuentoManual && traeDescuentoDelCliente(req.body)) {
+    return checkDescuentoDelCliente(req, res, () =>
+      hasPromotion ? checkPermission('discounts:apply')(req, res, afterPermission) : afterPermission(),
+    )
+  }
   // Promoción y rebaja manual comparten el permiso: una sola ficha de gerente por petición, sin consumirla dos veces.
-  return checkPermission('discounts:apply')(req, res, () =>
-    hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion(),
-  )
+  return checkPermission('discounts:apply')(req, res, afterPermission)
 }
 
 router.post(

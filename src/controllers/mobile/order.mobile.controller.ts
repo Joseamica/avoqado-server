@@ -17,7 +17,7 @@ import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/serv
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { conCortesiaSiRegala, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { conCortesiaSiRegala, tieneCortesiaAutorizada, tieneDescuentoConPermisoPropio } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { membresiaDeQuienLlama } from '@/services/tpv/discount.tpv.service'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
@@ -106,6 +106,30 @@ function idDeLaColaDelCuerpo(body: Record<string, unknown>, campo: string): { va
   if (valor === undefined || valor === null || valor === '') return { valido: true, id: null }
   if (typeof valor !== 'string' || valor.length > 64) return { valido: false }
   return { valido: true, id: body.isOfflineReplay === true ? valor : null }
+}
+
+/**
+ * Descuento del cliente (fase 2, spec B4): `discount` ya ES el descuento del cliente y la etiqueta dice de quién y cuánto. Exige el
+ * cliente de la venta y el mismo monto; nunca con catálogo ni cupón (ese camino recalcula). Con 0 no hay nada que autorizar ni
+ * registrar: la venta sigue sin etiqueta.
+ */
+function descuentoDelClienteDelCuerpo(
+  body: Record<string, any>,
+): { error: string } | { valor: { discountId: string; montoCents: number } | null } {
+  const etiqueta = body.descuentoDelCliente
+  if (etiqueta == null) return { valor: null }
+  const { discountId, montoCents } = etiqueta
+  if (typeof discountId !== 'string' || !discountId || discountId.length > 64 || !Number.isInteger(montoCents) || montoCents < 0) {
+    return { error: 'descuentoDelCliente requiere discountId y montoCents (centavos enteros, 0 o más)' }
+  }
+  if (typeof body.customerId !== 'string' || !body.customerId.trim()) {
+    return { error: 'El descuento del cliente requiere el cliente de la venta (customerId)' }
+  }
+  if (montoCents !== body.discount) return { error: 'montoCents del descuento del cliente debe ser igual a discount' }
+  if (body.orderDiscountId != null || body.couponCode != null) {
+    return { error: 'El descuento del cliente no se combina con un descuento de catálogo ni con un cupón' }
+  }
+  return { valor: montoCents > 0 ? { discountId, montoCents } : null }
 }
 
 const TURNO_DE_LA_VENTA_INVALIDO = 'shiftIdDeLaVenta debe ser texto de hasta 64 caracteres'
@@ -242,6 +266,8 @@ export function leerVentaDeMostrador(
   if (couponCode != null && orderDiscountId != null) {
     return { error: 'Una venta no puede llevar cupón y descuento de catálogo a la vez' }
   }
+  const delCliente = descuentoDelClienteDelCuerpo(body)
+  if ('error' in delCliente) return delCliente
   // D5 (Codex r1 #3): el premio cambia el total después de crear la cuenta y la caja ajusta sólo su parte; con un cupón que el servidor
   // recalcula, lo cobrado podía no ser la cuenta. Hasta resolverlo junto, no se combinan.
   if (couponCode != null && typeof stampRewardId === 'string') {
@@ -290,6 +316,12 @@ export function leerVentaDeMostrador(
       orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
       // D5: validado arriba; el servicio lo revalida y calcula en línea.
       couponCode: typeof couponCode === 'string' ? couponCode.trim() : null,
+      // Descuento del cliente (fase 2): la etiqueta de `discount`, validada arriba. La autorización la decide la sesión (el guard)
+      // o el PIN del cuerpo; el marcador del permiso propio nunca sale del cuerpo (`autoridadDeLaVenta`). Sin ellos, el input de hoy.
+      ...(delCliente.valor ? { descuentoDelCliente: delCliente.valor } : {}),
+      ...(typeof body.autorizacionDelDescuento === 'string' && body.autorizacionDelDescuento.trim()
+        ? { autorizacionDelDescuento: body.autorizacionDelDescuento.trim() }
+        : {}),
       tip: opciones.conPropinaDeOrden && typeof tip === 'number' ? tip : 0,
       note,
       splitType,
@@ -331,7 +363,9 @@ export function leerVentaDeMostrador(
 export async function autoridadDeLaVenta(
   req: Request,
   venta: orderMobileService.CreateOrderInput,
-): Promise<Pick<orderMobileService.CreateOrderInput, 'canCompItems' | 'performedBy' | 'terminalSerialNumber'>> {
+): Promise<
+  Pick<orderMobileService.CreateOrderInput, 'canCompItems' | 'performedBy' | 'terminalSerialNumber' | 'descuentoConPermisoPropio'>
+> {
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
   // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
   // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
@@ -346,6 +380,8 @@ export async function autoridadDeLaVenta(
   if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
   return {
     ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
+    // Descuento del cliente (fase 2): `discounts:apply` propio, sólo si lo comprobó el guard de ESTE request (`/orders` y pay-new-order).
+    ...(venta.descuentoDelCliente ? { descuentoConPermisoPropio: tieneDescuentoConPermisoPropio(req) } : {}),
     // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
     terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
   }

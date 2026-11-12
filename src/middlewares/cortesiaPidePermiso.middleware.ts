@@ -1,11 +1,14 @@
 import { DiscountType } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
-import { RegaloSinPermisoError } from '../errors/AppError'
+import { ForbiddenError, RegaloSinPermisoError } from '../errors/AppError'
+import { DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION, textoDelDescuentoSinPermiso } from '../services/shared/descuentoDelCliente.service'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
+import { tienePermisoEnVenue } from './permissionFlag.middleware'
 
 /** D5: en línea el servidor valida el cupón y calcula el monto. En una venta de la cola se ignora: ahí `discount` sí es libre. */
-const traeCuponEnLinea = (body: any): boolean => typeof body?.couponCode === 'string' && body.couponCode.trim() !== '' && body.isOfflineReplay !== true
+const traeCuponEnLinea = (body: any): boolean =>
+  typeof body?.couponCode === 'string' && body.couponCode.trim() !== '' && body.isOfflineReplay !== true
 
 /** Con id de catálogo o cupón, `discount` sólo repite ese importe; sin ellos, el servicio aplica el número positivo como rebaja manual. */
 export const traeDescuentoManual = (body: any): boolean =>
@@ -17,6 +20,57 @@ export const checkCuponPermissionIfPresent = (req: Request, res: Response, next:
 
 export const checkDescuentoManualPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
   traeDescuentoManual(req.body) ? checkPermission('discounts:apply')(req, res, next) : next()
+
+/** Descuento del cliente (fase 2): el descuento manual de la venta trae la etiqueta `descuentoDelCliente`. */
+export const traeDescuentoDelCliente = (body: any): boolean => traeDescuentoManual(body) && body?.descuentoDelCliente != null
+
+/** El PIN de gerente que viaja en el CUERPO (`autorizacionDelDescuento`), nunca en `X-Permission-Override`. Genérico (D4 lo reusa). */
+const traeAutorizacionDelDescuento = (body: any): boolean =>
+  typeof body?.autorizacionDelDescuento === 'string' && body.autorizacionDelDescuento.trim() !== ''
+
+const descuentosConPermisoPropio = new WeakMap<Request, { venueId: string; userId: string }>()
+
+/** Sólo acredita `discounts:apply` PROPIO comprobado por `checkDescuentoDelCliente`, en este request, negocio y sesión. */
+export function tieneDescuentoConPermisoPropio(req: Request): boolean {
+  const marca = descuentosConPermisoPropio.get(req)
+  return !!marca && marca.venueId === req.params.venueId && marca.userId === req.authContext?.userId
+}
+
+/**
+ * Descuento del cliente (fase 2, spec B6): lo acota la AUTORIZACIÓN, nunca una tarifa. El permiso propio manda: con
+ * `discounts:apply` (la misma evaluación de `checkPermission`, sin responder) se marca el request y el token ni se lee. Sin él y con
+ * `autorizacionDelDescuento`, pasa al servicio, que exige el PIN atado a este cliente, a este descuento y a un tope que alcance el
+ * monto. Sin los dos, 403 aquí. No consume `X-Permission-Override`: ese PIN no autoriza el descuento del cliente. Si la base falla,
+ * error (nunca «tiene permiso»).
+ */
+export const checkDescuentoDelCliente = async (req: Request, _res: Response, next: NextFunction) => {
+  try {
+    descuentosConPermisoPropio.delete(req)
+    const venueId = req.params.venueId
+    const userId = req.authContext?.userId
+    if (venueId && userId && (await tienePermisoEnVenue(req, 'discounts:apply'))) {
+      descuentosConPermisoPropio.set(req, { venueId, userId })
+      return next()
+    }
+    if (traeAutorizacionDelDescuento(req.body)) return next()
+    return next(
+      new ForbiddenError(textoDelDescuentoSinPermiso(await nombreDelCliente(venueId, req.body)), DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION),
+    )
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/** El nombre del 403, con la misma prioridad que la venta: el que manda la caja o el del cliente del negocio. */
+async function nombreDelCliente(venueId: string | undefined, body: any): Promise<string | null> {
+  if (typeof body?.customerName === 'string' && body.customerName.trim()) return body.customerName
+  if (!venueId || typeof body?.customerId !== 'string' || !body.customerId) return null
+  const cliente = await prisma.customer.findFirst({
+    where: { id: body.customerId, venueId },
+    select: { firstName: true, lastName: true },
+  })
+  return cliente ? `${cliente.firstName ?? ''} ${cliente.lastName ?? ''}`.trim() || null : null
+}
 
 const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string; porPin?: string }>()
 
