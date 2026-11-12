@@ -33,14 +33,15 @@ const CUENTA_95 = { total: 104.5, subtotal: 95, discountAmount: 0, status: 'PEND
 function vista(saldo: number, orden: object | null, c = cfg()) {
   ;(getOrCreateLoyaltyConfig as jest.Mock).mockResolvedValue(c)
   prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1', firstName: 'Ana', lastName: null, loyaltyPoints: saldo })
-  prismaMock.order.findFirst.mockResolvedValue(orden)
+  // D650: la clienta (`c1`) es la de la cuenta.
+  prismaMock.order.findFirst.mockResolvedValue(orden && { customerId: 'c1', ...orden })
   return getCustomerLoyalty('v1', 'c1', 'o1')
 }
 
 /** Un `tx` falso con lo que lee y escribe el canje. */
 function txFalso(saldo: number, orden: object) {
   return {
-    order: { findFirst: jest.fn().mockResolvedValue({ id: 'o1', paidAmount: 0, originSystem: null, ...orden }) },
+    order: { findFirst: jest.fn().mockResolvedValue({ id: 'o1', paidAmount: 0, originSystem: null, customerId: 'c1', ...orden }) },
     customer: {
       findFirst: jest.fn().mockResolvedValue({ id: 'c1', loyaltyPoints: saldo }),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),

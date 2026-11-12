@@ -2551,6 +2551,8 @@ describe('Task3 receipt coverage', () => {
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'Comp refund', loyaltyPoints: 10000 } })
     const order = await plainOrder(),
       item = order.items.find(x => x.productName === 'A')!
+    // D650: el canje sólo usa los puntos de un cliente de la cuenta.
+    await prisma.orderCustomer.create({ data: { orderId: order.id, customerId: customer.id, isPrimary: true } })
     await redeemPointsToOrder(venueId, order.id, customer.id, 1000, authorId)
     const discount = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: order.id } })
     await prisma.orderDiscount.update({
@@ -3060,6 +3062,8 @@ test('Task4 loyalty receipt keeps exact balance after later customer changes', a
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Gate A', loyaltyPoints: 20000 } }),
     o = await plainOrder()
+  // D650: ligado por `OrderCustomer` (como la TPV); la cabecera sigue sin cliente.
+  await prisma.orderCustomer.create({ data: { orderId: o.id, customerId: c.id, isPrimary: true } })
   const i = operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: o.id, customerId: c.id }, payload: { points: 1000 } })
   const r = await exactReplay(i, 'post', `/orders/${o.id}/loyalty/redeem`, { customerId: c.id, points: 1000 }, () =>
     prisma.customer.update({ where: { id: c.id }, data: { loyaltyPoints: { increment: 77 } } }),
@@ -3096,6 +3100,7 @@ test('Task4 remove discount stores original refund amount and created ADJUST id 
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Refund', loyaltyPoints: 10000 } }),
     o = await plainOrder()
+  await prisma.orderCustomer.create({ data: { orderId: o.id, customerId: c.id, isPrimary: true } }) // D650
   await redeemPointsToOrder(venueId, o.id, c.id, 1000, authorId)
   const row = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: o.id } })
   const i = operationInput({ action: 'removeOrderDiscount', refs: { orderId: o.id, orderDiscountId: row.id }, payload: {} })

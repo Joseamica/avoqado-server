@@ -110,6 +110,24 @@ function comoLoPintaElPos(x: number): number {
   return new Prisma.Decimal(String(x)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
 }
 
+/** D650: el texto con el que el canje, la caja y la previa del MCP rechazan a un cliente que no está en la cuenta. */
+export const CLIENTE_FUERA_DE_LA_CUENTA = 'Este cliente no está en esta cuenta: agrégalo a la cuenta antes de canjear sus puntos.'
+
+/**
+ * D650 (Codex android r5 #1): ¿el cliente está en ESTA cuenta? Es su cliente (`Order.customerId`, lo que pone el POS) o tiene su liga
+ * (`OrderCustomer`, lo que pone la TPV, varios por cuenta). Sin esto, una caja que volvió de estar sin red con el cliente viejo
+ * quemaba sus puntos en la cuenta que otra caja ya había pasado a otro cliente.
+ */
+async function estaEnLaCuenta(
+  db: Pick<Prisma.TransactionClient, 'orderCustomer'>,
+  orderId: string,
+  clienteDeLaCuenta: string | null,
+  customerId: string,
+): Promise<boolean> {
+  if (clienteDeLaCuenta === customerId) return true
+  return !!(await db.orderCustomer.findUnique({ where: { orderId_customerId: { orderId, customerId } }, select: { id: true } }))
+}
+
 /**
  * Lo que el canje haría con `puntos` sobre la cuenta que describe `vista` (la respuesta de `getCustomerLoyalty`), sin escribir: la
  * vista previa del MCP. Las mismas negativas que el canje (mínimo, saldo) y la misma regla (`puntosQueSeCanjean`) contra el tope de
@@ -141,7 +159,10 @@ export async function previaDelCanjeEnCuenta(
   { ok: true; puntos: number; monto: number; vista: Awaited<ReturnType<typeof getCustomerLoyalty>> } | { ok: false; error: string }
 > {
   const vista = await getCustomerLoyalty(venueId, customerId, orderId)
-  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { status: true, paymentStatus: true } })
+  const cuenta = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { status: true, paymentStatus: true, customerId: true },
+  })
   if (!cuenta) return { ok: false, error: 'Orden no encontrada' }
   if (cuenta.status === 'CANCELLED' || cuenta.status === 'DELETED') {
     return { ok: false, error: 'Esta venta está cancelada: no se pueden canjear puntos.' }
@@ -149,6 +170,7 @@ export async function previaDelCanjeEnCuenta(
   if (cuenta.paymentStatus === 'PAID' || cuenta.paymentStatus === 'PARTIAL') {
     return { ok: false, error: 'No se puede modificar una orden ya pagada' }
   }
+  if (!(await estaEnLaCuenta(prisma, orderId, cuenta.customerId, customerId))) return { ok: false, error: CLIENTE_FUERA_DE_LA_CUENTA }
   if (!vista.active) return { ok: false, error: 'El programa de lealtad no está activo en esta sucursal' }
   const r = previaDelCanje(puntos, vista)
   return r.ok ? { ...r, vista } : r
@@ -178,15 +200,17 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   if (orderId) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, venueId },
-      select: { subtotal: true, discountAmount: true, status: true, paymentStatus: true },
+      select: { subtotal: true, discountAmount: true, status: true, paymentStatus: true, customerId: true },
     })
     // Codex r4: una cuenta con abono, pagada o anulada no admite canjes (el canje la rechaza): no hay nada que ofrecer en ella.
+    // D650: tampoco a un cliente que no está en la cuenta (otra caja ya la pasó a otro cliente).
     const admiteCanje =
       order !== null &&
       order.status !== 'CANCELLED' &&
       order.status !== 'DELETED' &&
       order.paymentStatus !== 'PAID' &&
-      order.paymentStatus !== 'PARTIAL'
+      order.paymentStatus !== 'PARTIAL' &&
+      (await estaEnLaCuenta(prisma, orderId, order.customerId, customerId))
     redeemableBase = order ? (admiteCanje ? Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0)) : 0) : null
   }
 
@@ -253,6 +277,7 @@ export async function redeemPointsToOrderInTransaction(
       paidAmount: true,
       originSystem: true,
       status: true,
+      customerId: true,
     },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
@@ -267,6 +292,8 @@ export async function redeemPointsToOrderInTransaction(
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
+  // D650: sólo los puntos de un cliente que está en la cuenta, leído bajo su candado (tomado arriba).
+  if (!(await estaEnLaCuenta(tx, orderId, order.customerId, customerId))) throw new BadRequestError(CLIENTE_FUERA_DE_LA_CUENTA)
 
   const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
   if (!effectiveConfig.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')

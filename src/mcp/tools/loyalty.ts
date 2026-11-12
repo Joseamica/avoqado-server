@@ -341,7 +341,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'redeem_loyalty_on_check',
-    '🔴 CRITICAL (moves customer value AND money on an open check). Redeem a customer\'s loyalty points as a discount on an OPEN check of a venue you can access — the POS "Recompensas" action. Find the customer by name/email/phone and pass the orderId of the open check. Points are burned and the matching discount is applied to the check in ONE transaction; if the points are worth more than the check, only the points actually needed are burned and the rest stay in the balance. Removing that discount later refunds the points automatically. By DEFAULT this only PREVIEWS (points → discount → new balance); call again with confirm:true to apply. This WRITES — requires orders:update.',
+    '🔴 CRITICAL (moves customer value AND money on an open check). Redeem a customer\'s loyalty points as a discount on an OPEN check of a venue you can access — the POS "Recompensas" action. Find the customer by name/email/phone and pass the orderId of the open check; the customer must already be on that check (attach them first), otherwise it is rejected. Points are burned and the matching discount is applied to the check in ONE transaction; if the points are worth more than the check, only the points actually needed are burned and the rest stay in the balance. Removing that discount later refunds the points automatically. By DEFAULT this only PREVIEWS (points → discount → new balance); call again with confirm:true to apply. This WRITES — requires orders:update.',
     {
       venueId: z.string().describe('Venue that owns the check and the customer (must be in your scope)'),
       orderId: z.string().describe('The OPEN order/check to discount'),

@@ -36,7 +36,8 @@ function preparar({
 }) {
   ;(getOrCreateLoyaltyConfig as jest.Mock).mockResolvedValue(config(cfg))
   prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1', firstName: 'Ana', lastName: null, loyaltyPoints: saldo })
-  prismaMock.order.findFirst.mockResolvedValue(orden ?? null)
+  // D650: la clienta (`c1`) es la de la cuenta.
+  prismaMock.order.findFirst.mockResolvedValue(orden ? { customerId: 'c1', ...orden } : null)
 }
 
 describe('getCustomerLoyalty — tope igual al canje (D18)', () => {
