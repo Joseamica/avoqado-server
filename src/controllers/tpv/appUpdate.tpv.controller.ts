@@ -140,10 +140,12 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
-    // App de campo: la obligatoria PENDIENTE, aparte de la más nueva (con FORCE 4 y luego BANNER 5, quien está en 3 sigue
-    // obligado a llegar a 4). La TPV no la usa (tiene el 426 y el heartbeat) y su respuesta queda igual que antes.
+    // La obligatoria PENDIENTE que le toca a esta terminal, aparte de la más nueva (con FORCE 4 y luego BANNER 5, quien está
+    // en 3 sigue obligado a llegar a 4). La app de campo la recibe como `minVersionCode`. La TPV, como la más nueva en modo
+    // FORCE: una obligatoria dirigida no la frena el 426 (sólo cuenta las de todas) y el latido no sustituye una pendiente
+    // más nueva, así que sin esto una opcional más nueva la dejaba seguir sin actualizar (Codex, apps viejas r2).
     const forcePendiente =
-      platformParam !== 'ANDROID_CAMPO'
+      platformParam !== 'ANDROID_CAMPO' && platformParam !== 'ANDROID_TPV'
         ? undefined
         : await prisma.appUpdate.findFirst({
             where: {
@@ -164,7 +166,7 @@ export async function checkForUpdate(req: Request, res: Response) {
     return res.json({
       success: true,
       hasUpdate: true,
-      ...(forcePendiente !== undefined && { minVersionCode: forcePendiente?.versionCode ?? null }),
+      ...(platformParam === 'ANDROID_CAMPO' && { minVersionCode: forcePendiente?.versionCode ?? null }),
       update: {
         id: latestUpdate.id,
         versionName: latestUpdate.versionName,
@@ -173,7 +175,7 @@ export async function checkForUpdate(req: Request, res: Response) {
         fileSize: latestUpdate.fileSize.toString(), // Convert BigInt to string for JSON
         checksum: latestUpdate.checksum,
         releaseNotes: latestUpdate.releaseNotes,
-        updateMode: latestUpdate.updateMode, // NONE, BANNER, or FORCE
+        updateMode: platformParam === 'ANDROID_TPV' && forcePendiente ? 'FORCE' : latestUpdate.updateMode, // NONE, BANNER, or FORCE
         minAndroidSdk: latestUpdate.minAndroidSdk,
         publishedAt: latestUpdate.createdAt.toISOString(),
       },

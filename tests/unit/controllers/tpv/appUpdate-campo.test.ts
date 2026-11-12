@@ -72,10 +72,12 @@ it('sin platform sigue siendo la TPV', async () => {
   for (const [arg] of findFirst.mock.calls) expect(arg.where.platform).toBe('ANDROID_TPV')
 })
 
-it('la respuesta de la TPV con versión nueva queda igual que antes: sin minVersionCode ni consulta extra', async () => {
+// Desde la auditoría de apps viejas r2 (11-nov) la TPV también busca su obligatoria pendiente (una consulta más), pero su
+// respuesta conserva la forma de siempre: sin minVersionCode.
+it('la respuesta de la TPV con versión nueva conserva su forma: sin minVersionCode', async () => {
   findFirst.mockResolvedValue({ ...fila(130, 'FORCE'), versionName: '2.19.0' })
   const res = await pedir({ currentVersion: '129', environment: 'PRODUCTION' })
 
-  expect(findFirst).toHaveBeenCalledTimes(1)
   expect(res.json.mock.calls[0][0]).not.toHaveProperty('minVersionCode')
+  expect(res.json.mock.calls[0][0].update).toEqual(expect.objectContaining({ versionCode: 130, updateMode: 'FORCE' }))
 })

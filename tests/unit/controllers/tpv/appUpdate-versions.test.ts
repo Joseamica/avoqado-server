@@ -48,3 +48,28 @@ it('una TPV con serial que no está dada de alta sólo ve las versiones para tod
   await getSpecificVersion({ query: { versionCode: '140', environment: 'PRODUCTION' }, headers: {}, get: () => 'AVQD-DESCONOCIDA' } as any, res)
   expect((prisma.appUpdate.findFirst as jest.Mock).mock.calls[0][0].where.OR).toEqual([{ targetType: 'ALL' }])
 })
+
+// Codex, apps viejas r2 (11-nov): con una obligatoria dirigida (140) y una opcional más nueva para todas (141), la TPV vieja
+// se quedaba con la 141 opcional (el latido no sustituye una pendiente más nueva) y el 426 ya no la frena. Si a la terminal
+// le toca una obligatoria pendiente, check-update le ofrece la más nueva como obligatoria.
+const peticionTpv = { query: { currentVersion: '105', environment: 'PRODUCTION' }, headers: {} } as any
+it('TPV: con una obligatoria pendiente que le toca, la más nueva se ofrece como obligatoria', async () => {
+  ;(prisma.appUpdate.findFirst as jest.Mock)
+    .mockReset()
+    .mockResolvedValueOnce({ ...versionActiva, versionCode: 141, updateMode: 'BANNER' })
+    .mockResolvedValueOnce({ versionCode: 140 })
+  const res = response()
+  await checkForUpdate(peticionTpv, res)
+  const cuerpo = (res.json as jest.Mock).mock.calls[0][0]
+  expect(cuerpo.update).toEqual(expect.objectContaining({ versionCode: 141, updateMode: 'FORCE' }))
+  expect(cuerpo).not.toHaveProperty('minVersionCode') // la respuesta de la TPV no cambia de forma
+})
+it('TPV: sin obligatoria pendiente, la más nueva conserva su modo', async () => {
+  ;(prisma.appUpdate.findFirst as jest.Mock)
+    .mockReset()
+    .mockResolvedValueOnce({ ...versionActiva, versionCode: 141, updateMode: 'BANNER' })
+    .mockResolvedValueOnce(null)
+  const res = response()
+  await checkForUpdate(peticionTpv, res)
+  expect((res.json as jest.Mock).mock.calls[0][0].update).toEqual(expect.objectContaining({ versionCode: 141, updateMode: 'BANNER' }))
+})
