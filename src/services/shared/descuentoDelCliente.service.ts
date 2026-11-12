@@ -14,6 +14,8 @@ export type DescuentoDelCliente = {
   maxDiscountAmount: number | null
 }
 
+const TOPE_POR_CLIENTE = 10
+
 type Asignacion = { active: boolean; validFrom: Date | null; validUntil: Date | null; maxUses: number | null }
 
 // Vigencia por instantes (validFrom <= ahora <= validUntil), igual que `getCustomerDiscounts`.
@@ -59,9 +61,38 @@ export async function descuentosDeLosClientes(
   if (customerIds.length === 0) return resultado
 
   const ahora = new Date()
+  const ventana = (ahora: Date) => [
+    { OR: [{ validFrom: null }, { validFrom: { lte: ahora } }] },
+    { OR: [{ validUntil: null }, { validUntil: { gte: ahora } }] },
+  ]
+  // La regla vive en el WHERE: sólo vuelven candidatos válidos. `cuentaComoDescuentoDelCliente` queda como doble revisión.
+  // ponytail: tope de 10 asignaciones válidas por cliente en esta consulta; el orden es global (priority, value, más viejo),
+  // así que lo mejor sale primero. Si algún cliente llega a tener más, subir el tope o consultar por cliente.
   const filas = await db.customerDiscount.findMany({
-    where: { customerId: { in: customerIds }, active: true, discount: { venueId } },
+    where: {
+      customerId: { in: customerIds },
+      active: true,
+      maxUses: null,
+      AND: ventana(ahora),
+      discount: {
+        venueId,
+        active: true,
+        type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
+        scope: 'ORDER',
+        requiresApproval: false,
+        minPurchaseAmount: null,
+        daysOfWeek: { isEmpty: true },
+        timeFrom: null,
+        timeUntil: null,
+        maxTotalUses: null,
+        maxUsesPerCustomer: null,
+        customerGroupId: null,
+        AND: ventana(ahora),
+      },
+    },
     include: { discount: true },
+    orderBy: [{ discount: { priority: 'desc' } }, { discount: { value: 'desc' } }, { discount: { createdAt: 'asc' } }],
+    take: customerIds.length * TOPE_POR_CLIENTE,
   })
 
   const candidatos = new Map<string, Discount[]>()

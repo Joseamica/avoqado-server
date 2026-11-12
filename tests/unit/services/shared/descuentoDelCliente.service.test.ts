@@ -97,7 +97,30 @@ describe('descuentosDeLosClientes', () => {
     const db: any = { customerDiscount: { findMany } }
     const mapa = await descuentosDeLosClientes('v1', ['c1', 'c2'], db)
     expect(findMany).toHaveBeenCalledTimes(1)
-    expect(findMany.mock.calls[0][0].where).toEqual({ customerId: { in: ['c1', 'c2'] }, active: true, discount: { venueId: 'v1' } })
+    const arg = findMany.mock.calls[0][0]
+    expect(arg.where).toMatchObject({
+      customerId: { in: ['c1', 'c2'] },
+      active: true,
+      maxUses: null,
+      discount: {
+        venueId: 'v1',
+        active: true,
+        type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
+        scope: 'ORDER',
+        requiresApproval: false,
+        minPurchaseAmount: null,
+        daysOfWeek: { isEmpty: true },
+        timeFrom: null,
+        timeUntil: null,
+        maxTotalUses: null,
+        maxUsesPerCustomer: null,
+        customerGroupId: null,
+      },
+    })
+    expect(arg.where.AND).toHaveLength(2)
+    expect(arg.where.discount.AND).toHaveLength(2)
+    expect(arg.orderBy).toEqual([{ discount: { priority: 'desc' } }, { discount: { value: 'desc' } }, { discount: { createdAt: 'asc' } }])
+    expect(arg.take).toBe(20)
     expect(mapa.size).toBe(1)
     expect(mapa.get('c1')).toEqual({ discountId: 'b', name: 'Cliente 30 %', type: 'PERCENTAGE', value: 30, maxDiscountAmount: null })
   })
