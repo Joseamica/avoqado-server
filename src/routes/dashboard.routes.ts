@@ -79,6 +79,7 @@ import * as privacyNoticeController from '../controllers/dashboard/privacyNotice
 import * as venueRoleConfigController from '../controllers/dashboard/venueRoleConfig.dashboard.controller'
 import * as venueSettingsController from '../controllers/dashboard/venueSettings.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
+import * as loyaltyPromotionController from '../controllers/dashboard/loyaltyPromotion.dashboard.controller'
 import * as discountController from '../controllers/dashboard/discount.dashboard.controller'
 import * as tenderTypeController from '../controllers/dashboard/tenderType.dashboard.controller'
 import {
@@ -273,6 +274,12 @@ import {
   CardDesignUpdateSchema,
   RedeemStampRewardSchema,
 } from '../schemas/dashboard/loyalty.schema'
+import {
+  CreateLoyaltyPromotionSchema,
+  ListLoyaltyPromotionsSchema,
+  LoyaltyPromotionParamsSchema,
+  UpdateLoyaltyPromotionSchema,
+} from '../schemas/dashboard/loyaltyPromotion.schema'
 import {
   getDiscountsQuerySchema,
   createDiscountBodySchema,
@@ -11311,6 +11318,37 @@ router.put(
   checkPermission('loyalty:update'),
   validateRequest(UpdateLoyaltyConfigSchema),
   loyaltyController.updateLoyaltyConfig,
+)
+
+// Promociones de lealtad («sello doble», «puntos dobles», «+N»): spec 2026-11-12 §4.1. Pasan por el candado de plan
+// LOYALTY_PROGRAM del prefijo `/venues/:venueId/loyalty` (arriba). Sin borrar: terminar guarda `endedAt`.
+router.get(
+  '/venues/:venueId/loyalty/promotions',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(ListLoyaltyPromotionsSchema),
+  loyaltyPromotionController.listLoyaltyPromotions,
+)
+router.post(
+  '/venues/:venueId/loyalty/promotions',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  validateRequest(CreateLoyaltyPromotionSchema),
+  loyaltyPromotionController.createLoyaltyPromotion,
+)
+router.patch(
+  '/venues/:venueId/loyalty/promotions/:id',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  validateRequest(UpdateLoyaltyPromotionSchema),
+  loyaltyPromotionController.updateLoyaltyPromotion,
+)
+router.post(
+  '/venues/:venueId/loyalty/promotions/:id/end',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  validateRequest(LoyaltyPromotionParamsSchema),
+  loyaltyPromotionController.endLoyaltyPromotion,
 )
 
 /**
