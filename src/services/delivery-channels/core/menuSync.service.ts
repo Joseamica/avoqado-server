@@ -114,6 +114,10 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
   const conRevision = adapter.menuConRevision === true
 
   try {
+    // 🔴 Codex r2: la copia que trae la pasada puede ser vieja (el dueño guardó su lista, precios u horario después). Se relee
+    // la configuración vigente justo antes de armar el menú. Con revisión (Rappi), la reserva bajo candado lo vuelve a
+    // comprobar; sin revisión (Uber), lo que quede de ventana se corrige solo en la siguiente pasada (la huella cambia).
+    link = await conConfigVigente(link)
     // 1. 🔴 Con un menú en revisión no se publica NADA encima, ni con `force`: el veredicto que llegue sería del menú
     // anterior y sellaría el nuevo (o lo tiraría). Es la salida barata: ni snapshot ni red.
     const enRevision = leerMenuEnRevision(link.config)
@@ -553,6 +557,15 @@ export function revisionDeMenuOf(config: unknown): RevisionDeMenu {
   }
 }
 
+/**
+ * El canal con su `config` VIGENTE (Codex r2): la pasada del job lo leyó antes y el dueño pudo cambiar su lista de
+ * productos, precios u horario. Sin fila (se borró a media pasada) sigue con la copia: lo de abajo no encuentra a quién escribir.
+ */
+async function conConfigVigente(link: DeliveryChannelLink): Promise<DeliveryChannelLink> {
+  const fila = await prisma.deliveryChannelLink.findUnique({ where: { id: link.id }, select: { config: true } })
+  return fila ? { ...link, config: fila.config } : link
+}
+
 /** Los canales que deben mantenerse sincronizados: activos y con el auto-sync prendido. */
 export function syncableLinksWhere() {
   return {
@@ -598,6 +611,8 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   if (typeof adapter.setItemSoldOut !== 'function') return { agotados: 0, revividos: 0 }
 
   if (!(await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING'))) return { agotados: 0, revividos: 0 }
+  // Codex r2: la lista de productos (y lo ya agotado) se leen de la configuración VIGENTE, no de la copia de la pasada.
+  link = await conConfigVigente(link)
 
   // (a) Productos con inventario PROPIO que se acabaron.
   const sinStock = await prisma.product.findMany({
