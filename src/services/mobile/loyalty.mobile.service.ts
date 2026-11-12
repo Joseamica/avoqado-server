@@ -188,7 +188,9 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
     balanceValue,
     maxRedeemablePoints,
     maxRedeemableValue,
-    canRedeem: config.active && balance >= config.minPointsRedeem && maxRedeemablePoints >= config.minPointsRedeem,
+    // Codex r5: con mínimo 0, «0 puntos» no es un canje (el canje exige un entero positivo).
+    canRedeem:
+      config.active && balance >= config.minPointsRedeem && maxRedeemablePoints >= config.minPointsRedeem && maxRedeemablePoints > 0,
   }
 }
 

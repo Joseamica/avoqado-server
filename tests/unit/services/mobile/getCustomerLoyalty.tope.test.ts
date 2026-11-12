@@ -91,6 +91,17 @@ describe('getCustomerLoyalty — tope igual al canje (D18)', () => {
     }
   })
 
+  it('con mínimo 0, una cuenta sin nada que descontar no prende el botón (Codex r5)', async () => {
+    preparar({
+      saldo: 500,
+      orden: { total: 100, subtotal: 100, discountAmount: 0, paymentStatus: 'PARTIAL' } as any,
+      cfg: { minPointsRedeem: 0 },
+    })
+    expect((await getCustomerLoyalty('v1', 'c1', 'o1')).canRedeem).toBe(false)
+    preparar({ saldo: 500, orden: { total: 100, subtotal: 100, discountAmount: 0 }, cfg: { minPointsRedeem: 0 } })
+    expect((await getCustomerLoyalty('v1', 'c1', 'o1')).canRedeem).toBe(true)
+  })
+
   // ── Regresión: lo que ya hacía ──
   it('sin orden, el tope es el saldo', async () => {
     preparar({ saldo: 250 })
@@ -256,5 +267,64 @@ describe('previaDelCanjeEnCuenta — las negativas del canje también en la prev
       ok: false,
       error: 'No se puede modificar una orden ya pagada',
     })
+  })
+})
+
+/**
+ * Pasada exhaustiva de la familia «cuándo se prende Recompensas» (Codex r4 y r5 fueron de ella): para cada combinación de programa,
+ * estado de la cuenta, pago, mínimo, saldo y base, el botón (`canRedeem`) se prende SI Y SÓLO SI la previa del canje (las mismas
+ * negativas y la misma regla del canje) acepta algún número de puntos sin recortarlos; y si se prende, acepta exactamente el máximo.
+ */
+describe('canRedeem ⇔ el canje acepta algún número de puntos sin recortarlos (pasada exhaustiva)', () => {
+  it('todas las combinaciones', async () => {
+    let casos = 0
+    for (const active of [true, false]) {
+      for (const status of ['PENDING', 'CANCELLED', 'DELETED']) {
+        for (const paymentStatus of ['PENDING', 'PARTIAL', 'PAID']) {
+          for (const minPointsRedeem of [0, 1, 5, 20]) {
+            for (const saldo of [0, 1, 4, 5, 19, 20, 60]) {
+              for (const [subtotal, discountAmount] of [
+                [0, 0],
+                [10, 10],
+                [10, 0],
+                [0.04, 0],
+                [100, 30],
+              ]) {
+                for (const redemptionRate of [1, 0.0201, 0.25]) {
+                  jest.clearAllMocks()
+                  const orden = { total: subtotal - discountAmount, subtotal, discountAmount, status, paymentStatus }
+                  preparar({ saldo, orden: orden as any, cfg: { active, minPointsRedeem, redemptionRate } })
+                  const vista = await getCustomerLoyalty('v1', 'c1', 'o1')
+                  const aceptados: number[] = []
+                  for (let p = 1; p <= saldo; p++) {
+                    // Sin recortar: el canje quema esos puntos y descuenta su valor completo. La caja nunca ofrece quemar un punto
+                    // entero por menos de lo que vale (cuenta de $0.04 a $1 por punto): así era antes y así sigue.
+                    const r = await previaDelCanjeEnCuenta('v1', 'c1', 'o1', p)
+                    if (r.ok && r.puntos === p && r.monto === Math.round(p * redemptionRate * 100) / 100) aceptados.push(p)
+                  }
+                  casos++
+                  const etiqueta = JSON.stringify({
+                    active,
+                    status,
+                    paymentStatus,
+                    minPointsRedeem,
+                    saldo,
+                    subtotal,
+                    discountAmount,
+                    redemptionRate,
+                  })
+                  expect([etiqueta, vista.canRedeem]).toEqual([etiqueta, aceptados.length > 0])
+                  if (vista.canRedeem) {
+                    const conMax = await previaDelCanjeEnCuenta('v1', 'c1', 'o1', vista.maxRedeemablePoints)
+                    expect([etiqueta, conMax]).toEqual([etiqueta, expect.objectContaining({ ok: true, puntos: vista.maxRedeemablePoints })])
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(casos).toBe(2 * 3 * 3 * 4 * 7 * 5 * 3)
   })
 })
