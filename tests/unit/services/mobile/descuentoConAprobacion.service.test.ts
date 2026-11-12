@@ -193,7 +193,10 @@ describe('D4 · Mostrador: la venta nueva con un descuento que pide aprobación'
       }),
     )
     const filas = db.descuentos.filter(d => d.orderId === creada.id)
-    expect(filas).toEqual([expect.objectContaining({ name: 'Descuento de la cuenta', amount: 10, authorizedById: 'sv-gerente' })])
+    // Codex r2 #4: quien lo aplicó es la sesión (`sesion-1`), no la vendedora elegida (`staff-1`).
+    expect(filas).toEqual([
+      expect.objectContaining({ name: 'Descuento de la cuenta', amount: 10, appliedById: 'sv-sesion-1', authorizedById: 'sv-gerente' }),
+    ])
   })
 
   it('regresión: la etiqueta de un % sin aprobación no pide nada ni pone aprobador', async () => {

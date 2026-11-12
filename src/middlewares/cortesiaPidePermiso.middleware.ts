@@ -148,13 +148,25 @@ export const checkCortesiaEnDescuento = async (req: Request, res: Response, next
 function exigirCortesia(req: Request, res: Response, next: NextFunction) {
   const venueId = req.params.venueId
   const userId = req.authContext?.userId
-  const pinAntes = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-  return checkPermission('orders:comp')(req, res, error => {
-    if (error) return next(error)
-    // Sólo cuenta el PIN que consumió ESTE check (el token es de un solo uso: si cambió el autorizador, fue por `orders:comp`).
-    const pinDespues = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-    const porPin = pinDespues && pinDespues !== pinAntes ? pinDespues : undefined
+  return exigirConPin(req, res, next, 'orders:comp', porPin => {
     if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
+  })
+}
+
+/**
+ * `checkPermission(permiso)` y, si pasa, `alPasar` con el gerente cuyo PIN gastó ESTE check (`undefined` = el permiso es propio).
+ * D4 (Codex r2 #3): antes se comparaba `overrideAuthorizedBy` con el de antes; si el MISMO gerente autorizaba cortesía y descuento,
+ * el segundo check no veía su PIN. Ahora se vacía antes del check y, si éste no gastó ninguno, se deja el de antes.
+ */
+function exigirConPin(req: Request, res: Response, next: NextFunction, permiso: string, alPasar: (porPin: string | undefined) => void) {
+  const auth = (req as any).authContext as { overrideAuthorizedBy?: string } | undefined
+  const pinAntes = auth?.overrideAuthorizedBy
+  if (auth) auth.overrideAuthorizedBy = undefined
+  return checkPermission(permiso)(req, res, error => {
+    const porPin = auth?.overrideAuthorizedBy
+    if (auth && !porPin) auth.overrideAuthorizedBy = pinAntes
+    if (error) return next(error)
+    alPasar(porPin)
     next()
   })
 }
@@ -260,14 +272,9 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
       return next()
     }
     const userId = req.authContext?.userId
-    const pinAntes = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-    return checkPermission(PERMISO_QUE_APRUEBA_DESCUENTOS)(req, res, error => {
-      if (error) return next(error)
-      // Sólo cuenta el PIN que consumió ESTE check (el token es de un solo uso y de un solo permiso).
-      const pinDespues = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-      const porPin = pinDespues && pinDespues !== pinAntes ? pinDespues : undefined
+    // Sólo cuenta el PIN que gastó ESTE check (el token es de un solo uso y de un solo permiso).
+    return exigirConPin(req, res, next, PERMISO_QUE_APRUEBA_DESCUENTOS, porPin => {
       if (userId) aprobacionesDelRequest.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
-      next()
     })
   } catch (error) {
     return next(error)

@@ -930,21 +930,19 @@ function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo
 const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
 
 /** D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación». Una COMP la cubre `orders:comp` (D1). */
-const pideAprobacionDeGerente = (d: { requiresApproval?: boolean | null; type: string } | null | undefined): boolean =>
+export const pideAprobacionDeGerente = (d: { requiresApproval?: unknown; type?: unknown } | null | undefined): boolean =>
   d?.requiresApproval === true && d.type !== 'COMP'
 
 /** D4: el 403 del servicio cuando falta la acreditación de la ruta (el de la ruta, con PIN, sale antes de llegar aquí). */
 const sinAprobacionDelDescuento = () =>
   new ForbiddenError('Este descuento necesita la aprobación de un gerente (permiso «Aplicar descuentos en TPV»).', 'PERMISSION_DENIED')
 
-/** D4: quién aprobó: el gerente del PIN o, sin PIN, la membresía activa de la sesión que tiene el permiso. */
-async function aprobadorDelDescuento(
+/** D4: la membresía activa de la sesión (quien aplica y, sin PIN, quien aprueba con su propio permiso). */
+export async function membresiaDeLaSesion(
   tx: Prisma.TransactionClient,
   venueId: string,
-  aprobacion: { porPin?: string },
   sesion: string | undefined,
 ): Promise<string | null> {
-  if (aprobacion.porPin) return aprobacion.porPin
   if (!sesion) return null
   return (await tx.staffVenue.findFirst({ where: { venueId, staffId: sesion, active: true }, select: { id: true } }))?.id ?? null
 }
@@ -1821,13 +1819,17 @@ export async function crearVentaDeMostradorEnTx(
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
   if (cuentaPideAprobacion && !input.aprobacionDelDescuento) throw sinAprobacionDelDescuento()
-  const aprobador =
+  // D4: quien lo aplicó es la SESIÓN (no el vendedor elegido, Codex r2 #4); quien lo aprobó, el gerente del PIN o la sesión.
+  const sesionQueAplica =
     input.aprobacionDelDescuento && (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente))
-      ? await aprobadorDelDescuento(tx, venueId, input.aprobacionDelDescuento, input.performedBy)
+      ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
       : null
-  /** D4: la fila de un descuento que pidió aprobación lleva a su aprobador, si no trae ya otro (el del regalo de D2, el del cliente). */
-  const conAprobador = <T extends { authorizedById?: string | null }>(fila: T, pide: boolean): T =>
-    pide && aprobador && !fila.authorizedById ? { ...fila, authorizedById: aprobador } : fila
+  const aprobador = input.aprobacionDelDescuento?.porPin ?? sesionQueAplica
+  /** D4: la fila de un descuento que pidió aprobación lleva a la sesión y a su aprobador (si no trae ya otro: el del regalo de D2). */
+  const conAprobador = <T extends { appliedById?: string | null; authorizedById?: string | null }>(fila: T, pide: boolean): T =>
+    pide && aprobador
+      ? { ...fila, appliedById: sesionQueAplica ?? fila.appliedById, authorizedById: fila.authorizedById || aprobador }
+      : fila
 
   // Order-level discount composes additively with the per-item reductions above (cortesías
   // included) — same shape as TPV's `discountAmount = itemDiscountPesos + orderDiscountPesos`
@@ -1965,7 +1967,7 @@ export async function crearVentaDeMostradorEnTx(
           discountAmountPesos: Number(item.discountAmount) - (ajusteDelRenglon.get(item.id) ?? 0),
           appliedById: appliedByStaffVenue?.id || null,
         }),
-        pideAprobacionDeGerente(discount as any),
+        pideAprobacionDeGerente(discount),
       ),
     })
   }

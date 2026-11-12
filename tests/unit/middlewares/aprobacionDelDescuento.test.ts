@@ -86,6 +86,23 @@ describe('D4: % o fijo con «Requiere aprobación» pide tpv-orders:discount', (
     expect(aprobacionDelDescuento(req)).toEqual({})
   })
 
+  it('Codex r2 #3: el MISMO gerente que ya autorizó otra cosa del request (cortesía) también queda como aprobador', async () => {
+    findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+    mockPinConsumido = 'sv-gerente'
+    const req = request({ discountId: 'disc-gerente' })
+    ;(req as any).authContext.overrideAuthorizedBy = 'sv-gerente'
+    await run(req)
+    expect(aprobacionDelDescuento(req)).toEqual({ porPin: 'sv-gerente' })
+  })
+
+  it('sin PIN propio, el autorizador de antes se conserva para quien lo lea después', async () => {
+    findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+    const req = request({ discountId: 'disc-gerente' })
+    ;(req as any).authContext.overrideAuthorizedBy = 'sv-gerente-de-cortesias'
+    await run(req)
+    expect((req as any).authContext.overrideAuthorizedBy).toBe('sv-gerente-de-cortesias')
+  })
+
   it('sin el permiso: 403 de checkPermission, no sigue ni acredita', async () => {
     findDiscount.mockResolvedValue({ id: 'disc-gerente' })
     mockPermissionResult = 'denied'
