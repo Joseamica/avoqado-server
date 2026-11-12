@@ -12,6 +12,7 @@ import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/ser
 import { clientaDeLaSesion } from '@/services/online-ordering/clientaDeLaSesion'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
+import { cuentaConBeneficios } from '@/services/online-ordering/cuentaConBeneficios'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cotizarConBeneficios, type EleccionDeBeneficios } from '@/services/online-ordering/beneficios.service'
@@ -48,7 +49,7 @@ function fail(res: Response, error: any, fallback: string) {
 export async function getInfo(req: Request, res: Response) {
   try {
     const venue = venueOf(req)
-    const [state, row] = await Promise.all([
+    const [state, row, conCuenta] = await Promise.all([
       getAcceptingStatus(venue.id),
       prisma.venue.findUnique({
         where: { id: venue.id },
@@ -67,6 +68,11 @@ export async function getInfo(req: Request, res: Response) {
           zipCode: true,
           phone: true,
         },
+      }),
+      // D16: si falla, la tienda no se cae: sale sin el campo y enseña «Entrar» como antes.
+      cuentaConBeneficios(venue.id).catch((error: any) => {
+        logger.warn('[OnlineOrdering] /info sin cuentaConBeneficios: no se pudo calcular', { venueId: venue.id, error: error?.message })
+        return undefined
       }),
     ])
     // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
@@ -112,6 +118,8 @@ export async function getInfo(req: Request, res: Response) {
         // (`GET /api/v1/public/venues/:venueId/privacy-notice`); la tienda le antepone su base.
         contact: buildVenueContact(row ?? {}),
         privacyNoticePath: `/venues/${venue.id}/privacy-notice`,
+        // D16 (aditivo): `false` = ninguna clienta tiene nada de cuenta aquí ⇒ la tienda no invita a «Entrar»; sin el campo, como antes.
+        ...(conCuenta === undefined ? {} : { cuentaConBeneficios: conCuenta }),
       },
     })
   } catch (error) {
