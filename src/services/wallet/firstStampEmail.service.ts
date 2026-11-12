@@ -57,14 +57,19 @@ export async function sendFirstStampEmailIfDue(venueId: string, customerId: stri
       where: { id: stampCardId },
       select: { stampsEarned: true, stampsRequired: true },
     })
-    // Solo el primer sello. En el segundo ya tiene la tarjeta (o decidio no bajarla).
-    if (!card || card.stampsEarned !== 1) return
+    if (!card) return
 
-    // 🔴 Y solo si es su PRIMERA cartilla. La segunda tambien arranca en 1 de 7: sin
-    // este conteo, el cliente mas fiel del negocio recibiria el mismo correo cada vez
-    // que completa una cartilla.
-    const cartillas = await prisma.stampCard.count({ where: { venueId, customerId } })
-    if (cartillas > 1) return
+    // 🔴 "Primer sello" = la clienta tiene UNA sola venta sellada en el negocio (no "la tarjeta
+    // tiene 1 sello": una venta con promo puede dar 2 de golpe). Eso tambien deja fuera a la
+    // segunda cartilla: para abrirla hacen falta mas ventas. Se cuenta por orderId distinto
+    // para que valga aunque una venta se parta en varias filas EARN.
+    const ventas = await prisma.stampEvent.findMany({
+      where: { venueId, type: 'EARN', stampCard: { customerId } },
+      distinct: ['orderId'],
+      select: { orderId: true },
+      take: 2,
+    })
+    if (ventas.length !== 1) return
 
     const customer = await prisma.customer.findFirst({
       where: { id: customerId, venueId },
