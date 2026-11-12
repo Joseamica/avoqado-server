@@ -637,6 +637,32 @@ describe('deliveryChannelLink.service', () => {
       expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
     })
 
+    it('🔴 Codex r1 #3: guardar horario y margen desde el DASHBOARD (`precios` sin `overrides`) NO borra los precios por SKU', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        { config: { productos: ['LATTE'], precios: { markupPercent: 10, overrides: { LATTE: 60 } } } },
+      ])
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      // Lo que manda ChannelSettingsDialog: con margen en blanco, `precios: {}`; con margen, `{ markupPercent }`.
+      await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK, precios: {} } })
+      await updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 25 } } })
+      // Quitar los precios por SKU sigue siendo posible, mandándolos explícitos.
+      await updateChannelLink('venue1', 'link1', { config: { precios: { overrides: {} } } })
+
+      const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config.precios)
+      expect(escritos[0]).toEqual({ overrides: { LATTE: 60 } })
+      expect(escritos[1]).toEqual({ markupPercent: 25, overrides: { LATTE: 60 } })
+      expect(escritos[2]).toEqual({ overrides: {} })
+    })
+
+    it('🔴 Codex r1 #4: crear un canal valida su `config` igual que editarlo (lista de productos incluida)', async () => {
+      await expect(
+        createChannelLink('venue1', { provider: 'UBER_EATS', externalLocationId: 'store-x', config: { productos: [] } } as any),
+      ).rejects.toThrow(ValidationError)
+      expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
+    })
+
     it('acepta una lista de productos del canal y `null` (= vuelve a todo el catálogo)', async () => {
       ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })

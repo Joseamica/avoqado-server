@@ -259,6 +259,21 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     expect(mockedUpdate.mock.calls.some(([a]: any[]) => 'lastMenuHash' in a.data)).toBe(false)
   })
 
+  it('🔴 Codex r1 #2: si el dueño cambió su lista de productos (o precios u horario) después de que la pasada leyó el canal, NO se manda la copia vieja', async () => {
+    // La pasada leyó el canal SIN lista; mientras armaba el menú, el dueño guardó ["LATTE"]. Con revisión, mandar la copia
+    // vieja dejaba en revisión el catálogo equivocado y las pasadas siguientes daban IN_REVIEW sin poder corregirlo.
+    const publicar = jest.fn(async () => ok200())
+    conRevision(publicar)
+    const vieja = copia()
+    fila.config = { productos: ['LATTE'] }
+
+    const r = await syncChannelMenu(vieja)
+
+    expect(r.outcome).toBe('UNCHANGED') // la siguiente pasada lee la lista nueva
+    expect(publicar).not.toHaveBeenCalled()
+    expect(fila.config.menuEnRevision).toBeUndefined()
+  })
+
   it('🔴 el veredicto que llega mientras el POST sigue en vuelo encuentra la pendiente y no se pierde', async () => {
     // Codex plan r1 #3: con la pendiente escrita DESPUÉS del 2xx, un veredicto rápido no encontraba qué sellar.
     const publicar = jest.fn(async () => {
@@ -978,6 +993,17 @@ describe('productos del canal (`config.productos`): sólo esa lista viaja al pro
     await syncChannelMenu(link({ config: { precios: { markupPercent: 30 } } }))
 
     expect(a.publishMenu).toHaveBeenCalledWith(MENU, 'store1', expect.anything())
+  })
+
+  it('🔴 Codex r1 #1: una lista válida que no deja NINGÚN producto (SKU inexistentes o archivados) no publica un menú vacío', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link({ config: { productos: ['LATTE ', 'VASO-INFUSOR'] } }))
+
+    expect(r.outcome).toBe('FAILED')
+    expect(a.publishMenu).not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalled()
   })
 
   it('🔴 una lista mal escrita NO publica nada (un menú vacío borraría el de Uber): FAILED y a la vista', async () => {

@@ -148,6 +148,8 @@ export async function createChannelLink(
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
   exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
+  // Codex r1 #4: crear valida `config` igual que editar (horario, precios, lista de productos).
+  if (data.config != null) validarConfig(data.config as Prisma.InputJsonValue)
 
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
@@ -273,8 +275,8 @@ function validarPrecios(v: unknown): void {
  * único que evita perder dinero en cada pedido, porque Uber se queda ~30%. No falla, no
  * avisa: simplemente el comercio deja de cobrar de más y no entiende por qué.
  *
- * Es un merge SUPERFICIAL a propósito: mandar `precios` reemplaza el bloque `precios`
- * completo (quitar un override es mandar el objeto sin él), pero nunca toca `deliveryHours`.
+ * Es un merge SUPERFICIAL a propósito: mandar `precios` reemplaza el bloque `precios`, salvo `precios.overrides`, que
+ * se conserva si no viene (Codex r1 #3; quitar uno es mandar `overrides` sin él). Nunca toca `deliveryHours`.
  * Un merge profundo haría imposible borrar una llave.
  *
  * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
@@ -299,6 +301,19 @@ function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null):
   const pedido = Object.fromEntries(
     Object.entries(entrante as Record<string, unknown>).filter(([llave]) => !(LLAVES_DEL_SISTEMA as readonly string[]).includes(llave)),
   )
+  // 🔴 Codex r1 #3: el DASHBOARD guarda el margen como `precios: {}` o `{ markupPercent }` y no conoce los precios por SKU.
+  // Un `precios` SIN la llave `overrides` conserva los que había; quitarlos es mandar `overrides` explícito (`{}` = ninguno).
+  const preciosBase = base.precios as { overrides?: unknown } | undefined
+  const preciosPedido = pedido.precios
+  if (
+    preciosPedido &&
+    typeof preciosPedido === 'object' &&
+    !Array.isArray(preciosPedido) &&
+    !('overrides' in preciosPedido) &&
+    preciosBase?.overrides !== undefined
+  ) {
+    pedido.precios = { ...preciosPedido, overrides: preciosBase.overrides }
+  }
   return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue
 }
 

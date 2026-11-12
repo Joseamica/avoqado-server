@@ -43,7 +43,7 @@ import {
   type MenuEnRevision,
 } from './llavesDelSistema'
 import { buildMenuSnapshot } from './menuSnapshot.service'
-import { filtrarMenuDelCanal, productosDelCanal } from './productosDelCanal'
+import { filtrarMenuDelCanal, productosDelCanal, seleccionDelCanal } from './productosDelCanal'
 import { DeliveryWriteNotSentError, type ProblemaDeMenu, type PublicacionDeMenu } from './types'
 
 /**
@@ -121,7 +121,13 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
 
     // Sólo los productos de ESTE canal (`config.productos`; sin lista, todo el catálogo). Va antes de la huella: cambiar la
     // lista republica. Una lista mal escrita truena aquí y cae al catch (FAILED, sin publicar nada).
-    const snapshot = filtrarMenuDelCanal(await buildMenuSnapshot(link.venueId), productosDelCanal(link.config))
+    const delCanal = productosDelCanal(link.config)
+    const snapshot = filtrarMenuDelCanal(await buildMenuSnapshot(link.venueId), delCanal)
+    // 🔴 Codex r1 #1: una lista válida puede no dejar NINGÚN producto (SKU que ya no existen o se archivaron). Un menú vacío
+    // BORRA el de Uber (reemplaza el menú entero): no se publica, y queda a la vista como FAILED.
+    if (delCanal && snapshot.categories.length === 0) {
+      throw new Error('Ningún producto de la lista del canal (config.productos) está activo en el catálogo: no se publica un menú vacío')
+    }
 
     // 🔴 El horario va SIEMPRE, y entra en la huella: si el dueño cambia sus horas, el menú
     // se republica solo. Antes se publicaba 24/7 en silencio y nadie se enteraba de que su
@@ -148,7 +154,7 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
     // 4. Con revisión, la pendiente se reserva ANTES del POST, decidiendo con la fila bloqueada (la copia puede ser vieja).
     let reserva: Reserva | null = null
     if (conRevision) {
-      const reservada = await reservarRevision(link.id, actual, opts.force === true)
+      const reservada = await reservarRevision(link.id, actual, opts.force === true, seleccionDelCanal(link.config))
       if (!('huella' in reservada)) return { outcome: reservada.outcome, linkId: link.id }
       reserva = reservada
     }
@@ -289,10 +295,15 @@ async function reservarRevision(
   linkId: string,
   huella: string,
   force: boolean,
+  seleccion: string,
 ): Promise<Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' }> {
   let resultado: Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' } = { outcome: 'FAILED' }
   await escribirLlavesDelSistema(linkId, fila => {
     if (leerMenuEnRevision(fila.config)) resultado = { outcome: 'IN_REVIEW' }
+    // 🔴 Codex r1 #2: el dueño cambió su lista, precios u horario después de que esta pasada leyó el canal. Mandar la copia
+    // vieja dejaría EN REVISIÓN el menú equivocado (y nada se publica encima hasta el veredicto). Se salta: la siguiente
+    // pasada lee lo nuevo.
+    else if (seleccionDelCanal(fila.config) !== seleccion) resultado = { outcome: 'UNCHANGED' }
     else if (!force && fila.lastMenuHash === huella) resultado = { outcome: 'UNCHANGED' }
     else if (!force && leerMenuRechazado(fila.config)?.huella === huella) resultado = { outcome: 'REJECTED_UNCHANGED' }
     else {
