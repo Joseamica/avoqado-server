@@ -1,9 +1,11 @@
 /**
  * D2 · B (coordinador, 12-nov): en la venta sin red, el SERVIDOR registra lo que la terminal YA cobró. La TPV 2.14.0–2.16.1 (builds
- * 123–126) trunca el % de catálogo (`RoundingMode.DOWN`) y no conoce el tope; desde 2.16.2 (build 127) redondea mitad hacia arriba con
+ * 123–126) trunca el % de catálogo (`RoundingMode.DOWN`) y no conoce el tope (aquí sí se respeta: Codex r3); desde 2.16.2 (build 127) redondea mitad hacia arriba con
  * tope, como el SERVIDOR. Producción el 12-nov: 24 TPV 2.16.0 vistas hoy, ninguna ≥ 2.16.2.
  */
+import { Prisma } from '@prisma/client'
 import { descuentoComoLoCobroLaTpvVieja, esTpvQueTruncaElDescuento } from '@/services/shared/descuentoDeTpvVieja'
+import { calculateDiscountPesos } from '@/services/shared/discount.service'
 
 describe('esTpvQueTruncaElDescuento — por el número de compilación de la TPV', () => {
   it.each([
@@ -36,8 +38,18 @@ describe('descuentoComoLoCobroLaTpvVieja — la cuenta de la TPV ≤ 2.16.1', ()
   it('10 % de $21.37: $2.13 (el SERVIDOR exacto daría $2.14)', () => {
     expect(descuentoComoLoCobroLaTpvVieja(diez, 21.37)).toBe(2.13)
   })
-  it('no conoce el tope del catálogo: 10 % con tope de $1 sobre $21.35 sigue en $2.13', () => {
-    expect(descuentoComoLoCobroLaTpvVieja({ ...diez, maxDiscountAmount: 1 }, 21.35)).toBe(2.13)
+  it('🔴 Codex r2 #1 y r3 #1: el tope del catálogo SÍ se respeta (10 % con tope de $1 sobre $21.35 ⇒ $1.00), como en la regla exacta', () => {
+    expect(descuentoComoLoCobroLaTpvVieja({ ...diez, maxDiscountAmount: 1 }, 21.35)).toBe(1)
+  })
+  it('🔴 nunca descuenta más que la regla exacta (`calculateDiscountPesos`): con o sin tope, % entero o con decimales', () => {
+    for (const value of [1, 5, 9.2, 10, 12.5, 15, 33.33, 50, 100]) {
+      for (const maxDiscountAmount of [null, 0, 1, 2.5, new Prisma.Decimal(0), new Prisma.Decimal('3.75')]) {
+        for (let c = 1; c <= 3000; c += 7) {
+          const d = { name: 'x', type: 'PERCENTAGE', value, maxDiscountAmount, minPurchaseAmount: null }
+          expect(descuentoComoLoCobroLaTpvVieja(d, c / 100)!).toBeLessThanOrEqual(calculateDiscountPesos(d, c / 100))
+        }
+      }
+    }
   })
   it('nunca más que la base', () => {
     expect(descuentoComoLoCobroLaTpvVieja({ ...diez, value: 150 }, 21.35)).toBe(21.35)

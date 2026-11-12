@@ -382,7 +382,7 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
     expect(Number(orden.total)).toBeCloseTo(19.22, 2) // el doble en memoria no redondea como la columna Decimal(10,2)
   })
 
-  it('🔴 TPV 2.16.0 con tope de $1 en el catálogo: $2.13, porque esa versión no lo conocía y ya lo cobró así', async () => {
+  it('🔴 Codex r3: TPV 2.16.0 con tope de $1 en el catálogo: $1.00 (el tope se respeta; esta excepción nunca descuenta más que la exacta)', async () => {
     const db = baseEnMemoria()
     prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
       where.id === DESCUENTO_10
@@ -399,7 +399,7 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
         : null,
     )
     const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
-    expect(db.orden(creada.id).discountAmount).toBe(2.13)
+    expect(db.orden(creada.id).discountAmount).toBe(1)
   })
 
   it('TPV 2.16.2 en adelante (sin la marca): $2.14 exacto, cierra con $19.21', async () => {
