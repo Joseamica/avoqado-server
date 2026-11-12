@@ -21,8 +21,10 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
+const mockValidar = jest.fn()
 jest.mock('@/services/loyalty/promotions/loyaltyPromotion.service', () => ({
   ...jest.requireActual('@/services/loyalty/promotions/loyaltyPromotion.service'),
+  validarNuevaPromocion: (...a: unknown[]) => mockValidar(...(a as [])),
   listLoyaltyPromotions: (...a: unknown[]) => mockList(...(a as [])),
   createLoyaltyPromotion: (...a: unknown[]) => mockCreate(...(a as [])),
   endLoyaltyPromotion: (...a: unknown[]) => mockEnd(...(a as [])),
@@ -46,6 +48,22 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockCfg.mockResolvedValue({ active: true, stampsEnabled: true })
+  // Por default el servicio acepta y devuelve los valores ya validados (con sus defaults).
+  mockValidar.mockImplementation(async (_v: string, i: Record<string, unknown>) => ({
+    v: {
+      daysOfWeek: [],
+      timeFrom: null,
+      timeUntil: null,
+      productIds: [],
+      categoryIds: [],
+      minSpend: null,
+      limit: 'NONE',
+      extraStamps: null,
+      extraPoints: null,
+      multiplier: null,
+      ...i,
+    },
+  }))
 })
 
 const nueva = { venueId: 'v1', name: 'Doble', kind: 'MULTIPLY', multiplier: 2, startDate: '2026-11-13', endDate: '2026-11-17' }
@@ -65,6 +83,20 @@ describe('create_loyalty_promotion', () => {
     expect(out.preview).toBe('Del 13 al 17 de nov., cada visita da 2 sellos en vez de 1')
   })
 
+  it.each([
+    'El multiplicador va de 2 a 10',
+    'Indica cuántos sellos o puntos extra da la promoción',
+    'Elige productos o categorías, no los dos',
+    'La promoción no puede empezar antes de hoy',
+    'Ya hay 10 promociones de lealtad activas o programadas: termina una para crear otra',
+  ])('la vista previa rechaza con el mensaje del servicio: %s', async msg => {
+    mockValidar.mockRejectedValueOnce(new Error(msg))
+    const out = parse(await call('create_loyalty_promotion', nueva))
+    expect(out).toEqual({ ok: false, error: msg })
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
   it('con confirm escribe y audita', async () => {
     mockCreate.mockResolvedValue({ id: 'p1', name: 'Doble', status: 'SCHEDULED' })
     const out = parse(await call('create_loyalty_promotion', { ...nueva, confirm: true }))
@@ -72,7 +104,7 @@ describe('create_loyalty_promotion', () => {
     expect(mockCreate).toHaveBeenCalledWith('v1', expect.objectContaining({ name: 'Doble', multiplier: 2 }), 's1')
     expect(mockAudit).toHaveBeenCalledWith(
       scope,
-      expect.objectContaining({ action: 'LOYALTY_PROMOTION_CREATED', entityId: 'p1', venueId: 'v1' }),
+      expect.objectContaining({ action: 'LOYALTY_PROMOTION_CREATED_VIA_MCP', entityId: 'p1', venueId: 'v1' }),
     )
   })
 
@@ -109,13 +141,21 @@ describe('end_loyalty_promotion', () => {
     expect(mockEnd).not.toHaveBeenCalled()
   })
 
+  it('con confirm sobre una ya terminada no audita', async () => {
+    mockPromo.mockResolvedValue({ ...vigente, endedAt: new Date('2021-01-01') })
+    mockEnd.mockResolvedValue({ id: 'p1', name: 'Doble', status: 'ENDED' })
+    const out = parse(await call('end_loyalty_promotion', { venueId: 'v1', promotionId: 'p1', confirm: true }))
+    expect(out.ok).toBe(true)
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('con confirm termina y audita', async () => {
     mockPromo.mockResolvedValue(vigente)
     mockEnd.mockResolvedValue({ id: 'p1', name: 'Doble', status: 'ENDED' })
     const out = parse(await call('end_loyalty_promotion', { venueId: 'v1', promotionId: 'p1', confirm: true }))
     expect(out.ok).toBe(true)
     expect(mockEnd).toHaveBeenCalledWith('v1', 'p1', 's1')
-    expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'LOYALTY_PROMOTION_ENDED', entityId: 'p1' }))
+    expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'LOYALTY_PROMOTION_ENDED_VIA_MCP', entityId: 'p1' }))
   })
 })
 

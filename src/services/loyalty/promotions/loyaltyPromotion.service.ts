@@ -316,17 +316,35 @@ export async function listLoyaltyPromotions(venueId: string, query: ListLoyaltyP
   return { items: await aVista(filas, venueId, tz, ahora), total, page, pageSize }
 }
 
-export async function createLoyaltyPromotion(
-  venueId: string,
-  input: NewLoyaltyPromotionInput,
-  staffId: string | null,
-): Promise<LoyaltyPromotionView> {
+const topeLleno = () =>
+  new ConflictError(`Ya hay ${MAX_PROMOS_VIVAS} promociones de lealtad activas o programadas: termina una para crear otra`)
+
+/**
+ * Las reglas de un alta, SIN escribir: zona del negocio, valores, fechas (regla 15), productos/categorías del negocio y el tope vivo
+ * (sin candado). `createLoyaltyPromotion` la usa y vuelve a contar el tope bajo el candado; el MCP la usa para la vista previa.
+ */
+export async function validarNuevaPromocion(venueId: string, input: NewLoyaltyPromotionInput, opts: { contarTope?: boolean } = {}) {
   const tz = await zonaDelNegocio(venueId)
   const ahora = new Date()
   const v = validar({ ...NUEVA, ...definidos(input) } as Valores)
   const startsAt = inicioDe(input.startDate, tz, ahora)
   const endsAt = finDe(input.endDate ?? null, input.startDate, tz)
   await delNegocio(prisma, venueId, v.productIds, v.categoryIds)
+  // El alta real no cuenta aquí: lo hace bajo el candado, que es la autoridad. La vista previa sí (`contarTope`, por default).
+  if (
+    opts.contarTope !== false &&
+    (await prisma.loyaltyPromotion.count({ where: { venueId, ...whereDeEstado('VIVA', ahora) } })) >= MAX_PROMOS_VIVAS
+  )
+    throw topeLleno()
+  return { tz, v, startsAt, endsAt }
+}
+
+export async function createLoyaltyPromotion(
+  venueId: string,
+  input: NewLoyaltyPromotionInput,
+  staffId: string | null,
+): Promise<LoyaltyPromotionView> {
+  const { tz, v, startsAt, endsAt } = await validarNuevaPromocion(venueId, input, { contarTope: false })
   const createdById = staffId
     ? ((await prisma.staffVenue.findUnique({ where: { staffId_venueId: { staffId, venueId } }, select: { id: true } }))?.id ?? null)
     : null
@@ -336,8 +354,7 @@ export async function createLoyaltyPromotion(
     // Regla 15 otra vez tras el candado: si otra alta lo tuvo, `startsAt` precalculado ya quedó en el pasado.
     const ahoraEnTx = new Date()
     const vivas = await tx.loyaltyPromotion.count({ where: { venueId, ...whereDeEstado('VIVA', ahoraEnTx) } })
-    if (vivas >= MAX_PROMOS_VIVAS)
-      throw new ConflictError(`Ya hay ${MAX_PROMOS_VIVAS} promociones de lealtad activas o programadas: termina una para crear otra`)
+    if (vivas >= MAX_PROMOS_VIVAS) throw topeLleno()
     return tx.loyaltyPromotion.create({
       data: { venueId, ...columnas(v), startsAt: startsAt > ahoraEnTx ? startsAt : ahoraEnTx, endsAt, createdById },
     })

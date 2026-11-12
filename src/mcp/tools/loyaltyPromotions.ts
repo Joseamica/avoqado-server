@@ -11,6 +11,7 @@ import {
   endLoyaltyPromotion,
   estadoDePromo,
   listLoyaltyPromotions,
+  validarNuevaPromocion,
   type NewLoyaltyPromotionInput,
 } from '@/services/loyalty/promotions/loyaltyPromotion.service'
 
@@ -31,12 +32,29 @@ function cuando(inicio: string, fin?: string | null) {
 }
 
 /** Vista previa como la del panel: sólo habla de lo que el negocio tiene prendido (sellos y/o puntos). */
-function vistaPrevia(i: NewLoyaltyPromotionInput, cfg: { active: boolean; stampsEnabled: boolean } | null) {
+function vistaPrevia(
+  i: {
+    kind: string
+    multiplier: number | null
+    extraStamps: number | null
+    extraPoints: number | null
+    daysOfWeek: number[]
+    timeFrom: string | null
+    timeUntil: string | null
+    productIds: string[]
+    categoryIds: string[]
+    minSpend: number | null
+    limit: string
+  },
+  startDate: string,
+  endDate: string | null,
+  cfg: { active: boolean; stampsEnabled: boolean } | null,
+) {
   const sellos = cfg?.stampsEnabled ?? false
   const puntos = cfg?.active ?? false
   const partes: string[] = []
   if (i.kind === 'MULTIPLY') {
-    const m = i.multiplier ?? 2
+    const m = i.multiplier as number
     if (sellos) partes.push(`${m} sellos en vez de 1`)
     if (puntos) partes.push(m === 2 ? 'el doble de puntos' : `${m} veces los puntos`)
   } else {
@@ -54,7 +72,7 @@ function vistaPrevia(i: NewLoyaltyPromotionInput, cfg: { active: boolean; stamps
   if (i.minSpend) extras.push(`con consumo mínimo de $${i.minSpend}`)
   if (i.limit === 'ONCE_PER_DAY') extras.push('una vez al día por cliente')
   if (i.limit === 'ONCE_PER_PROMOTION') extras.push('una vez por cliente en toda la promoción')
-  return `${cuando(i.startDate, i.endDate)}, ${que}${extras.length ? ` (${extras.join(', ')})` : ''}`
+  return `${cuando(startDate, endDate)}, ${que}${extras.length ? ` (${extras.join(', ')})` : ''}`
 }
 
 export function registerLoyaltyPromotionTools(server: McpServer, scope: McpScope) {
@@ -118,8 +136,14 @@ export function registerLoyaltyPromotionTools(server: McpServer, scope: McpScope
 
       if (!confirm) {
         // Lectura directa (nunca get-or-create): la vista previa no debe prender nada.
+        let validado
+        try {
+          validado = await validarNuevaPromocion(venueId, input) // las mismas reglas que el alta: no se promete lo que se rechazaría
+        } catch (err) {
+          return text({ ok: false, error: (err as Error).message })
+        }
         const cfg = await prisma.loyaltyConfig.findFirst({ where, select: { active: true, stampsEnabled: true } })
-        const preview = vistaPrevia(input, cfg)
+        const preview = vistaPrevia(validado.v, input.startDate, input.endDate ?? null, cfg)
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -131,7 +155,7 @@ export function registerLoyaltyPromotionTools(server: McpServer, scope: McpScope
       try {
         const p = await createLoyaltyPromotion(venueId, input, scope.staffId)
         await auditMcpWrite(scope, {
-          action: 'LOYALTY_PROMOTION_CREATED',
+          action: 'LOYALTY_PROMOTION_CREATED_VIA_MCP', // el servicio ya deja LOYALTY_PROMOTION_CREATED; esta fila sólo marca el origen
           entity: 'LoyaltyPromotion',
           entityId: p.id,
           venueId,
@@ -176,14 +200,20 @@ export function registerLoyaltyPromotionTools(server: McpServer, scope: McpScope
       }
 
       try {
-        const p = await endLoyaltyPromotion(venueId, promotionId, scope.staffId)
-        await auditMcpWrite(scope, {
-          action: 'LOYALTY_PROMOTION_ENDED',
-          entity: 'LoyaltyPromotion',
-          entityId: promotionId,
-          venueId,
-          data: { name: p.name },
+        const antes = await prisma.loyaltyPromotion.findFirst({
+          where: { ...where, id: promotionId },
+          select: { startsAt: true, endsAt: true, endedAt: true },
         })
+        const p = await endLoyaltyPromotion(venueId, promotionId, scope.staffId)
+        // Sólo si de verdad cambió algo; el servicio ya deja LOYALTY_PROMOTION_ENDED, esta fila sólo marca el origen.
+        if (antes && estadoDePromo(antes, new Date()) !== 'ENDED')
+          await auditMcpWrite(scope, {
+            action: 'LOYALTY_PROMOTION_ENDED_VIA_MCP',
+            entity: 'LoyaltyPromotion',
+            entityId: promotionId,
+            venueId,
+            data: { name: p.name },
+          })
         return text({ ok: true, promotion: p })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
