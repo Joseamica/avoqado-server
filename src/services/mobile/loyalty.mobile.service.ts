@@ -81,11 +81,24 @@ export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: numb
   // Codex r2/r3: el POS arranca en este número y pinta `puntos × tasa` con `%.2f`, que redondea el decimal escrito; el canje
   // redondea el binario. En un empate de medio centavo pueden diferir en 1 centavo hacia los dos lados (50 × 0.0201: pinta $1.01 y
   // descuenta $1.00; 250 × 0.0059: pinta $1.47 y descuenta $1.48). Se baja cuando la pantalla prometería MÁS de lo que se
-  // descuenta, también por debajo del mínimo (12-nov): entonces el botón se apaga, como antes del arreglo, en vez de pintar un
-  // centavo que no se descuenta. De menos en pantalla se deja: el cliente recibe el centavo. (La pantalla de ANDROID es la que debe
+  // descuenta, también por debajo del mínimo del negocio (12-nov): con la regla B (`minimoParaCanjear`) ese número honesto pasa a
+  // ser el mínimo de la cuenta, en vez de pintar un centavo que no se descuenta. De menos en pantalla se deja: el cliente recibe el centavo. (La pantalla de ANDROID es la que debe
   // redondear como el canje: tarjeta aparte en el pizarrón.)
   while (p > 0 && comoLoPintaElPos(p * valorPorPunto) > money(p * valorPorPunto)) p--
   return p
+}
+
+/**
+ * Regla «B · todo lo que queda» (founder, 12-nov, hz:ce654971:D18): el mínimo de puntos para canjear en ESTA cuenta. Si el saldo
+ * llega al mínimo del negocio pero la cuenta vale menos que ese mínimo, el mínimo es lo que la llena (los puntos que se ofrecen,
+ * `puntosQueCaben`): la clienta paga con puntos toda la cuenta, como ya pasaba cuando el canje recortaba, y la pantalla dice lo que
+ * se descuenta. El mínimo del negocio sólo evita canjes chiquitos cuando la cuenta da para más. Una sola regla para lo que ofrece la
+ * caja (`getCustomerLoyalty`), el canje y la vista previa del MCP.
+ */
+export function minimoParaCanjear(minNegocio: number, saldo: number, valorPorPunto: number, base: number): number {
+  if (saldo < minNegocio) return minNegocio
+  const llenan = puntosQueCaben(puntosQueSeCanjean(saldo, valorPorPunto, base).monto, valorPorPunto, saldo)
+  return llenan > 0 ? Math.min(minNegocio, llenan) : minNegocio
 }
 
 /** `String.format("%.2f", x)` de ANDROID (`RewardsDialog`): redondea a la mitad hacia arriba el decimal más corto que escribe `x`. */
@@ -178,6 +191,10 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   // Points that produce that value — never more than the customer owns, and never more than the canje would use: with these points
   // the canje is not capped, so it discounts `money(points × rate)` and burns exactly them.
   const maxRedeemablePoints = puntosQueCaben(maxRedeemableValue, redemptionRate, balance)
+  // Regla B: en una cuenta más chica que el mínimo, el mínimo es lo que la llena. Va en el MISMO campo `minPointsRedeem` (otro valor,
+  // no otro campo): las apps viejas muestran [mínimo, máximo] = [lo que llena, lo que llena] y mandan ese número, que el canje acepta.
+  const minimo =
+    redeemableBase === null ? config.minPointsRedeem : minimoParaCanjear(config.minPointsRedeem, balance, redemptionRate, redeemableBase)
 
   return {
     customerId: customer.id,
@@ -186,13 +203,12 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
     balance,
     pointsPerDollar: Number(config.pointsPerDollar),
     redemptionRate,
-    minPointsRedeem: config.minPointsRedeem,
+    minPointsRedeem: minimo,
     balanceValue,
     maxRedeemablePoints,
     maxRedeemableValue,
     // Codex r5: con mínimo 0, «0 puntos» no es un canje (el canje exige un entero positivo).
-    canRedeem:
-      config.active && balance >= config.minPointsRedeem && maxRedeemablePoints >= config.minPointsRedeem && maxRedeemablePoints > 0,
+    canRedeem: config.active && balance >= config.minPointsRedeem && maxRedeemablePoints >= minimo && maxRedeemablePoints > 0,
   }
 }
 
@@ -251,7 +267,12 @@ export async function redeemPointsToOrderInTransaction(
   const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
   if (!effectiveConfig.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
   if (points < effectiveConfig.minPointsRedeem) {
-    throw new BadRequestError(`Se requieren al menos ${effectiveConfig.minPointsRedeem} puntos para canjear`)
+    // Regla B (`minimoParaCanjear`): abajo del mínimo del negocio sólo pasa lo que llena una cuenta más chica que ese mínimo, con el
+    // saldo y la base leídos bajo el candado de la cuenta (lo mismo que la caja ofreció).
+    const saldo = (await tx.customer.findFirst({ where: { id: customerId, venueId }, select: { loyaltyPoints: true } }))?.loyaltyPoints ?? 0
+    const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
+    const minimo = minimoParaCanjear(effectiveConfig.minPointsRedeem, saldo, Number(effectiveConfig.redemptionRate), base)
+    if (points < minimo) throw new BadRequestError(`Se requieren al menos ${minimo} puntos para canjear`)
   }
 
   const customer = await tx.customer.findFirst({
