@@ -83,6 +83,14 @@ describe('getCustomerLoyalty — tope igual al canje (D18)', () => {
     expect(r.canRedeem).toBe(false)
   })
 
+  it('cuenta con abono, pagada o anulada: nada que ofrecer, el botón sale apagado (Codex r4)', async () => {
+    for (const o of [{ paymentStatus: 'PARTIAL' }, { paymentStatus: 'PAID' }, { status: 'CANCELLED' }, { status: 'DELETED' }]) {
+      preparar({ saldo: 500, orden: { total: 100, subtotal: 100, discountAmount: 0, ...o } as any })
+      const r = await getCustomerLoyalty('v1', 'c1', 'o1')
+      expect(r).toMatchObject({ maxRedeemablePoints: 0, maxRedeemableValue: 0, canRedeem: false, balance: 500, balanceValue: 500 })
+    }
+  })
+
   // ── Regresión: lo que ya hacía ──
   it('sin orden, el tope es el saldo', async () => {
     preparar({ saldo: 250 })

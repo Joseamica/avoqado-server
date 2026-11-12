@@ -159,9 +159,16 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   if (orderId) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, venueId },
-      select: { subtotal: true, discountAmount: true },
+      select: { subtotal: true, discountAmount: true, status: true, paymentStatus: true },
     })
-    redeemableBase = order ? Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0)) : null
+    // Codex r4: una cuenta con abono, pagada o anulada no admite canjes (el canje la rechaza): no hay nada que ofrecer en ella.
+    const admiteCanje =
+      order !== null &&
+      order.status !== 'CANCELLED' &&
+      order.status !== 'DELETED' &&
+      order.paymentStatus !== 'PAID' &&
+      order.paymentStatus !== 'PARTIAL'
+    redeemableBase = order ? (admiteCanje ? Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0)) : 0) : null
   }
 
   const balanceValue = money(balance * redemptionRate)
