@@ -402,6 +402,8 @@ const WRITERS: Record<string, Writer> = {
     callers: [
       'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
+      // W7 A1, B (founder, 12-nov): quitar en la TPV recalcula como el móvil y conserva antes el resto histórico (R7-1).
+      'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
       'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction',
       'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction',
       'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction',

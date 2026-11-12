@@ -22,7 +22,7 @@ import * as motor from '@/services/dashboard/discountEngine.service'
 import { applyAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 import * as pedidos from '@/services/online-ordering/order.service'
 import { crearCuentaDelPedidoEnTx, toQuoteSnapshot } from '@/services/online-ordering/order.service'
-import { quoteCart } from '@/services/online-ordering/quote.service'
+import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import {
   SIMULACION,
   aplicarBeneficiosEnTx,
@@ -30,7 +30,7 @@ import {
   topeGlobalDeSimulaciones,
   type EleccionDeBeneficios,
 } from '@/services/online-ordering/beneficios.service'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { payCashOrder, removeOrderDiscount } from '@/services/mobile/order.mobile.service'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { notifyCustomerPassUpdated } from '@/services/wallet/notifyPassUpdated.service'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
@@ -324,6 +324,8 @@ describe("S10 · la cotización = el modo estricto, con la regla vigente de la c
       ['PREMIO', '1.00'],
       ['PUNTOS', '18.22'],
     ])
+    // W7: la oferta ya no dice «5,000 puntos (−$50)»: dice los que el canje usa y quema abajo (1,822, −$18.22).
+    expect(q.oferta?.puntos).toMatchObject({ maxPuntos: 5000, usables: { puntos: 1822, monto: 18.22 } })
 
     const real = await estricto(cafe, e.clientaId, eleccion)
     expect(PESOS(real.total)).toBe('0.00')
@@ -451,6 +453,110 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     expect(ofrecido.oferta?.premio).toEqual({ id: e.premioId, etiqueta: 'Galleta gratis' })
     const elegido = await cotizarConBeneficios(venueId, carrito(combo), { customerId: e.clientaId, eleccion: { premioId: e.premioId } })
     expect(premioDe(elegido.aplicados!)).not.toHaveProperty('lineIndex')
+  })
+
+  /** W7 A1: la escena del folio W2UJM: hamburguesa $129 + americano $30, $15 del motor, cupón 10 % y café gratis. */
+  let carroA1: Array<{ productId: string; quantity: number }> | null = null
+  async function escenaW2UJM() {
+    const e = await cafeGratis()
+    await prisma.discount.update({ where: { id: e.automaticoId }, data: { value: 15 } })
+    if (!carroA1) {
+      const categoria = await prisma.menuCategory.findFirstOrThrow({ where: { venueId }, select: { id: true } })
+      const producto = async (name: string, price: number) =>
+        (
+          await prisma.product.create({
+            data: { venueId, categoryId: categoria.id, name, sku: `A1-${name}-${RUN}`, price, availableOnline: true },
+          })
+        ).id
+      carroA1 = [
+        { productId: await producto('Hamburguesa', 129), quantity: 1 },
+        { productId: await producto('Americano', 30), quantity: 1 },
+      ]
+    }
+    return { e, carro: carroA1, eleccion: { cupon: e.codigo, premioId: e.premioId } }
+  }
+
+  it('🔴 W7 A1: quitar después el premio libera lugar y el cupón vuelve a lo suyo ($128.10), igual en la TPV que en el móvil', async () => {
+    for (const quitar of [
+      (orderId: string, filaId: string) => motor.removeDiscountFromOrder(orderId, filaId, undefined, venueId),
+      (orderId: string, filaId: string) => removeOrderDiscount(venueId, orderId, filaId),
+    ]) {
+      const { e, carro, eleccion } = await escenaW2UJM()
+      const real = await estrictoCon(carro, e.clientaId, eleccion)
+      const premio = premioDe(real.aplicados)!
+      const { orderId } = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: premio.orderDiscountId } })
+      await quitar(orderId, premio.orderDiscountId)
+
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { discountAmount: true, total: true } })
+      const filas = await prisma.orderDiscount.findMany({ where: { orderId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      expect(filas.map(f => PESOS(f.amount))).toEqual(['15.00', '15.90'])
+      expect(PESOS(cuenta.discountAmount)).toBe('30.90')
+      expect(PESOS(cuenta.total)).toBe('128.10')
+      expect(await prisma.stampReward.findUnique({ where: { id: e.premioId }, select: { status: true } })).toEqual({ status: 'PENDING' })
+    }
+    // `logAction` es un jest.fn() global de la integración: sus llamadas de quitar no deben llegar al espía de «no deja rastro».
+    ;(bitacora.logAction as jest.Mock).mockClear()
+  })
+
+  it('🔴 W7 puntos usables: la cotización dice los puntos que el canje de verdad usa, en el mismo punto de la cadena', async () => {
+    // Sin premio: el motor deja $144 y el cupón $129.60; 20,000 puntos ($200) sólo usan lo que queda.
+    const { e, carro } = await escenaW2UJM()
+    await prisma.customer.update({ where: { id: e.clientaId }, data: { loyaltyPoints: 20000 } })
+    const q = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: { cupon: e.codigo } })
+    const usables = q.oferta!.puntos!.usables!
+    expect(q.oferta!.puntos!.maxPuntos).toBe(20000)
+    expect(usables.monto).toBe(129.6)
+    expect(usables.puntos).toBeLessThan(20000)
+    expect(toPublicQuote(q).oferta?.puntos?.usables).toEqual(usables)
+    // Eligiéndolos, la cotización aplica exactamente eso…
+    const conPuntos = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: { cupon: e.codigo, puntos: 20000 } })
+    expect(conPuntos.aplicados!.find(a => a.tipo === 'PUNTOS')!.monto.toNumber()).toBe(usables.monto)
+    expect(PESOS(conPuntos.totalConBeneficios!)).toBe('0.00')
+    // …y el canje real quema esos mismos puntos y descuenta lo mismo; los % no pasan de la cuenta.
+    const real = await estrictoCon(carro, e.clientaId, { cupon: e.codigo, puntos: 20000 })
+    expect(real.aplicados.find(a => a.tipo === 'PUNTOS')!.monto.toNumber()).toBe(usables.monto)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: e.clientaId } })).loyaltyPoints).toBe(20000 - usables.puntos)
+    const { orderId } = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: real.aplicados[0].orderDiscountId } })
+    expect(PESOS((await prisma.orderDiscount.aggregate({ where: { orderId }, _sum: { amount: true } }))._sum.amount!)).toBe('159.00')
+
+    // Con el premio, ya no queda nada: la oferta dice 0 y el canje los rechaza (descartados al cotizar, rechazo en estricto).
+    const otra = await escenaW2UJM()
+    await prisma.customer.update({ where: { id: otra.e.clientaId }, data: { loyaltyPoints: 300 } })
+    const sinLugar = await cotizarConBeneficios(venueId, otra.carro, { customerId: otra.e.clientaId, eleccion: otra.eleccion })
+    expect(sinLugar.oferta!.puntos!.usables).toEqual({ puntos: 0, monto: 0 })
+    const pidiendo = await cotizarConBeneficios(venueId, otra.carro, {
+      customerId: otra.e.clientaId,
+      eleccion: { ...otra.eleccion, puntos: 300 },
+    })
+    expect(pidiendo.descartados).toEqual(['PUNTOS'])
+    await expect(estrictoCon(otra.carro, otra.e.clientaId, { ...otra.eleccion, puntos: 300 })).rejects.toMatchObject({
+      code: 'BENEFIT_UNAVAILABLE',
+      details: { cual: 'PUNTOS' },
+    })
+  })
+
+  it('🔴 W7 A1 (folio W2UJM): $15 del motor + cupón 10 % + café gratis sobre $159 ⇒ 15 + 15.00 + 129 = $159 (hoy el cupón $15.90 y Σ $159.90), igual que el estricto', async () => {
+    const { e, carro, eleccion } = await escenaW2UJM()
+    // A mano: el motor deja $144; el cupón nace en 10 % de lo que queda ($14.40); P11 regala la hamburguesa entera ($129, cabe en
+    // $129.60). El recálculo del premio vuelve a derivar el cupón sobre la cuenta completa ($15.90): ahí sólo caben $15.00.
+    const q = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion })
+    expect(q.descartados).toEqual([])
+    expect(PESOS(q.totalConBeneficios!)).toBe('0.00')
+    expect(montos(q.aplicados!)).toEqual([
+      ['DESCUENTO', '15.00'],
+      ['CUPON', '15.00'],
+      ['PREMIO', '129.00'],
+    ])
+
+    const real = await estrictoCon(carro, e.clientaId, eleccion)
+    expect(PESOS(real.total)).toBe('0.00')
+    expect(montos(real.aplicados)).toEqual(montos(q.aplicados!))
+    const { orderId } = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: real.aplicados[0].orderDiscountId } })
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { subtotal: true, discountAmount: true } })
+    const filas = await prisma.orderDiscount.aggregate({ where: { orderId }, _sum: { amount: true } })
+    expect(PESOS(cuenta.subtotal)).toBe('159.00')
+    expect(PESOS(cuenta.discountAmount)).toBe('159.00')
+    expect(PESOS(filas._sum.amount!)).toBe('159.00')
   })
 })
 

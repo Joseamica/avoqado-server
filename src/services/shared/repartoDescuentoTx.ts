@@ -9,6 +9,7 @@ import type { TxConReintento } from '@/utils/serializableRetry'
 import {
   aCentavos,
   comoJson,
+  cuentaLlena,
   impuestoQueSeLlevan,
   leerReparto,
   mismoReparto,
@@ -315,8 +316,13 @@ export async function recortarDescuentosDeRenglones(
     select: { id: true, appliedDiscountId: true, isCortesia: true, discountAmount: true },
     take: o.renglones.length,
   })
-  const decisiones = (await filasDeLaOrden(tx, orderId))
-    .map(fila => ({ fila, recorte: recorteDeFila(fila, cambian) }))
+  // W7 A1, decisión (ii): los renglones y las filas de ANTES del cambio dicen si la cuenta está llena, si un % de ámbito estaba topado y
+  // si le queda un renglón que valga algo.
+  const vivos = await renglonesParaReparto(tx, orderId)
+  const filas = await filasDeLaOrden(tx, orderId)
+  const contexto = { vivos, cuentaLlena: cuentaLlena(vivos, filas) }
+  const decisiones = filas
+    .map(fila => ({ fila, recorte: recorteDeFila(fila, cambian, contexto) }))
     .filter(d => d.recorte.accion !== 'NADA')
     .sort((a, b) => (a.fila.id < b.fila.id ? -1 : a.fila.id > b.fila.id ? 1 : 0))
   if (decisiones.length === 0) return resultado
@@ -326,7 +332,6 @@ export async function recortarDescuentosDeRenglones(
   let recortadoCents = 0
   let impuesto = new Prisma.Decimal(0)
   let orden: { contratoDePrecio: string | null; taxAmount: Prisma.Decimal } | null = null
-  let vivos: RenglonParaReparto[] | null = null
   let disponible = new Prisma.Decimal(0)
   for (const { fila, recorte } of decisiones) {
     if (recorte.accion === 'NADA') continue
@@ -360,7 +365,6 @@ export async function recortarDescuentosDeRenglones(
         disponible = new Prisma.Decimal(orden.taxAmount)
       }
       if (orden.contratoDePrecio === 'IVA_APARTE') {
-        vivos ??= await renglonesParaReparto(tx, orderId)
         disponible = disponible.plus(guardada)
         const nueva = reduccionDeImpuestoCobrado(orden.contratoDePrecio, recorte.reparto.renglones, vivos, disponible)
         disponible = disponible.minus(nueva)

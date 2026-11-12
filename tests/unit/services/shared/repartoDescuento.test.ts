@@ -8,6 +8,7 @@ import {
   aCentavos,
   aportacionCents,
   capacidadRestante,
+  cuentaLlena,
   enAmbito,
   estaRegalado,
   importesDeLasFilas,
@@ -285,6 +286,67 @@ describe('R8 — el % ya no se calcula sobre lo regalado (founder, 2-oct)', () =
   it('control — venta sana: un artículo con descuento PARCIAL sigue en la base como hoy ($15)', () => {
     const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1', { discountAmount: 10 }), rp('b', 50, 'pb', 'c1')], [pct('cta', 10, null, 15)])
     expect(res.montosRederivados.get('cta')).toBe(15)
+  })
+})
+
+describe('🔴 W7 A1 — Σ de las filas nunca pasa de la cuenta: el % re-derivado se topa a lo que queda', () => {
+  const pct = (id: string, value: number, amount: number, s: number) =>
+    fila(id, amount, nuevoRepartoDeCuenta({ conPromociones: true }), { type: 'PERCENTAGE', value, createdAt: t(s) })
+  const fijo = (id: string, amount: number, s: number) =>
+    fila(id, amount, nuevoRepartoDeCuenta({ conPromociones: true }), { createdAt: t(s) })
+  const premio = (id: string, amount: number, renglon: string, s: number) =>
+    fila(id, amount, nuevoRepartoDirigido(amount, { [renglon]: amount }, { espejo: false }), { createdAt: t(s) })
+  const hamburguesa = rp('h', 129, 'ph', 'c1')
+  const cafe = rp('c', 30, 'pc', 'c1')
+  const suma = (filas: Array<{ id: string; amount: number }>, m: Map<string, number>) =>
+    filas.reduce((s, f) => s + aCentavos(m.get(f.id) ?? f.amount), 0)
+
+  it('🔴 antes/después (folio W2UJM): asignado $15 + cupón 10 % + premio $129 sobre $159 ⇒ el cupón queda en $15.00 (hoy $15.90, Σ $159.90)', () => {
+    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), premio('premio', 129, 'h', 3)]
+    const res = importesDeLasFilas([hamburguesa, cafe], filas)
+    expect(res.montosRederivados.get('cupon')).toBe(15)
+    expect(res.descuento).toBe(159)
+    expect(suma(filas, res.montosRederivados)).toBe(15900)
+    // El reparto canónico coloca exactamente ese importe: la factura y la fila dicen lo mismo.
+    const m = repartosDeLaOrden(
+      [hamburguesa, cafe],
+      filas.map(f => (res.montosRederivados.has(f.id) ? { ...f, amount: res.montosRederivados.get(f.id)! } : f)),
+      { rederivadas: new Set(res.montosRederivados.keys()) },
+    )
+    expect(renglonesDe(m, 'premio')).toEqual({ h: 12900 })
+    expect(renglonesDe(m, 'cupon')).toEqual({ c: 1500 })
+  })
+  it('🔴 lo mismo con puntos en vez de premio: $15 + cupón + $129.60 de puntos ⇒ el cupón vuelve a $14.40 (hoy $15.90, Σ $160.50)', () => {
+    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), fijo('puntos', 129.6, 3)]
+    const res = importesDeLasFilas([hamburguesa, cafe], filas)
+    expect(res.montosRederivados.get('cupon')).toBe(14.4)
+    expect(res.descuento).toBe(159)
+  })
+  it('con dos % re-derivados se topa primero el más reciente, y luego el anterior', () => {
+    const renglones = [rp('a', 100, 'pa', 'c1')]
+    const res = importesDeLasFilas(renglones, [pct('auto', 10, 10, 1), pct('cupon', 10, 9, 2), fijo('fijo', 85, 3)])
+    expect(res.montosRederivados.get('cupon')).toBe(5)
+    expect(res.montosRederivados.get('auto')).toBe(10)
+    expect(res.descuento).toBe(100)
+    const mas = importesDeLasFilas(renglones, [pct('auto', 10, 10, 1), pct('cupon', 10, 9, 2), fijo('fijo', 95, 3)])
+    expect(mas.montosRederivados.get('cupon')).toBe(0)
+    expect(mas.montosRederivados.get('auto')).toBe(5)
+    expect(mas.descuento).toBe(100)
+  })
+  it('control — sin pasarse, el % re-deriva igual que hoy ($15 + $15.90 sobre $159)', () => {
+    const res = importesDeLasFilas([hamburguesa, cafe], [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2)])
+    expect(res.montosRederivados.get('cupon')).toBe(15.9)
+    expect(res.descuento).toBe(30.9)
+  })
+  it('control — justo en la cuenta no se toca nada (10 % = $10 + $90 fijo = $100)', () => {
+    const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1')], [pct('auto', 10, 10, 1), fijo('fijo', 90, 2)])
+    expect(res.montosRederivados.get('auto')).toBe(10)
+    expect(res.descuento).toBe(100)
+  })
+  it('control — lo fijo NO se toca aunque pase de la cuenta (lo topa el total al guardar, como hoy)', () => {
+    const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1')], [fijo('fijo', 120, 1)])
+    expect(res.montosRederivados.size).toBe(0)
+    expect(res.descuento).toBe(120)
   })
 })
 
@@ -617,5 +679,109 @@ describe('recorteDeFila — B2c (P4, P5): qué pasa con una fila cuando salen re
   it('control — destino DIRIGIDO cuyo renglón ya no está en la orden desaparece de las llaves del reparto', () => {
     const m = repartosDeLaOrden([r('b', 100)], [fila('cat', 20, nuevoRepartoDirigido(20, { a: 5, b: 15 }, { espejo: false }))])
     expect(Object.keys(renglonesDe(m, 'cat')!)).toEqual(['b'])
+  })
+
+  // W7 A1, rediseño B, decisión (ii) del founder (12-nov): el tope de la cuenta puede dejar un % de ámbito abajo de lo suyo (hasta $0);
+  // `quita ≥ monto` lo borraba aunque le quedara un renglón con valor y ya no volvía (Codex r4 #1). Regla: en una cuenta LLENA (Σ filas
+  // ≥ Σ renglones, medido ANTES del recorte), un % de ámbito topado (su importe sin tope > el guardado) sobrevive mientras le quede un
+  // renglón con valor. Fuera de una cuenta llena, el recorte es exactamente el de develop (Codex r5 #2, r7 #1).
+  describe('🔴 W7 A1 (decisión (ii)): en una cuenta LLENA, un % de ámbito topado no se retira mientras le quede un renglón con valor', () => {
+    const ambito = { productos: [], categorias: ['c1'] }
+    const pctDeAmbito = (amount: number, renglones: Record<string, number>, extra: Record<string, unknown> = {}) =>
+      fila('cat', amount, { ...dirigido(renglones), ambito, ...extra }, { type: 'PERCENTAGE', value: 10 })
+    const vivos = [rp('a', 45, 'pa', 'c1'), rp('b', 45, 'pb', 'c1')]
+    const llena = { vivos, cuentaLlena: true }
+
+    it('cuentaLlena: Σ filas ≥ Σ total de los renglones (la cortesía de la terminal cuenta su total y su espejo; el servicio no entra)', () => {
+      expect(cuentaLlena(vivos, [fila('f', 90, null)])).toBe(true)
+      expect(cuentaLlena(vivos, [fila('f', 89.99, null)])).toBe(false)
+      expect(cuentaLlena(vivos, [fila('f', 91, null)])).toBe(true)
+      const cortesiaTpv = rp('c', 10, 'pc', 'c2', { isCortesia: true, discountAmount: 10 })
+      expect(cuentaLlena([...vivos, cortesiaTpv], [fila('f', 90, null), fila('esp', 10, dirigido({ c: 1000 }, true))])).toBe(true)
+      expect(cuentaLlena([...vivos, cortesiaTpv], [fila('f', 90, null)])).toBe(false)
+    })
+    it('🔴 Codex r4 #1 (estado 1, topado por el recálculo): llena, en $0, sale A y queda B con $45 ⇒ se RECORTA a $0 y el recálculo lo re-deriva', () => {
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], llena)).toEqual({
+        accion: 'RECORTAR',
+        quitaCents: 0,
+        amountCents: 0,
+        appliedToItemIds: [],
+        reparto: { ...dirigido({ b: 0 }), ambito },
+      })
+    })
+    it('llena, topado a $3 con la parte de A en $3, sale A y queda B ⇒ RECORTA a $0, no se retira', () => {
+      expect(recorteDeFila(pctDeAmbito(3, { a: 300, b: 0 }), [sale('a')], llena)).toMatchObject({
+        accion: 'RECORTAR',
+        quitaCents: 300,
+        amountCents: 0,
+        reparto: { ...dirigido({ b: 0 }), ambito },
+      })
+    })
+    it('🔴 Codex r6 #1 (estado 2, topado al crearlo, aceptado): fijos de $45 a B y $44.99 a A, 10 % nace en $0.01; llena ⇒ sobrevive', () => {
+      expect(recorteDeFila(pctDeAmbito(0.01, { a: 1, b: 0 }), [sale('a')], llena)).toMatchObject({
+        accion: 'RECORTAR',
+        quitaCents: 1,
+        amountCents: 0,
+      })
+    })
+    it('🔴 Codex r7 #1: A $15, B $0.50 y C $0.99 regalada; el 1 % guardado en $0.15 (el recálculo daría $0.16) y la cuenta NO llena ⇒ se retira, como develop', () => {
+      const vivosR7 = [
+        rp('a', 15, 'pa', 'c1'),
+        rp('b', 0.5, 'pb', 'c1'),
+        rp('c', 0.99, 'pc', 'c1', { isCortesia: true, discountAmount: 0.99 }),
+      ]
+      const uno = fila('cat', 0.15, { ...dirigido({ a: 15, b: 0 }), ambito }, { type: 'PERCENTAGE', value: 1 })
+      const filasR7 = [fila('esp', 0.99, dirigido({ c: 99 }, true)), uno]
+      expect(cuentaLlena(vivosR7, filasR7)).toBe(false)
+      expect(recorteDeFila(uno, [sale('a')], { vivos: vivosR7, cuentaLlena: cuentaLlena(vivosR7, filasR7) })).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 15,
+      })
+    })
+    it('🔴 Codex r5 #2: 10 % con tope del catálogo de $1, A $1,000 y B $1; la cuenta NO llena ⇒ se retira como develop (B cuesta $1)', () => {
+      const conTope = fila('cat', 1, { ...dirigido({ a: 100, b: 0 }), ambito, tope: 1 }, { type: 'PERCENTAGE', value: 10 })
+      const vivosR5 = [rp('a', 1000, 'pa', 'c1'), rp('b', 1, 'pb', 'c1')]
+      expect(recorteDeFila(conTope, [sale('a')], { vivos: vivosR5, cuentaLlena: cuentaLlena(vivosR5, [conTope]) })).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 100,
+      })
+    })
+    it('llena pero sin tope (importe sin tope = guardado) ⇒ se retira como hoy', () => {
+      expect(recorteDeFila(pctDeAmbito(9, { a: 900, b: 0 }), [sale('a')], llena)).toEqual({ accion: 'RETIRAR', quitaCents: 900 })
+    })
+    it('llena, pero lo que queda ya no vale nada (regalado o en $0): su importe sin tope sería 0 ⇒ se retira, como hoy', () => {
+      const regalado = rp('b', 45, 'pb', 'c1', { isCortesia: true, discountAmount: 45 })
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], { vivos: [vivos[0], regalado], cuentaLlena: true })).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 0,
+      })
+      expect(
+        recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], { vivos: [vivos[0], rp('b', 0, 'pb', 'c1')], cuentaLlena: true }),
+      ).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 0,
+      })
+    })
+    it('salen todos sus renglones ⇒ se retira, como hoy', () => {
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a'), sale('b')], llena)).toEqual({ accion: 'RETIRAR', quitaCents: 0 })
+    })
+    it('control — sin tope (quita < monto) recorta igual que hoy', () => {
+      expect(recorteDeFila(pctDeAmbito(9, { a: 450, b: 450 }), [sale('a')], llena)).toEqual({
+        accion: 'RECORTAR',
+        quitaCents: 450,
+        amountCents: 450,
+        appliedToItemIds: [],
+        reparto: { ...dirigido({ b: 450 }), ambito },
+      })
+    })
+    it('control — una DIRIGIDA que no se re-deriva (premio, 2×1) con quita ≥ monto se retira como hoy, llena o no', () => {
+      expect(recorteDeFila(fila('premio', 1, dirigido({ a: 100, b: 0 })), [sale('a')], llena)).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 100,
+      })
+    })
+    it('control — sin contexto (otro llamador) el recorte es el de develop', () => {
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')])).toEqual({ accion: 'RETIRAR', quitaCents: 0 })
+    })
   })
 })
