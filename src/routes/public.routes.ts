@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import rateLimit from 'express-rate-limit'
 import { ipDelCliente } from '../utils/clientIp'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
+import { descargarAppDeCampo } from '../controllers/public/descargaDeCampo.controller'
 import {
   autofacturaController,
   getAutofacturaStatusController,
@@ -219,6 +220,8 @@ router.use('/venues/:venueSlug/ordering', onlineOrderingPublicRoutes)
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)
+// App de campo: la liga de primera instalación (siempre la última versión de producción de ANDROID_CAMPO).
+router.get('/campo/descargar', readLimit, descargarAppDeCampo)
 
 // CFDI autofactura (Flow A) — customer self-service invoice from receipt page
 // Both cfdiLimit (per-IP) and cfdiPerKeyLimit (per-accessKey) must pass to reach the controller.

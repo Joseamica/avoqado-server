@@ -402,7 +402,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/promoters/promoters.service.ts': 4,
   'src/services/promoters/terminalLocation.service.ts': 4,
   // 1 → 2: las líneas de UNA promoción de UNA orden, bajo su candado (B2c P4).
-  'src/services/promotions/promotion.service.ts': 2,
+  'src/services/promotions/promotion.service.ts': 1,
   'src/services/promotions/promotionCatalog.service.ts': 1,
   'src/services/referrals/referralQualification.service.ts': 1,
   'src/services/referrals/referralRefund.service.ts': 1,

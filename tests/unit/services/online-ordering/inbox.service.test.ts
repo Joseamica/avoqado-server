@@ -508,6 +508,18 @@ describe('fase 2: cardStatus en la bandeja', () => {
     expect(lista.select.rejectReason).toBe(true)
   })
 
+  it('D10: la Bandeja y getInboxOrder (MCP) dicen «pagado» con la hora del aparato del cobro sin red, igual que las listas de la caja', async () => {
+    const enElAparato = new Date(NOW.getTime() - 20 * 60_000)
+    const llegada = new Date(NOW.getTime() - 17 * 60_000)
+    const pagado = row('A', 'ACCEPTED', { createdAt: new Date(NOW.getTime() - 50 * 60_000) }) as any
+    pagado.order = { ...pagado.order, paymentStatus: 'PAID', loyaltySaleAt: enElAparato, payments: [{ createdAt: llegada }] }
+    unaSola(pagado)
+    expect((await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0].paidAt).toBe(enElAparato.toISOString())
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(pagado)
+    expect((await getInboxOrder({ venueId: 'v1', orderId: 'ord-A', now: NOW }))?.paidAt).toBe(enElAparato.toISOString())
+    expect((prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).select.order.select).toMatchObject({ loyaltySaleAt: true })
+  })
+
   it('getInboxOrder también lleva cardStatus', async () => {
     prismaMock.onlineOrder.findFirst.mockResolvedValue(
       row('A', 'ACCEPTED', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }) as any,

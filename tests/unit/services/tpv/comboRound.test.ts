@@ -97,6 +97,21 @@ describe('table combo rounds use one locked fiscal transaction', () => {
     expect(prismaMock.orderItem.createMany).not.toHaveBeenCalled()
     expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
+  // hz:5bda0b30:D3: la cola sin red manda la ronda con combos por aquí, con la hora en que se VENDIÓ sin red (ya acotada).
+  it('una ronda de la cola sin red evalúa y envía el combo a la hora en que se vendió; sin ella, la del envío', async () => {
+    const vendidoEn = new Date(Date.now() - 40 * 60_000)
+    await addItemsToOrder('venue', 'order', [promo] as any, 1, true, undefined, vendidoEn)
+    expect(applyPromotionToOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ soldAt: vendidoEn }),
+      tx,
+      expect.objectContaining({ deferTotalsToCaller: true, sentToKitchenAt: vendidoEn }),
+    )
+    ;(applyPromotionToOrder as jest.Mock).mockClear()
+    await addItemsToOrder('venue', 'order', [promo] as any, 1, true)
+    const [params, , options] = (applyPromotionToOrder as jest.Mock).mock.calls[0]
+    expect(params.soldAt).not.toEqual(vendidoEn)
+    expect(options.sentToKitchenAt).toEqual(params.soldAt)
+  })
   it('never sends promotion references through the normal product/custom-price branch', async () => {
     await addItemsToOrder('venue', 'order', [promo] as any, 1, true)
     expect(tx.orderItem.create).not.toHaveBeenCalled()

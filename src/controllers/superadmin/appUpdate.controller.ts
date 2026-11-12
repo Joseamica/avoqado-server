@@ -1,10 +1,11 @@
 // src/controllers/superadmin/appUpdate.controller.ts
 import { Request, Response } from 'express'
-import { AppEnvironment, UpdateMode } from '@prisma/client'
+import { AppEnvironment, AppPlatform, UpdateMode } from '@prisma/client'
 import { getStorageBucket } from '../../config/firebase'
 import logger from '../../config/logger'
 import crypto from 'crypto'
-import { extractApkMetadata, validatePackageName } from '../../services/apk-parser.service'
+import { ambienteDeCampo, extractApkMetadata, PAQUETE_DE_CAMPO, validatePackageName } from '../../services/apk-parser.service'
+import { HUELLA_DE_FIRMA_DE_CAMPO, huellaDelCertificadoDeclarado } from '../../services/apk/certificadoDeclarado'
 import prisma from '../../utils/prismaClient'
 import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../services/appUpdate/audienceTargeting'
 
@@ -28,9 +29,11 @@ import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../service
  */
 export async function listAppUpdates(req: Request, res: Response) {
   try {
-    const { environment } = req.query
+    const { environment, platform } = req.query
 
-    const where: any = {}
+    // Sin plataforma: sólo la TPV, como siempre («Instalar versión» de una terminal identifica la versión por su código,
+    // que ahora se repite entre carriles). El panel de versiones pide la de campo explícitamente.
+    const where: any = { platform: (platform as AppPlatform | undefined) ?? 'ANDROID_TPV' }
     if (environment && ['SANDBOX', 'PRODUCTION'].includes(environment as string)) {
       where.environment = environment as AppEnvironment
     }
@@ -139,7 +142,9 @@ export async function createAppUpdate(req: Request, res: Response) {
       updateMode = 'NONE',
       minAndroidSdk: providedMinSdk,
       apkBase64,
+      platform = 'ANDROID_TPV',
     } = req.body
+    const esCampo = platform === 'ANDROID_CAMPO'
 
     // DEBUG: Log what we received
     logger.info(`📥 Received updateMode from request: ${req.body.updateMode}`)
@@ -179,12 +184,33 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     // Validate package name matches environment
-    const packageValidation = validatePackageName(apkMetadata, environment as 'SANDBOX' | 'PRODUCTION')
+    const packageValidation = validatePackageName(apkMetadata, environment as 'SANDBOX' | 'PRODUCTION', esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV')
     if (!packageValidation.valid) {
       return res.status(400).json({
         success: false,
         error: packageValidation.message,
       })
+    }
+
+    if (esCampo) {
+      // El celular compara el versionCode anunciado con el del APK: si no coinciden, pediría la misma versión para siempre.
+      const distinto =
+        (providedVersionCode !== undefined && Number(providedVersionCode) !== apkMetadata.versionCode) ||
+        (providedVersionName !== undefined && providedVersionName !== apkMetadata.versionName)
+      if (distinto) {
+        return res.status(400).json({
+          success: false,
+          error: `En la app de campo la versión es la del APK (${apkMetadata.versionName}, código ${apkMetadata.versionCode}); no se puede cambiar`,
+        })
+      }
+      // Freno de accidentes (no es verificación criptográfica, ver certificadoDeclarado.ts): un APK de producción con otra
+      // llave dejaría a los celulares nuevos con una firma que nunca podrá actualizarse.
+      if (environment === 'PRODUCTION' && huellaDelCertificadoDeclarado(apkBuffer) !== HUELLA_DE_FIRMA_DE_CAMPO) {
+        return res.status(400).json({
+          success: false,
+          error: 'El APK no está firmado con la llave de la app de campo (súbelo desde el release firmado de GitHub)',
+        })
+      }
     }
 
     // Use provided values or auto-detected values
@@ -210,9 +236,10 @@ export async function createAppUpdate(req: Request, res: Response) {
     // Check if version already exists for this environment
     const existing = await prisma.appUpdate.findUnique({
       where: {
-        versionCode_environment: {
+        versionCode_environment_platform: {
           versionCode: typeof versionCode === 'string' ? parseInt(versionCode) : versionCode,
           environment: environment as AppEnvironment,
+          platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
         },
       },
     })
@@ -220,7 +247,7 @@ export async function createAppUpdate(req: Request, res: Response) {
     if (existing) {
       return res.status(409).json({
         success: false,
-        error: `Version code ${versionCode} already exists for ${environment} environment`,
+        error: `Version code ${versionCode} already exists for ${environment} environment (${platform})`,
       })
     }
 
@@ -237,7 +264,11 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     const bucket = storage.bucket()
-    const fileName = `tpv-updates/${environment.toLowerCase()}/avoqado-tpv-${versionName}-${environment.toLowerCase()}.apk`
+    // Campo: el nombre lleva el inicio del SHA-256, así que dos altas simultáneas de builds distintos nunca escriben el mismo
+    // archivo (la que pierde el INSERT deja su archivo huérfano, pero la fila ganadora siempre apunta a SUS bytes).
+    const fileName = esCampo
+      ? `campo-updates/${environment.toLowerCase()}/avoqado-campo-${versionName}-${versionCode}-${checksum.slice(0, 12)}.apk`
+      : `tpv-updates/${environment.toLowerCase()}/avoqado-tpv-${versionName}-${environment.toLowerCase()}.apk`
     const file = bucket.file(fileName)
 
     await file.save(apkBuffer, {
@@ -278,17 +309,22 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     // Validate + normalize audience targeting (defaults to ALL = every terminal)
-    const targeting = normalizeTargeting(req.body)
+    // La app de campo no reporta sucursal ni serie al buscar versiones: una fila VENUES/TERMINALS nunca le llegaría.
+    // Su carril es siempre para todos los celulares.
+    const targeting = esCampo
+      ? { targetType: 'ALL' as const, targetVenueIds: [] as string[], targetTerminalIds: [] as string[] }
+      : normalizeTargeting(req.body)
     if ('error' in targeting) {
       return res.status(400).json({ success: false, error: targeting.error })
     }
 
-    // Create database record
+    // Create database record (la llave única resuelve dos altas simultáneas: la que pierde es 409, no 500)
     const appUpdate = await prisma.appUpdate.create({
       data: {
         versionName,
         versionCode: versionCodeInt,
         environment: environment as AppEnvironment,
+        platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
         releaseNotes,
         updateMode: updateMode as UpdateMode,
         minAndroidSdk,
@@ -328,6 +364,7 @@ export async function createAppUpdate(req: Request, res: Response) {
             versionName,
             versionCode: versionCodeInt,
             environment,
+            platform: esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
             updateMode,
             targetType: targeting.targetType,
             targetVenueIds: targeting.targetVenueIds,
@@ -360,6 +397,9 @@ export async function createAppUpdate(req: Request, res: Response) {
       ...(warnings.length > 0 && { warnings }),
     })
   } catch (error) {
+    if ((error as { code?: string })?.code === 'P2002') {
+      return res.status(409).json({ success: false, error: 'Esa versión ya existe en ese ambiente y plataforma (otra alta ganó)' })
+    }
     logger.error('Error creating app update:', error)
     return res.status(500).json({
       success: false,
@@ -400,6 +440,13 @@ export async function updateAppUpdate(req: Request, res: Response) {
     // Audience targeting is only touched if the caller sent targetType
     let targeting: { targetType: AppUpdateTargetTypeValue; targetVenueIds: string[]; targetTerminalIds: string[] } | undefined
     if (req.body.targetType !== undefined) {
+      // La app de campo no reporta sucursal ni serie: una fila limitada nunca le llegaría (el alta ya la fuerza a ALL).
+      if (existing.platform === 'ANDROID_CAMPO' && req.body.targetType !== 'ALL') {
+        return res.status(400).json({
+          success: false,
+          error: 'La app de campo siempre sale para todos los celulares: no reporta sucursal ni serie, así que no se puede limitar',
+        })
+      }
       const result = normalizeTargeting(req.body)
       if ('error' in result) {
         return res.status(400).json({ success: false, error: result.error })
@@ -547,6 +594,7 @@ export async function getLatestAppUpdate(req: Request, res: Response) {
     const latest = await prisma.appUpdate.findFirst({
       where: {
         environment: environment.toUpperCase() as AppEnvironment,
+        platform: (req.query.platform as AppPlatform | undefined) ?? 'ANDROID_TPV',
         isActive: true,
       },
       orderBy: { versionCode: 'desc' },
@@ -624,13 +672,16 @@ export async function previewApkMetadata(req: Request, res: Response) {
         versionName: metadata.versionName,
         packageName: metadata.packageName,
         minSdkVersion: metadata.minSdkVersion,
-        // Helper to determine environment based on package name
+        // Helper to determine environment based on package name (la app de campo: por su versionName)
         detectedEnvironment:
-          metadata.packageName === 'com.jaac.avoqado_tpv.sandbox'
-            ? 'SANDBOX'
-            : metadata.packageName === 'com.jaac.avoqado_tpv'
-              ? 'PRODUCTION'
-              : null,
+          metadata.packageName === PAQUETE_DE_CAMPO
+            ? ambienteDeCampo(metadata.versionName)
+            : metadata.packageName === 'com.jaac.avoqado_tpv.sandbox'
+              ? 'SANDBOX'
+              : metadata.packageName === 'com.jaac.avoqado_tpv'
+                ? 'PRODUCTION'
+                : null,
+        detectedPlatform: metadata.packageName === PAQUETE_DE_CAMPO ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
       },
     })
   } catch (error) {

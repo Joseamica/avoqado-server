@@ -446,7 +446,8 @@ export interface OrgAppVersion {
  */
 export async function listAppVersionsForOrg(environment: AppEnvironmentParam): Promise<OrgAppVersion[]> {
   const versions = await prisma.appUpdate.findMany({
-    where: { environment, isActive: true },
+    // Sólo versiones de la TERMINAL: las de la app de campo (ANDROID_CAMPO) no se instalan en una PAX.
+    where: { environment, platform: 'ANDROID_TPV', isActive: true },
     orderBy: { versionCode: 'desc' },
     select: { versionName: true, versionCode: true, environment: true, releaseNotes: true, createdAt: true },
   })
