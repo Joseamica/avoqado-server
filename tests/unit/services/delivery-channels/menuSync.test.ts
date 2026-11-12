@@ -1053,3 +1053,53 @@ describe('disponibilidad con productos del canal', () => {
     expect(r).toEqual({ agotados: 0, revividos: 0 })
   })
 })
+
+describe('Codex r2: la lista vigente se relee del canal antes de publicar o agotar (no la copia de la pasada)', () => {
+  const producto = (plu: string) => ({ plu, name: plu, description: null, price: 50, imageUrl: null, modifierGroups: [] })
+  const MENU = {
+    venueId: 'venue1',
+    generatedAt: 'x',
+    categories: [
+      { name: 'BARRA DE CAFE', products: [producto('LATTE')] },
+      { name: 'CERVEZAS', products: [producto('CORONA')] },
+    ],
+  }
+  const mockedFindUnique = (prisma as any).deliveryChannelLink.findUnique as jest.Mock
+  const mockedProducts = (prisma as any).product.findMany as jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedHasAdapter.mockReturnValue(true)
+    mockedSnapshot.mockResolvedValue(MENU)
+    mockedUpdate.mockResolvedValue({})
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    ;(prisma as any).$queryRaw.mockResolvedValue([{ config: {} }])
+  })
+  afterEach(() => mockedFindUnique.mockReset())
+
+  it('🔴 Uber (sin revisión): la pasada leyó el canal SIN lista y el dueño ya guardó ["LATTE"]: sólo sale LATTE', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+    mockedFindUnique.mockResolvedValue({ config: { productos: ['LATTE'] } })
+
+    await syncChannelMenu(link({ config: {} }))
+
+    expect(a.publishMenu).toHaveBeenCalledWith(
+      { ...MENU, categories: [{ name: 'BARRA DE CAFE', products: [producto('LATTE')] }] },
+      'store1',
+      expect.anything(),
+    )
+  })
+
+  it('🔴 disponibilidad: con la lista vigente ["LATTE"], no agota CORONA aunque la copia de la pasada no tuviera lista', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedFindUnique.mockResolvedValue({ config: { productos: ['LATTE'], soldOutSkus: [] } })
+    mockedProducts.mockResolvedValueOnce([{ sku: 'LATTE' }, { sku: 'CORONA' }]).mockResolvedValueOnce([])
+
+    await syncChannelAvailability(link({ config: { soldOutSkus: [] } }))
+
+    expect(a.setItemSoldOut).toHaveBeenCalledTimes(1)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', true)
+  })
+})
