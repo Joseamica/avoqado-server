@@ -95,12 +95,12 @@ describe('evaluarPromo', () => {
     const v = venta({
       amount: 110,
       lineas: [
-        { productId: 'A', categoryIdActual: null, categoryName: null, neto: D('30.4') },
-        { productId: 'B', categoryIdActual: null, categoryName: null, neto: D('79.6') },
+        { productId: 'A', categoryIdActual: null, categoryName: null, neto: D(30) },
+        { productId: 'B', categoryIdActual: null, categoryName: null, neto: D(80) },
       ],
     })
     const d = evaluarPromo([promo({ productIds: ['A'] })], v)!
-    expect(d.montoQueCalifica.toString()).toBe('30.4')
+    expect(d.montoQueCalifica.toString()).toBe('30')
     const r = puntosConPromo({ total: 110, bono: 0, pointsPerDollar: 1 }, d)
     expect(r.total).toBe(140)
   })
@@ -135,6 +135,27 @@ describe('evaluarPromo', () => {
     expect(evaluarPromo([p], venta({ usos: { p1: { delDia: 0, total: 1 } } }))).toBeNull()
   })
 
+  it('empate de createdAt: gana el id mayor, sin importar el orden', () => {
+    const a = promo({ id: 'a' })
+    const b = promo({ id: 'b' })
+    expect(evaluarPromo([a, b], venta())?.promotionId).toBe('b')
+    expect(evaluarPromo([b, a], venta())?.promotionId).toBe('b')
+  })
+
+  it('sin filtro el monto se redondea a centavos', () => {
+    expect(evaluarPromo([promo()], venta({ amount: 10.005 }))!.montoQueCalifica.toString()).toBe('10.01')
+  })
+
+  it('filtro con neto total 0 → null', () => {
+    const v = venta({ lineas: [{ productId: 'A', categoryIdActual: null, categoryName: null, neto: D(0) }] })
+    expect(evaluarPromo([promo({ productIds: ['A'] })], v)).toBeNull()
+  })
+
+  it('el monto que califica nunca pasa del amount', () => {
+    const v = venta({ amount: 50, lineas: [{ productId: 'A', categoryIdActual: null, categoryName: null, neto: D(100) }] })
+    expect(evaluarPromo([promo({ productIds: ['A'] })], v)!.montoQueCalifica.toString()).toBe('50')
+  })
+
   it('dos vigentes → la más nueva', () => {
     const vieja = promo({ id: 'vieja', createdAt: new Date('2026-11-01T00:00:00Z') })
     const nueva = promo({ id: 'nueva', createdAt: new Date('2026-11-05T00:00:00Z') })
@@ -167,6 +188,24 @@ describe('sellosConPromo', () => {
       bonusPoints: 110,
       visitBonusPoints: 20,
     })
+  })
+
+  it('MULTIPLY: floor de lo que califica antes de multiplicar (30.6 ×3 → 60, no 61)', () => {
+    const d = dec({ multiplier: 3, montoQueCalifica: D('30.6') })
+    expect(puntosConPromo({ total: 30, bono: 0, pointsPerDollar: 1 }, d).bonusPoints).toBe(60)
+  })
+
+  it('sin filtro, total = multiplicador × total base', () => {
+    const d = evaluarPromo([promo({ multiplier: 3 })], venta({ amount: 30.6, lineas: [] }))!
+    expect(puntosConPromo({ total: 40, bono: 10, pointsPerDollar: 1 }, d).total).toBe(120)
+    expect(puntosConPromo({ total: 30, bono: 0, pointsPerDollar: 1 }, d).total).toBe(90)
+  })
+
+  it('ADD sólo extraStamps → 0 puntos extra; sólo extraPoints → 1 sello', () => {
+    const s = dec({ kind: 'ADD', extraStamps: 2 })
+    expect(sellosConPromo(s)).toBe(3)
+    expect(puntosConPromo({ total: 10, bono: 0, pointsPerDollar: 1 }, s).bonusPoints).toBe(0)
+    expect(sellosConPromo(dec({ kind: 'ADD', extraPoints: 5 }))).toBe(1)
   })
 
   it('puntosConPromo ADD y null', () => {

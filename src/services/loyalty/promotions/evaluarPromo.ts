@@ -67,20 +67,27 @@ function evaluar(p: PromoCandidata, v: VentaParaPromo): Prisma.Decimal | null {
   if (p.limit === 'ONCE_PER_PROMOTION' && uso && uso.total >= 1) return null
 
   const amount = new Prisma.Decimal(v.amount)
-  if (p.productIds.length === 0 && p.categoryIds.length === 0) return amount
+  const centavos = (n: Prisma.Decimal) => n.toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  if (p.productIds.length === 0 && p.categoryIds.length === 0) return centavos(amount)
 
   const califican = v.lineas.filter(l => linea(p, l))
   if (califican.length === 0) return null
   const sum = (ls: typeof v.lineas) => ls.reduce((a, l) => a.plus(l.neto), new Prisma.Decimal(0))
-  // multiplica antes de dividir
-  return amount.times(sum(califican)).dividedBy(sum(v.lineas)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const total = sum(v.lineas)
+  if (total.lte(0)) return null
+  // multiplica antes de dividir; nunca más que el amount
+  const monto = centavos(amount.times(sum(califican)).dividedBy(total))
+  return monto.gt(amount) ? centavos(amount) : monto
 }
 
 export function evaluarPromo(promos: PromoCandidata[], venta: VentaParaPromo): PromoDecidida | null {
   let mejor: { p: PromoCandidata; monto: Prisma.Decimal } | null = null
   for (const p of promos) {
     const monto = evaluar(p, venta)
-    if (monto && (!mejor || p.createdAt.getTime() > mejor.p.createdAt.getTime())) mejor = { p, monto }
+    if (!monto) continue
+    const dt = mejor ? p.createdAt.getTime() - mejor.p.createdAt.getTime() : 1
+    // empate de createdAt: id mayor, para no depender del orden de entrada
+    if (dt > 0 || (dt === 0 && p.id > mejor!.p.id)) mejor = { p, monto }
   }
   if (!mejor) return null
   const { p, monto } = mejor
@@ -110,8 +117,8 @@ export function puntosConPromo(
     return { total: base.total + extra, bonusPoints: extra, visitBonusPoints: base.bono + extra }
   }
   const mult = new Prisma.Decimal(d.multiplier ?? 1)
-  // r2 #2: todo en Decimal, floor sólo al final
-  const bonusPoints = d.montoQueCalifica.times(base.pointsPerDollar).plus(base.bono).times(mult.minus(1)).floor().toNumber()
+  // floor de lo que califica (puntos normales = floor(monto × ppd) + bono), luego × (mult − 1); Decimal hasta ese floor (r2 #2)
+  const bonusPoints = d.montoQueCalifica.times(base.pointsPerDollar).floor().plus(base.bono).times(mult.minus(1)).floor().toNumber()
   return {
     total: base.total + bonusPoints,
     bonusPoints,
