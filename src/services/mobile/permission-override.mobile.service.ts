@@ -310,6 +310,36 @@ export async function autorizadorDelDescuentoDelCliente(p: {
 }
 
 /**
+ * Descuento del cliente (fase 2): como `autorizadorDelDescuentoDelCliente`, pero exige la llave CON tope
+ * (`descuento-cliente:<customerId>:<discountId>:<topeCents>`) y devuelve el tope. La llave sin sufijo (fase 1) no acredita
+ * ningún tope ⇒ `null`. LEE sin gastar. Lanza si la base falla (quien llama decide; no es la venta de la fase 1).
+ */
+export async function leerAutorizacionDelDescuentoConTope(
+  venueId: string,
+  token: string | undefined,
+  customerId: string,
+  discountId: string,
+  ahora: Date = new Date(),
+): Promise<{ autorizadoPor: string; topeCents: number } | null> {
+  const t = token?.trim()
+  if (!t) return null
+  const base = `${llaveDelDescuentoDelCliente(customerId, discountId)}:`
+  const fila = await prisma.permissionOverride.findFirst({
+    where: {
+      token: t,
+      venueId,
+      permission: 'discounts:apply',
+      operationKey: { startsWith: base },
+      expiresAt: { gt: ahora },
+    },
+    select: { authorizedById: true, operationKey: true },
+  })
+  const sufijo = fila?.operationKey?.slice(base.length)
+  if (!fila || !sufijo || !/^\d{1,12}$/.test(sufijo)) return null
+  return { autorizadoPor: fila.authorizedById, topeCents: Number(sufijo) }
+}
+
+/**
  * ¿El venue activó el PIN de autorización? Nace OFF.
  * 🔴 NUNCA lanza: se llama en el camino de un 403 y un fallo de base no puede
  * convertir un "no tienes permiso" en un 500.
