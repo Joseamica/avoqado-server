@@ -13,6 +13,7 @@ import {
   recordDismiss,
 } from '../../services/announcements/announcementRead.service'
 import { ConflictError } from '../../errors/AppError'
+import { readHomeAppIdentity } from '../../services/posAppVersion/appIdentity'
 
 export const getDetail = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -27,11 +28,15 @@ export const getDetail = async (req: Request, res: Response, next: NextFunction)
 /**
  * Lo que el inicio del dashboard pide de una sola vez: el banner y la ventana que
  * interrumpe. Reemplaza al endpoint `/banner`, que sólo daba la mitad.
+ *
+ * Actualizador del POS (r7, spec §4.7.3): la app que pregunta sale de sus cabeceras. Si está debajo de un aviso de
+ * actualizar, ése ocupa sólo los lugares que llena (el que deja vacío lo llenan los anuncios de hoy); el DASHBOARD no manda
+ * esas cabeceras y sigue igual.
  */
 export const home = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId } = (req as any).authContext
-    const data = await getActiveForHome(userId)
+    const data = await getActiveForHome(userId, readHomeAppIdentity(req.headers))
     res.json({ success: true, data })
   } catch (error) {
     next(error)

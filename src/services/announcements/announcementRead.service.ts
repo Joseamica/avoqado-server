@@ -1,6 +1,9 @@
-import { PlatformAnnouncementStatus, NotificationType } from '@prisma/client'
+import { Prisma, PlatformAnnouncementStatus, NotificationType, PosAppNoticeKind, type PlatformAnnouncement } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { ForbiddenError } from '../../errors/AppError'
+import logger from '../../config/logger'
+import { isBelow } from '../posAppVersion/decide'
+import type { HomeAppIdentity } from '../posAppVersion/appIdentity'
 
 const ENTITY = 'PlatformAnnouncement'
 
@@ -19,12 +22,27 @@ const ENTITY = 'PlatformAnnouncement'
  *    función PRO, la compra, y al subir de plan perdería justo el aviso que lo convenció.
  *
  * El acuse resuelve las dos: no es fabricable y es histórico.
+ *
+ * 🔴 La única excepción es el aviso de actualizar del POS (spec §4.7.4): un anuncio con `posAppPlatform` no tiene acuses
+ * (nace ya «repartido» y el inicio lo elige por la versión de la app), así que lo lee cualquier empleado autenticado
+ * mientras esté `PUBLISHED`. Su contenido no es sensible, y así una app vieja puede abrirlo, tocar [Actualizar] y cerrarlo.
+ * Archivado da 403, como un anuncio sin acuse, aunque por algún motivo tuviera uno.
+ *
+ * Las dos lecturas van EN PARALELO: un anuncio normal no espera una consulta de más. La del anuncio es por su id y sólo
+ * trae esas dos columnas, no el contenido.
  */
 async function puedeLeer(announcementId: string, staffId: string): Promise<boolean> {
-  const acuse = await prisma.platformAnnouncementDelivery.findFirst({
-    where: { announcementId, staffId },
-    select: { id: true },
-  })
+  const [anuncio, acuse] = await Promise.all([
+    prisma.platformAnnouncement.findFirst({
+      where: { id: announcementId },
+      select: { posAppPlatform: true, status: true },
+    }),
+    prisma.platformAnnouncementDelivery.findFirst({
+      where: { announcementId, staffId },
+      select: { id: true },
+    }),
+  ])
+  if (anuncio?.posAppPlatform) return anuncio.status === PlatformAnnouncementStatus.PUBLISHED
   return Boolean(acuse)
 }
 
@@ -79,6 +97,76 @@ export async function recordDismiss(announcementId: string, staffId: string, ven
   })
 }
 
+type InicioDelHome = { banner: PlatformAnnouncement | null; modal: PlatformAnnouncement | null }
+
+/**
+ * El aviso de actualizar que le toca a esta app en el inicio, o `null` si no le toca ninguno (spec §4.7.3). Lo que
+ * devuelve son SÓLO los lugares que el aviso llena; el que deja en `null` lo llena el camino de hoy (`getActiveForHome`).
+ *
+ * - «Bloquear» (`REQUIRED`) cuya versión deja a la app debajo: banner Y ventana son el aviso, aunque los haya cerrado.
+ *   🔴 Por qué la ventana tampoco respeta el cierre: el ANDROID de hoy no tiene banner, sólo enseña `modal`
+ *   (avoqado-android `AnnouncementsRepository.kt`, `parseVentanaPendiente`), así que la ventana es lo más fuerte que una
+ *   app vieja puede mostrar. No hay ciclo: la app pide el inicio una vez al abrirse (`AnnouncementGate.kt`,
+ *   `LaunchedEffect(Unit)`), así que la ventana sale una vez por cada vez que abren la app, no en bucle.
+ * - Si no, «Avisar» (`RECOMMENDED`) sin cerrar: banner y ventana según su forma, como un anuncio normal; cerrado, `null`.
+ *
+ * Sin acuses: estos anuncios nacen ya «repartidos» y no son de nadie en particular. Lo que decide es la versión.
+ */
+async function avisoDeActualizar(staffId: string, app: HomeAppIdentity, ahora: Date): Promise<InicioDelHome | null> {
+  // A lo más hay dos vivos por plataforma (uno por nivel). El tope tolera un duplicado pasajero; gana el más reciente.
+  const avisos = await prisma.platformAnnouncement.findMany({
+    where: {
+      posAppPlatform: app.platform,
+      status: PlatformAnnouncementStatus.PUBLISHED,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
+    },
+    orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
+    take: 4,
+  })
+  if (avisos.length === 0) return null
+
+  const instalada = { versionCode: app.versionCode, versionName: app.versionName }
+  const debajo = (a: PlatformAnnouncement) =>
+    isBelow(app.platform, instalada, { versionCode: a.posAppBelowVersionCode, versionName: a.posAppBelowVersionName })
+
+  // «Bloquear» no mira el cierre (ver arriba), así que ni se lee.
+  const bloquear = avisos.find(a => a.posAppNoticeKind === PosAppNoticeKind.REQUIRED && debajo(a))
+  if (bloquear) return { banner: bloquear, modal: bloquear }
+
+  const avisar = avisos.find(a => a.posAppNoticeKind === PosAppNoticeKind.RECOMMENDED && debajo(a))
+  if (!avisar) return null
+
+  // Lo que apaga «Avisar» es haberlo CERRADO (`dismissedAt`), igual que un anuncio normal. El unique (anuncio, persona)
+  // deja a lo más una fila.
+  const cerrado = await prisma.platformAnnouncementClick.findMany({
+    where: { staffId, announcementId: { in: [avisar.id] }, dismissedAt: { not: null } },
+    select: { announcementId: true },
+    take: 1,
+  })
+  if (cerrado.length > 0) return null
+  return { banner: avisar.showAsBanner ? avisar : null, modal: avisar.showAsModal ? avisar : null }
+}
+
+/**
+ * 🔴 El paso nuevo nunca tumba el inicio de las apps (fallo 11): si la consulta de avisos o la de su cierre falla, se
+ * anota y el inicio sigue exactamente como hoy.
+ */
+async function avisoDeActualizarSinTumbar(staffId: string, app: HomeAppIdentity, ahora: Date): Promise<InicioDelHome | null> {
+  try {
+    return await avisoDeActualizar(staffId, app, ahora)
+  } catch (error) {
+    // El mensaje como texto: en producción winston escribe `json()` sin `format.errors()`, y un `Error` crudo sale `{}`.
+    logger.warn('Inicio de la app: no se pudo leer el aviso de actualizar; sigue el inicio de siempre', {
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof Prisma.PrismaClientKnownRequestError && { code: error.code }),
+      platform: app.platform,
+      versionCode: app.versionCode,
+      versionName: app.versionName,
+    })
+    return null
+  }
+}
+
 /**
  * Lo que el inicio del dashboard necesita de una sola llamada: el banner y la ventana.
  *
@@ -90,11 +178,28 @@ export async function recordDismiss(announcementId: string, staffId: string, ven
  *    cerrar ventanas sin leerlas.
  *
  * Los dos pasan por el acuse de recibo: sin él no se enseña nada.
+ *
+ * 🔴 Actualizador del POS (r7, spec §4.7.3): `app` es la app que pregunta, leída de sus cabeceras SÓLO por la ruta
+ * (`readHomeAppIdentity`). Si viene y está debajo de un aviso de actualizar de su plataforma, el aviso ocupa SÓLO los
+ * lugares que llena (`avisoDeActualizar`); el que deja vacío lo llena el camino de hoy, con sus reglas de siempre. El
+ * camino de hoy corre a lo más una vez, y ninguna si el aviso llena los dos. Sin `app` (el DASHBOARD, o una app que no se
+ * puede comparar) todo sigue como siempre, y el camino de hoy nunca enseña un aviso de actualizar (`posAppPlatform: null`).
  */
-export async function getActiveForHome(staffId: string) {
+export async function getActiveForHome(staffId: string, app?: HomeAppIdentity | null): Promise<InicioDelHome> {
   const ahora = new Date()
+  const aviso = app ? await avisoDeActualizarSinTumbar(staffId, app, ahora) : null
+  if (aviso?.banner && aviso.modal) return aviso
+
+  const deHoy = await anunciosConAcuse(staffId, ahora)
+  return { banner: aviso?.banner ?? deHoy.banner, modal: aviso?.modal ?? deHoy.modal }
+}
+
+/** El camino de hoy: los anuncios con acuse de esta persona, con su orden y su cierre. */
+async function anunciosConAcuse(staffId: string, ahora: Date): Promise<InicioDelHome> {
   const activos = await prisma.platformAnnouncement.findMany({
     where: {
+      // Los avisos de actualizar no tienen acuses y sólo los elige la versión de la app (arriba).
+      posAppPlatform: null,
       status: PlatformAnnouncementStatus.PUBLISHED,
       OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
       AND: [{ OR: [{ showAsBanner: true }, { showAsModal: true }] }],

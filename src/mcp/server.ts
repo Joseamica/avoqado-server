@@ -82,6 +82,7 @@ import { registerLandingLeadTools } from './tools/landingLeads'
 import { registerDocumentRequestTools } from './tools/documentRequests'
 import { registerCrmTools } from './tools/crm'
 import { registerPlatformChargeTools } from './tools/platformCharges'
+import { registerPosAppVersionTools } from './tools/posAppVersions'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPassIntegrationTools } from './tools/passIntegrations'
@@ -190,6 +191,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   if (scope.isSuperAdmin) registerCrmTools(server, scope)
   // «Por cobrar» (lo que los clientes le deben a Avoqado): lectura, sólo para Avoqado y sólo en el MCP libre (no está en el directorio).
   if (scope.isSuperAdmin) registerPlatformChargeTools(server, scope)
+  if (scope.isSuperAdmin) registerPosAppVersionTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPassIntegrationTools(server, scope)
   registerShopifyTools(server, scope)
