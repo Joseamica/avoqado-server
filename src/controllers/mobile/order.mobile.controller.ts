@@ -25,6 +25,7 @@ import { payLaterDesdeMetodoDePago } from '@/services/shared/porCobrar'
 import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
 import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/services/mobile/cortesia-pendiente.public'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
+import { esTpvQueTruncaElDescuento } from '../../services/shared/descuentoDeTpvVieja'
 
 /** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
 export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
@@ -420,6 +421,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       orderMobileService.createOrderWithItems(venueId, {
         ...venta.input,
         ...autoridad,
+        // D2 · B: la TPV ≤ 2.16.1 truncó el % de catálogo; su venta sin red se registra como lo cobró (de los encabezados, nunca del cuerpo).
+        descuentoTruncadoDeTpvVieja: esTpvQueTruncaElDescuento(req.headers),
         ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}),
         // El gerente del PIN o la membresía de QUIEN COBRA (nunca el vendedor elegido), sólo si hay descuento de cuenta libre.
         regaloAutorizadoPor:

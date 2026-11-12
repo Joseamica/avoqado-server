@@ -77,6 +77,7 @@ import {
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -354,6 +355,11 @@ export interface CreateOrderInput {
   stampRewardExpectedDiscount?: number | null
   /** Cola sin red / reserva del efectivo: «la venta ya ocurrió». Nunca recibe el 409 de precio cambiado. */
   isOfflineReplay?: boolean
+  /**
+   * D2 · B (server-owned, de los encabezados): la TPV 2.14.0–2.16.1 truncó el % de catálogo y no conocía el tope. En su venta sin red
+   * (`source: 'TPV'` + `isOfflineReplay`) se registra lo que cobró (`descuentoComoLoCobroLaTpvVieja`).
+   */
+  descuentoTruncadoDeTpvVieja?: boolean
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -1779,10 +1785,17 @@ export async function crearVentaDeMostradorEnTx(
   // the order can never go negative. With `orderDiscountId` the catalog discount decides the
   // amount and `discount` is not added (in /tpv it only repeated that same amount); without it,
   // `discount` (cents) is the flat amount, clamped.
+  // El de catálogo; también lanza bajo el mínimo de compra, como siempre.
+  const delCatalogo = orderDiscount && !cupon ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts) : 0
+  // D2 · B: la venta sin red de una TPV ≤ 2.16.1 registra el % como lo cobró esa terminal (truncado, sin tope); lo demás, la regla de hoy.
+  const comoLoCobroLaTpv =
+    orderDiscount && !cupon && enLaCola && input.source === 'TPV' && input.descuentoTruncadoDeTpvVieja === true
+      ? descuentoComoLoCobroLaTpvVieja(orderDiscount, remainingAfterItemDiscounts)
+      : null
   const orderLevelDiscountDecimal = cupon
     ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)
     : orderDiscount
-      ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+      ? (comoLoCobroLaTpv ?? delCatalogo)
       : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
   if (orderDiscount && !cupon && (input.discount ?? 0) > 0) {
     logger.warn('[ORDER.MOBILE] Llegaron orderDiscountId y discount: manda el de catálogo y el libre no se suma', {

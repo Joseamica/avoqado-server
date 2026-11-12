@@ -357,3 +357,68 @@ describe('D2 — el % de cuenta en centavos: 10 % de $21.35 = $2.14 (antes $2.13
     expect(saldo.isFullyPaid).toBe(true)
   })
 })
+
+// D2 · B (coordinador, 12-nov): la venta sin red registra lo que la TPV YA cobró. 2.16.0/2.16.1 truncan y no conocen el tope.
+describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según su versión', () => {
+  const ventaSinRedDeTpv = (extra: Fila = {}) =>
+    venta({
+      items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }],
+      tip: 0,
+      orderDiscountId: DESCUENTO_10,
+      discount: 0,
+      source: 'TPV',
+      isOfflineReplay: true,
+      ...extra,
+    })
+
+  it('🔴 TPV 2.16.0: $2.13 (trunca), y la cuenta cierra con los $19.22 que cobró', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    const saldo = cierraCon(orden, 19.22, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+    expect(Number(orden.total)).toBeCloseTo(19.22, 2) // el doble en memoria no redondea como la columna Decimal(10,2)
+  })
+
+  it('🔴 TPV 2.16.0 con tope de $1 en el catálogo: $2.13, porque esa versión no lo conocía y ya lo cobró así', async () => {
+    const db = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true }))
+    expect(db.orden(creada.id).discountAmount).toBe(2.13)
+  })
+
+  it('TPV 2.16.2 en adelante (sin la marca): $2.14 exacto, cierra con $19.21', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    expect(cierraCon(orden, 19.21, 0).isFullyPaid).toBe(true)
+  })
+
+  it('control — la marca sólo vale en una venta sin red de la TPV: con otra fuente, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true, source: 'AVOQADO_ANDROID' }))
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('control — y no en línea: sin `isOfflineReplay`, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true, isOfflineReplay: false }))
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+})
