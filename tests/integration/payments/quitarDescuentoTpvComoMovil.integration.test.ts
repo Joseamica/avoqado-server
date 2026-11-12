@@ -7,7 +7,7 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { createOrderWithItems as crearEnTerminal, removeOrderItem } from '@/services/tpv/order.tpv.service'
+import { compItems, createOrderWithItems as crearEnTerminal, removeOrderItem } from '@/services/tpv/order.tpv.service'
 import { applyDiscountToOrder, applyManualDiscount, removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
 import { payCashOrder, removeOrderDiscount } from '@/services/mobile/order.mobile.service'
 import { applyServiceCharge } from '@/services/mobile/service-charge.mobile.service'
@@ -65,6 +65,10 @@ beforeAll(async () => {
   await producto('C', otros.id, 10)
   await producto('Combo', otros.id, 100)
   await producto('Raro', otros.id, 100.11)
+  // Codex r7 #1: chicos de la misma categoría que A y B.
+  await producto('Quince', pizzas.id, 15)
+  await producto('Medio', pizzas.id, 0.5)
+  await producto('Casi', pizzas.id, 0.99)
 })
 
 afterAll(async () => {
@@ -224,6 +228,59 @@ describe('W7 A1 · B: quitar un descuento en la TPV = quitarlo en el móvil (mis
         cobro: 'PARTIAL',
       })
     })
+  })
+
+  const catalogo = (name: string, data: Partial<Prisma.DiscountUncheckedCreateInput>) =>
+    prisma.discount.create({
+      data: { venueId, name, type: 'PERCENTAGE', value: 10, scope: 'ORDER', ...data } as Prisma.DiscountUncheckedCreateInput,
+    })
+
+  it.each(CAMINOS)(
+    'Codex r6 #1 (estado 2, aceptado por el founder): fijos de $45 a B y $44.99 a A, 10 %% de categoría nace en $0.01 (cuenta llena); quitar A y luego el fijo de B ⇒ $40.50 (%s)',
+    async camino => {
+      const orderId = await cuenta([
+        ['A', 45],
+        ['B', 45],
+      ])
+      const fijoB = await catalogo(`Fijo B ${camino}`, { type: 'FIXED_AMOUNT', value: 45, scope: 'ITEM', targetItemIds: [productos.B] })
+      const fijoA = await catalogo(`Fijo A ${camino}`, { type: 'FIXED_AMOUNT', value: 44.99, scope: 'ITEM', targetItemIds: [productos.A] })
+      const pizzas = await catalogo(`10 % pizzas r6 ${camino}`, { scope: 'CATEGORY', targetCategoryIds: [categoriaId] })
+      for (const d of [fijoB, fijoA, pizzas])
+        expect(await applyDiscountToOrder(orderId, d.id, staffVenueId, undefined, venueId, true)).toMatchObject({ success: true })
+      expect(await montos(orderId)).toEqual([
+        [fijoB.name, '45.00'],
+        [fijoA.name, '44.99'],
+        [pizzas.name, '0.01'],
+      ])
+
+      await removeOrderItem(venueId, orderId, (await renglonDe(orderId, productos.A)).id, await version(orderId))
+      // La cuenta estaba llena y el 10 % no cupo: sobrevive (en $0, porque el fijo de B la sigue llenando).
+      expect(await montos(orderId)).toEqual([
+        [fijoB.name, '45.00'],
+        [pizzas.name, '0.00'],
+      ])
+
+      await quitar[camino](orderId, (await fila(orderId, fijoB.name)).id)
+
+      expect(await montos(orderId)).toEqual([[pizzas.name, '4.50']])
+      expect(await cabecera(orderId)).toEqual({ subtotal: '45.00', descuento: '4.50', total: '40.50', saldo: '40.50' })
+    },
+  )
+
+  it('🔴 Codex r7 #1: A $15, B $0.50 y C $0.99 regalada, 1 % de categoría ($0.15); la cuenta NO está llena: quitar A retira el %, como develop ($0.50)', async () => {
+    const orderId = await cuenta([
+      ['Quince', 15],
+      ['Medio', 0.5],
+      ['Casi', 0.99],
+    ])
+    await compItems(venueId, orderId, { itemIds: [(await renglonDe(orderId, productos.Casi)).id], reason: 'Invitación', staffId })
+    const uno = await catalogo('1 % pizzas r7', { value: 1, scope: 'CATEGORY', targetCategoryIds: [categoriaId] })
+    expect(await applyDiscountToOrder(orderId, uno.id, staffVenueId, undefined, venueId)).toMatchObject({ success: true, amount: 0.15 })
+
+    await removeOrderItem(venueId, orderId, (await renglonDe(orderId, productos.Quince)).id, await version(orderId))
+
+    expect((await montos(orderId)).map(([nombre]) => nombre)).not.toContain(uno.name)
+    expect(await cabecera(orderId)).toMatchObject({ total: '0.50', saldo: '0.50' })
   })
 
   it('Codex r4 #2: $100.11, fijo $96, 5 % y servicio del 5 %; quitar el $96 da las mismas filas y la misma cabecera en la TPV y en el móvil', async () => {

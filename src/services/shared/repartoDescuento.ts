@@ -530,14 +530,28 @@ export type Recorte =
   | { accion: 'RECORTAR'; quitaCents: number; amountCents: number; appliedToItemIds: string[]; reparto: RepartoDescuento | null }
 
 /**
- * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar. `vivos` = los
- * renglones de la orden ANTES del cambio (W7 A1: deciden si un % de ámbito estaba topado).
+ * W7 A1, decisión (ii) del founder (12-nov): la cuenta está LLENA si sus filas ya cubren Σ `total` de sus renglones: el tope de la cuenta
+ * está mordiendo. Es el mismo techo que `importesDeLasFilas`: entra toda fila (también las espejo y las viejas sin reparto) y todo
+ * renglón (la cortesía de la terminal con su total bruto, que su espejo cubre; la del móvil ya en $0). El servicio y la propina no
+ * entran: no son mercancía. Se mide ANTES del recorte y de cambiar los renglones.
+ */
+export function cuentaLlena(renglones: Array<{ total: unknown }>, filas: Array<{ amount: unknown }>): boolean {
+  return filas.reduce((s, f) => s + aCentavos(f.amount), 0) >= renglones.reduce((s, x) => s + aCentavos(x.total), 0)
+}
+
+/**
+ * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar. `contexto` (W7
+ * A1): los renglones de la orden ANTES del cambio y si la cuenta estaba llena; sin él, el recorte es el de siempre.
  * DIRIGIDA (y espejo): se recorta por la parte GUARDADA de los destinos que salen; si salen todos, se retira entera. CUENTA:
  * nada (la sincronización la re-reparte). Vieja sin reparto: sólo las dos formas de espejo que reconoce
  * `revertirDescuentoDelRenglon` —la de `buildItemDiscountRow` y la cortesía de «Cobrar» (COMP SIN `discountId`: una COMP del
  * catálogo es de cuenta, y la cortesía de su renglón es independiente)—; lo demás es D8. Nunca lanza.
  */
-export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia[], vivos?: RenglonParaReparto[]): Recorte {
+export function recorteDeFila(
+  fila: FilaParaRecorte,
+  renglones: RenglonQueCambia[],
+  contexto?: { vivos: RenglonParaReparto[]; cuentaLlena: boolean },
+): Recorte {
   const salen = new Map(renglones.map(r => [r.id, r] as const))
   const monto = aCentavos(fila.amount)
   const reparto = leerReparto(fila.reparto)
@@ -560,13 +574,13 @@ export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia
     const quedan = destinos.filter(id => !salen.has(id))
     const quita = tocados.reduce((s, id) => s + reparto.renglones[id], 0)
     const nuevo = { ...reparto, renglones: Object.fromEntries(quedan.map(id => [id, reparto.renglones[id]] as const)) }
-    // 🔴 W7 A1 (Codex r4 #1, r5 #2): el tope de la cuenta puede dejar un % de ámbito abajo de lo suyo (hasta $0), y `quita ≥ monto` lo
-    // borraba aunque le quedara un renglón con valor: al liberar lugar ya no volvía. Si estaba TOPADO (su importe sin tope, con los
-    // renglones de antes del cambio, es mayor que el guardado) y le queda un renglón que vale algo, se recorta a $0 y el recálculo que
-    // siempre sigue lo vuelve a derivar. Sin tope, o sin nada que valga, igual que hoy.
-    if (quita >= monto && vivos && seRecalculaDentroDeSuAmbito(fila)) {
-      const sinTope = importeSinTope(vivos, fila)
-      const porId = new Map(vivos.map(r => [r.id, r] as const))
+    // 🔴 W7 A1, decisión (ii) del founder (12-nov; Codex r4 #1, r5 #2, r6 #1, r7 #1): en una cuenta LLENA, un % de ámbito TOPADO (su
+    // importe sin tope, con los renglones de antes del cambio, es mayor que el guardado: no cupo, al crearlo o al recalcular) sobrevive
+    // mientras le quede un renglón que valga algo: se recorta a $0 y el recálculo que siempre sigue lo vuelve a derivar. Antes,
+    // `quita ≥ monto` lo borraba y al liberar lugar ya no volvía. Fuera de una cuenta llena, el recorte es exactamente el de siempre.
+    if (quita >= monto && contexto?.cuentaLlena && seRecalculaDentroDeSuAmbito(fila)) {
+      const sinTope = importeSinTope(contexto.vivos, fila)
+      const porId = new Map(contexto.vivos.map(r => [r.id, r] as const))
       const quedaConValor = quedan.some(id => {
         const r = porId.get(id)
         return !!r && !estaRegalado(r) && aCentavos(r.total) > 0
