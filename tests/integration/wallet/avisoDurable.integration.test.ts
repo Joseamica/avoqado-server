@@ -745,10 +745,12 @@ it.each(['UTC', 'America/Mexico_City'])(
           const leases: number[] = []
           const rastros: number[] = []
           let primera = true
+          // D2 (hz:87f4b879): las columnas son TIMESTAMP(3) y Postgres REDONDEA al guardar (hasta +0.5 ms). Medidas contra el reloj
+          // en microsegundos daban 60.000081 > 60; con el reloj a milisegundos, el tope exacto (60 / 120) ya no puede rebasarse.
           const remoto = proveedor(async () => {
             const [h] = await tx.$queryRaw<{ lease: number; rastro: number }[]>`
-          SELECT max(EXTRACT(EPOCH FROM ("reclamadoHasta" - (clock_timestamp() AT TIME ZONE 'UTC')))) AS lease,
-            max(CASE WHEN motivo = 'REPARACION' THEN EXTRACT(EPOCH FROM ("siguienteIntentoAt" - (clock_timestamp() AT TIME ZONE 'UTC'))) END) AS rastro
+          SELECT max(EXTRACT(EPOCH FROM ("reclamadoHasta" - (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)))) AS lease,
+            max(CASE WHEN motivo = 'REPARACION' THEN EXTRACT(EPOCH FROM ("siguienteIntentoAt" - (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3))) END) AS rastro
           FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${s.c.id}`
             leases.push(Number(h.lease))
             rastros.push(Number(h.rastro))
@@ -773,7 +775,7 @@ it.each(['UTC', 'America/Mexico_City'])(
           expect(await avisos.notifyCustomerPassUpdated(venueId, s.c.id)).toMatchObject({ failed: true })
           const hs = await tx.$queryRaw<
             { motivo: string; espera: number }[]
-          >`SELECT motivo, EXTRACT(EPOCH FROM ("siguienteIntentoAt" - (clock_timestamp() AT TIME ZONE 'UTC'))) AS espera FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${s.c.id}`
+          >`SELECT motivo, EXTRACT(EPOCH FROM ("siguienteIntentoAt" - (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3))) AS espera FROM "WalletPassOutbox" WHERE "venueId" = ${venueId} AND "customerId" = ${s.c.id}`
           const espera = Number(hs.find(h => h.motivo === 'AJUSTE')!.espera)
           const rastro = Number(hs.find(h => h.motivo === 'REPARACION')!.espera)
           expect(espera).toBeGreaterThan(55)
