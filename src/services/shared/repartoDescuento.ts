@@ -292,6 +292,11 @@ const aPesosRedondeados = (x: number) => Math.round(x * 100) / 100
  * La regla ÚNICA de los recalculadores (los tres de hoy y, desde B2c, `voidItems`, `compItems` y el vale): un % de cuenta se
  * re-deriva sobre los renglones sin promoción; un % dirigido con ámbito, sobre los renglones de su ámbito (P1); en los dos,
  * sin lo ya regalado (R8). Lo demás conserva su importe. Devuelve los importes re-derivados y la suma de todas las filas.
+ *
+ * 🔴 W7 A1 (folio W2UJM): cada escritor topa su fila contra lo que queda AL CREARLA, pero un % re-derivado aquí crece sobre la cuenta
+ * completa (cupón $14.40 → $15.90 tras un premio de $129) y Σ filas pasaba de la cuenta ($159.90 sobre $159). Si Σ pasa de Σ `total`
+ * de los renglones, el exceso sale de las filas RE-DERIVADAS, de la más reciente a la más vieja, nunca abajo de 0: lo dirigido (el
+ * premio, P11) y lo fijo conservan su importe. Lo cobrado no cambia (la mercancía ya quedaba en $0); sin exceso, nada cambia.
  */
 export function importesDeLasFilas(
   renglones: RenglonParaReparto[],
@@ -320,7 +325,27 @@ export function importesDeLasFilas(
     montosRederivados.set(fila.id, monto)
     descuento += monto
   }
+  let exceso =
+    filas.reduce((s, f) => s + aCentavos(montosRederivados.get(f.id) ?? f.amount), 0) -
+    renglones.reduce((s, x) => s + aCentavos(x.total), 0)
+  for (const fila of filas.filter(f => montosRederivados.has(f.id)).sort((a, b) => cronologico(b, a))) {
+    if (exceso <= 0) break
+    const cents = aCentavos(montosRederivados.get(fila.id))
+    const quita = Math.min(Math.max(0, cents), exceso)
+    montosRederivados.set(fila.id, (cents - quita) / 100)
+    descuento -= quita / 100
+    exceso -= quita
+  }
   return { montosRederivados, descuento: aPesosRedondeados(descuento) }
+}
+
+/**
+ * W7 A1: ¿las filas ya cubren la cuenta (Σ importes ≥ Σ `total` de los renglones)? Sólo así `importesDeLasFilas` pudo haber topado
+ * un % re-derivado: quien libera lugar sin recalcular (quitar una fila en la TPV) lo re-deriva para que regrese a lo suyo.
+ */
+export function filasCubrenLaCuenta(renglones: RenglonParaReparto[], filas: FilaParaReparto[]): boolean {
+  const suma = filas.reduce((s, f) => s + aCentavos(f.amount), 0)
+  return suma > 0 && suma >= renglones.reduce((s, x) => s + aCentavos(x.total), 0)
 }
 
 const cronologico = (a: FilaParaReparto, b: FilaParaReparto) => {

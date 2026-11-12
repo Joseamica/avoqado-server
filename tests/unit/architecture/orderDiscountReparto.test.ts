@@ -225,6 +225,8 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
 }
 const RECALCULADORES = [
+  // W7 A1 (Codex r1 #1): quitar una fila en la TPV con la cuenta cubierta re-deriva los % (uno pudo quedar topado), como el móvil.
+  'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
   // B2c T5 (P5): agregar al vale re-deriva los % de cuenta sobre la base nueva, como los otros caminos de agregar.
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
   'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
@@ -271,7 +273,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
   },
   'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder': {
     origen: 'FILAS',
-    nota: 'cabecera −= la fila quitada; espejo revertido, beneficios devueltos (P3)',
+    nota: 'cabecera −= la fila quitada; espejo revertido, beneficios devueltos (P3); con la cuenta cubierta re-deriva los % (W7 A1) y suma lo que crecieron',
   },
   'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals': {
     origen: 'RECALCULO',

@@ -10,6 +10,7 @@ import {
   capacidadRestante,
   enAmbito,
   estaRegalado,
+  filasCubrenLaCuenta,
   importesDeLasFilas,
   impuestoQueSeLlevan,
   leerReparto,
@@ -285,6 +286,72 @@ describe('R8 — el % ya no se calcula sobre lo regalado (founder, 2-oct)', () =
   it('control — venta sana: un artículo con descuento PARCIAL sigue en la base como hoy ($15)', () => {
     const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1', { discountAmount: 10 }), rp('b', 50, 'pb', 'c1')], [pct('cta', 10, null, 15)])
     expect(res.montosRederivados.get('cta')).toBe(15)
+  })
+})
+
+describe('🔴 W7 A1 — Σ de las filas nunca pasa de la cuenta: el % re-derivado se topa a lo que queda', () => {
+  const pct = (id: string, value: number, amount: number, s: number) =>
+    fila(id, amount, nuevoRepartoDeCuenta({ conPromociones: true }), { type: 'PERCENTAGE', value, createdAt: t(s) })
+  const fijo = (id: string, amount: number, s: number) =>
+    fila(id, amount, nuevoRepartoDeCuenta({ conPromociones: true }), { createdAt: t(s) })
+  const premio = (id: string, amount: number, renglon: string, s: number) =>
+    fila(id, amount, nuevoRepartoDirigido(amount, { [renglon]: amount }, { espejo: false }), { createdAt: t(s) })
+  const hamburguesa = rp('h', 129, 'ph', 'c1')
+  const cafe = rp('c', 30, 'pc', 'c1')
+  const suma = (filas: Array<{ id: string; amount: number }>, m: Map<string, number>) =>
+    filas.reduce((s, f) => s + aCentavos(m.get(f.id) ?? f.amount), 0)
+
+  it('🔴 antes/después (folio W2UJM): asignado $15 + cupón 10 % + premio $129 sobre $159 ⇒ el cupón queda en $15.00 (hoy $15.90, Σ $159.90)', () => {
+    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), premio('premio', 129, 'h', 3)]
+    const res = importesDeLasFilas([hamburguesa, cafe], filas)
+    expect(res.montosRederivados.get('cupon')).toBe(15)
+    expect(res.descuento).toBe(159)
+    expect(suma(filas, res.montosRederivados)).toBe(15900)
+    // El reparto canónico coloca exactamente ese importe: la factura y la fila dicen lo mismo.
+    const m = repartosDeLaOrden(
+      [hamburguesa, cafe],
+      filas.map(f => (res.montosRederivados.has(f.id) ? { ...f, amount: res.montosRederivados.get(f.id)! } : f)),
+      { rederivadas: new Set(res.montosRederivados.keys()) },
+    )
+    expect(renglonesDe(m, 'premio')).toEqual({ h: 12900 })
+    expect(renglonesDe(m, 'cupon')).toEqual({ c: 1500 })
+  })
+  it('🔴 lo mismo con puntos en vez de premio: $15 + cupón + $129.60 de puntos ⇒ el cupón vuelve a $14.40 (hoy $15.90, Σ $160.50)', () => {
+    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), fijo('puntos', 129.6, 3)]
+    const res = importesDeLasFilas([hamburguesa, cafe], filas)
+    expect(res.montosRederivados.get('cupon')).toBe(14.4)
+    expect(res.descuento).toBe(159)
+  })
+  it('con dos % re-derivados se topa primero el más reciente, y luego el anterior', () => {
+    const renglones = [rp('a', 100, 'pa', 'c1')]
+    const res = importesDeLasFilas(renglones, [pct('auto', 10, 10, 1), pct('cupon', 10, 9, 2), fijo('fijo', 85, 3)])
+    expect(res.montosRederivados.get('cupon')).toBe(5)
+    expect(res.montosRederivados.get('auto')).toBe(10)
+    expect(res.descuento).toBe(100)
+    const mas = importesDeLasFilas(renglones, [pct('auto', 10, 10, 1), pct('cupon', 10, 9, 2), fijo('fijo', 95, 3)])
+    expect(mas.montosRederivados.get('cupon')).toBe(0)
+    expect(mas.montosRederivados.get('auto')).toBe(5)
+    expect(mas.descuento).toBe(100)
+  })
+  it('control — sin pasarse, el % re-deriva igual que hoy ($15 + $15.90 sobre $159)', () => {
+    const res = importesDeLasFilas([hamburguesa, cafe], [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2)])
+    expect(res.montosRederivados.get('cupon')).toBe(15.9)
+    expect(res.descuento).toBe(30.9)
+  })
+  it('control — justo en la cuenta no se toca nada (10 % = $10 + $90 fijo = $100)', () => {
+    const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1')], [pct('auto', 10, 10, 1), fijo('fijo', 90, 2)])
+    expect(res.montosRederivados.get('auto')).toBe(10)
+    expect(res.descuento).toBe(100)
+  })
+  it('control — lo fijo NO se toca aunque pase de la cuenta (lo topa el total al guardar, como hoy)', () => {
+    const res = importesDeLasFilas([rp('a', 100, 'pa', 'c1')], [fijo('fijo', 120, 1)])
+    expect(res.montosRederivados.size).toBe(0)
+    expect(res.descuento).toBe(120)
+  })
+  it('filasCubrenLaCuenta: sólo con Σ filas ≥ Σ renglones (y alguna fila); quitar en la TPV re-deriva sólo entonces', () => {
+    expect(filasCubrenLaCuenta([hamburguesa, cafe], [fijo('a', 15, 1), pct('c', 10, 15, 2), premio('p', 129, 'h', 3)])).toBe(true)
+    expect(filasCubrenLaCuenta([hamburguesa, cafe], [fijo('a', 15, 1), pct('c', 10, 14.4, 2)])).toBe(false)
+    expect(filasCubrenLaCuenta([], [])).toBe(false)
   })
 })
 

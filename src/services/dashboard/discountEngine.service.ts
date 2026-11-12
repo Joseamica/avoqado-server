@@ -24,13 +24,21 @@ import {
   aCentavos,
   comoJson,
   estaRegalado,
+  filasCubrenLaCuenta,
+  importesDeLasFilas,
   nuevoRepartoDeCuenta,
   nuevoRepartoDirigido,
   reduccionDeImpuestoCobrado,
   type AlcanceDeDescuento,
   type Ambito,
 } from '../shared/repartoDescuento'
-import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
+import {
+  conservarDescuentoHistorico,
+  filasDeLaOrden,
+  renglonesParaReparto,
+  revertirDescuentoDelRenglon,
+  sincronizarRepartos,
+} from '../shared/repartoDescuentoTx'
 import { repartirProporcional } from '../fiscal/ivaMath'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
@@ -1224,6 +1232,10 @@ export async function removeDiscountFromOrder(
         const premio = await refundStampRewardForOrderDiscount(tx, order.venueId, orderDiscount)
         // R3-2: si la fila era espejo, su renglón deja de traer el descuento.
         await revertirDescuentoDelRenglon(tx, orderId, orderDiscount)
+        // W7 A1: con la cuenta cubierta, `importesDeLasFilas` pudo haber topado un % re-derivado; al liberar lugar se re-deriva con
+        // la regla de los recalculadores (como al quitarlo en el móvil) y la cabecera suma lo que creció. Si no, como siempre.
+        const renglones = await renglonesParaReparto(tx, orderId)
+        const cubierta = filasCubrenLaCuenta(renglones, await filasDeLaOrden(tx, orderId))
         await tx.orderDiscount.delete({ where: { id: orderDiscountId } })
         // Codex r2 N2: quitar CUALQUIER fila libera lugar (las no espejo también consumen capacidad): las demás se re-reparten
         // siempre, en esta misma transacción y antes de escribir los totales.
@@ -1231,10 +1243,19 @@ export async function removeDiscountFromOrder(
         // se re-reparten (siempre) y al final se escriben los totales.
         const devueltoDeLaFila = new Prisma.Decimal(orderDiscount.taxReduction ?? 0)
         if (devueltoDeLaFila.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: devueltoDeLaFila } } })
-        const sincronizado = await sincronizarRepartos(tx, orderId)
+        const filas = cubierta ? await filasDeLaOrden(tx, orderId) : null
+        const { montosRederivados } = filas ? importesDeLasFilas(renglones, filas) : { montosRederivados: new Map<string, number>() }
+        const sincronizado = await sincronizarRepartos(tx, orderId, filas ? { renglones, filas, montosRederivados } : {})
+        const crecioCents = (filas ?? []).reduce(
+          (s, f) => s + (montosRederivados.has(f.id) ? aCentavos(montosRederivados.get(f.id)) - aCentavos(f.amount) : 0),
+          0,
+        )
 
         // Update order totals
-        const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount))
+        const newDiscountAmount = Math.max(
+          0,
+          Math.round((Number(order.discountAmount) - Number(orderDiscount.amount)) * 100 + crecioCents) / 100,
+        )
         const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
         // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
         // not a tip and not a discount). It was omitted here, so removing a discount
