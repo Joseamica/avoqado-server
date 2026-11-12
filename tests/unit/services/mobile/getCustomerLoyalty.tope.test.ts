@@ -190,41 +190,61 @@ describe('puntosQueCaben — lo que ANDROID pinta al abrir es lo que se descuent
 
   it('tasa 0.0059, mínimo 250 y saldo 250 (Codex r3): se ofrecen los 250 y el botón sigue prendido', () => {
     // 250 × 0.0059 = 1.4749999999999999: ANDROID pinta $1.47 y el canje descuenta $1.48 (de menos en pantalla, nunca de más).
-    expect(puntosQueCaben(100, 0.0059, 250, 250)).toBe(250)
+    expect(puntosQueCaben(100, 0.0059, 250)).toBe(250)
     expect(puntosQueSeCanjean(250, 0.0059, 100)).toEqual({ puntos: 250, monto: 1.48 })
   })
 
-  it('el ajuste del empate nunca baja del mínimo, aunque la pantalla diga un centavo de más', () => {
-    expect(puntosQueCaben(1, 0.0201, 500, 50)).toBe(50)
-    expect(puntosQueCaben(1, 0.0201, 500, 49)).toBe(49)
+  it('la pantalla nunca promete de más: si el único número que cabe sobre el mínimo pintaría un centavo de más, no se ofrece (12-nov)', () => {
+    // 50 × 0.0201: ANDROID pinta «$1.01» y el canje descuenta $1.00. Con mínimo 50 se baja a 49 y el botón se apaga, como en develop.
+    expect(puntosQueCaben(1, 0.0201, 500)).toBe(49)
+  })
+
+  it('cuenta de $1, tasa 0.0201, mínimo 50: «Recompensas» sale apagado (antes del PR también; con el PR pintaba $1.01 y descontaba $1.00)', async () => {
+    preparar({ saldo: 500, orden: { total: 1, subtotal: 1, discountAmount: 0 }, cfg: { redemptionRate: 0.0201, minPointsRedeem: 50 } })
+    const r = await getCustomerLoyalty('v1', 'c1', 'o1')
+    expect(r).toMatchObject({ maxRedeemablePoints: 49, canRedeem: false })
+    preparar({ saldo: 500, orden: { total: 1, subtotal: 1, discountAmount: 0 }, cfg: { redemptionRate: 0.0201, minPointsRedeem: 49 } })
+    expect(await getCustomerLoyalty('v1', 'c1', 'o1')).toMatchObject({ maxRedeemablePoints: 49, canRedeem: true })
   })
 
   /**
    * Pasada exhaustiva de la familia «redondeo» (las tres rondas de Codex fueron de ella): tasas de 0.0001 a 0.06 de diezmilésimo en
    * diezmilésimo, más tasas comunes; cuentas con centavos; mínimos y saldos que caen justo en el borde. Tres reglas a la vez:
    *   1. con el máximo ofrecido el canje no topa (quema exactamente esos puntos y descuenta su valor redondeado);
-   *   2. si el canje exacto alcanza el mínimo, la caja deja canjear (nunca se apaga por el redondeo);
-   *   3. la pantalla de ANDROID no promete más de lo que se descuenta, salvo que bajar un punto deje al cliente bajo el mínimo.
+   *   2. se ofrece el MAYOR número que el canje no topa y cuya cifra en pantalla no promete de más (si queda bajo el mínimo, el
+   *      botón se apaga: así era en develop);
+   *   3. la pantalla de ANDROID nunca promete más de lo que se descuenta (12-nov: también cuando bajar deja al cliente bajo el mínimo).
    */
-  it('barrido exhaustivo: el canje no topa, nunca se apaga un canje válido y la pantalla no promete de más', () => {
+  it('barrido exhaustivo: el canje no topa, se ofrece el mayor honesto y la pantalla nunca promete de más', () => {
     const tasas = [...Array.from({ length: 600 }, (_, i) => (i + 1) / 10000), 0.0149, 0.0201, 0.0059, 0.125, 0.3333, 1, 1.5, 7]
     const valores = [0.01, 0.3, 0.99, 1, 1.47, 1.5, 9.99, 95.5, 223, 1234.56]
     let casos = 0
     for (const tasa of tasas) {
       for (const valor of valores) {
-        const exacto = puntosQueCaben(valor, tasa, Number.MAX_SAFE_INTEGER) // sin saldo ni mínimo: el mayor que el canje no topa
+        // Sin saldo ni mínimo: el mayor que el canje no topa (su valor redondeado a centavos cabe en `valor`).
+        const cabe = (q: number) => Math.round(q * tasa * 100) / 100 <= valor
+        let exacto = Math.ceil((valor + 0.005) / tasa)
+        while (exacto > 0 && !cabe(exacto)) exacto--
+        while (cabe(exacto + 1)) exacto++
         for (const saldo of [1, exacto - 1, exacto, exacto + 1, 1_000_000].filter(n => n >= 1)) {
           for (const minimo of [1, Math.min(saldo, exacto), Math.min(saldo, exacto) - 1].filter(n => n >= 1)) {
             casos++
-            const p = puntosQueCaben(valor, tasa, saldo, minimo)
+            const p = puntosQueCaben(valor, tasa, saldo)
             const tope = Math.min(saldo, exacto)
+            const honesto = (q: number) => comoAndroid(q * tasa) <= Math.round(q * tasa * 100) / 100
+            let esperado = tope
+            while (esperado > 0 && !honesto(esperado)) esperado--
             if (p > 0) {
               const canje = puntosQueSeCanjean(p, tasa, valor)
               expect(canje).toEqual({ puntos: p, monto: Math.round(p * tasa * 100) / 100 }) // 1
-              if (p - 1 >= minimo) expect(comoAndroid(p * tasa)).toBeLessThanOrEqual(canje.monto) // 3
+              expect(comoAndroid(p * tasa)).toBeLessThanOrEqual(canje.monto) // 3
             }
-            if (tope >= minimo) expect(p).toBeGreaterThanOrEqual(minimo) // 2
-            expect(p).toBeLessThanOrEqual(tope)
+            // 2: el mayor honesto que cabe. Así, el botón (p ≥ mínimo) se prende si y sólo si hay un número honesto entre el mínimo
+            // y el tope.
+            expect(p).toBe(esperado)
+            if (p < minimo) {
+              for (let q = minimo; q <= tope; q++) expect(honesto(q)).toBe(false)
+            }
           }
         }
       }
@@ -299,8 +319,10 @@ describe('canRedeem ⇔ el canje acepta algún número de puntos sin recortarlos
                   for (let p = 1; p <= saldo; p++) {
                     // Sin recortar: el canje quema esos puntos y descuenta su valor completo. La caja nunca ofrece quemar un punto
                     // entero por menos de lo que vale (cuenta de $0.04 a $1 por punto): así era antes y así sigue.
+                    // Y la pantalla de ANDROID no promete de más con ese número (12-nov).
                     const r = await previaDelCanjeEnCuenta('v1', 'c1', 'o1', p)
-                    if (r.ok && r.puntos === p && r.monto === Math.round(p * redemptionRate * 100) / 100) aceptados.push(p)
+                    const monto = Math.round(p * redemptionRate * 100) / 100
+                    if (r.ok && r.puntos === p && r.monto === monto && comoAndroid(p * redemptionRate) <= monto) aceptados.push(p)
                   }
                   casos++
                   const etiqueta = JSON.stringify({
