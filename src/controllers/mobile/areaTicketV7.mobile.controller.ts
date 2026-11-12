@@ -4,6 +4,7 @@ import { AreaTicketFulfillmentMethod, AreaTicketPrintAttemptKind, AreaTicketPrin
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
+import { aprobacionPorPermisoPropio } from '../../middlewares/cortesiaPidePermiso.middleware'
 import * as service from '../../services/mobile/areaTicketV7.mobile.service'
 import { setTerminalAreaRole } from '../../services/mobile/areaTicketRole.mobile.service'
 import { setAreaComandaFromPos } from '../../services/mobile/areaComanda.mobile.service'
@@ -130,6 +131,11 @@ export async function issue(req: Request, res: Response, next: NextFunction) {
         Array.isArray(req.body?.lines) &&
         req.body.lines.some((line: any) => !!line.discountId) &&
         (await tienePermisoEnVenue(req, 'orders:comp')),
+      // D4: aquí no hay PIN; un % o fijo con «Requiere aprobación» pide `tpv-orders:discount` propio.
+      aprobacionDelDescuento: await aprobacionPorPermisoPropio(
+        req,
+        Array.isArray(req.body?.lines) && req.body.lines.some((line: any) => !!line.discountId),
+      ),
       performedBy: req.authContext?.userId,
     })
     return success(res, { ticket }, 201)
@@ -212,6 +218,10 @@ export async function materialize(req: Request, res: Response, next: NextFunctio
         Array.isArray(req.body?.normalItems) &&
         req.body.normalItems.some((item: any) => !!item.discountId) &&
         (await tienePermisoEnVenue(req, 'orders:comp')),
+      aprobacionDelDescuento: await aprobacionPorPermisoPropio(
+        req,
+        Array.isArray(req.body?.normalItems) && req.body.normalItems.some((item: any) => !!item.discountId),
+      ),
       performedBy: req.authContext?.userId,
       source: origenDelCobro(req.body?.source),
       customerName: req.body?.customerName,

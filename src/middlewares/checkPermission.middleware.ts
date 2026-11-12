@@ -454,14 +454,23 @@ export const checkPermission = (requiredPermission: string) => {
         // vengan. Cero cambios por-acción, igual que lo resuelve Square.
         const overrideToken = req.headers?.['x-permission-override']
         if (typeof overrideToken === 'string' && overrideToken.length > 0) {
-          const consumed = await consumePermissionOverride({
-            token: overrideToken,
-            venueId,
-            permission: requiredPermission,
-            route: `${req.method} ${rutaSinQuery(req)}`,
-            // Sólo el retiro de caja pone la llave (`ponerLlaveDelRetiro`); en las demás rutas es null.
-            operationKey: (req as any).llaveDeOperacion ?? null,
-          })
+          // D4 (Codex r1 #4): una venta puede traer varios tokens separados por coma (cortesía y descuento con aprobación). Cada
+          // token está atado a UN permiso al consumirse, así que esta revisión sólo gasta el suyo y deja los demás para la suya.
+          let consumed: Awaited<ReturnType<typeof consumePermissionOverride>> = null
+          for (const token of overrideToken
+            .split(',')
+            .map(t => t.trim())
+            .filter(Boolean)) {
+            consumed = await consumePermissionOverride({
+              token,
+              venueId,
+              permission: requiredPermission,
+              route: `${req.method} ${rutaSinQuery(req)}`,
+              // Sólo el retiro de caja pone la llave (`ponerLlaveDelRetiro`); en las demás rutas es null.
+              operationKey: (req as any).llaveDeOperacion ?? null,
+            })
+            if (consumed) break
+          }
 
           if (consumed) {
             ;(req as any).authContext.overrideAuthorizedBy = consumed.authorizedById

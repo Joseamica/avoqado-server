@@ -448,7 +448,7 @@ export async function assignDevicePartition(venueId: string, input: AssignPartit
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets
 
-export interface OpenAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface OpenAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   /** Código ACUÑADO POR EL CLIENTE (`9 PP NNNNNN C`). El server lo valida, no lo inventa. */
   code: string
   deviceUid: string
@@ -648,7 +648,7 @@ export async function resolveAreaTicket(venueId: string, rawCode: string): Promi
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets/:code/items
 
-export interface AddAreaTicketItemsInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface AddAreaTicketItemsInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   deviceUid: string
   staffId?: string | null
   items: CreateOrderItemInput[]

@@ -125,6 +125,7 @@ import { updateCustomerContact, getCustomers as getCustomersMobile } from '../co
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
 import {
+  checkAprobacionDelDescuento,
   checkCortesiaEnDescuento,
   checkCortesiaPermissionIfPresent,
   checkCuponPermissionIfPresent,
@@ -723,6 +724,8 @@ router.post(
   // S9: regalar una línea (`isCortesia`) pide `orders:comp`. Después del aviso (S7) para que su 403 también avise al gerente.
   checkCortesiaPermissionIfPresent,
   checkCuponPermissionIfPresent,
+  // D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación» pide `tpv-orders:discount` (PIN de gerente incluido).
+  checkAprobacionDelDescuento,
   checkPromotionGuardsIfPresent,
   orderMobileController.createOrder,
 )
@@ -1782,6 +1785,8 @@ router.post(
   // Unión con develop (S9): esta venta también puede regalar (`isCortesia`, descuento COMP); pide `orders:comp` como `POST /orders`.
   checkCortesiaPermissionIfPresent,
   checkCuponPermissionIfPresent,
+  // D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación» pide `tpv-orders:discount` (PIN de gerente incluido).
+  checkAprobacionDelDescuento,
   checkPromotionGuardsIfPresent,
   ...giftCardPayFailureRateLimiters,
   giftCardMobileController.payNewOrder,
@@ -3420,6 +3425,8 @@ router.post(
   checkTableOwnership('order'),
   // D1 (hz:f34960c5:D1): un descuento de cuenta tipo cortesía (COMP) pide `orders:comp`, con PIN de gerente.
   checkCortesiaEnDescuento,
+  // D4 (hz:f34960c5:D4): un % o fijo con «Requiere aprobación» pide `tpv-orders:discount`, con PIN de gerente.
+  checkAprobacionDelDescuento,
   orderMobileController.applyOrderDiscount,
 )
 
