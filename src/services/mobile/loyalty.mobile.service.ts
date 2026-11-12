@@ -72,15 +72,17 @@ async function resolveStaffVenueId(
  * a centavos como lo redondea el canje (`money`), no pasa de `valor`. Un `floor(valor / tasa)` se queda corto con tasas como 0.0149
  * (101 × 0.0149 = 1.5049 → $1.50 sí cabe en $1.50) y, en flotante, con 0.3 / 0.1 = 2.9999999999999996.
  */
-export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: number): number {
+export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: number, minimo = 0): number {
   if (!(valorPorPunto > 0) || !(valor > 0) || saldo <= 0) return 0
   let p = Math.min(saldo, Math.max(0, Math.ceil((valor + 0.005) / valorPorPunto) - 1))
   while (p > 0 && money(p * valorPorPunto) > valor) p--
   while (p < saldo && money((p + 1) * valorPorPunto) <= valor) p++
-  // Codex r2: el POS arranca en este número y pinta `puntos × tasa` con `%.2f`, que redondea el decimal escrito (1.005 → «$1.01»);
-  // el canje redondea el binario (1.0049999… → $1.00). En ese empate de medio centavo se baja un punto, para que lo que el POS
-  // muestra al abrir sea lo que se descuenta.
-  while (p > 0 && comoLoPintaElPos(p * valorPorPunto) !== money(p * valorPorPunto)) p--
+  // Codex r2/r3: el POS arranca en este número y pinta `puntos × tasa` con `%.2f`, que redondea el decimal escrito; el canje
+  // redondea el binario. En un empate de medio centavo pueden diferir en 1 centavo hacia los dos lados (50 × 0.0201: pinta $1.01 y
+  // descuenta $1.00; 250 × 0.0059: pinta $1.47 y descuenta $1.48). Sólo se baja un punto cuando la pantalla prometería MÁS de lo
+  // que se descuenta, y nunca por debajo del mínimo: un canje válido no se apaga por un centavo de pantalla (la pantalla de ANDROID
+  // es la que debe redondear como el canje: tarjeta aparte en el pizarrón).
+  while (p - 1 >= Math.max(1, minimo) && comoLoPintaElPos(p * valorPorPunto) > money(p * valorPorPunto)) p--
   return p
 }
 
@@ -166,7 +168,7 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   const maxRedeemableValue = redeemableBase === null ? balanceValue : puntosQueSeCanjean(balance, redemptionRate, redeemableBase).monto
   // Points that produce that value — never more than the customer owns, and never more than the canje would use: with these points
   // the canje is not capped, so it discounts `money(points × rate)` and burns exactly them.
-  const maxRedeemablePoints = puntosQueCaben(maxRedeemableValue, redemptionRate, balance)
+  const maxRedeemablePoints = puntosQueCaben(maxRedeemableValue, redemptionRate, balance, config.minPointsRedeem)
 
   return {
     customerId: customer.id,

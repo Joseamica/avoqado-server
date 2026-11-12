@@ -169,14 +169,48 @@ describe('puntosQueCaben — lo que ANDROID pinta al abrir es lo que se descuent
     expect(puntosQueCaben(1, 0.0201, 500)).toBe(49)
   })
 
-  it('barrido: el máximo ofrecido se pinta igual que lo que descuenta el canje', () => {
-    for (const tasa of [0.01, 0.0149, 0.0201, 0.05, 0.1, 0.125, 0.3333, 1, 1.5, 7]) {
-      for (const valor of [0.01, 0.3, 1, 1.5, 9.99, 95.5, 223, 1234.56]) {
-        const p = puntosQueCaben(valor, tasa, 100000)
-        const canje = puntosQueSeCanjean(p, tasa, valor)
-        if (p > 0) expect(comoAndroid(p * tasa)).toBe(canje.monto)
+  it('tasa 0.0059, mínimo 250 y saldo 250 (Codex r3): se ofrecen los 250 y el botón sigue prendido', () => {
+    // 250 × 0.0059 = 1.4749999999999999: ANDROID pinta $1.47 y el canje descuenta $1.48 (de menos en pantalla, nunca de más).
+    expect(puntosQueCaben(100, 0.0059, 250, 250)).toBe(250)
+    expect(puntosQueSeCanjean(250, 0.0059, 100)).toEqual({ puntos: 250, monto: 1.48 })
+  })
+
+  it('el ajuste del empate nunca baja del mínimo, aunque la pantalla diga un centavo de más', () => {
+    expect(puntosQueCaben(1, 0.0201, 500, 50)).toBe(50)
+    expect(puntosQueCaben(1, 0.0201, 500, 49)).toBe(49)
+  })
+
+  /**
+   * Pasada exhaustiva de la familia «redondeo» (las tres rondas de Codex fueron de ella): tasas de 0.0001 a 0.06 de diezmilésimo en
+   * diezmilésimo, más tasas comunes; cuentas con centavos; mínimos y saldos que caen justo en el borde. Tres reglas a la vez:
+   *   1. con el máximo ofrecido el canje no topa (quema exactamente esos puntos y descuenta su valor redondeado);
+   *   2. si el canje exacto alcanza el mínimo, la caja deja canjear (nunca se apaga por el redondeo);
+   *   3. la pantalla de ANDROID no promete más de lo que se descuenta, salvo que bajar un punto deje al cliente bajo el mínimo.
+   */
+  it('barrido exhaustivo: el canje no topa, nunca se apaga un canje válido y la pantalla no promete de más', () => {
+    const tasas = [...Array.from({ length: 600 }, (_, i) => (i + 1) / 10000), 0.0149, 0.0201, 0.0059, 0.125, 0.3333, 1, 1.5, 7]
+    const valores = [0.01, 0.3, 0.99, 1, 1.47, 1.5, 9.99, 95.5, 223, 1234.56]
+    let casos = 0
+    for (const tasa of tasas) {
+      for (const valor of valores) {
+        const exacto = puntosQueCaben(valor, tasa, Number.MAX_SAFE_INTEGER) // sin saldo ni mínimo: el mayor que el canje no topa
+        for (const saldo of [1, exacto - 1, exacto, exacto + 1, 1_000_000].filter(n => n >= 1)) {
+          for (const minimo of [1, Math.min(saldo, exacto), Math.min(saldo, exacto) - 1].filter(n => n >= 1)) {
+            casos++
+            const p = puntosQueCaben(valor, tasa, saldo, minimo)
+            const tope = Math.min(saldo, exacto)
+            if (p > 0) {
+              const canje = puntosQueSeCanjean(p, tasa, valor)
+              expect(canje).toEqual({ puntos: p, monto: Math.round(p * tasa * 100) / 100 }) // 1
+              if (p - 1 >= minimo) expect(comoAndroid(p * tasa)).toBeLessThanOrEqual(canje.monto) // 3
+            }
+            if (tope >= minimo) expect(p).toBeGreaterThanOrEqual(minimo) // 2
+            expect(p).toBeLessThanOrEqual(tope)
+          }
+        }
       }
     }
+    expect(casos).toBeGreaterThan(20000)
   })
 })
 
