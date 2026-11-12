@@ -141,6 +141,51 @@ describe('D19 · el abono devuelto vuelve a deberse (Postgres)', () => {
     expect(candidatas.map(c => c.id)).not.toContain(order.id)
   })
 
+  it('🔴 revisión de la Mac (12-nov): devolver POR ARTÍCULOS un producto de $30 de una cuenta que todavía debe NO reabre (es devolución de producto, no de abono): sigue faltando $50, no $80', async () => {
+    // Cuenta de $100 con dos productos ($70 + $30), abono de $50. Se devuelve el producto de $30 por artículos: el negocio
+    // conserva $20 y los productos que quedan valen $70 ⇒ faltan $50. Si reabriera, pediría $80 (cobraría $100 netos por $70).
+    const { order, abono } = await cuentaConAbono(venueId, staffId)
+    const producto = testData.products[0]
+    await prisma.orderItem.create({
+      data: {
+        orderId: order.id,
+        productId: producto.id,
+        productName: producto.name,
+        quantity: 1,
+        unitPrice: d(70),
+        taxAmount: d(0),
+        total: d(70),
+      },
+    })
+    const devuelto = await prisma.orderItem.create({
+      data: {
+        orderId: order.id,
+        productId: producto.id,
+        productName: producto.name,
+        quantity: 1,
+        unitPrice: d(30),
+        taxAmount: d(0),
+        total: d(30),
+      },
+    })
+
+    const r = await issueRefund({
+      venueId,
+      paymentId: abono.id,
+      items: [{ orderItemId: devuelto.id, quantity: 1 }],
+      reason: 'RETURNED_GOODS',
+      staffId,
+    })
+
+    const fila = await prisma.payment.findUniqueOrThrow({ where: { id: r.refundId } })
+    expect(fila.amount.toString()).toBe('-30')
+    expect(fila.reopenedAmount).toBeNull()
+    expect(fila.reopenedTipAmount).toBeNull()
+    const { guardado, calculado } = await saldoDe(venueId, order.id)
+    expect([guardado.paidAmount.toString(), guardado.remainingBalance.toString(), guardado.paymentStatus]).toEqual(['50', '50', 'PARTIAL'])
+    expect(calculado.remainingBalance.toString()).toBe('50')
+  })
+
   it('REGRESIÓN 18-ago: una venta CERRADA (PAID) que se reembolsa sigue cerrada y no reabre nada', async () => {
     const { pago } = await sembrarCobro({ venueId, staffId, saleCents: 10000 })
 

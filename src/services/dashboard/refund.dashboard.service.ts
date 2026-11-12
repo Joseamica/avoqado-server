@@ -680,6 +680,7 @@ interface WriteRefundBase {
   skipNegativeCostObligation?: boolean
   /**
    * D19 (founder 10-nov «A»): si la cuenta todavía debía, lo devuelto vuelve a deberse (`fijarSaldoReabiertoEnTx`). Default `true`.
+   * Un reembolso con `refundedItems` nunca reabre (devolución de producto, revisión de la Mac del 12-nov), aunque esto diga `true`.
    * `false` sólo donde el reembolso NO es un abono que se regresa: el reverso del saldo de regalo que cancela la cuenta en la misma
    * transacción, y el ajuste de precio del proveedor de reparto (la plataforma bajó lo que cobra; nadie va a pagar la diferencia).
    */
@@ -1036,8 +1037,11 @@ export async function writeRefundInTx(
   // 🔴 D19 (founder 10-nov «A»): si la cuenta todavía debía, el abono devuelto vuelve a deberse. Se decide AQUÍ, una vez, con la
   // cuenta ya bloqueada (`bloquearCobroParaReembolso`) y sus cobros de este momento; reescribe lo guardado de la cuenta en esta
   // misma transacción. Una venta cerrada o cubierta no cambia (18-ago). Un replay por llave ya regresó arriba: no corre dos veces.
+  // 🔴 Revisión de la Mac (12-nov): un reembolso POR ARTÍCULOS es devolución de producto, no de un abono. El subtotal de la cuenta
+  // no baja, así que reabrir volvería a cobrar el producto devuelto (cuenta $100 con un abono de $50: devolver un artículo de $30
+  // pedía $80 por $70 de productos; sin reabrir faltan $50, lo correcto). Con artículos nunca se reabre.
   const saldoReabierto =
-    input.reabreSaldo === false
+    input.reabreSaldo === false || input.refundedItems.length > 0
       ? undefined
       : await fijarSaldoReabiertoEnTx(tx, {
           venueId: input.venueId,
