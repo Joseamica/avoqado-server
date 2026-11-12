@@ -3093,6 +3093,57 @@ test('Task4 loyalty receipt keeps exact balance after later customer changes', a
     data: { customerId: c.id, points: 1000, discountAmount: 10 },
   })
 })
+test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CHANGED sin quemar (operación y plano); con la oferta de ahora, canjea', async () => {
+  await prisma.loyaltyConfig.upsert({
+    where: { venueId },
+    create: { venueId, active: true, minPointsRedeem: 100, redemptionRate: 0.01 },
+    update: { active: true, minPointsRedeem: 100, redemptionRate: 0.01 },
+  })
+  const c = await prisma.customer.create({ data: { venueId, firstName: 'Candado', loyaltyPoints: 20000 } }),
+    o = await plainOrder()
+  await ligarCliente(o.id, c.id)
+  // Otra caja dejó la cuenta con $1 por descontar; la tablet todavía enseña 1000 puntos por $10.
+  await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 99 } })
+  const body = { customerId: c.id, points: 1000, expectedDiscountAmount: 10 }
+  const i = operationInput({
+    action: 'redeemLoyaltyPoints',
+    refs: { orderId: o.id, customerId: c.id },
+    payload: { points: 1000, expectedDiscountAmount: 10 },
+  })
+  const r = await callHttp(i, 'post', `/orders/${o.id}/loyalty/redeem`, body)
+  expect(r.status).toBe(409)
+  expect(r.body).toMatchObject({ success: false, code: 'LOYALTY_OFFER_CHANGED' })
+  expect(r.body.message).toContain('100 puntos por $1.00')
+  expect((await stored(i))!.status).toBe('REJECTED')
+  const otraVez = await callHttp(i, 'post', `/orders/${o.id}/loyalty/redeem`, body)
+  expect(otraVez.status).toBe(409)
+  expect(otraVez.body.code).toBe('LOYALTY_OFFER_CHANGED')
+
+  const plano = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send(body)
+  expect(plano.status).toBe(409)
+  // (este app de prueba no copia `details`; el de producción, `app.ts`, sí los manda)
+  expect(plano.body).toMatchObject({ code: 'LOYALTY_OFFER_CHANGED' })
+  expect(plano.body.message).toContain('100 puntos por $1.00')
+  expect((await prisma.customer.findUniqueOrThrow({ where: { id: c.id } })).loyaltyPoints).toBe(20000)
+  expect(await prisma.loyaltyTransaction.count({ where: { orderId: o.id } })).toBe(0)
+  expect(await prisma.orderDiscount.count({ where: { orderId: o.id } })).toBe(0)
+
+  const malo = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 'diez' })
+  expect(malo.status).toBe(400)
+
+  const bien = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(bien.status).toBe(200)
+  expect(bien.body.data).toMatchObject({ pointsRedeemed: 100, discountAmount: 1, newBalance: 19900 })
+})
 test('Task4 remove discount stores original refund amount and created ADJUST id once', async () => {
   const { redeemPointsToOrder } = await import('@/services/mobile/loyalty.mobile.service')
   await prisma.loyaltyConfig.upsert({

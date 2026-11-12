@@ -10,7 +10,7 @@ import { adjustPoints, getLoyaltyTransactions, updateLoyaltyConfig } from '@/ser
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
-import { previaDelCanjeEnCuenta, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { OFERTA_DE_CANJE_CAMBIO, previaDelCanjeEnCuenta, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -348,8 +348,16 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
       points: z.number().int().positive().describe('Points to redeem (positive integer)'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+      expectedDiscount: z
+        .number()
+        .finite()
+        .nonnegative()
+        .optional()
+        .describe(
+          "With confirm:true, pass the preview's `discount` here: the check is then redeemed only if it still gives exactly that (if it changed, nothing is redeemed and you get the new offer)",
+        ),
     },
-    async ({ venueId, orderId, search, points, confirm }) => {
+    async ({ venueId, orderId, search, points, confirm, expectedDiscount }) => {
       const base = guard.venueFilter(venueId)
       guard.requirePermission('orders:update', venueId)
       const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
@@ -398,7 +406,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
               newBalance: status.balance - wouldBurn,
               minPointsRedeem: status.minPointsRedeem,
             },
-            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true para aplicar.`,
+            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true y expectedDiscount: ${previa.monto} para aplicar exactamente esto (si la cuenta cambió, no se canjea y te dice la oferta nueva).`,
           })
         } catch (err) {
           return text({ ok: false, error: (err as Error).message })
@@ -406,7 +414,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       }
 
       try {
-        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId)
+        // D18: con el monto de la previa, el mismo candado que la tablet (si la cuenta cambió, no se canjea).
+        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId, expectedDiscount)
         await auditMcpWrite(scope, {
           action: 'LOYALTY_POINTS_REDEEMED',
           entity: 'Order',
@@ -423,7 +432,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           orderTotal: result.order.total,
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        const code = (err as { code?: string }).code
+        return text({ ok: false, ...(code === OFERTA_DE_CANJE_CAMBIO ? { code } : {}), error: (err as Error).message })
       }
     },
   )
