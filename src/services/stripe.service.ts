@@ -24,7 +24,7 @@ import { daAcceso } from './access/ventanaDeAcceso'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { ventaSueltaAbierta } from './access/ventaSuelta'
-import { PREMIUM_ONLY_SIN_CATALOGO } from './access/basePlan.service'
+import { CODIGOS_DE_PILOTO, PREMIUM_ONLY_SIN_CATALOGO } from './access/basePlan.service'
 import {
   avisarConflictoCreado,
   cerrarConflictoEntregado,
@@ -161,6 +161,12 @@ export async function getOrCreateStripeCustomer(
 }
 
 /**
+ * Las funciones que viven en Stripe: las activas, menos los códigos de piloto (D5 · bloque P), que no se venden y nunca llevan
+ * producto ni precio. El arranque (`stripe-sync.startup.ts`) cuenta con el mismo filtro.
+ */
+const funcionesPorSincronizar = () => ({ active: true, code: { notIn: [...CODIGOS_DE_PILOTO] } })
+
+/**
  * Sync features to Stripe products and prices
  * Creates or updates Stripe products/prices for each feature
  *
@@ -168,7 +174,7 @@ export async function getOrCreateStripeCustomer(
  */
 export async function syncFeaturesToStripe(): Promise<Feature[]> {
   const features = await prisma.feature.findMany({
-    where: { active: true },
+    where: funcionesPorSincronizar(),
   })
 
   logger.info(`🔄 Syncing ${features.length} features to Stripe...`)
@@ -255,7 +261,7 @@ export async function syncFeaturesToStripe(): Promise<Feature[]> {
 
   // Return updated features
   return prisma.feature.findMany({
-    where: { active: true },
+    where: funcionesPorSincronizar(),
   })
 }
 

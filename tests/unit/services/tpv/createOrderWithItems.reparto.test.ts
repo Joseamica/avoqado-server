@@ -249,7 +249,10 @@ describe('/tpv: descuento libre que deja los productos en $0 ⇒ cortesía', () 
 
   it('sin permiso de cortesía ⇒ 403 y no crea la venta', async () => {
     armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
-    await expect(venta({ discount: 100, total: 0 })).rejects.toMatchObject({ statusCode: 403, message: 'No tienes permiso para dar cortesías' })
+    await expect(venta({ discount: 100, total: 0 })).rejects.toMatchObject({
+      statusCode: 403,
+      message: 'No tienes permiso para dar cortesías',
+    })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -290,5 +293,109 @@ describe('/tpv: descuento libre que deja los productos en $0 ⇒ cortesía', () 
     await venta({ discount: 99.99, total: 0.01 })
     expect(creadas[0]).toMatchObject({ amount: new Prisma.Decimal(99.99) })
     expect(creadas[0].authorizedById).toBeUndefined()
+  })
+})
+
+// hz:f34960c5:D5: el autor de un descuento o cortesía de «Cobrar» es quien está en SESIÓN (`performedBy`), no el vendedor que la
+// terminal eligió en el selector (`staffId`). El vendedor sigue siendo el de la venta y queda como nota en la bitácora.
+describe('/tpv D5: autor = la sesión, no el vendedor elegido', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service') as { logAction: jest.Mock }
+  const ventaCompleta = (extra: Record<string, unknown>) => {
+    armarTx([
+      { id: 'oi-1', total: 100, discountAmount: 10, orderPromotionId: null },
+      { id: 'oi-2', total: 50, discountAmount: 50, orderPromotionId: null },
+      { id: 'oi-3', total: 50, discountAmount: 0, orderPromotionId: null },
+    ])
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      table: null,
+      payments: [],
+      items: [{ id: 'oi-2', isCortesia: true, total: 50, cortesiaReason: 'Invitación' }],
+    } as any)
+    return createOrderWithItems('venue-1', {
+      items: [
+        { productId: 'cafe', quantity: 1, unitPrice: 100, itemDiscountId: 'art10' },
+        { productId: 'pan', quantity: 1, unitPrice: 50, isCortesia: true, cortesiaReason: 'Invitación' },
+        { productId: 'jugo', quantity: 1, unitPrice: 50 },
+      ],
+      orderDiscountId: 'orden20',
+      discount: 20,
+      staffId: 'staff-1',
+      taxAmount: 0,
+      subtotal: 200,
+      total: 120,
+      tip: 0,
+      ...extra,
+    } as any)
+  }
+
+  it('🔴 sesión A ≠ vendedor B: las filas son de la membresía de A; OrderAction y bitácora de la cortesía, de A; B como nota', async () => {
+    prismaMock.staffVenue.findFirst.mockImplementation((async ({ where }: any) =>
+      where.staffId === 'user-A' && where.venueId === 'venue-1' && where.active === true ? { id: 'sv-A' } : null) as any)
+
+    await ventaCompleta({ performedBy: 'user-A', canCompItems: true })
+
+    expect(creadas).toHaveLength(3)
+    for (const fila of creadas) expect(fila.appliedById).toBe('sv-A')
+    expect(tx.orderAction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ performedById: 'user-A' }) })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ITEM_COMPED',
+        entity: 'Order',
+        entityId: 'order-1',
+        venueId: 'venue-1',
+        staffId: 'user-A',
+        data: expect.objectContaining({ itemIds: ['oi-2'], amount: 50, vendedorSegunElAparato: 'staff-1' }),
+      }),
+    )
+    // La venta sigue siendo del vendedor.
+    expect((prismaMock.order.create as jest.Mock).mock.calls[0][0].data).toMatchObject({ createdById: 'staff-1', servedById: 'staff-1' })
+  })
+
+  it('el descuento libre (sin catálogo) también es de la sesión', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-A' } as any)
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    await createOrderWithItems('venue-1', {
+      items: [{ productId: 'cafe', quantity: 1, unitPrice: 100 }],
+      discount: 15,
+      staffId: 'staff-1',
+      performedBy: 'user-A',
+      taxAmount: 0,
+      subtotal: 100,
+      total: 85,
+      tip: 0,
+    } as any)
+    expect(creadas[0]).toMatchObject({ name: 'Descuento de la cuenta', appliedById: 'sv-A' })
+  })
+
+  it('sesión sin membresía activa (dueño de la organización): las filas quedan sin autor', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    await ventaCompleta({ performedBy: 'user-A', canCompItems: true })
+    for (const fila of creadas) expect(fila.appliedById).toBeNull()
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', staffId: 'user-A' }))
+  })
+
+  it('la sesión ES el vendedor: como hoy (su membresía ya validada, sin otra lectura) y sin nota', async () => {
+    await ventaCompleta({ performedBy: 'staff-1', canCompItems: true })
+    for (const fila of creadas) expect(fila.appliedById).toBe('sv-1')
+    expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+    const comp = logAction.mock.calls.find(c => c[0].action === 'ITEM_COMPED')![0]
+    expect(comp).toMatchObject({ staffId: 'staff-1' })
+    expect(comp.data).not.toHaveProperty('vendedorSegunElAparato')
+  })
+
+  it('una venta sin cortesía no escribe ITEM_COMPED', async () => {
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    await createOrderWithItems('venue-1', {
+      items: [{ productId: 'cafe', quantity: 1, unitPrice: 100 }],
+      staffId: 'staff-1',
+      performedBy: 'user-A',
+      taxAmount: 0,
+      subtotal: 100,
+      total: 100,
+      tip: 0,
+    } as any)
+    expect(logAction.mock.calls.filter(c => c[0].action === 'ITEM_COMPED')).toHaveLength(0)
   })
 })

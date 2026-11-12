@@ -3702,6 +3702,12 @@ export interface CashPaymentInput {
   terminalSerialNumber?: string | null
   /** D1: la copia de los renglones que imprimió el cobro (sin validar; ver `copiaQueCuadra`). */
   lineasDelTicket?: unknown
+  /**
+   * D5 · bloque P: lo que la tablet creía que debía la cuenta ANTES de este cobro sin red (`expectedBalanceBeforeCents` del
+   * `PAY_CASH`, ya validado por el reducer) y el aparato del lote. Sólo deja rastro (`COBRO_SIN_RED_CON_DIFERENCIA`) si el saldo
+   * del servidor al aplicarlo difiere en más de 1 centavo; nunca cambia el cobro.
+   */
+  saldoEsperadoSinRed?: { antesCents: number; deviceId: string | null }
 }
 
 export interface CashPaymentResponse {
@@ -4079,6 +4085,8 @@ export interface AbonoEnTx {
   /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
   aplicadoCents: number
   cambioCents: number
+  /** D5 · bloque P: lo que la cuenta debía al recibir este dinero (bajo el candado de la orden), en centavos. */
+  saldoAntesCents: number
   /** Rappi 2b (T5b): la propina y lo de terceros que se REGISTRARON (el reparto del servidor), en centavos. */
   propinaCents: number
   tercerosCents: number
@@ -4757,6 +4765,7 @@ export async function registrarAbonoEnTx(
     reabiertaDeCancelada,
     aplicadoCents,
     cambioCents,
+    saldoAntesCents: pesosToCents(saldoAntes.remainingBalance.toNumber()),
     propinaCents: pesosToCents(tipDecimal),
     tercerosCents: repartoAntes && countsAsDrawerCash ? tercerosCents : 0,
     areaTicketOrder: areaFinalization.areaTicketOrder,
@@ -5180,6 +5189,27 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   // D10-B: efectivo nuevo (en vivo o de la cola) sobre una venta con la tarjeta en duda. Después del commit y sin esperarlo.
   void avisarEfectivoConTarjetaEnDuda(payment)
+
+  // 🔴 D5 · bloque P: la tablet cobró la mesa sin red creyendo otro saldo (otra tablet le agregó o le cobró algo, o una escritura
+  // propia de desenlace incierto). Sólo rastro para el gerente, después del commit: el cobro ya quedó como siempre. No reemplaza al
+  // aviso de sobrepago. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. Montos en pesos, como la bitácora.
+  const esperado = input.saldoEsperadoSinRed
+  if (esperado && Math.abs(esperado.antesCents - paymentResult.saldoAntesCents) > 1) {
+    void (await import('../dashboard/activity-log.service')).logAction({
+      action: 'COBRO_SIN_RED_CON_DIFERENCIA',
+      entity: 'Order',
+      entityId: orderId,
+      venueId,
+      staffId: effectiveStaffId ?? null,
+      data: {
+        paymentId: payment.id,
+        saldoEsperado: esperado.antesCents / 100,
+        saldoDelServidor: paymentResult.saldoAntesCents / 100,
+        diferencia: (esperado.antesCents - paymentResult.saldoAntesCents) / 100,
+        aparato: esperado.deviceId,
+      },
+    })
+  }
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
   avisarSiLlegoConProblema(payment.posRawData, balance)

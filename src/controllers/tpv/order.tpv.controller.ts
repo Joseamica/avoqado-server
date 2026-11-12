@@ -229,6 +229,8 @@ export async function compItems(
       reason,
       staffId,
       notes,
+      // D5: el autor es la sesión; `staffId` del cuerpo sigue siendo el vendedor elegido en la terminal.
+      performedBy: req.authContext?.userId,
     })
 
     res.status(200).json({
@@ -289,6 +291,8 @@ export async function applyDiscount(
         itemIds,
         expectedVersion,
         puedeRegalar: !!cortesia,
+        // D5: el autor es la sesión; `staffId` del cuerpo sigue siendo el vendedor elegido en la terminal.
+        performedBy: req.authContext?.userId,
       }),
     )
     if (!updatedOrder) return

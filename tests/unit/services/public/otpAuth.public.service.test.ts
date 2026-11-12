@@ -104,6 +104,55 @@ describe('OTP Auth Public Service', () => {
     })
   })
 
+  // D17 (tienda híbrida): si el proveedor no aceptó el código, la página no puede decir «te lo enviamos». El código se manda a
+  // CUALQUIER contacto sin buscar su ficha, así que «no salió» no dice si alguien tiene cuenta.
+  describe('D17: el código que no salió', () => {
+    beforeEach(() => {
+      prismaMock.otpChallenge.count.mockResolvedValue(0)
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 0 })
+      prismaMock.otpChallenge.create.mockResolvedValue({ id: 'otp-1' } as any)
+      prismaMock.otpChallenge.deleteMany.mockResolvedValue({ count: 1 })
+    })
+
+    it('WhatsApp falla ⇒ 503 OTP_SEND_FAILED «por WhatsApp», y el reto se borra (no gasta los 30 s ni los 5 por hora)', async () => {
+      ;(sendOtpWhatsApp as jest.Mock).mockRejectedValueOnce(new Error('Error al enviar WhatsApp: (#131000) Something went wrong'))
+
+      await expect(requestOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'OTP_SEND_FAILED',
+        message: 'No pudimos mandar el código por WhatsApp. Intenta en un momento.',
+      })
+      expect(prismaMock.otpChallenge.deleteMany).toHaveBeenCalledWith({ where: { id: 'otp-1' } })
+    })
+
+    it('el correo no sale ⇒ 503 OTP_SEND_FAILED «por correo», y el reto se borra', async () => {
+      ;(emailService.sendOtpCodeEmail as jest.Mock).mockResolvedValueOnce(false)
+
+      await expect(requestOtp({ venueId: VENUE_ID, channel: 'email', destination: 'Ana@Correo.com' })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'OTP_SEND_FAILED',
+        message: 'No pudimos mandar el código por correo. Intenta en un momento.',
+      })
+      expect(prismaMock.otpChallenge.deleteMany).toHaveBeenCalledWith({ where: { id: 'otp-1' } })
+    })
+
+    it('si el borrado también falla, sale el MISMO 503 (el intento queda contado, como antes)', async () => {
+      ;(sendOtpWhatsApp as jest.Mock).mockRejectedValueOnce(new Error('No se pudo enviar el mensaje de WhatsApp: fetch failed'))
+      prismaMock.otpChallenge.deleteMany.mockRejectedValueOnce(new Error('P1001'))
+
+      await expect(requestOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'OTP_SEND_FAILED',
+      })
+    })
+
+    it('regresión: si salió, responde {ok:true} y el reto NO se borra', async () => {
+      await expect(requestOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW })).resolves.toEqual({ ok: true })
+      await expect(requestOtp({ venueId: VENUE_ID, channel: 'email', destination: 'ana@correo.com' })).resolves.toEqual({ ok: true })
+      expect(prismaMock.otpChallenge.deleteMany).not.toHaveBeenCalled()
+    })
+  })
+
   // ==========================================
   // verifyOtp
   // ==========================================

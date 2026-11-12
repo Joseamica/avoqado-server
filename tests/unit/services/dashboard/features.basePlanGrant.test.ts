@@ -237,4 +237,74 @@ describe('getVenueFeatureStatus tier-aware base-plan blanket grant', () => {
     // ...and CFDI is not offered as a locked upsell card.
     expect(status.availableFeatures.find(f => f.code === 'CFDI')).toBeUndefined()
   })
+
+  /**
+   * 🔴 D5 · R5-3 (rulings-r5.md): el estado de funciones presenta como concedida a un negocio EXENTO cualquier función activa.
+   * Con el código del piloto eso mentía: el diálogo del superadmin la enseñaba prendida y no dejaba activarla, mientras ANDROID
+   * (que lee la lista exacta) la tenía apagada. El piloto nunca se concede por exención: sale apagado hasta la concesión real.
+   */
+  describe('código de piloto (MESAS_SIN_RED) en un negocio exento', () => {
+    const PILOTO = {
+      id: 'feat_mesas_sin_red',
+      code: 'MESAS_SIN_RED',
+      name: 'Mesas: cobrar sin internet (piloto)',
+      description: 'Piloto',
+      monthlyPrice: '0.00',
+      stripeProductId: null,
+      stripePriceId: null,
+      active: true,
+    }
+    const venueExento = (features: any[]) =>
+      prismaMock.venue.findUnique.mockResolvedValue({
+        id: VENUE_ID,
+        name: 'Test Venue',
+        stripeCustomerId: null,
+        stripePaymentMethodId: null,
+        seatCapExempt: true,
+        organization: { seatCapExempt: false },
+        features,
+      } as any)
+
+    beforeEach(() => {
+      prismaMock.feature.findMany.mockResolvedValue([...CATALOG, PILOTO] as any)
+      prismaMock.venueFeature.findMany.mockResolvedValue([] as any)
+    })
+
+    it('🔴 sin concesión real sale APAGADO (en availableFeatures) aunque las demás funciones salgan concedidas por la exención', async () => {
+      venueExento([])
+
+      const status = await getVenueFeatureStatus(VENUE_ID)
+
+      expect(status.activeFeatures.find(f => f.feature.code === 'MESAS_SIN_RED')).toBeUndefined()
+      expect(status.availableFeatures.find(f => f.code === 'MESAS_SIN_RED')).toBeDefined()
+      // Control: la exención sigue concediendo lo demás como siempre.
+      expect(status.activeFeatures.find(f => f.feature.code === 'LOYALTY_PROGRAM')).toMatchObject({ grantedByBasePlan: true })
+    })
+
+    it('con la concesión real del superadmin sale PRENDIDO con su fila real (el diálogo la puede apagar)', async () => {
+      venueExento([
+        {
+          id: 'vf_piloto',
+          venueId: VENUE_ID,
+          featureId: PILOTO.id,
+          feature: PILOTO,
+          active: true,
+          monthlyPrice: '0.00',
+          startDate: new Date(),
+          endDate: null,
+          stripeSubscriptionId: null,
+          stripePriceId: null,
+          gracePeriodEndsAt: null,
+          suspendedAt: null,
+        },
+      ])
+
+      const status = await getVenueFeatureStatus(VENUE_ID)
+
+      const piloto = status.activeFeatures.filter(f => f.feature.code === 'MESAS_SIN_RED')
+      expect(piloto).toHaveLength(1)
+      expect(piloto[0]).toMatchObject({ id: 'vf_piloto', accessGranted: true })
+      expect(status.availableFeatures.find(f => f.code === 'MESAS_SIN_RED')).toBeUndefined()
+    })
+  })
 })

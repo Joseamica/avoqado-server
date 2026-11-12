@@ -64,6 +64,13 @@ describe('get_activity_log', () => {
     expect(description).toContain('CLAIM_LOST')
   })
 
+  it('documents the offline table charge whose expected balance did not match (D5 · bloque P)', () => {
+    const description = descriptions.get('get_activity_log')
+
+    expect(description).toContain('COBRO_SIN_RED_CON_DIFERENCIA')
+    for (const key of ['data.saldoEsperado', 'data.saldoDelServidor', 'data.diferencia', 'data.aparato']) expect(description).toContain(key)
+  })
+
   it('returns logs scoped to the requested venue (caller has activity:read)', async () => {
     mockFindMany.mockResolvedValueOnce([
       {

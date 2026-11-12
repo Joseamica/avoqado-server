@@ -154,7 +154,7 @@ describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () 
       data: { couponId: 'c1', discountName: 'Promo 10', amount: 10, newOrderTotal: 90 },
       message: 'Coupon "PROMO10" applied successfully',
     })
-    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', false)
+    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', false, 'staff-1')
   })
 
   // D14: el servicio decide si el cupón regala; el controlador le pasa si QUIEN LLAMA tiene `orders:comp`.
@@ -165,7 +165,7 @@ describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () 
     await aplicar()
 
     expect(permisoMock).toHaveBeenCalledWith(expect.anything(), 'orders:comp')
-    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', true)
+    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', true, 'staff-1')
   })
 
   it('D14: el 403 de cortesía llega a la TPV con su texto en `error`', async () => {
@@ -206,7 +206,17 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
       .post('/venues/v1/orders/o1/discounts/manual')
       .send({ type: 'COMP', value: 100, reason: 'Invitación', authorizedById: 'id-inventado' })
-    expect(manualMock).toHaveBeenCalledWith('v1', 'o1', 'COMP', 100, 'Invitación', undefined, 'id-inventado', { porPin: 'sv-gerente' })
+    expect(manualMock).toHaveBeenCalledWith(
+      'v1',
+      'o1',
+      'COMP',
+      100,
+      'Invitación',
+      undefined,
+      'id-inventado',
+      { porPin: 'sv-gerente' },
+      'u-cajera',
+    )
   })
 
   it('manual sin acreditación: el servicio no recibe cortesía', async () => {
@@ -247,5 +257,14 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     expect(membresiaMock).toHaveBeenCalledWith('v1', 'staff-1')
     expect(manualMock.mock.calls[0][5]).toBe('sv-1')
     expect(predefinidoMock.mock.calls[0][3]).toBe('sv-1')
+  })
+
+  // hz:f34960c5:D5: la bitácora del manual va a nombre de la sesión (Staff.id); el servicio la recibe del controlador.
+  it('D5: manual pasa el usuario de la sesión para la bitácora', async () => {
+    acreditado.mockReturnValue(false)
+    await request(app({ userId: 'staff-1' }))
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'PERCENTAGE', value: 10, reason: 'x', staffId: 'otro-vendedor' })
+    expect(manualMock.mock.calls[0][8]).toBe('staff-1')
   })
 })
