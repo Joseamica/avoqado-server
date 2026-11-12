@@ -243,6 +243,21 @@ export async function getOrders(
   }))
 }
 
+// Lo que la TPV lee de cada descuento de la cuenta (`OrderDiscountDto`: `type` obligatorio). Recortado a { id, name, amount }
+// (29-jul) la TPV tronaba al releer la venta tras cobrar y la pantalla final decía «Queda por pagar» con lo ya pagado
+// (QA del descuento del cliente en la PAX, 11-nov). Sólo agrega campos: lo que ya iba sigue igual.
+export const SELECT_DESCUENTO_DE_LA_CUENTA = {
+  id: true,
+  name: true,
+  amount: true,
+  orderId: true,
+  discountId: true,
+  couponCodeId: true,
+  type: true,
+  value: true,
+  appliedById: true,
+} as const
+
 /**
  * Get a specific order (order) by ID
  * @param orgId Organization ID (for future authorization)
@@ -319,9 +334,7 @@ export async function getOrder(
       // shape `order.mobile.service.ts::getOrder` already uses (same Prisma
       // relation names, same field selection) — additive only, no existing
       // field removed or renamed.
-      orderDiscounts: {
-        select: { id: true, name: true, amount: true },
-      },
+      orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
       serviceCharges: true,
     },
   })
