@@ -151,6 +151,28 @@ export async function createAppUpdate(req: Request, res: Response) {
     } = req.body
     const esCampo = platform === 'ANDROID_CAMPO'
 
+    // Modo y alcance se validan ANTES de leer y subir el APK: un alta rechazada después de subir reemplazaba el archivo del
+    // mismo nombre que ya estaba publicado (Codex, apps viejas r4).
+    const validUpdateModes = ['NONE', 'BANNER', 'FORCE']
+    if (!validUpdateModes.includes(updateMode)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid updateMode. Must be one of: ${validUpdateModes.join(', ')}`,
+      })
+    }
+    // Validate + normalize audience targeting (defaults to ALL = every terminal)
+    // La app de campo no reporta sucursal ni serie al buscar versiones: una fila VENUES/TERMINALS nunca le llegaría.
+    // Su carril es siempre para todos los celulares.
+    const targeting = esCampo
+      ? { targetType: 'ALL' as const, targetVenueIds: [] as string[], targetTerminalIds: [] as string[] }
+      : normalizeTargeting(req.body)
+    if ('error' in targeting) {
+      return res.status(400).json({ success: false, error: targeting.error })
+    }
+    if (esObligatoriaDirigida(updateMode, targeting.targetType)) {
+      return res.status(400).json({ success: false, error: OBLIGATORIA_SOLO_PARA_TODAS, message: OBLIGATORIA_SOLO_PARA_TODAS })
+    }
+
     // DEBUG: Log what we received
     logger.info(`📥 Received updateMode from request: ${req.body.updateMode}`)
     logger.info(`📥 updateMode after destructuring (with default): ${updateMode}`)
@@ -189,7 +211,11 @@ export async function createAppUpdate(req: Request, res: Response) {
     }
 
     // Validate package name matches environment
-    const packageValidation = validatePackageName(apkMetadata, environment as 'SANDBOX' | 'PRODUCTION', esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV')
+    const packageValidation = validatePackageName(
+      apkMetadata,
+      environment as 'SANDBOX' | 'PRODUCTION',
+      esCampo ? 'ANDROID_CAMPO' : 'ANDROID_TPV',
+    )
     if (!packageValidation.valid) {
       return res.status(400).json({
         success: false,
@@ -303,28 +329,6 @@ export async function createAppUpdate(req: Request, res: Response) {
 
     // Ensure versionCode is an integer
     const versionCodeInt = typeof versionCode === 'string' ? parseInt(versionCode) : versionCode
-
-    // Validate updateMode
-    const validUpdateModes = ['NONE', 'BANNER', 'FORCE']
-    if (!validUpdateModes.includes(updateMode)) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid updateMode. Must be one of: ${validUpdateModes.join(', ')}`,
-      })
-    }
-
-    // Validate + normalize audience targeting (defaults to ALL = every terminal)
-    // La app de campo no reporta sucursal ni serie al buscar versiones: una fila VENUES/TERMINALS nunca le llegaría.
-    // Su carril es siempre para todos los celulares.
-    const targeting = esCampo
-      ? { targetType: 'ALL' as const, targetVenueIds: [] as string[], targetTerminalIds: [] as string[] }
-      : normalizeTargeting(req.body)
-    if ('error' in targeting) {
-      return res.status(400).json({ success: false, error: targeting.error })
-    }
-    if (esObligatoriaDirigida(updateMode, targeting.targetType)) {
-      return res.status(400).json({ success: false, error: OBLIGATORIA_SOLO_PARA_TODAS, message: OBLIGATORIA_SOLO_PARA_TODAS })
-    }
 
     // Create database record (la llave única resuelve dos altas simultáneas: la que pierde es 409, no 500)
     const appUpdate = await prisma.appUpdate.create({
@@ -465,29 +469,44 @@ export async function updateAppUpdate(req: Request, res: Response) {
       return res.status(400).json({ success: false, error: OBLIGATORIA_SOLO_PARA_TODAS, message: OBLIGATORIA_SOLO_PARA_TODAS })
     }
 
-    const updated = await prisma.appUpdate.update({
-      where: { id },
-      data: {
-        ...(releaseNotes !== undefined && { releaseNotes }),
-        ...(updateMode !== undefined && { updateMode: updateMode as UpdateMode }),
-        ...(isActive !== undefined && { isActive }),
-        ...(targeting && {
-          targetType: targeting.targetType,
-          targetVenueIds: targeting.targetVenueIds,
-          targetTerminalIds: targeting.targetTerminalIds,
-        }),
-      },
-      include: {
-        uploadedBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
+    // «Obligatoria = para todas» se cumple en la misma escritura: si otra edición cambió el modo o el alcance entre la lectura
+    // de arriba y aquí, la fila ya no coincide y no se escribe (Codex, apps viejas r4).
+    const guarda =
+      !targeting && updateMode === 'FORCE'
+        ? { targetType: 'ALL' as const }
+        : targeting && targeting.targetType !== 'ALL' && updateMode === undefined
+          ? { updateMode: { not: UpdateMode.FORCE } }
+          : {}
+    let updated
+    try {
+      updated = await prisma.appUpdate.update({
+        where: { id, ...guarda },
+        data: {
+          ...(releaseNotes !== undefined && { releaseNotes }),
+          ...(updateMode !== undefined && { updateMode: updateMode as UpdateMode }),
+          ...(isActive !== undefined && { isActive }),
+          ...(targeting && {
+            targetType: targeting.targetType,
+            targetVenueIds: targeting.targetVenueIds,
+            targetTerminalIds: targeting.targetTerminalIds,
+          }),
+        },
+        include: {
+          uploadedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
           },
         },
-      },
-    })
+      })
+    } catch (error: any) {
+      if (error?.code !== 'P2025') throw error
+      const cambio = 'Esta versión cambió mientras la editabas. Recarga la página y vuelve a intentarlo.'
+      return res.status(409).json({ success: false, error: cambio, message: cambio })
+    }
 
     logger.info(`App update ${id} updated`)
 

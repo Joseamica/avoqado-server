@@ -146,3 +146,33 @@ it('PATCH de una dirigida a obligatoria Y para todas a la vez: se acepta', async
 
   expect(r.status).toBe(200)
 })
+
+// Codex, apps viejas r4: dos ediciones a la vez (una pone obligatoria, otra pone sucursales) leían el mismo estado y las
+// dos pasaban. La regla se cumple en la misma escritura: si la fila cambió en medio, no se escribe.
+it('PATCH a obligatoria sin tocar el alcance: la escritura exige que siga siendo para todas', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'ALL', updateMode: 'BANNER' })
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ updateMode: 'FORCE' })
+
+  expect(r.status).toBe(200)
+  expect(appUpdate.update.mock.calls[0][0].where).toEqual({ id: ROW_ID, targetType: 'ALL' })
+})
+
+it('PATCH a sucursales sin tocar el modo: la escritura exige que no sea obligatoria', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'ALL', updateMode: 'BANNER' })
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ targetType: 'VENUES', targetVenueIds: [V1] })
+
+  expect(r.status).toBe(200)
+  expect(appUpdate.update.mock.calls[0][0].where).toEqual({ id: ROW_ID, updateMode: { not: 'FORCE' } })
+})
+
+it('si otra edición la cambió en medio: 409 con mensaje, no 500', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'ALL', updateMode: 'BANNER' })
+  appUpdate.update.mockRejectedValue(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }))
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ updateMode: 'FORCE' })
+
+  expect(r.status).toBe(409)
+  expect(r.body.message).toMatch(/recarga/i)
+})
