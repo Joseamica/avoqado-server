@@ -24,7 +24,7 @@ import {
   aCentavos,
   comoJson,
   estaRegalado,
-  devolverLoTopado,
+  importesDeLasFilas,
   nuevoRepartoDeCuenta,
   nuevoRepartoDirigido,
   reduccionDeImpuestoCobrado,
@@ -1225,6 +1225,11 @@ export async function removeDiscountFromOrder(
           return { success: false, amount: 0, newOrderTotal: 0, error: 'Discount not found on this order' }
         }
 
+        // W7 A1, rediseño B (founder, 12-nov): quitar en la TPV recalcula IGUAL que quitar en el móvil (`removeOrderDiscountInTransaction`
+        // → `recalculateOrderTotals`): la cabecera es Σ filas, con los % re-derivados y el tope de la cuenta. R7-1, como el móvil: el
+        // resto de cabecera sin fila (orden anterior a B2) se congela en la suya ANTES de quitar; si no, el recálculo lo perdería.
+        await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+
         // P3: devoluciones en ESTA transacción, con el tenant ya bloqueado (Order → Customer/StampReward, el orden de siempre).
         // Hoy el premio quedaba REDEEMED apuntando a una fila borrada y los puntos no volvían.
         const puntos = await refundLoyaltyForOrderDiscount(tx, order.venueId, orderDiscount, staffId)
@@ -1238,21 +1243,15 @@ export async function removeDiscountFromOrder(
         // se re-reparten (siempre) y al final se escriben los totales.
         const devueltoDeLaFila = new Prisma.Decimal(orderDiscount.taxReduction ?? 0)
         if (devueltoDeLaFila.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: devueltoDeLaFila } } })
-        // W7 A1 (Codex r1 #1, r2 #1): aquí no se recalcula; lo que el tope de la cuenta le quitó a un % re-derivado (su `topado`)
-        // vuelve con el lugar que libera esta fila, como si se recalculara, y la cabecera lo suma. Un % que nunca se topó, como hoy.
+        // B: la regla única de los recalculadores sobre lo que queda (un % que el tope dejó abajo de lo suyo vuelve con el lugar que
+        // libera esta fila; uno que nació sobre lo que quedaba se re-deriva como en el móvil).
         const renglones = await renglonesParaReparto(tx, orderId)
         const filas = await filasDeLaOrden(tx, orderId)
-        const devuelto = devolverLoTopado(renglones, filas)
-        const sincronizado = await sincronizarRepartos(tx, orderId, {
-          renglones,
-          filas,
-          montosRederivados: devuelto.montos,
-          topados: devuelto.topados,
-        })
+        const { montosRederivados, descuento } = importesDeLasFilas(renglones, filas)
+        const sincronizado = await sincronizarRepartos(tx, orderId, { renglones, filas, montosRederivados })
 
         // Update order totals
-        // Codex r3 #2: sin nada que devolver, la misma resta de siempre (redondearla movería el cargo % en un centavo).
-        const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount) + devuelto.devueltoCents / 100)
+        const newDiscountAmount = descuento
         const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
         // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
         // not a tip and not a discount). It was omitted here, so removing a discount
@@ -1281,6 +1280,18 @@ export async function removeDiscountFromOrder(
           serviceChargeAmount: newServiceChargeAmount,
           tipAmount: order.tipAmount,
         }).toNumber()
+
+        // B (Codex r5 #1): re-derivar puede BAJAR la cuenta (dos % que nacieron sobre lo que quedaba vuelven a su % de la cuenta). La
+        // TPV, a diferencia del móvil, deja quitar con un abono: si la cuenta quedara abajo de lo ya cobrado, se cobró de más sin
+        // devolución registrada. Se rechaza ANTES de guardar (la transacción revierte devoluciones y borrado) y se dice qué hacer.
+        const cobrado = Number(order.paidAmount ?? 0)
+        if (cobrado > 0 && newTotal < cobrado) {
+          throw new BadRequestError(
+            `Al quitar este descuento los demás se vuelven a calcular y la cuenta quedaría en $${newTotal.toFixed(2)}, menos de los $${cobrado.toFixed(2)} que ya se cobraron. Primero reembolsa lo cobrado y luego quita el descuento.`,
+            'QUITAR_DESCUENTO_BAJO_LO_COBRADO',
+            { totalNuevo: newTotal, cobrado },
+          )
+        }
 
         await tx.order.update({
           where: { id: orderId },

@@ -637,9 +637,11 @@ describe('quitar un descuento (R3-2, P3)', () => {
     await removeDiscountFromOrder(o.id, espejo.id, staffId, venueId) // sincronizarRepartos
     expect(Number((await renglonDe(o.id, cafeId)).discountAmount)).toBe(0)
     const [cuenta] = await filas(o.id)
-    expect(Number(cuenta.amount)).toBe(14) // el motor no recalcula al quitar: importe de hoy
-    expect(cuenta.reparto).toMatchObject({ renglones: { [cafe.id]: 933, [pan.id]: 467 } }) // Codex r1 #8: el mapa viejo también sumaba 14
-    expect(await cabecera(o.id)).toMatchObject({ subtotal: 150, descuento: 14, total: 136 })
+    // W7 A1, rediseño B (founder, 12-nov): quitar en la TPV recalcula IGUAL que el móvil: el 10 % vuelve a ser de la cuenta completa
+    // ($150 ⇒ $15). Antes la TPV no recalculaba y dejaba el importe de hoy ($14, total $136) mientras el móvil cobraba $135.
+    expect(Number(cuenta.amount)).toBe(15)
+    expect(cuenta.reparto).toMatchObject({ renglones: { [cafe.id]: 1000, [pan.id]: 500 } })
+    expect(await cabecera(o.id)).toMatchObject({ subtotal: 150, descuento: 15, total: 135 })
   })
   it('🔴 P3: quitar desde la terminal un canje de puntos devuelve los puntos', async () => {
     await prisma.loyaltyConfig.create({ data: { venueId, active: true, redemptionRate: 0.01, minPointsRedeem: 100 } })

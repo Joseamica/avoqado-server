@@ -2282,15 +2282,10 @@ export async function addItemsToOrder(
       // 🔴 MONEY (auditoría 2026-07-18): misma regla que los demás recalculadores (`importesDeLasFilas`, con P1 acotado):
       // las filas con appliedToItemIds son POR ARTÍCULO y conservan su importe; las líneas de promoción quedan fuera de la
       // base de un % de cuenta; el valor es el DENORMALIZADO de la fila. Repartos sincronizados en esta tx, antes del CAS.
-      const { montosRederivados, descuento, topados } = importesDeLasFilas(allItemsFromDb, orderDiscounts)
+      const { montosRederivados, descuento } = importesDeLasFilas(allItemsFromDb, orderDiscounts)
       let newDiscountAmount = descuento
       // B2b (D16): la sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
-      const sincronizado = await sincronizarRepartos(tx, orderId, {
-        renglones: allItemsFromDb,
-        filas: orderDiscounts,
-        montosRederivados,
-        topados,
-      })
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: allItemsFromDb, filas: orderDiscounts, montosRederivados })
 
       // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
       if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
@@ -2698,15 +2693,10 @@ export async function removeOrderItem(
 
       // 🔴 MONEY (auditoría 2026-07-18): misma regla que addItemsToOrder (`importesDeLasFilas`, con P1 acotado). Sus
       // renglones ya traen el producto (y su categoría). Repartos sincronizados en esta tx, antes de escribir los totales.
-      const { montosRederivados, descuento, topados } = importesDeLasFilas(remainingItems, orderDiscounts)
+      const { montosRederivados, descuento } = importesDeLasFilas(remainingItems, orderDiscounts)
       let newDiscountAmount = descuento
       // B2b (D16): la sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
-      const sincronizado = await sincronizarRepartos(tx, orderId, {
-        renglones: remainingItems,
-        filas: orderDiscounts,
-        montosRederivados,
-        topados,
-      })
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: remainingItems, filas: orderDiscounts, montosRederivados })
 
       // Sin filas, la cabecera de antes menos lo recortado: un espejo retirado no puede volver por la cabecera.
       if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
@@ -3015,8 +3005,8 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       // misma cortesía cobraba distinto en la terminal ($5) que en el móvil ($35).
       const renglones = await renglonesParaReparto(tx, orderId)
       const filas = await filasDeLaOrden(tx, orderId)
-      const { montosRederivados, descuento, topados } = importesDeLasFilas(renglones, filas)
-      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones, filas, montosRederivados, topados })
+      const { montosRederivados, descuento } = importesDeLasFilas(renglones, filas)
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones, filas, montosRederivados })
 
       // 🔴 MONEY: cabecera = Σ filas (con los % re-derivados), SIN tope, como `voidItems`. El total nunca queda negativo: lo topa
       // `computeStoredOrderTotal` (caso de hardware cmsetvfft…: cortesía de toda la cuenta sobre un descuento previo). Topar aquí
@@ -3376,8 +3366,8 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // P13 (2-oct; Codex r2): anular recalcula igual que borrar — los % (de cuenta y dirigidos con ámbito) se re-derivan sobre
       // lo que queda, con la regla única de los recalculadores; sin filas, la cabecera de antes menos lo recortado (P4).
       const filas = await filasDeLaOrden(tx, orderId)
-      const { montosRederivados, descuento, topados } = importesDeLasFilas(remainingItems, filas)
-      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: remainingItems, filas, montosRederivados, topados })
+      const { montosRederivados, descuento } = importesDeLasFilas(remainingItems, filas)
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: remainingItems, filas, montosRederivados })
       const nuevoDescuento =
         filas.length > 0
           ? new Prisma.Decimal(descuento)

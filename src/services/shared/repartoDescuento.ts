@@ -37,11 +37,6 @@ export type RepartoDescuento = {
   tope?: number
   /** La fila participa en D16 (la escribe el motor en B2b, aunque su reducción resulte 0). Ausente = no. */
   reduceImpuesto?: boolean
-  /**
-   * W7 A1: centavos que el tope de la cuenta (`importesDeLasFilas`) le quitó a este % re-derivado en el último recálculo. Quitar otra
-   * fila sin recalcular (la TPV) se los devuelve con el lugar que libera (`devolverLoTopado`). Ausente = nada.
-   */
-  topado?: number
 }
 
 /** El ámbito de un % dirigido del motor: sus productos o categorías. */
@@ -195,7 +190,6 @@ export function leerReparto(valor: unknown): RepartoDescuento | null {
     return null
   if (r.tope !== undefined && !(typeof r.tope === 'number' && Number.isFinite(r.tope) && r.tope >= 0)) return null
   if (r.reduceImpuesto !== undefined && typeof r.reduceImpuesto !== 'boolean') return null
-  if (r.topado !== undefined && !(typeof r.topado === 'number' && Number.isInteger(r.topado) && r.topado >= 0)) return null
   if (!r.renglones || typeof r.renglones !== 'object' || Array.isArray(r.renglones)) return null
   const renglones: Record<string, number> = {}
   for (const [id, c] of Object.entries(r.renglones as Record<string, unknown>)) {
@@ -213,11 +207,10 @@ export function leerReparto(valor: unknown): RepartoDescuento | null {
     ...(ambito ? { ambito: { productos: ambito.productos as string[], categorias: ambito.categorias as string[] } } : {}),
     ...(typeof r.tope === 'number' ? { tope: r.tope } : {}),
     ...(typeof r.reduceImpuesto === 'boolean' ? { reduceImpuesto: r.reduceImpuesto } : {}),
-    ...(typeof r.topado === 'number' && r.topado > 0 ? { topado: r.topado } : {}),
   }
 }
 
-/** Mismo contenido, sin importar el orden de llaves ni de listas. Compara también `tope`, `reduceImpuesto`, `ambito` (preflight R-7) y `topado`. */
+/** Mismo contenido, sin importar el orden de llaves ni de listas. Compara también `tope`, `reduceImpuesto` y `ambito` (preflight R-7). */
 export function mismoReparto(a: RepartoDescuento | null, b: RepartoDescuento | null): boolean {
   if (!a || !b) return a === b
   const ordenada = (x?: string[] | null) => [...(x ?? [])].sort(porId)
@@ -230,7 +223,6 @@ export function mismoReparto(a: RepartoDescuento | null, b: RepartoDescuento | n
     a.espejo === b.espejo &&
     a.tope === b.tope &&
     a.reduceImpuesto === b.reduceImpuesto &&
-    a.topado === b.topado &&
     !a.ambito === !b.ambito &&
     igualLista(ordenada(a.ambito?.productos), ordenada(b.ambito?.productos)) &&
     igualLista(ordenada(a.ambito?.categorias), ordenada(b.ambito?.categorias)) &&
@@ -297,6 +289,27 @@ export function estaRegalado(r: RenglonParaReparto): boolean {
 const aPesosRedondeados = (x: number) => Math.round(x * 100) / 100
 
 /**
+ * Lo que la regla de los recalculadores le da a una fila SIN el tope de la cuenta: un % de cuenta, sobre los renglones sin promoción;
+ * un % dirigido con ámbito, sobre los de su ámbito (P1); en los dos sin lo ya regalado (R8) y con el tope del catálogo (R6). `null` =
+ * la fila no se re-deriva (conserva su importe).
+ */
+function importeSinTope(renglones: RenglonParaReparto[], fila: FilaParaReparto): number | null {
+  // R8 (founder, 2-oct): la base de un % —de cuenta o dentro de su ámbito— deja fuera lo ya regalado.
+  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + Number(x.total ?? 0), 0)
+  let base: number | null = null
+  if (seRecalculaComoPorcentajeDeCuenta(fila)) base = suma(renglones.filter(x => !x.orderPromotionId))
+  else if (seRecalculaDentroDeSuAmbito(fila)) {
+    const ambito = leerReparto(fila.reparto)!.ambito!
+    base = suma(renglones.filter(x => enAmbito(x, ambito)))
+  }
+  if (base === null) return null
+  // R6 (founder, 2-oct): el tope del catálogo vale también al recalcular, sea de cuenta o dirigido.
+  const tope = leerReparto(fila.reparto)?.tope ?? null
+  const calculado = aPesosRedondeados((base * Number(fila.value)) / 100)
+  return tope === null ? calculado : Math.min(calculado, tope)
+}
+
+/**
  * La regla ÚNICA de los recalculadores (los tres de hoy y, desde B2c, `voidItems`, `compItems` y el vale): un % de cuenta se
  * re-deriva sobre los renglones sin promoción; un % dirigido con ámbito, sobre los renglones de su ámbito (P1); en los dos,
  * sin lo ya regalado (R8). Lo demás conserva su importe. Devuelve los importes re-derivados y la suma de todas las filas.
@@ -304,82 +317,36 @@ const aPesosRedondeados = (x: number) => Math.round(x * 100) / 100
  * 🔴 W7 A1 (folio W2UJM): cada escritor topa su fila contra lo que queda AL CREARLA, pero un % re-derivado aquí crece sobre la cuenta
  * completa (cupón $14.40 → $15.90 tras un premio de $129) y Σ filas pasaba de la cuenta ($159.90 sobre $159). Si Σ pasa de Σ `total`
  * de los renglones, el exceso sale de las filas RE-DERIVADAS, de la más reciente a la más vieja, nunca abajo de 0: lo dirigido (el
- * premio, P11) y lo fijo conservan su importe. Lo cobrado no cambia (la mercancía ya quedaba en $0); sin exceso, nada cambia.
+ * premio, P11) y lo fijo conservan su importe. Sin exceso, nada cambia. Quitar una fila en la TPV recalcula aquí también (B, 12-nov):
+ * al liberar lugar, el % vuelve a lo suyo.
  */
 export function importesDeLasFilas(
   renglones: RenglonParaReparto[],
   filas: FilaParaReparto[],
-): { montosRederivados: Map<string, number>; descuento: number; topados: Map<string, number> } {
-  // R8 (founder, 2-oct): la base de un % —de cuenta o dentro de su ámbito— deja fuera lo ya regalado.
-  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + Number(x.total ?? 0), 0)
-  const baseDeCuenta = suma(renglones.filter(x => !x.orderPromotionId))
+): { montosRederivados: Map<string, number>; descuento: number } {
   const montosRederivados = new Map<string, number>()
   let descuento = 0
   for (const fila of filas) {
-    let base: number | null = null
-    if (seRecalculaComoPorcentajeDeCuenta(fila)) base = baseDeCuenta
-    else if (seRecalculaDentroDeSuAmbito(fila)) {
-      const ambito = leerReparto(fila.reparto)!.ambito!
-      base = suma(renglones.filter(x => enAmbito(x, ambito)))
-    }
-    // R6 (founder, 2-oct): el tope del catálogo vale también al recalcular, sea de cuenta o dirigido.
-    const tope = leerReparto(fila.reparto)?.tope ?? null
-    if (base === null) {
+    const monto = importeSinTope(renglones, fila)
+    if (monto === null) {
       descuento += Number(fila.amount)
       continue
     }
-    const calculado = aPesosRedondeados((base * Number(fila.value)) / 100)
-    const monto = tope === null ? calculado : Math.min(calculado, tope)
     montosRederivados.set(fila.id, monto)
     descuento += monto
   }
-  // W7 A1: lo que se quitó queda en `topados` (centavos); quien sincroniza lo guarda en el reparto (`topado`).
-  const topados = new Map<string, number>()
-  let exceso = lugarEnLaCuenta(renglones, filas, montosRederivados) * -1
+  let exceso =
+    filas.reduce((s, f) => s + aCentavos(montosRederivados.get(f.id) ?? f.amount), 0) -
+    renglones.reduce((s, x) => s + aCentavos(x.total), 0)
   for (const fila of filas.filter(f => montosRederivados.has(f.id)).sort((a, b) => cronologico(b, a))) {
     if (exceso <= 0) break
     const cents = aCentavos(montosRederivados.get(fila.id))
     const quita = Math.min(Math.max(0, cents), exceso)
-    if (quita <= 0) continue
     montosRederivados.set(fila.id, (cents - quita) / 100)
-    topados.set(fila.id, quita)
     descuento -= quita / 100
     exceso -= quita
   }
-  return { montosRederivados, descuento: aPesosRedondeados(descuento), topados }
-}
-
-/** Centavos que todavía caben en la cuenta: Σ `total` de los renglones − Σ importes de las filas (los re-derivados, si se pasan). */
-function lugarEnLaCuenta(renglones: RenglonParaReparto[], filas: FilaParaReparto[], montos?: ReadonlyMap<string, number>): number {
-  return renglones.reduce((s, x) => s + aCentavos(x.total), 0) - filas.reduce((s, f) => s + aCentavos(montos?.get(f.id) ?? f.amount), 0)
-}
-
-/**
- * W7 A1 (Codex r1 #1, r2 #1): quien quita una fila SIN recalcular (la TPV) le devuelve a cada % su `topado` con el lugar que quedó,
- * del más viejo al más nuevo (al revés de como el tope los quitó), y nada más: un % que nunca se topó se queda como está, igual que
- * hoy. Devuelve los importes nuevos (pesos) y lo que les sigue faltando (centavos), sólo de las filas que recuperan algo.
- */
-export function devolverLoTopado(
-  renglones: RenglonParaReparto[],
-  filas: FilaParaReparto[],
-): { montos: Map<string, number>; topados: Map<string, number>; devueltoCents: number } {
-  const montos = new Map<string, number>()
-  const topados = new Map<string, number>()
-  let lugar = lugarEnLaCuenta(renglones, filas)
-  let devueltoCents = 0
-  for (const fila of [...filas].sort(cronologico)) {
-    // Codex r3 #1: sólo una fila que el recálculo todavía re-derivaría; una que se volvió FIJA (la cortesía de un folio anulado)
-    // conserva su importe congelado aunque su reparto traiga la marca.
-    const rederivable = seRecalculaComoPorcentajeDeCuenta(fila) || seRecalculaDentroDeSuAmbito(fila)
-    const topado = rederivable ? (leerReparto(fila.reparto)?.topado ?? 0) : 0
-    const vuelve = Math.min(topado, lugar)
-    if (vuelve <= 0) continue
-    montos.set(fila.id, (aCentavos(fila.amount) + vuelve) / 100)
-    topados.set(fila.id, topado - vuelve)
-    lugar -= vuelve
-    devueltoCents += vuelve
-  }
-  return { montos, topados, devueltoCents }
+  return { montosRederivados, descuento: aPesosRedondeados(descuento) }
 }
 
 const cronologico = (a: FilaParaReparto, b: FilaParaReparto) => {
@@ -395,7 +362,7 @@ const cronologico = (a: FilaParaReparto, b: FilaParaReparto) => {
 export function repartosDeLaOrden(
   renglones: RenglonParaReparto[],
   filas: FilaParaReparto[],
-  o: { rederivadas?: ReadonlySet<string>; topados?: ReadonlyMap<string, number> } = {},
+  o: { rederivadas?: ReadonlySet<string> } = {},
 ): Map<string, RepartoDescuento> {
   return calcular(renglones, filas, o).finales
 }
@@ -408,7 +375,7 @@ export function capacidadRestante(renglones: RenglonParaReparto[], filas: FilaPa
 function calcular(
   renglones: RenglonParaReparto[],
   filas: FilaParaReparto[],
-  o: { rederivadas?: ReadonlySet<string>; topados?: ReadonlyMap<string, number> },
+  o: { rederivadas?: ReadonlySet<string> },
 ): { finales: Map<string, RepartoDescuento>; capacidad: Map<string, number> } {
   const capacidad = new Map(renglones.map(x => [x.id, aportacionCents(x)] as const))
   const promo = new Set(renglones.filter(x => x.orderPromotionId).map(x => x.id))
@@ -419,21 +386,15 @@ function calcular(
   for (const fila of filas) {
     if (o.rederivadas?.has(fila.id)) {
       const previo = leerReparto(fila.reparto)
-      // W7 A1: lo que el tope de la cuenta le quitó en ESTE recálculo (o lo que le sigue faltando tras devolverle); sin nada, se borra.
-      const topado = o.topados?.get(fila.id) ?? 0
-      const conTopado = (r: RepartoDescuento): RepartoDescuento => {
-        const { topado: _anterior, ...resto } = r
-        return topado > 0 ? { ...resto, topado } : resto
-      }
       if (previo?.alcance === 'DIRIGIDO' && previo.ambito) {
         // P1: sigue DIRIGIDA; sus pesos son los totales de los renglones de su ámbito.
         const ambito = previo.ambito
         const pesos = Object.fromEntries(renglones.filter(x => enAmbito(x, ambito)).map(x => [x.id, aCentavos(x.total)] as const))
-        dirigidas.push([fila, conTopado({ ...previo, renglones: pesos })])
+        dirigidas.push([fila, { ...previo, renglones: pesos }])
       } else {
         // La regla del recálculo, conservando lo que el escritor declaró: su tope (R6) y su marca de D16 (B2b).
         const regla = nuevoRepartoDeCuenta({ conPromociones: false, tope: previo?.tope ?? null })
-        deCuenta.push([fila, conTopado(previo?.reduceImpuesto !== undefined ? { ...regla, reduceImpuesto: previo.reduceImpuesto } : regla)])
+        deCuenta.push([fila, previo?.reduceImpuesto !== undefined ? { ...regla, reduceImpuesto: previo.reduceImpuesto } : regla])
       }
       continue
     }
@@ -569,13 +530,14 @@ export type Recorte =
   | { accion: 'RECORTAR'; quitaCents: number; amountCents: number; appliedToItemIds: string[]; reparto: RepartoDescuento | null }
 
 /**
- * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar.
+ * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar. `vivos` = los
+ * renglones de la orden ANTES del cambio (W7 A1: deciden si un % de ámbito estaba topado).
  * DIRIGIDA (y espejo): se recorta por la parte GUARDADA de los destinos que salen; si salen todos, se retira entera. CUENTA:
  * nada (la sincronización la re-reparte). Vieja sin reparto: sólo las dos formas de espejo que reconoce
  * `revertirDescuentoDelRenglon` —la de `buildItemDiscountRow` y la cortesía de «Cobrar» (COMP SIN `discountId`: una COMP del
  * catálogo es de cuenta, y la cortesía de su renglón es independiente)—; lo demás es D8. Nunca lanza.
  */
-export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia[]): Recorte {
+export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia[], vivos?: RenglonParaReparto[]): Recorte {
   const salen = new Map(renglones.map(r => [r.id, r] as const))
   const monto = aCentavos(fila.amount)
   const reparto = leerReparto(fila.reparto)
@@ -597,7 +559,23 @@ export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia
     if (tocados.length === destinos.length) return { accion: 'RETIRAR', quitaCents: monto }
     const quedan = destinos.filter(id => !salen.has(id))
     const quita = tocados.reduce((s, id) => s + reparto.renglones[id], 0)
-    return recortar(quita, { ...reparto, renglones: Object.fromEntries(quedan.map(id => [id, reparto.renglones[id]] as const)) })
+    const nuevo = { ...reparto, renglones: Object.fromEntries(quedan.map(id => [id, reparto.renglones[id]] as const)) }
+    // 🔴 W7 A1 (Codex r4 #1, r5 #2): el tope de la cuenta puede dejar un % de ámbito abajo de lo suyo (hasta $0), y `quita ≥ monto` lo
+    // borraba aunque le quedara un renglón con valor: al liberar lugar ya no volvía. Si estaba TOPADO (su importe sin tope, con los
+    // renglones de antes del cambio, es mayor que el guardado) y le queda un renglón que vale algo, se recorta a $0 y el recálculo que
+    // siempre sigue lo vuelve a derivar. Sin tope, o sin nada que valga, igual que hoy.
+    if (quita >= monto && vivos && seRecalculaDentroDeSuAmbito(fila)) {
+      const sinTope = importeSinTope(vivos, fila)
+      const porId = new Map(vivos.map(r => [r.id, r] as const))
+      const quedaConValor = quedan.some(id => {
+        const r = porId.get(id)
+        return !!r && !estaRegalado(r) && aCentavos(r.total) > 0
+      })
+      if (sinTope !== null && aCentavos(sinTope) > monto && quedaConValor) {
+        return { accion: 'RECORTAR', quitaCents: monto, amountCents: 0, appliedToItemIds: ids.filter(id => !salen.has(id)), reparto: nuevo }
+      }
+    }
+    return recortar(quita, nuevo)
   }
   if (reparto) return { accion: 'NADA' }
   if (ids.length === 1 && fila.discountId && salen.get(ids[0])?.appliedDiscountId === fila.discountId)

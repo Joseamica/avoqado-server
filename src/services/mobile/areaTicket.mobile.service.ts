@@ -745,18 +745,14 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     // espejo VIEJA sin reparto pasaría el filtro, pero los vales no tuvieron filas ESPEJO antes de B2c (preflight T-23); filas de
     // cuenta sí podían recibir (cupón, motor, premio). Un descuento propio viejo sin espejo lo convierte en espejo
     // `conservarDescuentoHistorico` antes de congelar el resto (B2c F2, Codex r1 #4), así que no se cuenta dos veces.
-    const {
-      montosRederivados,
-      descuento: descuentoDeFilas,
-      topados,
-    } = importesDeLasFilas(
+    const { montosRederivados, descuento: descuentoDeFilas } = importesDeLasFilas(
       allItems,
       filas.filter(f => !leerReparto(f.reparto)?.espejo),
     )
     const descuentoPropio = allItems
       .filter(i => Number(i.total) > 0 && (i.isCortesia || !i.orderPromotionId))
       .reduce((sum, i) => sum + Number(i.discountAmount || 0), 0)
-    const sincronizado = await sincronizarRepartos(tx, order.id, { renglones: allItems, filas, montosRederivados, topados })
+    const sincronizado = await sincronizarRepartos(tx, order.id, { renglones: allItems, filas, montosRederivados })
     const newItemDiscount = Math.round((descuentoPropio + descuentoDeFilas) * 100) / 100
     // Codex r2 N4: el total sale de la regla común — la mercancía se clampa a 0 y DESPUÉS se suman cargo y propina (P12: y el
     // IVA aparte; el vale nace IVA_INCLUIDO). Con la resta a mano, un descuento fijo mayor que lo que queda guardaba un total

@@ -476,47 +476,6 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     return { e, carro: carroA1, eleccion: { cupon: e.codigo, premioId: e.premioId } }
   }
 
-  it('🔴 Codex r2 #1 — control: cuenta llena SIN tope (fijo $50 + 10 % de lo que queda + fijo $45); quitar el $45 en la TPV cobra $45, como hoy', async () => {
-    const venta = await prisma.order.create({
-      data: {
-        venueId,
-        orderNumber: `A1C${++ciclo}`,
-        type: 'PICKUP',
-        contratoDePrecio: 'IVA_INCLUIDO',
-        subtotal: 100,
-        discountAmount: 0,
-        taxAmount: 0,
-        total: 100,
-        remainingBalance: 100,
-        status: 'PENDING',
-        paymentStatus: 'PENDING',
-        items: { create: [{ productId: combo, productName: 'Combo', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 }] },
-      },
-    })
-    for (const [tipo, valor] of [
-      ['FIXED_AMOUNT', 50],
-      ['PERCENTAGE', 10],
-      ['FIXED_AMOUNT', 45],
-    ] as const) {
-      expect(
-        await motor.applyManualDiscount(venta.id, tipo, valor, `${tipo} ${valor}`, undefined, undefined, 'A1', venueId, true),
-      ).toMatchObject({
-        success: true,
-      })
-    }
-    const filas = await prisma.orderDiscount.findMany({ where: { orderId: venta.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
-    expect(filas.map(f => PESOS(f.amount))).toEqual(['50.00', '5.00', '45.00'])
-
-    await motor.removeDiscountFromOrder(venta.id, filas[2].id, undefined, venueId)
-
-    const quedan = await prisma.orderDiscount.findMany({ where: { orderId: venta.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
-    expect(quedan.map(f => PESOS(f.amount))).toEqual(['50.00', '5.00'])
-    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: venta.id }, select: { discountAmount: true, total: true } })
-    expect(PESOS(cuenta.discountAmount)).toBe('55.00')
-    expect(PESOS(cuenta.total)).toBe('45.00')
-    ;(bitacora.logAction as jest.Mock).mockClear()
-  })
-
   it('🔴 W7 A1: quitar después el premio libera lugar y el cupón vuelve a lo suyo ($128.10), igual en la TPV que en el móvil', async () => {
     for (const quitar of [
       (orderId: string, filaId: string) => motor.removeDiscountFromOrder(orderId, filaId, undefined, venueId),
@@ -598,9 +557,6 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     expect(PESOS(cuenta.subtotal)).toBe('159.00')
     expect(PESOS(cuenta.discountAmount)).toBe('159.00')
     expect(PESOS(filas._sum.amount!)).toBe('159.00')
-    // Lo que el tope le quitó al cupón queda marcado en su reparto (para devolvérselo si se libera lugar sin recalcular).
-    const cupon = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: real.aplicados[1].orderDiscountId } })
-    expect(cupon.reparto).toMatchObject({ topado: 90, renglones: expect.any(Object) })
   })
 })
 

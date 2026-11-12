@@ -255,9 +255,9 @@ export async function recalculateOrderTotals(
   // fila, y las líneas de promoción quedan FUERA de la base de un % de cuenta (el combo ya trae su precio: $20 → $39.80).
   // B2: UNA regla para los recalculadores (`importesDeLasFilas`): % de cuenta sobre los renglones sin promoción, como
   // hoy; % dirigido con ámbito dentro de su ámbito (P1, Codex r2 N1). Repartos sincronizados en esta misma tx.
-  const { montosRederivados, descuento, topados } = importesDeLasFilas(items, orderDiscounts)
+  const { montosRederivados, descuento } = importesDeLasFilas(items, orderDiscounts)
   let newDiscountAmount = descuento
-  await sincronizarRepartos(db, orderId, { renglones: items, filas: orderDiscounts, montosRederivados, topados })
+  await sincronizarRepartos(db, orderId, { renglones: items, filas: orderDiscounts, montosRederivados })
   if (orderDiscounts.length === 0 && fallbackDiscount > 0) {
     newDiscountAmount = fallbackDiscount
   }

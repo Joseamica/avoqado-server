@@ -10,7 +10,6 @@ import {
   capacidadRestante,
   enAmbito,
   estaRegalado,
-  devolverLoTopado,
   importesDeLasFilas,
   impuestoQueSeLlevan,
   leerReparto,
@@ -348,72 +347,6 @@ describe('🔴 W7 A1 — Σ de las filas nunca pasa de la cuenta: el % re-deriva
     expect(res.montosRederivados.size).toBe(0)
     expect(res.descuento).toBe(120)
   })
-  it('lo que el tope quita queda en `topados` (centavos), y el reparto canónico lo guarda como `topado` sólo en esa fila', () => {
-    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), premio('premio', 129, 'h', 3)]
-    const res = importesDeLasFilas([hamburguesa, cafe], filas)
-    expect([...res.topados]).toEqual([['cupon', 90]])
-    const m = repartosDeLaOrden(
-      [hamburguesa, cafe],
-      filas.map(f => (res.montosRederivados.has(f.id) ? { ...f, amount: res.montosRederivados.get(f.id)! } : f)),
-      { rederivadas: new Set(res.montosRederivados.keys()), topados: res.topados },
-    )
-    expect(m.get('cupon')?.topado).toBe(90)
-    expect(m.get('premio')).not.toHaveProperty('topado')
-    expect(m.get('asignado')).not.toHaveProperty('topado')
-    // Sin exceso no hay `topados`, y un recálculo sin tope borra la marca vieja.
-    expect(importesDeLasFilas([hamburguesa, cafe], [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2)]).topados.size).toBe(0)
-    const marcada = fila('cupon', 15, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 }, { type: 'PERCENTAGE', value: 10 })
-    expect(repartosDeLaOrden([hamburguesa, cafe], [marcada], { rederivadas: new Set(['cupon']) }).get('cupon')).not.toHaveProperty('topado')
-  })
-  it('leerReparto conserva `topado` (entero ≥ 0) y rechaza basura; mismoReparto lo compara', () => {
-    const base = { ...nuevoRepartoDeCuenta({ conPromociones: false }), renglones: { c: 1500 } }
-    expect(leerReparto({ ...base, topado: 90 })?.topado).toBe(90)
-    expect(leerReparto({ ...base, topado: 0 })).not.toHaveProperty('topado')
-    expect(leerReparto({ ...base, topado: 1.5 })).toBeNull()
-    expect(leerReparto({ ...base, topado: -1 })).toBeNull()
-    expect(mismoReparto(leerReparto({ ...base, topado: 90 }), leerReparto(base))).toBe(false)
-  })
-  it('🔴 devolverLoTopado (quitar en la TPV): quitar el premio devuelve los 90 ¢ al cupón ($15.90), nada más', () => {
-    const cupon = fila(
-      'cupon',
-      15,
-      { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 },
-      { type: 'PERCENTAGE', value: 10, createdAt: t(2) },
-    )
-    const r = devolverLoTopado([hamburguesa, cafe], [fijo('asignado', 15, 1), cupon])
-    expect([...r.montos]).toEqual([['cupon', 15.9]])
-    expect([...r.topados]).toEqual([['cupon', 0]])
-    expect(r.devueltoCents).toBe(90)
-  })
-  it('🔴 Codex r2 #1 — control: un % que nunca se topó (nació sobre lo que quedaba) no se toca al liberar lugar', () => {
-    const r = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [fijo('f50', 50, 1), pct('pct', 10, 5, 2)])
-    expect(r.montos.size).toBe(0)
-    expect(r.devueltoCents).toBe(0)
-  })
-  it('🔴 Codex r3 #1: una fila que se volvió FIJA (cortesía de folio anulado) no recupera su `topado`, aunque su reparto lo traiga', () => {
-    const cortesia = fila('cupon', 15, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 }, { createdAt: t(2) })
-    const r = devolverLoTopado([hamburguesa, cafe], [fijo('asignado', 15, 1), cortesia])
-    expect(r.montos.size).toBe(0)
-    expect(r.devueltoCents).toBe(0)
-  })
-  it('devolverLoTopado reparte el lugar del más viejo al más nuevo y sólo lo que cabe', () => {
-    const marca = (id: string, amount: number, topado: number, s: number) =>
-      fila(id, amount, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado }, { type: 'PERCENTAGE', value: 10, createdAt: t(s) })
-    const r = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [marca('viejo', 5, 500, 1), marca('nuevo', 0, 1000, 2), fijo('f', 88, 3)])
-    // Quedan 700 ¢: 500 al viejo (todo lo suyo) y 200 al nuevo.
-    expect([...r.montos]).toEqual([
-      ['viejo', 10],
-      ['nuevo', 2],
-    ])
-    expect([...r.topados]).toEqual([
-      ['viejo', 0],
-      ['nuevo', 800],
-    ])
-    expect(r.devueltoCents).toBe(700)
-    const poco = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [marca('viejo', 5, 500, 1), fijo('f', 93, 3)])
-    expect([...poco.montos]).toEqual([['viejo', 7]])
-    expect([...poco.topados]).toEqual([['viejo', 300]])
-  })
 })
 
 describe('repartosDeLaOrden — el cálculo canónico', () => {
@@ -745,5 +678,68 @@ describe('recorteDeFila — B2c (P4, P5): qué pasa con una fila cuando salen re
   it('control — destino DIRIGIDO cuyo renglón ya no está en la orden desaparece de las llaves del reparto', () => {
     const m = repartosDeLaOrden([r('b', 100)], [fila('cat', 20, nuevoRepartoDirigido(20, { a: 5, b: 15 }, { espejo: false }))])
     expect(Object.keys(renglonesDe(m, 'cat')!)).toEqual(['b'])
+  })
+
+  // W7 A1, rediseño B (Codex r4 #1): el tope de la cuenta puede dejar un % de ámbito en $0; `quita 0 ≥ monto 0` lo borraba aunque
+  // le quedara un renglón con valor, y al liberar lugar ya no volvía (A $45 + B $45 con 10 % de pizzas y fijo $90: $45 en vez de
+  // $40.50). Una fila que se re-deriva sólo se retira si salen todos sus renglones o si ninguno de los que quedan vale algo.
+  describe('🔴 Codex r4 #1 (W7 A1): un % de ámbito topado no se retira mientras le quede un renglón con valor', () => {
+    const ambito = { productos: [], categorias: ['c1'] }
+    const pctDeAmbito = (amount: number, renglones: Record<string, number>) =>
+      fila('cat', amount, { ...dirigido(renglones), ambito }, { type: 'PERCENTAGE', value: 10 })
+    const vivos = [rp('a', 45, 'pa', 'c1'), rp('b', 45, 'pb', 'c1')]
+
+    it('topado a $0, sale A y queda B con $45 ⇒ se RECORTA a $0 (el recálculo que sigue lo re-deriva); hoy se retiraba', () => {
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], vivos)).toEqual({
+        accion: 'RECORTAR',
+        quitaCents: 0,
+        amountCents: 0,
+        appliedToItemIds: [],
+        reparto: { ...dirigido({ b: 0 }), ambito },
+      })
+    })
+    it('topado a $3 con la parte de A en $3, sale A y queda B ⇒ RECORTA a $0, no se retira', () => {
+      expect(recorteDeFila(pctDeAmbito(3, { a: 300, b: 0 }), [sale('a')], vivos)).toMatchObject({
+        accion: 'RECORTAR',
+        quitaCents: 300,
+        amountCents: 0,
+        reparto: { ...dirigido({ b: 0 }), ambito },
+      })
+    })
+    it('lo que queda ya no vale nada (regalado o en $0): su importe sin tope sería 0 ⇒ se retira, como hoy', () => {
+      const regalado = rp('b', 45, 'pb', 'c1', { isCortesia: true, discountAmount: 45 })
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], [vivos[0], regalado])).toEqual({ accion: 'RETIRAR', quitaCents: 0 })
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a')], [vivos[0], rp('b', 0, 'pb', 'c1')])).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 0,
+      })
+    })
+    it('salen todos sus renglones ⇒ se retira, como hoy', () => {
+      expect(recorteDeFila(pctDeAmbito(0, { a: 0, b: 0 }), [sale('a'), sale('b')], vivos)).toEqual({ accion: 'RETIRAR', quitaCents: 0 })
+    })
+    it('control — sin tope (quita < monto) recorta igual que hoy', () => {
+      expect(recorteDeFila(pctDeAmbito(9, { a: 450, b: 450 }), [sale('a')], vivos)).toEqual({
+        accion: 'RECORTAR',
+        quitaCents: 450,
+        amountCents: 450,
+        appliedToItemIds: [],
+        reparto: { ...dirigido({ b: 450 }), ambito },
+      })
+    })
+    it('🔴 Codex r5 #2 — control: un % de ámbito que NO estaba topado (su tope del catálogo) se retira como hoy aunque quede otro renglón', () => {
+      // A $1,000 y B $1 de la categoría, 10 % con tope de $1: el motor guarda A $1, B $0. Nunca hubo exceso: quitar A lo retira y B
+      // cuesta $1 (como hoy); recortarlo lo re-derivaría a $0.10 y cambiaría el cobro de una cuenta sana.
+      const conTope = fila('cat', 1, { ...dirigido({ a: 100, b: 0 }), ambito, tope: 1 }, { type: 'PERCENTAGE', value: 10 })
+      expect(recorteDeFila(conTope, [sale('a')], [rp('a', 1000, 'pa', 'c1'), rp('b', 1, 'pb', 'c1')])).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 100,
+      })
+    })
+    it('control — una DIRIGIDA que no se re-deriva (premio, 2×1) con quita ≥ monto se retira como hoy', () => {
+      expect(recorteDeFila(fila('premio', 1, dirigido({ a: 100, b: 0 })), [sale('a')], vivos)).toEqual({
+        accion: 'RETIRAR',
+        quitaCents: 100,
+      })
+    })
   })
 })

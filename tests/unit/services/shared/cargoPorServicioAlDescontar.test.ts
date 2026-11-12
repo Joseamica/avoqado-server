@@ -544,31 +544,6 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
     expect(totalGuardado()).toBe(115)
   })
 
-  it('🔴 Codex r3 #2 (W7 A1): quitar un descuento sin nada `topado` conserva la resta de siempre, centavo a centavo', async () => {
-    // $15.10 + $5.20 de descuento y 5 % de servicio; se quita el de $5.20. La resta da 15.100000000000001 y el cargo, $4.24 (hoy).
-    prismaMock.orderDiscount.findFirst.mockResolvedValue({
-      id: 'od-1',
-      orderId: 'order-sc',
-      discountId: null,
-      amount: new Decimal('5.20'),
-      taxReduction: new Decimal(0),
-      name: 'Promo',
-    } as never)
-    prismaMock.order.findUnique.mockResolvedValue(
-      ordenConCargo({
-        discountAmount: new Decimal('20.30'),
-        serviceChargeAmount: new Decimal('3.99'),
-        total: new Decimal('83.69'),
-      }) as never,
-    )
-    prismaMock.orderDiscount.delete.mockResolvedValue({} as never)
-    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaPorcentual(5, 3.99)] as never)
-
-    await removeDiscountFromOrder('order-sc', 'od-1')
-
-    expect(cargoGuardado()).toBe(4.24)
-  })
-
   it('un cargo de MONTO FIJO no se toca aunque cambie la base', async () => {
     prismaMock.order.findUnique.mockResolvedValue(ordenConCargo({ serviceChargeAmount: new Decimal(50) }) as never)
     prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaFija(50)] as never)

@@ -175,9 +175,18 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', SYNC],
   },
+  // W7 A1, rediseño B (founder, 12-nov): quitar en la TPV recalcula como el móvil — conserva el resto histórico (R7-1), re-deriva
+  // con el tope de la cuenta y sincroniza con los importes re-derivados.
   'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder': {
     clase: 'QUITA',
-    marcas: ['revertirDescuentoDelRenglon(', 'refundLoyaltyForOrderDiscount(', 'refundStampRewardForOrderDiscount(', SYNC],
+    marcas: [
+      HISTORICO,
+      'revertirDescuentoDelRenglon(',
+      'refundLoyaltyForOrderDiscount(',
+      'refundStampRewardForOrderDiscount(',
+      'importesDeLasFilas(',
+      SYNC,
+    ],
   },
   'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction': {
     clase: 'ESCRIBE',
@@ -225,6 +234,8 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
 }
 const RECALCULADORES = [
+  // W7 A1, rediseño B (founder, 12-nov): quitar un descuento en la TPV recalcula igual que el móvil.
+  'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
   // B2c T5 (P5): agregar al vale re-deriva los % de cuenta sobre la base nueva, como los otros caminos de agregar.
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
   'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
@@ -270,8 +281,8 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'cabecera += la fila manual, que trae su reparto',
   },
   'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder': {
-    origen: 'FILAS',
-    nota: 'cabecera −= la fila quitada; espejo revertido, beneficios devueltos (P3); += lo `topado` que vuelve a los % con el lugar liberado (W7 A1)',
+    origen: 'RECALCULO',
+    nota: 'B (W7 A1): cabecera = Σ filas re-derivadas con tope, como quitar en el móvil; espejo revertido, beneficios devueltos (P3)',
   },
   'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals': {
     origen: 'RECALCULO',

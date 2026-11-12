@@ -819,7 +819,7 @@ describe('B2b T4 — aplicar y quitar en el motor: la reducción la pone la sinc
   })
   it('control de regresión: quitar una fila VIEJA devuelve exactamente lo que restó (−1.60 ⇒ 0; total 100)', async () => {
     tx.order.findUnique.mockResolvedValue({ ...order(), subtotal: 100, taxAmount: -1.6, discountAmount: 10, total: 90 })
-    tx.orderDiscount.findFirst.mockResolvedValue({
+    const vieja = {
       id: 'od',
       orderId: 'order',
       discountId: null,
@@ -829,7 +829,12 @@ describe('B2b T4 — aplicar y quitar en el motor: la reducción la pone la sinc
       appliedToItemIds: [],
       reparto: null,
       name: 'Vieja',
-    })
+    }
+    tx.orderDiscount.findFirst.mockResolvedValue(vieja)
+    // W7 A1, B: quitar en la TPV recalcula desde las filas (como el móvil); la fila vieja está en la orden hasta que se borra.
+    let quedan: any[] = [vieja]
+    tx.orderDiscount.findMany.mockImplementation(async () => quedan)
+    tx.orderDiscount.delete.mockImplementation(async ({ where }: any) => (quedan = quedan.filter(f => f.id !== where.id)))
     tx.stampReward = { findFirst: jest.fn(async () => null), update: jest.fn() }
     await tpv.removeDiscount('venue', 'order', 'od', 'staff')
     const escrito = tx.order.update.mock.calls.at(-1)[0].data

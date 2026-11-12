@@ -207,19 +207,13 @@ function renglonesConEspejo(
 export async function sincronizarRepartos(
   tx: Prisma.TransactionClient,
   orderId: string,
-  o: {
-    renglones?: RenglonParaReparto[]
-    filas?: FilaParaReparto[]
-    montosRederivados?: ReadonlyMap<string, number>
-    /** W7 A1: lo que el tope de la cuenta le quitó a cada fila re-derivada (`importesDeLasFilas`); queda en su reparto. */
-    topados?: ReadonlyMap<string, number>
-  } = {},
+  o: { renglones?: RenglonParaReparto[]; filas?: FilaParaReparto[]; montosRederivados?: ReadonlyMap<string, number> } = {},
 ): Promise<{ repartos: Map<string, RepartoDescuento>; impuestoDevuelto: Prisma.Decimal }> {
   const renglones = o.renglones ?? (await renglonesParaReparto(tx, orderId))
   const leidas = o.filas ?? (await filasDeLaOrden(tx, orderId))
   const montos = o.montosRederivados ?? new Map<string, number>()
   const filas = leidas.map(f => (montos.has(f.id) ? { ...f, amount: montos.get(f.id) } : f))
-  const finales = repartosDeLaOrden(renglones, filas, { rederivadas: new Set(montos.keys()), topados: o.topados })
+  const finales = repartosDeLaOrden(renglones, filas, { rederivadas: new Set(montos.keys()) })
   // B2b (D16; Codex r1 #3, r2 N3, r3 V3/V4): la reducción de una fila que PARTICIPA en D16 (su reparto lo marca; la guardada
   // puede ser 0) se recalcula en CADA sincronización si la orden cobra el impuesto aparte —aunque su reparto no cambie: D16
   // depende también del importe y del impuesto de cada renglón (V4)— y éste es el ÚNICO lugar que la escribe, también la
@@ -321,8 +315,10 @@ export async function recortarDescuentosDeRenglones(
     select: { id: true, appliedDiscountId: true, isCortesia: true, discountAmount: true },
     take: o.renglones.length,
   })
+  // W7 A1 (Codex r4 #1): los renglones de ANTES del cambio deciden si un % de ámbito estaba topado y si le queda uno que valga algo.
+  const vivos = await renglonesParaReparto(tx, orderId)
   const decisiones = (await filasDeLaOrden(tx, orderId))
-    .map(fila => ({ fila, recorte: recorteDeFila(fila, cambian) }))
+    .map(fila => ({ fila, recorte: recorteDeFila(fila, cambian, vivos) }))
     .filter(d => d.recorte.accion !== 'NADA')
     .sort((a, b) => (a.fila.id < b.fila.id ? -1 : a.fila.id > b.fila.id ? 1 : 0))
   if (decisiones.length === 0) return resultado
@@ -332,7 +328,6 @@ export async function recortarDescuentosDeRenglones(
   let recortadoCents = 0
   let impuesto = new Prisma.Decimal(0)
   let orden: { contratoDePrecio: string | null; taxAmount: Prisma.Decimal } | null = null
-  let vivos: RenglonParaReparto[] | null = null
   let disponible = new Prisma.Decimal(0)
   for (const { fila, recorte } of decisiones) {
     if (recorte.accion === 'NADA') continue
@@ -366,7 +361,6 @@ export async function recortarDescuentosDeRenglones(
         disponible = new Prisma.Decimal(orden.taxAmount)
       }
       if (orden.contratoDePrecio === 'IVA_APARTE') {
-        vivos ??= await renglonesParaReparto(tx, orderId)
         disponible = disponible.plus(guardada)
         const nueva = reduccionDeImpuestoCobrado(orden.contratoDePrecio, recorte.reparto.renglones, vivos, disponible)
         disponible = disponible.minus(nueva)
