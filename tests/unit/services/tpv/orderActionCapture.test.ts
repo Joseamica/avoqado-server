@@ -54,7 +54,10 @@ jest.mock('@/utils/prismaClient', () => {
       delete: jest.fn(),
     },
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
-    staffVenue: { findFirst: jest.fn(async () => null) },
+    // hz:87f4b879:D1: retirar un canje de puntos busca la membresía de quien lo devuelve (`findUnique`) y escribe su ajuste.
+    staffVenue: { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null) },
+    loyaltyTransaction: { findUnique: jest.fn(async () => null), create: jest.fn(async () => ({ id: 'adj-1' })) },
+    customer: { update: jest.fn(async () => ({})) },
     // Tarea 7a: retirar una fila dirigida busca su premio de cartilla.
     stampReward: { findFirst: jest.fn(async () => null) },
     orderServiceCharge: {
@@ -200,7 +203,54 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
     mockPrisma.staff.findUnique.mockResolvedValue({ id: STAFF_ID })
     // `clearAllMocks` no borra implementaciones: las pruebas de D5 cambian ésta.
     mockPrisma.staffVenue.findFirst.mockResolvedValue(null)
+    // …y las de D1 (hz:87f4b879) éstas.
+    mockPrisma.staffVenue.findUnique.mockResolvedValue(null)
+    mockPrisma.loyaltyTransaction.findUnique.mockResolvedValue(null)
   })
+
+  /**
+   * hz:87f4b879:D1: un canje de puntos DIRIGIDO al renglón que se anula o se regala. El recorte lo retira y devuelve sus 500
+   * puntos; la membresía de quien firma la devolución sale de `staffVenue.findUnique` (A = sesión ⇒ sv-A, B = vendedor ⇒ sv-B).
+   */
+  function conCanjeDePuntosEnItem1() {
+    const canje = {
+      id: 'canje',
+      name: 'Puntos',
+      type: 'FIXED_AMOUNT',
+      value: new Decimal(10),
+      amount: new Decimal(10),
+      taxReduction: new Decimal(0),
+      loyaltyTransactionId: 'lt-1',
+      appliedToItemIds: ['item-1'],
+      reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { 'item-1': 1000 } },
+      createdAt: null,
+    }
+    mockPrisma.order.findUnique.mockResolvedValue(makeOrder({ total: new Decimal(90), discountAmount: new Decimal(10) }))
+    // Lecturas de filas: conservar (Σ 10 = cabecera 10, nada que congelar) y el recorte la ven; después ya no hay filas.
+    mockPrisma.orderDiscount.findMany.mockResolvedValueOnce([canje]).mockResolvedValueOnce([canje])
+    mockPrisma.orderItem.findMany.mockResolvedValueOnce([
+      { id: 'item-1', appliedDiscountId: null, isCortesia: false, discountAmount: new Decimal(10) },
+    ])
+    mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+    mockPrisma.staffVenue.findUnique.mockImplementation(async ({ where }: any) =>
+      where.staffId_venueId.venueId !== VENUE_ID ? null : { id: where.staffId_venueId.staffId === 'user-A' ? 'sv-A' : 'sv-B' },
+    )
+    mockPrisma.loyaltyTransaction.findUnique.mockResolvedValue({ id: 'lt-1', customerId: 'cust-1', points: -500, orderId: ORDER_ID })
+  }
+
+  /** La devolución: los MISMOS 500 puntos de siempre, firmada por la membresía `svEsperada`. */
+  function esperaDevolucionDePuntosFirmadaPor(svEsperada: string, staffEsperado: string) {
+    expect(mockPrisma.staffVenue.findUnique).toHaveBeenCalledWith({
+      where: { staffId_venueId: { staffId: staffEsperado, venueId: VENUE_ID } },
+      select: { id: true },
+    })
+    expect(mockPrisma.loyaltyTransaction.create).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.loyaltyTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ type: 'ADJUST', points: 500, customerId: 'cust-1', createdById: svEsperada }),
+    })
+    expect(mockPrisma.customer.update).toHaveBeenCalledWith({ where: { id: 'cust-1' }, data: { loyaltyPoints: { increment: 500 } } })
+    expect(mockPrisma.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'canje' } })
+  }
 
   // ── compItems ──────────────────────────────────────────────────────────────
 
@@ -290,6 +340,15 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
 
       const data = mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_COMPED')![0].data as Record<string, unknown>
       expect(data).not.toHaveProperty('vendedorSegunElAparato')
+    })
+
+    // hz:87f4b879:D1: regalar el renglón retira su canje de puntos; la devolución la firmaba el vendedor elegido (B).
+    it('🔴 D1: regalar un renglón con canje de puntos ⇒ los puntos vuelven a nombre de la sesión (A), no del vendedor (B)', async () => {
+      conCanjeDePuntosEnItem1()
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Frío', staffId: 'staff-B', performedBy: 'user-A' })
+
+      esperaDevolucionDePuntosFirmadaPor('sv-A', 'user-A')
     })
   })
 
@@ -573,6 +632,82 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
           venueId: VENUE_ID,
           staffId: STAFF_ID,
           data: expect.objectContaining({ amount: 60, reason: 'Wrong item' }),
+        }),
+      )
+      // Sin sesión (no debería pasar en /tpv), como antes: sin nota de vendedor.
+      expect(mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_VOIDED')![0].data).not.toHaveProperty('vendedorSegunElAparato')
+    })
+
+    // hz:87f4b879:D1: el autor de anular es quien está en SESIÓN (A, `actorId`), no el vendedor elegido en la terminal (B).
+    it('🔴 D1: sesión A, vendedor B ⇒ OrderAction y bitácora de anular a nombre de A; B queda como nota', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.orderItem.deleteMany.mockResolvedValue({ count: 1 })
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await voidItems(VENUE_ID, ORDER_ID, {
+        itemIds: ['item-1'],
+        reason: 'Error',
+        staffId: 'staff-B',
+        expectedVersion: 1,
+        actorId: 'user-A',
+      })
+
+      expect(mockPrisma.orderAction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ actionType: 'VOID', performedById: 'user-A' }),
+      })
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ITEM_VOIDED',
+          staffId: 'user-A',
+          data: expect.objectContaining({ amount: 60, reason: 'Error', vendedorSegunElAparato: 'staff-B' }),
+        }),
+      )
+      // El vendedor sigue siendo a quien se valida (la venta es suya); la cuenta queda igual que antes.
+      expect(mockPrisma.staff.findUnique).toHaveBeenCalledWith({ where: { id: 'staff-B' } })
+      expect(mockPrisma.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ subtotal: 40, total: 40 }) }),
+      )
+    })
+
+    it('D1: la sesión ES el vendedor ⇒ sin nota de vendedor', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.orderItem.deleteMany.mockResolvedValue({ count: 1 })
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await voidItems(VENUE_ID, ORDER_ID, {
+        itemIds: ['item-1'],
+        reason: 'Error',
+        staffId: STAFF_ID,
+        expectedVersion: 1,
+        actorId: STAFF_ID,
+      })
+
+      const log = mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_VOIDED')![0]
+      expect(log.staffId).toBe(STAFF_ID)
+      expect(log.data).not.toHaveProperty('vendedorSegunElAparato')
+    })
+
+    it('🔴 D1: anular un renglón con canje de puntos ⇒ los puntos vuelven a nombre de la sesión (A), no del vendedor (B)', async () => {
+      conCanjeDePuntosEnItem1()
+      mockPrisma.orderItem.deleteMany.mockResolvedValue({ count: 1 })
+
+      await voidItems(VENUE_ID, ORDER_ID, {
+        itemIds: ['item-1'],
+        reason: 'Error',
+        staffId: 'staff-B',
+        expectedVersion: 1,
+        actorId: 'user-A',
+      })
+
+      esperaDevolucionDePuntosFirmadaPor('sv-A', 'user-A')
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ITEM_VOIDED',
+          staffId: 'user-A',
+          data: expect.objectContaining({
+            descuentosRetirados: [expect.objectContaining({ id: 'canje', pointsRefunded: 500 })],
+            vendedorSegunElAparato: 'staff-B',
+          }),
         }),
       )
     })
