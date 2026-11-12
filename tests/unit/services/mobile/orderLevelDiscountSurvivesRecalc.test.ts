@@ -450,6 +450,31 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
     expect(db2.orden(otra.id).discountAmount).toBe(1)
   })
 
+  it('🔴 Codex r4: con un tope inválido (negativo) la excepción tampoco da más que la regla exacta', async () => {
+    const conTopeNegativo = () =>
+      prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+        where.id === DESCUENTO_10
+          ? {
+              id: DESCUENTO_10,
+              venueId: VENUE,
+              name: 'tope -1',
+              type: 'PERCENTAGE',
+              value: 10,
+              scope: 'ORDER',
+              active: true,
+              maxDiscountAmount: -1,
+            }
+          : null,
+      )
+    const dbExacta = baseEnMemoria()
+    conTopeNegativo()
+    const exacta = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    const dbVieja = baseEnMemoria()
+    conTopeNegativo()
+    const vieja = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 2135 } }))
+    expect(dbVieja.orden(vieja.id).discountAmount).toBe(dbExacta.orden(exacta.id).discountAmount)
+  })
+
   it('control — terminal nueva sin versión vieja y con un total que no es el truncado: exacto ($2.14)', async () => {
     const db = baseEnMemoria()
     const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: null } }))

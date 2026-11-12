@@ -1797,7 +1797,8 @@ export async function crearVentaDeMostradorEnTx(
     terminal &&
     truncado !== null &&
     (terminal.truncaPorVersion || (terminal.totalCents === totalCon(truncado) && terminal.totalCents !== totalCon(delCatalogo)))
-      ? truncado
+      ? // Codex r3/r4: por construcción nunca más que la regla exacta (también con un tope inválido): fingir una TPV vieja no rinde.
+        Math.min(truncado, delCatalogo)
       : null
   const orderLevelDiscountDecimal = cupon
     ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)
