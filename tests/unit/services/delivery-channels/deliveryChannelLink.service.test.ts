@@ -663,6 +663,12 @@ describe('deliveryChannelLink.service', () => {
       expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
     })
 
+    it('`agotarPorInventario` acepta sí/no (o null = como siempre) y rechaza otra cosa', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+      await expect(updateChannelLink('venue1', 'link1', { config: { agotarPorInventario: 'no' } })).rejects.toThrow(ValidationError)
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
     it('acepta una lista de productos del canal y `null` (= vuelve a todo el catálogo)', async () => {
       ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })

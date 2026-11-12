@@ -614,49 +614,55 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   // Codex r2: la lista de productos (y lo ya agotado) se leen de la configuración VIGENTE, no de la copia de la pasada.
   link = await conConfigVigente(link)
 
-  // (a) Productos con inventario PROPIO que se acabaron.
-  const sinStock = await prisma.product.findMany({
-    where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
-    select: { sku: true },
-  })
   // Sólo lo que está en el menú de ESTE canal: un SKU que el proveedor no tiene no se agota ni se revive allá.
   const delCanal = productosDelCanal(link.config)
   const enElMenu = (sku: string) => !delCanal || delCanal.has(sku)
-  const deben = new Set(sinStock.map(p => p.sku).filter(Boolean) as string[])
+  const deben = new Set<string>()
+  // 🔴 Interruptor del canal (Testarudo, 12-nov): un negocio que usa recetas sólo para costear y no registra la existencia de
+  // sus insumos (todos en 0) quedaba con 28 de 38 productos «agotados» en Rappi. `false` = no agotar nada por inventario; lo
+  // que ya estaba agotado se revive solo abajo. Sin la llave (o `true`), como siempre.
+  if ((link.config as { agotarPorInventario?: unknown } | null)?.agotarPorInventario !== false) {
+    // (a) Productos con inventario PROPIO que se acabaron.
+    const sinStock = await prisma.product.findMany({
+      where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
+      select: { sku: true },
+    })
+    for (const p of sinStock) if (p.sku) deben.add(p.sku)
 
-  // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
-  // verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la carne — y entonces
-  // TODOS los platillos que la llevan dejan de existir. Sin esto, Uber los sigue vendiendo y
-  // cada uno termina en un rechazo, que es lo que cuenta contra la tasa de inyección.
-  const conReceta = await prisma.product.findMany({
-    where: { venueId: link.venueId, active: true, recipe: { isNot: null } },
-    select: {
-      sku: true,
-      recipe: {
-        select: {
-          portionYield: true,
-          lines: {
-            // Un ingrediente OPCIONAL que falte no impide hacer el platillo — sólo sale sin
-            // él. Contarlo agotaría platillos que sí se pueden preparar.
-            where: { isOptional: false },
-            select: { quantity: true, rawMaterial: { select: { currentStock: true, name: true } } },
+    // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
+    // verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la carne — y entonces
+    // TODOS los platillos que la llevan dejan de existir. Sin esto, Uber los sigue vendiendo y
+    // cada uno termina en un rechazo, que es lo que cuenta contra la tasa de inyección.
+    const conReceta = await prisma.product.findMany({
+      where: { venueId: link.venueId, active: true, recipe: { isNot: null } },
+      select: {
+        sku: true,
+        recipe: {
+          select: {
+            portionYield: true,
+            lines: {
+              // Un ingrediente OPCIONAL que falte no impide hacer el platillo — sólo sale sin
+              // él. Contarlo agotaría platillos que sí se pueden preparar.
+              where: { isOptional: false },
+              select: { quantity: true, rawMaterial: { select: { currentStock: true, name: true } } },
+            },
           },
         },
       },
-    },
-  })
-
-  for (const p of conReceta) {
-    if (!p.sku || !p.recipe) continue
-    const porciones = p.recipe.portionYield > 0 ? p.recipe.portionYield : 1
-    const faltaAlgo = p.recipe.lines.some(l => {
-      // Lo que se necesita para UNA porción: la receta rinde `portionYield`.
-      const necesario = l.quantity.div(porciones)
-      return l.rawMaterial.currentStock.lessThan(necesario)
     })
-    if (faltaAlgo) deben.add(p.sku)
+
+    for (const p of conReceta) {
+      if (!p.sku || !p.recipe) continue
+      const porciones = p.recipe.portionYield > 0 ? p.recipe.portionYield : 1
+      const faltaAlgo = p.recipe.lines.some(l => {
+        // Lo que se necesita para UNA porción: la receta rinde `portionYield`.
+        const necesario = l.quantity.div(porciones)
+        return l.rawMaterial.currentStock.lessThan(necesario)
+      })
+      if (faltaAlgo) deben.add(p.sku)
+    }
+    for (const sku of deben) if (!enElMenu(sku)) deben.delete(sku)
   }
-  for (const sku of deben) if (!enElMenu(sku)) deben.delete(sku)
 
   // Lo que ya le dijimos al proveedor. Se guarda la LISTA y no una huella: hace falta el
   // contenido para mandar sólo la diferencia — repetir el estado de 96 productos cada 5

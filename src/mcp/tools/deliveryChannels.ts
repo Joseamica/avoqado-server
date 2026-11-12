@@ -118,6 +118,8 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // Cuántos productos publica este canal. `cuantos: null` = todo el catálogo activo. Con `problema`, la lista
           // guardada no sirve y el menú NO se está publicando hasta corregirla.
           productosDelCanal: resumenDeProductos(l.config),
+          // Si el canal agota productos en el proveedor según el inventario (recetas e insumos). `false` = nunca por inventario.
+          agotarPorInventario: (l.config as { agotarPorInventario?: unknown } | null)?.agotarPorInventario !== false,
         })),
         todayByChannel,
         conexionesRecientes: conexiones.map(c => ({

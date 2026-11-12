@@ -425,6 +425,19 @@ describe('delivery_channels', () => {
     expect(out.channels.map((c: { margenPorcentaje: number | null }) => c.margenPorcentaje)).toEqual([30, null, null, null])
   })
 
+  it('dice si el canal agota por inventario (sin el interruptor: sí, como siempre)', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      { ...LINK_BASE, id: 'l1', config: { agotarPorInventario: false } },
+      { ...LINK_BASE, id: 'l2', config: null },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.channels.map((c: { agotarPorInventario: boolean }) => c.agotarPorInventario)).toEqual([false, true])
+  })
+
   it('🔴 dice cuántos productos publica cada canal: `null` = todo el catálogo; basura = «lista inválida», sin tumbar el tool', async () => {
     mockHasFeatureAccess.mockResolvedValueOnce(true)
     mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })

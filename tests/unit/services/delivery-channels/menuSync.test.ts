@@ -1103,3 +1103,42 @@ describe('Codex r2: la lista vigente se relee del canal antes de publicar o agot
     expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', true)
   })
 })
+
+describe('interruptor `agotarPorInventario` del canal (Testarudo, 12-nov: insumos en 0 = 28 de 38 agotados)', () => {
+  const mockedProducts = (prisma as any).product.findMany as jest.Mock
+  const mockedFindUnique = (prisma as any).deliveryChannelLink.findUnique as jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(hasAdapter as jest.Mock).mockReturnValue(true)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    ;(prisma as any).deliveryChannelLink.update.mockResolvedValue({})
+    ;(prisma as any).$queryRaw.mockResolvedValue([{ config: {} }])
+  })
+  afterEach(() => mockedFindUnique.mockReset())
+
+  it('🔴 en `false`, NO agota nada por inventario y REVIVE lo que ya estaba agotado en el proveedor', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedFindUnique.mockResolvedValue({ config: { agotarPorInventario: false, soldOutSkus: ['LATTE', 'CHAI'] } })
+
+    const r = await syncChannelAvailability(link({ config: {} }))
+
+    expect(mockedProducts).not.toHaveBeenCalled() // ni siquiera lee inventario ni recetas
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', false)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('CHAI', 'store1', false)
+    expect(r).toEqual({ agotados: 0, revividos: 2 })
+  })
+
+  it('sin el interruptor (o en `true`) agota por inventario como siempre', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedFindUnique.mockResolvedValue({ config: { agotarPorInventario: true, soldOutSkus: [] } })
+    mockedProducts.mockResolvedValueOnce([{ sku: 'LATTE' }]).mockResolvedValueOnce([])
+
+    const r = await syncChannelAvailability(link({ config: {} }))
+
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', true)
+    expect(r).toEqual({ agotados: 1, revividos: 0 })
+  })
+})

@@ -337,6 +337,9 @@ function validarConfig(entrante: Prisma.InputJsonValue): void {
 
   validarPrecios(c.precios)
   validarProductosDelCanal(c.productos)
+  if (c.agotarPorInventario !== undefined && c.agotarPorInventario !== null && typeof c.agotarPorInventario !== 'boolean') {
+    throw new ValidationError('`agotarPorInventario` debe ser sí o no (true/false)')
+  }
 }
 
 export async function updateChannelLink(
