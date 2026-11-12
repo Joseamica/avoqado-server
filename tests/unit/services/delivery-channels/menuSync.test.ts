@@ -932,6 +932,16 @@ describe('disponibilidad — agotar y revivir productos', () => {
     expect(a.setItemSoldOut).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex r4: sin INVENTORY_TRACKING (p. ej. perdió el plan) lo que YA estaba agotado se revive, no se queda así para siempre', async () => {
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedFeature.mockResolvedValue(false)
+
+    expect(await syncChannelAvailability(link({ config: { soldOutSkus: ['LATTE'] } }))).toEqual({ agotados: 0, revividos: 1 })
+    expect(mockedProducts).not.toHaveBeenCalled()
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', false)
+  })
+
   it('🔴 si el proveedor RECHAZA agotar uno, no se registra como hecho', async () => {
     // Registrarlo haría que la siguiente pasada creyera que ya está agotado y nunca lo
     // reintentara: el proveedor seguiría vendiendo algo que no hay, para siempre.

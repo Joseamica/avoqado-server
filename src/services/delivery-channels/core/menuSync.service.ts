@@ -610,7 +610,9 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   const adapter = adapterFor(link.provider)
   if (typeof adapter.setItemSoldOut !== 'function') return { agotados: 0, revividos: 0 }
 
-  if (!(await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING'))) return { agotados: 0, revividos: 0 }
+  // Sin INVENTORY_TRACKING los números de stock son basura: no se agota nada. Pero lo que YA estaba agotado se revive
+  // (Codex r4): antes se salía aquí y un negocio que perdió el plan quedaba con productos apagados para siempre.
+  const conInventario = await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING')
   // Codex r2: la lista de productos (y lo ya agotado) se leen de la configuración VIGENTE, no de la copia de la pasada.
   link = await conConfigVigente(link)
 
@@ -621,7 +623,7 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   // 🔴 Interruptor del canal (Testarudo, 12-nov): un negocio que usa recetas sólo para costear y no registra la existencia de
   // sus insumos (todos en 0) quedaba con 28 de 38 productos «agotados» en Rappi. `false` = no agotar nada por inventario; lo
   // que ya estaba agotado se revive solo abajo. Sin la llave (o `true`), como siempre.
-  if ((link.config as { agotarPorInventario?: unknown } | null)?.agotarPorInventario !== false) {
+  if (conInventario && (link.config as { agotarPorInventario?: unknown } | null)?.agotarPorInventario !== false) {
     // (a) Productos con inventario PROPIO que se acabaron.
     const sinStock = await prisma.product.findMany({
       where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
