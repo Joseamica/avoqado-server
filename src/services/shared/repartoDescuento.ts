@@ -368,7 +368,10 @@ export function devolverLoTopado(
   let lugar = lugarEnLaCuenta(renglones, filas)
   let devueltoCents = 0
   for (const fila of [...filas].sort(cronologico)) {
-    const topado = leerReparto(fila.reparto)?.topado ?? 0
+    // Codex r3 #1: sólo una fila que el recálculo todavía re-derivaría; una que se volvió FIJA (la cortesía de un folio anulado)
+    // conserva su importe congelado aunque su reparto traiga la marca.
+    const rederivable = seRecalculaComoPorcentajeDeCuenta(fila) || seRecalculaDentroDeSuAmbito(fila)
+    const topado = rederivable ? (leerReparto(fila.reparto)?.topado ?? 0) : 0
     const vuelve = Math.min(topado, lugar)
     if (vuelve <= 0) continue
     montos.set(fila.id, (aCentavos(fila.amount) + vuelve) / 100)

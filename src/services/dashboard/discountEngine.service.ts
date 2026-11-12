@@ -1251,10 +1251,8 @@ export async function removeDiscountFromOrder(
         })
 
         // Update order totals
-        const newDiscountAmount = Math.max(
-          0,
-          Math.round((Number(order.discountAmount) - Number(orderDiscount.amount)) * 100 + devuelto.devueltoCents) / 100,
-        )
+        // Codex r3 #2: sin nada que devolver, la misma resta de siempre (redondearla movería el cargo % en un centavo).
+        const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount) + devuelto.devueltoCents / 100)
         const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
         // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
         // not a tip and not a discount). It was omitted here, so removing a discount

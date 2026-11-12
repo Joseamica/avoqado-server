@@ -390,6 +390,12 @@ describe('🔴 W7 A1 — Σ de las filas nunca pasa de la cuenta: el % re-deriva
     expect(r.montos.size).toBe(0)
     expect(r.devueltoCents).toBe(0)
   })
+  it('🔴 Codex r3 #1: una fila que se volvió FIJA (cortesía de folio anulado) no recupera su `topado`, aunque su reparto lo traiga', () => {
+    const cortesia = fila('cupon', 15, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 }, { createdAt: t(2) })
+    const r = devolverLoTopado([hamburguesa, cafe], [fijo('asignado', 15, 1), cortesia])
+    expect(r.montos.size).toBe(0)
+    expect(r.devueltoCents).toBe(0)
+  })
   it('devolverLoTopado reparte el lugar del más viejo al más nuevo y sólo lo que cabe', () => {
     const marca = (id: string, amount: number, topado: number, s: number) =>
       fila(id, amount, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado }, { type: 'PERCENTAGE', value: 10, createdAt: t(s) })
