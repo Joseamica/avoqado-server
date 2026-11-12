@@ -133,6 +133,17 @@ describe('sendFirstStampEmailIfDue', () => {
     expect(enviar).toHaveBeenCalledTimes(1)
   })
 
+  it('cuenta ventas por la parte 0 de su sello (una por venta), acotado en la base: sin distinct y take 2', async () => {
+    sembrar({ ventasSelladas: 1 })
+    await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
+    const args = prismaMock.stampEvent.findMany.mock.calls[0][0]
+    expect(args).toEqual({
+      where: { venueId: 'v1', type: 'EARN', part: 0, stampCard: { customerId: 'c1' } },
+      select: { id: true },
+      take: 2,
+    })
+  })
+
   it('NO manda en la segunda venta sellada aunque la tarjeta tenga 2', async () => {
     sembrar({ card: { stampsEarned: 2 }, ventasSelladas: 2 })
     await sendFirstStampEmailIfDue('v1', 'c1', 'card1')

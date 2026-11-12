@@ -350,7 +350,8 @@ export async function earnPoints(
     logger.info('⏭️ Sello omitido: la venta nueva de un cambio no es una visita nueva', { venueId, customerId, orderId })
   } else {
     try {
-      sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
+      // `amount` (sin propina) es la base de la promo de la venta: la misma que la de los puntos (spec §4.3 regla 5).
+      sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config, amount })
     } catch (stampError: any) {
       deferredStampError = stampError
       logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {

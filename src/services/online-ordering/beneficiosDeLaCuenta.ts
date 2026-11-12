@@ -144,7 +144,7 @@ export const sqlSelloDeLaVenta = (venueId: string, orderId: string) => Prisma.sq
     ) AS "revertido"
   FROM "StampEvent" se
   JOIN "StampCard" sc ON sc."id" = se."stampCardId"
-  WHERE se."venueId" = ${venueId} AND se."orderId" = ${orderId} AND se."type" = 'EARN'
+  WHERE se."venueId" = ${venueId} AND se."orderId" = ${orderId} AND se."type" = 'EARN' AND se."part" = 0
   LIMIT 1`
 
 interface SelloDeLaVenta {

@@ -63,6 +63,14 @@ describe('topeDelDiaAlcanzado (vía la vista previa del MCP)', () => {
     expect(v?.dailyLimitReached).toBe(false)
   })
 
+  it('cuenta VISITAS (la parte 0 de cada venta), no partes: una venta ×2 que cruzó de tarjeta es una (ruling 8)', async () => {
+    arma({ loyaltySaleAt: HOY_1000, loyaltyEligibleAt: HOY_1000, payments: [{ createdAt: HOY_1000 }] }, 2)
+    // Hoy: una venta con dos partes (0 y 1). Por partes serían 2 y alcanzaría el tope de 2; por visitas es 1.
+    prismaMock.stampEvent.count.mockImplementation((async ({ where }: any) => (where.part === 0 ? 1 : 2)) as never)
+    const v = await previewSaleStamp({ venueId: 'v1', orderId: 'o1', customerId: 'c1' })
+    expect(v?.dailyLimitReached).toBe(false)
+  })
+
   it('0 = sin límite: nunca alcanzado y ni cuenta', async () => {
     arma({ loyaltySaleAt: HOY_1000, loyaltyEligibleAt: HOY_1000, payments: [{ createdAt: HOY_1000 }] }, 0)
     const v = await previewSaleStamp({ venueId: 'v1', orderId: 'o1', customerId: 'c1' })

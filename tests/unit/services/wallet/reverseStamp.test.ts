@@ -28,7 +28,7 @@ function cartillas(lista: Cartilla[]) {
           (w.rewards?.none === undefined || c.premio !== 'PENDING'),
       )
       .sort((a, b) => b.cycle - a.cycle)
-    return ok[0] ? { id: ok[0].id } : null
+    return ok[0] ? { id: ok[0].id, stampsEarned: ok[0].stampsEarned } : null
   }) as never)
   // La relectura bajo el candado de FILA de la cartilla elegida (y la cartilla de la venta) salen de la misma lista.
   prismaMock.stampCard.findUnique.mockImplementation((async (args: any) => {

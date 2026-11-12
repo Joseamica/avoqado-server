@@ -181,8 +181,9 @@ const VENTA_SELECT = {
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: 1,
   },
+  // Parte 0: una por venta, sea el sello o su reversa (las partes de más de una promo quedarían en el tope y esconderían la reversa).
   stampEvents: {
-    where: { type: { in: [StampEventType.EARN, StampEventType.REVERSAL] } },
+    where: { part: 0, type: { in: [StampEventType.EARN, StampEventType.REVERSAL] } },
     select: { type: true, stampCard: { select: { customerId: true } } },
     take: 10,
   },
@@ -511,7 +512,10 @@ async function leerPrograma(venueId: string): Promise<Programa> {
 const horaDeLaVenta = (v: { loyaltySaleAt: Date | null; loyaltyEligibleAt: Date | null }, nowMs: number): Date =>
   v.loyaltySaleAt ?? v.loyaltyEligibleAt ?? new Date(nowMs)
 
-/** El MISMO conteo que `grantStamp`: EARN del cliente en el día del VENUE de la hora de la VENTA. Tope 0 = sin tope. */
+/**
+ * El MISMO conteo que `grantStamp`: VISITAS del cliente (la parte 0 de cada venta, ruling 8) en el día del VENUE de la hora de la
+ * VENTA. Tope 0 = sin tope.
+ */
 async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, soldAt: Date): Promise<boolean> {
   if (!programa.stampsEnabled || programa.maxStampsPerDay <= 0) return false
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
@@ -521,6 +525,7 @@ async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa
     where: {
       venueId,
       type: StampEventType.EARN,
+      part: 0,
       stampCard: { customerId },
       createdAt: { gte: venueStartOfDay(tz, ref), lte: venueEndOfDay(tz, ref) },
     },
@@ -561,7 +566,8 @@ async function motivo(
  */
 async function cartillaDeLaVenta(venueId: string, customerId: string, orderId: string, premioDeHoy: string): Promise<SaleStampCard | null> {
   const earn = await prisma.stampEvent.findFirst({
-    where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId } },
+    // La cartilla de la parte 0: la de siempre (si la venta cruzó de cartilla con una promo, la que se llenó).
+    where: { venueId, orderId, type: StampEventType.EARN, part: 0, stampCard: { customerId } },
     select: {
       stampCard: {
         select: {

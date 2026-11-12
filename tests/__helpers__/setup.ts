@@ -258,6 +258,8 @@ const prismaMock: any = {
   customerOrderMetric: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
+  loyaltyPromotion: createMockModel(),
+  loyaltyPromotionUse: createMockModel(),
   walletPass: createMockModel(),
   walletPassOutbox: createMockModel(),
   receiptLayout: createMockModel(),
@@ -692,6 +694,11 @@ prismaMock.printGateway.findUnique.mockResolvedValue(null)
 // ninguna prueba elige menús: por default ninguna fila, para que los fixtures POS que llaman a la regla sin saberlo
 // (`settingsEnvelope.test.ts`) no tengan que mockearla.
 prismaMock.terminalMenu.findMany.mockResolvedValue([])
+// Promos de lealtad (12-nov-2026): `grantStamp` decide la promo de la venta (`decidirPromoDeLaVentaEnTx`) y la reversa suma las
+// partes de más de su sello. Por default, sin promos ni uso, y el sello de una venta es de una sola parte: lo de siempre.
+prismaMock.loyaltyPromotionUse.findUnique.mockResolvedValue(null)
+prismaMock.loyaltyPromotion.findMany.mockResolvedValue([])
+prismaMock.stampEvent.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

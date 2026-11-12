@@ -61,12 +61,11 @@ export async function sendFirstStampEmailIfDue(venueId: string, customerId: stri
 
     // 🔴 "Primer sello" = la clienta tiene UNA sola venta sellada en el negocio (no "la tarjeta
     // tiene 1 sello": una venta con promo puede dar 2 de golpe). Eso tambien deja fuera a la
-    // segunda cartilla: para abrirla hacen falta mas ventas. Se cuenta por orderId distinto
-    // para que valga aunque una venta se parta en varias filas EARN.
+    // segunda cartilla: para abrirla hacen falta mas ventas. Cada venta sellada tiene UNA parte 0
+    // (aunque se parta en varias filas EARN), asi que se cuentan esas, acotado en la base.
     const ventas = await prisma.stampEvent.findMany({
-      where: { venueId, type: 'EARN', stampCard: { customerId } },
-      distinct: ['orderId'],
-      select: { orderId: true },
+      where: { venueId, type: 'EARN', part: 0, stampCard: { customerId } },
+      select: { id: true },
       take: 2,
     })
     if (ventas.length !== 1) return

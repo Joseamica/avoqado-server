@@ -6,6 +6,8 @@ import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
+import { decidirPromoDeLaVentaEnTx, registrarUsoEnTx } from '../loyalty/promotions/promoDeLaVenta'
+import { sellosConPromo } from '../loyalty/promotions/evaluarPromo'
 
 /**
  * Cuarta ola (15-oct-2026): el MISMO presupuesto que la escritura de los puntos (`PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA` en
@@ -110,13 +112,20 @@ export async function esperarEfectosDeSellos(opciones: { maxMs?: number } = {}):
 export interface GrantStampResult {
   granted: boolean
   reason?: GrantStampReason
+  /** La cartilla de la parte 0 (la de siempre): su avance y su meta tras el sello. */
   stampsEarned?: number
   stampsRequired?: number
   stampCardId?: string
-  /** True cuando este sello completó la cartilla. */
+  /** True cuando la venta completó al menos una cartilla (si completó alguna, completó la de la parte 0). */
   completed?: boolean
-  /** El premio que nació al completarla, si la completó. */
+  /** El primer premio que nació (el de la cartilla de la parte 0). */
   rewardId?: string
+  /** Promos de lealtad: cuántos sellos dio la venta (1 sin promo). */
+  stampsAdded?: number
+  /** Todos los premios que nacieron, en orden (una venta con promo puede completar varias cartillas). */
+  rewardIds?: string[]
+  /** La promo que dio sellos de más, si la hubo. */
+  promotionId?: string
 }
 
 /**
@@ -152,30 +161,44 @@ export interface GrantStampOptions {
    * nada, sobre todo en los venues que ni siquiera usan sellos.
    */
   config?: StampConfigView | null
+  /**
+   * El monto de la venta SIN propina, el mismo con que `earnPoints` calcula sus puntos: con él la promo revisa el gasto mínimo y
+   * el monto que califica (spec §4.3 regla 5). Sin él (un llamador que no lo trae) se usa el total de la orden menos su propina.
+   */
+  amount?: number
 }
 
 /**
- * El índice que garantiza «cada parte de un pago se sella una vez» (parcial y crudo: Prisma no lo conoce por nombre). Era
- * `(venueId, orderId)` (20260826145859); desde las promos de lealtad (20261112190000) es `(venueId, orderId, part)`.
+ * Los índices que garantizan «cada parte de un pago se sella una vez» y «se revierte una vez» (parciales y crudos: Prisma no
+ * los conoce por nombre). El del sello era `(venueId, orderId)` (20260826145859); desde las promos de lealtad (20261112190000)
+ * los dos son `(venueId, orderId, part)`.
  */
 const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_part_earn_unique'
+const UNICA_REVERSA_DE_LA_ORDEN = 'StampEvent_venueId_orderId_part_reversal_unique'
 
 /**
- * ¿Este P2002 es el sello de ESTA orden, y no el premio ni la cartilla siguiente? (auditoría A #3, 14-oct-2026)
+ * Una venta con promo da a lo más 10 sellos (validación del panel): con cartillas de 2 caben en 6 partes. 11 deja holgura;
+ * pasarlo sólo pasa con una configuración inválida, y entonces se lanza en vez de sellar de más (ruling 6).
+ */
+const TOPE_DE_PARTES = 11
+
+/**
+ * ¿Este P2002 es el índice `indice` de ESTA orden, y no el premio ni la cartilla siguiente? (auditoría A #3, 14-oct-2026)
  *
  * Antes cualquier P2002 se leía como «ya estaba sellado». Si el choque era del premio (`StampReward.stampCardId`) o de la
  * cartilla siguiente (`StampCard[customerId, venueId, cycle]`), la transacción se revertía y el sello de una venta DISTINTA se
  * perdía en silencio. Se aceptan las formas que `esChoqueDelUnico` (turnoDeCaja.ts) midió contra Postgres: el nombre del índice
  * en `meta.constraint` / `meta.target` (suelto o en un arreglo de uno), o la lista EXACTA de columnas `['venueId','orderId','part']`
- * del modelo StampEvent. El otro único de esas columnas (`…_part_reversal_unique`) no se puede tocar aquí: sólo se insertan EARN.
+ * del modelo StampEvent. Los dos índices tienen esas columnas, pero cada transacción inserta un solo tipo (el sello sólo EARN,
+ * la reversa sólo REVERSAL), así que las columnas señalan al índice de quien pregunta.
  * Sin descriptor no se adivina: se relanza (`earnPoints` lo difiere y el reconciliador reintenta).
  */
-function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
+function esChoqueDelUnicoDeLaOrden(error: unknown, indice: string): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false
   const meta = error.meta as { modelName?: unknown; target?: unknown; constraint?: unknown } | undefined
   const descriptor = meta?.constraint ?? meta?.target
-  if (descriptor === UNICO_SELLO_DE_LA_ORDEN) return true
-  if (Array.isArray(descriptor) && descriptor.length === 1 && descriptor[0] === UNICO_SELLO_DE_LA_ORDEN) return true
+  if (descriptor === indice) return true
+  if (Array.isArray(descriptor) && descriptor.length === 1 && descriptor[0] === indice) return true
   return (
     (meta?.modelName === undefined || meta.modelName === 'StampEvent') &&
     Array.isArray(descriptor) &&
@@ -191,7 +214,19 @@ type DentroDelCandado =
   | { otorgado: false; reason: 'ORDER_REFUNDED' }
   | { otorgado: false; reason: 'ALREADY_STAMPED'; cardId: string }
   | { otorgado: false; reason: 'OTHER_CUSTOMER' }
-  | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
+  | {
+      otorgado: true
+      /** La cartilla de la parte 0, con su avance y meta tras el sello. */
+      cardId: string
+      ganados: number
+      meta: number
+      completed: boolean
+      /** La última cartilla que tocó la venta: donde va su avance de hoy (la liga del correo del primer sello). */
+      ultimaCardId: string
+      stampsAdded: number
+      rewardIds: string[]
+      promotionId?: string
+    }
 
 /**
  * La cartilla se llenó: la marca completada, deja su premio PENDING y abre la siguiente. Corre DENTRO de la transacción de
@@ -288,9 +323,9 @@ export async function grantStamp(
   if (!config.stampsEnabled) return { granted: false, reason: 'STAMPS_DISABLED' }
 
   // Atajo barato. La garantía de verdad es el índice único; esto sólo evita
-  // levantar una transacción cuando ya sabemos que va a rebotar.
+  // levantar una transacción cuando ya sabemos que va a rebotar. «Sellada» = tiene su parte 0 (todas nacen juntas).
   const yaSellado = await prisma.stampEvent.findFirst({
-    where: { venueId, orderId, type: StampEventType.EARN },
+    where: { venueId, orderId, type: StampEventType.EARN, part: 0 },
     select: { id: true, stampCardId: true },
   })
   if (yaSellado) return { granted: false, reason: 'ALREADY_STAMPED', stampCardId: yaSellado.stampCardId }
@@ -321,14 +356,14 @@ export async function grantStamp(
         // y, sin esta relectura, contaba el sello que la primera acababa de dar como «el de hoy» y respondía DAILY_LIMIT: falso
         // para esta venta, que sí quedó sellada. (Un segundo sello, de quien sea, también lo impide el índice único por venta.)
         const propio = await tx.stampEvent.findFirst({
-          where: { venueId, orderId, type: StampEventType.EARN },
+          where: { venueId, orderId, type: StampEventType.EARN, part: 0 },
           select: { id: true, stampCardId: true },
         })
         if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
 
         const venta = await tx.order.findFirst({
           where: { id: orderId, venueId },
-          select: { loyaltySaleAt: true, loyaltyEligibleAt: true },
+          select: { loyaltySaleAt: true, loyaltyEligibleAt: true, total: true, tipAmount: true },
         })
         const soldAt = venta?.loyaltySaleAt ?? venta?.loyaltyEligibleAt ?? new Date()
 
@@ -344,12 +379,14 @@ export async function grantStamp(
         })
         if (puntosDeOtro) return { otorgado: false, reason: 'OTHER_CUSTOMER' }
 
-        // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
+        // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado. Cuenta VISITAS (la parte 0 de cada venta), no sellos:
+        // una venta ×2 que cruzó de cartilla es una visita (spec §4.3 regla 9, ruling 8). `topeDelDiaAlcanzado` cuenta igual.
         if (tz) {
           const hoy = await tx.stampEvent.count({
             where: {
               venueId,
               type: StampEventType.EARN,
+              part: 0,
               stampCard: { customerId },
               createdAt: { gte: venueStartOfDay(tz, soldAt), lte: venueEndOfDay(tz, soldAt) },
             },
@@ -357,45 +394,80 @@ export async function grantStamp(
           if (hoy >= config.maxStampsPerDay) return { otorgado: false, reason: 'DAILY_LIMIT_REACHED' }
         }
 
-        // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
-        // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
-        // 🔴 La abierta MÁS VIEJA (D2): una devolución puede reabrir una cartilla llena cuando ya existe la siguiente; se termina
-        // primero la reabierta. Con una sola abierta (lo normal) es la misma de siempre.
-        let card = await tx.stampCard.findFirst({
-          where: { venueId, customerId, completedAt: null },
-          orderBy: { cycle: 'asc' },
-        })
-        if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+        // ── Promos de lealtad (spec §4.3): se decide DESPUÉS de las reglas normales (regla 8: si la venta no daba sello, la promo
+        // tampoco) y DENTRO del candado de la clienta, para que dos ventas a la vez no se salten «1 vez al día». La hora es la de
+        // la venta (regla 3); el monto, el mismo sin propina de los puntos (regla 5).
+        const amount =
+          options.amount ??
+          Prisma.Decimal.max(0, new Prisma.Decimal(venta?.total ?? 0).minus(venta?.tipAmount ?? 0))
+            .toDecimalPlaces(2)
+            .toNumber()
+        const decision = await decidirPromoDeLaVentaEnTx(tx, { venueId, customerId, orderId, soldAt, amount })
+        // Nunca menos que el sello de siempre, aunque una promo inválida dijera 0.
+        const sellos = Math.max(1, sellosConPromo(decision))
+        // La promo se anota en el sello sólo si dio sellos de más (un «+N puntos» no toca los sellos).
+        const promotionId = sellos > 1 ? decision?.promotionId : undefined
 
-        await tx.stampEvent.create({
-          data: {
-            stampCardId: card.id,
-            venueId,
-            orderId,
-            type: StampEventType.EARN,
-            quantity: 1,
-            createdById: options.staffVenueId,
-            terminalId: options.terminalId,
-            createdAt: soldAt,
-          },
-        })
-        // El contador se mueve en la MISMA transacción que su evento: si viven
-        // separados, un fallo a medias deja el cache mintiendo sobre el libro.
-        const actualizada = await tx.stampCard.update({
-          where: { id: card.id },
-          data: { stampsEarned: { increment: 1 } },
-          select: { stampsEarned: true, stampsRequired: true },
-        })
+        // Los sellos se reparten en PARTES, una por cartilla que tocan (regla 10): cada parte llena la abierta más vieja hasta su
+        // meta; si la completa, nace su premio y la siguiente parte va a la abierta que siga. Sin promo es UNA parte de 1 sello: lo
+        // de siempre. El índice único (venta, parte) garantiza que ninguna parte se sella dos veces; todas nacen en esta transacción.
+        let restante = sellos
+        let primera: { cardId: string; ganados: number; meta: number; completed: boolean } | undefined
+        let ultimaCardId = ''
+        const rewardIds: string[] = []
+        for (let part = 0; restante > 0; part++) {
+          if (part >= TOPE_DE_PARTES) throw new Error(`Sello con promo: la venta ${orderId} pide más de ${TOPE_DE_PARTES} partes`)
+
+          // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
+          // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
+          // 🔴 La abierta MÁS VIEJA (D2): una devolución puede reabrir una cartilla llena cuando ya existe la siguiente; se termina
+          // primero la reabierta. Con una sola abierta (lo normal) es la misma de siempre.
+          let card = await tx.stampCard.findFirst({
+            where: { venueId, customerId, completedAt: null },
+            orderBy: { cycle: 'asc' },
+          })
+          if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+
+          // Hasta la meta de ESTA cartilla. Una abierta que ya estuviera en su meta (no debería) recibe 1 y se completa, como antes.
+          const faltan = card.stampsRequired - card.stampsEarned
+          const quantity = Math.min(restante, faltan > 0 ? faltan : 1)
+          await tx.stampEvent.create({
+            data: {
+              stampCardId: card.id,
+              venueId,
+              orderId,
+              type: StampEventType.EARN,
+              part,
+              quantity,
+              promotionId,
+              createdById: options.staffVenueId,
+              terminalId: options.terminalId,
+              createdAt: soldAt,
+            },
+          })
+          // El contador se mueve en la MISMA transacción que su evento: si viven
+          // separados, un fallo a medias deja el cache mintiendo sobre el libro.
+          const actualizada = await tx.stampCard.update({
+            where: { id: card.id },
+            data: { stampsEarned: { increment: quantity } },
+            select: { stampsEarned: true, stampsRequired: true },
+          })
+          restante -= quantity
+          ultimaCardId = card.id
+
+          const ganados = actualizada.stampsEarned
+          const meta = actualizada.stampsRequired ?? card.stampsRequired
+          // ── La cartilla se llenó ────────────────────────────────────────────────
+          const completed = ganados >= meta
+          if (completed) rewardIds.push((await completarCartilla(tx, card, config, venueId, customerId)).rewardId)
+          primera ??= { cardId: card.id, ganados, meta, completed }
+        }
 
         await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO' })
-        const ganados = actualizada.stampsEarned
-        const meta = actualizada.stampsRequired ?? card.stampsRequired
-        if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
+        // El bono gasta el límite de la clienta en la MISMA transacción que sus sellos (regla 14). Sin bono no hay fila.
+        if (decision && sellos > 1) await registrarUsoEnTx(tx, { venueId, customerId, orderId, soldAt, decision, stampsBonus: sellos - 1 })
 
-        // ── La cartilla se llenó ────────────────────────────────────────────────
-        const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
-
-        return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId }
+        return { otorgado: true, ...primera!, ultimaCardId, stampsAdded: sellos, rewardIds, promotionId }
       },
       { etiqueta: 'grantStamp', ...PRESUPUESTO_DEL_SELLO },
     )
@@ -409,7 +481,8 @@ export async function grantStamp(
     // 🔴 El sello subió: avisarle al teléfono del cliente (en segundo plano; `notifyCustomerPassUpdated` nunca lanza).
     enSegundoPlano('aviso', notifyCustomerPassUpdated(venueId, customerId))
     // 🔴 Y si es su PRIMER sello, mandarle la liga para que guarde la tarjeta (`sendFirstStampEmailIfDue` decide y nunca lanza).
-    enSegundoPlano('correo', sendFirstStampEmailIfDue(venueId, customerId, resultado.cardId))
+    // La liga muestra el avance de la ÚLTIMA cartilla que tocó la venta (con una sola parte, la de siempre).
+    enSegundoPlano('correo', sendFirstStampEmailIfDue(venueId, customerId, resultado.ultimaCardId))
 
     return {
       granted: true,
@@ -417,12 +490,15 @@ export async function grantStamp(
       stampsEarned: resultado.ganados,
       stampsRequired: resultado.meta,
       completed: resultado.completed,
-      rewardId: resultado.rewardId,
+      rewardId: resultado.rewardIds[0],
+      stampsAdded: resultado.stampsAdded,
+      rewardIds: resultado.rewardIds,
+      promotionId: resultado.promotionId,
     }
   } catch (error: unknown) {
     // 🔴 SÓLO el índice del sello de esta orden es «otro cobro simultáneo ya la selló». No se propaga: el cobro se vería
     // fallido aunque el dinero entró. Cualquier otro P2002 (premio, cartilla) SÍ se propaga (auditoría A #3).
-    if (esChoqueDelSelloDeLaOrden(error)) {
+    if (esChoqueDelUnicoDeLaOrden(error, UNICO_SELLO_DE_LA_ORDEN)) {
       logger.info('Sello duplicado evitado por el índice único', { venueId, orderId, customerId })
       return { granted: false, reason: 'ALREADY_STAMPED' }
     }
@@ -512,6 +588,9 @@ async function reintentarSiSeVence<T>(venueId: string, orderId: string, correr: 
  * del mismo cliente la completaba (premio + cartilla nueva) y la reversión restaba con su lectura vieja: la cartilla quedaba
  * «2 de 3, completada, con un premio pendiente» que el cliente ya no se había ganado. El cliente sale de la cartilla del
  * sello ORIGINAL (una cartilla nunca cambia de dueño).
+ *
+ * Promos de lealtad (Task 6): una venta puede haber dado varios sellos en varias PARTES (una por cartilla). Se quita la suma
+ * de todas, en una o varias cartillas, con un asiento REVERSAL por cartilla tocada (parte 0, 1, 2…). Con un sello, lo de siempre.
  */
 export async function reverseStampForOrder(
   venueId: string,
@@ -525,10 +604,18 @@ export async function reverseStampForOrder(
   const otorgado = await reintentarSiSeVence(venueId, orderId, () =>
     prisma.$transaction(async tx => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
-      return tx.stampEvent.findFirst({
-        where: { venueId, orderId, type: StampEventType.EARN },
+      // La parte 0 es el sello de siempre y su cartilla es «la de la venta»; las demás (el sobrante de una promo) sólo suman.
+      const parte0 = await tx.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN, part: 0 },
         select: { id: true, stampCardId: true, quantity: true },
       })
+      if (!parte0) return null
+      const demas = await tx.stampEvent.findMany({
+        where: { venueId, orderId, type: StampEventType.EARN, part: { gt: 0 } },
+        select: { quantity: true },
+        take: TOPE_DE_PARTES,
+      })
+      return { stampCardId: parte0.stampCardId, cantidad: demas.reduce((s, d) => s + d.quantity, parte0.quantity ?? 1) }
     }, PRESUPUESTO_DEL_SELLO),
   )
   if (!otorgado) return { reversed: false }
@@ -540,7 +627,7 @@ export async function reverseStampForOrder(
   })
   if (yaRevertido > 0) return { reversed: false, stampCardId: otorgado.stampCardId }
 
-  const cantidad = otorgado.quantity ?? 1
+  const cantidad = otorgado.cantidad
   // El dueño de la cartilla del sello original: con él se forma el candado, igual que en `grantStamp`.
   const original = await prisma.stampCard.findUnique({ where: { id: otorgado.stampCardId }, select: { customerId: true } })
   if (!original) return { reversed: false }
@@ -571,85 +658,99 @@ export async function reverseStampForOrder(
     })
     if (!card) return false
 
-    // 🔴 ¿De qué cartilla sale el sello? (D3, 21-oct, founder: «A, como Square»). UNA sola regla para todos los estados
-    // (varias llenas, varias abiertas por D2, canjes de por medio): de una cartilla que TENGA el sello, en este orden:
-    //   1. abierta (la de la venta, luego la más nueva): no toca ningún premio — «consume primero el avance nuevo»;
-    //   2. llena con premio SIN cobrar (la de la venta, luego la más nueva): el premio se cancela y la cartilla se reabre;
-    //   3. llena con premio ya cobrado: sólo pierde el sello; lo cobrado no se quita.
-    // Como siempre se elige una que tiene el sello, nunca hay negativos, y ningún premio pendiente queda sin sus sellos.
+    // 🔴 ¿De qué cartilla salen los sellos? (D3, 21-oct, founder: «A, como Square»). UNA sola regla para todos los estados
+    // (varias llenas, varias abiertas por D2, canjes de por medio): de cartillas que TENGAN sellos, en este orden:
+    //   1. abiertas (la de la venta, luego la más nueva): no tocan ningún premio — «consume primero el avance nuevo»;
+    //   2. llenas con premio SIN cobrar (la de la venta, luego la más nueva): el premio se cancela y la cartilla se reabre;
+    //   3. llenas con premio ya cobrado: sólo pierden sellos; lo cobrado no se quita.
+    // Nunca se quita más de lo que una cartilla tiene, así que nunca hay negativos, y ningún premio pendiente queda sin sus sellos.
     // Antes eran reglas sueltas por caso y cada combinación nueva dejaba una cartilla en −1 (Codex D2-r1, D3-r1).
     // Un nivel a la vez y en el orden de la regla, sin traer listas (un tope podía dejar fuera la cartilla correcta, Codex
     // D3-r2 #2): primero la de la venta si está en ese nivel, luego la más nueva del nivel.
-    const delCliente = { venueId, customerId: card.customerId, stampsEarned: { gte: cantidad } }
+    // Promos (ruling 1, Codex r1 del plan): una venta de N sellos vacía NIVEL POR NIVEL, quitando de cada cartilla lo que tenga
+    // hasta completar N; sólo pasa al siguiente nivel cuando el actual ya no tiene sellos. Así dos abiertas con 1 sello cubren una
+    // devolución de 2 sin cancelar un premio pendiente. Con N = 1 es exactamente la regla de siempre.
+    const delCliente = { venueId, customerId: card.customerId, stampsEarned: { gte: 1 } }
     const niveles: Prisma.StampCardWhereInput[] = [
       { ...delCliente, completedAt: null },
       { ...delCliente, completedAt: { not: null }, rewards: { some: { status: StampRewardStatus.PENDING } } },
       { ...delCliente, completedAt: { not: null }, rewards: { none: { status: StampRewardStatus.PENDING } } },
       // Red de seguridad (Codex D3-r5 #1): entre una consulta y otra, quitar un canje puede pasar un premio de cobrado a por
-      // cobrar y la cartilla «cambia de nivel» sin aparecer en ninguno. Cualquiera con el sello; la relectura bajo la fila
+      // cobrar y la cartilla «cambia de nivel» sin aparecer en ninguno. Cualquiera con sellos; la relectura bajo la fila
       // del premio decide qué hacer con él.
       delCliente,
     ]
-    let elegida: { id: string } | null = null
+    let restante = cantidad
+    let parte = 0
     for (const donde of niveles) {
-      elegida =
-        (await tx.stampCard.findFirst({ where: { ...donde, id: card.id }, select: { id: true } })) ??
-        (await tx.stampCard.findFirst({ where: donde, orderBy: { cycle: 'desc' }, select: { id: true } }))
-      if (elegida) break
-    }
-    if (!elegida) {
-      // Ninguna cartilla tiene el sello: datos de antes de esta regla. Queda el asiento (la venta no se revierte dos
-      // veces) pero no se resta nada: nunca negativos.
-      logger.warn('Reversa de sello sin cartilla con saldo: no se resta', { venueId, orderId, stampCardId: card.id })
-    }
+      while (restante > 0) {
+        const elegida =
+          (await tx.stampCard.findFirst({ where: { ...donde, id: card.id }, select: { id: true, stampsEarned: true } })) ??
+          (await tx.stampCard.findFirst({ where: donde, orderBy: { cycle: 'desc' }, select: { id: true, stampsEarned: true } }))
+        if (!elegida) break
+        // Lo que tenga, hasta lo que falta: la cartilla queda en 0 (no se vuelve a elegir) o ya no falta nada.
+        const quita = Math.min(elegida.stampsEarned, restante)
+        restante -= quita
 
-    await tx.stampEvent.create({
-      data: {
-        stampCardId: elegida?.id ?? card.id,
-        venueId,
-        orderId,
-        type: StampEventType.REVERSAL,
-        // Negativo: el libro se lee sumando, así que el asiento contrario resta. Sin cartilla con saldo (`elegida` null) el
-        // asiento SIGUE existiendo, para que la misma venta no se revierta dos veces, pero resta 0 porque no restó nada:
-        // así el libro (suma de asientos) sigue igual al contador.
-        quantity: elegida ? -cantidad : 0,
-        createdById: options.staffVenueId,
-      },
-    })
-
-    // El contador vive en la MISMA transacción que su asiento. Si se separan, un
-    // fallo a medias deja al cliente viendo un avance que el libro no respalda.
-    if (elegida) {
-      // 🔴 Candado de FILA del PREMIO de esa cartilla (si tiene), DESPUÉS del asiento, y se vuelve a mirar (Codex D3-r2 #1,
-      // r3 y r4): quitar un premio canjeado de una cuenta toma esa misma fila para decidir si vuelve por cobrar, así que las
-      // dos van en fila. No es la fila de la CARTILLA (el asiento ya la toca por su llave foránea y cerraba un círculo con la
-      // liquidación de cuentas) ni el candado del cliente (r3). La cartilla se resta DESPUÉS, con el premio ya decidido.
-      await tx.$queryRaw`SELECT id FROM "StampReward" WHERE "stampCardId" = ${elegida.id} FOR UPDATE`
-      const ahora = await tx.stampCard.findUnique({
-        where: { id: elegida.id },
-        select: { completedAt: true, rewards: { select: { status: true }, take: 1 } },
-      })
-      let reabrir = false
-      if (ahora?.completedAt && ahora.rewards?.[0]?.status === StampRewardStatus.PENDING) {
-        const cancelled = await tx.stampReward.updateMany({
-          where: { stampCardId: elegida.id, status: StampRewardStatus.PENDING },
-          data: { status: StampRewardStatus.CANCELLED },
+        // Negativo: el libro se lee sumando, así que el asiento contrario resta. Uno por cartilla tocada, con su parte.
+        await tx.stampEvent.create({
+          data: {
+            stampCardId: elegida.id,
+            venueId,
+            orderId,
+            type: StampEventType.REVERSAL,
+            part: parte++,
+            quantity: -quita,
+            createdById: options.staffVenueId,
+          },
         })
-        reabrir = cancelled.count > 0
+
+        // El contador vive en la MISMA transacción que su asiento. Si se separan, un
+        // fallo a medias deja al cliente viendo un avance que el libro no respalda.
+        // 🔴 Candado de FILA del PREMIO de esa cartilla (si tiene), DESPUÉS del asiento, y se vuelve a mirar (Codex D3-r2 #1,
+        // r3 y r4): quitar un premio canjeado de una cuenta toma esa misma fila para decidir si vuelve por cobrar, así que las
+        // dos van en fila. No es la fila de la CARTILLA (el asiento ya la toca por su llave foránea y cerraba un círculo con la
+        // liquidación de cuentas) ni el candado del cliente (r3). La cartilla se resta DESPUÉS, con el premio ya decidido.
+        await tx.$queryRaw`SELECT id FROM "StampReward" WHERE "stampCardId" = ${elegida.id} FOR UPDATE`
+        const ahora = await tx.stampCard.findUnique({
+          where: { id: elegida.id },
+          select: { completedAt: true, rewards: { select: { status: true }, take: 1 } },
+        })
+        let reabrir = false
+        if (ahora?.completedAt && ahora.rewards?.[0]?.status === StampRewardStatus.PENDING) {
+          const cancelled = await tx.stampReward.updateMany({
+            where: { stampCardId: elegida.id, status: StampRewardStatus.PENDING },
+            data: { status: StampRewardStatus.CANCELLED },
+          })
+          reabrir = cancelled.count > 0
+        }
+        await tx.stampCard.update({
+          where: { id: elegida.id },
+          data: { stampsEarned: { decrement: quita }, ...(reabrir ? { completedAt: null } : {}) },
+        })
       }
-      await tx.stampCard.update({
-        where: { id: elegida.id },
-        data: { stampsEarned: { decrement: cantidad }, ...(reabrir ? { completedAt: null } : {}) },
-      })
     }
-    if (elegida) await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO_REVERTIDO' })
+
+    if (parte === 0) {
+      // Ninguna cartilla tiene sellos: datos de antes de esta regla. Queda el asiento (la venta no se revierte dos veces)
+      // pero resta 0 porque no restó nada: así el libro (suma de asientos) sigue igual al contador. Nunca negativos.
+      logger.warn('Reversa de sello sin cartilla con saldo: no se resta', { venueId, orderId, stampCardId: card.id })
+      await tx.stampEvent.create({
+        data: { stampCardId: card.id, venueId, orderId, type: StampEventType.REVERSAL, quantity: 0, createdById: options.staffVenueId },
+      })
+      return true
+    }
+    // Se quitó parte, no todo: lo demás ya no estaba en ninguna cartilla. Igual que arriba: nunca negativos.
+    if (restante > 0) logger.warn('Reversa de sello incompleta: las cartillas no tenían todos los sellos', { venueId, orderId, restante })
+    await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO_REVERTIDO' })
     return true
   }
   let revertida: boolean
   try {
     revertida = await revertirConReintento()
-  } catch (error: any) {
-    if (error?.code === 'P2002') {
+  } catch (error: unknown) {
+    // SÓLO el índice de la reversa de esta venta es «otra reversa ganó»; cualquier otro P2002 sube (como en `grantStamp`).
+    if (esChoqueDelUnicoDeLaOrden(error, UNICA_REVERSA_DE_LA_ORDEN)) {
       logger.info('Reversa de sello duplicada evitada por el índice único', { venueId, orderId })
       return { reversed: false, stampCardId: otorgado.stampCardId }
     }
