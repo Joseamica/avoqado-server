@@ -115,16 +115,17 @@ function cuentaAlAzar(azar: () => number) {
   const renglones: RenglonParaReparto[] = Array.from({ length: n }, (_, i) => {
     const total = azar() < 0.1 ? 0 : pesos(20000)
     const cortesia = azar() < 0.1
-    const promo = !cortesia && azar() < 0.1
+    const promo = azar() < 0.1 // también regalada: una promoción que después se da de cortesía
     const propio = cortesia ? total : azar() < 0.15 ? Math.min(total, pesos(5000)) : 0
+    const sinProducto = azar() < 0.05 // «Otro importe»: nunca entra a un ámbito
     return {
       id: `r${i}`,
       total,
       discountAmount: propio,
       orderPromotionId: promo ? 'op' : null,
       isCortesia: cortesia,
-      productId: `p${i}`,
-      product: { categoryId: azar() < 0.6 ? 'c1' : 'c2' },
+      productId: sinProducto ? null : `p${i}`,
+      product: sinProducto ? null : { categoryId: azar() < 0.6 ? 'c1' : 'c2' },
     }
   })
   const ids = renglones.map(r => r.id)
@@ -134,7 +135,7 @@ function cuentaAlAzar(azar: () => number) {
     const id = `f${k}`
     const createdAt = new Date(Date.UTC(2026, 10, 1, 0, 0, k))
     const amount = pesos(15000)
-    const tipo = entero(0, 5)
+    const tipo = entero(0, 6)
     const destinos = algunos().length > 0 ? algunos() : [ids[0]]
     if (tipo === 0) {
       // % de ámbito (re-derivable), a veces con tope del catálogo.
@@ -170,7 +171,25 @@ function cuentaAlAzar(azar: () => number) {
         value: entero(1, 50),
         amount,
         appliedToItemIds: [],
-        reparto: nuevoRepartoDeCuenta({ conPromociones: azar() < 0.5 }),
+        reparto: nuevoRepartoDeCuenta({
+          conPromociones: azar() < 0.5,
+          base: azar() < 0.3 ? destinos : null,
+          tope: azar() < 0.2 ? pesos(3000) : null,
+        }),
+        createdAt,
+      }
+    }
+    if (tipo === 5) {
+      // Cortesía moderna de la terminal: COMP espejo con reparto, sin discountId.
+      return {
+        id,
+        type: 'COMP',
+        value: 100,
+        amount,
+        appliedToItemIds: destinos,
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones: centavosPara(destinos) },
+        isComp: true,
+        discountId: null,
         createdAt,
       }
     }
@@ -192,6 +211,19 @@ function cuentaAlAzar(azar: () => number) {
       createdAt,
     }
   })
+  if (azar() < 0.35) {
+    const falta = renglones.reduce((s, r) => s + aCentavos(r.total), 0) - filas.reduce((s, f) => s + aCentavos(f.amount), 0)
+    if (falta > 0)
+      filas.push({
+        id: 'justa',
+        type: 'FIXED_AMOUNT',
+        value: falta / 100,
+        amount: falta / 100,
+        appliedToItemIds: [],
+        reparto: nuevoRepartoDeCuenta({ conPromociones: true }),
+        createdAt: new Date(Date.UTC(2026, 10, 1, 0, 1, 0)),
+      })
+  }
   const cambian: RenglonQueCambia[] = ids
     .filter(() => azar() < 0.4)
     .map(id => {
@@ -241,9 +273,12 @@ describe('W7 A1 · diferencial contra develop (61125d8e0)', () => {
   it(`recorteDeFila: dentro de una cuenta llena sólo cambia el % de ámbito topado con un renglón con valor; todo lo demás = develop`, () => {
     const azar = mulberry32(7)
     let distintas = 0
+    let exactas = 0
     for (let i = 0; i < CASOS; i++) {
       const { renglones, filas, cambian } = cuentaAlAzar(azar)
       if (!cuentaLlena(renglones, filas)) continue
+      const techo = renglones.reduce((s, r) => s + aCentavos(r.total), 0)
+      if (filas.reduce((s, f) => s + aCentavos(f.amount), 0) === techo) exactas++
       for (const fila of filas) {
         const nuevo = recorteDeFila(fila, cambian, { vivos: renglones, cuentaLlena: true })
         const viejo = recorteDeDevelop(fila, cambian)
@@ -256,6 +291,7 @@ describe('W7 A1 · diferencial contra develop (61125d8e0)', () => {
       }
     }
     expect(distintas).toBeGreaterThan(0)
+    expect(exactas).toBeGreaterThan(1_000) // Codex r8: también cuentas EXACTAMENTE llenas, no sólo excedidas
   })
 
   it(`importesDeLasFilas: en ${CASOS.toLocaleString('es-MX')} cuentas generadas SIN exceso, los importes y la cabecera = develop`, () => {
