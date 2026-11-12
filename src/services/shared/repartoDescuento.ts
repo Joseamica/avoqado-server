@@ -289,36 +289,62 @@ export function estaRegalado(r: RenglonParaReparto): boolean {
 const aPesosRedondeados = (x: number) => Math.round(x * 100) / 100
 
 /**
+ * Lo que la regla de los recalculadores le da a una fila SIN el tope de la cuenta: un % de cuenta, sobre los renglones sin promoción;
+ * un % dirigido con ámbito, sobre los de su ámbito (P1); en los dos sin lo ya regalado (R8) y con el tope del catálogo (R6). `null` =
+ * la fila no se re-deriva (conserva su importe).
+ */
+function importeSinTope(renglones: RenglonParaReparto[], fila: FilaParaReparto): number | null {
+  // R8 (founder, 2-oct): la base de un % —de cuenta o dentro de su ámbito— deja fuera lo ya regalado.
+  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + Number(x.total ?? 0), 0)
+  let base: number | null = null
+  if (seRecalculaComoPorcentajeDeCuenta(fila)) base = suma(renglones.filter(x => !x.orderPromotionId))
+  else if (seRecalculaDentroDeSuAmbito(fila)) {
+    const ambito = leerReparto(fila.reparto)!.ambito!
+    base = suma(renglones.filter(x => enAmbito(x, ambito)))
+  }
+  if (base === null) return null
+  // R6 (founder, 2-oct): el tope del catálogo vale también al recalcular, sea de cuenta o dirigido.
+  const tope = leerReparto(fila.reparto)?.tope ?? null
+  const calculado = aPesosRedondeados((base * Number(fila.value)) / 100)
+  return tope === null ? calculado : Math.min(calculado, tope)
+}
+
+/**
  * La regla ÚNICA de los recalculadores (los tres de hoy y, desde B2c, `voidItems`, `compItems` y el vale): un % de cuenta se
  * re-deriva sobre los renglones sin promoción; un % dirigido con ámbito, sobre los renglones de su ámbito (P1); en los dos,
  * sin lo ya regalado (R8). Lo demás conserva su importe. Devuelve los importes re-derivados y la suma de todas las filas.
+ *
+ * 🔴 W7 A1 (folio W2UJM): cada escritor topa su fila contra lo que queda AL CREARLA, pero un % re-derivado aquí crece sobre la cuenta
+ * completa (cupón $14.40 → $15.90 tras un premio de $129) y Σ filas pasaba de la cuenta ($159.90 sobre $159). Si Σ pasa de Σ `total`
+ * de los renglones, el exceso sale de las filas RE-DERIVADAS, de la más reciente a la más vieja, nunca abajo de 0: lo dirigido (el
+ * premio, P11) y lo fijo conservan su importe. Sin exceso, nada cambia. Quitar una fila en la TPV recalcula aquí también (B, 12-nov):
+ * al liberar lugar, el % vuelve a lo suyo.
  */
 export function importesDeLasFilas(
   renglones: RenglonParaReparto[],
   filas: FilaParaReparto[],
 ): { montosRederivados: Map<string, number>; descuento: number } {
-  // R8 (founder, 2-oct): la base de un % —de cuenta o dentro de su ámbito— deja fuera lo ya regalado.
-  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + Number(x.total ?? 0), 0)
-  const baseDeCuenta = suma(renglones.filter(x => !x.orderPromotionId))
   const montosRederivados = new Map<string, number>()
   let descuento = 0
   for (const fila of filas) {
-    let base: number | null = null
-    if (seRecalculaComoPorcentajeDeCuenta(fila)) base = baseDeCuenta
-    else if (seRecalculaDentroDeSuAmbito(fila)) {
-      const ambito = leerReparto(fila.reparto)!.ambito!
-      base = suma(renglones.filter(x => enAmbito(x, ambito)))
-    }
-    // R6 (founder, 2-oct): el tope del catálogo vale también al recalcular, sea de cuenta o dirigido.
-    const tope = leerReparto(fila.reparto)?.tope ?? null
-    if (base === null) {
+    const monto = importeSinTope(renglones, fila)
+    if (monto === null) {
       descuento += Number(fila.amount)
       continue
     }
-    const calculado = aPesosRedondeados((base * Number(fila.value)) / 100)
-    const monto = tope === null ? calculado : Math.min(calculado, tope)
     montosRederivados.set(fila.id, monto)
     descuento += monto
+  }
+  let exceso =
+    filas.reduce((s, f) => s + aCentavos(montosRederivados.get(f.id) ?? f.amount), 0) -
+    renglones.reduce((s, x) => s + aCentavos(x.total), 0)
+  for (const fila of filas.filter(f => montosRederivados.has(f.id)).sort((a, b) => cronologico(b, a))) {
+    if (exceso <= 0) break
+    const cents = aCentavos(montosRederivados.get(fila.id))
+    const quita = Math.min(Math.max(0, cents), exceso)
+    montosRederivados.set(fila.id, (cents - quita) / 100)
+    descuento -= quita / 100
+    exceso -= quita
   }
   return { montosRederivados, descuento: aPesosRedondeados(descuento) }
 }
@@ -504,13 +530,28 @@ export type Recorte =
   | { accion: 'RECORTAR'; quitaCents: number; amountCents: number; appliedToItemIds: string[]; reparto: RepartoDescuento | null }
 
 /**
- * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar.
+ * W7 A1, decisión (ii) del founder (12-nov): la cuenta está LLENA si sus filas ya cubren Σ `total` de sus renglones: el tope de la cuenta
+ * está mordiendo. Es el mismo techo que `importesDeLasFilas`: entra toda fila (también las espejo y las viejas sin reparto) y todo
+ * renglón (la cortesía de la terminal con su total bruto, que su espejo cubre; la del móvil ya en $0). El servicio y la propina no
+ * entran: no son mercancía. Se mide ANTES del recorte y de cambiar los renglones.
+ */
+export function cuentaLlena(renglones: Array<{ total: unknown }>, filas: Array<{ amount: unknown }>): boolean {
+  return filas.reduce((s, f) => s + aCentavos(f.amount), 0) >= renglones.reduce((s, x) => s + aCentavos(x.total), 0)
+}
+
+/**
+ * B2c (P4, P5; founder 1-oct): qué le pasa a una fila cuando ciertos renglones salen de la cuenta o dejan de costar. `contexto` (W7
+ * A1): los renglones de la orden ANTES del cambio y si la cuenta estaba llena; sin él, el recorte es el de siempre.
  * DIRIGIDA (y espejo): se recorta por la parte GUARDADA de los destinos que salen; si salen todos, se retira entera. CUENTA:
  * nada (la sincronización la re-reparte). Vieja sin reparto: sólo las dos formas de espejo que reconoce
  * `revertirDescuentoDelRenglon` —la de `buildItemDiscountRow` y la cortesía de «Cobrar» (COMP SIN `discountId`: una COMP del
  * catálogo es de cuenta, y la cortesía de su renglón es independiente)—; lo demás es D8. Nunca lanza.
  */
-export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia[]): Recorte {
+export function recorteDeFila(
+  fila: FilaParaRecorte,
+  renglones: RenglonQueCambia[],
+  contexto?: { vivos: RenglonParaReparto[]; cuentaLlena: boolean },
+): Recorte {
   const salen = new Map(renglones.map(r => [r.id, r] as const))
   const monto = aCentavos(fila.amount)
   const reparto = leerReparto(fila.reparto)
@@ -532,7 +573,23 @@ export function recorteDeFila(fila: FilaParaRecorte, renglones: RenglonQueCambia
     if (tocados.length === destinos.length) return { accion: 'RETIRAR', quitaCents: monto }
     const quedan = destinos.filter(id => !salen.has(id))
     const quita = tocados.reduce((s, id) => s + reparto.renglones[id], 0)
-    return recortar(quita, { ...reparto, renglones: Object.fromEntries(quedan.map(id => [id, reparto.renglones[id]] as const)) })
+    const nuevo = { ...reparto, renglones: Object.fromEntries(quedan.map(id => [id, reparto.renglones[id]] as const)) }
+    // 🔴 W7 A1, decisión (ii) del founder (12-nov; Codex r4 #1, r5 #2, r6 #1, r7 #1): en una cuenta LLENA, un % de ámbito TOPADO (su
+    // importe sin tope, con los renglones de antes del cambio, es mayor que el guardado: no cupo, al crearlo o al recalcular) sobrevive
+    // mientras le quede un renglón que valga algo: se recorta a $0 y el recálculo que siempre sigue lo vuelve a derivar. Antes,
+    // `quita ≥ monto` lo borraba y al liberar lugar ya no volvía. Fuera de una cuenta llena, el recorte es exactamente el de siempre.
+    if (quita >= monto && contexto?.cuentaLlena && seRecalculaDentroDeSuAmbito(fila)) {
+      const sinTope = importeSinTope(contexto.vivos, fila)
+      const porId = new Map(contexto.vivos.map(r => [r.id, r] as const))
+      const quedaConValor = quedan.some(id => {
+        const r = porId.get(id)
+        return !!r && !estaRegalado(r) && aCentavos(r.total) > 0
+      })
+      if (sinTope !== null && aCentavos(sinTope) > monto && quedaConValor) {
+        return { accion: 'RECORTAR', quitaCents: monto, amountCents: 0, appliedToItemIds: ids.filter(id => !salen.has(id)), reparto: nuevo }
+      }
+    }
+    return recortar(quita, nuevo)
   }
   if (reparto) return { accion: 'NADA' }
   if (ids.length === 1 && fila.discountId && salen.get(ids[0])?.appliedDiscountId === fila.discountId)

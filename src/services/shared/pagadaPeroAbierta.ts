@@ -19,6 +19,19 @@ import { utcTs } from '../../utils/sqlDates'
 export const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
 
 /**
+ * 🔴 D19 (founder 10-nov «A»; 12-nov): lo PAGADO que cubre la cuenta = Σ importe de `COBRO_QUE_CUBRE` MENOS lo que los reembolsos
+ * de abonos volvieron a deber (`Payment.reopenedAmount`, sólo en REFUND, positivo). Es el gemelo en SQL de `summarizeRefunds`: un
+ * REFUND sin marca sigue sin restar (18-ago); el que devolvió un abono de una cuenta que todavía debía, sí. Sin esto, la cuenta con
+ * su abono devuelto volvía a parecer «pagada pero abierta» y el barrido la mandaba a cerrar cada 10 minutos.
+ *
+ * Una subconsulta escalar por cuenta (`alias` es la orden). Sólo importe: la propina se cancela a los dos lados (ver la base).
+ */
+export function pagadoQueCubreSql(alias = 'o'): string {
+  return `(SELECT COALESCE(SUM(CASE WHEN p.type = 'REFUND' THEN -ABS(COALESCE(p."reopenedAmount", 0)) ELSE p.amount END), 0)
+      FROM "Payment" p WHERE p."orderId" = ${alias}.id AND p.status = 'COMPLETED')`
+}
+
+/**
  * Lo que la cuenta DEBE: `max(0, subtotal − descuento) + cargo por servicio + max(0, IVA)`.
  *
  * Vive una sola vez por el mismo motivo que `COBRO_QUE_CUBRE` —es el OTRO lado de la misma
@@ -94,10 +107,7 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
         AND p.type IN ('REGULAR', 'FAST') AND p.amount > 0
     ) OR (${pedidoDePlataformaPagadoYAceptadoSql(o)}
       AND ${o}.total = 0 AND ${o}."remainingBalance" = 0 AND (${baseQueDebeCubrirseSql(o)}) = 0))
-    AND (
-      SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
-      WHERE p."orderId" = ${o}.id AND ${COBRO_QUE_CUBRE}
-    ) >= ${baseQueDebeCubrirseSql(o)} - 0.01`
+    AND ${pagadoQueCubreSql(o)} >= ${baseQueDebeCubrirseSql(o)} - 0.01`
 }
 
 /**
@@ -298,8 +308,7 @@ export async function findPaidButOpenOrders(
   const rows = await db.$queryRaw<CandidataPagadaAbierta[]>`
     SELECT o.id, o."venueId", o."orderNumber", o.status::text AS status, o."paymentStatus"::text AS "paymentStatus",
            (${Prisma.raw(baseQueDebeCubrirseSql('o'))})::text AS base,
-           (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
-             WHERE p."orderId" = o.id AND ${Prisma.raw(COBRO_QUE_CUBRE)})::text AS pagado,
+           ${Prisma.raw(pagadoQueCubreSql('o'))}::text AS pagado,
            ARRAY(SELECT p.id FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED' ORDER BY p."createdAt") AS "paymentIds"
     FROM "Order" o
     WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}

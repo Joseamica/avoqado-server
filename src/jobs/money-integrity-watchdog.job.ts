@@ -7,7 +7,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 import {
   baseQueDebeCubrirseSql,
-  COBRO_QUE_CUBRE,
+  pagadoQueCubreSql,
   criterioPagadaPeroAbiertaSql,
   instanteUtcSql,
   pedidoDePlataformaQueBDejaAbiertoSql,
@@ -315,7 +315,7 @@ export function buildWatchdogSql(now: Date = new Date()): { counts: string; deta
         SELECT 'PAGADA PERO ABIERTA', v.name, o.id,
                'status=' || o.status || ' paymentStatus=' || o."paymentStatus" ||
                ' base=' || ${baseQueDebeCubrirseSql('o')} ||
-               ' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})
+               ' pagado=' || ${pagadoQueCubreSql('o')}
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE ${criterioPagadaPeroAbiertaSql('o')}
           AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'

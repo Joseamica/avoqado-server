@@ -143,6 +143,8 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
   'services/dashboard/refund.dashboard.service.ts#writeRefundInTx': { clase: 'REEMBOLSO', marcadores: [] },
   'services/mobile/refund.mobile.service.ts#createRefund': { clase: 'REEMBOLSO', marcadores: [] },
   'services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': { clase: 'REEMBOLSO', marcadores: [] },
+  // D19: sólo marca lo reabierto en el REFUND recién creado; con la cuenta cancelada no reabre nada ni escribe.
+  'services/shared/saldoReabiertoAlReembolsar.ts#fijarSaldoReabiertoEnTx': { clase: 'REEMBOLSO', marcadores: [] },
 }
 
 // R-P2-S2-5: única clasificación de TODOS los métodos Payment; create conserva sus marcadores previos.

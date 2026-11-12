@@ -24,6 +24,7 @@ import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
 import { estadoBancarioSql } from './tpv/estadoBancario'
+import { cobradoQueCubreEnTx } from './shared/saldoReabiertoAlReembolsar'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
 import { puertaDelDinero } from './tpv/avisosNoGuardados'
 import { solicitudDelRegistro } from './tpv/identidadDelCobro'
@@ -61,7 +62,7 @@ import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
-import { computeOrderBalance, REFUND_PAYMENT_TYPE } from './shared/orderBalance'
+import { computeOrderBalance } from './shared/orderBalance'
 import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -2043,16 +2044,9 @@ class TerminalPaymentService {
           // fila que el registro del pago, antes de tocar la terminal: no se mueve dinero. La propina va aparte y no cuenta. Una
           // cuenta sin abono no cambia (el Cambio ya exige su diferencia exacta, arriba). Una suma y no la lista de cobros: los
           // REFUND fuera, como `ligaDeClienteEnVenta`; la propina se cancela a los dos lados del saldo.
-          const cobrado = await tx.payment.aggregate({
-            where: {
-              venueId,
-              orderId: request.orderId,
-              status: 'COMPLETED',
-              OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }],
-            },
-            _sum: { amount: true, tipAmount: true },
-          })
-          const saldo = computeOrderBalance(order, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
+          // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`): esa parte vuelve a cobrarse.
+          const cobrado = await cobradoQueCubreEnTx(tx, { venueId, orderId: request.orderId })
+          const saldo = computeOrderBalance(order, [{ amount: cobrado.amount, tipAmount: cobrado.tipAmount }])
           const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
           if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
             const falta = (faltaCents / 100).toFixed(2)
@@ -3961,7 +3955,9 @@ class TerminalPaymentService {
     if (!this.seguimientoEnCurso) {
       this.seguimientoEnCurso = true
       void this.avisarAlertasResueltas(now)
-        .catch(err => logger.warn('[Terminal-payment watchdog] alert follow-up failed', { error: err instanceof Error ? err.message : String(err) }))
+        .catch(err =>
+          logger.warn('[Terminal-payment watchdog] alert follow-up failed', { error: err instanceof Error ? err.message : String(err) }),
+        )
         .finally(() => {
           this.seguimientoEnCurso = false
         })
@@ -3981,7 +3977,8 @@ class TerminalPaymentService {
    */
   private podarAlertasVencidas(now: Date): void {
     const DIA_MS = 24 * 60 * 60_000
-    for (const [requestId, a] of this.alertasSinResolver) if (now.getTime() - a.alertadaEn > DIA_MS) this.alertasSinResolver.delete(requestId)
+    for (const [requestId, a] of this.alertasSinResolver)
+      if (now.getTime() - a.alertadaEn > DIA_MS) this.alertasSinResolver.delete(requestId)
   }
 
   private async avisarAlertasResueltas(now: Date): Promise<void> {
@@ -3994,7 +3991,15 @@ class TerminalPaymentService {
       filas = await Promise.race([
         prisma.terminalPaymentRequest.findMany({
           where: { requestId: { in: [...this.alertasSinResolver.keys()] } },
-          select: { requestId: true, venueId: true, status: true, failureCode: true, cancelDisposition: true, paymentId: true, resultJson: true },
+          select: {
+            requestId: true,
+            venueId: true,
+            status: true,
+            failureCode: true,
+            cancelDisposition: true,
+            paymentId: true,
+            resultJson: true,
+          },
           take: 500,
         }),
         new Promise<never>((_, reject) => {
@@ -4015,7 +4020,9 @@ class TerminalPaymentService {
       // la venta pudo volver a cobrarse mientras estaba en duda (Codex r2, P1).
       const d = desenlaceCanonico(fila)
       if (d.outcome === 'UNRESOLVED') continue
-      const noCobradoFirme = d.outcome === 'NOT_CHARGED' && !esLiberacionReversible({ ...fila, failureCode: fila.failureCode ?? null, paymentId: fila.paymentId ?? null })
+      const noCobradoFirme =
+        d.outcome === 'NOT_CHARGED' &&
+        !esLiberacionReversible({ ...fila, failureCode: fila.failureCode ?? null, paymentId: fila.paymentId ?? null })
       const desenlace =
         d.outcome === 'CHARGED'
           ? d.reconciliationRequired

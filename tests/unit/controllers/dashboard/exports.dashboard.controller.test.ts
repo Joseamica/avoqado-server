@@ -126,6 +126,12 @@ describe('exports.dashboard.controller', () => {
     expect(performance.now() - t0).toBeLessThan(200) // cuadrático tardaba ~2 s
     expect((exportRunService.pedir as jest.Mock).mock.calls[0][0].columnas).toEqual(['paymentId'])
   })
+  it('ninguna columna conocida ⇒ 400 con mensaje en español (lo puede ver el usuario)', async () => {
+    const next = jest.fn()
+    await pedirExporte(req({ body: { format: 'csv', columns: ['x'], filters: filtros } }), res(), next)
+    expect(next.mock.calls[0][0]?.statusCode).toBe(400)
+    expect(next.mock.calls[0][0]?.message).toBe('Elige al menos una columna válida para exportar')
+  })
   it('formato pdf ⇒ 400', async () => {
     const next = jest.fn()
     await pedirExporte(req({ body: { format: 'pdf', columns: ['paymentId'], filters: filtros } }), res(), next)

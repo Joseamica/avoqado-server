@@ -327,12 +327,37 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
     expect(Number((prismaMock.order.create as jest.Mock).mock.calls[0][0].data.total)).toBe(19.21)
   })
 
-  it('9b. el mismo importe con discount 2.13 (el redondeo flotante viejo) ⇒ 400 con el texto exacto', async () => {
+  // Apps viejas (12-nov, revisión antes de publicar): producción tolera un centavo (`assertClosePesos`), como el cupón de al
+  // lado; exigir centavos exactos dejaba sin cobrar a las TPV 2.7.1–2.16.0. Se guarda el monto exacto del servidor.
+  it('9b. el mismo importe con discount 2.13 (un centavo de diferencia) ⇒ se crea con la fila exacta del servidor ($2.14)', async () => {
+    await createOrderWithItems(
+      VENUE,
+      venta({ items: [{ name: 'Importe', quantity: 1, unitPrice: 21.35 }], subtotal: 21.35, discount: 2.13, total: 19.22 }),
+    )
+
+    expect(Number(filaDelCatalogo().amount)).toBe(2.14)
+    expect(Number((prismaMock.order.create as jest.Mock).mock.calls[0][0].data.total)).toBe(19.21)
+  })
+
+  it('9c. dos centavos de diferencia (discount 2.12) ⇒ 400 con el texto exacto: el descuento sí cambió', async () => {
     await expect(
       createOrderWithItems(
         VENUE,
-        venta({ items: [{ name: 'Importe', quantity: 1, unitPrice: 21.35 }], subtotal: 21.35, discount: 2.13, total: 19.22 }),
+        venta({ items: [{ name: 'Importe', quantity: 1, unitPrice: 21.35 }], subtotal: 21.35, discount: 2.12, total: 19.23 }),
       ),
     ).rejects.toMatchObject({ statusCode: 400, message: TEXTO_CAMBIO })
+  })
+
+  it('9d. TPV vieja (2.7.1–2.16.0): $1 con 1 % del catálogo, manda discount 0 y total 0.99 ⇒ se crea con $0.01', async () => {
+    asignaciones = []
+    const unoPorCiento = descuento({ name: 'Uno por ciento', value: new Prisma.Decimal(1) })
+    prismaMock.discount.findMany.mockImplementation(async ({ where }: any) => [unoPorCiento].filter(d => where.id.in.includes(d.id)))
+    await createOrderWithItems(
+      VENUE,
+      venta({ items: [{ name: 'Importe', quantity: 1, unitPrice: 1 }], customerId: undefined, subtotal: 1, discount: 0, total: 0.99 }),
+    )
+
+    expect(Number(filaDelCatalogo().amount)).toBe(0.01)
+    expect(Number((prismaMock.order.create as jest.Mock).mock.calls[0][0].data.total)).toBe(0.99)
   })
 })

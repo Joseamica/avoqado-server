@@ -135,6 +135,10 @@ describe('getOrders · conFactura', () => {
     expect(args.skip).toBe(20)
     expect(args.take).toBe(20)
     expect(args.where.venueId).toBe(VENUE)
-    expect(args.include.payments).toEqual({ where: { status: 'COMPLETED' }, select: { amount: true, tipAmount: true, type: true } })
+    // D19: con lo que reembolsos de abonos volvieron a deber.
+    expect(args.include.payments).toEqual({
+      where: { status: 'COMPLETED' },
+      select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
+    })
   })
 })

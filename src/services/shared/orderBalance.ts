@@ -1,4 +1,4 @@
-import { PaymentStatus, Prisma } from '@prisma/client'
+import { PaymentStatus, Prisma, type PaymentType } from '@prisma/client'
 import { esRenglonDeVale } from './renglonDeVale'
 
 /**
@@ -78,12 +78,45 @@ export interface OrderAmountsForBalance {
  * pagos de la base **debe** seleccionarlo: sin `type` un reembolso es
  * indistinguible de un cobro negativo y vuelve a restar del saldo.
  */
-export interface CompletedPaymentForBalance {
+interface PagoBaseParaSaldo {
   amount: DecimalLike
   tipAmount?: DecimalLike
-  /** `PaymentType` del pago. Sólo `'REFUND'` cambia el comportamiento. */
-  type?: string | null
 }
+
+/**
+ * Un `Payment` en estado COMPLETED. La propina cuenta como dinero recibido.
+ *
+ * Dos formas, y el compilador elige:
+ * - SIN `type`, o con un tipo que no puede ser REFUND: una suma ya hecha o un cobro sintético (`[{ amount, tipAmount }]`,
+ *   `{ …, type: 'REGULAR' }`). No es un reembolso.
+ * - Con un `type` que PUEDE ser REFUND (una fila leída de la base, `PaymentType | null` o `string`): 🔴 D19 (12-nov) también
+ *   trae `reopenedAmount` y `reopenedTipAmount`, aunque valgan null. Así cada `select` que lee pagos para el saldo y olvida las dos columnas NO COMPILA: sin ellas un abono devuelto
+ *   volvería a contar como cobrado en silencio. Usa `PAGO_PARA_SALDO_SELECT`.
+ */
+export type CompletedPaymentForBalance =
+  | (PagoBaseParaSaldo & {
+      /** Un tipo que NO puede ser un reembolso (un cobro sintético `type: 'REGULAR'`, o null): no necesita lo reabierto. */
+      type?: Exclude<PaymentType, 'REFUND'> | null
+      reopenedAmount?: DecimalLike
+      reopenedTipAmount?: DecimalLike
+    })
+  | (PagoBaseParaSaldo & {
+      /** `PaymentType` del pago. Sólo `'REFUND'` cambia el comportamiento. */
+      type: string | null
+      /** D19: sólo en un REFUND. Cuánto del importe devuelto vuelve a deberse (positivo; null = nada). */
+      reopenedAmount: DecimalLike
+      /** D19: lo mismo para la propina devuelta. */
+      reopenedTipAmount: DecimalLike
+    })
+
+/** Lo que hay que leer de cada `Payment` para el saldo (D19: con lo reabierto). Úsalo en vez de escribir el `select` a mano. */
+export const PAGO_PARA_SALDO_SELECT = {
+  amount: true,
+  tipAmount: true,
+  type: true,
+  reopenedAmount: true,
+  reopenedTipAmount: true,
+} as const
 
 /** Cuánto de la venta se ha devuelto. Espejo de `Payment.refundStatus` de Toast. */
 export type RefundState = 'NONE' | 'PARTIAL' | 'FULL'
@@ -93,8 +126,13 @@ export interface OrderBalance {
   total: Prisma.Decimal
   /** Suma de las propinas COBRADAS (los REFUND no restan). */
   tipAmount: Prisma.Decimal
-  /** Lo efectivamente recibido (importe + propina) de los COMPLETED que no son REFUND. */
+  /** Lo efectivamente recibido (importe + propina) de los COMPLETED que no son REFUND, menos lo reabierto (D19). */
   paidAmount: Prisma.Decimal
+  /**
+   * D19: lo que los reembolsos de abonos volvieron a deber (importe + propina), ya restado de `paidAmount`. 0 si ninguno
+   * reabre. Quien necesite lo cobrado BRUTO (como antes del 12-nov) suma `paidAmount + reopenedAmount`.
+   */
+  reopenedAmount: Prisma.Decimal
   /** Lo que falta por cobrar. Nunca negativo: un sobrepago deja 0. */
   remainingBalance: Prisma.Decimal
   /** `true` sólo si el faltante cabe en la tolerancia de un centavo. */
@@ -126,10 +164,12 @@ export function isRefundPayment(payment: CompletedPaymentForBalance): boolean {
 
 /** Lo que sale de separar cobros y devoluciones dentro de una MISMA orden. */
 export interface RefundSummary {
-  /** Σ (amount + tipAmount) de los pagos que NO son REFUND. */
+  /** Σ (amount + tipAmount) de los pagos que NO son REFUND, menos lo reabierto por los REFUND (D19). */
   netPaidAmount: Prisma.Decimal
-  /** Σ tipAmount de los pagos que NO son REFUND. */
+  /** Σ tipAmount de los pagos que NO son REFUND, menos la propina reabierta (D19). */
   netTipAmount: Prisma.Decimal
+  /** D19: Σ (reopenedAmount + reopenedTipAmount) de los REFUND. Ya restado de `netPaidAmount`. */
+  reopenedAmount: Prisma.Decimal
   refundedAmount: Prisma.Decimal
   refundedCents: number
   refundState: RefundState
@@ -144,9 +184,11 @@ export interface RefundSummary {
  * que las apps y el dashboard tienen que pintar.
  */
 export function summarizeRefunds(completedPayments: readonly CompletedPaymentForBalance[]): RefundSummary {
-  let netPaidAmount = ZERO
-  let netTipAmount = ZERO
+  let grossPaidAmount = ZERO
+  let grossTipAmount = ZERO
   let refundedAmount = ZERO
+  let reopenedAmount = ZERO
+  let reopenedTip = ZERO
 
   for (const payment of completedPayments) {
     const amount = dec(payment.amount)
@@ -155,25 +197,29 @@ export function summarizeRefunds(completedPayments: readonly CompletedPaymentFor
       // Los REFUND se guardan NEGATIVOS (importe y propina). Se acumulan en
       // valor absoluto: "cuánto se devolvió", no "cuánto restan".
       refundedAmount = refundedAmount.plus(amount.abs()).plus(tip.abs())
+      // 🔴 D19 (founder 10-nov «A»): la parte que su escritor marcó como abono devuelto vuelve a deberse. Se lee en positivo
+      // (abs: nunca SUMA a lo cobrado). Sin marca, nada: la regla del 18-ago sigue para todo lo demás.
+      reopenedAmount = reopenedAmount.plus(dec(payment.reopenedAmount).abs())
+      reopenedTip = reopenedTip.plus(dec(payment.reopenedTipAmount).abs())
       continue
     }
-    netTipAmount = netTipAmount.plus(tip)
-    netPaidAmount = netPaidAmount.plus(amount).plus(tip)
+    grossTipAmount = grossTipAmount.plus(tip)
+    grossPaidAmount = grossPaidAmount.plus(amount).plus(tip)
   }
 
-  // FULL cuando lo devuelto alcanza lo pagado neto. Con `netPaidAmount` en 0
-  // (la orden placeholder de un reembolso NO asociado, que nace sin cobro) un
-  // reembolso > 0 también es FULL, que es la lectura correcta: no queda nada
-  // por devolver.
+  // FULL cuando lo devuelto alcanza lo pagado BRUTO (el de antes de D19: lo reabierto no cambia lo que pintan las apps). Con
+  // `grossPaidAmount` en 0 (la orden placeholder de un reembolso NO asociado, que nace sin cobro) un reembolso > 0 también es
+  // FULL, que es la lectura correcta: no queda nada por devolver.
   const refundState: RefundState = refundedAmount.lessThanOrEqualTo(ZERO)
     ? 'NONE'
-    : refundedAmount.greaterThanOrEqualTo(netPaidAmount)
+    : refundedAmount.greaterThanOrEqualTo(grossPaidAmount)
       ? 'FULL'
       : 'PARTIAL'
 
   return {
-    netPaidAmount,
-    netTipAmount,
+    netPaidAmount: grossPaidAmount.minus(reopenedAmount).minus(reopenedTip),
+    netTipAmount: grossTipAmount.minus(reopenedTip),
+    reopenedAmount: reopenedAmount.plus(reopenedTip),
     refundedAmount,
     refundedCents: refundedAmount.mul(100).round().toNumber(),
     refundState,
@@ -416,6 +462,7 @@ export function computeOrderBalance(order: OrderAmountsForBalance, completedPaym
     total,
     tipAmount,
     paidAmount,
+    reopenedAmount: refunds.reopenedAmount,
     remainingBalance: remaining.isNegative() ? ZERO : remaining,
     isFullyPaid: remaining.lessThanOrEqualTo(FULL_PAYMENT_TOLERANCE),
     refundedAmount: refunds.refundedAmount,

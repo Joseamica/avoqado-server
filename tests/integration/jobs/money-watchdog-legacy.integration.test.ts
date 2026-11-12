@@ -17,8 +17,9 @@ const tables = {
   // Decisión B (22-oct): la invariante 6 resta el pedido de plataforma que la cocina todavía prepara.
   KdsOrder: 'id text, "orderId" text, "venueId" text, status text',
   // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
+  // D19: `reopenedAmount` (sólo en REFUND) lo resta «lo pagado que cubre» (`pagadoQueCubreSql`). NULL = no reabre.
   Payment:
-    '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',
+    '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp, "reopenedAmount" numeric',
   // D1 (vale cancelado que se vuelve a cobrar): el renglón de un vale revendido en otra cuenta no descuenta aquí.
   OrderItem: 'id text, "orderId" text, "productId" text, "areaTicketLineId" text, "releasedAreaTicketLineId" text',
   // B2c F2: «descuento excede el consumo» compara la cabecera con la suma de sus filas.

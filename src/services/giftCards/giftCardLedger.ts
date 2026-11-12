@@ -173,7 +173,13 @@ export async function sobresDelCanje(tx: DbDeLectura, p: { venueId: string; paym
 export async function dineroDeLaCuenta(
   tx: DbDeLectura,
   p: { venueId: string; orderId: string },
-): Promise<{ cobrado: Prisma.Decimal; reembolsado: Prisma.Decimal; conservado: Prisma.Decimal }> {
+): Promise<{
+  cobrado: Prisma.Decimal
+  reembolsado: Prisma.Decimal
+  conservado: Prisma.Decimal
+  /** D19: lo cobrado que CUBRE la cuenta = `cobrado` menos lo que reembolsos de abonos volvieron a deber (`reopenedAmount`). */
+  cobradoQueCubre: Prisma.Decimal
+}> {
   const cobros = await tx.payment.aggregate({
     where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     _sum: { amount: true },
@@ -181,10 +187,11 @@ export async function dineroDeLaCuenta(
   const cobrado = cobros._sum.amount ?? CERO()
   const devoluciones = await tx.payment.aggregate({
     where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', type: 'REFUND' },
-    _sum: { amount: true },
+    _sum: { amount: true, reopenedAmount: true },
   })
   const reembolsado = (devoluciones._sum.amount ?? CERO()).abs()
-  return { cobrado, reembolsado, conservado: cobrado.minus(reembolsado) }
+  const reabierto = (devoluciones._sum?.reopenedAmount ?? CERO()).abs()
+  return { cobrado, reembolsado, conservado: cobrado.minus(reembolsado), cobradoQueCubre: cobrado.minus(reabierto) }
 }
 
 /**
@@ -298,10 +305,13 @@ export async function activarSobresDeCuentaPagadaEnTx(
     take: MAX_SOBRES_POR_CUENTA + 1,
   })
   const esperado = renglones.reduce((suma, r) => suma.plus(r.total), CERO())
-  const { cobrado, reembolsado, conservado } = await dineroDeLaCuenta(tx, p)
+  const { cobrado, reembolsado, conservado, cobradoQueCubre } = await dineroDeLaCuenta(tx, p)
   const mixta = renglones.length === 0 || renglones.length > MAX_SOBRES_POR_CUENTA || renglones.some(r => r.giftCardId == null)
   const dineroDevuelto = conservado.lessThan(esperado)
-  if (mixta || dineroDevuelto || !cobrado.equals(esperado)) {
+  // 🔴 D19 (Codex código r3 #1): lo que se compara contra los sobres es lo cobrado que CUBRE la cuenta. Un abono de $200 sobre $500
+  // al que se le devolvieron $100 vuelve a deber $100; cobrar los $400 que faltan deja $600 brutos y $500 que cubren: la tarjeta se
+  // activa. Sin abonos devueltos `cobradoQueCubre` es `cobrado`, como antes.
+  if (mixta || dineroDevuelto || !cobradoQueCubre.equals(esperado)) {
     await recordGiftCardAnomaly(tx, {
       check: 'ACTIVATION_AMOUNT_MISMATCH',
       id: p.orderId,

@@ -88,7 +88,7 @@ describe('exportador cobros', () => {
       startDate: '2026-10-01T06:00:00.000Z',
       endDate: undefined,
     })
-    expect(() => cobros.parsearFiltros({ endDate: 'ayer' })).toThrow(/endDate must be a valid ISO date/)
+    expect(() => cobros.parsearFiltros({ endDate: 'ayer' })).toThrow(/La fecha de fin no es válida/)
     expect(cobros.parsearFiltros(f)).toEqual(f)
     expect(cobros.parsearFiltros(undefined)).toEqual(expect.objectContaining({ startDate: undefined }))
   })

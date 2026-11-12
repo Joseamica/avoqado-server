@@ -1402,7 +1402,7 @@ async function settleOrderForConfirmedCryptoPayment(
           // alguna vez se escribió mal; recalcular desde aquí lo repara solo.
           const completedPayments = await tx.payment.findMany({
             where: { orderId: payment.orderId, status: 'COMPLETED' },
-            select: { amount: true, tipAmount: true, type: true },
+            select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
           })
 
           // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — y ya no hace falta un guard

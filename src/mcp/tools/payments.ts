@@ -419,7 +419,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
               // y la app reportan estados distintos para la misma venta.
               payments: {
                 where: { status: TransactionStatus.COMPLETED },
-                select: { amount: true, tipAmount: true, type: true },
+                select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
               },
             },
           },

@@ -1,5 +1,6 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
+import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -1244,16 +1245,17 @@ export async function createOrderWithItems(
   const totalPesos = roundPesos(grossSubtotalPesos - discountAmountPesos)
 
   assertClosePesos('subtotal', input.subtotal, grossSubtotalPesos)
+  // En centavos enteros (restar pesos flotantes da 0.0100000002) y con un centavo de tolerancia, como `assertClosePesos`.
+  const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
   if (cupon) {
-    // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta. En
-    // centavos enteros: restar pesos flotantes da 0.0100000002 y un centavo de redondeo se leía como otro cupón.
-    const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
+    // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta.
     if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos))
       throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
   } else if (orderDiscount) {
-    // Descuento del cliente: centavos exactos contra lo que la terminal mostró; si no cuadra, el descuento cambió en el catálogo.
-    if (Math.round((input.discount || 0) * 100) !== Math.round(orderDiscountPesos * 100))
-      throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
+    // Descuento del catálogo (del cliente o no): contra lo que la terminal mostró; más de un centavo ⇒ cambió en el catálogo. El
+    // centavo de tolerancia es el de producción: las TPV 2.7.1–2.16.0 mandan `discount: 0` y un descuento de $0.01 debe pasar
+    // (revisión de apps viejas, 12-nov). La fila guarda siempre el monto exacto del servidor.
+    if (difiere(input.discount || 0, orderDiscountPesos)) throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
     assertClosePesos('total', input.total, totalPesos)
   } else {
     assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
@@ -3518,11 +3520,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // otra decisión). Lo cobrado se relee BAJO el candado: el de la orden y el de los `Payment` registrados, el mayor,
       // porque hay órdenes históricas con pagos COMPLETED y `paidAmount` desfasado. Mismo filtro que el registro del
       // dinero: pagos no-reembolso (`type` nulo incluido), importe + propina — igual que `newTotal`, que lleva la propina.
-      const pagosRegistrados = await tx.payment.aggregate({
-        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-        _sum: { amount: true, tipAmount: true },
-      })
-      const pagadoPorPagos = new Prisma.Decimal(pagosRegistrados?._sum?.amount ?? 0).plus(pagosRegistrados?._sum?.tipAmount ?? 0)
+      // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`).
+      const pagosRegistrados = await cobradoQueCubreEnTx(tx, { venueId, orderId })
+      const pagadoPorPagos = pagosRegistrados.amount.plus(pagosRegistrados.tipAmount)
       const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {

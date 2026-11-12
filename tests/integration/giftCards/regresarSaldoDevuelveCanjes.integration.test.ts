@@ -220,11 +220,12 @@ describe('«Regresar saldo y cancelar» devuelve lo canjeado', () => {
     expect(v.status).toBe('CANCELLED')
     expect(v.orderDiscounts).toHaveLength(0)
     expect(await bitacoras(orderId)).toBe(1)
-    // Codex r1 #1: el total conserva la propina del abono y el saldo no se la resta de más. Canónico: $1,000 + $20 = $1,020; cobrado $220.
-    expect([Number(v.total), Number(v.tipAmount), Number(v.paidAmount), Number(v.remainingBalance)]).toEqual([1020, 20, 220, 800])
-    // El detalle (calculador canónico) y la recuperación por llave (columna guardada) dicen lo mismo.
-    expect((await getOrder(venueId, orderId)).preBillBalance).toMatchObject({ orderTotalCents: 102000, remainingBalanceCents: 80000 })
-    expect(await getGiftCardPaymentByKey(venueId, llaveDelAbono)).toMatchObject({ orderRemaining: 800 })
+    // D19 (12-nov; Codex plan r2 #3): el abono de $200 + $20 regresó al saldo, así que vuelve a deberse (importe y propina). Lo
+    // guardado dice la verdad: total $1,000 sin propina, cobrado $0, faltan $1,000. Antes contaba los $220 devueltos como cobrados.
+    expect([Number(v.total), Number(v.tipAmount), Number(v.paidAmount), Number(v.remainingBalance)]).toEqual([1000, 0, 0, 1000])
+    // El detalle (calculador canónico) y la recuperación por llave (columna guardada) dicen lo mismo (Codex r1 #1).
+    expect((await getOrder(venueId, orderId)).preBillBalance).toMatchObject({ orderTotalCents: 100000, remainingBalanceCents: 100000 })
+    expect(await getGiftCardPaymentByKey(venueId, llaveDelAbono)).toMatchObject({ orderRemaining: 1000 })
   })
 
   it('un descuento normal se queda en la venta anulada: sólo sale el canje', async () => {
@@ -245,7 +246,7 @@ describe('«Regresar saldo y cancelar» devuelve lo canjeado', () => {
     expect(await premioDe(premioId)).toMatchObject({ status: 'PENDING' })
   })
 
-  it('una venta sin canjes queda igual que hoy: sin bitácora y con los mismos números', async () => {
+  it('una venta sin canjes: sin bitácora, el mismo total y descuento; lo cobrado regresa a $0 porque el abono volvió al saldo (D19)', async () => {
     const c = await cliente()
     const orderId = await cuenta(c)
     const t = await tarjeta(1000)
@@ -256,9 +257,9 @@ describe('«Regresar saldo y cancelar» devuelve lo canjeado', () => {
 
     const v = await ventaDe(orderId)
     expect(v.status).toBe('CANCELLED')
-    expect([v.total, v.discountAmount, v.remainingBalance, v.paidAmount].map(Number)).toEqual(
-      [antes.total, antes.discountAmount, antes.remainingBalance, antes.paidAmount].map(Number),
-    )
+    expect([v.total, v.discountAmount].map(Number)).toEqual([antes.total, antes.discountAmount].map(Number))
+    // D19: el abono de $200 regresó al saldo de la tarjeta ⇒ la cuenta (cancelada) ya no lo cuenta como cobrado.
+    expect([v.paidAmount, v.remainingBalance].map(Number)).toEqual([0, Number(antes.total)])
     expect(await bitacoras(orderId)).toBe(0)
     expect(await saldoDe(t.id)).toBe('1000.00')
   })
@@ -405,7 +406,7 @@ describe('si no se puede regresar el saldo, el canje se queda como estaba', () =
 })
 
 describe('lo que sigue después de cancelar', () => {
-  it('🔴 dinero ya capturado que revive la venta: la ve sin el descuento y debe la diferencia; no hay otra devolución', async () => {
+  it('🔴 dinero ya capturado que revive la venta: la ve sin el descuento y debe la diferencia SIN contar el abono que regresó al saldo (D19); no hay otra devolución', async () => {
     const c = await cliente()
     const orderId = await cuenta(c)
     const premioId = await conPremio(orderId, c)
@@ -441,7 +442,8 @@ describe('lo que sigue después de cancelar', () => {
     const v = await ventaDe(orderId)
     expect(v.status).not.toBe('CANCELLED')
     expect(Number(v.total)).toBe(1000)
-    expect(Number(v.remainingBalance)).toBe(30)
+    // D19 (Codex plan r2 #3): el abono de $200 regresó a la tarjeta; el negocio sólo tiene los $770 ⇒ faltan $230 (antes decía $30).
+    expect(Number(v.remainingBalance)).toBe(230)
     expect(await premioDe(premioId)).toMatchObject({ status: 'PENDING', orderDiscountId: null })
     expect(await bitacoras(orderId)).toBe(1)
   })

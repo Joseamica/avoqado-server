@@ -452,6 +452,11 @@
   "services/shared/repartoDescuentoTx.ts#sincronizarRepartos": {
     "clase": "AYUDANTE_HISTORICO"
   },
+  "services/shared/saldoReabiertoAlReembolsar.ts#fijarSaldoReabiertoEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "REEMBOLSO",
+    "motivo": "D19: al escribir el REFUND de un abono, con la cuenta ya bloqueada por el núcleo del reembolso, reescribe pagado/total/lo que falta. Una cuenta CANCELLED/DELETED o cerrada no reabre nada (saldoQueReabreElReembolso devuelve NADA y no escribe); no es una edición ordinaria de la cuenta."
+  },
   "services/shared/serviceCharges.ts#recalcularCargosPorServicio": {
     "clase": "AYUDANTE_HISTORICO"
   },

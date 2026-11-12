@@ -397,7 +397,11 @@ async function fotoDeOrden(id: string): Promise<OrdenFoto> {
   const o = await prisma.order.findUniqueOrThrow({
     where: { id },
     include: {
-      payments: { where: { status: 'COMPLETED' }, select: { id: true, status: true, type: true, amount: true, tipAmount: true }, take: 10 },
+      payments: {
+        where: { status: 'COMPLETED' },
+        select: { id: true, status: true, type: true, amount: true, tipAmount: true, reopenedAmount: true, reopenedTipAmount: true },
+        take: 10,
+      },
       items: { select: { areaTicketLineId: true, giftCardId: true }, take: 10 },
       onlineOrder: { select: { id: true } },
     },

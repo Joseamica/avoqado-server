@@ -20,6 +20,7 @@ import { aTiempo, aparcarLaSiguienteTransaccion, esperarBloqueado } from '@tests
 import { createOrderWithItems as crearEnTerminal } from '@/services/tpv/order.tpv.service'
 import { createOrderWithItems as crearEnMovil } from '@/services/mobile/order.mobile.service'
 import { revokeTierReward } from '@/services/referrals/referralRefund.service'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 import { finalizeCouponsForOrder } from '@/services/shared/cuponDeLaVenta'
 import { recordCouponRedemption } from '@/services/dashboard/coupon.dashboard.service'
 import { deleteDiscount } from '@/services/dashboard/discount.dashboard.service'
@@ -257,6 +258,18 @@ const manejada = <T>(p: Promise<T>): Promise<T> => {
 }
 
 type Resultado = PromiseSettledResult<unknown>
+
+/** El motivo de un rechazo en una línea: clase, código (de la app, de Prisma o de Postgres), texto y su `cause`. */
+function motivoDe(e: unknown, profundidad = 0): string {
+  if (!(e instanceof Error)) return String(e)
+  const x = e as Error & { code?: unknown; errorCode?: unknown; meta?: { code?: unknown }; cause?: unknown }
+  const codigo = [x.code, x.errorCode, x.meta?.code].filter(c => c != null).join('/')
+  const causa = x.cause != null && profundidad < 2 ? ` ← ${motivoDe(x.cause, profundidad + 1)}` : ''
+  return `${x.constructor?.name ?? 'Error'}${codigo ? `[${codigo}]` : ''}: ${x.message.replace(/\s+/g, ' ').slice(0, 300)}${causa}`
+}
+
+/** «fulfilled», o «rejected: <motivo>»: si una prueba falla, el mensaje dice POR QUÉ se rechazó, no sólo que se rechazó. */
+const desenlace = (r: Resultado) => (r.status === 'fulfilled' ? 'fulfilled' : `rejected: ${motivoDe(r.reason)}`)
 const caidoPor40P01 = (r: Resultado) =>
   r.status === 'rejected' && (isDeadlockError(r.reason) || isDeadlockError((r.reason as { cause?: unknown } | undefined)?.cause))
 
@@ -283,7 +296,7 @@ async function soltarYEsperar(c: Cruce): Promise<[Resultado, Resultado]> {
 
 // ───────────────────────── X5 ─────────────────────────
 describe('X5 · venta de mostrador del POS contra createOrderWithItems de la TPV en la misma mesa y con el mismo cupón (círculo real)', () => {
-  async function armar(): Promise<{ n: Negocio; cruce: Cruce }> {
+  async function armar(): Promise<{ n: Negocio; cruce: Cruce; reintentarTpv: () => Promise<unknown> }> {
     const n = await negocio()
     const mesa = await prisma.table.create({
       data: { venueId: n.venueId, number: `M-${randomUUID().slice(0, 6)}`, capacity: 4, qrCode: randomUUID() },
@@ -305,22 +318,25 @@ describe('X5 · venta de mostrador del POS contra createOrderWithItems de la TPV
       throw e
     })
     // La TPV: mesa → asesor. Toma la mesa y espera el asesor que tiene el POS.
-    const tpv = manejada(
-      crearEnTerminal(n.venueId, {
-        items: [{ productId: n.productId, quantity: 1 }],
-        staffId: n.staffId,
-        taxAmount: 0,
-        subtotal: 100,
-        discount: 10,
-        total: 90,
-        tip: 0,
-        tableId: mesa.id,
-        couponCode: n.couponCode,
-      } as never),
-    )
+    const pedidoTpv = {
+      items: [{ productId: n.productId, quantity: 1 }],
+      staffId: n.staffId,
+      taxAmount: 0,
+      subtotal: 100,
+      discount: 10,
+      total: 90,
+      tip: 0,
+      tableId: mesa.id,
+      couponCode: n.couponCode,
+    }
+    const tpv = manejada(crearEnTerminal(n.venueId, pedidoTpv as never))
     const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPos], consulta: /pg_advisory_xact_lock/, ms: 10_000 })
     expect(espera).not.toBeNull() // el cruce SÍ ocurrió: la TPV, con la mesa, espera el asesor del POS
-    return { n, cruce: { aparcada: { promesa: pos, barrera }, otra: tpv } }
+    return {
+      n,
+      cruce: { aparcada: { promesa: pos, barrera }, otra: tpv },
+      reintentarTpv: () => crearEnTerminal(n.venueId, pedidoTpv as never),
+    }
   }
 
   it('rojo · con 1 intento una aborta con 40P01', async () => {
@@ -331,10 +347,18 @@ describe('X5 · venta de mostrador del POS contra createOrderWithItems de la TPV
   })
 
   it('verde · con 4 intentos el log trae el warn y las dos terminan', async () => {
-    const { n, cruce } = await armar()
-    const [pos, tpv] = await soltarYEsperar(cruce)
-    expect(pos.status).toBe('fulfilled')
-    expect(tpv.status).toBe('fulfilled')
+    const { n, cruce, reintentarTpv } = await armar()
+    const [pos, primeraTpv] = await soltarYEsperar(cruce)
+    expect(desenlace(pos)).toBe('fulfilled')
+    // La TPV es la que pierde el 40P01. Si su reintento empieza ANTES de que el POS confirme, lee la mesa vacía, espera la mesa y al
+    // tomarla ya está la cuenta del POS: contesta, a propósito, 503 ORDER_TABLE_TOPOLOGY_CHANGED (`tableOrderLock.ts`, D9), que el
+    // cliente vuelve a intentar. Medido en el CI el 12-nov (encargo b4072e): 1 de 30 vueltas, y las 30 con la TPV como víctima. Se
+    // acepta ESE rechazo y ningún otro, y se repite la venta como lo haría la terminal: tiene que terminar.
+    const tpv =
+      primeraTpv.status === 'rejected' && primeraTpv.reason instanceof OrderTableTopologyChanged
+        ? (await Promise.allSettled([reintentarTpv()]))[0]
+        : primeraTpv
+    expect(desenlace(tpv)).toBe('fulfilled')
     expect(huboInterbloqueo()).toBe(true)
     expect(await prisma.order.count({ where: { venueId: n.venueId } })).toBe(2)
   })

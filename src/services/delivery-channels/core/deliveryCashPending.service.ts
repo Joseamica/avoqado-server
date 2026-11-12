@@ -103,13 +103,21 @@ export async function listDeliveryCashPending(p: {
     ? await prisma.payment.groupBy({
         by: ['orderId', 'type'],
         where: { orderId: { in: pagina.map(o => o.id) }, status: 'COMPLETED' },
-        _sum: { amount: true, tipAmount: true, thirdPartyCashAmount: true },
+        // D19: lo reabierto por un reembolso de abono (sólo en REFUND) se suma con lo demás.
+        _sum: { amount: true, tipAmount: true, thirdPartyCashAmount: true, reopenedAmount: true, reopenedTipAmount: true },
       })
     : []
   const cobrosDe = (orderId: string) =>
     sumas
       .filter(g => g.orderId === orderId)
-      .map(g => ({ amount: g._sum.amount, tipAmount: g._sum.tipAmount, thirdPartyCashAmount: g._sum.thirdPartyCashAmount, type: g.type }))
+      .map(g => ({
+        amount: g._sum.amount,
+        tipAmount: g._sum.tipAmount,
+        thirdPartyCashAmount: g._sum.thirdPartyCashAmount,
+        type: g.type,
+        reopenedAmount: g._sum.reopenedAmount,
+        reopenedTipAmount: g._sum.reopenedTipAmount,
+      }))
 
   const orders = pagina.flatMap(o => {
     const saldo = saldoDeCobroDeReparto(o, cobrosDe(o.id))
