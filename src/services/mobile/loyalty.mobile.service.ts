@@ -47,6 +47,27 @@ export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: 
 }
 
 /**
+ * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
+ * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
+ * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
+ * points and discount silently never persist. Resolve the row first; if the
+ * caller has no assignment to this venue we store null rather than fail: the
+ * audit attribution is nice to have, the money movement is not optional.
+ */
+async function resolveStaffVenueId(
+  db: Pick<Prisma.TransactionClient, 'staffVenue'>,
+  venueId: string,
+  staffId?: string,
+): Promise<string | undefined> {
+  if (!staffId) return undefined
+  const sv = await db.staffVenue.findUnique({
+    where: { staffId_venueId: { staffId, venueId } },
+    select: { id: true },
+  })
+  return sv?.id
+}
+
+/**
  * hz:ce654971:D18 (Codex r1): los puntos MÁS que se pueden ofrecer sin que el canje los tope: el mayor `p ≤ saldo` cuyo valor, redondeado
  * a centavos como lo redondea el canje (`money`), no pasa de `valor`. Un `floor(valor / tasa)` se queda corto con tasas como 0.0149
  * (101 × 0.0149 = 1.5049 → $1.50 sí cabe en $1.50) y, en flotante, con 0.3 / 0.1 = 2.9999999999999996.
@@ -73,27 +94,6 @@ export function previaDelCanje(
   const r = puntosQueSeCanjean(puntos, vista.redemptionRate, vista.maxRedeemableValue)
   if (r.monto <= 0) return { ok: false, error: 'El canje no genera descuento sobre esta cuenta' }
   return { ok: true, ...r }
-}
-
-/**
- * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
- * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
- * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
- * points and discount silently never persist. Resolve the row first; if the
- * caller has no assignment to this venue we store null rather than fail: the
- * audit attribution is nice to have, the money movement is not optional.
- */
-async function resolveStaffVenueId(
-  db: Pick<Prisma.TransactionClient, 'staffVenue'>,
-  venueId: string,
-  staffId?: string,
-): Promise<string | undefined> {
-  if (!staffId) return undefined
-  const sv = await db.staffVenue.findUnique({
-    where: { staffId_venueId: { staffId, venueId } },
-    select: { id: true },
-  })
-  return sv?.id
 }
 
 /**
