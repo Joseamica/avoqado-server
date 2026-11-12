@@ -10,7 +10,7 @@ import { adjustPoints, getLoyaltyTransactions, updateLoyaltyConfig } from '@/ser
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
-import { getCustomerLoyalty, previaDelCanje, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { previaDelCanjeEnCuenta, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -381,10 +381,11 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
       if (!confirm) {
         try {
-          const status = await getCustomerLoyalty(venueId, c.id, orderId)
-          // D18: la previa es lo que el canje hará con ESTOS `points` (los que se mandan al confirmar), con su misma regla y base.
-          const previa = previaDelCanje(points, status)
+          // D18: la previa es lo que el canje hará con ESTOS `points` (los que se mandan al confirmar): su misma regla, su base y
+          // sus negativas.
+          const previa = await previaDelCanjeEnCuenta(venueId, c.id, orderId, points)
           if (!previa.ok) return text({ ok: false, error: previa.error })
+          const status = previa.vista
           const wouldBurn = previa.puntos
           return text({
             ok: false,

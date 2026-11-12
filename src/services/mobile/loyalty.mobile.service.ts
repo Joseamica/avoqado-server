@@ -77,7 +77,16 @@ export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: numb
   let p = Math.min(saldo, Math.max(0, Math.ceil((valor + 0.005) / valorPorPunto) - 1))
   while (p > 0 && money(p * valorPorPunto) > valor) p--
   while (p < saldo && money((p + 1) * valorPorPunto) <= valor) p++
+  // Codex r2: el POS arranca en este número y pinta `puntos × tasa` con `%.2f`, que redondea el decimal escrito (1.005 → «$1.01»);
+  // el canje redondea el binario (1.0049999… → $1.00). En ese empate de medio centavo se baja un punto, para que lo que el POS
+  // muestra al abrir sea lo que se descuenta.
+  while (p > 0 && comoLoPintaElPos(p * valorPorPunto) !== money(p * valorPorPunto)) p--
   return p
+}
+
+/** `String.format("%.2f", x)` de ANDROID (`RewardsDialog`): redondea a la mitad hacia arriba el decimal más corto que escribe `x`. */
+function comoLoPintaElPos(x: number): number {
+  return new Prisma.Decimal(String(x)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
 }
 
 /**
@@ -94,6 +103,34 @@ export function previaDelCanje(
   const r = puntosQueSeCanjean(puntos, vista.redemptionRate, vista.maxRedeemableValue)
   if (r.monto <= 0) return { ok: false, error: 'El canje no genera descuento sobre esta cuenta' }
   return { ok: true, ...r }
+}
+
+/**
+ * La vista previa del MCP (`redeem_loyalty_on_check`) sobre una cuenta: las negativas del canje que no dependen de escribir (programa
+ * apagado, cuenta que no existe, anulada o ya pagada; luego mínimo, saldo y sin descuento) con sus mismos textos, y la cifra con
+ * `previaDelCanje`. Lo que el canje revisa además bajo candado (importada, cuenta de tarjetas, pedido con tarjeta apartada) lo
+ * contesta él al confirmar.
+ */
+export async function previaDelCanjeEnCuenta(
+  venueId: string,
+  customerId: string,
+  orderId: string,
+  puntos: number,
+): Promise<
+  { ok: true; puntos: number; monto: number; vista: Awaited<ReturnType<typeof getCustomerLoyalty>> } | { ok: false; error: string }
+> {
+  const vista = await getCustomerLoyalty(venueId, customerId, orderId)
+  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { status: true, paymentStatus: true } })
+  if (!cuenta) return { ok: false, error: 'Orden no encontrada' }
+  if (cuenta.status === 'CANCELLED' || cuenta.status === 'DELETED') {
+    return { ok: false, error: 'Esta venta está cancelada: no se pueden canjear puntos.' }
+  }
+  if (cuenta.paymentStatus === 'PAID' || cuenta.paymentStatus === 'PARTIAL') {
+    return { ok: false, error: 'No se puede modificar una orden ya pagada' }
+  }
+  if (!vista.active) return { ok: false, error: 'El programa de lealtad no está activo en esta sucursal' }
+  const r = previaDelCanje(puntos, vista)
+  return r.ok ? { ...r, vista } : r
 }
 
 /**

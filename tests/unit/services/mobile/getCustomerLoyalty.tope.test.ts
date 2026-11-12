@@ -6,8 +6,15 @@ jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
   getOrCreateLoyaltyConfig: jest.fn(),
 }))
 
+import { Prisma } from '@prisma/client'
 import { getOrCreateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
-import { getCustomerLoyalty, previaDelCanje, puntosQueCaben, puntosQueSeCanjean } from '@/services/mobile/loyalty.mobile.service'
+import {
+  getCustomerLoyalty,
+  previaDelCanje,
+  previaDelCanjeEnCuenta,
+  puntosQueCaben,
+  puntosQueSeCanjean,
+} from '@/services/mobile/loyalty.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const config = (o: Partial<{ redemptionRate: number; minPointsRedeem: number; active: boolean }> = {}) => ({
@@ -150,5 +157,62 @@ describe('previaDelCanje — la vista previa del MCP es lo que el canje hará co
     expect(previaDelCanje(5, { ...vista, minPointsRedeem: 10 })).toMatchObject({ ok: false })
     expect(previaDelCanje(501, vista)).toEqual({ ok: false, error: 'Puntos insuficientes: el cliente tiene 500' })
     expect(previaDelCanje(10, { ...vista, maxRedeemableValue: 0 })).toMatchObject({ ok: false })
+  })
+})
+
+/** `String.format(Locale.US, "%.2f", x)` de ANDROID: la mitad hacia arriba sobre el decimal que escribe `x`. */
+const comoAndroid = (x: number) => Number(new Prisma.Decimal(String(x)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP))
+
+describe('puntosQueCaben — lo que ANDROID pinta al abrir es lo que se descuenta (Codex r2)', () => {
+  it('tasa 0.0201 sobre $1.00: 50 pts pintarían «$1.01» y descuentan $1.00 ⇒ se ofrecen 49', () => {
+    expect(comoAndroid(50 * 0.0201)).toBe(1.01)
+    expect(puntosQueCaben(1, 0.0201, 500)).toBe(49)
+  })
+
+  it('barrido: el máximo ofrecido se pinta igual que lo que descuenta el canje', () => {
+    for (const tasa of [0.01, 0.0149, 0.0201, 0.05, 0.1, 0.125, 0.3333, 1, 1.5, 7]) {
+      for (const valor of [0.01, 0.3, 1, 1.5, 9.99, 95.5, 223, 1234.56]) {
+        const p = puntosQueCaben(valor, tasa, 100000)
+        const canje = puntosQueSeCanjean(p, tasa, valor)
+        if (p > 0) expect(comoAndroid(p * tasa)).toBe(canje.monto)
+      }
+    }
+  })
+})
+
+describe('previaDelCanjeEnCuenta — las negativas del canje también en la previa (Codex r2)', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const cuenta = (o: Partial<{ status: string; paymentStatus: string }> = {}) => ({
+    total: 1,
+    subtotal: 1,
+    discountAmount: 0,
+    status: 'PENDING',
+    paymentStatus: 'PENDING',
+    ...o,
+  })
+
+  it('cuenta abierta: la cifra es la del canje', async () => {
+    preparar({ saldo: 500, orden: cuenta() as any, cfg: { redemptionRate: 0.0201, minPointsRedeem: 1 } })
+    await expect(previaDelCanjeEnCuenta('v1', 'c1', 'o1', 50)).resolves.toMatchObject({ ok: true, ...puntosQueSeCanjean(50, 0.0201, 1) })
+  })
+
+  it('programa apagado', async () => {
+    preparar({ saldo: 500, orden: cuenta() as any, cfg: { active: false } })
+    await expect(previaDelCanjeEnCuenta('v1', 'c1', 'o1', 50)).resolves.toEqual({
+      ok: false,
+      error: 'El programa de lealtad no está activo en esta sucursal',
+    })
+  })
+
+  it('cuenta que no existe, anulada o ya pagada', async () => {
+    preparar({ saldo: 500, orden: null })
+    await expect(previaDelCanjeEnCuenta('v1', 'c1', 'o1', 50)).resolves.toEqual({ ok: false, error: 'Orden no encontrada' })
+    preparar({ saldo: 500, orden: cuenta({ status: 'CANCELLED' }) as any })
+    await expect(previaDelCanjeEnCuenta('v1', 'c1', 'o1', 50)).resolves.toMatchObject({ ok: false })
+    preparar({ saldo: 500, orden: cuenta({ paymentStatus: 'PARTIAL' }) as any })
+    await expect(previaDelCanjeEnCuenta('v1', 'c1', 'o1', 50)).resolves.toEqual({
+      ok: false,
+      error: 'No se puede modificar una orden ya pagada',
+    })
   })
 })
