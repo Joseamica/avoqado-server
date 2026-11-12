@@ -33,6 +33,20 @@ function money(value: number): number {
 }
 
 /**
+ * La regla del canje de puntos (la usa `redeemPointsToOrderInTransaction`, y la cotización de la tienda para decir cuántos se
+ * usarían de verdad): el valor de `puntos` topado a lo que queda por descontar (`base` = subtotal − descuentos); si se topó, sólo se
+ * queman los que se usan (⌈monto / valor por punto⌉). `monto` 0 = el canje lo rechaza.
+ */
+export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: number): { puntos: number; monto: number } {
+  const rawValue = money(puntos * valorPorPunto)
+  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total incluye cobros por servicio que el descuento no puede
+  // compensar — topar contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
+  const monto = money(Math.min(rawValue, Math.max(0, base)))
+  // If the value was capped, only burn the points actually used.
+  return { puntos: monto < rawValue && valorPorPunto > 0 ? Math.ceil(monto / valorPorPunto) : puntos, monto }
+}
+
+/**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
  * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
  * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
@@ -55,7 +69,11 @@ async function resolveStaffVenueId(
 
 /**
  * Balance + program rules for the customer attached to a check, plus how much
- * the POS may redeem RIGHT NOW against this order (capped at its total).
+ * the POS may redeem RIGHT NOW against this order.
+ *
+ * 🔴 hz:ce654971:D18: el tope usa la MISMA regla (`puntosQueSeCanjean`) y la MISMA base que el canje
+ * (`redeemPointsToOrderInTransaction`): subtotal − descuentos, NUNCA `order.total` (que trae cargos por servicio y el IVA que va
+ * aparte). Con el total, la caja ofrecía puntos que el canje no iba a usar.
  */
 export async function getCustomerLoyalty(venueId: string, customerId: string, orderId?: string) {
   const customer = await prisma.customer.findFirst({
@@ -68,20 +86,22 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   const redemptionRate = Number(config.redemptionRate)
   const balance = customer.loyaltyPoints
 
-  // What the balance is worth, capped by what is still owed on the check.
-  let orderTotal: number | null = null
+  // Lo que el canje puede descontar en esta cuenta: la misma base que lee `redeemPointsToOrderInTransaction`.
+  let redeemableBase: number | null = null
   if (orderId) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, venueId },
-      select: { total: true },
+      select: { subtotal: true, discountAmount: true },
     })
-    orderTotal = order ? Number(order.total) : null
+    redeemableBase = order ? Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0)) : null
   }
 
   const balanceValue = money(balance * redemptionRate)
-  const maxRedeemableValue = orderTotal === null ? balanceValue : money(Math.min(balanceValue, orderTotal))
-  // Points that produce that value — never more than the customer owns.
-  const maxRedeemablePoints = redemptionRate > 0 ? Math.min(balance, Math.floor(maxRedeemableValue / redemptionRate)) : 0
+  const maxRedeemableValue = redeemableBase === null ? balanceValue : puntosQueSeCanjean(balance, redemptionRate, redeemableBase).monto
+  // Points that produce that value — never more than the customer owns, and never more than the redemption would use (floor, so
+  // `points × rate` is exactly what the canje discounts). Rounded first: 0.3 / 0.1 = 2.9999999999999996 in floating point.
+  const maxRedeemablePoints =
+    redemptionRate > 0 ? Math.min(balance, Math.floor(Math.round((maxRedeemableValue / redemptionRate) * 1e6) / 1e6)) : 0
 
   return {
     customerId: customer.id,
@@ -166,17 +186,11 @@ export async function redeemPointsToOrderInTransaction(
   }
 
   const redemptionRate = Number(effectiveConfig.redemptionRate)
-  const rawValue = money(points * redemptionRate)
-  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
-  // incluye cobros por servicio que el descuento no puede compensar — topar
-  // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
   const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
-  const discountAmount = money(Math.min(rawValue, redeemableBase))
+  const { monto: discountAmount, puntos: pointsToBurn } = puntosQueSeCanjean(points, redemptionRate, redeemableBase)
   if (discountAmount <= 0) {
     throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
   }
-  // If the value was capped, only burn the points actually used.
-  const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
 
   const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
 
