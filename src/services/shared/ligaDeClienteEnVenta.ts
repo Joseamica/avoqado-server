@@ -3,6 +3,7 @@ import { ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppEr
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 import { computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
+import { cobradoQueCubreEnTx } from './saldoReabiertoAlReembolsar'
 import { WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '../exchanges/exchangeMarks'
 import {
   isCustomerAssignableSale,
@@ -152,11 +153,9 @@ export async function ventaYaCobradaBajoCandado(
   if (esVentaYaCobrada(orden)) return { ...base, cobrada: true, pendiente: new Prisma.Decimal(0) }
   // Una suma, no la lista de cobros: los REFUND fuera (con `type` NULL dentro, como `COBRO_QUE_CUBRE`); la propina se cancela a
   // los dos lados del saldo.
-  const cobrado = await tx.payment.aggregate({
-    where: { orderId: venta.orderId, venueId: venta.venueId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-    _sum: { amount: true, tipAmount: true },
-  })
-  const saldo = computeOrderBalance(orden, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
+  // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`).
+  const cobrado = await cobradoQueCubreEnTx(tx, { venueId: venta.venueId, orderId: venta.orderId })
+  const saldo = computeOrderBalance(orden, [{ amount: cobrado.amount, tipAmount: cobrado.tipAmount }])
   return {
     ...base,
     cobrada: saldo.paidAmount.greaterThan(0) && saldo.isFullyPaid,

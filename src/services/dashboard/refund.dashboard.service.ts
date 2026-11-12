@@ -29,6 +29,7 @@ import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
+import { fijarSaldoReabiertoEnTx, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
 import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
@@ -675,6 +676,12 @@ interface WriteRefundBase {
   moneyAs?: RefundMoneySemantics
   /** La fila no abre la obligación de costo negativo del cobro: no regresó dinero por el procesador (el crédito de un cambio). */
   skipNegativeCostObligation?: boolean
+  /**
+   * D19 (founder 10-nov «A»): si la cuenta todavía debía, lo devuelto vuelve a deberse (`fijarSaldoReabiertoEnTx`). Default `true`.
+   * `false` sólo donde el reembolso NO es un abono que se regresa: el reverso del saldo de regalo que cancela la cuenta en la misma
+   * transacción, y el ajuste de precio del proveedor de reparto (la plataforma bajó lo que cobra; nadie va a pagar la diferencia).
+   */
+  reabreSaldo?: boolean
   /** Pedidos en línea fase 2 (T10): comisión de la plataforma devuelta por Stripe, en centavos (ver `IssueRefundInput`). */
   platformFeeRefundCents?: number
   /**
@@ -722,7 +729,7 @@ export type WriteRefundInput = WriteRefundBase &
 export async function writeRefundInTx(
   tx: TxConReintento,
   input: WriteRefundInput,
-): Promise<{ refundPaymentId: string; replay: boolean; abono?: AbonoDeSaldoAFavor }> {
+): Promise<{ refundPaymentId: string; replay: boolean; abono?: AbonoDeSaldoAFavor; saldoReabierto?: SaldoReabierto }> {
   // El replay va PRIMERO, antes de validar saldo o cantidades: un reintento de algo que ya se
   // devolvió no puede morir en la validación (spec [N-11]).
   if (input.idempotencyKey) {
@@ -1024,6 +1031,20 @@ export async function writeRefundInTx(
     })
   }
 
+  // 🔴 D19 (founder 10-nov «A»): si la cuenta todavía debía, el abono devuelto vuelve a deberse. Se decide AQUÍ, una vez, con la
+  // cuenta ya bloqueada (`bloquearCobroParaReembolso`) y sus cobros de este momento; reescribe lo guardado de la cuenta en esta
+  // misma transacción. Una venta cerrada o cubierta no cambia (18-ago). Un replay por llave ya regresó arriba: no corre dos veces.
+  const saldoReabierto =
+    input.reabreSaldo === false
+      ? undefined
+      : await fijarSaldoReabiertoEnTx(tx, {
+          venueId: input.venueId,
+          orderId: original.orderId,
+          refundPaymentId: refundPayment.id,
+          devueltoImporte: salesRefundPesos,
+          devueltoPropina: tipRefundPesos,
+        })
+
   // Bump refundedAmount on the original payment's processorData.
   // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
   // por separado es cómo empiezan a divergir. Semántica: venta + propina.
@@ -1091,7 +1112,12 @@ export async function writeRefundInTx(
       ? await input.aSaldoAFavor.abonar(tx, refundPayment.id, sobre, { orderId: original.orderId, montoCents: refundCents })
       : undefined
 
-  return { refundPaymentId: refundPayment.id, replay: false, ...(abono ? { abono } : {}) }
+  return {
+    refundPaymentId: refundPayment.id,
+    replay: false,
+    ...(abono ? { abono } : {}),
+    ...(saldoReabierto?.reabre ? { saldoReabierto } : {}),
+  }
 }
 
 export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundResult> {
@@ -1527,7 +1553,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
         // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
         // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
-        const { refundPaymentId, replay, abono } = await writeRefundInTx(tx, {
+        const { refundPaymentId, replay, abono, saldoReabierto } = await writeRefundInTx(tx, {
           originalPaymentId: original.id,
           venueId: input.venueId,
           salesRefundCents,
@@ -1597,6 +1623,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         return {
           regreso,
           refundPaymentId,
+          saldoReabierto,
           originalPaymentId: original.id,
           originalOrderId: original.orderId,
           refundedItems,
@@ -1793,6 +1820,23 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       source: 'DASHBOARD',
     },
   })
+
+  // D19: la cuenta todavía debía y este reembolso devolvió un abono: vuelve a deberse. Se audita aparte (el dueño lo busca así).
+  if (result.saldoReabierto?.reabre) {
+    void logAction({
+      staffId: input.staffId ?? null,
+      venueId: input.venueId,
+      action: 'ORDER_BALANCE_REOPENED_BY_REFUND',
+      entity: 'Order',
+      entityId: result.originalOrderId,
+      data: {
+        refundPaymentId: result.refundPaymentId,
+        reopenedAmount: result.saldoReabierto.reopenedAmount.toNumber(), // pesos
+        reopenedTipAmount: result.saldoReabierto.reopenedTipAmount.toNumber(),
+        source: 'DASHBOARD',
+      },
+    })
+  }
 
   // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
   if (result.cuentaDeTarjetasCancelada) {

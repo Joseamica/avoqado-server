@@ -3922,7 +3922,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
     // `refundState`, y filtrarlos aquí los escondería.
     const payments = await tx.payment.findMany({
       where: { orderId: input.orderId, venueId: input.venueId, status: 'COMPLETED' },
-      select: { amount: true, tipAmount: true, type: true },
+      select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
     })
     // La aritmética canónica compartida (`src/services/shared/orderBalance.ts`),
     // ya no una copia local: MISMA fórmula que efectivo, TPV y cripto, y con

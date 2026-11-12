@@ -104,7 +104,8 @@ export interface CobroCandidato {
   idempotencyKey: string | null | undefined
 }
 
-export interface PagoPrevio extends CompletedPaymentForBalance {
+// D19: `type` y no `interface … extends`: `CompletedPaymentForBalance` es una unión (con o sin lo reabierto).
+export type PagoPrevio = CompletedPaymentForBalance & {
   id: string
   method?: string | null
   createdAt?: Date
@@ -161,7 +162,9 @@ export function cobroEnEfectivoSobreOrdenSaldada(
   const saldo = computeOrderBalance(order, pagosCompletados)
   // `remainingBalance` viene clampado a 0 (un sobrepago no deja saldo negativo), así que el
   // faltante se recalcula desde `total` y `paidAmount` y se le SUMA lo devuelto.
-  const restante = saldo.total.minus(saldo.paidAmount).plus(saldo.refundedAmount)
+  // D19: lo devuelto que REABRIÓ ya salió de `paidAmount`; sumarlo otra vez lo contaría dos veces. Es la misma cifra que antes del
+  // 12-nov para toda cuenta sin abonos devueltos.
+  const restante = saldo.total.minus(saldo.paidAmount).plus(saldo.refundedAmount.minus(saldo.reopenedAmount))
   if (restante.greaterThan(FULL_PAYMENT_TOLERANCE)) return null
 
   // 🔴 Identidad EXACTA, no la tolerancia del saldo. `FULL_PAYMENT_TOLERANCE` ($0.01) existe

@@ -176,7 +176,10 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           venue: { select: { name: true } },
           // Sólo para el carril del reembolso (ver abajo): tres columnas de los
           // pagos COMPLETED, no el pago entero. El array no sale en la respuesta.
-          payments: { where: { status: TransactionStatus.COMPLETED }, select: { amount: true, tipAmount: true, type: true } },
+          payments: {
+            where: { status: TransactionStatus.COMPLETED },
+            select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
+          },
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -299,7 +302,18 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           },
           // `type` distingue un reembolso (Payment NEGATIVO type REFUND) de un
           // cobro. Se devuelve tal cual: es dato útil para quien lee la orden.
-          payments: { select: { amount: true, tipAmount: true, method: true, status: true, type: true, createdAt: true } },
+          payments: {
+            select: {
+              amount: true,
+              tipAmount: true,
+              method: true,
+              status: true,
+              type: true,
+              createdAt: true,
+              reopenedAmount: true,
+              reopenedTipAmount: true,
+            },
+          },
         },
       })
       if (!order) return text({ found: false, reason: 'Order not found, or it is outside your venues' })
@@ -329,7 +343,14 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       const refunds = summarizeRefunds((order.payments ?? []).filter(p => p.status === TransactionStatus.COMPLETED))
       return text({
         found: true,
-        order: { ...order, promotions, refundState: refunds.refundState, refundedAmount: Number(refunds.refundedAmount) },
+        order: {
+          ...order,
+          promotions,
+          refundState: refunds.refundState,
+          refundedAmount: Number(refunds.refundedAmount),
+          // D19 (aditivo, pesos): lo que reembolsos de abonos volvieron a deber (la cuenta todavía debía). 0 en todo lo demás.
+          reopenedAmount: Number(refunds.reopenedAmount),
+        },
       })
     },
   )
