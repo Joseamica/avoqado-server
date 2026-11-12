@@ -60,3 +60,16 @@ export function buildAudienceConditions(venueId?: string, terminalId?: string): 
   if (terminalId) conditions.push({ targetType: 'TERMINALS', targetTerminalIds: { has: terminalId } })
   return conditions
 }
+
+/**
+ * Una versión OBLIGATORIA siempre sale para todas las terminales. Las TPV viejas no se pueden obligar con una dirigida: las
+ * menores a 2.12.2 no mandan su serial y ninguna vuelve a preguntar por versiones si ya tiene una pendiente más nueva, así
+ * que la obligación se perdía o frenaba a quien no tocaba (auditoría de apps viejas, Codex r1→r3, 11-nov). «Aplica a» queda
+ * para las opcionales; para una sola terminal está «Instalar versión».
+ */
+export const OBLIGATORIA_SOLO_PARA_TODAS =
+  'Una versión obligatoria sale para todas las terminales. Para limitarla a ciertas sucursales o terminales, publícala como opcional (o usa «Instalar versión» en esa terminal).'
+
+export function esObligatoriaDirigida(updateMode: string | null | undefined, targetType: string | null | undefined): boolean {
+  return updateMode === 'FORCE' && (targetType ?? 'ALL') !== 'ALL'
+}

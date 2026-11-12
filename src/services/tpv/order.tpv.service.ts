@@ -26,12 +26,14 @@ import {
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import type { ValesSoltados } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { membresiaDeQuienLlama } from './discount.tpv.service'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import {
   accionDeCortesia,
   buildItemDiscountRow,
+  calcularDescuentoExactoCents,
   calculateDiscountPesos,
   filaDeCortesias,
   filaDeDescuentoDeCatalogoEnCuenta,
@@ -39,6 +41,8 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { descuentosDeLosClientes } from '../shared/descuentoDelCliente.service'
+import { autorizadorDelDescuentoDelCliente } from '../mobile/permission-override.mobile.service'
 import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
@@ -240,6 +244,21 @@ export async function getOrders(
   }))
 }
 
+// Lo que la TPV lee de cada descuento de la cuenta (`OrderDiscountDto`: `type` obligatorio). Recortado a { id, name, amount }
+// (29-jul) la TPV tronaba al releer la venta tras cobrar y la pantalla final decía «Queda por pagar» con lo ya pagado
+// (QA del descuento del cliente en la PAX, 11-nov). Sólo agrega campos: lo que ya iba sigue igual.
+export const SELECT_DESCUENTO_DE_LA_CUENTA = {
+  id: true,
+  name: true,
+  amount: true,
+  orderId: true,
+  discountId: true,
+  couponCodeId: true,
+  type: true,
+  value: true,
+  appliedById: true,
+} as const
+
 /**
  * Get a specific order (order) by ID
  * @param orgId Organization ID (for future authorization)
@@ -316,9 +335,7 @@ export async function getOrder(
       // shape `order.mobile.service.ts::getOrder` already uses (same Prisma
       // relation names, same field selection) — additive only, no existing
       // field removed or renamed.
-      orderDiscounts: {
-        select: { id: true, name: true, amount: true },
-      },
+      orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
       serviceCharges: true,
     },
   })
@@ -728,6 +745,8 @@ type TpvCreateOrderWithItemsInput = {
   customerId?: string | null
   discount?: number // pesos
   orderDiscountId?: string | null
+  /** Descuento del cliente: el token del PIN de gerente para ese cliente y su descuento. Se lee sin gastar y nunca rechaza. */
+  autorizacionDelDescuento?: string | null
   /** D5: el cupón que la terminal validó. El servidor lo revalida y calcula; `discount` sólo tiene que coincidir. */
   couponCode?: string | null
   taxAmount: number // pesos (must be 0 in V1)
@@ -1027,6 +1046,8 @@ async function buildCreateOrderResponse(orderId: string): Promise<Order & { tabl
 }
 
 const MENSAJE_PIDE_APROBACION = 'Este descuento requiere aprobación de un gerente y todavía no se puede aplicar en la terminal.'
+const descuentoDeCatalogoCambio = (nombre: string) =>
+  `El descuento «${nombre}» cambió desde que se puso en la cuenta. Vuelve a elegir al cliente para actualizarlo.`
 /** D2: un % o fijo que pide aprobación no tiene aprobador (decisión pendiente del founder); una cortesía sí (`orders:comp`). */
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'
@@ -1084,6 +1105,12 @@ export async function createOrderWithItems(
   // Referencia ya validada: el narrowing del guard de arriba no entra a la
   // función interna de la transacción (TS no propaga narrowings a closures).
   const activeStaffVenue = staffVenue
+  // hz:f34960c5:D5: quien firma un descuento o cortesía es la SESIÓN, no el vendedor elegido en la terminal (`staffId`, que
+  // sigue siendo el de la venta). Sin membresía activa (dueño de la organización) queda sin autor; sin sesión, como antes.
+  const autorDelDescuento =
+    !input.performedBy || input.performedBy === input.staffId
+      ? activeStaffVenue.id
+      : ((await membresiaDeQuienLlama(venueId, input.performedBy)) ?? null)
 
   const productIds = [...new Set(input.items.map(item => item.productId).filter((id): id is string => !!id))]
   const products = productIds.length
@@ -1206,10 +1233,12 @@ export async function createOrderWithItems(
   if (cupon && pideAprobacionSinAprobador(cupon.discount)) throw new BadRequestError(MENSAJE_PIDE_APROBACION)
   const orderDiscount =
     cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
+  // El de catálogo sin cupón, al centavo exacto con la regla de la TPV (Decimal, «medio hacia arriba»): en pesos flotantes 2135 ¢
+  // al 10 % daban 2.13 y la terminal muestra 2.14.
   const orderDiscountPesos = cupon
     ? montoDelCupon(cupon.discount, baseDeLaCuentaPesos)
     : orderDiscount
-      ? calculateDiscountPesos(orderDiscount, baseDeLaCuentaPesos)
+      ? calcularDescuentoExactoCents(orderDiscount, Math.round(baseDeLaCuentaPesos * 100)) / 100
       : roundPesos(input.discount || 0)
   const discountAmountPesos = roundPesos(itemDiscountPesos + orderDiscountPesos)
   const totalPesos = roundPesos(grossSubtotalPesos - discountAmountPesos)
@@ -1221,6 +1250,11 @@ export async function createOrderWithItems(
     const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
     if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos))
       throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
+  } else if (orderDiscount) {
+    // Descuento del cliente: centavos exactos contra lo que la terminal mostró; si no cuadra, el descuento cambió en el catálogo.
+    if (Math.round((input.discount || 0) * 100) !== Math.round(orderDiscountPesos * 100))
+      throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
+    assertClosePesos('total', input.total, totalPesos)
   } else {
     assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
     assertClosePesos('total', input.total, totalPesos)
@@ -1238,6 +1272,22 @@ export async function createOrderWithItems(
     baseDeLaCuentaPesos > 0 &&
     Math.round(orderDiscountPesos * 100) >= Math.round(baseDeLaCuentaPesos * 100)
   if (descuentoLibreRegala && (input.canCompItems !== true || !input.performedBy)) throw new RegaloSinPermisoError()
+
+  // Descuento del cliente: el de catálogo sin cupón que el negocio le asignó a ESTE cliente se marca automático y guarda al
+  // gerente del PIN (leído sin gastar; si no sirve, `null`). Fuera de la transacción: dos lecturas, sólo si hay fila que marcar.
+  let filaDelCliente: { isAutomatic: true; isManual: false; authorizedById: string | null } | null = null
+  if (orderDiscount && !cupon && orderDiscountPesos > 0 && input.customerId) {
+    const suyo = (await descuentosDeLosClientes(venueId, [input.customerId])).get(input.customerId)
+    if (suyo?.discountId === orderDiscount.id) {
+      const authorizedById = await autorizadorDelDescuentoDelCliente({
+        venueId,
+        token: input.autorizacionDelDescuento,
+        customerId: input.customerId,
+        discountId: orderDiscount.id,
+      })
+      filaDelCliente = { isAutomatic: true, isManual: false, authorizedById }
+    }
+  }
 
   let resolvedTerminalId = input.terminalId || null
   if (!resolvedTerminalId && input.deviceSerialNumber) {
@@ -1273,6 +1323,28 @@ export async function createOrderWithItems(
       }
     }
     throw err
+  }
+
+  // El descuento del cliente (automático, o con el PIN del gerente) deja su renglón en la auditoría, como el descuento y la
+  // cortesía de Mesas. Fuera de la transacción y sin esperar: una auditoría que falla no tumba la venta. Una venta repetida
+  // (misma llave) regresa arriba y no vuelve a anotarse.
+  if (filaDelCliente && orderDiscount && orderDiscountPesos > 0) {
+    void logAction({
+      staffId: input.performedBy ?? input.staffId ?? null,
+      venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: createdOrder.id,
+      data: {
+        amount: orderDiscountPesos,
+        discountId: orderDiscount.id,
+        name: orderDiscount.name,
+        customerId: input.customerId,
+        descuentoDelCliente: true,
+        ...(filaDelCliente.authorizedById ? { autorizadoPor: filaDelCliente.authorizedById } : {}),
+        ...vendedorSiNoEsLaSesion(input),
+      },
+    })
   }
 
   async function runCreateOrderTransaction() {
@@ -1382,7 +1454,7 @@ export async function createOrderWithItems(
         })
         if (cortesiaItems.length > 0) {
           await tx.orderDiscount.create({
-            data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: activeStaffVenue.id }),
+            data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: autorDelDescuento }),
           })
         }
 
@@ -1393,7 +1465,7 @@ export async function createOrderWithItems(
               itemId: item.id,
               discount: item.line.appliedDiscount!,
               discountAmountPesos: item.line.lineDiscountPesos,
-              appliedById: activeStaffVenue.id,
+              appliedById: autorDelDescuento,
             }),
           })
         }
@@ -1403,14 +1475,14 @@ export async function createOrderWithItems(
             orderId: order.id,
             discount: orderDiscount,
             montoPesos: orderDiscountPesos,
-            appliedById: activeStaffVenue.id,
+            appliedById: autorDelDescuento,
             renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
             tope:
               cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null
                 ? Number(orderDiscount.maxDiscountAmount)
                 : null,
           })
-          await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+          await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : filaDelCliente ? { ...fila, ...filaDelCliente } : fila })
         }
         if (!orderDiscount && orderDiscountPesos > 0) {
           // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
@@ -1418,7 +1490,7 @@ export async function createOrderWithItems(
             data: filaDeDescuentoDeCuenta({
               orderId: order.id,
               montoPesos: orderDiscountPesos,
-              appliedById: activeStaffVenue.id,
+              appliedById: autorDelDescuento,
               // Codex r2 #1: el autorizador lo resuelve el controlador (gerente del PIN o quien cobra), nunca el vendedor del cuerpo.
               ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor } : {}),
             }),
@@ -1442,7 +1514,7 @@ export async function createOrderWithItems(
           await tx.orderAction.create({
             data: accionDeCortesia({
               orderId: order.id,
-              performedById: input.staffId,
+              performedById: input.performedBy ?? input.staffId,
               renglon: enCortesia(item),
               productId: item.line.product?.id || null,
               productName: item.line.product?.name || item.line.input.name || 'Otro importe',
@@ -1519,6 +1591,23 @@ export async function createOrderWithItems(
 
   if (totalPesos === 0) {
     await deductTrackedInventoryForFreeCart(fullOrder, input.staffId)
+  }
+
+  // D5: la cortesía de «Cobrar» también va a la bitácora del dueño (antes sólo a `OrderAction`), tras el commit.
+  const cortesias = fullOrder.items.filter(item => item.isCortesia)
+  if (cortesias.length > 0) {
+    void logAction({
+      staffId: input.performedBy ?? input.staffId,
+      venueId,
+      action: 'ITEM_COMPED',
+      entity: 'Order',
+      entityId: fullOrder.id,
+      data: {
+        itemIds: cortesias.map(item => item.id),
+        amount: roundPesos(cortesias.reduce((suma, item) => suma + Number(item.total), 0)),
+        ...vendedorSiNoEsLaSesion(input),
+      },
+    })
   }
 
   if (marcarCocina) {
@@ -2846,8 +2935,15 @@ export async function removeOrderItem(
 interface CompItemsInput {
   itemIds: string[] // Items to comp (empty array = comp entire order)
   reason: string // Required: "Food quality issue", "Long wait time", etc.
-  staffId: string // Staff member performing the action
+  staffId: string // Vendedor elegido en la terminal (del cuerpo)
   notes?: string
+  /** Server-owned (hz:f34960c5:D5): el `userId` de la sesión. Es el autor; sin él, como antes, el `staffId` del cuerpo. */
+  performedBy?: string
+}
+
+/** D5: la nota de la bitácora cuando el vendedor que eligió la terminal no es quien está en sesión. */
+function vendedorSiNoEsLaSesion(input: { staffId?: string; performedBy?: string }) {
+  return input.performedBy && input.staffId && input.staffId !== input.performedBy ? { vendedorSegunElAparato: input.staffId } : {}
 }
 
 /**
@@ -2883,6 +2979,8 @@ export function anulacionExigeOrdenSinCobroVivo(_input: { isVoidingAllItems: boo
  */
 export async function compItems(venueId: string, orderId: string, input: CompItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`🚫 [ORDER SERVICE] Comping items for order ${orderId} | reason: ${input.reason}`)
+  const autor = input.performedBy ?? input.staffId
+  const membresiaDeLaSesion = input.performedBy ? ((await membresiaDeQuienLlama(venueId, input.performedBy)) ?? null) : undefined
 
   const { updatedOrder, compAmount, itemCount, newTotal, recorte } = await withDeadlockRetry(
     async tx => {
@@ -2978,7 +3076,11 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       // P5: la cortesía tiene su fila ESPEJO, como en «Cobrar». Sin ella vivía sólo en la cabecera y el siguiente recálculo
       // (Σ filas) la borraba. Una cortesía de $0 no gana espejo: sería una «Cortesía $0» sin renglones que nadie retira.
       if (compAmount > 0) {
-        const otorgadaPor = await tx.staffVenue.findFirst({ where: { staffId: input.staffId, venueId }, select: { id: true } })
+        // D5: la membresía de la sesión (resuelta antes del candado); sin sesión, la del `staffId` del cuerpo, como antes.
+        const otorgadaPor =
+          membresiaDeLaSesion !== undefined
+            ? { id: membresiaDeLaSesion }
+            : await tx.staffVenue.findFirst({ where: { staffId: input.staffId, venueId }, select: { id: true } })
         await tx.orderDiscount.create({
           data: {
             orderId,
@@ -3107,7 +3209,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
         data: {
           orderId: updated.id,
           actionType: 'COMP',
-          performedById: input.staffId,
+          performedById: autor,
           reason: input.reason,
           metadata: {
             itemIds: input.itemIds,
@@ -3124,7 +3226,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
   )
 
   void logAction({
-    staffId: input.staffId ?? null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_COMPED',
     entity: 'Order',
@@ -3134,6 +3236,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       amount: Number(compAmount),
       reason: input.reason ?? undefined,
       ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+      ...vendedorSiNoEsLaSesion(input),
     },
   })
 
@@ -3602,7 +3705,9 @@ interface ApplyDiscountInput {
   type: 'PERCENTAGE' | 'FIXED_AMOUNT'
   value: number // Percentage (0-100) or fixed amount
   reason?: string // Optional for promotional discounts
-  staffId: string // Staff member performing the action
+  staffId: string // Vendedor elegido en la terminal (del cuerpo)
+  /** Server-owned (hz:f34960c5:D5): el `userId` de la sesión. Es el autor; sin él, como antes, el `staffId` del cuerpo. */
+  performedBy?: string
   itemIds?: string[] // Optional: apply to specific items (null = order-level)
   expectedVersion: number // Optimistic locking
   /** Server-owned (hz:e0b12f00:D1): quien llama tiene `orders:comp` (o lo autorizó el PIN de un gerente). */
@@ -3622,6 +3727,8 @@ export async function applyDiscount(
   input: ApplyDiscountInput,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`💰 [ORDER SERVICE] Applying ${input.type} discount to order ${orderId} | value: ${input.value}`)
+  // D5: la fila lleva la membresía de la sesión (antes no guardaba autor). Sin sesión, como antes: sin autor.
+  const membresiaDeLaSesion = input.performedBy ? ((await membresiaDeQuienLlama(venueId, input.performedBy)) ?? null) : undefined
 
   const { updatedOrder, discountAmount, newTotal } = await prisma.$transaction(
     async tx => {
@@ -3735,8 +3842,8 @@ export async function applyDiscount(
 
       // P2 (founder, 1-oct): este descuento sólo vivía en la cabecera y el siguiente recálculo con filas lo borraba. Ahora es
       // su fila, con el importe CONGELADO (`appliedToItemIds`), igual que «Cobrar»: hoy no se re-deriva y así sigue.
-      // Quién lo aplicó queda en `OrderAction` y `ActivityLog` (aquí sólo hay Staff, no StaffVenue). Sólo si descuenta algo Y
-      // la cuenta tiene renglones: sin destinos, la fila quedaría como % de cuenta y un recálculo la re-derivaría (ruling R-6;
+      // Quién lo aplicó: la sesión (D5), en la fila con su membresía y en `OrderAction`/`ActivityLog` con su Staff.
+      // Sólo si descuenta algo Y la cuenta tiene renglones: sin destinos, la fila quedaría como % de cuenta y un recálculo la re-derivaría (ruling R-6;
       // Codex r1: subtotal $100 sin renglones, 10 % = $10, al agregar $50 ⇒ $5). Sin renglones vive sólo en la cabecera, como
       // hoy; si después llega otra fila, `conservarDescuentoHistorico` la congela.
       // B2b (Codex r4 R4-2): lo que la sincronización devuelva a `Order.taxAmount` en ESTA transacción entra al total de abajo.
@@ -3754,6 +3861,7 @@ export async function applyDiscount(
             amount: discountAmount,
             taxReduction: 0,
             isManual: true,
+            appliedById: membresiaDeLaSesion,
             appliedToItemIds: elegidos.map(item => item.id),
             reparto: comoJson(
               conArticulos
@@ -3869,7 +3977,7 @@ export async function applyDiscount(
     data: {
       orderId,
       actionType: 'DISCOUNT',
-      performedById: input.staffId,
+      performedById: input.performedBy ?? input.staffId,
       reason: input.reason || 'Discount applied',
       metadata: {
         discountType: input.type,
@@ -3881,12 +3989,12 @@ export async function applyDiscount(
     },
   })
   void logAction({
-    staffId: input.staffId ?? null,
+    staffId: input.performedBy ?? input.staffId ?? null,
     venueId,
     action: 'DISCOUNT_APPLIED',
     entity: 'Order',
     entityId: orderId,
-    data: { amount: Number(discountAmount), reason: input.reason ?? undefined },
+    data: { amount: Number(discountAmount), reason: input.reason ?? undefined, ...vendedorSiNoEsLaSesion(input) },
   })
 
   logger.info(`✅ [ORDER SERVICE] Applied discount | amount: $${discountAmount} | new total: $${newTotal}`)

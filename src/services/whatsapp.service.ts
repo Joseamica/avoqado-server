@@ -570,6 +570,7 @@ export async function sendServiceMessage(phone: string, body: string): Promise<{
  * buttonUrlParam path — same sub_type:'url' component shape).
  */
 export async function sendOtpWhatsApp(phone: string, code: string): Promise<boolean> {
-  await sendTemplateMessage(phone, 'otp_verify', [{ type: 'text', text: code }], code, 'es')
-  return true
+  const { messageId } = await sendTemplateMessage(phone, 'otp_verify', [{ type: 'text', text: code }], code, 'es')
+  // D17: un negocio demo no manda nada (el candado contesta `negocio-demo`); para el código eso es «no salió», no «enviado».
+  return messageId !== 'negocio-demo'
 }

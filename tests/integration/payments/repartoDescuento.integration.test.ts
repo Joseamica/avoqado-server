@@ -46,6 +46,8 @@ if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_(?:[
 
 const venueId = `reparto-${randomUUID()}`
 let staffId: string, staffVenueId: string, cafeId: string, panId: string, categoriaCafeId: string, llaveroId: string
+/** D5: el personal extra que crean sus pruebas (se borra con el de la suite, después de sus filas). */
+const personalExtra: string[] = []
 
 const filas = (orderId: string) => prisma.orderDiscount.findMany({ where: { orderId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
 const renglonDe = (orderId: string, productId: string) => prisma.orderItem.findFirstOrThrow({ where: { orderId, productId } })
@@ -187,7 +189,7 @@ afterAll(async () => {
   await prisma.product.deleteMany({ where: { venueId } })
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  await prisma.staff.deleteMany({ where: { id: { in: [staffId, ...personalExtra] } } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: venueId } })
 })
@@ -2179,5 +2181,109 @@ describe('D16: la reducción sigue al reparto y vuelve al quitar (B2b)', () => {
     expect(Number(fila.taxReduction)).toBe(0.8) // 10 × 16 / 200; la v3 de este plan conservaba 1.60
     expect(await impuesto(orderId)).toBe(15.2)
     expect((await cabecera(orderId)).total).toBe(205.2) // 200 − 10 + 15.20
+  })
+})
+
+// hz:f34960c5:D5, contra Postgres real: el autor de un descuento o cortesía de la TPV es la SESIÓN (`performedBy`), no el
+// vendedor elegido (`staffId`). Aquí truena lo que el doble no ve: `appliedById` es FK a StaffVenue y `performedById` a Staff.
+describe('D5: quien aplica es la sesión (llaves foráneas reales)', () => {
+  let sesionId: string, sesionMembresiaId: string, sinMembresiaId: string
+  const ordenesD5: string[] = []
+
+  beforeAll(async () => {
+    sesionId = (await prisma.staff.create({ data: { email: `${venueId}@sesion.test`, firstName: 'Sesión', lastName: 'D5' } })).id
+    sinMembresiaId = (await prisma.staff.create({ data: { email: `${venueId}@dueno.test`, firstName: 'Dueño', lastName: 'D5' } })).id
+    personalExtra.push(sesionId, sinMembresiaId)
+    sesionMembresiaId = (await prisma.staffVenue.create({ data: { venueId, staffId: sesionId, role: 'CASHIER' } })).id
+  })
+
+  afterAll(async () => {
+    if (!venueId || ordenesD5.length === 0) return
+    await prisma.orderDiscount.deleteMany({ where: { orderId: { in: ordenesD5 } } })
+    await prisma.orderAction.deleteMany({ where: { orderId: { in: ordenesD5 } } })
+    await prisma.orderItem.deleteMany({ where: { orderId: { in: ordenesD5 } } })
+    await prisma.order.deleteMany({ where: { id: { in: ordenesD5 }, venueId } })
+  })
+
+  const acciones = (orderId: string) =>
+    prisma.orderAction.findMany({ where: { orderId }, select: { actionType: true, performedById: true } })
+
+  /** Café $100 + pan de cortesía $50 + $10 libres de cuenta, vendido por `staffId` (B) con la sesión `performedBy`. */
+  async function ventaConCortesiaYDescuento(performedBy: string) {
+    const o = await crearEnTerminal(venueId, {
+      items: [
+        { productId: cafeId, quantity: 1, unitPrice: 100 },
+        { productId: panId, quantity: 1, unitPrice: 50, isCortesia: true, cortesiaReason: 'Invitación' },
+      ],
+      discount: 10,
+      staffId,
+      performedBy,
+      taxAmount: 0,
+      subtotal: 150,
+      total: 90,
+      tip: 0,
+    } as any)
+    ordenesD5.push(o.id)
+    return o.id
+  }
+  async function cuentaD5() {
+    const orderId = await cuentaDeCafe()
+    ordenesD5.push(orderId)
+    return orderId
+  }
+
+  const casos = [
+    ['con membresía', () => sesionId, () => sesionMembresiaId],
+    ['sin membresía en el negocio (dueño de la organización)', () => sinMembresiaId, () => null],
+  ] as const
+
+  describe.each(casos)('sesión %s', (_nombre, sesion, autorEsperado) => {
+    it('a. «Cobrar»: cortesía y descuento de cuenta a nombre de la sesión; la venta sigue siendo del vendedor', async () => {
+      ;(logAction as jest.Mock).mockClear()
+      const orderId = await ventaConCortesiaYDescuento(sesion())
+
+      const filasD5 = await filas(orderId)
+      expect(filasD5).toHaveLength(2)
+      for (const fila of filasD5) expect(fila.appliedById).toBe(autorEsperado())
+      expect(await acciones(orderId)).toEqual([{ actionType: 'COMP', performedById: sesion() }])
+      const orden = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { createdById: true, servedById: true } })
+      expect(orden).toEqual({ createdById: staffId, servedById: staffId })
+      expect(await cabecera(orderId)).toEqual({ subtotal: 150, descuento: 60, total: 90, saldo: 90 })
+      // `logAction` está simulado en esta suite: se revisa lo que recibe, no la fila de ActivityLog.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ITEM_COMPED',
+          entityId: orderId,
+          staffId: sesion(),
+          data: expect.objectContaining({ amount: 50, vendedorSegunElAparato: staffId }),
+        }),
+      )
+    })
+
+    it('b. /comp: fila espejo y OrderAction de la sesión', async () => {
+      const orderId = await cuentaD5()
+      await compItems(venueId, orderId, { itemIds: [], reason: 'Invitación', staffId, performedBy: sesion() })
+
+      const [espejo] = await filas(orderId)
+      expect(espejo).toMatchObject({ isComp: true, appliedById: autorEsperado() })
+      expect(await acciones(orderId)).toEqual([{ actionType: 'COMP', performedById: sesion() }])
+    })
+
+    it('c. /discount: la fila trae por fin su autor; OrderAction de la sesión', async () => {
+      const orderId = await cuentaD5()
+      await applyDiscountHeredado(venueId, orderId, {
+        type: 'FIXED_AMOUNT',
+        value: 10,
+        reason: 'Promo',
+        staffId,
+        performedBy: sesion(),
+        expectedVersion: await version(orderId),
+      } as any)
+
+      const [fila] = await filas(orderId)
+      expect(fila.appliedById).toBe(autorEsperado())
+      expect(Number(fila.amount)).toBe(10)
+      expect(await acciones(orderId)).toEqual([{ actionType: 'DISCOUNT', performedById: sesion() }])
+    })
   })
 })
