@@ -6,7 +6,11 @@
  *     ⇒ «Liquidar» del panel cobra $100, no $50
  *     ⇒ el POS cobra $50 en efectivo: queda PARTIAL debiendo $50 (antes PAGADA) y el barrido de «pagada pero abierta» no la elige
  *   y la regla del 18-ago: una venta cerrada que se reembolsa sigue cerrada, sin nada reabierto.
+ *
+ *   D649: si la cuenta es una venta de VALES, su sesión viva sube la versión (y dice PARTIALLY_PAID): sin eso el POS descarta la
+ *   respuesta con menos pagado y sigue proponiendo «Cobrar saldo» por $50. Si otra caja tiene la sesión, el reembolso no la espera.
  */
+import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
@@ -198,5 +202,98 @@ describe('D19 · el abono devuelto vuelve a deberse (Postgres)', () => {
     expect(guardado.paymentStatus).toBe('PAID')
     expect(guardado.remainingBalance.toString()).toBe('0')
     expect(calculado.isFullyPaid).toBe(true)
+  })
+
+  describe('D649 · venta de VALES: la sesión viva se entera del abono devuelto', () => {
+    const terminales: string[] = []
+    const sesiones: string[] = []
+
+    async function sesionDeVales(orderId: string, status: 'MATERIALIZED' | 'PARTIALLY_PAID', version: number) {
+      const terminal = await prisma.terminal.create({
+        data: {
+          venueId,
+          name: 'caja de vales D649',
+          serialNumber: `d649-${randomUUID().slice(0, 8)}`,
+          type: 'TPV_ANDROID',
+          deviceUid: `d649-uid-${randomUUID().slice(0, 8)}`,
+          canCheckoutAreaTickets: true,
+        } as Prisma.TerminalUncheckedCreateInput,
+      })
+      terminales.push(terminal.id)
+      const sesion = await prisma.areaTicketCheckoutSession.create({
+        data: {
+          venueId,
+          terminalId: terminal.id,
+          idempotencyKey: randomUUID(),
+          expiresAt: new Date(Date.now() + 3_600_000),
+          orderId,
+          status,
+          version,
+        } as Prisma.AreaTicketCheckoutSessionUncheckedCreateInput,
+      })
+      sesiones.push(sesion.id)
+      return sesion
+    }
+    const sesionAhora = (id: string) =>
+      prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id }, select: { status: true, version: true } })
+
+    afterAll(async () => {
+      await prisma.areaTicketCheckoutSession.deleteMany({ where: { id: { in: sesiones } } })
+      await prisma.terminal.deleteMany({ where: { id: { in: terminales } } })
+    })
+
+    it('🔴 sesión MATERIALIZED (abono por otro canal): el reembolso sube su versión y la deja PARTIALLY_PAID', async () => {
+      const { order, abono } = await cuentaConAbono(venueId, staffId)
+      const sesion = await sesionDeVales(order.id, 'MATERIALIZED', 3)
+
+      await issueRefund({ venueId, paymentId: abono.id, amount: 5000, reason: 'OTHER', staffId })
+
+      expect(await sesionAhora(sesion.id)).toEqual({ status: 'PARTIALLY_PAID', version: 4 })
+      const { guardado } = await saldoDe(venueId, order.id)
+      expect([guardado.paidAmount.toString(), guardado.remainingBalance.toString()]).toEqual(['0', '100'])
+    })
+
+    it('sesión PARTIALLY_PAID (abono por la sesión): sólo sube su versión', async () => {
+      const { order, abono } = await cuentaConAbono(venueId, staffId)
+      const sesion = await sesionDeVales(order.id, 'PARTIALLY_PAID', 5)
+
+      await issueRefund({ venueId, paymentId: abono.id, amount: 5000, reason: 'OTHER', staffId })
+
+      expect(await sesionAhora(sesion.id)).toEqual({ status: 'PARTIALLY_PAID', version: 6 })
+    })
+
+    it('otra caja tiene la sesión en ese instante: el reembolso NO la espera (sesión → vales → cuenta), reabre igual y la sesión no cambia', async () => {
+      const { order, abono } = await cuentaConAbono(venueId, staffId)
+      const sesion = await sesionDeVales(order.id, 'MATERIALIZED', 3)
+      let soltar!: () => void
+      const suelta = new Promise<void>(r => (soltar = r))
+      let avisar!: () => void
+      const tomada = new Promise<void>(r => (avisar = r))
+      const otraCaja = prisma.$transaction(
+        async tx => {
+          await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sesion.id} FOR UPDATE`
+          avisar()
+          await suelta
+        },
+        { timeout: 30_000 },
+      )
+      await tomada
+      let reloj: NodeJS.Timeout | undefined
+      try {
+        const desenlace = await Promise.race([
+          issueRefund({ venueId, paymentId: abono.id, amount: 5000, reason: 'OTHER', staffId }).then(() => 'terminó'),
+          new Promise(r => (reloj = setTimeout(() => r('esperó a la otra caja'), 10_000))),
+        ])
+        expect(desenlace).toBe('terminó')
+      } finally {
+        clearTimeout(reloj)
+        soltar()
+        await otraCaja
+      }
+
+      expect(await sesionAhora(sesion.id)).toEqual({ status: 'MATERIALIZED', version: 3 })
+      const { guardado } = await saldoDe(venueId, order.id)
+      expect(guardado.remainingBalance.toString()).toBe('100')
+    })
   })
 })

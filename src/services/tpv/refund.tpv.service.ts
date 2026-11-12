@@ -1350,6 +1350,8 @@ export async function recordRefund(
         reopenedAmount: postCommitAuthority.saldoReabierto.reopenedAmount.toNumber(), // pesos
         reopenedTipAmount: postCommitAuthority.saldoReabierto.reopenedTipAmount.toNumber(),
         source: 'TPV',
+        // D649: la sesión de vales que se puso al día (versión, y PARTIALLY_PAID si seguía MATERIALIZED).
+        ...(postCommitAuthority.saldoReabierto.sesionDeVales ? { sesionDeVales: postCommitAuthority.saldoReabierto.sesionDeVales } : {}),
       },
     })
   }
