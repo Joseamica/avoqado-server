@@ -46,14 +46,23 @@ function destinoDelReto(channel: 'whatsapp' | 'email', destination: string): str
 
 type PedirCodigo = { venueId: string; channel: 'whatsapp' | 'email'; destination: string; ip?: string | null }
 
-export async function requestOtp(args: PedirCodigo): Promise<{ ok: true }> {
-  await pedirCodigo(args)
+/**
+ * D17: si el proveedor no aceptó el código, 503 `OTP_SEND_FAILED` y la página no dice «te lo enviamos». No revela cuentas: el código
+ * sale a CUALQUIER contacto sin buscar su ficha, así que «no salió» sólo habla del proveedor. «Entrar» y «Cambiar mi número» pasan aquí.
+ */
+export async function requestOtp(args: PedirCodigo, proposito: PropositoDeReto = PROPOSITO): Promise<{ ok: true }> {
+  if (!(await pedirCodigo(args, proposito))) {
+    throw new ServiceUnavailableError(
+      `No pudimos mandar el código por ${args.channel === 'whatsapp' ? 'WhatsApp' : 'correo'}. Intenta en un momento.`,
+      'OTP_SEND_FAILED',
+    )
+  }
   return { ok: true }
 }
 
 /**
- * El reto y el envío de `requestOtp`. `true` sólo si el proveedor aceptó el mensaje: `requestOtp` lo ignora (como siempre: la página no
- * dice si se mandó), pero Google lo necesita para no afirmar «te mandamos un código» cuando el correo no salió (codex-s7-r1 #2).
+ * El reto y el envío. `true` sólo si el proveedor aceptó el mensaje; si no, el reto se borra (D17: lo que no salió no gasta los 30 s ni
+ * los 5 por hora) y quien llama responde el error: `requestOtp` y Google (codex-s7-r1 #2).
  */
 export async function pedirCodigo(args: PedirCodigo, proposito: PropositoDeReto = PROPOSITO): Promise<boolean> {
   const destination = destinoDelReto(args.channel, args.destination)
@@ -77,7 +86,7 @@ export async function pedirCodigo(args: PedirCodigo, proposito: PropositoDeReto 
   })
 
   const code = generateOtpCode()
-  await prisma.otpChallenge.create({
+  const reto = await prisma.otpChallenge.create({
     data: {
       venueId,
       channel: args.channel,
@@ -89,14 +98,25 @@ export async function pedirCodigo(args: PedirCodigo, proposito: PropositoDeReto 
     },
   })
 
+  let salio: boolean
   try {
-    return args.channel === 'whatsapp'
-      ? (await sendOtpWhatsApp(destination, code)) !== false
-      : (await emailService.sendOtpCodeEmail(destination, code)) === true
+    salio =
+      args.channel === 'whatsapp'
+        ? (await sendOtpWhatsApp(destination, code)) !== false
+        : (await emailService.sendOtpCodeEmail(destination, code)) === true
   } catch (err) {
     logger.warn(`[OTP] send failed for ${args.channel}:${destination}: ${(err as Error).message}`)
-    return false
+    salio = false
   }
+  if (!salio) {
+    // Si el borrado falla, el intento queda contado (como antes de D17) y sale el mismo error.
+    try {
+      await prisma.otpChallenge.deleteMany({ where: { id: reto.id } })
+    } catch (err) {
+      logger.warn(`[OTP] no se pudo borrar el reto que no salió (cuenta para el límite): ${(err as Error).message}`)
+    }
+  }
+  return salio
 }
 
 type VerifyOtpArgs = {

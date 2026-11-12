@@ -289,8 +289,11 @@ describe('entrarConGoogle (S7)', () => {
     google({ email: 'ana@empresa.com' })
     prismaMock.otpChallenge.count.mockResolvedValue(0)
     ;(emailService.sendOtpCodeEmail as jest.Mock).mockResolvedValueOnce(false)
+    prismaMock.otpChallenge.create.mockResolvedValueOnce({ id: 'creto000000000000000000g1' } as any)
     await expect(entrarConGoogle(VENUE, 'id-token', {})).rejects.toMatchObject({ statusCode: 503, code: 'OTP_SEND_FAILED' })
     expect(prismaMock.customer.create).not.toHaveBeenCalled()
+    // D17: el reto que no salió se borra (no gasta el límite).
+    expect(prismaMock.otpChallenge.deleteMany).toHaveBeenCalledWith({ where: { id: 'creto000000000000000000g1' } })
   })
 
   it('sin correo de Google ⇒ 400 sin sesión ni código', async () => {
