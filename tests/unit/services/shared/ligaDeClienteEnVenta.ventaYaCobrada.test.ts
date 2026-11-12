@@ -172,7 +172,21 @@ describe('🔴 R11-2: ventaYaCobradaBajoCandado', () => {
     expect(t.payment.aggregate).toHaveBeenCalledWith({
       where: { orderId: ORDER, venueId: VENUE, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
       _sum: { amount: true, tipAmount: true },
+      _count: true,
     })
+    // D19: y aparte, lo que los reembolsos de abonos de ESTA venta volvieron a deber.
+    expect(t.payment.aggregate).toHaveBeenCalledWith({
+      where: { venueId: VENUE, orderId: ORDER, status: 'COMPLETED', type: 'REFUND' },
+      _sum: { reopenedAmount: true, reopenedTipAmount: true },
+    })
+  })
+
+  it('🔴 D19: $100 capturados de $100 pero con un abono de $50 devuelto que reabrió ⇒ NO está cobrada', async () => {
+    const t = venta('PARTIAL', '100.00')
+    t.payment.aggregate
+      .mockResolvedValueOnce({ _sum: { amount: '100.00', tipAmount: null }, _count: 2 })
+      .mockResolvedValueOnce({ _sum: { reopenedAmount: '50.00', reopenedTipAmount: null } })
+    await expect(lee(t)).resolves.toMatchObject({ cobrada: false })
   })
 
   it('una cortesía total ($0) sin cobros sigue abierta: sin dinero no hay «ya cobrada»', async () => {

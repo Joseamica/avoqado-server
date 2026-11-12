@@ -469,6 +469,17 @@ const WRITERS: Record<string, Writer> = {
       'el renglón nuevo con descuento de artículo trae su fila ESPEJO',
     ),
   },
+  // D19 (founder 10-nov «A»): el reembolso de un abono de una cuenta que todavía debía reescribe pagado/total/lo que falta. Lo
+  // llaman sólo los dos núcleos que escriben un REFUND colgado de una cuenta, con la cuenta ya bloqueada.
+  'src/services/shared/saldoReabiertoAlReembolsar.ts#fijarSaldoReabiertoEnTx': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx', 'src/services/tpv/refund.tpv.service.ts#recordRefund'],
+    proof: proof(
+      'tests/integration/payments/abonoDevueltoVuelveADeberse.integration.test.ts',
+      'issueRefund',
+      '🔴 el panel devuelve el abono de $50: la cuenta vuelve a deber $100, guardado y calculado',
+    ),
+  },
   'src/services/shared/serviceCharges.ts#recalcularCargosPorServicio': {
     class: 'CALLER_LOCKED',
     callers: [
@@ -861,6 +872,10 @@ const WRITERS: Record<string, Writer> = {
 
 /** Functions that are not fiscal writers themselves but hold the Order lock for a CALLER_LOCKED helper. */
 const LOCK_HOLDERS: Record<string, string[]> = {
+  // D19: el núcleo del reembolso bloquea la cuenta en `bloquearCobroParaReembolso` (Order FOR UPDATE, luego el cobro), o recibe ese
+  // mismo bloqueo ya tomado por quien llama (`bloqueado`).
+  'src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx': ['bloquearCobroParaReembolso('],
+  'src/services/tpv/refund.tpv.service.ts#recordRefund': LOCK,
   'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': LOCK,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
