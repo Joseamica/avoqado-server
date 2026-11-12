@@ -20,6 +20,7 @@ import * as jwtService from '@/jwt.service'
 import logger from '@/config/logger'
 import { isLiveDemoVenue as isLiveDemoStatus } from '@/lib/venueStatus.constants'
 import { ForbiddenError, TooManyRequestsError, UnauthorizedError } from '@/errors/AppError'
+import { CODIGOS_DE_PILOTO } from '@/services/access/basePlan.service'
 
 const LIVE_DEMO_DURATION_HOURS = 5
 const LIVE_DEMO_ORG_NAME = 'Live Demo Organization'
@@ -299,7 +300,10 @@ export async function enableAllFeaturesForLiveDemo(venueId: string): Promise<voi
     // Get all active features — except PLAN_PRO: the demo carries ONE plan, Premium, which already includes everything.
     // 🔴 D21 (5-nov): with both plans on, the menu said Premium and «Tu plan» said Pro; two live plans is a state the rest
     // of the server refuses («no se concede un plan encima de otro», concederPlanDecision).
-    const features = (await prisma.feature.findMany({ where: { active: true } })).filter(f => f.code !== 'PLAN_PRO')
+    // 🔴 D5 · R5-2: tampoco los códigos de piloto (MESAS_SIN_RED): sólo los concede el superadmin, negocio por negocio.
+    const features = (await prisma.feature.findMany({ where: { active: true } })).filter(
+      f => f.code !== 'PLAN_PRO' && !(CODIGOS_DE_PILOTO as readonly string[]).includes(f.code),
+    )
 
     logger.info(`📦 Found ${features.length} active features to enable`)
 

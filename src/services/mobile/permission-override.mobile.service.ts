@@ -16,6 +16,7 @@ import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
+import { llaveDelDescuentoDelCliente } from '@/services/shared/descuentoDelCliente.service'
 
 /** Vida del token. Suficiente para reintentar la request, corto para no dejar la terminal elevada. */
 export const OVERRIDE_TTL_MS = 60_000
@@ -263,6 +264,47 @@ export async function consumePermissionOverride(params: {
     return row ? { authorizedById: row.authorizedById } : null
   } catch (error) {
     logger.error('No se pudo consumir el token de override — se trata como no autorizado', { venueId, permission, error })
+    return null
+  }
+}
+
+/**
+ * Descuento del cliente (fase 1): el gerente cuyo PIN autorizó el descuento de ESTE cliente (`descuento-cliente:<customerId>:
+ * <discountId>`, `discounts:apply`, vigente y de este negocio), para guardarlo en `OrderDiscount.authorizedById`.
+ *
+ * 🔴 LEE sin gastar: la autorización está atada al cliente y su descuento, no a la venta (la cajera puede editar el carrito
+ * después del PIN). Y NUNCA hace fallar la venta: el servidor no exige el permiso, así que una autorización que no sirve
+ * (otro cliente, otro descuento, vencida, de otro negocio) o una base caída sólo dejan el autorizador en `null`, con aviso.
+ */
+export async function autorizadorDelDescuentoDelCliente(p: {
+  venueId: string
+  token: string | null | undefined
+  customerId: string | null | undefined
+  discountId: string
+  ahora?: Date
+}): Promise<string | null> {
+  const token = p.token?.trim()
+  if (!token) return null
+  const contexto = { venueId: p.venueId, customerId: p.customerId ?? null, discountId: p.discountId }
+  if (!p.customerId) {
+    logger.warn('Autorización del descuento del cliente sin cliente en la venta: se guarda sin autorizador', contexto)
+    return null
+  }
+  try {
+    const fila = await prisma.permissionOverride.findFirst({
+      where: {
+        token,
+        venueId: p.venueId,
+        permission: 'discounts:apply',
+        operationKey: llaveDelDescuentoDelCliente(p.customerId, p.discountId),
+        expiresAt: { gt: p.ahora ?? new Date() },
+      },
+      select: { authorizedById: true },
+    })
+    if (!fila) logger.warn('Autorización del descuento del cliente que no sirve: se guarda sin autorizador', contexto)
+    return fila?.authorizedById ?? null
+  } catch (error) {
+    logger.error('No se pudo leer la autorización del descuento del cliente: se guarda sin autorizador', { ...contexto, error })
     return null
   }
 }

@@ -198,6 +198,8 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
     mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
     mockPrisma.orderCustomer.deleteMany.mockResolvedValue({ count: 0 })
     mockPrisma.staff.findUnique.mockResolvedValue({ id: STAFF_ID })
+    // `clearAllMocks` no borra implementaciones: las pruebas de D5 cambian ésta.
+    mockPrisma.staffVenue.findFirst.mockResolvedValue(null)
   })
 
   // ── compItems ──────────────────────────────────────────────────────────────
@@ -244,6 +246,50 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       })
 
       expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', entity: 'Order', entityId: ORDER_ID }))
+    })
+
+    // hz:f34960c5:D5: el autor es quien está en SESIÓN (A), no el vendedor elegido en la terminal (`staffId` del cuerpo, B).
+    it('🔴 D5: sesión A, vendedor B ⇒ fila, OrderAction y bitácora a nombre de A; B queda como nota', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+      mockPrisma.staffVenue.findFirst.mockImplementation(async ({ where }: any) =>
+        where.staffId === 'user-A' && where.venueId === VENUE_ID ? { id: 'sv-A' } : { id: 'sv-B' },
+      )
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Frío', staffId: 'staff-B', performedBy: 'user-A' })
+
+      expect(mockPrisma.orderDiscount.create).toHaveBeenCalledWith({ data: expect.objectContaining({ isComp: true, appliedById: 'sv-A' }) })
+      expect(mockPrisma.orderAction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ actionType: 'COMP', performedById: 'user-A' }),
+      })
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ITEM_COMPED',
+          staffId: 'user-A',
+          data: expect.objectContaining({ vendedorSegunElAparato: 'staff-B' }),
+        }),
+      )
+    })
+
+    it('D5: sesión sin membresía activa en la sucursal ⇒ la fila queda sin autor; la bitácora sigue a nombre de la sesión', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+      mockPrisma.staffVenue.findFirst.mockImplementation(async ({ where }: any) => (where.staffId === 'user-A' ? null : { id: 'sv-B' }))
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Frío', staffId: 'staff-B', performedBy: 'user-A' })
+
+      expect(mockPrisma.orderDiscount.create).toHaveBeenCalledWith({ data: expect.objectContaining({ appliedById: null }) })
+      expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', staffId: 'user-A' }))
+    })
+
+    it('D5: la sesión ES el vendedor ⇒ sin nota de vendedor', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Frío', staffId: STAFF_ID, performedBy: STAFF_ID })
+
+      const data = mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_COMPED')![0].data as Record<string, unknown>
+      expect(data).not.toHaveProperty('vendedorSegunElAparato')
     })
   })
 
@@ -562,6 +608,47 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
           data: expect.objectContaining({ amount: 10, reason: 'Promo code' }),
         }),
       )
+    })
+
+    // hz:f34960c5:D5: antes la fila no guardaba autor y la bitácora/OrderAction eran del vendedor elegido (`staffId` del cuerpo).
+    it('🔴 D5: sesión A, vendedor B ⇒ fila con la membresía de A, OrderAction y bitácora de A; B queda como nota', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder({ discountAmount: new Decimal(10) }))
+      mockPrisma.staffVenue.findFirst.mockImplementation(async ({ where }: any) =>
+        where.staffId === 'user-A' && where.venueId === VENUE_ID && where.active === true ? { id: 'sv-A' } : null,
+      )
+
+      await applyDiscount(VENUE_ID, ORDER_ID, {
+        type: 'FIXED_AMOUNT',
+        value: 10,
+        reason: 'Promo',
+        staffId: 'staff-B',
+        expectedVersion: 1,
+        performedBy: 'user-A',
+      })
+
+      expect(mockPrisma.orderDiscount.create).toHaveBeenCalledWith({ data: expect.objectContaining({ appliedById: 'sv-A' }) })
+      expect(mockPrisma.orderAction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ actionType: 'DISCOUNT', performedById: 'user-A' }),
+      })
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'DISCOUNT_APPLIED',
+          staffId: 'user-A',
+          data: expect.objectContaining({ amount: 10, vendedorSegunElAparato: 'staff-B' }),
+        }),
+      )
+    })
+
+    it('D5: sin sesión (no debería pasar) ⇒ como hoy: sin autor en la fila, a nombre del `staffId` del cuerpo', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(makeOrder())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder({ discountAmount: new Decimal(10) }))
+
+      await applyDiscount(VENUE_ID, ORDER_ID, { type: 'FIXED_AMOUNT', value: 10, reason: 'Promo', staffId: STAFF_ID, expectedVersion: 1 })
+
+      expect(mockPrisma.staffVenue.findFirst).not.toHaveBeenCalled()
+      expect(mockPrisma.orderDiscount.create.mock.calls[0][0].data.appliedById).toBeUndefined()
+      expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'DISCOUNT_APPLIED', staffId: STAFF_ID }))
     })
   })
 

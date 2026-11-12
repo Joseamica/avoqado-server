@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
+import { descuentosDeLosClientes, type DescuentoDelCliente } from '@/services/shared/descuentoDelCliente.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -30,6 +31,8 @@ export interface CustomerSearchResult {
     name: string
     color: string | null
   } | null
+  /** Siempre presente en las respuestas nuevas; null si el cliente no tiene descuento. Las terminales viejas lo ignoran. */
+  descuentoDelCliente: DescuentoDelCliente | null
 }
 
 interface QuickCreateCustomerData {
@@ -37,6 +40,27 @@ interface QuickCreateCustomerData {
   lastName?: string
   phone?: string
   email?: string
+}
+
+/** Agrega el descuento de cada cliente con UNA sola consulta para toda la lista. */
+async function conDescuentoDelCliente(
+  venueId: string,
+  clientes: Omit<CustomerSearchResult, 'descuentoDelCliente'>[],
+): Promise<CustomerSearchResult[]> {
+  try {
+    const descuentos = await descuentosDeLosClientes(
+      venueId,
+      clientes.map(c => c.id),
+    )
+    return clientes.map(c => ({ ...c, descuentoDelCliente: descuentos.get(c.id) ?? null }))
+  } catch (err) {
+    // Elegir cliente está en la ruta de cobro: si falla la consulta, se degrada (la cajera aplica el descuento a mano).
+    logger.warn('[tpv-customer] no se pudo consultar el descuento de los clientes', {
+      venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return clientes.map(c => ({ ...c, descuentoDelCliente: null }))
+  }
 }
 
 // ==========================================
@@ -93,10 +117,10 @@ export async function findCustomerByPhone(venueId: string, phone: string, limit:
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -145,10 +169,10 @@ export async function findCustomerByEmail(venueId: string, email: string, limit:
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -206,10 +230,10 @@ export async function searchCustomers(venueId: string, query: string, limit: num
     count: customers.length,
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }
 
 /**
@@ -249,10 +273,8 @@ export async function getCustomerForCheckout(venueId: string, customerId: string
     throw new NotFoundError(`Customer ${customerId} not found`)
   }
 
-  return {
-    ...customer,
-    totalSpent: customer.totalSpent.toNumber(),
-  }
+  const [conDescuento] = await conDescuentoDelCliente(venueId, [{ ...customer, totalSpent: customer.totalSpent.toNumber() }])
+  return conDescuento
 }
 
 // ==========================================
@@ -293,18 +315,20 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         customerId: existingByPhone.id,
       })
 
-      // Return existing customer instead of error (better UX for cashiers)
-      return {
-        id: existingByPhone.id,
-        firstName: existingByPhone.firstName,
-        lastName: existingByPhone.lastName,
-        email: existingByPhone.email,
-        phone: existingByPhone.phone,
-        loyaltyPoints: existingByPhone.loyaltyPoints,
-        totalVisits: existingByPhone.totalVisits,
-        totalSpent: existingByPhone.totalSpent.toNumber(),
-        customerGroup: null,
-      }
+      const [conDescuento] = await conDescuentoDelCliente(venueId, [
+        {
+          id: existingByPhone.id,
+          firstName: existingByPhone.firstName,
+          lastName: existingByPhone.lastName,
+          email: existingByPhone.email,
+          phone: existingByPhone.phone,
+          loyaltyPoints: existingByPhone.loyaltyPoints,
+          totalVisits: existingByPhone.totalVisits,
+          totalSpent: existingByPhone.totalSpent.toNumber(),
+          customerGroup: null,
+        },
+      ])
+      return conDescuento
     }
   }
 
@@ -326,17 +350,20 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         customerId: existingByEmail.id,
       })
 
-      return {
-        id: existingByEmail.id,
-        firstName: existingByEmail.firstName,
-        lastName: existingByEmail.lastName,
-        email: existingByEmail.email,
-        phone: existingByEmail.phone,
-        loyaltyPoints: existingByEmail.loyaltyPoints,
-        totalVisits: existingByEmail.totalVisits,
-        totalSpent: existingByEmail.totalSpent.toNumber(),
-        customerGroup: null,
-      }
+      const [conDescuento] = await conDescuentoDelCliente(venueId, [
+        {
+          id: existingByEmail.id,
+          firstName: existingByEmail.firstName,
+          lastName: existingByEmail.lastName,
+          email: existingByEmail.email,
+          phone: existingByEmail.phone,
+          loyaltyPoints: existingByEmail.loyaltyPoints,
+          totalVisits: existingByEmail.totalVisits,
+          totalSpent: existingByEmail.totalSpent.toNumber(),
+          customerGroup: null,
+        },
+      ])
+      return conDescuento
     }
   }
 
@@ -442,9 +469,11 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
   // Strip referralCode from response (kept above only for the hook check)
   const { referralCode: _referralCode, ...customerResponse } = customer
 
+  // Cliente recién creado: aún no tiene descuento asignado.
   return {
     ...customerResponse,
     totalSpent: customer.totalSpent.toNumber(),
+    descuentoDelCliente: null,
   }
 }
 
@@ -486,8 +515,8 @@ export async function getRecentCustomers(venueId: string, limit: number = 10): P
     },
   })
 
-  return customers.map(c => ({
-    ...c,
-    totalSpent: c.totalSpent.toNumber(),
-  }))
+  return conDescuentoDelCliente(
+    venueId,
+    customers.map(c => ({ ...c, totalSpent: c.totalSpent.toNumber() })),
+  )
 }

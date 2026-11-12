@@ -29,6 +29,7 @@ import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
+import { CODIGOS_DE_PILOTO } from '../access/basePlan.service'
 import { utmLegible } from './atribucionLegible'
 import { esCorreoDemo } from '@/services/demo/candadoDemo'
 import {
@@ -629,7 +630,7 @@ export async function enablePremiumFeatures(
   venueId: string,
   email: string,
   name: string,
-  featureCodes: string[],
+  pedidas: string[],
   paymentMethodId?: string,
   venueName?: string,
   venueSlug?: string,
@@ -637,9 +638,13 @@ export async function enablePremiumFeatures(
   // 🔴 Venta suelta CERRADA (founder, 21-sep): se saltan ANTES de intentarlo. Si sólo fallara Stripe,
   // el respaldo de abajo crearía las funciones SIN cobro por 5 días — las regalaría.
   if (!ventaSueltaAbierta()) {
-    logger.warn('Alta V1: funciones sueltas elegidas pero la venta suelta está cerrada; no se activan', { venueId, featureCodes })
+    logger.warn('Alta V1: funciones sueltas elegidas pero la venta suelta está cerrada; no se activan', { venueId, featureCodes: pedidas })
     return
   }
+  // 🔴 D5 · R5-2: un código de piloto (MESAS_SIN_RED) sólo lo concede el superadmin; la lista viene del cliente y el respaldo sin
+  // Stripe de abajo lo crearía tal cual.
+  const featureCodes = pedidas.filter(code => !(CODIGOS_DE_PILOTO as readonly string[]).includes(code))
+  if (featureCodes.length === 0) return
 
   try {
     logger.info(`🎯 Enabling premium features for venue ${venueId}: ${featureCodes.join(', ')}`)

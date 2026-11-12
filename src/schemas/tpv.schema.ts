@@ -545,6 +545,10 @@ export const createOrderWithItemsSchema = z.object({
       customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional().nullable(),
       discount: z.number().nonnegative({ message: 'El descuento debe ser un número no negativo en pesos.' }).default(0),
       orderDiscountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }).optional().nullable(),
+      // Descuento del cliente. ADITIVO: el token del PIN de gerente (`descuento-cliente:<customerId>:<discountId>`). El servidor lo
+      // lee sin gastarlo; si no sirve, la venta se crea igual sin autorizador. Va en el cuerpo, no en `X-Permission-Override` (ése
+      // es de la cortesía y chocarían en la misma venta).
+      autorizacionDelDescuento: z.string().max(200, { message: 'La autorización del descuento es demasiado larga.' }).optional().nullable(),
       // D5. ADITIVO: las TPV viejas no lo mandan. El servidor valida el cupón y `discount` debe coincidir con lo que él calcula.
       couponCode: z
         .string()

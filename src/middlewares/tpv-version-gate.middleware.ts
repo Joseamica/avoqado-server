@@ -62,6 +62,9 @@ async function getMinimumRequiredVersion(environment: AppEnvironment): Promise<n
         where: {
           environment: 'SANDBOX',
           platform: 'ANDROID_TPV',
+          // El 426 no sabe qué terminal pregunta: sólo frena con las obligatorias PARA TODAS. Una obligatoria dirigida
+          // («Aplica a» sucursales o terminales) la exige el latido sólo a su audiencia.
+          targetType: 'ALL',
           isActive: true,
           updateMode: UpdateMode.FORCE,
         },
@@ -72,6 +75,9 @@ async function getMinimumRequiredVersion(environment: AppEnvironment): Promise<n
         where: {
           environment: 'PRODUCTION',
           platform: 'ANDROID_TPV',
+          // El 426 no sabe qué terminal pregunta: sólo frena con las obligatorias PARA TODAS. Una obligatoria dirigida
+          // («Aplica a» sucursales o terminales) la exige el latido sólo a su audiencia.
+          targetType: 'ALL',
           isActive: true,
           updateMode: UpdateMode.FORCE,
         },
@@ -197,6 +203,7 @@ export async function tpvVersionGate(req: Request, res: Response, next: NextFunc
       where: {
         environment,
         platform: 'ANDROID_TPV',
+        targetType: 'ALL',
         isActive: true,
         updateMode: UpdateMode.FORCE,
         versionCode: minVersion,

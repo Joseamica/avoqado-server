@@ -1100,27 +1100,28 @@ describe('C1 · ventana fiscal estable y pertenencia única', () => {
       expect(await manifiesto(julio.id)).toEqual([enJulio.id])
     })
 
-    it('control — ronda 2 (N4): una global de otra periodicidad TIMBRADA, rechazada en definitiva, diagnóstica o cancelada NO cubre nada (contra la base)', async () => {
+    // Un caso por estado (antes, las cuatro vueltas en UN caso con UN reloj de 60 s): en el CI del 12-nov (PR #391 del SERVIDOR) el
+    // caso entero se pasó de los 60 s con el runner lento (el archivo tardó 434 s contra 137–267 s; el caso, 3–7 s en las corridas
+    // buenas) y el error no decía en qué vuelta iba. Dos revisiones (Claude y Codex) no encontraron candado ni trabajo suelto: la
+    // fragilidad era el reloj compartido. Cada vuelta ya empezaba limpiando (`cleanOrders`), así que separarlas no cambia lo probado.
+    it.each<[string, Record<string, unknown>]>([
+      ['timbrada', { status: 'STAMPED', uuid: randomUUID(), enviadoAt: new Date() }],
+      ['rechazada en definitiva', { status: 'STAMP_FAILED', falloDefinitivo: true, enviadoAt: new Date(), lastError: 'El SAT rechazó' }],
+      ['diagnóstica', { status: 'VALIDATION_FAILED', lastError: 'no cuadra' }],
+      ['cancelada', { status: 'CANCELLED', cancelStatus: 'ACCEPTED', uuid: randomUUID(), enviadoAt: new Date() }],
+    ])('control — ronda 2 (N4): una global de otra periodicidad %s NO cubre nada (contra la base)', async (caso, estado) => {
       const MAYO_5 = new Date('2026-05-05T17:00:00Z')
-      const casos: Array<[string, Record<string, unknown>]> = [
-        ['timbrada', { status: 'STAMPED', uuid: randomUUID(), enviadoAt: new Date() }],
-        ['rechazada en definitiva', { status: 'STAMP_FAILED', falloDefinitivo: true, enviadoAt: new Date(), lastError: 'El SAT rechazó' }],
-        ['diagnóstica', { status: 'VALIDATION_FAILED', lastError: 'no cuadra' }],
-        ['cancelada', { status: 'CANCELLED', cancelStatus: 'ACCEPTED', uuid: randomUUID(), enviadoAt: new Date() }],
-      ]
-      for (const [caso, estado] of casos) {
-        await cleanOrders()
-        await emisorA({ globalPeriodicity: 'BIMESTRAL', regimenFiscal: '621' })
-        await venta([['CREDIT_CARD', m1, new Date('2026-03-10T12:00:00Z')]])
-        await reservarSinEnviar({ now: MAYO_5 })
-        const bimestral = await prisma.cfdi.findFirstOrThrow({ where: { venueId, isGlobal: true } })
-        await prisma.cfdi.update({ where: { id: bimestral.id }, data: estado as any })
-        await emisorA({ globalPeriodicity: 'MENSUAL', regimenFiscal: '601' })
-        await venta([['CREDIT_CARD', m1, new Date('2026-03-20T12:00:00Z')]])
-        provider.createGlobalInvoice.mockImplementation(async () => valid())
-        const r = await issueGlobalForEmisor({ emisorId: fiscalEmisorId, now: MAYO_5, sandbox: true, desde: '2026-03-01T06:00:00.000Z' })
-        expect([caso, r.status, r.reasons ?? []]).toEqual([caso, 'STAMPED', []])
-      }
+      await cleanOrders()
+      await emisorA({ globalPeriodicity: 'BIMESTRAL', regimenFiscal: '621' })
+      await venta([['CREDIT_CARD', m1, new Date('2026-03-10T12:00:00Z')]])
+      await reservarSinEnviar({ now: MAYO_5 })
+      const bimestral = await prisma.cfdi.findFirstOrThrow({ where: { venueId, isGlobal: true } })
+      await prisma.cfdi.update({ where: { id: bimestral.id }, data: estado as any })
+      await emisorA({ globalPeriodicity: 'MENSUAL', regimenFiscal: '601' })
+      await venta([['CREDIT_CARD', m1, new Date('2026-03-20T12:00:00Z')]])
+      provider.createGlobalInvoice.mockImplementation(async () => valid())
+      const r = await issueGlobalForEmisor({ emisorId: fiscalEmisorId, now: MAYO_5, sandbox: true, desde: '2026-03-01T06:00:00.000Z' })
+      expect([caso, r.status, r.reasons ?? []]).toEqual([caso, 'STAMPED', []])
     })
 
     it('🔴 ronda 2 (N2): una fila de la COLA que la pasada detiene deja ver su motivo en el panel (con los relojes reales)', async () => {
