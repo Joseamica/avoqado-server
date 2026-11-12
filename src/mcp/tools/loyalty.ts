@@ -10,7 +10,7 @@ import { adjustPoints, getLoyaltyTransactions, updateLoyaltyConfig } from '@/ser
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
-import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { getCustomerLoyalty, previaDelCanje, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -382,8 +382,10 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       if (!confirm) {
         try {
           const status = await getCustomerLoyalty(venueId, c.id, orderId)
-          const rate = status.redemptionRate
-          const wouldBurn = Math.min(points, status.maxRedeemablePoints)
+          // D18: la previa es lo que el canje hará con ESTOS `points` (los que se mandan al confirmar), con su misma regla y base.
+          const previa = previaDelCanje(points, status)
+          if (!previa.ok) return text({ ok: false, error: previa.error })
+          const wouldBurn = previa.puntos
           return text({
             ok: false,
             requiresConfirmation: true,
@@ -391,11 +393,11 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
               customer: name,
               currentPoints: status.balance,
               pointsToRedeem: wouldBurn,
-              discount: Math.round(wouldBurn * rate * 100) / 100,
+              discount: previa.monto,
               newBalance: status.balance - wouldBurn,
               minPointsRedeem: status.minPointsRedeem,
             },
-            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${(Math.round(wouldBurn * rate * 100) / 100).toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true para aplicar.`,
+            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true para aplicar.`,
           })
         } catch (err) {
           return text({ ok: false, error: (err as Error).message })

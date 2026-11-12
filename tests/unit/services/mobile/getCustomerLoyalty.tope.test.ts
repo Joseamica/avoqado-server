@@ -7,7 +7,7 @@ jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
 }))
 
 import { getOrCreateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
-import { getCustomerLoyalty, puntosQueSeCanjean } from '@/services/mobile/loyalty.mobile.service'
+import { getCustomerLoyalty, previaDelCanje, puntosQueCaben, puntosQueSeCanjean } from '@/services/mobile/loyalty.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const config = (o: Partial<{ redemptionRate: number; minPointsRedeem: number; active: boolean }> = {}) => ({
@@ -104,5 +104,51 @@ describe('getCustomerLoyalty — tope igual al canje (D18)', () => {
     preparar({ saldo: 5, orden: { total: 100, subtotal: 100, discountAmount: 0 } })
     const r = await getCustomerLoyalty('v1', 'c1', 'o1')
     expect(r.canRedeem).toBe(false)
+  })
+})
+
+describe('puntosQueCaben — el tope redondea a centavos como el canje (Codex r1)', () => {
+  it('tasa 0.0149 sobre $1.50: caben 101 (101 × 0.0149 = 1.5049 → $1.50) y el canje no los topa', () => {
+    expect(puntosQueCaben(1.5, 0.0149, 500)).toBe(101)
+    expect(puntosQueSeCanjean(101, 0.0149, 1.5)).toEqual({ puntos: 101, monto: 1.5 })
+    expect(puntosQueSeCanjean(102, 0.0149, 1.5).puntos).toBe(101) // uno más ya lo topa el canje
+  })
+
+  it('barrido: con el máximo el canje nunca topa, y con uno más sí (salvo que se acabe el saldo)', () => {
+    for (const tasa of [0.01, 0.0149, 0.05, 0.1, 0.25, 0.3333, 1, 1.5, 7]) {
+      for (const valor of [0.01, 0.3, 1.5, 9.99, 95.5, 223, 1234.56]) {
+        const saldo = 100000
+        const p = puntosQueCaben(valor, tasa, saldo)
+        const conP = puntosQueSeCanjean(p, tasa, valor)
+        if (p > 0) expect(conP.puntos).toBe(p)
+        expect(conP.monto).toBeLessThanOrEqual(valor)
+        if (p < saldo) expect(Math.round((p + 1) * tasa * 100) / 100).toBeGreaterThan(valor)
+        else expect(Math.round(saldo * tasa * 100) / 100).toBeLessThanOrEqual(valor)
+      }
+    }
+  })
+
+  it('nunca más que el saldo, y 0 con tasa o valor en cero', () => {
+    expect(puntosQueCaben(1000, 1, 40)).toBe(40)
+    expect(puntosQueCaben(10, 0, 40)).toBe(0)
+    expect(puntosQueCaben(0, 1, 40)).toBe(0)
+  })
+})
+
+describe('previaDelCanje — la vista previa del MCP es lo que el canje hará con esos puntos (Codex r1)', () => {
+  const vista = { balance: 500, redemptionRate: 0.0149, minPointsRedeem: 1, maxRedeemableValue: 1.5 }
+
+  it('101 puntos sobre $1.50: la previa dice 101 → $1.50, igual que el canje', () => {
+    expect(previaDelCanje(101, vista)).toEqual({ ok: true, puntos: 101, monto: 1.5 })
+  })
+
+  it('pedir de más: la previa dice lo que el canje quema de verdad (topado), no otra cifra', () => {
+    expect(previaDelCanje(300, vista)).toEqual({ ok: true, ...puntosQueSeCanjean(300, 0.0149, 1.5) })
+  })
+
+  it('las negativas del canje: mínimo, saldo y cuenta sin nada que descontar', () => {
+    expect(previaDelCanje(5, { ...vista, minPointsRedeem: 10 })).toMatchObject({ ok: false })
+    expect(previaDelCanje(501, vista)).toEqual({ ok: false, error: 'Puntos insuficientes: el cliente tiene 500' })
+    expect(previaDelCanje(10, { ...vista, maxRedeemableValue: 0 })).toMatchObject({ ok: false })
   })
 })

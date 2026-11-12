@@ -47,6 +47,35 @@ export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: 
 }
 
 /**
+ * hz:ce654971:D18 (Codex r1): los puntos MÁS que se pueden ofrecer sin que el canje los tope: el mayor `p ≤ saldo` cuyo valor, redondeado
+ * a centavos como lo redondea el canje (`money`), no pasa de `valor`. Un `floor(valor / tasa)` se queda corto con tasas como 0.0149
+ * (101 × 0.0149 = 1.5049 → $1.50 sí cabe en $1.50) y, en flotante, con 0.3 / 0.1 = 2.9999999999999996.
+ */
+export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: number): number {
+  if (!(valorPorPunto > 0) || !(valor > 0) || saldo <= 0) return 0
+  let p = Math.min(saldo, Math.max(0, Math.ceil((valor + 0.005) / valorPorPunto) - 1))
+  while (p > 0 && money(p * valorPorPunto) > valor) p--
+  while (p < saldo && money((p + 1) * valorPorPunto) <= valor) p++
+  return p
+}
+
+/**
+ * Lo que el canje haría con `puntos` sobre la cuenta que describe `vista` (la respuesta de `getCustomerLoyalty`), sin escribir: la
+ * vista previa del MCP. Las mismas negativas que el canje (mínimo, saldo) y la misma regla (`puntosQueSeCanjean`) contra el tope de
+ * la vista, que para `puntos ≤ saldo` es la base del canje.
+ */
+export function previaDelCanje(
+  puntos: number,
+  vista: { balance: number; redemptionRate: number; minPointsRedeem: number; maxRedeemableValue: number },
+): { ok: true; puntos: number; monto: number } | { ok: false; error: string } {
+  if (puntos < vista.minPointsRedeem) return { ok: false, error: `Se requieren al menos ${vista.minPointsRedeem} puntos para canjear` }
+  if (puntos > vista.balance) return { ok: false, error: `Puntos insuficientes: el cliente tiene ${vista.balance}` }
+  const r = puntosQueSeCanjean(puntos, vista.redemptionRate, vista.maxRedeemableValue)
+  if (r.monto <= 0) return { ok: false, error: 'El canje no genera descuento sobre esta cuenta' }
+  return { ok: true, ...r }
+}
+
+/**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
  * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
  * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
@@ -98,10 +127,9 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
 
   const balanceValue = money(balance * redemptionRate)
   const maxRedeemableValue = redeemableBase === null ? balanceValue : puntosQueSeCanjean(balance, redemptionRate, redeemableBase).monto
-  // Points that produce that value — never more than the customer owns, and never more than the redemption would use (floor, so
-  // `points × rate` is exactly what the canje discounts). Rounded first: 0.3 / 0.1 = 2.9999999999999996 in floating point.
-  const maxRedeemablePoints =
-    redemptionRate > 0 ? Math.min(balance, Math.floor(Math.round((maxRedeemableValue / redemptionRate) * 1e6) / 1e6)) : 0
+  // Points that produce that value — never more than the customer owns, and never more than the canje would use: with these points
+  // the canje is not capped, so it discounts `money(points × rate)` and burns exactly them.
+  const maxRedeemablePoints = puntosQueCaben(maxRedeemableValue, redemptionRate, balance)
 
   return {
     customerId: customer.id,
