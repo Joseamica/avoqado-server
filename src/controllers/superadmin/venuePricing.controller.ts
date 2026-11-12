@@ -4,6 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { AccountType } from '@prisma/client'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { leerConfirmaciones } from '../../services/shared/candadoDePosiciones'
 
 /**
  * VenuePricing Controller
@@ -70,19 +71,28 @@ export async function createVenuePaymentConfig(req: Request, res: Response, next
       tertiaryAccountId,
       routingRules,
       preferredProcessor,
+      positionConfirmations: leerConfirmaciones(req.body.positionConfirmations),
     })
 
     logger.info('Venue payment config created via API', {
       configId: config.id,
-      createdBy: (req as any).user?.uid,
+      createdBy: (req as any).authContext?.userId,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
       action: 'VENUE_PAYMENT_CONFIG_CREATED',
       entity: 'VenuePaymentConfig',
       entityId: venueId,
-      data: { venueId, primaryAccountId, secondaryAccountId, tertiaryAccountId, preferredProcessor },
+      data: {
+        venueId,
+        primaryAccountId,
+        secondaryAccountId,
+        tertiaryAccountId,
+        preferredProcessor,
+        positionChanges: config.positionChanges,
+      },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
     })
@@ -125,11 +135,25 @@ export async function deleteVenuePaymentConfig(req: Request, res: Response, next
   try {
     const { venueId } = req.params
 
-    await venuePricingService.deleteVenuePaymentConfig(venueId)
+    const { positionChanges } = await venuePricingService.deleteVenuePaymentConfig(
+      venueId,
+      leerConfirmaciones(req.body?.positionConfirmations),
+    )
 
     logger.warn('Venue payment config deleted via API', {
       venueId,
-      deletedBy: (req as any).user?.uid,
+      deletedBy: (req as any).authContext?.userId,
+    })
+
+    await logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'VENUE_PAYMENT_CONFIG_DELETED',
+      entity: 'VenuePaymentConfig',
+      entityId: venueId,
+      data: { venueId, positionChanges },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({
@@ -156,19 +180,28 @@ export async function updateVenuePaymentConfig(req: Request, res: Response, next
       tertiaryAccountId,
       routingRules,
       preferredProcessor,
+      positionConfirmations: leerConfirmaciones(req.body.positionConfirmations),
     })
 
     logger.info('Venue payment config updated via API', {
       venueId,
-      updatedBy: (req as any).user?.uid,
+      updatedBy: (req as any).authContext?.userId,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
       action: 'VENUE_PAYMENT_CONFIG_UPDATED',
       entity: 'VenuePaymentConfig',
       entityId: venueId,
-      data: { venueId, primaryAccountId, secondaryAccountId, tertiaryAccountId, preferredProcessor },
+      data: {
+        venueId,
+        primaryAccountId,
+        secondaryAccountId,
+        tertiaryAccountId,
+        preferredProcessor,
+        positionChanges: config.positionChanges,
+      },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
     })

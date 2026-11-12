@@ -21,6 +21,7 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { leerConfirmaciones } from '@/services/shared/candadoDePosiciones'
 import { TerminalStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
@@ -389,6 +390,7 @@ export async function approveAngelPayDiscoveredMerchantController(req: Request, 
       merchantAccountId,
       slot: resolvedSlot,
       terminalIds: resolvedTerminalIds,
+      positionConfirmations: leerConfirmaciones(req.body?.positionConfirmations),
     })
 
     logger.info('AngelPay discovered merchant approved via API', {
@@ -398,6 +400,14 @@ export async function approveAngelPayDiscoveredMerchantController(req: Request, 
       slot: resolvedSlot,
       terminalIds: resolvedTerminalIds,
       changedBy: (req as any).user?.uid,
+    })
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'ANGELPAY_DISCOVERED_MERCHANT_APPROVED',
+      entity: 'MerchantAccount',
+      entityId: merchantAccountId,
+      data: { slot: resolvedSlot, terminalIds: resolvedTerminalIds ?? null, positionChanges: result.positionChanges },
     })
 
     res.json({
@@ -727,6 +737,7 @@ export async function reserveAngelPaySlotController(req: Request, res: Response,
       slot,
       displayName,
       angelpayUserAccountId,
+      positionConfirmations: leerConfirmaciones(req.body?.positionConfirmations),
     })
 
     logger.info('AngelPay slot reserved via API', {
@@ -736,6 +747,14 @@ export async function reserveAngelPaySlotController(req: Request, res: Response,
       merchantAccountId: result.merchantAccountId,
       angelpayUserAccountId,
       changedBy: (req as any).user?.uid,
+    })
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'ANGELPAY_SLOT_RESERVED',
+      entity: 'MerchantAccount',
+      entityId: result.merchantAccountId,
+      data: { slot: result.slot, positionChanges: result.positionChanges },
     })
 
     res.json({

@@ -7,6 +7,7 @@
  */
 
 import { Prisma, NotificationType, NotificationPriority, NotificationChannel, VenueStatus } from '@prisma/client'
+import { exigirConfirmacionDePosiciones } from '@/services/shared/candadoDePosiciones'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -472,6 +473,14 @@ export async function assignProcessorAndApproveKyc(
     logger.info(`✅ Created VenuePricingStructure for venue ${venueId}`)
 
     // 4. Create VenuePaymentConfig (links venue to merchant account)
+    // Candado de posiciones (tarifa al comercio, paso 1): si el negocio heredaba cuentas de su organización, crear la suya con
+    // sólo PRIMARY las quita (Codex p12-r1 #3) y eso se tiene que confirmar. La tarifa PRIMARY del paso 3 cuenta como capturada.
+    await exigirConfirmacionDePosiciones(tx, {
+      objetivo: { venueId },
+      siguiente: { PRIMARY: merchantAccount.id, SECONDARY: null, TERTIARY: null },
+      tarifaCapturada: ['PRIMARY'],
+      cuentaAnteriorYaVerificada: true,
+    })
     await tx.venuePaymentConfig.create({
       data: {
         venueId,

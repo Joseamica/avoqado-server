@@ -25,6 +25,7 @@ import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/s
 import { encryptCredentials } from './merchantAccount.service'
 import { registrarAvisoAngelPay } from './angelpayWebhookRegistration.service'
 import type { FullSetupAngelPayInput } from '../../schemas/dashboard/angelpay-full-setup.schema'
+import { exigirConfirmacionDePosiciones, POSICION_DESACTUALIZADA, tomarCandado, type CambioDePosicion } from '../shared/candadoDePosiciones'
 
 const SLOT_COLUMN = {
   PRIMARY: 'primaryAccountId',
@@ -49,6 +50,8 @@ export interface FullSetupAngelPayResult {
   webhookRegistered: boolean
   /** Why it stayed false, safe to show to the operator. Absent when `webhookRegistered` is true. */
   webhookRegistrationError?: string
+  /** Candado de posiciones (tarifa al comercio, paso 1): qué posición cambió y qué se confirmó. */
+  positionChanges?: CambioDePosicion[]
 }
 
 export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, createdBy?: string): Promise<FullSetupAngelPayResult> {
@@ -75,6 +78,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
   }
 
   const slotColumn = SLOT_COLUMN[input.slot.accountType]
+  let positionChanges: CambioDePosicion[] = []
 
   try {
     const result: FullSetupAngelPayResult = await prisma.$transaction(
@@ -182,13 +186,27 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
         }
 
         // ---- 3. Venue payment config slot ----
+        await tomarCandado(tx, { venueId: input.venueId })
         const existingConfig = await tx.venuePaymentConfig.findUnique({
           where: { venueId: input.venueId },
         })
+        // Candado de posiciones (tarifa al comercio, paso 1). Sin configuración propia, crear una con sólo PRIMARY también
+        // quita las cuentas que el negocio heredaba de su organización (Codex p12-r1 #3). El `pricing` de esta petición
+        // cuenta como la tarifa confirmada de la posición destino; su manejo de tarifas NO cambia.
+        const candado = {
+          objetivo: { venueId: input.venueId },
+          confirmaciones: input.positionConfirmations,
+          tarifaCapturada: input.pricing ? [input.slot.accountType] : [],
+        }
         if (!existingConfig) {
           if (input.slot.accountType !== 'PRIMARY') {
             throw new BadRequestError('El venue no tiene configuración de pagos — el primer slot debe ser PRIMARY')
           }
+          positionChanges = await exigirConfirmacionDePosiciones(tx, {
+            ...candado,
+            siguiente: { PRIMARY: merchantAccount.id, SECONDARY: null, TERTIARY: null },
+            cuentaAnteriorYaVerificada: true,
+          })
           await tx.venuePaymentConfig.create({
             data: {
               venueId: input.venueId,
@@ -212,9 +230,17 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
           // MOVED from another slot, also resolve that old slot in the SAME
           // update so the merchant never lands in two slots at once.
           const data: Record<string, string | null> = { [slotColumn]: merchantAccount.id }
+          const siguiente: Partial<Record<'PRIMARY' | 'SECONDARY' | 'TERTIARY', string | null>> = {
+            [input.slot.accountType]: merchantAccount.id,
+          }
           if (input.slot.fromSlot && input.slot.fromSlot !== input.slot.accountType) {
             const fromColumn = SLOT_COLUMN[input.slot.fromSlot]
+            // Codex p12-r1 #5: la cuenta tiene que seguir en la posición de origen que vio la pantalla.
+            if ((existingConfig as Record<string, unknown>)[fromColumn] !== merchantAccount.id) {
+              throw new ConflictError('La posición de origen cambió desde que la viste, reintenta', POSICION_DESACTUALIZADA)
+            }
             data[fromColumn] = input.slot.moveStrategy === 'swap' ? (input.slot.replacedAccountId ?? null) : null
+            siguiente[input.slot.fromSlot] = data[fromColumn]
           }
           // Codex R12-2: una afiliación ocupa UN solo slot. Un merchant `existing` puede estar ya en otro slot (o el
           // reemplazado de un swap seguir en un tercero): la configuración RESULTANTE se rechaza ANTES de escribir, con el
@@ -226,6 +252,8 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
             ...data,
           })
           if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
+          // La cuenta anterior ya la verifica este escritor (fill = vacía, replace = `replacedAccountId`, origen arriba).
+          positionChanges = await exigirConfirmacionDePosiciones(tx, { ...candado, siguiente, cuentaAnteriorYaVerificada: true })
           await tx.venuePaymentConfig.update({ where: { venueId: input.venueId }, data })
         }
 
@@ -338,6 +366,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
           pricingStructureId,
           settlementIds,
           webhookRegistered: false,
+          positionChanges,
         }
       },
       { timeout: 10_000 },
@@ -375,6 +404,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
       slot: input.slot.accountType,
       slotMode: input.slot.mode,
       webhookRegistered: result.webhookRegistered,
+      positionChanges,
     })
     return result
   } catch (err: unknown) {

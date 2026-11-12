@@ -275,6 +275,7 @@ export async function deleteVenuePaymentConfig(venueId: string, positionConfirma
       objetivo: { venueId },
       siguiente: deLaOrganizacion ?? { PRIMARY: null, SECONDARY: null, TERTIARY: null },
       confirmaciones: positionConfirmations,
+      siguienteCalculado: true,
     })
     await tx.venuePaymentConfig.delete({ where: { venueId } })
     return cambios
@@ -442,7 +443,8 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
   const config = await prisma.$transaction(async tx => {
     positionChanges = await exigirConfirmacionDePosiciones(tx, {
       objetivo: { venueId },
-      siguiente: { PRIMARY: resultante.primaryAccountId, SECONDARY: resultante.secondaryAccountId, TERTIARY: resultante.tertiaryAccountId },
+      // Sólo las posiciones que esta escritura toca (las pedidas y las que se vacían al mover una cuenta).
+      siguiente: { PRIMARY: updateData.primaryAccountId, SECONDARY: updateData.secondaryAccountId, TERTIARY: updateData.tertiaryAccountId },
       confirmaciones: data.positionConfirmations,
     })
     return tx.venuePaymentConfig.update({

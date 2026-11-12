@@ -10,6 +10,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { exigirConfirmacionDePosiciones } from '@/services/shared/candadoDePosiciones'
 import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import { exigirQueSePuedaConceder } from '@/services/access/concederPlan'
 import { planesPedidos } from '@/services/access/concederPlanDecision'
@@ -354,33 +355,49 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
         })
 
         if (!existingOrgConfig && payload.pricing.createOrgConfig?.primaryAccountId) {
-          // Create OrganizationPaymentConfig
-          await prisma.organizationPaymentConfig.create({
-            data: {
-              organizationId,
-              primaryAccountId: payload.pricing.createOrgConfig.primaryAccountId,
-              secondaryAccountId: payload.pricing.createOrgConfig.secondaryAccountId || null,
-              tertiaryAccountId: payload.pricing.createOrgConfig.tertiaryAccountId || null,
-              preferredProcessor: (payload.pricing.createOrgConfig.preferredProcessor as any) || 'AUTO',
-            },
-          })
+          const createOrgConfig = payload.pricing.createOrgConfig
+          // Configuración + tarifa PRIMARY en UNA transacción con el candado de posiciones (tarifa al comercio, paso 1): la tarifa
+          // PRIMARY del formulario cuenta como capturada; SECONDARY/TERTIARY sólo se rechazan si la organización ya tenía tarifa
+          // en ellas (el paso queda en error, como cualquier error de este paso).
+          await prisma.$transaction(async tx => {
+            await exigirConfirmacionDePosiciones(tx, {
+              objetivo: { organizationId },
+              siguiente: {
+                PRIMARY: createOrgConfig.primaryAccountId,
+                SECONDARY: createOrgConfig.secondaryAccountId || null,
+                TERTIARY: createOrgConfig.tertiaryAccountId || null,
+              },
+              tarifaCapturada: ['PRIMARY'],
+              cuentaAnteriorYaVerificada: true,
+            })
+            // Create OrganizationPaymentConfig
+            await tx.organizationPaymentConfig.create({
+              data: {
+                organizationId,
+                primaryAccountId: createOrgConfig.primaryAccountId,
+                secondaryAccountId: createOrgConfig.secondaryAccountId || null,
+                tertiaryAccountId: createOrgConfig.tertiaryAccountId || null,
+                preferredProcessor: (createOrgConfig.preferredProcessor as any) || 'AUTO',
+              },
+            })
 
-          // Create OrganizationPricingStructure with the rates from the form
-          await prisma.organizationPricingStructure.create({
-            data: {
-              organizationId,
-              accountType: AccountType.PRIMARY,
-              debitRate: new Prisma.Decimal(payload.pricing.debitRate),
-              creditRate: new Prisma.Decimal(payload.pricing.creditRate),
-              amexRate: new Prisma.Decimal(payload.pricing.amexRate),
-              internationalRate: new Prisma.Decimal(payload.pricing.internationalRate),
-              fixedFeePerTransaction: payload.pricing.fixedFeePerTransaction
-                ? new Prisma.Decimal(payload.pricing.fixedFeePerTransaction)
-                : null,
-              monthlyServiceFee: payload.pricing.monthlyServiceFee ? new Prisma.Decimal(payload.pricing.monthlyServiceFee) : null,
-              effectiveFrom: new Date(),
-              active: true,
-            },
+            // Create OrganizationPricingStructure with the rates from the form
+            await tx.organizationPricingStructure.create({
+              data: {
+                organizationId,
+                accountType: AccountType.PRIMARY,
+                debitRate: new Prisma.Decimal(payload.pricing.debitRate),
+                creditRate: new Prisma.Decimal(payload.pricing.creditRate),
+                amexRate: new Prisma.Decimal(payload.pricing.amexRate),
+                internationalRate: new Prisma.Decimal(payload.pricing.internationalRate),
+                fixedFeePerTransaction: payload.pricing.fixedFeePerTransaction
+                  ? new Prisma.Decimal(payload.pricing.fixedFeePerTransaction)
+                  : null,
+                monthlyServiceFee: payload.pricing.monthlyServiceFee ? new Prisma.Decimal(payload.pricing.monthlyServiceFee) : null,
+                effectiveFrom: new Date(),
+                active: true,
+              },
+            })
           })
 
           steps.push({ step: 'pricing', status: 'success', message: 'Organization payment config + pricing created' })

@@ -18,6 +18,7 @@ import paymentAnalyticsRoutes from './superadmin/paymentAnalytics.routes'
 import earningsRoutes from './superadmin/earnings.routes'
 import providerCostStructureRoutes from './superadmin/providerCostStructure.routes'
 import venuePricingRoutes from './superadmin/venuePricing.routes'
+import paymentPositionsRoutes from './superadmin/paymentPositions.routes'
 import webhookRoutes from './superadmin/webhook.routes'
 import terminalRoutes from './superadmin/terminal.routes'
 import venueAccessRoutes from './superadmin/venue-access.routes'
@@ -84,6 +85,7 @@ router.use('/payment-analytics', paymentAnalyticsRoutes)
 router.use('/earnings', earningsRoutes)
 router.use('/cost-structures', providerCostStructureRoutes)
 router.use('/venue-pricing', venuePricingRoutes)
+router.use('/payment-positions', paymentPositionsRoutes) // tarifa al comercio, paso 2: reporte de sólo lectura
 router.use('/rate-corrections', rateCorrectionRoutes)
 router.use('/webhooks', webhookRoutes)
 router.use('/credit', creditAssessmentRoutes)

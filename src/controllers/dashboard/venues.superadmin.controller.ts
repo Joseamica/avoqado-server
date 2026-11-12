@@ -1,4 +1,10 @@
 import { Request, Response, NextFunction } from 'express'
+import {
+  cuentasDeLaOrganizacion,
+  exigirConfirmacionDePosiciones,
+  tomarCandado as tomarCandadoDePosiciones,
+  type CambioDePosicion,
+} from '@/services/shared/candadoDePosiciones'
 import { assertVenueHasNoDocumentLinksTx } from '../../services/document-requests/venueLinks.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -145,7 +151,11 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
     const sourceOrgName = venue.organization.name
 
+    let positionChanges: CambioDePosicion[] = []
     const resultado = await prisma.$transaction(async tx => {
+      // Candado de posiciones (tarifa al comercio, paso 1): PRIMERO, igual que todos los guardados de posiciones (organización
+      // → filas de configuración), para no cruzarse con ellos en orden distinto al bloquear el negocio más abajo.
+      await tomarCandadoDePosiciones(tx, { venueId }, targetOrganizationId as string)
       // B9: el presupuesto de espera de TODA la transacción, creado al entrar (las dos organizaciones y el negocio).
       const presupuesto = PresupuestoDeEspera.para(TIMEOUT_TRASLADO_MS)
       // 1. El origen, ya dentro de la transacción: sigue donde se validó, o alguien lo movió.
@@ -170,6 +180,22 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
       // 4. Quién trabaja en el negocio, leído dentro de la transacción.
       const staffIds = (await tx.staffVenue.findMany({ where: { venueId }, select: { staffId: true } })).map(sv => sv.staffId)
+
+      // 4b. Candado de posiciones (tarifa al comercio, paso 1; Codex p12-r1 #1): sin configuración propia el negocio pasa a
+      // las cuentas de la organización destino, y su tarifa de respaldo también cambia. Eso se confirma antes de mover.
+      const configPropia = await tx.venuePaymentConfig.findUnique({
+        where: { venueId },
+        select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+      })
+      positionChanges = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: { venueId },
+        siguiente: configPropia
+          ? { PRIMARY: configPropia.primaryAccountId, SECONDARY: configPropia.secondaryAccountId, TERTIARY: configPropia.tertiaryAccountId }
+          : await cuentasDeLaOrganizacion(tx, targetOrganizationId as string),
+        organizacionDespues: targetOrganizationId as string,
+        siguienteCalculado: true,
+        confirmaciones: req.body.positionConfirmations,
+      })
 
       // 5. Move venue to target org (el trigger `Venue_trasladoIva_guard` impone la barrera de IVA)
       await tx.venue.update({
@@ -236,6 +262,7 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       entity: 'Venue',
       entityId: venueId,
       data: {
+        positionChanges,
         fromOrganizationId: resultado.fromOrganizationId,
         toOrganizationId: resultado.toOrganizationId,
         staffMembersUpdated: resultado.staffMembersUpdated,

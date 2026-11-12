@@ -4,6 +4,12 @@ import { BadRequestError } from '@/errors/AppError'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
+import {
+  cuentasDeLaOrganizacion,
+  exigirConfirmacionDePosiciones,
+  type CambioDePosicion,
+  type ConfirmacionDePosiciones,
+} from '@/services/shared/candadoDePosiciones'
 
 interface VenuePaymentConfigCreateInput {
   venueId: string
@@ -12,6 +18,8 @@ interface VenuePaymentConfigCreateInput {
   tertiaryAccountId?: string
   routingRules?: any
   preferredProcessor?: 'LEGACY' | 'MENTA' | 'CLIP' | 'BANK_DIRECT' | 'AUTO'
+  /** Candado de posiciones (tarifa al comercio, paso 1). */
+  positionConfirmations?: ConfirmacionDePosiciones
 }
 
 interface VenuePaymentConfigUpdateInput {
@@ -20,6 +28,7 @@ interface VenuePaymentConfigUpdateInput {
   tertiaryAccountId?: string | null
   routingRules?: any
   preferredProcessor?: 'LEGACY' | 'MENTA' | 'CLIP' | 'BANK_DIRECT' | 'AUTO'
+  positionConfirmations?: ConfirmacionDePosiciones
 }
 
 /**
@@ -85,40 +94,52 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
     }
   }
 
-  // Create payment config
-  const config = await prisma.venuePaymentConfig.create({
-    data: {
-      venueId: data.venueId,
-      primaryAccountId: data.primaryAccountId,
-      secondaryAccountId: data.secondaryAccountId,
-      tertiaryAccountId: data.tertiaryAccountId,
-      routingRules: data.routingRules || {},
-      preferredProcessor: data.preferredProcessor || 'AUTO',
-    },
-    include: {
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
+  // Create payment config (candado: el negocio deja de heredar las cuentas de su organización)
+  let positionChanges: CambioDePosicion[] = []
+  const config = await prisma.$transaction(async tx => {
+    positionChanges = await exigirConfirmacionDePosiciones(tx, {
+      objetivo: { venueId: data.venueId },
+      siguiente: {
+        PRIMARY: data.primaryAccountId,
+        SECONDARY: data.secondaryAccountId ?? null,
+        TERTIARY: data.tertiaryAccountId ?? null,
+      },
+      confirmaciones: data.positionConfirmations,
+    })
+    return tx.venuePaymentConfig.create({
+      data: {
+        venueId: data.venueId,
+        primaryAccountId: data.primaryAccountId,
+        secondaryAccountId: data.secondaryAccountId,
+        tertiaryAccountId: data.tertiaryAccountId,
+        routingRules: data.routingRules || {},
+        preferredProcessor: data.preferredProcessor || 'AUTO',
+      },
+      include: {
+        venue: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+        primaryAccount: {
+          include: {
+            provider: true,
+          },
+        },
+        secondaryAccount: {
+          include: {
+            provider: true,
+          },
+        },
+        tertiaryAccount: {
+          include: {
+            provider: true,
+          },
         },
       },
-      primaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      secondaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      tertiaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-    },
+    })
   })
 
   logAction({
@@ -126,10 +147,10 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
     action: 'VENUE_PAYMENT_CONFIG_CREATED',
     entity: 'VenuePaymentConfig',
     entityId: config.id,
-    data: { primaryAccountId: data.primaryAccountId, preferredProcessor: data.preferredProcessor },
+    data: { primaryAccountId: data.primaryAccountId, preferredProcessor: data.preferredProcessor, positionChanges },
   })
 
-  return config
+  return Object.assign(config, { positionChanges })
 }
 
 /**
@@ -189,40 +210,48 @@ export async function updateVenuePaymentConfig(configId: string, data: VenuePaym
   if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
   await assertAngelPayLoginsInVenue(existingConfig.venueId, [data.primaryAccountId, data.secondaryAccountId, data.tertiaryAccountId])
 
-  // Update payment config
-  const config = await prisma.venuePaymentConfig.update({
-    where: { id: configId },
-    data: {
-      primaryAccountId: data.primaryAccountId,
-      secondaryAccountId: data.secondaryAccountId,
-      tertiaryAccountId: data.tertiaryAccountId,
-      routingRules: data.routingRules,
-      preferredProcessor: data.preferredProcessor,
-    },
-    include: {
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
+  // Update payment config — candado sólo sobre las posiciones que esta escritura toca (`undefined` = no se toca)
+  let positionChanges: CambioDePosicion[] = []
+  const config = await prisma.$transaction(async tx => {
+    positionChanges = await exigirConfirmacionDePosiciones(tx, {
+      objetivo: { venueId: existingConfig.venueId },
+      siguiente: { PRIMARY: data.primaryAccountId, SECONDARY: data.secondaryAccountId, TERTIARY: data.tertiaryAccountId },
+      confirmaciones: data.positionConfirmations,
+    })
+    return tx.venuePaymentConfig.update({
+      where: { id: configId },
+      data: {
+        primaryAccountId: data.primaryAccountId,
+        secondaryAccountId: data.secondaryAccountId,
+        tertiaryAccountId: data.tertiaryAccountId,
+        routingRules: data.routingRules,
+        preferredProcessor: data.preferredProcessor,
+      },
+      include: {
+        venue: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+        primaryAccount: {
+          include: {
+            provider: true,
+          },
+        },
+        secondaryAccount: {
+          include: {
+            provider: true,
+          },
+        },
+        tertiaryAccount: {
+          include: {
+            provider: true,
+          },
         },
       },
-      primaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      secondaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      tertiaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-    },
+    })
   })
 
   logAction({
@@ -230,16 +259,16 @@ export async function updateVenuePaymentConfig(configId: string, data: VenuePaym
     action: 'VENUE_PAYMENT_CONFIG_UPDATED',
     entity: 'VenuePaymentConfig',
     entityId: configId,
-    data: { changes: Object.keys(data) },
+    data: { changes: Object.keys(data).filter(k => k !== 'positionConfirmations'), positionChanges },
   })
 
-  return config
+  return Object.assign(config, { positionChanges })
 }
 
 /**
  * Delete payment config for a venue
  */
-export async function deleteVenuePaymentConfig(configId: string) {
+export async function deleteVenuePaymentConfig(configId: string, positionConfirmations?: ConfirmacionDePosiciones) {
   // Verify config exists
   const existingConfig = await prisma.venuePaymentConfig.findUnique({
     where: { id: configId },
@@ -249,9 +278,17 @@ export async function deleteVenuePaymentConfig(configId: string) {
     throw new Error('Payment config not found')
   }
 
-  // Delete payment config
-  await prisma.venuePaymentConfig.delete({
-    where: { id: configId },
+  // Delete payment config (candado: sin configuración propia el negocio pasa a las cuentas de su organización)
+  const positionChanges = await prisma.$transaction(async tx => {
+    const venue = await tx.venue.findUnique({ where: { id: existingConfig.venueId }, select: { organizationId: true } })
+    const cambios = await exigirConfirmacionDePosiciones(tx, {
+      objetivo: { venueId: existingConfig.venueId },
+      siguiente: venue ? await cuentasDeLaOrganizacion(tx, venue.organizationId) : { PRIMARY: null, SECONDARY: null, TERTIARY: null },
+      confirmaciones: positionConfirmations,
+      siguienteCalculado: true,
+    })
+    await tx.venuePaymentConfig.delete({ where: { id: configId } })
+    return cambios
   })
 
   logAction({
@@ -259,6 +296,7 @@ export async function deleteVenuePaymentConfig(configId: string) {
     action: 'VENUE_PAYMENT_CONFIG_DELETED',
     entity: 'VenuePaymentConfig',
     entityId: configId,
+    data: { positionChanges },
   })
 
   return { success: true }
