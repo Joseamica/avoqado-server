@@ -60,7 +60,6 @@ afterAll(async () => {
   }
   if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
 })
-})
 
 describe('descuentosDeLosClientes contra Postgres', () => {
   it('el descuento simple asignado cuenta, en pesos 1:1', async () => {
