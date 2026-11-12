@@ -425,6 +425,24 @@ describe('delivery_channels', () => {
     expect(out.channels.map((c: { margenPorcentaje: number | null }) => c.margenPorcentaje)).toEqual([30, null, null, null])
   })
 
+  it('🔴 dice cuántos productos publica cada canal: `null` = todo el catálogo; basura = «lista inválida», sin tumbar el tool', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      { ...LINK_BASE, id: 'l1', config: { productos: ['LATTE', 'CROISSANT'] } },
+      { ...LINK_BASE, id: 'l2', config: null },
+      { ...LINK_BASE, id: 'l3', config: { productos: [] } },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.channels.map((c: { productosDelCanal: unknown }) => c.productosDelCanal)).toEqual([
+      { cuantos: 2 },
+      { cuantos: null },
+      { cuantos: null, problema: expect.stringMatching(/al menos un producto/) },
+    ])
+  })
+
   it('🔴 NUNCA devuelve webhookSecret ni el blob crudo de config', async () => {
     // Este tool dejó de usar `select` para poder resolver el horario (que necesita el
     // registro entero), así que la consulta AHORA trae el secreto. Se anula en el mapeo —

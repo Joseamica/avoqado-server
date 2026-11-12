@@ -43,6 +43,7 @@ import {
   type MenuEnRevision,
 } from './llavesDelSistema'
 import { buildMenuSnapshot } from './menuSnapshot.service'
+import { filtrarMenuDelCanal, productosDelCanal } from './productosDelCanal'
 import { DeliveryWriteNotSentError, type ProblemaDeMenu, type PublicacionDeMenu } from './types'
 
 /**
@@ -118,7 +119,9 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
     const enRevision = leerMenuEnRevision(link.config)
     if (enRevision) return await seguirEnRevision(link, enRevision)
 
-    const snapshot = await buildMenuSnapshot(link.venueId)
+    // Sólo los productos de ESTE canal (`config.productos`; sin lista, todo el catálogo). Va antes de la huella: cambiar la
+    // lista republica. Una lista mal escrita truena aquí y cae al catch (FAILED, sin publicar nada).
+    const snapshot = filtrarMenuDelCanal(await buildMenuSnapshot(link.venueId), productosDelCanal(link.config))
 
     // 🔴 El horario va SIEMPRE, y entra en la huella: si el dueño cambia sus horas, el menú
     // se republica solo. Antes se publicaba 24/7 en silencio y nadie se enteraba de que su
@@ -590,6 +593,9 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
     where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
     select: { sku: true },
   })
+  // Sólo lo que está en el menú de ESTE canal: un SKU que el proveedor no tiene no se agota ni se revive allá.
+  const delCanal = productosDelCanal(link.config)
+  const enElMenu = (sku: string) => !delCanal || delCanal.has(sku)
   const deben = new Set(sinStock.map(p => p.sku).filter(Boolean) as string[])
 
   // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
@@ -624,6 +630,7 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
     })
     if (faltaAlgo) deben.add(p.sku)
   }
+  for (const sku of deben) if (!enElMenu(sku)) deben.delete(sku)
 
   // Lo que ya le dijimos al proveedor. Se guarda la LISTA y no una huella: hace falta el
   // contenido para mandar sólo la diferencia — repetir el estado de 96 productos cada 5
@@ -631,7 +638,8 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   const previo = new Set(((link.config as { soldOutSkus?: string[] } | null)?.soldOutSkus ?? []) as string[])
 
   const agotar = [...deben].filter(sku => !previo.has(sku))
-  const revivir = [...previo].filter(sku => !deben.has(sku))
+  // Un agotado que ya salió del menú del canal se queda anotado: si regresa a la lista, se revive entonces.
+  const revivir = [...previo].filter(sku => !deben.has(sku) && enElMenu(sku))
   if (agotar.length === 0 && revivir.length === 0) return { agotados: 0, revividos: 0 }
 
   const logrados = new Set(previo)
