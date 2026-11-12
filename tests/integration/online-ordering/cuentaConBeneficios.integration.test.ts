@@ -124,13 +124,19 @@ describe('D16 · cuentaConBeneficios', () => {
       await tarjeta(venueId, customerId)
       expect(await cuentaConBeneficios(venueId)).toBe(true)
     })
-    it('una tarjeta de nadie, viva y con dinero, se puede guardar: true; bloqueada con dinero: true', async () => {
+    it('una tarjeta de nadie, viva y con dinero, se puede guardar: true; bloqueada con dinero y con dueña: true', async () => {
       const a = await negocio()
       await tarjeta(a.venueId)
       expect(await cuentaConBeneficios(a.venueId)).toBe(true)
       const b = await negocio()
       await tarjeta(b.venueId, b.customerId, { status: 'BLOCKED' })
       expect(await cuentaConBeneficios(b.venueId)).toBe(true)
+    })
+    it('bloqueada con dinero pero SIN dueña (nadie la ve ni la puede guardar): false (codex-r2 #3)', async () => {
+      const { venueId } = await negocio()
+      await prisma.giftCardSettings.create({ data: { venueId, enabled: false } })
+      await tarjeta(venueId, null, { status: 'BLOCKED' })
+      expect(await cuentaConBeneficios(venueId)).toBe(false)
     })
     it.each<[string, Partial<Prisma.GiftCardUncheckedCreateInput>]>([
       ['una venta cancelada antes de cobrar (sin dueña, desactivada y en $0)', { status: 'DEACTIVATED', balance: D(0) }],
@@ -211,6 +217,30 @@ describe('D16 · cuentaConBeneficios', () => {
     })
   })
 
+  // codex-r2 #1: en la tienda, el motor aplica los automáticos sólo con sesión (`cotizarConBeneficios` → `aplicarBeneficiosEnTx`).
+  describe('descuentos automáticos (los que el motor aplica con sesión)', () => {
+    it('uno vigente, sin grupo ni asignación: true', async () => {
+      const { venueId } = await negocio()
+      await descuento(venueId, { isAutomatic: true })
+      expect(await cuentaConBeneficios(venueId)).toBe(true)
+    })
+    it('uno con horario (happy hour) cuenta aunque ahora no sea su hora: true', async () => {
+      const { venueId } = await negocio()
+      await descuento(venueId, { isAutomatic: true, daysOfWeek: [((new Date().getDay() + 3) % 7) as number] })
+      expect(await cuentaConBeneficios(venueId)).toBe(true)
+    })
+    it.each<[string, Partial<Prisma.DiscountUncheckedCreateInput>]>([
+      ['vencido', { validUntil: ayer() }],
+      ['que todavía no empieza', { validFrom: manana() }],
+      ['apagado', { active: false }],
+      ['agotado para todas', { maxTotalUses: 3, currentUses: 3 }],
+    ])('sólo uno %s: false', async (_n, extra) => {
+      const { venueId } = await negocio()
+      await descuento(venueId, { isAutomatic: true, ...extra })
+      expect(await cuentaConBeneficios(venueId)).toBe(false)
+    })
+  })
+
   describe('cupones de la tienda: lo mismo que la oferta (ofertaDeBeneficios.cupon)', () => {
     it.each<[string, Partial<Prisma.DiscountUncheckedCreateInput>, Partial<Prisma.CouponCodeUncheckedCreateInput>, boolean]>([
       ['vigente', {}, {}, true],
@@ -230,6 +260,21 @@ describe('D16 · cuentaConBeneficios', () => {
       expect((await ofertaDeBeneficios(venueId, customerId)).cupon).toBe(esperado)
       expect(await cuentaConBeneficios(venueId)).toBe(esperado)
     })
+  })
+
+  // codex-r2 #2: la oferta enseña el campo de cupón sin mirar los límites, pero el canje los rechaza (`validateCoupon`, USAGE_LIMIT).
+  it.each<[string, Partial<Prisma.DiscountUncheckedCreateInput>, Partial<Prisma.CouponCodeUncheckedCreateInput>]>([
+    ['el código agotado', {}, { maxUses: 1, currentUses: 1 }],
+    ['el descuento del cupón agotado', { maxTotalUses: 2, currentUses: 2 }, {}],
+  ])('cupones: sólo uno con %s: false', async (_n, d, c) => {
+    const { venueId } = await negocio()
+    await cupon(venueId, d, c)
+    expect(await cuentaConBeneficios(venueId)).toBe(false)
+  })
+  it('cupones: un código con usos todavía disponibles: true', async () => {
+    const { venueId } = await negocio()
+    await cupon(venueId, { maxTotalUses: 2, currentUses: 1 }, { maxUses: 5, currentUses: 4 })
+    expect(await cuentaConBeneficios(venueId)).toBe(true)
   })
 
   it('lo de OTRO negocio no cuenta', async () => {
