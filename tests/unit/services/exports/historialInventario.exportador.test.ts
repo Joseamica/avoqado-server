@@ -125,6 +125,9 @@ describe('exportador historial-inventario', () => {
     expect(historialInventario.parsearFiltros(f)).toEqual(f)
     expect(historialInventario.parsearFiltros({ type: 'ALL' }).type).toBeUndefined()
     expect(historialInventario.parsearFiltros({ type: 'DROP TABLE' }).type).toBeUndefined()
+    // Las opciones del filtro «Tipo» de la pantalla son los tipos reales de cada movimiento.
+    expect(historialInventario.parsearFiltros({ type: 'USAGE' }).type).toBe('USAGE')
+    expect(historialInventario.parsearFiltros({ type: 'PURCHASE' }).type).toBe('PURCHASE')
     expect(() => historialInventario.parsearFiltros({ startDate: 'no' })).toThrow(/startDate must be a valid ISO date/)
   })
 

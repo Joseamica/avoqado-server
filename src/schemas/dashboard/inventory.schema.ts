@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { MovementType, RawMaterialMovementType } from '@prisma/client'
 import { existingId } from '../common/existingId.schema'
 import {
   RawMaterialCategory,
@@ -1085,6 +1086,19 @@ export const RecipeLineIdParamsSchema = z.object({
   }),
 })
 
+/**
+ * Los tipos que acepta el filtro del Historial de inventario: los alias de siempre (`RECEIVED`, `WASTE`) y los tipos
+ * REALES de las dos tablas, que son las opciones del filtro «Tipo» de la pantalla. Antes sólo había 7 y elegir «Recibido»
+ * (PURCHASE), «Uso», «Ajuste», «Pérdida» o «Desperdicio» contestaba 400. Lo usan esta ruta y el exporte del Historial;
+ * cada tabla filtra sólo los suyos (`wheresDelHistorial`).
+ */
+export const TIPOS_DEL_FILTRO_HISTORIAL = [
+  'ALL',
+  'RECEIVED',
+  'WASTE',
+  ...new Set<string>([...Object.values(MovementType), ...Object.values(RawMaterialMovementType)]),
+] as [string, ...string[]]
+
 export const GetGlobalMovementsQuerySchema = z.object({
   query: z.object({
     page: z.string().transform(Number).default('1'),
@@ -1092,7 +1106,7 @@ export const GetGlobalMovementsQuerySchema = z.object({
     search: z.string().optional(),
     startDate: z.string().datetime().optional(),
     endDate: z.string().datetime().optional(),
-    type: z.enum(['ALL', 'RECEIVED', 'COUNT', 'WASTE', 'RETURN', 'SALE', 'TRANSFER']).optional(),
+    type: z.enum(TIPOS_DEL_FILTRO_HISTORIAL, { message: 'Tipo de movimiento no válido' }).optional(),
   }),
 })
 

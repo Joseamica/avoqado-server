@@ -7,6 +7,7 @@ import {
 import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '@/services/access/basePlan.service'
 import { construirWhereKeyset, fecha, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
+import { TIPOS_DEL_FILTRO_HISTORIAL } from '@/schemas/dashboard/inventory.schema'
 
 export type FilaHistorial = Awaited<ReturnType<typeof fetchGlobalMovementsExportPage>>[number]
 
@@ -29,8 +30,8 @@ const TIPO_MOVIMIENTO: Record<string, string> = {
   SPOILAGE: 'Desperdicio',
 }
 
-/** Los tipos que la pantalla deja filtrar en el servidor (`GetGlobalMovementsQuerySchema`). */
-const TIPOS_DEL_FILTRO = new Set(['ALL', 'RECEIVED', 'COUNT', 'WASTE', 'RETURN', 'SALE', 'TRANSFER'])
+/** Los tipos que la pantalla deja filtrar en el servidor: los mismos de la ruta del Historial. */
+const TIPOS_DEL_FILTRO = new Set<string>(TIPOS_DEL_FILTRO_HISTORIAL)
 
 export const HISTORIAL_INVENTARIO_COLUMNAS: ExportColumnDef<FilaHistorial>[] = [
   { id: 'createdAt', label: 'Fecha', value: r => (r.createdAt ? new Date(r.createdAt).toISOString() : '') },
