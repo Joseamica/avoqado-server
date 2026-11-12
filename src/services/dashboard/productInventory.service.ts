@@ -262,23 +262,25 @@ export function wasteHistoryFields(
 }
 
 /**
- * Get unified global inventory movements (Products + Raw Materials)
+ * Filtros del Historial de inventario. Los usan la pantalla (`getGlobalMovements`) y el exporte del
+ * Historial (`fetchGlobalMovementsExportPage`): un solo lugar decide qué entra, para que el archivo
+ * nunca diga algo distinto de lo que se ve con los mismos filtros.
  */
-export async function getGlobalMovements(
-  venueId: string,
-  query: {
-    page: number
-    limit: number
-    search?: string
-    startDate?: string // ISO string
-    endDate?: string // ISO string
-    type?: string
-  },
-) {
-  const { page, limit, search, startDate, endDate, type } = query
-  const _skip = (page - 1) * limit
+export interface FiltrosHistorial {
+  search?: string
+  startDate?: string // ISO
+  endDate?: string // ISO
+  type?: string
+}
 
-  // 1. Build where clauses
+/** El `where` de cada tabla (productos e insumos) para los filtros del Historial. */
+function wheresDelHistorial(
+  venueId: string,
+  f: FiltrosHistorial,
+): { producto: Prisma.InventoryMovementWhereInput; insumo: Prisma.RawMaterialMovementWhereInput } {
+  const { search, startDate, endDate, type } = f
+
+  // Las dos fechas o ninguna, como siempre lo hizo la pantalla.
   const dateFilter =
     startDate && endDate
       ? {
@@ -315,52 +317,149 @@ export async function getGlobalMovements(
     return mapped ? { type: mapped as any } : { id: { in: [] as string[] } }
   })()
 
-  // 2. Fetch InventoryMovements (Products)
-  const productMovementsPromise = prisma.inventoryMovement.findMany({
-    where: {
-      inventory: {
-        venueId,
-        product: search
-          ? {
-              OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }],
-            }
-          : undefined,
-      },
+  const searchOr = search
+    ? { OR: [{ name: { contains: search, mode: 'insensitive' as const } }, { sku: { contains: search, mode: 'insensitive' as const } }] }
+    : undefined
+
+  return {
+    producto: {
+      inventory: { venueId, product: searchOr },
       ...dateFilter,
       ...productTypeFilter,
     },
-    include: {
-      inventory: {
-        include: {
-          product: true,
-        },
-      },
-      wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
+    insumo: {
+      venueId,
+      rawMaterial: searchOr,
+      ...dateFilter,
+      ...rawMaterialTypeFilter,
     },
+  }
+}
+
+const PRODUCT_MOVEMENT_INCLUDE = {
+  inventory: {
+    include: {
+      product: true,
+    },
+  },
+  wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
+} satisfies Prisma.InventoryMovementInclude
+
+const RAW_MOVEMENT_INCLUDE = {
+  rawMaterial: true,
+  // El proveedor sólo se puede saber por el lote que entró con una orden de
+  // compra. La columna "Proveedor" del dashboard lo esperaba y el backend
+  // nunca lo mandaba, así que TODO salía "Sin proveedor".
+  batch: { include: { purchaseOrderItem: { include: { purchaseOrder: { include: { supplier: true } } } } } },
+  wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
+} satisfies Prisma.RawMaterialMovementInclude
+
+type ProductMovementRow = Prisma.InventoryMovementGetPayload<{ include: typeof PRODUCT_MOVEMENT_INCLUDE }>
+type RawMovementRow = Prisma.RawMaterialMovementGetPayload<{ include: typeof RAW_MOVEMENT_INCLUDE }>
+
+/** Un renglón del Historial a partir de un movimiento de PRODUCTO. */
+function renglonDeProducto(m: ProductMovementRow) {
+  return {
+    id: m.id,
+    createdAt: m.createdAt,
+    itemName: m.inventory.product.name,
+    sku: m.inventory.product.sku,
+    category: 'PRODUCT',
+    type: m.type as string,
+    quantity: m.quantity.toNumber(),
+    unit: (m.inventory.product.unit || 'UNIT') as string,
+    cost: m.inventory.product.cost?.toNumber() || 0,
+    // CON SIGNO. Con `Math.abs` perder 10 cervezas y comprar 10 se veían
+    // idénticos en la columna de costo — el historial no distinguía una
+    // merma de una entrada.
+    // Una merma CON folio usa el costo que congeló el folio (`unitCost` del
+    // movimiento), no el costo actual; sin costo congelado es `null` =
+    // «sin valorar», nunca un costo inventado. Lo demás queda como hoy.
+    totalCost: (m.wasteReportId
+      ? m.unitCost === null
+        ? null
+        : m.unitCost.mul(m.quantity).toNumber() // en Decimal: 1.15 × −3 es −3.45, no −3.4499999999999997
+      : (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber()) as number | null,
+    ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'productMovements'),
+    // Un movimiento de PRODUCTO no cuelga de una orden de compra, así que no
+    // hay proveedor que mostrar. Se declara `null` en vez de omitirlo: la UI
+    // pinta "Sin proveedor" a propósito, no por un campo que nunca llegó.
+    supplierName: null as string | null,
+    reason: m.reason,
+    reference: m.reference,
+    previousStock: m.previousStock.toNumber(),
+    newStock: m.newStock.toNumber(),
+    createdBy: m.createdBy,
+  }
+}
+
+/** Un renglón del Historial a partir de un movimiento de INSUMO. */
+function renglonDeInsumo(m: RawMovementRow) {
+  return {
+    id: m.id,
+    createdAt: m.createdAt,
+    itemName: m.rawMaterial.name,
+    sku: m.rawMaterial.sku,
+    category: 'INGREDIENT',
+    type: m.type as string,
+    quantity: m.quantity.toNumber(),
+    unit: m.unit as string,
+    cost: m.rawMaterial.costPerUnit.toNumber(),
+    // `costImpact` ya viene firmado desde el movimiento; si falta, se deriva
+    // de la cantidad (que también lleva signo). Una merma CON folio usa SÓLO
+    // el costo del propio movimiento (su lote): el ajuste directo sin lotes no
+    // tiene costo y sale `null` = «sin valorar», sin inventarle el costo actual.
+    totalCost: (m.wasteReportId
+      ? (m.costImpact?.toNumber() ?? null)
+      : (m.costImpact?.toNumber() ?? m.rawMaterial.costPerUnit.toNumber() * m.quantity.toNumber())) as number | null,
+    supplierName: (m as any).batch?.purchaseOrderItem?.purchaseOrder?.supplier?.name ?? null,
+    reason: m.reason,
+    reference: m.reference,
+    previousStock: m.previousStock.toNumber(),
+    newStock: m.newStock.toNumber(),
+    createdBy: m.createdBy,
+    ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'rawMovements'),
+  }
+}
+
+export type RenglonHistorial = ReturnType<typeof renglonDeProducto>
+
+/** Orden del Historial: más nuevo primero y, en empate de fecha, id descendente (el mismo desempate del keyset). */
+function masNuevoPrimero(a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }): number {
+  const dt = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  if (dt !== 0) return dt
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+}
+
+/**
+ * Get unified global inventory movements (Products + Raw Materials)
+ */
+export async function getGlobalMovements(
+  venueId: string,
+  query: {
+    page: number
+    limit: number
+    search?: string
+    startDate?: string // ISO string
+    endDate?: string // ISO string
+    type?: string
+  },
+) {
+  const { page, limit } = query
+  const { producto, insumo } = wheresDelHistorial(venueId, query)
+
+  // 2. Fetch InventoryMovements (Products)
+  const productMovementsPromise = prisma.inventoryMovement.findMany({
+    where: producto,
+    include: PRODUCT_MOVEMENT_INCLUDE,
     orderBy: { createdAt: 'desc' },
     take: limit * page, // Fetch up to current page depth to ensure correct merge sort
   })
 
   // 3. Fetch RawMaterialMovements (Ingredients)
   const rawMaterialMovementsPromise = prisma.rawMaterialMovement.findMany({
-    where: {
-      venueId,
-      rawMaterial: search
-        ? {
-            OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }],
-          }
-        : undefined,
-      ...dateFilter,
-      ...rawMaterialTypeFilter,
-    },
-    include: {
-      rawMaterial: true,
-      // El proveedor sólo se puede saber por el lote que entró con una orden de
-      // compra. La columna "Proveedor" del dashboard lo esperaba y el backend
-      // nunca lo mandaba, así que TODO salía "Sin proveedor".
-      batch: { include: { purchaseOrderItem: { include: { purchaseOrder: { include: { supplier: true } } } } } },
-      wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
-    },
+    where: insumo,
+    include: RAW_MOVEMENT_INCLUDE,
     orderBy: { createdAt: 'desc' },
     take: limit * page,
   })
@@ -368,29 +467,8 @@ export async function getGlobalMovements(
   // Totales REALES. Antes se devolvía el literal 1000 ("Dummy total"), así que
   // la UI paginaba sobre un número inventado y no había forma de saber cuántos
   // movimientos existían de verdad.
-  const productCountPromise = prisma.inventoryMovement.count({
-    where: {
-      inventory: {
-        venueId,
-        product: search
-          ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }] }
-          : undefined,
-      },
-      ...dateFilter,
-      ...productTypeFilter,
-    },
-  })
-
-  const rawMaterialCountPromise = prisma.rawMaterialMovement.count({
-    where: {
-      venueId,
-      rawMaterial: search
-        ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }] }
-        : undefined,
-      ...dateFilter,
-      ...rawMaterialTypeFilter,
-    },
-  })
+  const productCountPromise = prisma.inventoryMovement.count({ where: producto })
+  const rawMaterialCountPromise = prisma.rawMaterialMovement.count({ where: insumo })
 
   const [productMovements, rawMaterialMovements, productCount, rawMaterialCount] = await Promise.all([
     productMovementsPromise,
@@ -400,65 +478,7 @@ export async function getGlobalMovements(
   ])
 
   // 4. Normalize and Merge
-  const combined = [
-    ...productMovements.map(m => ({
-      id: m.id,
-      createdAt: m.createdAt,
-      itemName: m.inventory.product.name,
-      sku: m.inventory.product.sku,
-      category: 'PRODUCT',
-      type: m.type,
-      quantity: m.quantity.toNumber(),
-      unit: m.inventory.product.unit || 'UNIT',
-      cost: m.inventory.product.cost?.toNumber() || 0,
-      // CON SIGNO. Con `Math.abs` perder 10 cervezas y comprar 10 se veían
-      // idénticos en la columna de costo — el historial no distinguía una
-      // merma de una entrada.
-      // Una merma CON folio usa el costo que congeló el folio (`unitCost` del
-      // movimiento), no el costo actual; sin costo congelado es `null` =
-      // «sin valorar», nunca un costo inventado. Lo demás queda como hoy.
-      totalCost: m.wasteReportId
-        ? m.unitCost === null
-          ? null
-          : m.unitCost.mul(m.quantity).toNumber() // en Decimal: 1.15 × −3 es −3.45, no −3.4499999999999997
-        : (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber(),
-      ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'productMovements'),
-      // Un movimiento de PRODUCTO no cuelga de una orden de compra, así que no
-      // hay proveedor que mostrar. Se declara `null` en vez de omitirlo: la UI
-      // pinta "Sin proveedor" a propósito, no por un campo que nunca llegó.
-      supplierName: null as string | null,
-      reason: m.reason,
-      reference: m.reference,
-      previousStock: m.previousStock.toNumber(),
-      newStock: m.newStock.toNumber(),
-      createdBy: m.createdBy,
-    })),
-    ...rawMaterialMovements.map(m => ({
-      id: m.id,
-      createdAt: m.createdAt,
-      itemName: m.rawMaterial.name,
-      sku: m.rawMaterial.sku,
-      category: 'INGREDIENT',
-      type: m.type,
-      quantity: m.quantity.toNumber(),
-      unit: m.unit,
-      cost: m.rawMaterial.costPerUnit.toNumber(),
-      // `costImpact` ya viene firmado desde el movimiento; si falta, se deriva
-      // de la cantidad (que también lleva signo). Una merma CON folio usa SÓLO
-      // el costo del propio movimiento (su lote): el ajuste directo sin lotes no
-      // tiene costo y sale `null` = «sin valorar», sin inventarle el costo actual.
-      totalCost: m.wasteReportId
-        ? (m.costImpact?.toNumber() ?? null)
-        : (m.costImpact?.toNumber() ?? m.rawMaterial.costPerUnit.toNumber() * m.quantity.toNumber()),
-      supplierName: (m as any).batch?.purchaseOrderItem?.purchaseOrder?.supplier?.name ?? null,
-      reason: m.reason,
-      reference: m.reference,
-      previousStock: m.previousStock.toNumber(),
-      newStock: m.newStock.toNumber(),
-      createdBy: m.createdBy,
-      ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'rawMovements'),
-    })),
-  ]
+  const combined = [...productMovements.map(renglonDeProducto), ...rawMaterialMovements.map(renglonDeInsumo)]
 
   // 5. Sort and Paginate in memory (since we merged sources)
   // Note: For large datasets this isn't efficient, but for typical "history view" it's acceptable.
@@ -477,6 +497,74 @@ export async function getGlobalMovements(
       limit,
     },
   }
+}
+
+/** Keyset descendente sobre (createdAt, id): lo construye el carril de exportes (`construirWhereKeyset`). */
+type KeysetHistorial = { OR?: [{ createdAt: { lt: Date } }, { createdAt: Date; id: { lt: string } }] }
+
+/**
+ * Cuántos movimientos trae el exporte del Historial: los mismos filtros de la pantalla, hasta el
+ * `corte` (lo que entra mientras se arma el archivo no se mezcla).
+ */
+export async function countGlobalMovementsForExportHasta(venueId: string, f: FiltrosHistorial, corte: Date): Promise<number> {
+  const { producto, insumo } = wheresDelHistorial(venueId, f)
+  const hasta = { createdAt: { lte: corte } }
+  const [p, r] = await Promise.all([
+    prisma.inventoryMovement.count({ where: { AND: [producto, hasta] } }),
+    prisma.rawMaterialMovement.count({ where: { AND: [insumo, hasta] } }),
+  ])
+  return p + r
+}
+
+/**
+ * Una página del exporte del Historial (productos e insumos mezclados), por keyset y nunca más de
+ * `limite` renglones. Cada tabla trae a lo más `limite` después del cursor; se mezclan en el orden
+ * del Historial y se cortan en `limite`. Lo que sobra de una tabla vuelve a salir en la página
+ * siguiente, porque queda después del nuevo cursor: nada se repite ni se pierde.
+ *
+ * Por renglón agrega `staffName` (quién hizo el movimiento): `createdBy` es un id suelto sin
+ * relación, así que los nombres salen de UNA consulta por página, acotada al negocio.
+ */
+export async function fetchGlobalMovementsExportPage(
+  venueId: string,
+  f: FiltrosHistorial,
+  corte: Date,
+  keyset: KeysetHistorial,
+  limite: number,
+): Promise<Array<RenglonHistorial & { staffName: string | null }>> {
+  const { producto, insumo } = wheresDelHistorial(venueId, f)
+  const hasta = { createdAt: { lte: corte } }
+  const orderBy = [{ createdAt: 'desc' as const }, { id: 'desc' as const }]
+
+  const [productos, insumos] = await Promise.all([
+    prisma.inventoryMovement.findMany({
+      where: { AND: [producto, hasta, keyset] },
+      include: PRODUCT_MOVEMENT_INCLUDE,
+      orderBy,
+      take: limite,
+    }),
+    prisma.rawMaterialMovement.findMany({
+      where: { AND: [insumo, hasta, keyset] },
+      include: RAW_MOVEMENT_INCLUDE,
+      orderBy,
+      take: limite,
+    }),
+  ])
+
+  const pagina = [...productos.map(renglonDeProducto), ...insumos.map(renglonDeInsumo)].sort(masNuevoPrimero).slice(0, limite)
+
+  const staffIds = Array.from(new Set(pagina.map(r => r.createdBy).filter((id): id is string => Boolean(id))))
+  const staff =
+    staffIds.length > 0
+      ? await prisma.staff.findMany({
+          where: { id: { in: staffIds }, venues: { some: { venueId } } },
+          select: { id: true, firstName: true, lastName: true },
+          take: staffIds.length,
+        })
+      : []
+  const nombres = new Map(staff.map(s => [s.id, `${s.firstName ?? ''} ${s.lastName ?? ''}`.trim()]))
+
+  return pagina.map(r => ({ ...r, staffName: r.createdBy ? (nombres.get(r.createdBy) ?? null) : null }))
 }
 
 /**
