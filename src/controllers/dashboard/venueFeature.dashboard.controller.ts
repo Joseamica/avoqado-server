@@ -86,7 +86,7 @@ export async function addVenueFeatures(
     }
 
     // `trialPeriodDays` del body se ignora a propósito: la política de prueba es del servidor.
-    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, paymentMethodId)
+    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, paymentMethodId, req.authContext?.userId)
 
     // Separate features by status for better UI feedback
     const activeFeatures = createdFeatures.filter(f => f.active)
@@ -149,7 +149,7 @@ export async function removeVenueFeature(
       featureId,
     })
 
-    const removedFeature = await venueFeatureService.removeFeatureFromVenue(venueId, featureId)
+    const removedFeature = await venueFeatureService.removeFeatureFromVenue(venueId, featureId, req.authContext?.userId)
 
     res.status(200).json({
       success: true,

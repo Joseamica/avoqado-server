@@ -100,9 +100,12 @@ describe('addFeaturesToVenue — los días de prueba los decide el SERVIDOR', ()
     expect(diasQueViajaronAStripe).toBe(5)
   })
 
-  it('la firma ya no acepta un trial del cliente', () => {
-    // 4 parámetros del cliente sería la firma vieja (venueId, codes, trialDays, paymentMethodId).
-    expect(addFeaturesToVenue.length).toBeLessThanOrEqual(3)
+  it('la firma ya no acepta un trial del cliente: el cuarto argumento es QUIÉN compra, no días', async () => {
+    // La firma vieja era (venueId, codes, trialDays, paymentMethodId). Hoy el cuarto es el actor (D36, 12-nov):
+    // ni el tercero ni el cuarto pueden llegar a Stripe como días de prueba.
+    await addFeaturesToVenue('venue-1', ['INVENTORY_TRACKING'], 'pm_x', 'staff-1')
+    expect(mockCreateTrialSubscriptions.mock.calls[0]?.[3]).toBe(5)
+    expect(mockCreateTrialSubscriptions.mock.calls[0]?.[6]).toBe('pm_x')
   })
 })
 
@@ -251,5 +254,117 @@ describe('R0 · la baja apaga SÓLO la fila que sigue ligada a la suscripción c
 
     await expect(removeFeatureFromVenue('venue-1', 'vf-1')).rejects.toMatchObject({ statusCode: 409, code: 'SUBSCRIPTION_LINK_CHANGED' })
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'FEATURE_REMOVED' }))
+  })
+})
+
+/**
+ * D36 (12-nov-2026): cuando el DUEÑO agrega o quita una función desde su panel, la bitácora guardaba FEATURES_ADDED /
+ * FEATURE_REMOVED sin QUIÉN (`staffId` vacío). Es el mismo hueco que el D30 cerró para el superadmin (#407).
+ */
+describe('D36 · bitácora: el dueño agrega o quita una función', () => {
+  const { logAction } = jest.requireMock('../../../src/services/dashboard/activity-log.service')
+  const asiento = (action: string) => {
+    const llamadas = (logAction as jest.Mock).mock.calls.map((c: any[]) => c[0]).filter((p: any) => p.action === action)
+    expect(llamadas).toHaveLength(1)
+    return llamadas[0]
+  }
+
+  it('agregar guarda quién, cuáles funciones y sus filas', async () => {
+    mockCreateTrialSubscriptions.mockResolvedValue(['sub_inv'])
+    mockVenueFeatureFindMany.mockImplementation((args: any) =>
+      args?.where?.stripeSubscriptionId
+        ? [{ id: 'vf-inv', active: false, feature: { code: 'INVENTORY_TRACKING', name: 'Inventario' } }]
+        : [],
+    )
+
+    await addFeaturesToVenue('venue-1', ['INVENTORY_TRACKING'], undefined, 'staff-1')
+
+    expect(asiento('FEATURES_ADDED')).toEqual({
+      staffId: 'staff-1',
+      venueId: 'venue-1',
+      action: 'FEATURES_ADDED',
+      entity: 'VenueFeature',
+      entityId: 'venue-1',
+      data: { featureCodes: ['INVENTORY_TRACKING'], venueFeatureIds: ['vf-inv'] },
+    })
+  })
+
+  it('quitar guarda quién, cuál función y la fila de la función (no el id del catálogo)', async () => {
+    mockVenueFeatureFindFirst.mockResolvedValue({
+      id: 'vf-1',
+      venueId: 'venue-1',
+      featureId: 'f1',
+      stripeSubscriptionId: 'sub_x',
+      feature: { id: 'f1', code: 'LOYALTY_PROGRAM', name: 'Lealtad' },
+    })
+    mockCancelSubscription.mockResolvedValue(undefined)
+
+    await removeFeatureFromVenue('venue-1', 'f1', 'staff-1')
+
+    expect(asiento('FEATURE_REMOVED')).toEqual({
+      staffId: 'staff-1',
+      venueId: 'venue-1',
+      action: 'FEATURE_REMOVED',
+      entity: 'VenueFeature',
+      entityId: 'vf-1',
+      data: { featureCode: 'LOYALTY_PROGRAM' },
+    })
+  })
+
+  it.each([
+    ['agregar', () => addFeaturesToVenue('venue-1', ['INVENTORY_TRACKING']), 'FEATURES_ADDED'],
+    ['quitar', () => removeFeatureFromVenue('venue-1', 'f1'), 'FEATURE_REMOVED'],
+  ])('%s sin actor (llamador viejo): no truena y guarda staffId null', async (_n, run, action) => {
+    mockVenueFeatureFindFirst.mockResolvedValue({
+      id: 'vf-1',
+      venueId: 'venue-1',
+      stripeSubscriptionId: null,
+      feature: { id: 'f1', code: 'LOYALTY_PROGRAM', name: 'Lealtad' },
+    })
+
+    await expect(run()).resolves.toBeDefined()
+    expect(asiento(action).staffId).toBeNull()
+  })
+})
+
+describe('D36 · controlador: agregar y quitar pasan quién lo hizo', () => {
+  const res = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn() }) as any
+
+  it('DELETE …/features/:featureId manda el usuario de la sesión al servicio', async () => {
+    const svc = jest.requireActual('../../../src/services/dashboard/venueFeature.dashboard.service')
+    const spy = jest.spyOn(svc, 'removeFeatureFromVenue').mockResolvedValue({ id: 'vf-1' } as never)
+    const { removeVenueFeature } = jest.requireActual('../../../src/controllers/dashboard/venueFeature.dashboard.controller')
+    const r = res()
+
+    await removeVenueFeature({ params: { venueId: 'venue-1', featureId: 'f1' }, authContext: { userId: 'staff-1' } } as any, r, jest.fn())
+
+    expect(spy).toHaveBeenCalledWith('venue-1', 'f1', 'staff-1')
+    expect(r.status).toHaveBeenCalledWith(200)
+    spy.mockRestore()
+  })
+
+  it('POST …/features manda el usuario de la sesión al servicio (con la venta suelta abierta)', async () => {
+    const svc = jest.requireActual('../../../src/services/dashboard/venueFeature.dashboard.service')
+    const venta = jest.requireActual('../../../src/services/access/ventaSuelta')
+    const abierta = jest.spyOn(venta, 'ventaSueltaAbierta').mockReturnValue(true)
+    const spy = jest.spyOn(svc, 'addFeaturesToVenue').mockResolvedValue([] as never)
+    const { addVenueFeatures } = jest.requireActual('../../../src/controllers/dashboard/venueFeature.dashboard.controller')
+    const r = res()
+    const next = jest.fn()
+
+    await addVenueFeatures(
+      {
+        params: { venueId: 'venue-1' },
+        body: { featureCodes: ['INVENTORY_TRACKING'], paymentMethodId: 'pm_x' },
+        authContext: { userId: 'staff-1' },
+      } as any,
+      r,
+      next,
+    )
+
+    expect(next).not.toHaveBeenCalled()
+    expect(spy).toHaveBeenCalledWith('venue-1', ['INVENTORY_TRACKING'], 'pm_x', 'staff-1')
+    spy.mockRestore()
+    abierta.mockRestore()
   })
 })
