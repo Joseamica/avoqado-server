@@ -197,86 +197,87 @@ describe('D6 — versión del catálogo del POS', () => {
     expect(await versionDelCatalogoMovil(n.venueId)).toBe(antes)
   })
 
-  it('Codex r1 P1: una transacción VIEJA que confirma DESPUÉS de otra más nueva no deja la misma versión', async () => {
-    // T1 (xid x1) abre y espera. Mientras, otras transacciones ya confirmadas dejan filas con xmin ABAJO de x1 (las «viejas»)
-    // y ARRIBA de x1 (las «nuevas»). Luego T1 reescribe un grupo de viejas y nuevas y confirma: todas quedan con xmin = x1.
-    // Si lo que T1 baja (Σ x1 − viejo) es igual a lo que sube (Σ nuevo − x1), una «suma de xmin» empata y serviría precios
-    // viejos. En vez de adivinar el xid que va a tocar (otro proceso del CI lo gasta antes: falló así el 12-nov), se LEEN los
-    // xmin reales y se elige el grupo que empata (suma de subconjuntos): lo que hagan los vecinos sólo cambia los números.
-    const M = 4_294_967_296 // xmin es de 32 bits; txid_current trae la época encima
-    const xid = async (c: any = prisma) => Number((await c.$queryRaw`SELECT (txid_current() % ${M})::bigint AS x`)[0].x)
-    const xminDe = async (ids: string[]) => {
-      const filas = await prisma.$queryRaw<Array<{ id: string; x: bigint }>>`
+  for (let vuelta = 1; vuelta <= 25; vuelta++)
+    it(`[medir ${vuelta}/25] Codex r1 P1: una transacción VIEJA que confirma DESPUÉS de otra más nueva no deja la misma versión`, async () => {
+      // T1 (xid x1) abre y espera. Mientras, otras transacciones ya confirmadas dejan filas con xmin ABAJO de x1 (las «viejas»)
+      // y ARRIBA de x1 (las «nuevas»). Luego T1 reescribe un grupo de viejas y nuevas y confirma: todas quedan con xmin = x1.
+      // Si lo que T1 baja (Σ x1 − viejo) es igual a lo que sube (Σ nuevo − x1), una «suma de xmin» empata y serviría precios
+      // viejos. En vez de adivinar el xid que va a tocar (otro proceso del CI lo gasta antes: falló así el 12-nov), se LEEN los
+      // xmin reales y se elige el grupo que empata (suma de subconjuntos): lo que hagan los vecinos sólo cambia los números.
+      const M = 4_294_967_296 // xmin es de 32 bits; txid_current trae la época encima
+      const xid = async (c: any = prisma) => Number((await c.$queryRaw`SELECT (txid_current() % ${M})::bigint AS x`)[0].x)
+      const xminDe = async (ids: string[]) => {
+        const filas = await prisma.$queryRaw<Array<{ id: string; x: bigint }>>`
         SELECT id, xmin::text::bigint AS x FROM "Product" WHERE id = ANY(${ids})`
-      return new Map(filas.map(f => [f.id, Number(f.x)]))
-    }
-    const sumaDeXmin = async () =>
-      Number(
-        (
-          await prisma.$queryRaw<Array<{ s: bigint }>>`
-            SELECT COALESCE(SUM(xmin::text::bigint), 0)::bigint AS s FROM "Product" WHERE "venueId" = ${n.venueId}`
-        )[0].s,
-      )
-    const nuevoProducto = async (nombre: string) =>
-      (
-        await prisma.product.create({
-          data: { venueId: n.venueId, categoryId: n.categoryId, sku: `D6E-${t()}`, name: nombre, price: 10 } as any,
-        })
-      ).id
-
-    // Las viejas: cada una en su propia transacción, así sus xmin quedan escalonados justo abajo de x1.
-    const viejas: string[] = []
-    for (let i = 0; i < 24; i++) viejas.push(await nuevoProducto(`Vieja ${i}`))
-
-    let soltarT1!: () => void
-    const puedeSeguir = new Promise<void>(r => (soltarT1 = r))
-    let avisarX1!: (x: number) => void
-    const x1Listo = new Promise<number>(r => (avisarX1 = r))
-    let elegidas: string[] = []
-    const t1 = prisma.$transaction(
-      async tx => {
-        avisarX1(await xid(tx))
-        await puedeSeguir
-        for (const id of elegidas) await tx.product.update({ where: { id }, data: { price: { increment: 1 } } })
-      },
-      { timeout: 60_000 },
-    )
-    const x1 = await x1Listo
-    const rastro: unknown[] = []
-    try {
-      const xViejas = await xminDe(viejas)
-      const deficit = viejas.map(id => ({ id, d: x1 - xViejas.get(id)! }))
-      expect(deficit.every(v => v.d > 0)).toBe(true)
-      const total = deficit.reduce((s, v) => s + v.d, 0)
-
-      // Las nuevas: se agregan de una en una hasta que un grupo de viejas sume exactamente lo que suben.
-      const nuevas: string[] = []
-      let objetivo = 0
-      let grupo: string[] | null = null
-      for (let k = 0; k < 6 && !grupo; k++) {
-        const id = await nuevoProducto(`Nueva ${k}`)
-        nuevas.push(id)
-        objetivo += (await xminDe([id])).get(id)! - x1
-        rastro.push({ x1, objetivo, total, deficit: deficit.map(v => v.d) })
-        if (objetivo <= total) grupo = subconjuntoQueSuma(deficit, objetivo)
+        return new Map(filas.map(f => [f.id, Number(f.x)]))
       }
-      if (!grupo) throw new Error(`no hubo grupo de viejas que empatara: ${JSON.stringify(rastro)}`)
-      elegidas = [...grupo, ...nuevas]
+      const sumaDeXmin = async () =>
+        Number(
+          (
+            await prisma.$queryRaw<Array<{ s: bigint }>>`
+            SELECT COALESCE(SUM(xmin::text::bigint), 0)::bigint AS s FROM "Product" WHERE "venueId" = ${n.venueId}`
+          )[0].s,
+        )
+      const nuevoProducto = async (nombre: string) =>
+        (
+          await prisma.product.create({
+            data: { venueId: n.venueId, categoryId: n.categoryId, sku: `D6E-${t()}`, name: nombre, price: 10 } as any,
+          })
+        ).id
 
-      vaciarCacheDelCatalogoMovil()
-      const antes = await versionDelCatalogoMovil(n.venueId)
-      const sumaAntes = await sumaDeXmin()
-      soltarT1()
-      await t1
-      // El escenario quedó armado: con una «suma de xmin» la versión NO se movería…
-      expect(await sumaDeXmin()).toBe(sumaAntes)
-      // …y la de verdad sí se mueve.
-      expect(await versionDelCatalogoMovil(n.venueId)).not.toBe(antes)
-    } finally {
-      soltarT1()
-      await t1.catch(() => undefined)
-    }
-  })
+      // Las viejas: cada una en su propia transacción, así sus xmin quedan escalonados justo abajo de x1.
+      const viejas: string[] = []
+      for (let i = 0; i < 24; i++) viejas.push(await nuevoProducto(`Vieja ${i}`))
+
+      let soltarT1!: () => void
+      const puedeSeguir = new Promise<void>(r => (soltarT1 = r))
+      let avisarX1!: (x: number) => void
+      const x1Listo = new Promise<number>(r => (avisarX1 = r))
+      let elegidas: string[] = []
+      const t1 = prisma.$transaction(
+        async tx => {
+          avisarX1(await xid(tx))
+          await puedeSeguir
+          for (const id of elegidas) await tx.product.update({ where: { id }, data: { price: { increment: 1 } } })
+        },
+        { timeout: 60_000 },
+      )
+      const x1 = await x1Listo
+      const rastro: unknown[] = []
+      try {
+        const xViejas = await xminDe(viejas)
+        const deficit = viejas.map(id => ({ id, d: x1 - xViejas.get(id)! }))
+        expect(deficit.every(v => v.d > 0)).toBe(true)
+        const total = deficit.reduce((s, v) => s + v.d, 0)
+
+        // Las nuevas: se agregan de una en una hasta que un grupo de viejas sume exactamente lo que suben.
+        const nuevas: string[] = []
+        let objetivo = 0
+        let grupo: string[] | null = null
+        for (let k = 0; k < 6 && !grupo; k++) {
+          const id = await nuevoProducto(`Nueva ${k}`)
+          nuevas.push(id)
+          objetivo += (await xminDe([id])).get(id)! - x1
+          rastro.push({ x1, objetivo, total, deficit: deficit.map(v => v.d) })
+          if (objetivo <= total) grupo = subconjuntoQueSuma(deficit, objetivo)
+        }
+        if (!grupo) throw new Error(`no hubo grupo de viejas que empatara: ${JSON.stringify(rastro)}`)
+        elegidas = [...grupo, ...nuevas]
+
+        vaciarCacheDelCatalogoMovil()
+        const antes = await versionDelCatalogoMovil(n.venueId)
+        const sumaAntes = await sumaDeXmin()
+        soltarT1()
+        await t1
+        // El escenario quedó armado: con una «suma de xmin» la versión NO se movería…
+        expect(await sumaDeXmin()).toBe(sumaAntes)
+        // …y la de verdad sí se mueve.
+        expect(await versionDelCatalogoMovil(n.venueId)).not.toBe(antes)
+      } finally {
+        soltarT1()
+        await t1.catch(() => undefined)
+      }
+    })
 
   it('de punta a punta: sin cambios la segunda bajada es idéntica; tras un cambio de precio sale el precio nuevo', async () => {
     const primera = await listar(n.venueId)
