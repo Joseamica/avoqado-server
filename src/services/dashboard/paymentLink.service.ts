@@ -125,7 +125,8 @@ async function validateBundleItems(
               minSelections: true,
               maxSelections: true,
               modifiers: {
-                where: archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
+                where:
+                  archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
                 select: { id: true, active: true },
               },
             },
@@ -2147,12 +2148,13 @@ async function creditPaymentLinkCustomer(args: {
  * La categoría de cada producto de una liga de productos, para `OrderItem.categoryName` (Codex r3 #1): los demás canales la
  * guardan (`product.category?.name || null`) y los reportes por categoría la leen. Se lee al cobrar, como la terminal.
  *
- * NUNCA lanza: en Blumon esto corre con la tarjeta YA cobrada; si la lectura falla, la venta se registra sin categoría.
+ * NUNCA lanza (ni por un renglón malformado del snapshot): si la lectura falla, la venta se registra sin categoría. En Blumon corre
+ * ANTES del cargo; en Stripe, al finalizar la sesión ya pagada.
  */
-async function categoriasDeLaLiga(venueId: string, items: BundleItemSnapshot[]): Promise<Map<string, string | null>> {
-  const ids = [...new Set(items.map(it => it.productId))]
-  if (ids.length === 0) return new Map()
+export async function categoriasDeLaLiga(venueId: string, items: BundleItemSnapshot[]): Promise<Map<string, string | null>> {
   try {
+    const ids = [...new Set(items.map(it => it.productId))]
+    if (ids.length === 0) return new Map()
     const productos = await prisma.product.findMany({
       where: { venueId, id: { in: ids } },
       select: { id: true, category: { select: { name: true } } },

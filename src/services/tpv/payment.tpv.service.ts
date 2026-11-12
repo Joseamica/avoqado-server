@@ -2526,7 +2526,7 @@ async function updateOrderTotalsForStandalonePayment(
     const lealtad = {
       venueId: updatedOrder.venueId,
       orderId,
-      orderTotal: Math.max(0, newTotal - totalTip),
+      orderTotal: baseDeLealtadSinPropina(newTotal, totalTip),
       staffId,
       legacyCustomer: order.customer
         ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
@@ -5191,6 +5191,14 @@ async function verifyDelegatedPaymentLanded(
 }
 
 /**
+ * Base de puntos de lealtad = total sin propina, restado en Decimal a centavos (igual que `baseDeLealtadDeLaVenta`): con números de JS,
+ * 69.60 − 11.60 = 57.99999999999999 y el piso de los puntos daba 57 en vez de 58.
+ */
+function baseDeLealtadSinPropina(total: number, tip: number): number {
+  return Math.max(0, new Prisma.Decimal(total).minus(tip).toDecimalPlaces(2).toNumber())
+}
+
+/**
  * Record a fast payment (without specific table association)
  * @param venueId Venue ID
  * @param paymentData Payment creation data
@@ -6254,7 +6262,7 @@ export async function recordFastPayment(
     await awardLoyaltyForPaidOrder({
       venueId: fastOrder.venueId,
       orderId: fastOrder.id,
-      orderTotal: Math.max(0, Number(fastOrder.total) - Number(fastOrder.tipAmount ?? 0)),
+      orderTotal: baseDeLealtadSinPropina(Number(fastOrder.total), Number(fastOrder.tipAmount ?? 0)),
       staffId: validatedStaffId,
       legacyCustomer: fastOrder.customerId ? { id: fastOrder.customerId, firstName: null, lastName: null } : null,
     })

@@ -43,7 +43,12 @@ jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrder
 import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 import { tablaDeUnaVenta, type FilaDeLealtad } from '../../../__helpers__/ordenConMarcasDeLealtad'
-import { completeCharge, finalizeMercadoPagoCheckout, finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import {
+  categoriasDeLaLiga,
+  completeCharge,
+  finalizeMercadoPagoCheckout,
+  finalizePaymentLinkCheckout,
+} from '@/services/dashboard/paymentLink.service'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
 
 const VENUE = 'venue-123'
@@ -311,6 +316,13 @@ describe('liga de pago · la lealtad se recupera si el proceso muere', () => {
     expect(prismaMock.product.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ venueId: VENUE, id: { in: ['prod-cafe', 'prod-pan'] } }) }),
     )
+  })
+
+  it('un renglón malformado del snapshot no lanza: el helper devuelve un mapa vacío', async () => {
+    const mapa = await categoriasDeLaLiga(VENUE, [null as any, { productId: 'prod-cafe' } as any])
+
+    expect(mapa.size).toBe(0)
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
   })
 
   it('si leer las categorías falla, la venta cobrada se registra igual (sin categoría)', async () => {

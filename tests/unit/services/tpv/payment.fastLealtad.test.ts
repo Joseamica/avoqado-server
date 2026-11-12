@@ -227,6 +227,14 @@ describe('recordFastPayment — la venta rápida da lealtad (Amaena, 14-sep-2026
     expect(award.mock.calls[0][0].orderTotal).toBe(100)
   })
 
+  it('la base resta la propina en centavos exactos: total $69.60 (58 + $11.60 de propina) = 58 (no 57.99…)', async () => {
+    installTransaction()
+
+    await recordFastPayment(VENUE, cobroRapido({ amount: 5800, tip: 1160 }), 'user-1')
+
+    expect(award.mock.calls[0][0].orderTotal).toBe(58)
+  })
+
   it('un cobro que NO quedó completado no marca ni da lealtad', async () => {
     const { txOrderUpdate } = installTransaction()
 
