@@ -66,35 +66,47 @@ export async function descuentosDeLosClientes(
     { OR: [{ validUntil: null }, { validUntil: { gte: ahora } }] },
   ]
   // La regla vive en el WHERE: sólo vuelven candidatos válidos. `cuentaComoDescuentoDelCliente` queda como doble revisión.
-  // ponytail: tope de 10 asignaciones válidas por cliente en esta consulta; el orden es global (priority, value, más viejo),
-  // así que lo mejor sale primero. Si algún cliente llega a tener más, subir el tope o consultar por cliente.
-  const filas = await db.customerDiscount.findMany({
-    where: {
-      customerId: { in: customerIds },
+  const donde = (ids: string[]): Prisma.CustomerDiscountWhereInput => ({
+    customerId: { in: ids },
+    active: true,
+    maxUses: null,
+    AND: ventana(ahora),
+    discount: {
+      venueId,
       active: true,
-      maxUses: null,
-      AND: ventana(ahora),
-      discount: {
-        venueId,
-        active: true,
-        type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
-        scope: 'ORDER',
-        requiresApproval: false,
-        minPurchaseAmount: null,
-        timeFrom: null,
-        timeUntil: null,
-        maxTotalUses: null,
-        maxUsesPerCustomer: null,
-        customerGroupId: null,
-        // Una lista NULL en la base (descuentos de referidos, cargas por SQL) Prisma la lee como []: se aceptan las dos,
-        // igual que `reglasDeDescuento.ts`. Con sólo `isEmpty` la base los descartaba (QA en la copia, 11-nov).
-        AND: [...ventana(ahora), { OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { equals: null } }] }],
-      },
+      type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
+      scope: 'ORDER',
+      requiresApproval: false,
+      minPurchaseAmount: null,
+      timeFrom: null,
+      timeUntil: null,
+      maxTotalUses: null,
+      maxUsesPerCustomer: null,
+      customerGroupId: null,
+      // Una lista NULL en la base (descuentos de referidos, cargas por SQL) Prisma la lee como []: se aceptan las dos,
+      // igual que `reglasDeDescuento.ts`. Con sólo `isEmpty` la base los descartaba (QA en la copia, 11-nov).
+      AND: [...ventana(ahora), { OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { equals: null } }] }],
     },
-    include: { discount: true },
-    orderBy: [{ discount: { priority: 'desc' } }, { discount: { value: 'desc' } }, { discount: { createdAt: 'asc' } }],
-    take: customerIds.length * TOPE_POR_CLIENTE,
   })
+  const orden: Prisma.CustomerDiscountOrderByWithRelationInput[] = [
+    { discount: { priority: 'desc' } },
+    { discount: { value: 'desc' } },
+    { discount: { createdAt: 'asc' } },
+  ]
+  // ponytail: tope de 10 asignaciones válidas por cliente; el orden es global (priority, value, más viejo), así que el
+  // primer renglón de cada cliente que sí salió es su ganador. Si se llena el tope, a un cliente le pueden haber ganado el
+  // lugar los de otro (Codex r7 #1): a los que no salieron se les busca aparte, uno por uno y con take 1 (sólo pasa con más
+  // de 10 asignaciones válidas en un mismo cliente).
+  const tope = customerIds.length * TOPE_POR_CLIENTE
+  const filas = await db.customerDiscount.findMany({ where: donde(customerIds), include: { discount: true }, orderBy: orden, take: tope })
+  if (filas.length === tope) {
+    const salieron = new Set(filas.map(f => f.customerId))
+    const faltan = customerIds.filter(id => !salieron.has(id))
+    const sueltas = await Promise.all(
+      faltan.map(id => db.customerDiscount.findMany({ where: donde([id]), include: { discount: true }, orderBy: orden, take: 1 })),
+    )
+    filas.push(...sueltas.flat())
+  }
 
   const candidatos = new Map<string, Discount[]>()
   for (const f of filas) {

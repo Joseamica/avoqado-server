@@ -88,6 +88,34 @@ describe('elegirDescuentoDelCliente', () => {
 })
 
 describe('descuentosDeLosClientes', () => {
+  // Codex r7 #1: el orden es global; si un cliente llena el tope, al otro le ganan el lugar. Al que no salió se le pregunta aparte.
+  it('si se llena el tope, a quien no salió se le busca aparte (uno por uno, take 1) y conserva su descuento', async () => {
+    const delPrimero = Array.from({ length: 20 }, (_, i) => ({
+      customerId: 'c1',
+      discountId: `a${i}`,
+      ...asig(),
+      discount: base({ id: `a${i}`, name: `Alto ${i}`, value: 50, priority: 9 }),
+    }))
+    const delSegundo = [{ customerId: 'c2', discountId: 'b', ...asig(), discount: base({ id: 'b', name: 'Cliente 10 %', value: 10 }) }]
+    const findMany = jest.fn().mockResolvedValueOnce(delPrimero).mockResolvedValueOnce(delSegundo)
+    const mapa = await descuentosDeLosClientes('v1', ['c1', 'c2'], { customerDiscount: { findMany } } as any)
+
+    expect(findMany).toHaveBeenCalledTimes(2)
+    const segunda = findMany.mock.calls[1][0]
+    expect(segunda.where.customerId).toEqual({ in: ['c2'] })
+    expect(segunda.take).toBe(1)
+    expect(segunda.orderBy).toEqual(findMany.mock.calls[0][0].orderBy)
+    expect(mapa.get('c2')).toMatchObject({ discountId: 'b', name: 'Cliente 10 %' })
+    expect(mapa.get('c1')).toMatchObject({ discountId: 'a0' })
+  })
+
+  it('sin llenar el tope no hay consultas de más', async () => {
+    const findMany = jest.fn().mockResolvedValue([{ customerId: 'c1', discountId: 'a', ...asig(), discount: base({ id: 'a' }) }])
+    await descuentosDeLosClientes('v1', ['c1', 'c2'], { customerDiscount: { findMany } } as any)
+
+    expect(findMany).toHaveBeenCalledTimes(1)
+  })
+
   it('una consulta para varios clientes; sólo entra quien tiene uno válido', async () => {
     const findMany = jest.fn().mockResolvedValue([
       { customerId: 'c1', discountId: 'a', ...asig(), discount: base({ id: 'a', name: 'Cliente 10 %', value: 10 }) },
