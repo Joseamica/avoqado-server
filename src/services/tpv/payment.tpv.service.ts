@@ -404,6 +404,7 @@ import {
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
   esVentaCerrada,
+  PAGO_PARA_SALDO_SELECT,
   type CompletedPaymentForBalance,
 } from '../shared/orderBalance'
 // Founder 3-oct (Tarea 6a): cobrar una cuenta CANCELADA — el cobro nuevo se rechaza; lo ya capturado la reabre.
@@ -4069,12 +4070,7 @@ export async function recordOrderPayment(
             // — el único olvido de esta lista que vuelve la regla MÁS agresiva, no inerte.
             select: {
               id: true,
-              amount: true,
-              tipAmount: true,
-              type: true,
-              // D19: el saldo de `cobroEnEfectivoSobreOrdenSaldada` resta lo que un reembolso de abono volvió a deber.
-              reopenedAmount: true,
-              reopenedTipAmount: true,
+              ...PAGO_PARA_SALDO_SELECT, // importe, propina, tipo y lo reabierto (D19)
               method: true,
               createdAt: true,
               terminalId: true,
