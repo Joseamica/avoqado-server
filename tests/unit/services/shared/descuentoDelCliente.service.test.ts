@@ -109,7 +109,6 @@ describe('descuentosDeLosClientes', () => {
         scope: 'ORDER',
         requiresApproval: false,
         minPurchaseAmount: null,
-        daysOfWeek: { isEmpty: true },
         timeFrom: null,
         timeUntil: null,
         maxTotalUses: null,
@@ -118,7 +117,10 @@ describe('descuentosDeLosClientes', () => {
       },
     })
     expect(arg.where.AND).toHaveLength(2)
-    expect(arg.where.discount.AND).toHaveLength(2)
+    // Una lista NULL en la base (descuentos de referidos, cargas por SQL) Prisma la lee como []: se aceptan las dos.
+    expect(arg.where.discount.daysOfWeek).toBeUndefined()
+    expect(arg.where.discount.AND).toHaveLength(3)
+    expect(arg.where.discount.AND).toContainEqual({ OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { equals: null } }] })
     expect(arg.orderBy).toEqual([{ discount: { priority: 'desc' } }, { discount: { value: 'desc' } }, { discount: { createdAt: 'asc' } }])
     expect(arg.take).toBe(20)
     expect(mapa.size).toBe(1)
