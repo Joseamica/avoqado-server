@@ -167,6 +167,7 @@ const VENTA_SELECT = {
   originSystem: true,
   customerId: true,
   loyaltyEligibleAt: true,
+  loyaltySaleAt: true,
   loyaltyProcessedAt: true,
   orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
   // Sólo el ÚLTIMO cobro completado que no es reembolso: es el ancla del plazo cuando `loyaltyEligibleAt` es null. Los
@@ -502,12 +503,16 @@ async function leerPrograma(venueId: string): Promise<Programa> {
   return { stampsEnabled: Boolean(conPlan && config?.active && config?.stampsEnabled), maxStampsPerDay: config?.maxStampsPerDay ?? 0 }
 }
 
-/** El MISMO conteo que `grantStamp`: EARN del cliente en el día del VENUE. Tope 0 = sin tope. */
-async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, nowMs: number): Promise<boolean> {
+/** La hora de la VENTA, la misma que usa `grantStamp` para contar el día. */
+const horaDeLaVenta = (v: { loyaltySaleAt: Date | null; loyaltyEligibleAt: Date | null }, nowMs: number): Date =>
+  v.loyaltySaleAt ?? v.loyaltyEligibleAt ?? new Date(nowMs)
+
+/** El MISMO conteo que `grantStamp`: EARN del cliente en el día del VENUE de la hora de la VENTA. Tope 0 = sin tope. */
+async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, soldAt: Date): Promise<boolean> {
   if (!programa.stampsEnabled || programa.maxStampsPerDay <= 0) return false
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const tz = venue?.timezone ?? 'America/Mexico_City'
-  const ref = new Date(nowMs)
+  const ref = soldAt
   const hoy = await prisma.stampEvent.count({
     where: {
       venueId,
@@ -524,7 +529,7 @@ async function motivo(
   venueId: string,
   customerId: string,
   programa: Programa,
-  nowMs: number,
+  soldAt: Date,
 ): Promise<SaleStampReason | null> {
   switch (decision) {
     case 'STAMPED':
@@ -541,7 +546,7 @@ async function motivo(
     case 'NO_ANCHOR':
       return 'ERROR'
     case 'ELIGIBLE':
-      return (await topeDelDiaAlcanzado(venueId, customerId, programa, nowMs)) ? 'DAILY_LIMIT' : 'ERROR'
+      return (await topeDelDiaAlcanzado(venueId, customerId, programa, soldAt)) ? 'DAILY_LIMIT' : 'ERROR'
   }
 }
 
@@ -616,7 +621,14 @@ const minutosDesde = (settledAt: Date | null, nowMs: number): number | null =>
 async function describir(venueId: string, customerId: string, venta: Venta, programa: Programa, nowMs: number): Promise<SaleStampOutcome> {
   const decision = decideSaleStamp(fotoPara(venta, customerId), nowMs)
   const stamped = decision === 'STAMPED'
-  return armarResultado(venueId, customerId, programa, stamped, await motivo(decision, venueId, customerId, programa, nowMs), venta.id)
+  return armarResultado(
+    venueId,
+    customerId,
+    programa,
+    stamped,
+    await motivo(decision, venueId, customerId, programa, horaDeLaVenta(venta, nowMs)),
+    venta.id,
+  )
 }
 
 /** Sólo LEE: describe el sello de una venta para un cliente. No otorga nada. */
@@ -749,7 +761,7 @@ export async function awardLoyaltyForLateCustomer(args: {
       customerId,
       programa,
       stamped,
-      await motivo(decision, venueId, customerId, programa, nowMs),
+      await motivo(decision, venueId, customerId, programa, horaDeLaVenta(venta, nowMs)),
       orderId,
     )
 
@@ -896,7 +908,8 @@ export async function previewSaleStamp(args: { venueId: string; orderId: string;
     decision,
     esVentaNuevaDeCambio: foto.esVentaNuevaDeCambio,
     stampsEnabled: programa.stampsEnabled,
-    dailyLimitReached: decision === 'ELIGIBLE' ? await topeDelDiaAlcanzado(args.venueId, args.customerId, programa, nowMs) : false,
+    dailyLimitReached:
+      decision === 'ELIGIBLE' ? await topeDelDiaAlcanzado(args.venueId, args.customerId, programa, horaDeLaVenta(venta, nowMs)) : false,
     minutosDesdeElCobro: minutosDesde(foto.settledAt, nowMs),
   }
 }

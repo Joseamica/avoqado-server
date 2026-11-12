@@ -122,8 +122,8 @@ export async function updateLoyaltyConfig(
       throw new BadRequestError(`La cartilla no puede pedir más de ${MAX_SELLOS} sellos`)
     }
   }
-  if (data.maxStampsPerDay !== undefined && (!Number.isInteger(data.maxStampsPerDay) || data.maxStampsPerDay < 1)) {
-    throw new BadRequestError('El tope de sellos por día debe ser al menos 1')
+  if (data.maxStampsPerDay !== undefined && (!Number.isInteger(data.maxStampsPerDay) || data.maxStampsPerDay < 0)) {
+    throw new BadRequestError('El tope de sellos por día no puede ser negativo (0 = sin límite)')
   }
 
   // Ensure config exists
