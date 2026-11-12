@@ -333,3 +333,27 @@ describe('el tope del catálogo vale para cualquier tipo de descuento de cuenta 
     expect(fila.reparto?.tope).toBeUndefined()
   })
 })
+
+// D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el % en centavos enteros, mitad hacia arriba, como la TPV y ANDROID. En pesos flotantes
+// 2.135 × 100 = 213.49999999999997 y el 10 % de una cuenta de $21.35 daba $2.13.
+describe('D2 — el % de cuenta en centavos: 10 % de $21.35 = $2.14 (antes $2.13)', () => {
+  const ventaDe2135 = (extra: Fila = {}) => venta({ items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }], tip: 0, ...extra })
+
+  it('🔴 mesa de ANDROID (catálogo en cuenta abierta): $2.14 en la fila y en la cuenta', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135())
+    const aplicado = await applyOrderDiscount(VENUE, creada.id, DESCUENTO_10, 'staff-1')
+    expect(aplicado.amount).toBe(2.14)
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 venta sin red de la TPV con `orderDiscountId`: $2.14 y la cuenta cierra con los $19.21 que cobró la terminal', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135({ orderDiscountId: DESCUENTO_10, discount: 0, source: 'TPV' }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    const saldo = cierraCon(orden, 19.21, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+  })
+})

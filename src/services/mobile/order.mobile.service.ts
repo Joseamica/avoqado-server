@@ -76,7 +76,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
-import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -2799,7 +2799,9 @@ export async function applyOrderDiscountInTransaction(
   // `remainingDiscountable` que ya usan discount.tpv.service.ts y
   // discountEngine.service.ts.
   const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+  // D2 (12-nov): el % en centavos enteros, mitad hacia arriba (en pesos flotantes 10 % de $21.35 daba $2.13).
+  const rawAmount =
+    discount.type === 'PERCENTAGE' ? porcentajeEnCentavos(aCentavos(subtotal), discount.value) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
   // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope

@@ -771,3 +771,41 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
     })
   })
 })
+
+// D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el descuento manual en % de la TPV en centavos enteros, mitad hacia arriba, como la propia
+// TPV (BigDecimal). En pesos flotantes 2.135 × 100 = 213.49999999999997: el 10 % de $21.35 daba $2.13.
+describe('D2 — applyDiscount en %: 10 % de $21.35 = $2.14 (antes $2.13)', () => {
+  const cuenta = () =>
+    ordenConCargo({
+      subtotal: new Decimal(21.35),
+      serviceChargeAmount: new Decimal(0),
+      total: new Decimal(21.35),
+      remainingBalance: new Decimal(21.35),
+      items: [{ id: 'item-1', productName: 'Café', product: { name: 'Café' }, sentToKitchenAt: null, total: new Decimal(21.35) }],
+    })
+  const diezPorCiento = (extra: Record<string, unknown> = {}) => ({
+    type: 'PERCENTAGE' as const,
+    value: 10,
+    reason: 'Promo',
+    staffId: STAFF_ID,
+    expectedVersion: 1,
+    ...extra,
+  })
+  beforeEach(() => {
+    mockPrisma.order.findUnique.mockResolvedValue(cuenta())
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
+  })
+
+  it('🔴 de toda la cuenta: $2.14 en la fila y en la cuenta', async () => {
+    await applyDiscount(VENUE_ID, ORDER_ID, diezPorCiento())
+    expect(Number(mockPrisma.orderDiscount.create.mock.calls[0][0].data.amount)).toBe(2.14)
+    expect(datosGuardados().discountAmount).toBe(2.14)
+    expect(datosGuardados().total).toBe(19.21)
+  })
+
+  it('🔴 de un renglón (`itemIds`): $2.14', async () => {
+    await applyDiscount(VENUE_ID, ORDER_ID, diezPorCiento({ itemIds: ['item-1'] }))
+    expect(Number(mockPrisma.orderDiscount.create.mock.calls[0][0].data.amount)).toBe(2.14)
+    expect(datosGuardados().discountAmount).toBe(2.14)
+  })
+})

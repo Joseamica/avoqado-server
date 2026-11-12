@@ -51,7 +51,14 @@ import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarC
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
-import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import {
+  aCentavos,
+  comoJson,
+  importesDeLasFilas,
+  nuevoRepartoDeCuenta,
+  nuevoRepartoDirigido,
+  porcentajeEnCentavos,
+} from '../shared/repartoDescuento'
 import {
   conservarDescuentoHistorico,
   filasDeLaOrden,
@@ -3806,7 +3813,8 @@ export async function applyDiscount(
         const itemsSubtotal = itemsToDiscount.reduce((sum, item) => sum + Number(item.total), 0)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (itemsSubtotal * input.value) / 100
+          // D2 (12-nov): centavos enteros, mitad hacia arriba, como la TPV (en pesos flotantes 10 % de $21.35 daba $2.13).
+          discountAmount = porcentajeEnCentavos(aCentavos(itemsSubtotal), input.value) / 100
         } else {
           discountAmount = Math.min(input.value, itemsSubtotal) // Can't discount more than item total
         }
@@ -3815,7 +3823,7 @@ export async function applyDiscount(
         const orderSubtotal = Number(order.subtotal)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (orderSubtotal * input.value) / 100
+          discountAmount = porcentajeEnCentavos(aCentavos(orderSubtotal), input.value) / 100 // D2: ídem
         } else {
           discountAmount = Math.min(input.value, orderSubtotal) // Can't discount more than order total
         }

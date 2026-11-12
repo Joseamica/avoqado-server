@@ -27,6 +27,7 @@ import {
   importesDeLasFilas,
   nuevoRepartoDeCuenta,
   nuevoRepartoDirigido,
+  porcentajeEnCentavos,
   reduccionDeImpuestoCobrado,
   type AlcanceDeDescuento,
   type Ambito,
@@ -482,7 +483,8 @@ export function calculateDiscountAmount(discount: DiscountCandidate['discount'],
   // Calculate discount based on type
   switch (discount.type) {
     case 'PERCENTAGE':
-      amount = (baseDelPorcentaje(discount, context, applicableBase) * discount.value) / 100
+      // D2: en centavos enteros, mitad hacia arriba (en pesos flotantes 10 % de $21.35 daba $2.13).
+      amount = porcentajeEnCentavos(aCentavos(baseDelPorcentaje(discount, context, applicableBase)), discount.value) / 100
       break
     case 'FIXED_AMOUNT':
       amount = Math.min(discount.value, applicableBase.amount) // Can't discount more than the base
@@ -721,7 +723,8 @@ function calculateBOGO(
 
   // Calculate discount for the cheapest qualifying items
   let remainingFree = freeItemCount
-  let totalDiscount = 0
+  // D2: en centavos y decimal exacto, con UN redondeo al final (en pesos flotantes, 50 % de $16.15 daba $8.07 y no $8.08).
+  let totalCents = new Prisma.Decimal(0)
   const applicableItems: string[] = []
   // B2: lo regalado POR ARTÍCULO (antes del tope): los pesos de la fila DIRIGIDA.
   const pesosPorRenglon: Record<string, number> = {}
@@ -730,24 +733,22 @@ function calculateBOGO(
     if (remainingFree <= 0) break
 
     const itemsToDiscount = Math.min(item.quantity, remainingFree)
-    const itemDiscount = (item.unitPrice * itemsToDiscount * discountPercent) / 100
+    const itemCents = new Prisma.Decimal(aCentavos(item.unitPrice)).mul(itemsToDiscount).mul(discountPercent).div(100)
 
-    totalDiscount += itemDiscount
-    pesosPorRenglon[item.id] = (pesosPorRenglon[item.id] ?? 0) + itemDiscount
+    totalCents = totalCents.plus(itemCents)
+    pesosPorRenglon[item.id] = (pesosPorRenglon[item.id] ?? 0) + itemCents.div(100).toNumber()
     remainingFree -= itemsToDiscount
     applicableItems.push(item.id)
   }
 
-  // Apply max discount cap
+  // Round (mitad hacia arriba) and apply max discount cap
+  let amountCents = totalCents.toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
   if (discount.maxDiscountAmount !== null) {
-    totalDiscount = Math.min(totalDiscount, discount.maxDiscountAmount)
+    amountCents = Math.min(amountCents, aCentavos(discount.maxDiscountAmount))
   }
 
-  // Round
-  totalDiscount = Math.round(totalDiscount * 100) / 100
-
   return {
-    amount: totalDiscount,
+    amount: amountCents / 100,
     applicableItems,
     pesosPorRenglon,
   }
@@ -1521,7 +1522,8 @@ export async function applyManualDiscount(
         if (value < 0 || value > 100) {
           return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Percentage must be 0-100' }
         }
-        amount = (remainingDiscountable * value) / 100
+        // D2: en centavos enteros, mitad hacia arriba (antes $2.13 por 10 % de $21.35).
+        amount = porcentajeEnCentavos(aCentavos(remainingDiscountable), value) / 100
         break
       case 'FIXED_AMOUNT':
         amount = Math.min(value, remainingDiscountable)

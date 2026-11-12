@@ -121,6 +121,23 @@ describe('redeemStampReward', () => {
     expect(r.discountAmount).toBe(50)
   })
 
+  // D2 (12-nov): en centavos enteros, como lo estiman ANDROID e iOS (`premioEstimadoCents`): en pesos flotantes daba $2.13 y la
+  // tablet avisaba «se aplicó por $2.13, no por $2.14».
+  it('🔴 D2: un premio del 10 % sobre una cuenta de $21.35 descuenta $2.14 (antes $2.13)', async () => {
+    prismaMock.order.findFirst.mockResolvedValue({ ...ORDEN, subtotal: 21.35, total: 21.35 } as any)
+    prismaMock.stampReward.findFirst.mockResolvedValue({
+      ...PREMIO_MONTO,
+      rewardType: 'PERCENTAGE',
+      rewardValue: 10,
+      rewardLabel: '10% de descuento',
+    } as any)
+
+    const r = await redeemStampReward('v1', 'o1', 'rw1')
+
+    expect(r.discountAmount).toBe(2.14)
+    expect(Number((prismaMock.orderDiscount.create.mock.calls[0][0] as any).data.amount)).toBe(2.14)
+  })
+
   it('🔴 un premio de PRODUCTO GRATIS descuenta el artículo MÁS CARO de la cuenta', async () => {
     // Decisión del founder (D10), tomada de Square: si el cliente pide algo más caro
     // que el producto prometido, se le descuenta lo más caro y no paga diferencia.
