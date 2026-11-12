@@ -379,25 +379,28 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['DEACTIVATED'])
     })
 
-    it('🔴 (d) $500 con abono de $200, se devuelven $100 y luego se paga el resto ($300): la activación se NIEGA (DINERO_DEVUELTO), sobres PENDING y anomalía', async () => {
+    it('🔴 (d) D19: $500 con abono de $200, se devuelven $100 ⇒ vuelve a deber $400; pagar $300 la deja PARTIAL (falta $100) y los $100 restantes la cierran y ACTIVAN el sobre', async () => {
+      // Antes de D19 (12-nov) el reembolso no reabría: pagar $300 la dejaba PAGADA con $400 netos y F8 negaba la activación.
       const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
       await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
       expect((await ordenDe(venta.orderId)).status).not.toBe('CANCELLED')
+      expect((await ordenDe(venta.orderId)).remainingBalance.toFixed(2)).toBe('400.00')
 
       await payCashOrder(venueId, venta.orderId, { amount: 30000, tip: 0, staffId, idempotencyKey: `b1r1-resto-${venta.orderId}` })
 
-      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PAID')
+      const aMedias = await ordenDe(venta.orderId)
+      expect([aMedias.paymentStatus, aMedias.remainingBalance.toFixed(2)]).toEqual(['PARTIAL', '100.00'])
       expect((await sobresDe(venta.giftCardIds)).map(x => [x.status, x.balance.toFixed(2)])).toEqual([['PENDING', '0.00']])
-      expect(await prisma.giftCardActivity.count({ where: { giftCardId: venta.giftCardIds[0], type: 'ACTIVATE' } })).toBe(0)
-      expect((await anomaliaDeActivacion(venta.orderId))?.observedState).toMatchObject({
-        motivo: 'DINERO_DEVUELTO',
-        cobrado: '500.00',
-        reembolsado: '100.00',
-        esperado: '500.00',
-      })
+      expect(await anomaliaDeActivacion(venta.orderId)).toBeFalsy()
+
+      await payCashOrder(venueId, venta.orderId, { amount: 10000, tip: 0, staffId, idempotencyKey: `b1r1-ultimo-${venta.orderId}` })
+
+      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PAID')
+      expect((await sobresDe(venta.giftCardIds)).map(x => [x.status, x.balance.toFixed(2)])).toEqual([['ACTIVE', '500.00']])
+      expect(await anomaliaDeActivacion(venta.orderId)).toBeFalsy()
     })
 
-    it('(d) variante: se devuelven $100 y se paga DE MÁS ($400 con terminal externa): lo cobrado no cuadra ⇒ COBRADO_DISTINTO, sin activar', async () => {
+    it('🔴 (d) variante D19 (Codex código r3 #1): se devuelven $100 y se cobran los $400 que faltan con terminal externa ⇒ PAGADA y el sobre se ACTIVA ($600 brutos, $500 que cubren)', async () => {
       const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
       await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
 
@@ -410,13 +413,9 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
         externalSource: 'Terminal externa',
       })
 
-      expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['PENDING'])
-      expect((await anomaliaDeActivacion(venta.orderId))?.observedState).toMatchObject({
-        motivo: 'COBRADO_DISTINTO',
-        cobrado: '600.00',
-        reembolsado: '100.00',
-        esperado: '500.00',
-      })
+      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PAID')
+      expect((await sobresDe(venta.giftCardIds)).map(x => [x.status, x.balance.toFixed(2)])).toEqual([['ACTIVE', '500.00']])
+      expect(await anomaliaDeActivacion(venta.orderId)).toBeFalsy()
     })
 
     it('(e) carrera con el cobro que completa la cuenta, orden «cobro primero»: la venta ya está PAGADA ⇒ GIFT_CARD_CANCEL_NOT_STARTED (es el flujo de B2), sin REFUND', async () => {
@@ -432,11 +431,11 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['ACTIVE'])
     })
 
-    it('🔴 r2 · fix 1: la cuenta del caso (d) —PAGADA con sus sobres PENDING porque F8 negó la activación— se devuelve cobro por cobro y en $0 se cierra', async () => {
+    it('🔴 r2 · fix 1: la cuenta del caso (d) —con D19 sigue PARTIAL, debiendo $100, con sus sobres PENDING— se devuelve cobro por cobro y en $0 se cierra', async () => {
       const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
       await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
       await payCashOrder(venueId, venta.orderId, { amount: 30000, tip: 0, staffId, idempotencyKey: `b1r2-resto-${venta.orderId}` })
-      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PAID')
+      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PARTIAL')
       expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['PENDING'])
       const cobros = await prisma.payment.findMany({
         where: { venueId, orderId: venta.orderId, status: 'COMPLETED', type: { not: 'REFUND' } },

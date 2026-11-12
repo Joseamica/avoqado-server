@@ -4,7 +4,7 @@
  *   cuenta $100 · abono $50 en efectivo · el panel devuelve ese abono
  *     ⇒ la fila del reembolso guarda `reopenedAmount = 50` y la cuenta guarda pagado $0 / falta $100 (sigue PARTIAL)
  *     ⇒ «Liquidar» del panel cobra $100, no $50
- *     ⇒ con otro cobro de $50, el barrido de «pagada pero abierta» ya NO la elige (antes sumaba $100 y la cerraba)
+ *     ⇒ el POS cobra $50 en efectivo: queda PARTIAL debiendo $50 (antes PAGADA) y el barrido de «pagada pero abierta» no la elige
  *   y la regla del 18-ago: una venta cerrada que se reembolsa sigue cerrada, sin nada reabierto.
  */
 import prisma from '@/utils/prismaClient'
@@ -12,6 +12,7 @@ import { Prisma } from '@prisma/client'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
+import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
 import { computeOrderBalance, PAGO_PARA_SALDO_SELECT } from '@/services/shared/orderBalance'
 import { limpiarVenue, sembrarCobro } from '../dashboard/sembrarCobroParaReembolso'
@@ -127,32 +128,17 @@ describe('D19 · el abono devuelto vuelve a deberse (Postgres)', () => {
     expect(calculado.paidAmount.toString()).toBe('100')
   })
 
-  it('🔴 con otro cobro de $50, el barrido de «pagada pero abierta» ya no la elige (antes contaba $100 y la cerraba)', async () => {
+  it('🔴 el POS cobra $50 en efectivo después: la cuenta queda PARTIAL debiendo $50 (antes se cerraba PAGADA) y el barrido no la elige', async () => {
     const { order, abono } = await cuentaConAbono(venueId, staffId)
     await issueRefund({ venueId, paymentId: abono.id, amount: 5000, reason: 'OTHER', staffId })
-    await prisma.payment.create({
-      data: {
-        venueId,
-        orderId: order.id,
-        amount: d(50),
-        tipAmount: d(0),
-        method: 'CASH',
-        status: 'COMPLETED',
-        type: 'REGULAR',
-        splitType: 'EQUALPARTS',
-        source: 'TPV',
-        processedById: staffId,
-        feePercentage: 0,
-        feeAmount: d(0),
-        netAmount: d(50),
-      },
-    })
 
-    const candidatas = await findPaidButOpenOrders(prisma, { graceMs: 0, limit: 100, since: new Date(Date.now() - 60 * 60 * 1000) })
+    await payCashOrder(venueId, order.id, { amount: 5000, tip: 0, staffId, idempotencyKey: `d19-pos-${order.id}` })
 
-    expect(candidatas.map(c => c.id)).not.toContain(order.id)
-    const { calculado } = await saldoDe(venueId, order.id)
+    const { guardado, calculado } = await saldoDe(venueId, order.id)
+    expect([guardado.paymentStatus, guardado.remainingBalance.toString()]).toEqual(['PARTIAL', '50'])
     expect(calculado.remainingBalance.toString()).toBe('50')
+    const candidatas = await findPaidButOpenOrders(prisma, { graceMs: 0, limit: 100, since: new Date(Date.now() - 60 * 60 * 1000) })
+    expect(candidatas.map(c => c.id)).not.toContain(order.id)
   })
 
   it('REGRESIÓN 18-ago: una venta CERRADA (PAID) que se reembolsa sigue cerrada y no reabre nada', async () => {

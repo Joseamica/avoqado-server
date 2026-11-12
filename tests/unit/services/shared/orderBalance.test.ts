@@ -55,6 +55,9 @@ const refund = (amount: string, tip = '0.00') => ({
   amount: d(`-${amount}`),
   tipAmount: d(`-${tip}`),
   type: 'REFUND' as const,
+  // D19: una fila que PUEDE ser REFUND trae lo reabierto; null = no reabre (como todos los reembolsos de antes del 12-nov).
+  reopenedAmount: null,
+  reopenedTipAmount: null,
 })
 
 describe('computeOrderBalance — aritmética canónica del saldo', () => {
@@ -431,7 +434,11 @@ describe('D19 — lo reabierto de un reembolso se resta de lo cobrado', () => {
       pay('200.00'),
       { ...refund('200.00'), reopenedAmount: null, reopenedTipAmount: null },
     ])
-    const sinCampo = computeOrderBalance(order({ subtotal: '200.00' }), [pay('200.00'), refund('200.00')])
+    // Sin el campo (un llamador sin tipos): se lee como null.
+    const sinCampo = computeOrderBalance(order({ subtotal: '200.00' }), [
+      pay('200.00'),
+      { ...refund('200.00'), reopenedAmount: undefined, reopenedTipAmount: undefined },
+    ])
 
     for (const balance of [conNull, sinCampo]) {
       expect(balance.paidAmount.toString()).toBe('200')

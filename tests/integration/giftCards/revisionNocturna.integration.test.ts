@@ -185,30 +185,27 @@ describe('B7 · revisión nocturna', () => {
     expect(await anomalia('BALANCE_MISMATCH', venta.giftCardIds[0])).toBe(0)
   })
 
-  it('🔴 r1 B-1 (F8): abono de $200, se devuelven $100, abono final de $300 ⇒ la cuenta queda PAGADA pero el sobre de $500 NO se activa, ni de noche', async () => {
-    // Con los servicios REALES. (Devolver el abono COMPLETO ya no sirve aquí: desde B1 r1 una venta sin pagar que queda en $0 se
-    // cancela en la misma transacción del reembolso.)
+  it('🔴 r1 B-1 (F8) con D19: abono de $200, se devuelven $100, abono de $300 ⇒ la cuenta sigue debiendo $100 (no se cierra con dinero de menos) y la noche no activa ni avisa', async () => {
+    // Antes de D19 (12-nov) el reembolso no reabría y la cuenta quedaba PAGADA con $400 netos; F8 negaba la activación y dejaba
+    // ACTIVATION_AMOUNT_MISMATCH. Ahora el abono devuelto vuelve a deberse: la cuenta sigue abierta, que es la protección de verdad.
     const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
     await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
     await payCashOrder(venueId, venta.orderId, { amount: 30000, tip: 0, staffId, idempotencyKey: `b7-f8-final-${venta.orderId}` })
-    expect((await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })).paymentStatus).toBe('PAID')
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })
+    expect([cuenta.paymentStatus, cuenta.remainingBalance.toFixed(2)]).toEqual(['PARTIAL', '100.00'])
     const sigueSinActivar = async () => {
       const sobre = await prisma.giftCard.findUniqueOrThrow({ where: { id: venta.giftCardIds[0] } })
       expect([sobre.status, sobre.balance.toFixed(2)]).toEqual(['PENDING', '0.00'])
       expect(await prisma.giftCardActivity.count({ where: { giftCardId: venta.giftCardIds[0], type: 'ACTIVATE' } })).toBe(0)
     }
     await sigueSinActivar()
-    expect(await observado('ACTIVATION_AMOUNT_MISMATCH', venta.orderId)).toMatchObject({ motivo: 'DINERO_DEVUELTO', esperado: '500.00' })
 
-    // La noche (pasada la gracia de 10 min) encuentra la cuenta PAGADA con su sobre PENDING, intenta activarla con la MISMA función
-    // y tampoco activa. `PAID_WITH_PENDING` sólo se escribe cuando la noche SÍ activa; lo que queda es la anomalía de la activación,
-    // una sola fila aunque la noche lo reintente (`giftcard:<check>:<id>` deduplica, R6).
+    // La noche (pasada la gracia de 10 min) no la ve como pagada: no activa ni deja anomalías de activación.
     await prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = "updatedAt" - interval '1 hour' WHERE id = ${venta.orderId}`
-    const r = await noche()
-    expect(r.cuentasPagadasConPendientes).toBeGreaterThanOrEqual(1)
+    await noche()
     await sigueSinActivar()
     expect(await anomalia('PAID_WITH_PENDING', venta.orderId)).toBe(0)
-    expect(await anomalia('ACTIVATION_AMOUNT_MISMATCH', venta.orderId)).toBe(1)
+    expect(await anomalia('ACTIVATION_AMOUNT_MISMATCH', venta.orderId)).toBe(0)
     expect(await anomalia('OPEN_AT_ZERO_WITH_PENDING', venta.orderId)).toBe(0)
   })
 

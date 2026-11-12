@@ -240,9 +240,10 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
       where: { venueId: VENUE, orderId: 'order-1', status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
       _sum: { amount: true },
     })
+    // D19: la misma consulta de devoluciones trae lo que reembolsos de abonos volvieron a deber.
     expect(prismaMock.payment.aggregate).toHaveBeenCalledWith({
       where: { venueId: VENUE, orderId: 'order-1', status: 'COMPLETED', type: 'REFUND' },
-      _sum: { amount: true },
+      _sum: { amount: true, reopenedAmount: true },
     })
     expect(prismaMock.giftCard.updateMany).toHaveBeenNthCalledWith(1, {
       where: { id: 'gc-1', venueId: VENUE, status: 'PENDING' },
