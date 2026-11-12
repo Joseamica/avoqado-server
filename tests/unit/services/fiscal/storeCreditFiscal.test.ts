@@ -264,6 +264,8 @@ describe('la nota de crédito', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       payment: { create, update: jest.fn(), findFirst: jest.fn() },
+      // D19: el reembolso pregunta si la cuenta todavía debía; este doble no la tiene ⇒ no reabre nada.
+      order: { findFirst: jest.fn().mockResolvedValue(null) },
       // develop (pedidos fase 2): la devolución sólo lleva su movimiento si el cobro original tiene el suyo.
       venueTransaction: { findUnique: jest.fn().mockResolvedValue({ id: 'cmviy09ma0009mywab26u6rlw' }), create: jest.fn() },
     }

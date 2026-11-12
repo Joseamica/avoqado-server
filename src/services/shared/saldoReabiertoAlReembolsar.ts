@@ -182,7 +182,7 @@ export async function fijarSaldoReabiertoEnTx(
  * pagada (mapa del 12-nov).
  */
 export async function cobradoQueCubreEnTx(
-  tx: Prisma.TransactionClient,
+  tx: Pick<Prisma.TransactionClient, 'payment'>,
   w: { venueId: string; orderId: string },
 ): Promise<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; cobros: number }> {
   const cobros = await tx.payment.aggregate({

@@ -278,6 +278,8 @@ interface RefundTransactionResult {
   /** «Regresa lo que salió menos lo que ya regresó» (28-oct): lo anotado en la transacción; se aplica después del commit. */
   regreso: Regreso | null
   refundPaymentId: string
+  /** D19: lo que este reembolso volvió a deber (sólo si la cuenta todavía debía); se audita después del commit. */
+  saldoReabierto?: SaldoReabierto
   originalPaymentId: string
   originalOrderId: string
   refundedItems: RefundedItemSnapshot[]

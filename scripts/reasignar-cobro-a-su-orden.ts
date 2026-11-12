@@ -171,7 +171,15 @@ type OrdenCruda = {
   tableId: string | null
   items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
   onlineOrder: { id: string } | null
-  payments: Array<{ id: string; status: string; type: string | null; amount: Prisma.Decimal; tipAmount: Prisma.Decimal }>
+  payments: Array<{
+    id: string
+    status: string
+    type: string | null
+    amount: Prisma.Decimal
+    tipAmount: Prisma.Decimal
+    reopenedAmount: Prisma.Decimal | null
+    reopenedTipAmount: Prisma.Decimal | null
+  }>
 }
 
 const aFoto = (o: OrdenCruda): OrdenFoto & { total: Prisma.Decimal; tipGuardado: Prisma.Decimal } => ({

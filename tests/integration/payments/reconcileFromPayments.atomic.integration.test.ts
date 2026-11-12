@@ -397,7 +397,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
       include: {
         payments: {
           where: { status: 'COMPLETED' },
-          select: { id: true, status: true, type: true, amount: true, tipAmount: true },
+          select: { id: true, status: true, type: true, amount: true, tipAmount: true, reopenedAmount: true, reopenedTipAmount: true },
           take: 10,
         },
         items: { select: { areaTicketLineId: true, giftCardId: true }, take: 10 },
