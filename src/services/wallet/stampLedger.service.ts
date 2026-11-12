@@ -28,7 +28,7 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
  *
  * 1. **Un pago = exactamente un sello.** La garantía NO es el chequeo previo de
  *    este archivo — entre un SELECT y un INSERT cabe otro cobro. La garantía es el
- *    índice `StampEvent_venueId_orderId_earn_unique`; el chequeo sólo evita el
+ *    índice `StampEvent_venueId_orderId_part_earn_unique` (parte 0 = el sello de siempre); el chequeo sólo evita el
  *    viaje. Por eso una violación de ESE índice se traduce a "ya estaba sellado"; cualquier otro único
  *    (premio, cartilla) se propaga. Y dos ventas del mismo cliente se forman en un candado por (negocio, cliente):
  *    el sello propio, el tope y la cartilla se leen dentro. La reversión toma el MISMO candado.
@@ -154,8 +154,11 @@ export interface GrantStampOptions {
   config?: StampConfigView | null
 }
 
-/** El índice que garantiza «un pago = un sello» (migración 20260826145859; parcial y crudo: Prisma no lo conoce por nombre). */
-const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_earn_unique'
+/**
+ * El índice que garantiza «cada parte de un pago se sella una vez» (parcial y crudo: Prisma no lo conoce por nombre). Era
+ * `(venueId, orderId)` (20260826145859); desde las promos de lealtad (20261112190000) es `(venueId, orderId, part)`.
+ */
+const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_part_earn_unique'
 
 /**
  * ¿Este P2002 es el sello de ESTA orden, y no el premio ni la cartilla siguiente? (auditoría A #3, 14-oct-2026)
@@ -163,8 +166,8 @@ const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_earn_unique'
  * Antes cualquier P2002 se leía como «ya estaba sellado». Si el choque era del premio (`StampReward.stampCardId`) o de la
  * cartilla siguiente (`StampCard[customerId, venueId, cycle]`), la transacción se revertía y el sello de una venta DISTINTA se
  * perdía en silencio. Se aceptan las formas que `esChoqueDelUnico` (turnoDeCaja.ts) midió contra Postgres: el nombre del índice
- * en `meta.constraint` / `meta.target` (suelto o en un arreglo de uno), o la lista EXACTA de columnas `['venueId','orderId']` del
- * modelo StampEvent. El otro único de esas columnas (`…_reversal_unique`) no se puede tocar aquí: sólo se insertan EARN.
+ * en `meta.constraint` / `meta.target` (suelto o en un arreglo de uno), o la lista EXACTA de columnas `['venueId','orderId','part']`
+ * del modelo StampEvent. El otro único de esas columnas (`…_part_reversal_unique`) no se puede tocar aquí: sólo se insertan EARN.
  * Sin descriptor no se adivina: se relanza (`earnPoints` lo difiere y el reconciliador reintenta).
  */
 function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
@@ -176,9 +179,10 @@ function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
   return (
     (meta?.modelName === undefined || meta.modelName === 'StampEvent') &&
     Array.isArray(descriptor) &&
-    descriptor.length === 2 &&
+    descriptor.length === 3 &&
     descriptor[0] === 'venueId' &&
-    descriptor[1] === 'orderId'
+    descriptor[1] === 'orderId' &&
+    descriptor[2] === 'part'
   )
 }
 

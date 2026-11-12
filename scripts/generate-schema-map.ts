@@ -504,6 +504,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   StampCard: 'Discounts, Loyalty & Credit Packs',
   StampEvent: 'Discounts, Loyalty & Credit Packs',
   StampReward: 'Discounts, Loyalty & Credit Packs',
+  LoyaltyPromotion: 'Discounts, Loyalty & Credit Packs',
+  LoyaltyPromotionUse: 'Discounts, Loyalty & Credit Packs',
   CreditPack: 'Discounts, Loyalty & Credit Packs',
   CreditPackItem: 'Discounts, Loyalty & Credit Packs',
   CreditPackPurchase: 'Discounts, Loyalty & Credit Packs',
