@@ -10,8 +10,8 @@ import { evaluarPromo, type PromoCandidata, type PromoDecidida, type VentaParaPr
  * No toma candados: la llama quien ya tiene el de la clienta (así dos ventas a la vez no se saltan el límite).
  */
 
-/** El panel deja a lo más 10 promos activas o programadas por negocio. */
-const PROMOS_POR_VENTA = 10
+/** El panel deja 10 activas o programadas; las terminadas que aún cubren una venta tardía también cuentan, por eso hay holgura. */
+const PROMOS_POR_VENTA = 25
 /** Mismo tope de renglones por orden que los libros fiscales (`TOPES_POR_ORDEN.renglones`). */
 const RENGLONES_POR_VENTA = 2_000
 
@@ -21,7 +21,12 @@ type Linea = VentaParaPromo['lineas'][number]
 export async function decidirPromoDeLaVentaEnTx(tx: TxConReintento, a: Venta): Promise<PromoDecidida | null> {
   const { venueId, customerId, orderId, soldAt } = a
   // Regla 14: si una mitad ya registró el uso, la venta ya está decidida con ESA promo, aunque después se haya creado otra.
-  const uso = await tx.loyaltyPromotionUse.findUnique({ where: { venueId_orderId: { venueId, orderId } }, select: { promotion: true } })
+  const uso = await tx.loyaltyPromotionUse.findUnique({
+    where: { venueId_orderId: { venueId, orderId } },
+    select: { customerId: true, promotion: true },
+  })
+  // El uso es de otra clienta (la venta cambió de clienta): ni se reusa ni se decide otra vez.
+  if (uso && uso.customerId !== customerId) return null
   const promos = uso
     ? [uso.promotion]
     : await tx.loyaltyPromotion.findMany({
@@ -34,6 +39,9 @@ export async function decidirPromoDeLaVentaEnTx(tx: TxConReintento, a: Venta): P
         take: PROMOS_POR_VENTA,
       })
   if (promos.length === 0) return null
+  if (!uso && promos.length === PROMOS_POR_VENTA) {
+    logger.warn('Promo de lealtad: la venta llegó al tope de promos candidatas; las más viejas no se leyeron', { venueId, orderId })
+  }
 
   const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone ?? 'America/Mexico_City'
@@ -65,6 +73,8 @@ export async function registrarUsoEnTx(
 ): Promise<void> {
   const stampsBonus = a.stampsBonus ?? 0
   const pointsBonus = a.pointsBonus ?? 0
+  // Toda fila de uso tiene bono (r2 #3): sin bono no se gasta el límite. Aquí pasan todos los llamadores.
+  if (stampsBonus <= 0 && pointsBonus <= 0) return
   await tx.loyaltyPromotionUse.upsert({
     where: { venueId_orderId: { venueId: a.venueId, orderId: a.orderId } },
     create: {

@@ -111,6 +111,17 @@ describe('decidirPromoDeLaVentaEnTx (Postgres real)', () => {
     expect((await decidir({ venueId, customerId, orderId: otra, soldAt, amount: 100 }))?.promotionId).toBe(nueva.id)
   })
 
+  it('el uso de la venta es de OTRA clienta → null (no se reusa ni se decide de nuevo)', async () => {
+    const { venueId, customerId } = await negocio()
+    const otra = (await prisma.customer.create({ data: { venueId, firstName: 'Otra' } })).id
+    const p = await promo(venueId)
+    const orderId = await venta(venueId, customerId)
+    const soldAt = new Date('2026-11-12T18:00:00Z')
+    await prisma.loyaltyPromotionUse.create({ data: { venueId, promotionId: p.id, customerId: otra, orderId, soldAt, stampsBonus: 1 } })
+
+    expect(await decidir({ venueId, customerId, orderId, soldAt, amount: 100 })).toBeNull()
+  })
+
   it('sin uso y sin promo vigente → null', async () => {
     const { venueId, customerId } = await negocio()
     await promo(venueId, { name: 'Pasada', endsAt: new Date('2026-11-10T05:59:59.999Z') })
@@ -199,5 +210,18 @@ describe('registrarUsoEnTx (Postgres real)', () => {
     const filas = await prisma.loyaltyPromotionUse.findMany({ where: { venueId, orderId }, take: 5 })
     expect(filas).toHaveLength(1)
     expect(filas[0]).toMatchObject({ promotionId: p.id, customerId, soldAt, stampsBonus: 1, pointsBonus: 110 })
+  })
+
+  it('sin bono en ninguna mitad no crea fila (toda fila de uso tiene bono)', async () => {
+    const { venueId, customerId } = await negocio()
+    await promo(venueId)
+    const orderId = await venta(venueId, customerId)
+    const soldAt = new Date('2026-11-12T18:00:00Z')
+    const decision = (await decidir({ venueId, customerId, orderId, soldAt, amount: 100 })) as PromoDecidida
+
+    await registrar({ venueId, customerId, orderId, soldAt, decision, stampsBonus: 0, pointsBonus: 0 })
+    await registrar({ venueId, customerId, orderId, soldAt, decision })
+
+    expect(await prisma.loyaltyPromotionUse.count({ where: { venueId, orderId } })).toBe(0)
   })
 })
