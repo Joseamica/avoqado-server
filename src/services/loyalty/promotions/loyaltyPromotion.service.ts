@@ -19,6 +19,10 @@ export const MAX_PROMOS_VIVAS = 10
 const PAGINA_DEFAULT = 50
 const PAGINA_MAX = 100
 const MAX_IDS = 200
+/** Cabe en `Decimal(12,2)`; el zod del panel tiene la misma cota. */
+const GASTO_MINIMO_MAX = 9_999_999.99
+/** Tope de página: `(page - 1) × pageSize` no desborda y nadie pagina 1,000,000 de promos. */
+const PAGINA_NUM_MAX = 10_000
 
 export const ESTADOS_DE_PROMO = ['ACTIVE', 'SCHEDULED', 'ENDED'] as const
 export type EstadoDePromo = (typeof ESTADOS_DE_PROMO)[number]
@@ -103,6 +107,7 @@ function whereDeEstado(estado: EstadoDePromo | 'VIVA' | undefined, ahora: Date):
 
 const mal = (m: string) => new BadRequestError(m)
 const enteroEntre = (n: unknown, min: number, max: number) => Number.isInteger(n) && (n as number) >= min && (n as number) <= max
+const hastaDosDecimales = (n: number) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6
 const sinRepetir = <T>(xs: T[]) => [...new Set(xs)]
 const definidos = <T extends object>(o: T): Partial<T> =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>
@@ -159,6 +164,8 @@ function validar(v: Valores): Valores {
   }
   if (v.productIds.length > 0 && v.categoryIds.length > 0) throw mal('Elige productos o categorías, no los dos')
   if (v.minSpend !== null && !(Number.isFinite(v.minSpend) && v.minSpend >= 0)) throw mal('El gasto mínimo no puede ser negativo')
+  if (v.minSpend !== null && (v.minSpend > GASTO_MINIMO_MAX || !hastaDosDecimales(v.minSpend)))
+    throw mal('El gasto mínimo va hasta $9,999,999.99, con hasta 2 decimales')
   if (!LIMITES.includes(v.limit)) throw mal('El límite por clienta debe ser NONE, ONCE_PER_DAY u ONCE_PER_PROMOTION')
   return {
     ...v,
@@ -293,7 +300,7 @@ export async function listLoyaltyPromotions(venueId: string, query: ListLoyaltyP
   if (query.status !== undefined && !ESTADOS_DE_PROMO.includes(query.status)) throw mal('El estado debe ser ACTIVE, SCHEDULED o ENDED')
   const entero = (n: unknown, d: number) => (typeof n === 'number' && Number.isFinite(n) ? Math.floor(n) : d)
   const pageSize = Math.min(PAGINA_MAX, Math.max(1, entero(query.pageSize, PAGINA_DEFAULT)))
-  const page = Math.max(1, entero(query.page, 1))
+  const page = Math.min(PAGINA_NUM_MAX, Math.max(1, entero(query.page, 1)))
   const tz = await zonaDelNegocio(venueId)
   const ahora = new Date()
   const where = { venueId, ...whereDeEstado(query.status, ahora) }
@@ -326,10 +333,14 @@ export async function createLoyaltyPromotion(
 
   const p = await prisma.$transaction(async tx => {
     await candado(tx, venueId)
-    const vivas = await tx.loyaltyPromotion.count({ where: { venueId, ...whereDeEstado('VIVA', new Date()) } })
+    // Regla 15 otra vez tras el candado: si otra alta lo tuvo, `startsAt` precalculado ya quedó en el pasado.
+    const ahoraEnTx = new Date()
+    const vivas = await tx.loyaltyPromotion.count({ where: { venueId, ...whereDeEstado('VIVA', ahoraEnTx) } })
     if (vivas >= MAX_PROMOS_VIVAS)
       throw new ConflictError(`Ya hay ${MAX_PROMOS_VIVAS} promociones de lealtad activas o programadas: termina una para crear otra`)
-    return tx.loyaltyPromotion.create({ data: { venueId, ...columnas(v), startsAt, endsAt, createdById } })
+    return tx.loyaltyPromotion.create({
+      data: { venueId, ...columnas(v), startsAt: startsAt > ahoraEnTx ? startsAt : ahoraEnTx, endsAt, createdById },
+    })
   })
 
   void logAction({
@@ -338,7 +349,7 @@ export async function createLoyaltyPromotion(
     action: 'LOYALTY_PROMOTION_CREATED',
     entity: 'LoyaltyPromotion',
     entityId: p.id,
-    data: paraBitacora(v, startsAt, endsAt),
+    data: paraBitacora(v, p.startsAt, endsAt),
   })
   return (await aVista([p], venueId, tz))[0]
 }

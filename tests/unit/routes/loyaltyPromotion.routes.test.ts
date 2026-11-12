@@ -3,7 +3,9 @@
  * candado de plan: cuelgan del mismo `router.use('/venues/:venueId/loyalty', …, checkFeatureAccess('LOYALTY_PROGRAM'))` que el
  * resto de lealtad, así que un negocio sin PRO recibe el MISMO 403 que en `/loyalty/config`.
  */
+import path from 'path'
 import express from 'express'
+import swaggerJsdoc from 'swagger-jsdoc'
 import request from 'supertest'
 import { prismaMock } from '../../__helpers__/setup'
 import dashboardRouter from '@/routes/dashboard.routes'
@@ -65,5 +67,18 @@ describe('rutas de promociones de lealtad', () => {
     // Control: con PRO pasa (es el candado de LOYALTY_PROGRAM, no otro).
     prismaMock.venueFeature.findMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
     expect((await request(app).post('/venues/v1/loyalty/promotions/x/end')).status).toBe(200)
+  })
+
+  it('las 4 rutas salen documentadas en el OpenAPI y el YAML se parsea (fix r1 #4)', () => {
+    const spec = swaggerJsdoc({
+      definition: { openapi: '3.0.0', info: { title: 'test', version: '1.0.0' } },
+      apis: [path.join(__dirname, '../../../src/routes/dashboard.routes.ts')],
+      failOnErrors: true,
+    }) as { paths: Record<string, Record<string, { summary?: string }>> }
+    const base = '/api/v1/dashboard/venues/{venueId}/loyalty/promotions'
+    expect(spec.paths[base]?.get?.summary).toBeTruthy()
+    expect(spec.paths[base]?.post?.summary).toBeTruthy()
+    expect(spec.paths[`${base}/{id}`]?.patch?.summary).toBeTruthy()
+    expect(spec.paths[`${base}/{id}/end`]?.post?.summary).toBeTruthy()
   })
 })

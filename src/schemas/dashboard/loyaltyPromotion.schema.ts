@@ -28,7 +28,15 @@ const campos = {
   timeUntil: Hora('La hora de fin').nullable().optional(),
   productIds: Ids('productos').optional(),
   categoryIds: Ids('categorías').optional(),
-  minSpend: z.number({ invalid_type_error: 'El gasto mínimo debe ser un número' }).nullable().optional(),
+  // Cota de Decimal(12,2) y centavos: sin esto, un monto enorme es un 500 de Prisma y uno de 3 decimales se redondea en silencio.
+  // La misma cota está en el servicio (por ahí entra el MCP).
+  minSpend: z
+    .number({ invalid_type_error: 'El gasto mínimo debe ser un número' })
+    .min(0, 'El gasto mínimo no puede ser negativo')
+    .max(9_999_999.99, 'El gasto mínimo va hasta $9,999,999.99')
+    .refine(n => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6, 'El gasto mínimo admite hasta 2 decimales')
+    .nullable()
+    .optional(),
   limit: z
     .enum(['NONE', 'ONCE_PER_DAY', 'ONCE_PER_PROMOTION'], {
       errorMap: () => ({ message: 'El límite por clienta debe ser NONE, ONCE_PER_DAY u ONCE_PER_PROMOTION' }),
@@ -42,7 +50,12 @@ export const ListLoyaltyPromotionsSchema = z.object({
     status: z
       .enum(['ACTIVE', 'SCHEDULED', 'ENDED'], { errorMap: () => ({ message: 'El estado debe ser ACTIVE, SCHEDULED o ENDED' }) })
       .optional(),
-    page: z.coerce.number().int('La página debe ser un número entero').positive('La página empieza en 1').optional(),
+    page: z.coerce
+      .number()
+      .int('La página debe ser un número entero')
+      .positive('La página empieza en 1')
+      .max(10_000, 'La página va hasta 10,000')
+      .optional(),
     // Sin máximo aquí: el servicio recorta a 100 (pedir 500 devuelve 100, no un 400).
     pageSize: z.coerce
       .number()

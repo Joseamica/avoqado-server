@@ -13,6 +13,7 @@ import {
   updateLoyaltyPromotion,
 } from '@/services/loyalty/promotions/loyaltyPromotion.service'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { CreateLoyaltyPromotionSchema, ListLoyaltyPromotionsSchema } from '@/schemas/dashboard/loyaltyPromotion.schema'
 
 const V = 'cvenue0000000000000000001'
 const STAFF = 'cstaff0000000000000000001'
@@ -97,6 +98,39 @@ describe('crear', () => {
 
     expect(prismaMock.loyaltyPromotion.create.mock.calls[0][0].data.startsAt).toEqual(new Date('2026-11-12T21:00:00.000Z'))
     expect(r.status).toBe('ACTIVE')
+  })
+
+  it('regla 15: startsAt nunca es anterior al momento de guardar, aunque el candado haya hecho esperar (fix r1 #1)', async () => {
+    relojEn('2026-11-12T21:00:00.000Z') // 15:00 CDMX: se valida y se precalcula aquí
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => {
+      jest.setSystemTime(new Date('2026-11-12T21:00:05.000Z')) // otra alta tenía el candado 5 s
+      return cb(prismaMock)
+    })
+
+    await createLoyaltyPromotion(V, { ...base, startDate: '2026-11-12' }, STAFF)
+
+    expect(prismaMock.loyaltyPromotion.create.mock.calls[0][0].data.startsAt).toEqual(new Date('2026-11-12T21:00:05.000Z'))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ startsAt: '2026-11-12T21:00:05.000Z' }) }),
+    )
+  })
+
+  it('gasto mínimo: tope de Decimal(12,2) y 2 decimales, en el servicio y en el zod (fix r1 #2)', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+    for (const minSpend of [10_000_000, 1.005])
+      await expect(createLoyaltyPromotion(V, { ...base, minSpend }, STAFF)).rejects.toThrow(BadRequestError)
+    expect(prismaMock.loyaltyPromotion.create).not.toHaveBeenCalled()
+    await createLoyaltyPromotion(V, { ...base, minSpend: 9_999_999.99 }, STAFF)
+    expect(prismaMock.loyaltyPromotion.create.mock.calls[0][0].data.minSpend.toFixed(2)).toBe('9999999.99')
+
+    const zod = (minSpend: number) => CreateLoyaltyPromotionSchema.safeParse({ params: { venueId: V }, body: { ...base, minSpend } })
+    expect(zod(19.99).success).toBe(true)
+    expect(zod(9_999_999.99).success).toBe(true)
+    for (const malo of [10_000_000, 1.005, -1]) {
+      const r = zod(malo)
+      expect(r.success).toBe(false)
+      expect(JSON.stringify((r as any).error.issues)).toMatch(/gasto mínimo/)
+    }
   })
 
   it('rechaza inicio de ayer; «hoy» es el día del NEGOCIO aunque en UTC ya sea mañana', async () => {
@@ -252,6 +286,17 @@ describe('editar y terminar', () => {
 })
 
 describe('listar', () => {
+  it('página: el zod rechaza más de 10,000 y el servicio la recorta (sin desbordar el skip, fix r1 #3)', async () => {
+    const q = (page: string) => ListLoyaltyPromotionsSchema.safeParse({ params: { venueId: V }, query: { page } })
+    expect(q('10000').success).toBe(true)
+    const r = q('10001')
+    expect(r.success).toBe(false)
+    expect(JSON.stringify((r as any).error.issues)).toMatch(/página/)
+
+    await listLoyaltyPromotions(V, { page: 1e15, pageSize: 100 })
+    expect(prismaMock.loyaltyPromotion.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 9999 * 100, take: 100 }))
+  })
+
   it('listado con pageSize 500 se recorta a 100 y trae total', async () => {
     relojEn('2026-11-14T18:00:00.000Z')
     prismaMock.loyaltyPromotion.count.mockResolvedValue(237)

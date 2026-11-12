@@ -11322,6 +11322,36 @@ router.put(
 
 // Promociones de lealtad («sello doble», «puntos dobles», «+N»): spec 2026-11-12 §4.1. Pasan por el candado de plan
 // LOYALTY_PROGRAM del prefijo `/venues/:venueId/loyalty` (arriba). Sin borrar: terminar guarda `endedAt`.
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/promotions:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Lista las promociones de lealtad del negocio
+ *     description: >
+ *       Paginado (pageSize por default 50, máximo 100: pedir más devuelve 100) con el total. Cada promoción trae su
+ *       estado calculado y los nombres actuales de sus productos o categorías. Orden: startsAt desc, id desc.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: status
+ *         in: query
+ *         schema: { type: string, enum: [ACTIVE, SCHEDULED, ENDED] }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, minimum: 1, maximum: 10000 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, minimum: 1 }
+ *     responses:
+ *       200: { description: '{ items, total, page, pageSize }' }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { description: Sin permiso, o el negocio no tiene el plan con el programa de lealtad (LOYALTY_PROGRAM) }
+ */
 router.get(
   '/venues/:venueId/loyalty/promotions',
   authenticateTokenMiddleware,
@@ -11329,6 +11359,49 @@ router.get(
   validateRequest(ListLoyaltyPromotionsSchema),
   loyaltyPromotionController.listLoyaltyPromotions,
 )
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/promotions:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Crea una promoción de lealtad («sello doble», «puntos dobles», «+N»)
+ *     description: >
+ *       Las fechas son días del negocio. El inicio no puede ser antes de hoy y nunca empieza antes de guardarse
+ *       («desde hoy» creada a las 3 pm empieza a las 3 pm). Máximo 10 activas o programadas por negocio.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string, maxLength: 80, example: 'Buen Fin sello doble' }
+ *               kind: { type: string, enum: [MULTIPLY, ADD] }
+ *               multiplier: { type: integer, minimum: 2, maximum: 10, nullable: true }
+ *               extraStamps: { type: integer, minimum: 1, maximum: 9, nullable: true }
+ *               extraPoints: { type: integer, minimum: 1, maximum: 10000, nullable: true }
+ *               startDate: { type: string, format: date, example: '2026-11-13' }
+ *               endDate: { type: string, format: date, nullable: true, example: '2026-11-17' }
+ *               daysOfWeek: { type: array, items: { type: integer, minimum: 0, maximum: 6 } }
+ *               timeFrom: { type: string, nullable: true, example: '16:00' }
+ *               timeUntil: { type: string, nullable: true, example: '18:00' }
+ *               productIds: { type: array, items: { type: string } }
+ *               categoryIds: { type: array, items: { type: string } }
+ *               minSpend: { type: number, minimum: 0, maximum: 9999999.99, nullable: true }
+ *               limit: { type: string, enum: [NONE, ONCE_PER_DAY, ONCE_PER_PROMOTION] }
+ *     responses:
+ *       201: { description: La promoción creada }
+ *       400: { description: Un valor fuera de rango, fechas inválidas o productos de otro negocio }
+ *       409: { description: Ya hay 10 promociones activas o programadas }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { description: Sin permiso, o el negocio no tiene el plan con el programa de lealtad (LOYALTY_PROGRAM) }
+ */
 router.post(
   '/venues/:venueId/loyalty/promotions',
   authenticateTokenMiddleware,
@@ -11336,6 +11409,53 @@ router.post(
   validateRequest(CreateLoyaltyPromotionSchema),
   loyaltyPromotionController.createLoyaltyPromotion,
 )
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/promotions/{id}:
+ *   patch:
+ *     tags: [Loyalty Program]
+ *     summary: Edita una promoción de lealtad
+ *     description: >
+ *       Programada: cualquier campo (un campo ausente se queda; null o [] lo limpia). Activa: sólo endDate, que no puede
+ *       ser antes de hoy. Terminada: no se edita.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string, maxLength: 80, example: 'Buen Fin sello doble' }
+ *               kind: { type: string, enum: [MULTIPLY, ADD] }
+ *               multiplier: { type: integer, minimum: 2, maximum: 10, nullable: true }
+ *               extraStamps: { type: integer, minimum: 1, maximum: 9, nullable: true }
+ *               extraPoints: { type: integer, minimum: 1, maximum: 10000, nullable: true }
+ *               startDate: { type: string, format: date, example: '2026-11-13' }
+ *               endDate: { type: string, format: date, nullable: true, example: '2026-11-17' }
+ *               daysOfWeek: { type: array, items: { type: integer, minimum: 0, maximum: 6 } }
+ *               timeFrom: { type: string, nullable: true, example: '16:00' }
+ *               timeUntil: { type: string, nullable: true, example: '18:00' }
+ *               productIds: { type: array, items: { type: string } }
+ *               categoryIds: { type: array, items: { type: string } }
+ *               minSpend: { type: number, minimum: 0, maximum: 9999999.99, nullable: true }
+ *               limit: { type: string, enum: [NONE, ONCE_PER_DAY, ONCE_PER_PROMOTION] }
+ *     responses:
+ *       200: { description: La promoción actualizada }
+ *       400: { description: Un valor fuera de rango o fechas inválidas }
+ *       404: { description: Promoción no encontrada en este negocio }
+ *       409: { description: La promoción está activa (sólo cambia su fin) o ya terminó }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { description: Sin permiso, o el negocio no tiene el plan con el programa de lealtad (LOYALTY_PROGRAM) }
+ */
 router.patch(
   '/venues/:venueId/loyalty/promotions/:id',
   authenticateTokenMiddleware,
@@ -11343,6 +11463,31 @@ router.patch(
   validateRequest(UpdateLoyaltyPromotionSchema),
   loyaltyPromotionController.updateLoyaltyPromotion,
 )
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/promotions/{id}/end:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Termina una promoción de lealtad ahora
+ *     description: >
+ *       Guarda la hora en que se terminó (no se borra). Una venta hecha antes de esa hora sí lleva el bono aunque
+ *       sincronice después. Terminar una ya terminada la devuelve igual.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: La promoción terminada }
+ *       404: { description: Promoción no encontrada en este negocio }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { description: Sin permiso, o el negocio no tiene el plan con el programa de lealtad (LOYALTY_PROGRAM) }
+ */
 router.post(
   '/venues/:venueId/loyalty/promotions/:id/end',
   authenticateTokenMiddleware,
