@@ -132,8 +132,6 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
       findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [SESSION_ROW])),
     }
     ;(prismaMock as any).staffVenue = { findMany: jest.fn().mockResolvedValue([{ staffId: 'staff-1' }]) }
-    // D23: la lectura de las llaves de los cobros (aquí, el pago de la venta no tiene llave).
-    ;(prismaMock as any).payment = { ...(prismaMock as any).payment, findMany: jest.fn().mockResolvedValue([]) }
   })
 
   // --------------------------------------------------------------------------
@@ -243,21 +241,8 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
     const session = await getCurrentSession(VENUE, true)
     const evento = (session!.events as any[]).find(e => e.id === 'srv-ev-payin')
 
-    // D23 agrega `paymentIdempotencyKey` (aditivo, `null` en un PAY_IN); ninguno de los de antes se va ni cambia.
     expect(Object.keys(evento).sort()).toEqual(
-      [
-        'amount',
-        'createdAt',
-        'id',
-        'localId',
-        'note',
-        'orderId',
-        'paymentIdempotencyKey',
-        'sessionId',
-        'staffId',
-        'staffName',
-        'type',
-      ].sort(),
+      ['amount', 'createdAt', 'id', 'localId', 'note', 'orderId', 'sessionId', 'staffId', 'staffName', 'type'].sort(),
     )
     expect(evento).toMatchObject({
       id: 'srv-ev-payin',

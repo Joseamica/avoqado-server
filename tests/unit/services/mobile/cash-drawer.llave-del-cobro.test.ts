@@ -62,6 +62,8 @@ const sesion = (over: Partial<Record<string, any>> = {}) => ({
     row({ id: 'srv-ev-n86', type: 'CASH_SALE', amount: 300, localId: 'srv-cash-sale:pay-n86' }),
     // Un cobro del dashboard sin llave.
     row({ id: 'srv-ev-dash', type: 'CASH_SALE', amount: 50, localId: 'srv-cash-sale:pay-dash' }),
+    // Codex r2: un pago que ya no está en esta sucursal (el job de «SIM de Evento» de PlayTelecom mueve la orden y sus pagos).
+    row({ id: 'srv-ev-movido', type: 'CASH_SALE', amount: 0, localId: 'srv-cash-sale:pay-movido' }),
     // Movimiento del cliente: su localId es la llave del aparato, no un pago.
     row({ id: 'srv-ev-payin', type: 'PAY_IN', amount: 100, localId: 'local-ev-payin' }),
     ...(over.events ?? []),
@@ -72,6 +74,7 @@ const sesion = (over: Partial<Record<string, any>> = {}) => ({
 const PAGOS = [
   { id: 'pay-d3', idempotencyKey: 'K-d3' },
   { id: 'pay-n86', idempotencyKey: 'K-n86' },
+  { id: 'pay-dash', idempotencyKey: null },
 ]
 
 const porId = (events: any[]) => Object.fromEntries(events.map(e => [e.id, e]))
@@ -98,16 +101,16 @@ describe('D23 · la venta del servidor trae la llave del cobro', () => {
     expect(ev['srv-ev-n86'].paymentIdempotencyKey).toBe('K-n86')
   })
 
-  it('sin llave en el pago, en la apertura y en un movimiento del cliente: null (con las llaves leídas, el campo siempre viene)', async () => {
+  it('el pago leído sin llave sale con null; lo que no es una venta leída sale SIN el campo («no lo sé»)', async () => {
     ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(sesion()) }
     sembrarPagos()
 
     const ev = porId((await getCurrentSession(VENUE, true))!.events as any[])
 
-    for (const id of ['srv-ev-dash', 'srv-ev-open', 'srv-ev-payin']) {
-      expect(ev[id]).toHaveProperty('paymentIdempotencyKey')
-      expect(ev[id].paymentIdempotencyKey).toBeNull()
-    }
+    expect(ev['srv-ev-dash']).toHaveProperty('paymentIdempotencyKey', null)
+    // 🔴 Codex r2: el pago movido a otra sucursal NO se encontró. Un null le diría al POS «no es de ninguna copia tuya» y su copia
+    // contaría dos veces; sin el campo, el POS adivina como antes.
+    for (const id of ['srv-ev-movido', 'srv-ev-open', 'srv-ev-payin']) expect(ev[id]).not.toHaveProperty('paymentIdempotencyKey')
     // Ningún campo de antes cambia.
     expect(ev['srv-ev-d3']).toMatchObject({ id: 'srv-ev-d3', type: 'CASH_SALE', amount: 300, localId: 'srv-cash-sale:pay-d3' })
   })
@@ -121,8 +124,8 @@ describe('D23 · la venta del servidor trae la llave del cobro', () => {
     expect(findMany).toHaveBeenCalledTimes(1)
     const args = findMany.mock.calls[0][0]
     expect(args.where.venueId).toBe(VENUE)
-    expect([...args.where.id.in].sort()).toEqual(['pay-d3', 'pay-dash', 'pay-n86'])
-    expect(args.take).toBe(3)
+    expect([...args.where.id.in].sort()).toEqual(['pay-d3', 'pay-dash', 'pay-movido', 'pay-n86'])
+    expect(args.take).toBe(4)
   })
 
   it('sin ventas del servidor no se lee ningún pago', async () => {

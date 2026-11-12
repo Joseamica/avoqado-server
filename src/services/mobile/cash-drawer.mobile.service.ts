@@ -1531,7 +1531,7 @@ function dollarsToDecimal(dollars: number): Decimal {
  * Una sesión CERRADA lo revela siempre: ese es el resultado que el cajero debe ver al
  * confirmar su conteo, y por eso el cierre no necesita tratarse aparte.
  */
-function formatSession(session: any, incluirEsperado = false, llaves?: Map<string, string>) {
+function formatSession(session: any, incluirEsperado = false, llaves?: Map<string, string | null>) {
   const expectedAmount = calculateExpectedAmount(session)
   const revelar = incluirEsperado || session.status !== 'OPEN'
 
@@ -1579,11 +1579,12 @@ function formatSession(session: any, incluirEsperado = false, llaves?: Map<strin
  * cuando la fila no tiene llave, y una app vieja que no lo lee se comporta idéntico a hoy.
  *
  * 🔴 D23: `paymentIdempotencyKey` es la llave con la que el aparato mandó el cobro de una venta que escribió el SERVIDOR (ver
- * [llavesDeLosCobros]). Igual de aditivo, y con DOS ausencias distintas a propósito: `null` = «lo leí y ese pago no tiene llave» (o el
- * evento no es una venta del servidor); el campo NO VIENE = «no lo sé» (no se leyeron las llaves: la lectura falló, o es un eco de
- * `/sync`, `pay-in` o `pay-out`). El POS sólo descarta una copia suya por identidad con lo primero; con lo segundo adivina como antes.
+ * [llavesDeLosCobros]). Igual de aditivo, y SÓLO viene cuando se leyó el pago de esa venta: con su llave, o `null` si el pago no
+ * tiene. En todo lo demás el campo NO VIENE, y eso quiere decir «no lo sé» (no es una venta del servidor, la lectura falló, el pago ya
+ * no está en esta sucursal, o es un eco de `/sync`, `pay-in` o `pay-out`). El POS sólo descarta una copia suya por identidad cuando el
+ * campo viene; sin él adivina como antes. Un `null` inventado le haría creer que la venta no es de ninguna de sus copias.
  */
-function formatEvent(event: any, llaves?: Map<string, string>) {
+function formatEvent(event: any, llaves?: Map<string, string | null>) {
   return {
     id: event.id,
     sessionId: event.sessionId,
@@ -1594,7 +1595,7 @@ function formatEvent(event: any, llaves?: Map<string, string>) {
     staffName: event.staffName,
     orderId: event.orderId,
     localId: event.localId ?? null,
-    ...(llaves ? { paymentIdempotencyKey: (event.localId && llaves.get(event.localId)) || null } : {}),
+    ...(event.localId && llaves?.has(event.localId) ? { paymentIdempotencyKey: llaves.get(event.localId) ?? null } : {}),
     createdAt: event.createdAt.toISOString(),
   }
 }
@@ -1609,14 +1610,15 @@ function formatEvent(event: any, llaves?: Map<string, string>) {
  * (todo cobro del POS la manda: el `PAY_CASH` con el id del intent, la cola de cobros con el id de su fila y el cobro con red con su
  * llave), así que se resuelve al LEER: cubre a los 8 escritores de `postCashSaleToDrawer` y a las ventas de antes, sin migración.
  *
- * Una sola lectura, acotada a la sucursal y con tope. NUNCA lanza: es una ayuda para la fusión del aparato; si falla devuelve
- * `undefined`, la caja contesta igual SIN el campo («no lo sé», ver [formatEvent]) y el POS cae al emparejamiento de siempre. Nunca un
- * `null` inventado: con `null` el POS concluiría que la venta no es de ninguna de sus copias.
+ * Devuelve sólo las ventas cuyo pago SE ENCONTRÓ (`localId` → llave, o `null` si el pago no tiene). Una sola lectura, acotada a la
+ * sucursal y con tope. Un pago que ya no está en esta sucursal (Codex r2: el job de «SIM de Evento» de PlayTelecom mueve la orden y sus
+ * pagos a otra y deja la caja) no se encontró: su venta sale SIN el campo («no lo sé»), nunca con un `null` que diga «no es tuya».
+ * NUNCA lanza: es una ayuda para la fusión del aparato; si falla, la caja contesta igual sin el campo y el POS adivina como siempre.
  */
 async function llavesDeLosCobros(
   venueId: string,
   events: Array<{ type: string; localId?: string | null }>,
-): Promise<Map<string, string> | undefined> {
+): Promise<Map<string, string | null>> {
   const ventaDelPago = new Map<string, string>() // paymentId → localId
   for (const event of events) {
     const paymentId = event.type === 'CASH_SALE' ? paymentIdDeLaVentaDelServidor(event.localId) : null
@@ -1629,10 +1631,10 @@ async function llavesDeLosCobros(
       select: { id: true, idempotencyKey: true },
       take: ventaDelPago.size,
     })
-    const llaves = new Map<string, string>()
+    const llaves = new Map<string, string | null>()
     for (const pago of pagos) {
       const localId = ventaDelPago.get(pago.id)
-      if (localId && pago.idempotencyKey) llaves.set(localId, pago.idempotencyKey)
+      if (localId) llaves.set(localId, pago.idempotencyKey ?? null)
     }
     return llaves
   } catch (error) {
@@ -1640,7 +1642,7 @@ async function llavesDeLosCobros(
       venueId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return undefined
+    return new Map()
   }
 }
 
