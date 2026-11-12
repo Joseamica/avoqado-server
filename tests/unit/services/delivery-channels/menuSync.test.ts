@@ -940,3 +940,90 @@ describe('disponibilidad — agotar y revivir productos', () => {
     expect(mockedLinkUpdate).not.toHaveBeenCalled()
   })
 })
+
+describe('productos del canal (`config.productos`): sólo esa lista viaja al proveedor', () => {
+  const producto = (plu: string) => ({ plu, name: plu, description: null, price: 50, imageUrl: null, modifierGroups: [] })
+  const MENU = {
+    venueId: 'venue1',
+    generatedAt: 'x',
+    categories: [
+      { name: 'BARRA DE CAFE', products: [producto('LATTE')] },
+      { name: 'CERVEZAS', products: [producto('CORONA')] },
+    ],
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedHasAdapter.mockReturnValue(true)
+    mockedSnapshot.mockResolvedValue(MENU)
+    mockedUpdate.mockResolvedValue({})
+  })
+
+  it('🔴 con lista, el proveedor sólo recibe esos productos (y la huella sale de ese menú)', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link({ config: { productos: ['LATTE'] } }))
+
+    expect(r.outcome).toBe('PUBLISHED')
+    const filtrado = { ...MENU, categories: [{ name: 'BARRA DE CAFE', products: [producto('LATTE')] }] }
+    expect(a.buildMenuPayload).toHaveBeenCalledWith(filtrado, expect.anything())
+    expect(a.publishMenu).toHaveBeenCalledWith(filtrado, 'store1', expect.anything())
+  })
+
+  it('sin lista se publica el catálogo completo, como siempre', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    await syncChannelMenu(link({ config: { precios: { markupPercent: 30 } } }))
+
+    expect(a.publishMenu).toHaveBeenCalledWith(MENU, 'store1', expect.anything())
+  })
+
+  it('🔴 una lista mal escrita NO publica nada (un menú vacío borraría el de Uber): FAILED y a la vista', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link({ config: { productos: [] } }))
+
+    expect(r.outcome).toBe('FAILED')
+    expect(a.publishMenu).not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('disponibilidad con productos del canal', () => {
+  const mockedProducts = (prisma as any).product.findMany as jest.Mock
+  const mockedQueryRaw = (prisma as any).$queryRaw as jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(hasAdapter as jest.Mock).mockReturnValue(true)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    ;(prisma as any).deliveryChannelLink.update.mockResolvedValue({})
+    mockedQueryRaw.mockResolvedValue([{ config: {} }])
+  })
+
+  it('🔴 no agota en el proveedor un producto que no está en el menú de ese canal', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([{ sku: 'LATTE' }, { sku: 'CORONA' }]).mockResolvedValueOnce([])
+
+    const r = await syncChannelAvailability(link({ config: { productos: ['LATTE'], soldOutSkus: [] } }))
+
+    expect(a.setItemSoldOut).toHaveBeenCalledTimes(1)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', true)
+    expect(r).toEqual({ agotados: 1, revividos: 0 })
+  })
+
+  it('un agotado que ya salió del menú no se revive en el proveedor (no existe allá)', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+
+    const r = await syncChannelAvailability(link({ config: { productos: ['LATTE'], soldOutSkus: ['CORONA'] } }))
+
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+    expect(r).toEqual({ agotados: 0, revividos: 0 })
+  })
+})

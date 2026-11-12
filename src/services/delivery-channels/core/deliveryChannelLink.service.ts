@@ -21,6 +21,7 @@ import { DeliveryChannelLink, DeliveryChannelStatus, DeliveryProvider, OrderAcce
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
+import { validarProductosDelCanal } from './productosDelCanal'
 import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
@@ -320,6 +321,7 @@ function validarConfig(entrante: Prisma.InputJsonValue): void {
   }
 
   validarPrecios(c.precios)
+  validarProductosDelCanal(c.productos)
 }
 
 export async function updateChannelLink(

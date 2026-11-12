@@ -13,13 +13,14 @@ import { text } from '../respond'
 import { planGateMessage } from '../planGate'
 import { auditMcpWrite } from '../audit'
 import AppError from '@/errors/AppError'
+import { resumenDeProductos } from '@/services/delivery-channels/core/productosDelCanal'
 
 export function registerDeliveryChannelTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'delivery_channels',
-    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats o Rappi con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber? ¿por qué no quedó conectada mi tienda de Rappi?". Pass venueId.',
+    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, CUÁNTOS productos publica cada canal (todo el catálogo o una lista), pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats o Rappi con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber? ¿por qué no quedó conectada mi tienda de Rappi?". Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales de delivery leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -114,6 +115,9 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
             typeof (l.config as { precios?: { markupPercent?: unknown } } | null)?.precios?.markupPercent === 'number'
               ? ((l.config as { precios: { markupPercent: number } }).precios.markupPercent as number)
               : null,
+          // Cuántos productos publica este canal. `cuantos: null` = todo el catálogo activo. Con `problema`, la lista
+          // guardada no sirve y el menú NO se está publicando hasta corregirla.
+          productosDelCanal: resumenDeProductos(l.config),
         })),
         todayByChannel,
         conexionesRecientes: conexiones.map(c => ({
