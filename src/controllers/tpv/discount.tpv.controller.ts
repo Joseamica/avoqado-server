@@ -137,7 +137,18 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
     // D1: una COMP la acredita `checkCortesiaEnDescuento` en la ruta (con el PIN que autorizó la cortesía, Codex r4 #3). Un % o
     // fijo que resulta dejar la cuenta en $0 lo descubre el motor; entonces se pide `orders:comp` aquí (hz:e0b12f00:D1).
     const result = await conCortesiaSiRegala(req, res, cortesia =>
-      discountTpvService.applyManualDiscount(venueId, orderId, type, value, reason, staffVenueId, authorizedById, cortesia),
+      // D5: el usuario de la sesión firma la bitácora (Staff.id), aunque no tenga membresía en la sucursal.
+      discountTpvService.applyManualDiscount(
+        venueId,
+        orderId,
+        type,
+        value,
+        reason,
+        staffVenueId,
+        authorizedById,
+        cortesia,
+        req.authContext?.userId,
+      ),
     )
     if (!result) return
 
@@ -178,7 +189,14 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
 
     // D14: un cupón de cortesía regala la cuenta; el servicio lo rechaza si quien llama no tiene `orders:comp` (como la venta de D5).
     const puedeRegalar = await tienePermisoEnVenue(req, 'orders:comp')
-    const result = await discountTpvService.applyCouponCode(venueId, orderId, couponCode, staffVenueId, puedeRegalar)
+    const result = await discountTpvService.applyCouponCode(
+      venueId,
+      orderId,
+      couponCode,
+      staffVenueId,
+      puedeRegalar,
+      req.authContext?.userId,
+    )
 
     if (result.success) {
       res.status(200).json({

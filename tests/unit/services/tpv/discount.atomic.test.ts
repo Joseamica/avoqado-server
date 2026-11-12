@@ -1108,3 +1108,55 @@ describe('S5b — la red por traba (40P01): sólo se publica la bitácora del in
     expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'DISCOUNT_APPLIED')).toHaveLength(0)
   })
 })
+
+// hz:f34960c5:D5: el descuento manual y el cupón de la terminal no dejaban bitácora. Ahora sí, DESPUÉS del commit y a nombre
+// de quien está en sesión (Staff.id), aunque no tenga membresía en la sucursal (la fila queda sin autor, como D3).
+describe('D5 — manual y cupón dejan su bitácora, a nombre de la sesión y tras el commit', () => {
+  it('manual: DISCOUNT_APPLIED con el Staff.id de la sesión', async () => {
+    const r = await tpv.applyManualDiscount('venue', 'order', 'FIXED_AMOUNT', 10, 'Diez', 'sv-A', undefined, undefined, 'user-A')
+    expect(r).toMatchObject({ success: true })
+    expect(creada).toMatchObject({ appliedById: 'sv-A' })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'user-A',
+        venueId: 'venue',
+        action: 'DISCOUNT_APPLIED',
+        entity: 'Order',
+        entityId: 'order',
+        data: expect.objectContaining({ orderDiscountId: 'od-nueva', amount: 10, type: 'FIXED_AMOUNT', reason: 'Diez', source: 'manual' }),
+      }),
+    )
+  })
+
+  it('cupón: DISCOUNT_APPLIED con el Staff.id de la sesión y el código', async () => {
+    const r = await tpv.applyCouponCode('venue', 'order', 'TEN', undefined, false, 'user-A')
+    expect(r).toMatchObject({ success: true })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'user-A',
+        action: 'DISCOUNT_APPLIED',
+        entityId: 'order',
+        data: expect.objectContaining({ orderDiscountId: 'od-nueva', couponCode: 'TEN', discountId: 'discount', source: 'coupon' }),
+      }),
+    )
+  })
+
+  it('la bitácora sale después del commit: si la transacción falla, no hay bitácora', async () => {
+    globalDb.$transaction.mockImplementation(async (cb: any) => {
+      await cb(tx)
+      throw new Error('commit falló')
+    })
+    await expect(
+      tpv.applyManualDiscount('venue', 'order', 'FIXED_AMOUNT', 10, 'Diez', 'sv-A', undefined, undefined, 'user-A'),
+    ).rejects.toThrow('commit falló')
+    await expect(tpv.applyCouponCode('venue', 'order', 'TEN', 'sv-A', false, 'user-A')).rejects.toThrow('commit falló')
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('un rechazo (success:false) no escribe bitácora', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), discountAmount: 100 })
+    const r = await tpv.applyManualDiscount('venue', 'order', 'FIXED_AMOUNT', 10, 'Diez', 'sv-A', undefined, undefined, 'user-A')
+    expect(r).toMatchObject({ success: false })
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})
