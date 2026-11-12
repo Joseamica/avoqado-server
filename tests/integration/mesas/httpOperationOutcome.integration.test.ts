@@ -1724,6 +1724,10 @@ async function plainOrder() {
     include: { items: true },
   })
 }
+/** D650: el canje sólo usa los puntos de un cliente de la cuenta. Se liga como la TPV (`OrderCustomer`): la cabecera sigue sin cliente. */
+async function ligarCliente(orderId: string, customerId: string) {
+  await prisma.orderCustomer.create({ data: { orderId, customerId, isPrimary: true } })
+}
 function operationInput<A extends HttpManifest['action']>(manifest: Extract<HttpManifest, { action: A }>): OperationInput<A> {
   return { venueId, actorId: authorId, operation: { version: 1, id: randomUUID(), deviceId: randomUUID() }, manifest }
 }
@@ -2551,8 +2555,7 @@ describe('Task3 receipt coverage', () => {
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'Comp refund', loyaltyPoints: 10000 } })
     const order = await plainOrder(),
       item = order.items.find(x => x.productName === 'A')!
-    // D650: el canje sólo usa los puntos de un cliente de la cuenta.
-    await prisma.orderCustomer.create({ data: { orderId: order.id, customerId: customer.id, isPrimary: true } })
+    await ligarCliente(order.id, customer.id)
     await redeemPointsToOrder(venueId, order.id, customer.id, 1000, authorId)
     const discount = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: order.id } })
     await prisma.orderDiscount.update({
@@ -3062,8 +3065,7 @@ test('Task4 loyalty receipt keeps exact balance after later customer changes', a
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Gate A', loyaltyPoints: 20000 } }),
     o = await plainOrder()
-  // D650: ligado por `OrderCustomer` (como la TPV); la cabecera sigue sin cliente.
-  await prisma.orderCustomer.create({ data: { orderId: o.id, customerId: c.id, isPrimary: true } })
+  await ligarCliente(o.id, c.id)
   const i = operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: o.id, customerId: c.id }, payload: { points: 1000 } })
   const r = await exactReplay(i, 'post', `/orders/${o.id}/loyalty/redeem`, { customerId: c.id, points: 1000 }, () =>
     prisma.customer.update({ where: { id: c.id }, data: { loyaltyPoints: { increment: 77 } } }),
@@ -3100,7 +3102,7 @@ test('Task4 remove discount stores original refund amount and created ADJUST id 
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Refund', loyaltyPoints: 10000 } }),
     o = await plainOrder()
-  await prisma.orderCustomer.create({ data: { orderId: o.id, customerId: c.id, isPrimary: true } }) // D650
+  await ligarCliente(o.id, c.id)
   await redeemPointsToOrder(venueId, o.id, c.id, 1000, authorId)
   const row = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: o.id } })
   const i = operationInput({ action: 'removeOrderDiscount', refs: { orderId: o.id, orderDiscountId: row.id }, payload: {} })
@@ -3146,6 +3148,7 @@ describe('Task4 receipt coverage', () => {
     const customer = await prisma.customer.create({
       data: { venueId, firstName: 'Task4 customer', loyaltyPoints: action === 'redeemLoyaltyPoints' ? 20000 : 10000 },
     })
+    await ligarCliente(order.id, customer.id)
     if (action === 'redeemLoyaltyPoints')
       return {
         order,
@@ -3527,6 +3530,7 @@ describe('Task4 receipt coverage', () => {
     expect(await discountSnapshot(f)).toEqual(before)
     const o = await plainOrder(),
       i = operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: o.id, customerId: f.customerId! }, payload: { points: 1000 } })
+    await ligarCliente(o.id, f.customerId!)
     const tombstone = terminal(await resolveHttpOperation({ ...i, actorId: managerId }))
     const late = await callHttp(i, 'post', discountPath(i), discountBody(i))
     expect(late.body.httpOperation.outcome).toBe('REJECTED')
@@ -3550,6 +3554,7 @@ describe('Task4 receipt coverage', () => {
     await activeConfig()
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'CAS race', loyaltyPoints: 1500 } })
     const orders = [await plainOrder(), await plainOrder()]
+    for (const order of orders) await ligarCliente(order.id, customer.id)
     const inputs = orders.map(order =>
       operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: order.id, customerId: customer.id }, payload: { points: 1000 } }),
     )
@@ -3633,6 +3638,8 @@ describe('Task4 receipt coverage', () => {
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'ACK original balance', loyaltyPoints: 20000 } })
     const firstOrder = await plainOrder(),
       secondOrder = await plainOrder()
+    await ligarCliente(firstOrder.id, customer.id)
+    await ligarCliente(secondOrder.id, customer.id)
     const firstInput = operationInput({
       action: 'redeemLoyaltyPoints',
       refs: { orderId: firstOrder.id, customerId: customer.id },
