@@ -1496,7 +1496,10 @@ async function moverCuentaAlImporte(
 ) {
   await rechazarSiCuentaAnuladaEnTx(tx, { venueId: orden.venueId, orderId: orden.id })
   const nuevo = new Prisma.Decimal(importe).toDecimalPlaces(2)
-  const saldo = computeOrderBalance({ ...orden, subtotal: nuevo }, [{ amount: nuevo, tipAmount: 0, type: tipo }])
+  // El cobro sintético de la venta verificada: nunca es un reembolso, no reabre nada (D19).
+  const saldo = computeOrderBalance({ ...orden, subtotal: nuevo }, [
+    { amount: nuevo, tipAmount: 0, type: tipo, reopenedAmount: null, reopenedTipAmount: null },
+  ])
   await tx.orderItem.update({ where: { id: articuloId }, data: { unitPrice: nuevo, total: nuevo } })
   await tx.order.update({
     where: { id: orden.id },

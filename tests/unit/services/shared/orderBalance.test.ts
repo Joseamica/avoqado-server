@@ -55,6 +55,9 @@ const refund = (amount: string, tip = '0.00') => ({
   amount: d(`-${amount}`),
   tipAmount: d(`-${tip}`),
   type: 'REFUND' as const,
+  // D19: una fila que PUEDE ser REFUND trae lo reabierto; null = no reabre (como todos los reembolsos de antes del 12-nov).
+  reopenedAmount: null,
+  reopenedTipAmount: null,
 })
 
 describe('computeOrderBalance — aritmética canónica del saldo', () => {
@@ -366,5 +369,91 @@ describe('cierreDelCobroSaldaLaCuenta — quién salda la cuenta (revisión 6d I
     // Un `externalId` en blanco no la vuelve integrada (el mismo `trim()` que tenía `recordOrderPayment`), ni uno fuera de POS.
     expect(cierreDelCobroSaldaLaCuenta({ ...normal, source: 'POS', externalId: '   ' })).toBe(true)
     expect(cierreDelCobroSaldaLaCuenta({ ...normal, source: 'TPV', externalId: 'X-1' })).toBe(true)
+  })
+})
+
+/**
+ * D19 (founder 10-nov «A»; nube 12-nov): un abono devuelto vuelve a deberse. Cuánto, lo fija quien escribe el reembolso
+ * (`reopenedAmount` / `reopenedTipAmount`, en positivo). El calculador sólo lo resta de lo cobrado: no decide nada.
+ */
+describe('D19 — lo reabierto de un reembolso se resta de lo cobrado', () => {
+  const reabre = (amount: string, tip = '0.00', reAmount = amount, reTip = tip) => ({
+    ...refund(amount, tip),
+    reopenedAmount: d(reAmount),
+    reopenedTipAmount: d(reTip),
+  })
+
+  it('🔴 cuenta $100, abono $50 devuelto como abono: vuelve a deber $100', () => {
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [pay('50.00'), reabre('50.00')])
+
+    expect(balance.paidAmount.toString()).toBe('0')
+    expect(balance.remainingBalance.toString()).toBe('100')
+    expect(balance.isFullyPaid).toBe(false)
+    expect(balance.reopenedAmount.toString()).toBe('50')
+    // El carril del reembolso no cambia: se devolvió $50 de $50 cobrados.
+    expect(balance.refundedAmount.toString()).toBe('50')
+    expect(balance.refundState).toBe('FULL')
+  })
+
+  it('🔴 después de reabrir, cobrar $50 NO la cierra: falta $50 (antes quedaba PAGADA con $50 netos)', () => {
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [pay('50.00'), reabre('50.00'), pay('50.00')])
+
+    expect(balance.paidAmount.toString()).toBe('50')
+    expect(balance.remainingBalance.toString()).toBe('50')
+    expect(balance.isFullyPaid).toBe(false)
+  })
+
+  it('y cobrar los $100 sí la cierra', () => {
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [pay('50.00'), reabre('50.00'), pay('100.00')])
+
+    expect(balance.paidAmount.toString()).toBe('100')
+    expect(balance.isFullyPaid).toBe(true)
+    expect(balance.refundState).toBe('PARTIAL')
+  })
+
+  it('la propina reabierta sale del total y de lo pagado a la vez: lo que falta no cambia por ella', () => {
+    // $100 de cuenta, abono $50 + $10 de propina; se devuelve todo y reabre todo.
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [pay('50.00', '10.00'), reabre('50.00', '10.00')])
+
+    expect(balance.tipAmount.toString()).toBe('0')
+    expect(balance.total.toString()).toBe('100')
+    expect(balance.paidAmount.toString()).toBe('0')
+    expect(balance.remainingBalance.toString()).toBe('100')
+  })
+
+  it('sólo reabre lo marcado: un reembolso de $50 que reabre $30 deja pagado $20', () => {
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [pay('50.00'), reabre('50.00', '0.00', '30.00')])
+
+    expect(balance.paidAmount.toString()).toBe('20')
+    expect(balance.remainingBalance.toString()).toBe('80')
+    expect(balance.reopenedAmount.toString()).toBe('30')
+  })
+
+  it('REGRESIÓN 18-ago: un REFUND sin marca (null o ausente) no reabre nada, igual que antes', () => {
+    const conNull = computeOrderBalance(order({ subtotal: '200.00' }), [
+      pay('200.00'),
+      { ...refund('200.00'), reopenedAmount: null, reopenedTipAmount: null },
+    ])
+    // Sin el campo (un llamador sin tipos): se lee como null.
+    const sinCampo = computeOrderBalance(order({ subtotal: '200.00' }), [
+      pay('200.00'),
+      { ...refund('200.00'), reopenedAmount: undefined, reopenedTipAmount: undefined },
+    ])
+
+    for (const balance of [conNull, sinCampo]) {
+      expect(balance.paidAmount.toString()).toBe('200')
+      expect(balance.isFullyPaid).toBe(true)
+      expect(balance.reopenedAmount.toString()).toBe('0')
+      expect(balance.refundState).toBe('FULL')
+    }
+  })
+
+  it('una marca en un pago que NO es REFUND se ignora (sólo el reembolso reabre)', () => {
+    const balance = computeOrderBalance(order({ subtotal: '100.00' }), [
+      { ...pay('100.00'), type: 'REGULAR', reopenedAmount: d('100.00'), reopenedTipAmount: d('0.00') },
+    ])
+
+    expect(balance.paidAmount.toString()).toBe('100')
+    expect(balance.reopenedAmount.toString()).toBe('0')
   })
 })

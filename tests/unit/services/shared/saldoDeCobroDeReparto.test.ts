@@ -27,25 +27,31 @@ describe('saldoDeCobroDeReparto', () => {
   })
 
   it('cobrado completo {175, 20, 10}: no falta nada', () => {
-    const pagos = [{ amount: d(175), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR' }]
+    const pagos = [
+      { amount: d(175), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR', reopenedAmount: null, reopenedTipAmount: null },
+    ]
     expect(enPesos(saldoDeCobroDeReparto(pedido, pagos))).toEqual(['0.00', '0.00', '0.00', '0.00'])
   })
 
   it('abono {70, 20, 10}: faltan 105 de venta', () => {
-    const pagos = [{ amount: d(70), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR' }]
+    const pagos = [
+      { amount: d(70), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR', reopenedAmount: null, reopenedTipAmount: null },
+    ]
     expect(enPesos(saldoDeCobroDeReparto(pedido, pagos))).toEqual(['105.00', '0.00', '0.00', '105.00'])
   })
 
   it('abono que sólo cubrió 5 de Rappi: la propina sigue pendiente aunque `Order.tipAmount` ya se haya reescrito', () => {
     // `cashTipDue` es la fuente; el pedido no lleva `tipAmount` a propósito (cada cobro lo reescribe con lo cobrado).
-    const pagos = [{ amount: d(0), tipAmount: d(0), thirdPartyCashAmount: d(5), type: 'REGULAR' }]
+    const pagos = [
+      { amount: d(0), tipAmount: d(0), thirdPartyCashAmount: d(5), type: 'REGULAR', reopenedAmount: null, reopenedTipAmount: null },
+    ]
     expect(enPesos(saldoDeCobroDeReparto(pedido, pagos))).toEqual(['175.00', '20.00', '5.00', '200.00'])
   })
 
   it('una devolución no vuelve a pedir propina ni Rappi ya cobrados', () => {
     const pagos = [
-      { amount: d(175), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR' },
-      { amount: d(-35), tipAmount: d(0), thirdPartyCashAmount: null, type: 'REFUND' },
+      { amount: d(175), tipAmount: d(20), thirdPartyCashAmount: d(10), type: 'REGULAR', reopenedAmount: null, reopenedTipAmount: null },
+      { amount: d(-35), tipAmount: d(0), thirdPartyCashAmount: null, type: 'REFUND', reopenedAmount: null, reopenedTipAmount: null },
     ]
     const r = saldoDeCobroDeReparto(pedido, pagos)!
     expect(r.propinaPendiente.toFixed(2)).toBe('0.00')
