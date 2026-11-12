@@ -3040,10 +3040,11 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
       // P5 (founder, 1-oct): lo DIRIGIDO a los renglones que se regalan —su descuento propio, un 2×1, un premio— se recorta o
       // retira con sus beneficios ANTES de marcarlos: la cortesía ya regala el renglón entero y no se le encima otro descuento.
+      // hz:87f4b879:D1: los puntos que devuelve el recorte van a nombre de la sesión, como el resto de la cortesía (D5).
       const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
         renglones: itemsToComp.map(item => item.id),
         venueId,
-        staffId: input.staffId,
+        staffId: autor,
       })
 
       // Calculate discount amount (total of comped items)
@@ -3269,9 +3270,12 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 interface VoidItemsInput {
   itemIds: string[] // Items to void
   reason: string // Required: "Wrong item entered", "Customer changed mind", etc.
-  staffId: string // Staff member performing the action
+  staffId: string // Vendedor elegido en la terminal (del cuerpo)
   expectedVersion: number // Optimistic locking
-  /** Quien está autenticado (`authContext.userId`): firma la bitácora si anular todo suelta los vales de la venta (D2). */
+  /**
+   * Quien está autenticado (`authContext.userId`). Es el AUTOR de la anulación (hz:87f4b879:D1, como D5): OrderAction, bitácoras,
+   * vales soltados (D2) y los canjes que se devuelven. Sin él, como antes: el `staffId` del cuerpo (los vales soltados, sin autor).
+   */
   actorId?: string
 }
 
@@ -3285,6 +3289,8 @@ interface VoidItemsInput {
  */
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
+  // hz:87f4b879:D1: el autor es la sesión; `staffId` del cuerpo sigue siendo el vendedor (se valida abajo y va como nota).
+  const autor = input.actorId ?? input.staffId
 
   // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
   const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados } = await withDeadlockRetry(
@@ -3360,7 +3366,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         if (await esCuentaDeFolioEnTx(tx, { venueId, orderId })) {
           throw new BadRequestError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
         }
-        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
+        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: autor, camino: 'voidItems' })
         order = await leerOrden()
         if (!order) throw new NotFoundError('Order not found')
       }
@@ -3453,7 +3459,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
       // P4 (founder, 1-oct): lo dirigido a lo que se anula se recorta o se retira con sus beneficios ANTES de borrar los platos
       // (y DESPUÉS de R9, como en `removeOrderItem`).
-      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: input.itemIds, venueId, staffId: input.staffId })
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: input.itemIds, venueId, staffId: autor })
 
       // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
       // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
@@ -3635,7 +3641,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     data: {
       orderId,
       actionType: 'VOID',
-      performedById: input.staffId,
+      performedById: autor,
       reason: input.reason,
       metadata: {
         itemIds: input.itemIds,
@@ -3648,7 +3654,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     },
   })
   void logAction({
-    staffId: input.staffId ?? null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_VOIDED',
     entity: 'Order',
@@ -3658,6 +3664,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       amount: Number(voidAmount),
       reason: input.reason ?? undefined,
       ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+      ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
     },
   })
 
