@@ -79,7 +79,7 @@ describe('exportador ordenes', () => {
       endDate: undefined,
     })
     expect(ordenes.parsearFiltros(f)).toEqual(f)
-    expect(() => ordenes.parsearFiltros({ startDate: 'no' })).toThrow(/startDate must be a valid ISO date/)
+    expect(() => ordenes.parsearFiltros({ startDate: 'no' })).toThrow(/La fecha de inicio no es válida/)
   })
   it('autorizar: hoy no hay función de plan para órdenes', async () => {
     expect(await ordenes.autorizar({ venueId: 'v1', staffId: 's1', esSuperadmin: false }, {})).toBeNull()

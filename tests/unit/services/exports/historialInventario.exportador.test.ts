@@ -128,7 +128,7 @@ describe('exportador historial-inventario', () => {
     // Las opciones del filtro «Tipo» de la pantalla son los tipos reales de cada movimiento.
     expect(historialInventario.parsearFiltros({ type: 'USAGE' }).type).toBe('USAGE')
     expect(historialInventario.parsearFiltros({ type: 'PURCHASE' }).type).toBe('PURCHASE')
-    expect(() => historialInventario.parsearFiltros({ startDate: 'no' })).toThrow(/startDate must be a valid ISO date/)
+    expect(() => historialInventario.parsearFiltros({ startDate: 'no' })).toThrow(/La fecha de inicio no es válida/)
   })
 
   it('autorizar: el mismo candado de la pantalla (INVENTORY_TRACKING), con superadmin y exentos', async () => {

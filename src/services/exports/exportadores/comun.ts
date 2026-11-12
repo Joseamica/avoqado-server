@@ -27,10 +27,13 @@ export function sinFuncion(featureCode: string): Bloqueo {
 
 export const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
 
+/** Cómo se nombra cada filtro de fecha en el 400 que puede ver el usuario (la regla del SERVIDOR: mensajes en español). */
+const ETIQUETA_FECHA: Record<string, string> = { startDate: 'La fecha de inicio', endDate: 'La fecha de fin' }
+
 /** Fecha opcional, leída como la lee el servicio (`new Date(s)`): si no es fecha, 400 al pedir y no un pedido que truena después. */
 export function fecha(v: unknown, nombre: string): string | undefined {
   const s = str(v)
-  if (s && Number.isNaN(new Date(s).getTime())) throw new BadRequestError(`${nombre} must be a valid ISO date string`)
+  if (s && Number.isNaN(new Date(s).getTime())) throw new BadRequestError(`${ETIQUETA_FECHA[nombre] ?? `La fecha «${nombre}»`} no es válida`)
   return s
 }
 
