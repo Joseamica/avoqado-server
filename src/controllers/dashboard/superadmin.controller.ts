@@ -222,7 +222,7 @@ export async function disableFeatureForVenue(req: Request, res: Response, next: 
     const { venueId, featureCode } = req.params
     logger.info('Disabling feature for venue', { venueId, featureCode, userId: req.authContext?.userId })
 
-    await superadminService.disableFeatureForVenue(venueId, featureCode)
+    await superadminService.disableFeatureForVenue(venueId, featureCode, req.authContext?.userId)
     // No content response is appropriate for successful DELETE
     res.status(204).send()
   } catch (error) {

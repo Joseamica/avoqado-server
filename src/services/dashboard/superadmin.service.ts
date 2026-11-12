@@ -704,7 +704,7 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
     }
 
     // Upsert venue-feature association and activate it
-    await prisma.venueFeature.upsert({
+    const venueFeature = await prisma.venueFeature.upsert({
       where: { venueId_featureId: { venueId, featureId: feature.id } },
       create: {
         venueId,
@@ -724,10 +724,12 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
     })
 
     logAction({
+      staffId: actorId ?? null,
       venueId,
       action: 'FEATURE_ENABLED_BY_ADMIN',
       entity: 'VenueFeature',
-      entityId: venueId,
+      entityId: venueFeature.id,
+      data: { featureCode: feature.code },
     })
   } catch (error) {
     logger.error('Error enabling feature for venue:', error)
@@ -740,7 +742,7 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
 /**
  * Disable a feature for a venue
  */
-export async function disableFeatureForVenue(venueId: string, featureCode: string): Promise<void> {
+export async function disableFeatureForVenue(venueId: string, featureCode: string, actorId?: string): Promise<void> {
   try {
     // Ensure venue exists
     const venue = await prisma.venue.findUnique({ where: { id: venueId } })
@@ -774,10 +776,12 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
     }
 
     logAction({
+      staffId: actorId ?? null,
       venueId,
       action: 'FEATURE_DISABLED_BY_ADMIN',
       entity: 'VenueFeature',
-      entityId: venueId,
+      entityId: fila.id,
+      data: { featureCode: feature.code },
     })
   } catch (error) {
     // Un rechazo con código (409 obligación viva, 503 Stripe sin contestar) llega tal cual a quien llamó.
@@ -1047,7 +1051,7 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier, actor
 
   const cambio = () =>
     new ConflictError('El plan cambió mientras se asignaba la cortesía. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
-  const apagadas: string[] = []
+  const apagadas: { id: string; featureId: string }[] = []
   await prisma.$transaction(async tx => {
     // R0 ronda 4 (Codex): dos cortesías simultáneas a tiers distintos leían «no hay filas», creaban cada
     // una su destino y ninguna apagaba la otra. El candado de la fila del negocio las serializa, y bajo él
@@ -1068,7 +1072,7 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier, actor
         data: { active: false, endDate: new Date() },
       })
       if (count === 0) throw cambio()
-      apagadas.push(f.id)
+      apagadas.push(f)
     }
     if (!destino) return
     // El vínculo del destino ya se comprobó que no cobra: se limpia junto con la cobranza, o la fila
@@ -1101,8 +1105,15 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier, actor
   })
 
   // Auditoría DESPUÉS de confirmar: una transacción revertida no deja rastro de un cambio que no ocurrió.
-  for (const id of apagadas) {
-    logAction({ venueId, action: 'FEATURE_DISABLED_BY_ADMIN', entity: 'VenueFeature', entityId: id })
+  for (const f of apagadas) {
+    logAction({
+      staffId: actorId ?? null,
+      venueId,
+      action: 'FEATURE_DISABLED_BY_ADMIN',
+      entity: 'VenueFeature',
+      entityId: f.id,
+      data: { featureCode: planes.find(p => p.id === f.featureId)?.code ?? null },
+    })
   }
   logAction({
     staffId: actorId ?? null,
