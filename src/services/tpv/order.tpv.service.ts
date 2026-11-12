@@ -1318,6 +1318,27 @@ export async function createOrderWithItems(
     throw err
   }
 
+  // El descuento del cliente (automático, o con el PIN del gerente) deja su renglón en la auditoría, como el descuento y la
+  // cortesía de Mesas. Fuera de la transacción y sin esperar: una auditoría que falla no tumba la venta. Una venta repetida
+  // (misma llave) regresa arriba y no vuelve a anotarse.
+  if (filaDelCliente && orderDiscount && orderDiscountPesos > 0) {
+    void logAction({
+      staffId: input.staffId ?? null,
+      venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: createdOrder.id,
+      data: {
+        amount: orderDiscountPesos,
+        discountId: orderDiscount.id,
+        name: orderDiscount.name,
+        customerId: input.customerId,
+        descuentoDelCliente: true,
+        ...(filaDelCliente.authorizedById ? { autorizadoPor: filaDelCliente.authorizedById } : {}),
+      },
+    })
+  }
+
   async function runCreateOrderTransaction() {
     return withDeadlockRetry(
       async tx => {

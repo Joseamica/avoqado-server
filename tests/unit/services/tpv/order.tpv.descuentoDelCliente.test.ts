@@ -18,6 +18,7 @@ jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: je
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ armarComandasTrasCommit: jest.fn().mockResolvedValue(undefined) }))
 
 import { createOrderWithItems } from '@/services/tpv/order.tpv.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { calcularDescuentoExactoCents, filaDeCortesias } from '@/services/shared/discount.service'
 
 const VENUE = 'venue-1'
@@ -174,6 +175,35 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
     expect(fila).toMatchObject({ discountId: DESCUENTO, isAutomatic: true, appliedById: QUIEN_COBRA, authorizedById: null })
     expect(Number(fila.amount)).toBe(10)
     expect(prismaMock.permissionOverride.findFirst).not.toHaveBeenCalled()
+  })
+
+  // QA en la PAX (11-nov): la venta de «Cobrar» guardaba el descuento del cliente sin renglón en la auditoría, a diferencia
+  // del descuento y la cortesía de Mesas. Lo que el dueño revisa es justo el que autorizó un gerente.
+  it('1b. deja DISCOUNT_APPLIED en la auditoría con el monto, el descuento y el cliente; con el PIN, también al gerente', async () => {
+    autorizaciones = [autorizacion()]
+    await createOrderWithItems(VENUE, venta({ autorizacionDelDescuento: TOKEN }))
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'staff-1',
+        venueId: VENUE,
+        action: 'DISCOUNT_APPLIED',
+        entity: 'Order',
+        data: expect.objectContaining({
+          amount: 10,
+          discountId: DESCUENTO,
+          customerId: CECILIA,
+          descuentoDelCliente: true,
+          autorizadoPor: GERENTE,
+        }),
+      }),
+    )
+  })
+
+  it('1c. un descuento del catálogo que NO es del cliente no deja ese renglón (sigue como hoy)', async () => {
+    await createOrderWithItems(VENUE, venta({ customerId: OTRO_CLIENTE }))
+
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DISCOUNT_APPLIED' }))
   })
 
   it('2. el descuento no está asignado a ese cliente ⇒ no automático (como hoy)', async () => {
