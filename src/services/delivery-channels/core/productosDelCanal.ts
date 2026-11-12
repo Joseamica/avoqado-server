@@ -60,3 +60,12 @@ export function resumenDeProductos(config: unknown): { cuantos: number | null; p
     ? { cuantos: null, problema: `${problema}: el menú de este canal no se publica hasta corregirla` }
     : { cuantos: new Set(lista as string[]).size }
 }
+
+/**
+ * Lo que el dueño configuró y entra al menú publicado: lista, precios y horario del canal. Sirve para comprobar, con la fila
+ * bloqueada, que la pasada no armó el menú con una copia vieja del canal (Codex r1 #2).
+ */
+export function seleccionDelCanal(config: unknown): string {
+  const c = config && typeof config === 'object' && !Array.isArray(config) ? (config as Record<string, unknown>) : {}
+  return JSON.stringify([c.productos ?? null, c.precios ?? null, c.deliveryHours ?? null])
+}
