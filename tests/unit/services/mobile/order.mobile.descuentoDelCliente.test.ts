@@ -14,7 +14,10 @@ jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
   ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
   avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
 }))
-jest.mock('@/middlewares/permissionFlag.middleware', () => ({ tienePermisoEnVenue: jest.fn() }))
+jest.mock('@/middlewares/permissionFlag.middleware', () => ({
+  ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
+  tienePermisoEnVenue: jest.fn(),
+}))
 
 import { Decimal } from '@prisma/client/runtime/library'
 import type { Request, Response } from 'express'
@@ -210,8 +213,10 @@ describe('servicio: la venta con el descuento del cliente', () => {
   })
 
   it.each([
-    ['de otro cliente o descuento', null],
-    ['vencido', null],
+    // Las dos primeras sólo cubren el camino «la consulta no encontró fila»: que OTRO cliente, OTRO descuento o un token vencido no
+    // coincidan lo decide el filtro de la consulta, y eso se prueba contra Postgres en la integración.
+    ['sin fila (camino de «otro cliente u otro descuento»)', null],
+    ['sin fila (camino de «vencido»)', null],
     ['de la fase 1 (sin tope)', { authorizedById: 'sv-gerente', operationKey: 'descuento-cliente:cust-1:disc-1' }],
   ])('🔴 3i · token %s ⇒ 403', async (_caso, fila) => {
     prismaMock.permissionOverride.findFirst.mockResolvedValue(fila)
@@ -293,6 +298,34 @@ describe('servicio: la venta con el descuento del cliente', () => {
       .find(b => b.action === 'VENTA_SIN_RED_DESCUENTO_SIN_PERMISO')
     expect(bitacora).toMatchObject({ data: expect.objectContaining({ montoCents: 10000 }) })
     expect(filasCreadas()[0]).toMatchObject({ isAutomatic: true, authorizedById: 'sv-gerente' })
+  })
+})
+
+describe('el uso del descuento del catálogo cuenta, como con orderDiscountId', () => {
+  const usosContados = () =>
+    (prismaMock.discount.updateMany as jest.Mock).mock.calls.filter(c => c[0]?.data?.currentUses).flatMap(c => c[0].where.id.in as string[])
+
+  it('venta con el descuento del cliente (existe en el negocio): su currentUses sube una vez', async () => {
+    await vender({ descuentoConPermisoPropio: true })
+    expect(usosContados()).toEqual(['disc-1'])
+    expect((prismaMock.discount.updateMany as jest.Mock).mock.calls[0][0].data).toEqual({ currentUses: { increment: 1 } })
+  })
+
+  it('con el PIN del gerente también cuenta', async () => {
+    prismaMock.permissionOverride.findFirst.mockResolvedValue(pinDeGerente(1000))
+    await vender({ autorizacionDelDescuento: 'tok-1' })
+    expect(usosContados()).toEqual(['disc-1'])
+  })
+
+  it('un discountId que no existe en el negocio no cuenta nada', async () => {
+    await vender({ descuentoConPermisoPropio: true, descuentoDelCliente: { discountId: 'disc-ajeno', montoCents: 1000 } })
+    expect(usosContados()).toEqual([])
+  })
+
+  it('un 403 no cuenta nada; sin etiqueta tampoco (el libre de hoy)', async () => {
+    await expect(vender()).rejects.toMatchObject({ statusCode: 403 })
+    await vender({ descuentoDelCliente: undefined })
+    expect(usosContados()).toEqual([])
   })
 })
 
@@ -438,7 +471,73 @@ describe('guard y puente al servicio (las dos rutas comparten checkPromotionGuar
     expect(next.mock.calls[0][0]).toMatchObject({ message: 'base caída' })
   })
 
+  it('🔴 un error de lo que sigue (next lanza) no vuelve a correr la cadena: next se llama una sola vez', async () => {
+    const next = jest.fn(() => {
+      throw new Error('abajo')
+    })
+    await expect(checkDescuentoDelCliente(req(conEtiqueta()), {} as Response, next)).rejects.toThrow('abajo')
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
   it('sin etiqueta, autoridadDeLaVenta no agrega el marcador (la venta de hoy queda igual)', async () => {
     expect(await autoridadDeLaVenta(req({}), venta({ descuentoDelCliente: undefined }))).not.toHaveProperty('descuentoConPermisoPropio')
+  })
+})
+
+/**
+ * Revisión r1 #1: el candado REAL de las dos rutas (`checkPromotionGuardsIfPresent`, la misma función en `/orders` y en
+ * `pay-new-order`) tiene que respetar lo que decide `checkDescuentoDelCliente`: su 403 y el error de la base cortan la cadena.
+ */
+describe('el candado de la ruta respeta el 403 y el error de la base (las dos rutas)', () => {
+  const tiene = tienePermisoEnVenue as jest.Mock
+  const guardiaDe = (ruta: string) => {
+    const mobileRouter = (require('@/routes/mobile.routes') as typeof import('@/routes/mobile.routes')).default
+    const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === 'post'))
+    const guardia = capa.route.stack.map((c: any) => c.handle).find((h: any) => h?.name === 'checkPromotionGuardsIfPresent')
+    expect(guardia).toBeDefined()
+    return guardia
+  }
+  const pedir = (ruta: string, body: Record<string, unknown>) => {
+    const express = require('express') as typeof import('express')
+    const request = require('supertest') as typeof import('supertest')
+    const app = express()
+    app.use(express.json())
+    app.post(
+      '/venues/:venueId/x',
+      (r: Request, _res: Response, next: () => void) => {
+        ;(r as any).authContext = { userId: 'staff-1', venueId: 'venue-1' }
+        next()
+      },
+      guardiaDe(ruta),
+      (_r: Request, res: Response) => res.status(200).json({ paso: true }),
+    )
+    app.use((error: any, _r: Request, res: Response, _n: unknown) =>
+      res.status(error.statusCode ?? 500).json({ message: error.message, code: error.code }),
+    )
+    return request(app).post('/venues/venue-1/x').send(body)
+  }
+  const etiqueta = { customerId: 'cust-1', discount: 1000, descuentoDelCliente: { discountId: 'disc-1', montoCents: 1000 } }
+  const RUTAS = ['/venues/:venueId/orders', '/venues/:venueId/gift-cards/pay-new-order']
+
+  it.each(RUTAS)('🔴 %s · sin permiso y sin PIN: 403 con el texto (no sigue a la venta)', async ruta => {
+    tiene.mockResolvedValue(false)
+    const res = await pedir(ruta, { ...etiqueta, items: [{ productId: 'prod-1', quantity: 1 }] })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ message: COPY, code: 'DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION' })
+  })
+
+  it.each(RUTAS)('🔴 %s · la base falla al resolver el permiso: 500 (reintentable), nunca 403 ni «pasa»', async ruta => {
+    tiene.mockRejectedValue(new Error('base caída'))
+    const res = await pedir(ruta, { ...etiqueta, autorizacionDelDescuento: 'tok-1', items: [{ productId: 'prod-1', quantity: 1 }] })
+    expect(res.status).toBe(500)
+    expect(res.body.message).toBe('base caída')
+  })
+
+  it.each(RUTAS)('%s · con permiso propio o con PIN en el cuerpo: sigue', async ruta => {
+    tiene.mockResolvedValue(true)
+    expect((await pedir(ruta, { ...etiqueta, items: [{ productId: 'prod-1', quantity: 1 }] })).status).toBe(200)
+    tiene.mockResolvedValue(false)
+    const conPin = await pedir(ruta, { ...etiqueta, autorizacionDelDescuento: 'tok-1', items: [{ productId: 'prod-1', quantity: 1 }] })
+    expect(conPin.status).toBe(200)
   })
 })

@@ -41,24 +41,25 @@ export function tieneDescuentoConPermisoPropio(req: Request): boolean {
  * `discounts:apply` (la misma evaluación de `checkPermission`, sin responder) se marca el request y el token ni se lee. Sin él y con
  * `autorizacionDelDescuento`, pasa al servicio, que exige el PIN atado a este cliente, a este descuento y a un tope que alcance el
  * monto. Sin los dos, 403 aquí. No consume `X-Permission-Override`: ese PIN no autoriza el descuento del cliente. Si la base falla,
- * error (nunca «tiene permiso»).
+ * error (nunca «tiene permiso»). Se decide dentro del `try` y `next` se llama UNA vez, fuera: un error de lo que sigue no vuelve a
+ * correr la cadena.
  */
 export const checkDescuentoDelCliente = async (req: Request, _res: Response, next: NextFunction) => {
+  let rechazo: unknown
   try {
     descuentosConPermisoPropio.delete(req)
     const venueId = req.params.venueId
     const userId = req.authContext?.userId
     if (venueId && userId && (await tienePermisoEnVenue(req, 'discounts:apply'))) {
       descuentosConPermisoPropio.set(req, { venueId, userId })
-      return next()
+    } else if (!traeAutorizacionDelDescuento(req.body)) {
+      const nombre = await nombreDelCliente(venueId, req.body)
+      rechazo = new ForbiddenError(textoDelDescuentoSinPermiso(nombre), DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION)
     }
-    if (traeAutorizacionDelDescuento(req.body)) return next()
-    return next(
-      new ForbiddenError(textoDelDescuentoSinPermiso(await nombreDelCliente(venueId, req.body)), DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION),
-    )
   } catch (error) {
-    return next(error)
+    rechazo = error ?? new Error('No se pudo revisar el permiso del descuento del cliente')
   }
+  return rechazo ? next(rechazo) : next()
 }
 
 /** El nombre del 403, con la misma prioridad que la venta: el que manda la caja o el del cliente del negocio. */

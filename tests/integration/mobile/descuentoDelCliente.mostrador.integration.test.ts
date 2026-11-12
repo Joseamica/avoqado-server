@@ -80,6 +80,8 @@ let gerenteVenueId: string
 let productId: string
 let ceciliaId: string
 let discountId: string
+let otroClienteId: string
+let otroDescuentoId: string
 
 beforeAll(async () => {
   organizationId = (await prisma.organization.create({ data: { name: `DC ${suffix}`, email: `${suffix}@org.test`, phone: '5555555555' } }))
@@ -114,8 +116,12 @@ beforeAll(async () => {
     })
   ).id
   ceciliaId = (await prisma.customer.create({ data: { venueId, firstName: 'Cecilia', lastName: 'López' } })).id
+  otroClienteId = (await prisma.customer.create({ data: { venueId, firstName: 'Ernesto', lastName: 'Ruiz' } })).id
   discountId = (
     await prisma.discount.create({ data: { venueId, name: 'Cliente frecuente', type: 'PERCENTAGE', value: D(10), scope: 'ORDER' } })
+  ).id
+  otroDescuentoId = (
+    await prisma.discount.create({ data: { venueId, name: 'Empleados', type: 'PERCENTAGE', value: D(20), scope: 'ORDER' } })
   ).id
   for (const id of [organizationId, venueId, cajeraId, gerenteId, productId, ceciliaId, discountId]) expect(id).toMatch(/^c[a-z0-9]{24}$/)
 })
@@ -125,8 +131,14 @@ afterAll(async () => {
   await limpiarNegocioDePrueba(venueId)
 })
 
-/** El PIN de un gerente para Cecilia y su descuento: `tope` en centavos (`null` = la llave de la fase 1, sin tope). */
-async function pin(tope: number | null, opciones: { vencido?: boolean } = {}): Promise<string> {
+/**
+ * El PIN de un gerente para Cecilia y su descuento: `tope` en centavos (`null` = la llave de la fase 1, sin tope). `para` lo emite para
+ * OTRO cliente u OTRO descuento (la llave es de ellos; la venta sigue siendo de Cecilia con su descuento).
+ */
+async function pin(
+  tope: number | null,
+  opciones: { vencido?: boolean; para?: { customerId?: string; discountId?: string } } = {},
+): Promise<string> {
   const token = cuid()
   await prisma.permissionOverride.create({
     data: {
@@ -134,7 +146,9 @@ async function pin(tope: number | null, opciones: { vencido?: boolean } = {}): P
       token,
       permission: 'discounts:apply',
       authorizedById: gerenteVenueId,
-      operationKey: `descuento-cliente:${ceciliaId}:${discountId}${tope === null ? '' : `:${tope}`}`,
+      operationKey: `descuento-cliente:${opciones.para?.customerId ?? ceciliaId}:${opciones.para?.discountId ?? discountId}${
+        tope === null ? '' : `:${tope}`
+      }`,
       expiresAt: new Date(Date.now() + (opciones.vencido ? -60_000 : 7 * 86_400_000)),
     },
   })
@@ -281,6 +295,8 @@ describe('POST /orders con el descuento del cliente', () => {
   it.each([
     ['vencido', () => pin(1000, { vencido: true })],
     ['de la fase 1, sin tope', () => pin(null)],
+    ['emitido para OTRO cliente', () => pin(1000, { para: { customerId: otroClienteId } })],
+    ['emitido para OTRO descuento', () => pin(1000, { para: { discountId: otroDescuentoId } })],
   ])('🔴 3i · sin permiso y con un PIN %s ⇒ 403', async (_caso, hacer) => {
     const r = await crearOrden(cajeraId, { autorizacionDelDescuento: await hacer() })
     expect(r.response.status).toBe(403)
@@ -346,6 +362,13 @@ describe('POST /orders con el descuento del cliente', () => {
     expect(r.order).toBeNull()
   })
 
+  it('🔴 3e · sin permiso y sin PIN, con la etiqueta mal armada: el 403 del candado sale ANTES que el 400 del cuerpo', async () => {
+    const r = await crearOrden(cajeraId, { discount: 1000, descuentoDelCliente: { discountId, montoCents: 900 } })
+    expect(r.response.status).toBe(403)
+    expect(r.response.body).toMatchObject({ message: COPY, code: 'DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION' })
+    expect(r.order).toBeNull()
+  })
+
   it('3f · montoCents distinto de discount ⇒ 400', async () => {
     const r = await crearOrden(gerenteId, { discount: 900 })
     expect(r.response.status).toBe(400)
@@ -379,6 +402,13 @@ describe('POST gift-cards/pay-new-order con el descuento del cliente (3m)', () =
     expect(r.response.body.message).toBe(COPY)
     expect(r.order).toBeNull()
     expect(await saldoDe(t.id)).toBe(500)
+  })
+
+  it('🔴 3e · sin permiso y sin PIN, con un código que no existe: 403 del candado (no el 404 de la tarjeta)', async () => {
+    const r = await pagarConSaldo(cajeraId, generateGiftCardCode().display, 90)
+    expect(r.response.status).toBe(403)
+    expect(r.response.body).toMatchObject({ message: COPY, code: 'DESCUENTO_DEL_CLIENTE_SIN_AUTORIZACION' })
+    expect(r.order).toBeNull()
   })
 
   it('🔴 3e · sin permiso y sin PIN: 403 en el guard y el saldo intacto', async () => {

@@ -686,11 +686,13 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
   if (!hasPromotion && !(revisarDescuentoManual && traeDescuentoManual(req.body))) return afterPromotion()
   const afterPermission = () => (hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion())
   // Descuento del cliente (fase 2): su rebaja la autoriza el permiso propio o el PIN del cuerpo atado al monto (lo valida el
-  // servicio). Ese PIN no autoriza nada más: una promoción sigue pidiendo `discounts:apply` aquí mismo.
+  // servicio). Ese PIN no autoriza nada más: una promoción sigue pidiendo `discounts:apply` aquí mismo. Su 403 o el error de la base
+  // (500, reintentable) cortan la cadena: se pasan tal cual.
   if (revisarDescuentoManual && traeDescuentoDelCliente(req.body)) {
-    return checkDescuentoDelCliente(req, res, () =>
-      hasPromotion ? checkPermission('discounts:apply')(req, res, afterPermission) : afterPermission(),
-    )
+    return checkDescuentoDelCliente(req, res, (error?: unknown) => {
+      if (error) return next(error)
+      return hasPromotion ? checkPermission('discounts:apply')(req, res, afterPermission) : afterPermission()
+    })
   }
   // Promoción y rebaja manual comparten el permiso: una sola ficha de gerente por petición, sin consumirla dos veces.
   return checkPermission('discounts:apply')(req, res, afterPermission)

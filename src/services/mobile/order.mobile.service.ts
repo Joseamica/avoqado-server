@@ -2162,12 +2162,18 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
   // order.tpv.service.ts). Best-effort: the order already committed above, so a
   // failure here must not fail the request — it would only leave a discount's
   // maxTotalUses counter stale, not corrupt the order/payment.
-  if (discounts.length > 0) {
+  // Descuento del cliente (revisión r1): su uso cuenta igual que el del `orderDiscountId` (y que la TPV de la fase 1), sólo si se
+  // registró y el descuento existe en el negocio.
+  const usados = [
+    ...discounts.map(discount => discount.id),
+    ...(delCliente?.discountId && creada.descuentoDelCliente ? [delCliente.discountId] : []),
+  ]
+  if (usados.length > 0) {
     try {
       await withDeadlockRetry(
         tx =>
           tx.discount.updateMany({
-            where: { id: { in: discounts.map(discount => discount.id) } },
+            where: { id: { in: usados } },
             data: { currentUses: { increment: 1 } },
           }),
         { etiqueta: 'terminarVentaDeMostrador' },
@@ -2175,7 +2181,7 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
     } catch (error) {
       logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
         orderId: order.id,
-        discountIds: discounts.map(discount => discount.id),
+        discountIds: usados,
         error: (error as Error).message,
       })
     }
