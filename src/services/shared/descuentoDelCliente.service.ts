@@ -1,5 +1,6 @@
-import type { Discount, Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
 
 /**
  * El «descuento del cliente»: el que el negocio le asignó a UN cliente (`CustomerDiscount`) y la caja aplica sola al elegirlo.
@@ -14,113 +15,57 @@ export type DescuentoDelCliente = {
   maxDiscountAmount: number | null
 }
 
-const TOPE_POR_CLIENTE = 10
-
-type Asignacion = { active: boolean; validFrom: Date | null; validUntil: Date | null; maxUses: number | null }
-
-// Vigencia por instantes (validFrom <= ahora <= validUntil), igual que `getCustomerDiscounts`.
-const vigente = (v: { validFrom: Date | null; validUntil: Date | null }, ahora: Date) =>
-  (!v.validFrom || v.validFrom <= ahora) && (!v.validUntil || v.validUntil >= ahora)
-
-export function cuentaComoDescuentoDelCliente(asignacion: Asignacion, d: Discount, venueId: string, ahora: Date): boolean {
-  return (
-    asignacion.active &&
-    vigente(asignacion, ahora) &&
-    asignacion.maxUses === null &&
-    d.venueId === venueId &&
-    d.active &&
-    vigente(d, ahora) &&
-    (d.type === 'PERCENTAGE' || d.type === 'FIXED_AMOUNT') &&
-    d.scope === 'ORDER' &&
-    d.minPurchaseAmount === null &&
-    d.daysOfWeek.length === 0 &&
-    d.timeFrom === null &&
-    d.timeUntil === null &&
-    d.maxTotalUses === null &&
-    d.maxUsesPerCustomer === null &&
-    !d.requiresApproval &&
-    d.customerGroupId === null
-  )
+type Ganador = {
+  customerId: string
+  discountId: string
+  name: string
+  type: 'PERCENTAGE' | 'FIXED_AMOUNT'
+  value: Prisma.Decimal
+  maxDiscountAmount: Prisma.Decimal | null
 }
 
-/** `priority` desc, luego `value` desc, luego el más viejo. */
-export function elegirDescuentoDelCliente(candidatos: Discount[]): Discount | null {
-  const orden = [...candidatos].sort(
-    (a, b) => b.priority - a.priority || Number(b.value) - Number(a.value) || a.createdAt.getTime() - b.createdAt.getTime(),
-  )
-  return orden[0] ?? null
-}
-
-/** Una sola consulta para toda la lista de clientes; los que no tienen descuento válido no aparecen en el mapa. */
+/**
+ * El descuento de cada cliente de la lista, en UNA consulta que devuelve a lo más un renglón por cliente (`DISTINCT ON`): la
+ * regla completa y el orden viven en la base. Gana `priority` mayor, luego `value` mayor, luego el más viejo y, en empate
+ * total, el id menor. Sin tope que elija otro descuento ni una consulta por cliente (Codex r6–r8). `daysOfWeek` NULL (filas
+ * por SQL, descuentos de referidos) cuenta como vacío, igual que lo lee Prisma. Los que no tienen uno válido no aparecen.
+ */
 export async function descuentosDeLosClientes(
   venueId: string,
   customerIds: string[],
-  db: Prisma.TransactionClient = prisma,
+  db: Pick<Prisma.TransactionClient, '$queryRaw'> = prisma,
 ): Promise<Map<string, DescuentoDelCliente>> {
   const resultado = new Map<string, DescuentoDelCliente>()
-  if (customerIds.length === 0) return resultado
+  const ids = [...new Set(customerIds)]
+  if (ids.length === 0) return resultado
 
   const ahora = new Date()
-  const ventana = (ahora: Date) => [
-    { OR: [{ validFrom: null }, { validFrom: { lte: ahora } }] },
-    { OR: [{ validUntil: null }, { validUntil: { gte: ahora } }] },
-  ]
-  // La regla vive en el WHERE: sólo vuelven candidatos válidos. `cuentaComoDescuentoDelCliente` queda como doble revisión.
-  const donde = (ids: string[]): Prisma.CustomerDiscountWhereInput => ({
-    customerId: { in: ids },
-    active: true,
-    maxUses: null,
-    AND: ventana(ahora),
-    discount: {
-      venueId,
-      active: true,
-      type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
-      scope: 'ORDER',
-      requiresApproval: false,
-      minPurchaseAmount: null,
-      timeFrom: null,
-      timeUntil: null,
-      maxTotalUses: null,
-      maxUsesPerCustomer: null,
-      customerGroupId: null,
-      // Una lista NULL en la base (descuentos de referidos, cargas por SQL) Prisma la lee como []: se aceptan las dos,
-      // igual que `reglasDeDescuento.ts`. Con sólo `isEmpty` la base los descartaba (QA en la copia, 11-nov).
-      AND: [...ventana(ahora), { OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { equals: null } }] }],
-    },
-  })
-  const orden: Prisma.CustomerDiscountOrderByWithRelationInput[] = [
-    { discount: { priority: 'desc' } },
-    { discount: { value: 'desc' } },
-    { discount: { createdAt: 'asc' } },
-  ]
-  // ponytail: tope de 10 asignaciones válidas por cliente; el orden es global (priority, value, más viejo), así que el
-  // primer renglón de cada cliente que sí salió es su ganador. Si se llena el tope, a un cliente le pueden haber ganado el
-  // lugar los de otro (Codex r7 #1): a los que no salieron se les busca aparte, uno por uno y con take 1 (sólo pasa con más
-  // de 10 asignaciones válidas en un mismo cliente).
-  const tope = customerIds.length * TOPE_POR_CLIENTE
-  const filas = await db.customerDiscount.findMany({ where: donde(customerIds), include: { discount: true }, orderBy: orden, take: tope })
-  if (filas.length === tope) {
-    const salieron = new Set(filas.map(f => f.customerId))
-    const faltan = customerIds.filter(id => !salieron.has(id))
-    const sueltas = await Promise.all(
-      faltan.map(id => db.customerDiscount.findMany({ where: donde([id]), include: { discount: true }, orderBy: orden, take: 1 })),
-    )
-    filas.push(...sueltas.flat())
-  }
-
-  const candidatos = new Map<string, Discount[]>()
-  for (const f of filas) {
-    if (!cuentaComoDescuentoDelCliente(f, f.discount, venueId, ahora)) continue
-    candidatos.set(f.customerId, [...(candidatos.get(f.customerId) ?? []), f.discount])
-  }
-  for (const [customerId, lista] of candidatos) {
-    const d = elegirDescuentoDelCliente(lista)!
-    resultado.set(customerId, {
-      discountId: d.id,
-      name: d.name,
-      type: d.type as 'PERCENTAGE' | 'FIXED_AMOUNT',
-      value: Number(d.value),
-      maxDiscountAmount: d.maxDiscountAmount != null ? Number(d.maxDiscountAmount) : null,
+  const ganadores = await db.$queryRaw<Ganador[]>`
+    SELECT DISTINCT ON (cd."customerId")
+      cd."customerId", d.id AS "discountId", d.name, d.type::text AS type, d.value, d."maxDiscountAmount"
+    FROM "CustomerDiscount" cd
+    JOIN "Discount" d ON d.id = cd."discountId"
+    WHERE cd."customerId" IN (${Prisma.join(ids)})
+      AND cd.active AND cd."maxUses" IS NULL
+      AND (cd."validFrom" IS NULL OR cd."validFrom" <= ${utcTs(ahora)})
+      AND (cd."validUntil" IS NULL OR cd."validUntil" >= ${utcTs(ahora)})
+      AND d."venueId" = ${venueId} AND d.active
+      AND d.type IN ('PERCENTAGE', 'FIXED_AMOUNT') AND d.scope = 'ORDER' AND NOT d."requiresApproval"
+      AND d."minPurchaseAmount" IS NULL AND d."timeFrom" IS NULL AND d."timeUntil" IS NULL
+      AND d."maxTotalUses" IS NULL AND d."maxUsesPerCustomer" IS NULL AND d."customerGroupId" IS NULL
+      AND COALESCE(cardinality(d."daysOfWeek"), 0) = 0
+      AND (d."validFrom" IS NULL OR d."validFrom" <= ${utcTs(ahora)})
+      AND (d."validUntil" IS NULL OR d."validUntil" >= ${utcTs(ahora)})
+    ORDER BY cd."customerId", d.priority DESC, d.value DESC, d."createdAt" ASC, d.id ASC
+    LIMIT ${ids.length}
+  `
+  for (const g of ganadores) {
+    resultado.set(g.customerId, {
+      discountId: g.discountId,
+      name: g.name,
+      type: g.type,
+      value: Number(g.value),
+      maxDiscountAmount: g.maxDiscountAmount != null ? Number(g.maxDiscountAmount) : null,
     })
   }
   return resultado

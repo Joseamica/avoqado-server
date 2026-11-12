@@ -106,19 +106,22 @@ beforeEach(() => {
   prismaMock.product.findMany.mockResolvedValue([])
   prismaMock.modifier.findMany.mockResolvedValue([])
   prismaMock.discount.findMany.mockImplementation(async ({ where }: any) => [descuento()].filter(d => where.id.in.includes(d.id)))
-  prismaMock.customerDiscount.findMany.mockImplementation(async ({ where }: any) =>
-    asignaciones
-      .filter(a => where.customerId.in.includes(a.customerId))
-      .map((a, i) => ({
-        id: `cd-${i}`,
+  // La consulta del descuento del cliente (un ganador por cliente, `DISTINCT ON`): aquí devuelve el de cada cliente pedido.
+  // Lo que elige la base de verdad se prueba contra Postgres (`descuentoDelCliente.integration.test.ts`).
+  ;(prismaMock.$queryRaw as any).mockImplementation(async (cadenas: any, ...valores: any[]) => {
+    const consulta = Prisma.sql(cadenas, ...valores)
+    if (!consulta.sql.includes('"CustomerDiscount"')) return undefined
+    return asignaciones
+      .filter(a => consulta.values.includes(a.customerId))
+      .map(a => ({
         customerId: a.customerId,
-        active: true,
-        validFrom: null,
-        validUntil: null,
-        maxUses: null,
-        discount: a.discount,
-      })),
-  )
+        discountId: a.discount.id,
+        name: a.discount.name,
+        type: a.discount.type,
+        value: new Prisma.Decimal(a.discount.value),
+        maxDiscountAmount: a.discount.maxDiscountAmount != null ? new Prisma.Decimal(a.discount.maxDiscountAmount) : null,
+      }))
+  })
   prismaMock.permissionOverride.findFirst.mockImplementation(async ({ where }: any) => {
     const fila = autorizaciones.find(a => cumple(a, where))
     return fila ? { authorizedById: fila.authorizedById } : null
@@ -219,7 +222,7 @@ describe('createOrderWithItems (TPV) — descuento del cliente', () => {
     await createOrderWithItems(VENUE, venta({ customerId: null }))
 
     expect(filaDelCatalogo().isAutomatic ?? false).toBe(false)
-    expect(prismaMock.customerDiscount.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
 
   it('2c. Cecilia tiene OTRO descuento asignado ⇒ éste no es automático', async () => {

@@ -1,164 +1,76 @@
-import {
-  cuentaComoDescuentoDelCliente,
-  elegirDescuentoDelCliente,
-  descuentosDeLosClientes,
-  llaveDelDescuentoDelCliente,
-} from '../../../../src/services/shared/descuentoDelCliente.service'
+import { Prisma } from '@prisma/client'
+import { descuentosDeLosClientes, llaveDelDescuentoDelCliente } from '@/services/shared/descuentoDelCliente.service'
 
-const AHORA = new Date('2026-11-11T18:00:00Z')
-const AYER = new Date('2026-11-10T18:00:00Z')
-const MANANA = new Date('2026-11-12T18:00:00Z')
-
-const base = (o: Record<string, any> = {}): any => ({
-  id: 'd1',
-  venueId: 'v1',
-  name: 'Cliente 10 %',
-  type: 'PERCENTAGE',
-  value: 10,
-  scope: 'ORDER',
-  active: true,
-  priority: 0,
-  validFrom: null,
-  validUntil: null,
-  minPurchaseAmount: null,
-  maxDiscountAmount: null,
-  daysOfWeek: [],
-  timeFrom: null,
-  timeUntil: null,
-  maxTotalUses: null,
-  maxUsesPerCustomer: null,
-  requiresApproval: false,
-  customerGroupId: null,
-  createdAt: new Date('2026-01-01T00:00:00Z'),
-  ...o,
-})
-const asig = (o: Record<string, any> = {}) => ({ active: true, validFrom: null, validUntil: null, maxUses: null, ...o })
-
-describe('cuentaComoDescuentoDelCliente', () => {
-  it('el descuento base cuenta', () => {
-    expect(cuentaComoDescuentoDelCliente(asig(), base(), 'v1', AHORA)).toBe(true)
-  })
-  it('FIXED_AMOUNT cuenta', () => {
-    expect(cuentaComoDescuentoDelCliente(asig(), base({ type: 'FIXED_AMOUNT' }), 'v1', AHORA)).toBe(true)
-  })
-
-  const noCuenta: Array<[string, Record<string, any>, Record<string, any>, string?]> = [
-    ['type COMP', { type: 'COMP' }, {}],
-    ['scope ITEM', { scope: 'ITEM' }, {}],
-    ['catálogo inactivo', { active: false }, {}],
-    ['catálogo vencido', { validUntil: AYER }, {}],
-    ['catálogo aún no vigente', { validFrom: MANANA }, {}],
-    ['mínimo de compra', { minPurchaseAmount: 100 }, {}],
-    ['días de la semana', { daysOfWeek: [1] }, {}],
-    ['hora desde', { timeFrom: '09:00' }, {}],
-    ['tope total', { maxTotalUses: 5 }, {}],
-    ['tope por cliente', { maxUsesPerCustomer: 1 }, {}],
-    ['asignación con maxUses', {}, { maxUses: 2 }],
-    ['asignación inactiva', {}, { active: false }],
-    ['asignación vencida', {}, { validUntil: AYER }],
-    ['asignación aún no vigente', {}, { validFrom: MANANA }],
-    ['requiere aprobación', { requiresApproval: true }, {}],
-    ['de un grupo de clientes', { customerGroupId: 'g1' }, {}],
-    ['otro venue', { venueId: 'v2' }, {}],
-  ]
-  it.each(noCuenta)('no cuenta: %s', (_n, d, a) => {
-    expect(cuentaComoDescuentoDelCliente(asig(a), base(d), 'v1', AHORA)).toBe(false)
-  })
-})
-
-describe('elegirDescuentoDelCliente', () => {
-  it('gana el de mayor valor con igual prioridad', () => {
-    const r = elegirDescuentoDelCliente([base({ id: 'a', value: 10 }), base({ id: 'b', value: 30 })])
-    expect(r?.id).toBe('b')
-  })
-  it('la prioridad manda sobre el valor', () => {
-    const r = elegirDescuentoDelCliente([base({ id: 'a', value: 30 }), base({ id: 'b', value: 10, priority: 5 })])
-    expect(r?.id).toBe('b')
-  })
-  it('empate total: el más viejo', () => {
-    const r = elegirDescuentoDelCliente([
-      base({ id: 'nuevo', createdAt: new Date('2026-06-01T00:00:00Z') }),
-      base({ id: 'viejo', createdAt: new Date('2026-02-01T00:00:00Z') }),
-    ])
-    expect(r?.id).toBe('viejo')
-  })
-  it('sin candidatos: null', () => {
-    expect(elegirDescuentoDelCliente([])).toBeNull()
-  })
-})
+/**
+ * La regla completa vive en la consulta (un ganador por cliente con `DISTINCT ON`): aquí se fija su forma y el mapeo; lo que
+ * elige la base se prueba contra Postgres en `tests/integration/tpv/descuentoDelCliente.integration.test.ts`.
+ */
+// `$queryRaw` se llama como plantilla: (cadenas, ...valores). Se rearma para leer el SQL y sus valores ya aplanados.
+const sqlDe = (llamada: any[]) => {
+  const consulta = Prisma.sql(llamada[0], ...llamada.slice(1))
+  return { texto: consulta.sql.replace(/\s+/g, ' '), valores: consulta.values }
+}
 
 describe('descuentosDeLosClientes', () => {
-  // Codex r7 #1: el orden es global; si un cliente llena el tope, al otro le ganan el lugar. Al que no salió se le pregunta aparte.
-  it('si se llena el tope, a quien no salió se le busca aparte (uno por uno, take 1) y conserva su descuento', async () => {
-    const delPrimero = Array.from({ length: 20 }, (_, i) => ({
-      customerId: 'c1',
-      discountId: `a${i}`,
-      ...asig(),
-      discount: base({ id: `a${i}`, name: `Alto ${i}`, value: 50, priority: 9 }),
-    }))
-    const delSegundo = [{ customerId: 'c2', discountId: 'b', ...asig(), discount: base({ id: 'b', name: 'Cliente 10 %', value: 10 }) }]
-    const findMany = jest.fn().mockResolvedValueOnce(delPrimero).mockResolvedValueOnce(delSegundo)
-    const mapa = await descuentosDeLosClientes('v1', ['c1', 'c2'], { customerDiscount: { findMany } } as any)
-
-    expect(findMany).toHaveBeenCalledTimes(2)
-    const segunda = findMany.mock.calls[1][0]
-    expect(segunda.where.customerId).toEqual({ in: ['c2'] })
-    expect(segunda.take).toBe(1)
-    expect(segunda.orderBy).toEqual(findMany.mock.calls[0][0].orderBy)
-    expect(mapa.get('c2')).toMatchObject({ discountId: 'b', name: 'Cliente 10 %' })
-    expect(mapa.get('c1')).toMatchObject({ discountId: 'a0' })
-  })
-
-  it('sin llenar el tope no hay consultas de más', async () => {
-    const findMany = jest.fn().mockResolvedValue([{ customerId: 'c1', discountId: 'a', ...asig(), discount: base({ id: 'a' }) }])
-    await descuentosDeLosClientes('v1', ['c1', 'c2'], { customerDiscount: { findMany } } as any)
-
-    expect(findMany).toHaveBeenCalledTimes(1)
-  })
-
-  it('una consulta para varios clientes; sólo entra quien tiene uno válido', async () => {
-    const findMany = jest.fn().mockResolvedValue([
-      { customerId: 'c1', discountId: 'a', ...asig(), discount: base({ id: 'a', name: 'Cliente 10 %', value: 10 }) },
-      { customerId: 'c1', discountId: 'b', ...asig(), discount: base({ id: 'b', name: 'Cliente 30 %', value: 30 }) },
-      { customerId: 'c2', discountId: 'a', ...asig({ maxUses: 1 }), discount: base({ id: 'a' }) },
-    ])
-    const db: any = { customerDiscount: { findMany } }
-    const mapa = await descuentosDeLosClientes('v1', ['c1', 'c2'], db)
-    expect(findMany).toHaveBeenCalledTimes(1)
-    const arg = findMany.mock.calls[0][0]
-    expect(arg.where).toMatchObject({
-      customerId: { in: ['c1', 'c2'] },
-      active: true,
-      maxUses: null,
-      discount: {
-        venueId: 'v1',
-        active: true,
-        type: { in: ['PERCENTAGE', 'FIXED_AMOUNT'] },
-        scope: 'ORDER',
-        requiresApproval: false,
-        minPurchaseAmount: null,
-        timeFrom: null,
-        timeUntil: null,
-        maxTotalUses: null,
-        maxUsesPerCustomer: null,
-        customerGroupId: null,
-      },
-    })
-    expect(arg.where.AND).toHaveLength(2)
-    // Una lista NULL en la base (descuentos de referidos, cargas por SQL) Prisma la lee como []: se aceptan las dos.
-    expect(arg.where.discount.daysOfWeek).toBeUndefined()
-    expect(arg.where.discount.AND).toHaveLength(3)
-    expect(arg.where.discount.AND).toContainEqual({ OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { equals: null } }] })
-    expect(arg.orderBy).toEqual([{ discount: { priority: 'desc' } }, { discount: { value: 'desc' } }, { discount: { createdAt: 'asc' } }])
-    expect(arg.take).toBe(20)
-    expect(mapa.size).toBe(1)
-    expect(mapa.get('c1')).toEqual({ discountId: 'b', name: 'Cliente 30 %', type: 'PERCENTAGE', value: 30, maxDiscountAmount: null })
-  })
   it('sin ids no consulta', async () => {
-    const findMany = jest.fn()
-    const mapa = await descuentosDeLosClientes('v1', [], { customerDiscount: { findMany } } as any)
+    const $queryRaw = jest.fn()
+    const mapa = await descuentosDeLosClientes('v1', [], { $queryRaw } as any)
     expect(mapa.size).toBe(0)
-    expect(findMany).not.toHaveBeenCalled()
+    expect($queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('UNA consulta, un renglón por cliente, con la regla completa y el desempate fijo', async () => {
+    const $queryRaw = jest.fn().mockResolvedValue([])
+    await descuentosDeLosClientes('v1', ['c1', 'c2'], { $queryRaw } as any)
+
+    expect($queryRaw).toHaveBeenCalledTimes(1)
+    const { texto, valores } = sqlDe($queryRaw.mock.calls[0])
+    expect(texto).toContain('SELECT DISTINCT ON (cd."customerId")')
+    expect(texto).toContain('ORDER BY cd."customerId", d.priority DESC, d.value DESC, d."createdAt" ASC, d.id ASC')
+    expect(texto).toContain('COALESCE(cardinality(d."daysOfWeek"), 0) = 0')
+    expect(texto).toContain(`d.type IN ('PERCENTAGE', 'FIXED_AMOUNT') AND d.scope = 'ORDER' AND NOT d."requiresApproval"`)
+    expect(texto).toContain('d."customerGroupId" IS NULL')
+    expect(texto).toContain('cd."maxUses" IS NULL')
+    // Fechas como `timestamp` en UTC, nunca un Date pelado (regla de binds de fechas).
+    expect(texto.match(/AT TIME ZONE 'UTC'/g)).toHaveLength(4)
+    expect(valores).toEqual(expect.arrayContaining(['c1', 'c2', 'v1']))
+    expect(texto.trim()).toMatch(/LIMIT \?$/)
+    expect(valores[valores.length - 1]).toBe(2)
+  })
+
+  it('los ids repetidos cuentan una vez (lista y LIMIT)', async () => {
+    const $queryRaw = jest.fn().mockResolvedValue([])
+    await descuentosDeLosClientes('v1', ['c1', 'c1', 'c2'], { $queryRaw } as any)
+
+    const { valores } = sqlDe($queryRaw.mock.calls[0])
+    expect(valores.filter(v => v === 'c1')).toHaveLength(1)
+    expect(valores[valores.length - 1]).toBe(2)
+  })
+
+  it('traduce cada ganador a pesos 1:1 (Decimal → número), sin tope = null', async () => {
+    const $queryRaw = jest.fn().mockResolvedValue([
+      {
+        customerId: 'c1',
+        discountId: 'd1',
+        name: 'Cliente 10 %',
+        type: 'PERCENTAGE',
+        value: new Prisma.Decimal('10'),
+        maxDiscountAmount: null,
+      },
+      {
+        customerId: 'c2',
+        discountId: 'd2',
+        name: 'Cliente $80',
+        type: 'FIXED_AMOUNT',
+        value: new Prisma.Decimal('80.50'),
+        maxDiscountAmount: new Prisma.Decimal('20'),
+      },
+    ])
+    const mapa = await descuentosDeLosClientes('v1', ['c1', 'c2', 'c3'], { $queryRaw } as any)
+
+    expect(mapa.get('c1')).toEqual({ discountId: 'd1', name: 'Cliente 10 %', type: 'PERCENTAGE', value: 10, maxDiscountAmount: null })
+    expect(mapa.get('c2')).toEqual({ discountId: 'd2', name: 'Cliente $80', type: 'FIXED_AMOUNT', value: 80.5, maxDiscountAmount: 20 })
+    expect(mapa.has('c3')).toBe(false)
   })
 })
 
