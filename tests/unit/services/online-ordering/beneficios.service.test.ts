@@ -19,7 +19,11 @@ jest.mock('@/services/shared/cuponDeLaVenta', () => ({
   bloquearDescuentoDelCupon: jest.fn(),
 }))
 jest.mock('@/services/wallet/redeemStampReward.service', () => ({ canjearPremioEnTx: jest.fn(), renglonDelPremioEnTx: jest.fn() }))
-jest.mock('@/services/mobile/loyalty.mobile.service', () => ({ redeemPointsToOrderInTransaction: jest.fn() }))
+jest.mock('@/services/mobile/loyalty.mobile.service', () => ({
+  redeemPointsToOrderInTransaction: jest.fn(),
+  // La regla del canje es pura: la cotización usa la REAL (W7, puntos usables).
+  puntosQueSeCanjean: jest.requireActual('@/services/mobile/loyalty.mobile.service').puntosQueSeCanjean,
+}))
 jest.mock('@/services/shared/repartoDescuentoTx', () => ({
   conservarDescuentoHistorico: jest.fn(),
   sincronizarRepartos: jest.fn(async () => ({ impuestoDevuelto: 0 })),
@@ -40,7 +44,7 @@ jest.mock('@/services/online-ordering/quote.service', () => ({
 import { aplicarDescuentosDelMotorEnTx } from '@/services/dashboard/discountEngine.service'
 import { apartarCupon, bloquearDescuentoDelCupon, cuponDeLaVenta } from '@/services/shared/cuponDeLaVenta'
 import { canjearPremioEnTx, renglonDelPremioEnTx } from '@/services/wallet/redeemStampReward.service'
-import { redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
+import { puntosQueSeCanjean, redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
 import { crearCuentaDelPedidoEnTx } from '@/services/online-ordering/order.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import {
@@ -454,6 +458,22 @@ describe('aplicarBeneficiosEnTx — R2 y R3: lo que la oferta oculta tampoco se 
     expect(r.descartados).toEqual(['PREMIO', 'PUNTOS'])
     expect(redeemPointsToOrderInTransaction).not.toHaveBeenCalled()
     expect(prismaMock.loyaltyConfig.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('W7 · puntos usables: la regla del canje (`puntosQueSeCanjean`)', () => {
+  it('500 puntos a $0.10 con $15 por descontar ⇒ se usan 150 (−$15), no 500 (−$50)', () => {
+    expect(puntosQueSeCanjean(500, 0.1, 15)).toEqual({ puntos: 150, monto: 15 })
+  })
+  it('si caben todos, se usan todos', () => {
+    expect(puntosQueSeCanjean(500, 0.1, 80)).toEqual({ puntos: 500, monto: 50 })
+  })
+  it('sin nada por descontar ⇒ 0 y 0 (el canje lo rechaza)', () => {
+    expect(puntosQueSeCanjean(300, 0.01, 0)).toEqual({ puntos: 0, monto: 0 })
+    expect(puntosQueSeCanjean(300, 0.01, -2)).toEqual({ puntos: 0, monto: 0 })
+  })
+  it('con centavos: $18.22 a $0.01 ⇒ ⌈18.22 / 0.01⌉ puntos, la misma aritmética que quema el canje', () => {
+    expect(puntosQueSeCanjean(5000, 0.01, 18.22)).toEqual({ puntos: Math.ceil(18.22 / 0.01), monto: 18.22 })
   })
 })
 

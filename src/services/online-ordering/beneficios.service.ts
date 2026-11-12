@@ -26,7 +26,7 @@ import { isDeadlockError, isModelLockTimeoutError, withDeadlockRetry, type TxCon
 import { aplicarDescuentosDelMotorEnTx } from '@/services/dashboard/discountEngine.service'
 import { apartarCupon, bloquearDescuentoDelCupon, cuponDeLaVenta, ligarCupon, montoDelCupon } from '@/services/shared/cuponDeLaVenta'
 import { canjearPremioEnTx, renglonDelPremioEnTx } from '@/services/wallet/redeemStampReward.service'
-import { redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
+import { puntosQueSeCanjean, redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
 import { comoJson, nuevoRepartoDeCuenta } from '@/services/shared/repartoDescuento'
 import { conservarDescuentoHistorico, sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 import { baseDeCargos, recalcularCargosPorServicio } from '@/services/shared/serviceCharges'
@@ -52,7 +52,18 @@ export interface BeneficioAplicado {
 export interface OfertaDeBeneficios {
   /** D8: `lineIndex` = el renglón del carrito donde caería si lo usa («Va en tu Latte»); sólo de producto gratis, y sólo al cotizar. */
   premio: { id: string; etiqueta: string; lineIndex?: number } | null
-  puntos: { saldo: number; minimo: number; valorPorPunto: number; maxPuntos: number } | null
+  /**
+   * `maxPuntos` = lo que alcanza su saldo, sin mirar el pedido. `usables` (sólo al cotizar, opcional) = lo que el canje de verdad
+   * usaría y descontaría si pide `maxPuntos`, en el punto de la cadena de los puntos (tras motor, cupón y premio elegidos), con la
+   * regla del canje (`puntosQueSeCanjean`). `monto` 0 = ya no cabe: el canje lo rechazaría.
+   */
+  puntos: {
+    saldo: number
+    minimo: number
+    valorPorPunto: number
+    maxPuntos: number
+    usables?: { puntos: number; monto: number }
+  } | null
   cupon: boolean
 }
 /** La cotización de hoy y, con sesión, lo de los beneficios. Sin sesión, ningún campo nuevo (como hoy). */
@@ -254,7 +265,7 @@ async function aplicarCuponEnTx(
 export async function aplicarBeneficiosEnTx(
   tx: TxConReintento,
   i: { venueId: string; orderId: string; customerId: string; eleccion: EleccionDeBeneficios },
-  opciones: { tolerante?: true; premioOfrecido?: string } = {},
+  opciones: { tolerante?: true; premioOfrecido?: string; puntosOfrecidos?: number } = {},
 ): Promise<{
   total: Prisma.Decimal
   aplicados: BeneficioAplicado[]
@@ -266,6 +277,8 @@ export async function aplicarBeneficiosEnTx(
   premio: boolean
   /** D8: sólo al cotizar con `premioOfrecido` y sin premio elegido: el renglón del carrito donde caería ese premio. */
   premioOfrecidoEn?: number
+  /** Sólo al cotizar con `puntosOfrecidos`: lo que el canje usaría de esos puntos en este punto de la cadena (`puntosQueSeCanjean`). */
+  puntosUsables?: { puntos: number; monto: number }
   /**
    * S11 (R7): sólo en estricto, la bitácora de cada canje real (la del motor y las de los envoltorios públicos del cupón, el premio y
    * los puntos). Quien crea el folio la escribe con su `tx`: un intento revertido se lleva sus filas.
@@ -344,6 +357,16 @@ export async function aplicarBeneficiosEnTx(
   } else if (simulacion && opciones.premioOfrecido) {
     renglonOfrecido = await renglonDelPremioEnTx(tx, venueId, orderId, opciones.premioOfrecido)
   }
+  // W7 (puntos usables): en ESTE punto de la cadena (tras motor, cupón y premio; antes de los puntos), sólo leyendo, cuántos de los
+  // puntos ofrecidos usaría el canje y cuánto bajarían, con su misma regla y la misma base que él lee.
+  let puntosUsables: { puntos: number; monto: number } | undefined
+  if (simulacion && opciones.puntosOfrecidos && config?.active) {
+    const cuenta = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { subtotal: true, discountAmount: true } })
+    if (cuenta) {
+      const base = Math.max(0, Number(cuenta.subtotal) - Number(cuenta.discountAmount || 0))
+      puntosUsables = puntosQueSeCanjean(opciones.puntosOfrecidos, config.redemptionRate.toNumber(), base)
+    }
+  }
   if (eleccion.puntos) {
     const puntos = eleccion.puntos
     const r = await canjear(tx, 'PUNTOS', simulacion, async () => {
@@ -399,6 +422,7 @@ export async function aplicarBeneficiosEnTx(
     descartados,
     premio: filaDelPremio !== null,
     ...(premioOfrecidoEn !== undefined ? { premioOfrecidoEn } : {}),
+    ...(puntosUsables ? { puntosUsables } : {}),
     ...incompleto,
     ...(simulacion ? {} : { auditorias }),
   }
@@ -573,6 +597,7 @@ async function simularLaCadena(
   customerId: string,
   eleccion: EleccionDeBeneficios,
   premioOfrecido?: string,
+  puntosOfrecidos?: number,
 ) {
   const folio = `COTIZACION-${cuid()}`
   return withDeadlockRetry(
@@ -590,7 +615,9 @@ async function simularLaCadena(
         note: null,
         paymentMode: 'PAY_AT_PICKUP',
       })
-      throw new Simulada(await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true, premioOfrecido }))
+      throw new Simulada(
+        await aplicarBeneficiosEnTx(tx, { venueId, orderId, customerId, eleccion }, { tolerante: true, premioOfrecido, puntosOfrecidos }),
+      )
     },
     { etiqueta: 'simularLaCadena', ...SIMULACION.transaccion },
   ).catch((error: unknown) => {
@@ -645,7 +672,7 @@ export async function cotizarConBeneficios(
   let calculados = false
   try {
     const oferta = await ofertaDeBeneficios(venueId, customerId)
-    const r = await simularLaCadena(venueId, quote, customerId, o.eleccion ?? {}, oferta.premio?.id)
+    const r = await simularLaCadena(venueId, quote, customerId, o.eleccion ?? {}, oferta.premio?.id, oferta.puntos?.maxPuntos)
     // r6: o se calcula todo o no se calcula. Con más filas que el tope del desglose, no se anuncian beneficios con detalle incompleto.
     if (r.aplicadosCompletos === false) {
       logger.warn('[OnlineOrdering] la cotización sale sin beneficios: el desglose pasa del tope', {
@@ -660,11 +687,13 @@ export async function cotizarConBeneficios(
     const ofrecido = oferta.premio
     const lineIndex =
       ofrecido && o.eleccion?.premioId === ofrecido.id ? r.aplicados.find(a => a.tipo === 'PREMIO')?.lineIndex : r.premioOfrecidoEn
+    // W7: los puntos que de verdad se usarían (la regla del canje en su punto de la cadena), además del máximo de su saldo.
+    const puntos = oferta.puntos && r.puntosUsables ? { ...oferta.puntos, usables: r.puntosUsables } : oferta.puntos
     return {
       ...quote,
       totalConBeneficios: r.total,
       aplicados: r.aplicados,
-      oferta: ofrecido && lineIndex !== undefined ? { ...oferta, premio: { ...ofrecido, lineIndex } } : oferta,
+      oferta: { ...oferta, puntos, ...(ofrecido && lineIndex !== undefined ? { premio: { ...ofrecido, lineIndex } } : {}) },
       descartados: r.descartados,
       beneficios: { calculados: true },
     }
