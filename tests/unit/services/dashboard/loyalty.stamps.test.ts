@@ -88,8 +88,9 @@ describe('updateLoyaltyConfig — programa de sellos', () => {
       await expect(updateLoyaltyConfig(VENUE, { stampsRequired: 60 })).rejects.toThrow(BadRequestError)
     })
 
-    it('rechaza un tope de sellos por día menor a 1 — nadie podría sellar', async () => {
-      await expect(updateLoyaltyConfig(VENUE, { maxStampsPerDay: 0 })).rejects.toThrow(BadRequestError)
+    // Desde las promos de lealtad (Task 2), 0 = sin límite; lo que no tiene sentido es un tope negativo.
+    it('rechaza un tope de sellos por día negativo', async () => {
+      await expect(updateLoyaltyConfig(VENUE, { maxStampsPerDay: -1 })).rejects.toThrow(BadRequestError)
     })
   })
 
