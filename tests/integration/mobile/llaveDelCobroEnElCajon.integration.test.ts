@@ -41,7 +41,7 @@ beforeAll(async () => {
   const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Barra', slug: `barra-${fixture}` } })).id
   productId = (
     await prisma.product.create({
-      data: { venueId, categoryId, name: 'Café', sku: `CAFE-${fixture}`, price: new Prisma.Decimal(300), taxRate: new Prisma.Decimal(0) },
+      data: { venueId, categoryId, name: 'Café', sku: `CAFE-${fixture}`, price: new Prisma.Decimal(300) },
     })
   ).id
   await prisma.cashDrawerSession.create({
