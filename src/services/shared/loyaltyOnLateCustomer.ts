@@ -57,6 +57,10 @@ export interface SaleStampOutcome {
    * describen la cartilla ABIERTA hoy; éste, la de la venta (Codex r1 #1-#3).
    */
   saleCard: SaleStampCard | null
+  /** Sellos que dio ESTA venta en total (suma de sus partes EARN; con promoción puede ser más de 1). Opcional: las apps viejas lo ignoran. */
+  stampsAdded?: number | null
+  /** Nombre de la promoción que se aplicó a la venta (la de su parte 0); null si fue sello normal. */
+  promotionName?: string | null
 }
 
 export interface SaleStampCard {
@@ -614,6 +618,21 @@ async function armarResultado(
   const tarjeta = await getStampCardStatus(venueId, customerId)
   const saleCard =
     programa.stampsEnabled && stamped && orderId ? await cartillaDeLaVenta(venueId, customerId, orderId, tarjeta.rewardLabel) : null
+  // De la base, no de GrantStampResult: un reintento (ALREADY_STAMPED) no trae esos números. Una sola lectura acotada (pocas partes).
+  const partes =
+    saleCard && orderId
+      ? ((await prisma.stampEvent.findMany({
+          where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId } },
+          select: { part: true, quantity: true, promotion: { select: { name: true } } },
+          take: 50,
+        })) ?? [])
+      : []
+  const extra = partes.length
+    ? {
+        stampsAdded: partes.reduce((n, e) => n + e.quantity, 0),
+        promotionName: partes.find(e => e.part === 0)?.promotion?.name ?? null,
+      }
+    : {}
   return {
     stampsEnabled: programa.stampsEnabled,
     stamped,
@@ -622,6 +641,7 @@ async function armarResultado(
     stampsRequired: tarjeta.stampsRequired,
     rewardReady: tarjeta.pendingRewards > 0,
     saleCard,
+    ...extra,
   }
 }
 
