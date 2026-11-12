@@ -50,13 +50,16 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  // Sin id no se borra nada: un filtro `undefined` borraría lo de otras pruebas de la misma base (Codex r9).
   for (const v of [venueId, otroVenueId]) {
+    if (!v) continue
     await prisma.customerDiscount.deleteMany({ where: { customer: { venueId: v } } })
     await prisma.discount.deleteMany({ where: { venueId: v } })
     await prisma.customer.deleteMany({ where: { venueId: v } })
     await prisma.venue.deleteMany({ where: { id: v } })
   }
-  await prisma.organization.deleteMany({ where: { id: orgId } })
+  if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
+})
 })
 
 describe('descuentosDeLosClientes contra Postgres', () => {
