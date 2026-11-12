@@ -219,7 +219,11 @@ export async function baseDeLealtadDeLaVenta(
     tipAmount: Prisma.Decimal | number | null
   },
 ): Promise<number> {
-  if (!esPedidoDePlataforma(venta)) return Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0))
+  // En Decimal (Codex r3 #3): con números de JS, 69.60 − 11.60 = 57.99999999999999 y el piso de los puntos daba 57, no 58.
+  if (!esPedidoDePlataforma(venta)) {
+    const sinPropina = new Prisma.Decimal(venta.total).minus(venta.tipAmount ?? 0).toDecimalPlaces(2)
+    return Prisma.Decimal.max(0, sinPropina).toNumber()
+  }
   const cobrado = await db.payment.aggregate({
     where: {
       orderId: venta.id,
