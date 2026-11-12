@@ -1232,3 +1232,81 @@ describe('Task4: el primer cierre en cero espera el desenlace acreditado de la t
     expect(prismaMock.payment.create.mock.invocationCallOrder[0]).toBeLessThan((createSalePostingInTx as jest.Mock).mock.invocationCallOrder[0])
   })
 })
+
+/**
+ * D5 · bloque P (11-nov-2026, rulings-r5.md): la tablet cobró una mesa SIN RED creyendo que la cuenta debía X. Si al aplicarlo el
+ * servidor dice otro saldo (otra tablet le agregó o le cobró algo, o una escritura propia de desenlace incierto), queda en la
+ * bitácora `COBRO_SIN_RED_CON_DIFERENCIA`. Sólo rastro: el cobro se registra igual, con o sin el dato, y no reemplaza al aviso de
+ * sobrepago.
+ */
+describe('D5 · bloque P: COBRO_SIN_RED_CON_DIFERENCIA', () => {
+  const marcas = () => (logAction as jest.Mock).mock.calls.map(c => c[0]).filter(d => d.action === 'COBRO_SIN_RED_CON_DIFERENCIA')
+  const conSaldo = (amount: number, llave: string, antesCents: number) => ({
+    ...cola(amount, llave),
+    saldoEsperadoSinRed: { antesCents, deviceId: 'tablet-1' },
+  })
+
+  it('🔴 otra caja abonó $30 que la tablet no vio: cobró $100 creyendo $100 ⇒ bitácora con esperado $100, real $70, diferencia $30', async () => {
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 30 }])
+
+    await payCashOrder('venue-1', 'order-1', conSaldo(10000, 'dif-1', 10000))
+
+    expect(marcas()).toEqual([
+      {
+        action: 'COBRO_SIN_RED_CON_DIFERENCIA',
+        entity: 'Order',
+        entityId: 'order-1',
+        venueId: 'venue-1',
+        staffId: 'staff-1',
+        data: { paymentId: 'payment-2', saldoEsperado: 100, saldoDelServidor: 70, diferencia: 30, aparato: 'tablet-1' },
+      },
+    ])
+    // No reemplaza al aviso de sobrepago: los dos salen.
+    expect(bitacoras()).toHaveLength(1)
+  })
+
+  it('la tablet creía $50 y el servidor dice $100 (otra tablet agregó una ronda) ⇒ diferencia negativa: quedó debiendo', async () => {
+    instalarBase({ paymentStatus: 'PENDING', total: 100 })
+
+    const r = await payCashOrder('venue-1', 'order-1', conSaldo(5000, 'dif-2', 5000))
+
+    expect(marcas()).toHaveLength(1)
+    expect(marcas()[0].data).toEqual({ paymentId: 'payment-1', saldoEsperado: 50, saldoDelServidor: 100, diferencia: -50, aparato: 'tablet-1' })
+    expect(r).toMatchObject({ remainingBalanceCents: 5000, orderPaymentStatus: 'PARTIAL' })
+  })
+
+  it('coincide, o difiere en 1 centavo (tolerancia) ⇒ sin bitácora', async () => {
+    instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    await payCashOrder('venue-1', 'order-1', conSaldo(5000, 'igual', 10000))
+    instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    await payCashOrder('venue-1', 'order-1', conSaldo(5000, 'un-centavo', 10001))
+    expect(marcas()).toHaveLength(0)
+  })
+
+  it('🔴 el dato no cambia el cobro: mismo pago y misma respuesta con y sin él', async () => {
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 30 }])
+    const sin = await payCashOrder('venue-1', 'order-1', cola(10000, 'misma'))
+    const pagosSin = prismaMock.payment.create.mock.calls.map((c: any) => c[0].data.amount)
+
+    jest.clearAllMocks()
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 30 }])
+    const con = await payCashOrder('venue-1', 'order-1', conSaldo(10000, 'misma', 10000))
+    const pagosCon = prismaMock.payment.create.mock.calls.map((c: any) => c[0].data.amount)
+
+    expect(con).toEqual(sin)
+    expect(pagosCon).toEqual(pagosSin)
+  })
+
+  it('sin el campo (apps viejas) ⇒ sin bitácora aunque el saldo haya cambiado', async () => {
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 30 }])
+    await payCashOrder('venue-1', 'order-1', cola(10000, 'viejo'))
+    expect(marcas()).toHaveLength(0)
+  })
+
+  it('el reintento idempotente del mismo cobro no deja otra bitácora', async () => {
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 30 }])
+    await payCashOrder('venue-1', 'order-1', conSaldo(10000, 'reintento', 10000))
+    await payCashOrder('venue-1', 'order-1', conSaldo(10000, 'reintento', 10000))
+    expect(marcas()).toHaveLength(1)
+  })
+})
