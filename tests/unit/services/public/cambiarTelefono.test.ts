@@ -9,6 +9,7 @@ import { hashOtpCode } from '@/lib/otp'
 import { verifyCustomerSession } from '@/jwt.service'
 import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
 import { pedirCambioDeTelefono, confirmarCambioDeTelefono } from '@/services/public/customerPortal.public.service'
+import { sendOtpWhatsApp } from '@/services/whatsapp.service'
 
 const VENUE = 'cvenue000000000000000000a'
 const VIEJO = '+525511110000'
@@ -95,6 +96,19 @@ describe('pedirCambioDeTelefono', () => {
     armar()
     await pedirCambioDeTelefono(VENUE, sesion([], { tipo: 'PEDIDOS_DE_HOY', verifiedPhone: VIEJO }), NUEVO)
     expect(prismaMock.otpChallenge.create).toHaveBeenCalled()
+  })
+
+  it('D17: WhatsApp no aceptó el código ⇒ 503 OTP_SEND_FAILED (nunca «te lo enviamos») y el reto se borra', async () => {
+    armar()
+    prismaMock.otpChallenge.create.mockResolvedValueOnce({ id: 'creto000000000000000000b1' } as any)
+    prismaMock.otpChallenge.deleteMany.mockResolvedValueOnce({ count: 1 })
+    ;(sendOtpWhatsApp as jest.Mock).mockRejectedValueOnce(new Error('Error al enviar WhatsApp: (#131000) Something went wrong'))
+    await expect(pedirCambioDeTelefono(VENUE, sesion([TEL_VIEJO]), NUEVO)).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'OTP_SEND_FAILED',
+      message: 'No pudimos mandar el código por WhatsApp. Intenta en un momento.',
+    })
+    expect(prismaMock.otpChallenge.deleteMany).toHaveBeenCalledWith({ where: { id: 'creto000000000000000000b1' } })
   })
 
   it('el mismo número que ya tiene ⇒ 400 CUSTOMER_PHONE_SAME', async () => {

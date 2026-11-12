@@ -26,7 +26,7 @@ import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { generateCustomerSession, type ContactoProbado } from '@/jwt.service'
 import { normalizarTelefonoMx, phonesMatch } from '@/utils/phone'
 import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
-import { apartarReto, consumirReto, pedirCodigo } from '@/services/public/otpAuth.public.service'
+import { apartarReto, consumirReto, requestOtp } from '@/services/public/otpAuth.public.service'
 import { fichaConContacto, repetirSiChoca, tapar, type SesionEmitida } from '@/services/public/sesionDeCliente.service'
 
 /**
@@ -735,8 +735,8 @@ export async function pedirCambioDeTelefono(venueId: string, auth: CustomerAuthC
   const nuevo = telefonoNuevo(phone)
   const actual = await prisma.customer.findFirst({ where: { id: auth.customerId, venueId }, select: { phone: true } })
   if (phonesMatch(nuevo, actual?.phone)) throw mismoNumero()
-  await pedirCodigo({ venueId, channel: 'whatsapp', destination: nuevo, ip }, RETO_DE_CAMBIO)
-  return { ok: true as const }
+  // D17: si WhatsApp no lo aceptó, 503 `OTP_SEND_FAILED` (nunca «te lo enviamos»).
+  return requestOtp({ venueId, channel: 'whatsapp', destination: nuevo, ip }, RETO_DE_CAMBIO)
 }
 
 /**
