@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
-import { Prisma, MovementType } from '@prisma/client'
+import { Prisma, MovementType, RawMaterialMovementType } from '@prisma/client'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 
@@ -261,6 +261,9 @@ export function wasteHistoryFields(
   }
 }
 
+const TIPOS_DE_PRODUCTO = new Set<string>(Object.values(MovementType))
+const TIPOS_DE_INSUMO = new Set<string>(Object.values(RawMaterialMovementType))
+
 /**
  * Filtros del Historial de inventario. Los usan la pantalla (`getGlobalMovements`) y el exporte del
  * Historial (`fetchGlobalMovementsExportPage`): un solo lugar decide qué entra, para que el archivo
@@ -291,31 +294,28 @@ function wheresDelHistorial(
         }
       : {}
 
-  // Filtro por tipo. La UI habla en su propio vocabulario ("RECEIVED") y cada
-  // tabla tiene su enum: productos usan `MovementType`, insumos
+  // Filtro por tipo. La UI habla en dos vocabularios: los alias de siempre
+  // ("RECEIVED", "WASTE") y los tipos REALES de cada movimiento, que son las
+  // opciones del filtro «Tipo» de la pantalla (PURCHASE, USAGE, SPOILAGE…).
+  // Cada tabla tiene su enum: productos usan `MovementType`, insumos
   // `RawMaterialMovementType`. Traducir por tabla NO es opcional:
   //   - `RECEIVED` no existe en NINGUNO de los dos: en ambos se llama PURCHASE.
   //     Mandarlo crudo a los insumos hacía que Prisma rechazara la consulta y
   //     el historial reventara en vez de filtrar.
   //   - `SALE` no existe en insumos (no se venden, se consumen) → sin resultados.
   //   - `WASTE` es LOSS en productos y SPOILAGE en insumos.
+  //   - Un tipo que una tabla no conoce (USAGE en productos, LOSS en insumos)
+  //     deja ESA tabla sin resultados; nunca sin filtro, que devolvía todo, ni
+  //     crudo, que Prisma rechaza.
   const wanted = type && type !== 'ALL' ? type : null
 
-  const productTypeFilter = (() => {
+  const filtroDeTipo = (alias: Record<string, string>, validos: Set<string>) => {
     if (!wanted) return {}
-    const map: Record<string, string | null> = { RECEIVED: 'PURCHASE', WASTE: 'LOSS', RETURN: null }
-    const mapped = wanted in map ? map[wanted] : wanted
-    // Un tipo que este lado no conoce (p. ej. RETURN, que sólo existe en
-    // insumos) NO puede quedar sin filtro: eso devolvía el historial completo.
-    return mapped ? { type: mapped as any } : { id: { in: [] as string[] } }
-  })()
-
-  const rawMaterialTypeFilter = (() => {
-    if (!wanted) return {}
-    const map: Record<string, string | null> = { RECEIVED: 'PURCHASE', WASTE: 'SPOILAGE', SALE: null }
-    const mapped = wanted in map ? map[wanted] : wanted
-    return mapped ? { type: mapped as any } : { id: { in: [] as string[] } }
-  })()
+    const mapped = alias[wanted] ?? wanted
+    return validos.has(mapped) ? { type: mapped as any } : { id: { in: [] as string[] } }
+  }
+  const productTypeFilter = filtroDeTipo({ RECEIVED: 'PURCHASE', WASTE: 'LOSS' }, TIPOS_DE_PRODUCTO)
+  const rawMaterialTypeFilter = filtroDeTipo({ RECEIVED: 'PURCHASE', WASTE: 'SPOILAGE' }, TIPOS_DE_INSUMO)
 
   const searchOr = search
     ? { OR: [{ name: { contains: search, mode: 'insensitive' as const } }, { sku: { contains: search, mode: 'insensitive' as const } }] }

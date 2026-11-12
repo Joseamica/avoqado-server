@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
 import { getGlobalMovements } from '@/services/dashboard/productInventory.service'
+import { GetGlobalMovementsQuerySchema } from '@/schemas/dashboard/inventory.schema'
 
 /**
  * El historial de inventario del dashboard sale de aquí. Cuatro defectos reales
@@ -187,6 +188,51 @@ describe('getGlobalMovements — el historial no puede mentir', () => {
 
     expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].include).toHaveProperty('wasteReport')
     expect(prismaMock.rawMaterialMovement.findMany.mock.calls[0][0].include).toHaveProperty('wasteReport')
+  })
+
+  // ── El filtro «Tipo» de la pantalla manda los tipos REALES (12-nov-2026) ──
+  // Sus opciones salen de los movimientos (PURCHASE, USAGE, SPOILAGE…). La ruta sólo aceptaba 7 alias
+  // y elegir «Recibido», «Uso», «Ajuste», «Pérdida» o «Desperdicio» contestaba 400.
+  it('🔴 la ruta acepta los tipos reales de las dos tablas y sigue rechazando lo inventado', () => {
+    for (const type of [
+      'PURCHASE',
+      'USAGE',
+      'SPOILAGE',
+      'LOSS',
+      'ADJUSTMENT',
+      'TRANSFER_IN',
+      'TRANSFER_OUT',
+      'SALE',
+      'COUNT',
+      'RECEIVED',
+      'WASTE',
+      'ALL',
+    ]) {
+      expect(GetGlobalMovementsQuerySchema.safeParse({ query: { type } }).success).toBe(true)
+    }
+    const malo = GetGlobalMovementsQuerySchema.safeParse({ query: { type: 'DROP' } })
+    expect(malo.success).toBe(false)
+    expect(malo.error!.issues[0].message).toBe('Tipo de movimiento no válido')
+  })
+
+  it('🔴 un tipo de una sola tabla filtra esa tabla y deja la otra sin resultados (nunca sin filtro ni crudo)', async () => {
+    await getGlobalMovements(venueId, { page: 1, limit: 50, type: 'USAGE' }) // sólo insumos
+    expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].where).toMatchObject({ id: { in: [] } })
+    expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].where.type).toBeUndefined()
+    expect(prismaMock.rawMaterialMovement.findMany.mock.calls[0][0].where).toMatchObject({ type: 'USAGE' })
+
+    jest.clearAllMocks()
+    prismaMock.inventoryMovement.findMany.mockResolvedValue([] as any)
+    prismaMock.rawMaterialMovement.findMany.mockResolvedValue([] as any)
+    await getGlobalMovements(venueId, { page: 1, limit: 50, type: 'LOSS' }) // sólo productos
+    expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].where).toMatchObject({ type: 'LOSS' })
+    expect(prismaMock.rawMaterialMovement.findMany.mock.calls[0][0].where).toMatchObject({ id: { in: [] } })
+  })
+
+  it('los alias de siempre se traducen igual: WASTE es LOSS en productos y SPOILAGE en insumos', async () => {
+    await getGlobalMovements(venueId, { page: 1, limit: 50, type: 'WASTE' })
+    expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].where).toMatchObject({ type: 'LOSS' })
+    expect(prismaMock.rawMaterialMovement.findMany.mock.calls[0][0].where).toMatchObject({ type: 'SPOILAGE' })
   })
 
   it('sin filtro de tipo no restringe ninguna de las dos tablas', async () => {
