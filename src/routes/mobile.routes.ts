@@ -121,7 +121,7 @@ import {
 } from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema'
-import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
+import { updateCustomerContact, getCustomers as getCustomersMobile } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
 import {
@@ -1600,7 +1600,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *       200:
  *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
-router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
+router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), getCustomersMobile)
 
 /**
  * @openapi
