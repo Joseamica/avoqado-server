@@ -33,6 +33,7 @@ import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import {
   accionDeCortesia,
   buildItemDiscountRow,
+  calcularDescuentoExactoCents,
   calculateDiscountPesos,
   filaDeCortesias,
   filaDeDescuentoDeCatalogoEnCuenta,
@@ -40,6 +41,8 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { descuentosDeLosClientes } from '../shared/descuentoDelCliente.service'
+import { autorizadorDelDescuentoDelCliente } from '../mobile/permission-override.mobile.service'
 import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
@@ -241,6 +244,21 @@ export async function getOrders(
   }))
 }
 
+// Lo que la TPV lee de cada descuento de la cuenta (`OrderDiscountDto`: `type` obligatorio). Recortado a { id, name, amount }
+// (29-jul) la TPV tronaba al releer la venta tras cobrar y la pantalla final decía «Queda por pagar» con lo ya pagado
+// (QA del descuento del cliente en la PAX, 11-nov). Sólo agrega campos: lo que ya iba sigue igual.
+export const SELECT_DESCUENTO_DE_LA_CUENTA = {
+  id: true,
+  name: true,
+  amount: true,
+  orderId: true,
+  discountId: true,
+  couponCodeId: true,
+  type: true,
+  value: true,
+  appliedById: true,
+} as const
+
 /**
  * Get a specific order (order) by ID
  * @param orgId Organization ID (for future authorization)
@@ -317,9 +335,7 @@ export async function getOrder(
       // shape `order.mobile.service.ts::getOrder` already uses (same Prisma
       // relation names, same field selection) — additive only, no existing
       // field removed or renamed.
-      orderDiscounts: {
-        select: { id: true, name: true, amount: true },
-      },
+      orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
       serviceCharges: true,
     },
   })
@@ -729,6 +745,8 @@ type TpvCreateOrderWithItemsInput = {
   customerId?: string | null
   discount?: number // pesos
   orderDiscountId?: string | null
+  /** Descuento del cliente: el token del PIN de gerente para ese cliente y su descuento. Se lee sin gastar y nunca rechaza. */
+  autorizacionDelDescuento?: string | null
   /** D5: el cupón que la terminal validó. El servidor lo revalida y calcula; `discount` sólo tiene que coincidir. */
   couponCode?: string | null
   taxAmount: number // pesos (must be 0 in V1)
@@ -1028,6 +1046,8 @@ async function buildCreateOrderResponse(orderId: string): Promise<Order & { tabl
 }
 
 const MENSAJE_PIDE_APROBACION = 'Este descuento requiere aprobación de un gerente y todavía no se puede aplicar en la terminal.'
+const descuentoDeCatalogoCambio = (nombre: string) =>
+  `El descuento «${nombre}» cambió desde que se puso en la cuenta. Vuelve a elegir al cliente para actualizarlo.`
 /** D2: un % o fijo que pide aprobación no tiene aprobador (decisión pendiente del founder); una cortesía sí (`orders:comp`). */
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'
@@ -1213,10 +1233,12 @@ export async function createOrderWithItems(
   if (cupon && pideAprobacionSinAprobador(cupon.discount)) throw new BadRequestError(MENSAJE_PIDE_APROBACION)
   const orderDiscount =
     cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
+  // El de catálogo sin cupón, al centavo exacto con la regla de la TPV (Decimal, «medio hacia arriba»): en pesos flotantes 2135 ¢
+  // al 10 % daban 2.13 y la terminal muestra 2.14.
   const orderDiscountPesos = cupon
     ? montoDelCupon(cupon.discount, baseDeLaCuentaPesos)
     : orderDiscount
-      ? calculateDiscountPesos(orderDiscount, baseDeLaCuentaPesos)
+      ? calcularDescuentoExactoCents(orderDiscount, Math.round(baseDeLaCuentaPesos * 100)) / 100
       : roundPesos(input.discount || 0)
   const discountAmountPesos = roundPesos(itemDiscountPesos + orderDiscountPesos)
   const totalPesos = roundPesos(grossSubtotalPesos - discountAmountPesos)
@@ -1228,6 +1250,11 @@ export async function createOrderWithItems(
     const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
     if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos))
       throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
+  } else if (orderDiscount) {
+    // Descuento del cliente: centavos exactos contra lo que la terminal mostró; si no cuadra, el descuento cambió en el catálogo.
+    if (Math.round((input.discount || 0) * 100) !== Math.round(orderDiscountPesos * 100))
+      throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
+    assertClosePesos('total', input.total, totalPesos)
   } else {
     assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
     assertClosePesos('total', input.total, totalPesos)
@@ -1245,6 +1272,22 @@ export async function createOrderWithItems(
     baseDeLaCuentaPesos > 0 &&
     Math.round(orderDiscountPesos * 100) >= Math.round(baseDeLaCuentaPesos * 100)
   if (descuentoLibreRegala && (input.canCompItems !== true || !input.performedBy)) throw new RegaloSinPermisoError()
+
+  // Descuento del cliente: el de catálogo sin cupón que el negocio le asignó a ESTE cliente se marca automático y guarda al
+  // gerente del PIN (leído sin gastar; si no sirve, `null`). Fuera de la transacción: dos lecturas, sólo si hay fila que marcar.
+  let filaDelCliente: { isAutomatic: true; isManual: false; authorizedById: string | null } | null = null
+  if (orderDiscount && !cupon && orderDiscountPesos > 0 && input.customerId) {
+    const suyo = (await descuentosDeLosClientes(venueId, [input.customerId])).get(input.customerId)
+    if (suyo?.discountId === orderDiscount.id) {
+      const authorizedById = await autorizadorDelDescuentoDelCliente({
+        venueId,
+        token: input.autorizacionDelDescuento,
+        customerId: input.customerId,
+        discountId: orderDiscount.id,
+      })
+      filaDelCliente = { isAutomatic: true, isManual: false, authorizedById }
+    }
+  }
 
   let resolvedTerminalId = input.terminalId || null
   if (!resolvedTerminalId && input.deviceSerialNumber) {
@@ -1280,6 +1323,28 @@ export async function createOrderWithItems(
       }
     }
     throw err
+  }
+
+  // El descuento del cliente (automático, o con el PIN del gerente) deja su renglón en la auditoría, como el descuento y la
+  // cortesía de Mesas. Fuera de la transacción y sin esperar: una auditoría que falla no tumba la venta. Una venta repetida
+  // (misma llave) regresa arriba y no vuelve a anotarse.
+  if (filaDelCliente && orderDiscount && orderDiscountPesos > 0) {
+    void logAction({
+      staffId: input.performedBy ?? input.staffId ?? null,
+      venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: createdOrder.id,
+      data: {
+        amount: orderDiscountPesos,
+        discountId: orderDiscount.id,
+        name: orderDiscount.name,
+        customerId: input.customerId,
+        descuentoDelCliente: true,
+        ...(filaDelCliente.authorizedById ? { autorizadoPor: filaDelCliente.authorizedById } : {}),
+        ...vendedorSiNoEsLaSesion(input),
+      },
+    })
   }
 
   async function runCreateOrderTransaction() {
@@ -1417,7 +1482,7 @@ export async function createOrderWithItems(
                 ? Number(orderDiscount.maxDiscountAmount)
                 : null,
           })
-          await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+          await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : filaDelCliente ? { ...fila, ...filaDelCliente } : fila })
         }
         if (!orderDiscount && orderDiscountPesos > 0) {
           // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
