@@ -86,7 +86,7 @@ describe('exportador ventas-detalladas', () => {
   })
   it('parsearFiltros exige fechas, valida el método y acepta su propia salida', () => {
     expect(() => ventasDetalladas.parsearFiltros({})).toThrow(/startDate/)
-    expect(() => ventasDetalladas.parsearFiltros({ ...filtros, endDate: 'y' })).toThrow(/endDate must be a valid ISO date/)
+    expect(() => ventasDetalladas.parsearFiltros({ ...filtros, endDate: 'y' })).toThrow(/La fecha de fin no es válida/)
     expect(() => ventasDetalladas.parsearFiltros({ ...filtros, paymentMethod: 'BITCOIN' })).toThrow(/paymentMethod/)
     expect(() => ventasDetalladas.parsearFiltros({ ...filtros, paymentMethod: 'QR_LEGACY' })).toThrow(/QR_LEGACY/)
     const una = ventasDetalladas.parsearFiltros({ ...filtros, staffIds: 'a,b', shiftId: ' t1 ' })
