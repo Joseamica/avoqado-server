@@ -21,7 +21,6 @@ import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 
 export async function cuentaConBeneficios(venueId: string, ahora: Date = new Date()): Promise<boolean> {
-  const t = utcTs(ahora)
   const [fila] = await prisma.$queryRaw<Array<{ si: boolean }>>`
     SELECT (
       EXISTS (SELECT 1 FROM "LoyaltyConfig" l WHERE l."venueId" = ${venueId} AND (l.active OR l."stampsEnabled"))
@@ -29,23 +28,23 @@ export async function cuentaConBeneficios(venueId: string, ahora: Date = new Dat
       OR EXISTS (
         SELECT 1 FROM "GiftCard" g
         WHERE g."venueId" = ${venueId} AND g.status IN ('ACTIVE', 'BLOCKED') AND g.balance > 0
-          AND (g."expiresAt" IS NULL OR g."expiresAt" > ${t})
+          AND (g."expiresAt" IS NULL OR g."expiresAt" > ${utcTs(ahora)})
       )
       OR EXISTS (
         SELECT 1 FROM "CreditPackPurchase" p
-        WHERE p."venueId" = ${venueId} AND p.status = 'ACTIVE' AND (p."expiresAt" IS NULL OR p."expiresAt" > ${t})
+        WHERE p."venueId" = ${venueId} AND p.status = 'ACTIVE' AND (p."expiresAt" IS NULL OR p."expiresAt" > ${utcTs(ahora)})
       )
       OR EXISTS (
         SELECT 1 FROM "Discount" d
         WHERE d."venueId" = ${venueId} AND d.active
-          AND (d."validFrom" IS NULL OR d."validFrom" <= ${t}) AND (d."validUntil" IS NULL OR d."validUntil" >= ${t})
+          AND (d."validFrom" IS NULL OR d."validFrom" <= ${utcTs(ahora)}) AND (d."validUntil" IS NULL OR d."validUntil" >= ${utcTs(ahora)})
           AND (d."maxTotalUses" IS NULL OR d."currentUses" < d."maxTotalUses")
           AND (
             EXISTS (SELECT 1 FROM "Customer" c WHERE c."customerGroupId" = d."customerGroupId" AND c."venueId" = d."venueId")
             OR EXISTS (
               SELECT 1 FROM "CustomerDiscount" cd
               WHERE cd."discountId" = d.id AND cd.active
-                AND (cd."validFrom" IS NULL OR cd."validFrom" <= ${t}) AND (cd."validUntil" IS NULL OR cd."validUntil" >= ${t})
+                AND (cd."validFrom" IS NULL OR cd."validFrom" <= ${utcTs(ahora)}) AND (cd."validUntil" IS NULL OR cd."validUntil" >= ${utcTs(ahora)})
                 AND (cd."maxUses" IS NULL OR cd."usageCount" < cd."maxUses")
             )
           )
@@ -54,8 +53,8 @@ export async function cuentaConBeneficios(venueId: string, ahora: Date = new Dat
         SELECT 1 FROM "CouponCode" c JOIN "Discount" d ON d.id = c."discountId"
         WHERE d."venueId" = ${venueId} AND c.active AND d.active
           AND d.scope = 'ORDER' AND d."requiresApproval" = false AND d.type <> 'COMP'
-          AND (c."validFrom" <= ${t} OR (c."validFrom" IS NULL AND (d."validFrom" IS NULL OR d."validFrom" <= ${t})))
-          AND (c."validUntil" >= ${t} OR (c."validUntil" IS NULL AND (d."validUntil" IS NULL OR d."validUntil" >= ${t})))
+          AND (c."validFrom" <= ${utcTs(ahora)} OR (c."validFrom" IS NULL AND (d."validFrom" IS NULL OR d."validFrom" <= ${utcTs(ahora)})))
+          AND (c."validUntil" >= ${utcTs(ahora)} OR (c."validUntil" IS NULL AND (d."validUntil" IS NULL OR d."validUntil" >= ${utcTs(ahora)})))
       )
     ) AS si`
   return fila?.si === true
