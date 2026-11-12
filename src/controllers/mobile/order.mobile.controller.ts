@@ -129,6 +129,7 @@ function descuentoDelClienteDelCuerpo(
   if (body.orderDiscountId != null || body.couponCode != null) {
     return { error: 'El descuento del cliente no se combina con un descuento de catálogo ni con un cupón' }
   }
+  if (body.stampRewardId != null) return { error: 'El descuento del cliente no se combina con un premio de sellos.' }
   return { valor: montoCents > 0 ? { discountId, montoCents } : null }
 }
 

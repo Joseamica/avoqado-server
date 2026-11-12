@@ -382,6 +382,7 @@ describe('3f · el cuerpo (leerVentaDeMostrador): 400', () => {
     ['sin customerId', { customerId: undefined }],
     ['con orderDiscountId', { orderDiscountId: 'disc-1' }],
     ['con couponCode', { couponCode: 'BIENVENIDA' }],
+    ['con un premio de sellos (stampRewardId)', { stampRewardId: 'rw-1', stampRewardAware: true }],
     ['montoCents no entero', { descuentoDelCliente: { discountId: 'disc-1', montoCents: 10.5 }, discount: 10.5 }],
     ['montoCents negativo', { descuentoDelCliente: { discountId: 'disc-1', montoCents: -1 }, discount: -1 }],
     ['sin discountId', { descuentoDelCliente: { montoCents: 1000 } }],
@@ -396,6 +397,15 @@ describe('3f · el cuerpo (leerVentaDeMostrador): 400', () => {
     expect(input.descuentoDelCliente).toEqual({ discountId: 'disc-1', montoCents: 1000 })
     expect(input.autorizacionDelDescuento).toBe('tok-1')
     expect(input.descuentoConPermisoPropio).toBeUndefined()
+  })
+
+  it('la etiqueta sin premio sigue válida, y el premio sin etiqueta sigue como hoy', () => {
+    expect(leer({})).not.toHaveProperty('error')
+    const sinEtiqueta = leerVentaDeMostrador(
+      { items: [{ productId: 'prod-1', quantity: 1 }], staffId: 'staff-1', discount: 20, stampRewardId: 'rw-1', stampRewardAware: true },
+      { conPropinaDeOrden: true, venueId: 'venue-1', usuario: 'staff-1' },
+    )
+    expect(sinEtiqueta).not.toHaveProperty('error')
   })
 
   it('montoCents 0 con discount 0: no hay nada que autorizar, la venta sigue sin etiqueta', () => {

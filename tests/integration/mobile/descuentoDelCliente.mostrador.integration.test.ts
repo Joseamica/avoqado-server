@@ -169,6 +169,32 @@ const cuerpo = (actor: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
 })
 
+/** Un premio de sellos de $20 listo para canjear, de Cecilia. */
+async function premioDeCecilia() {
+  const card = await prisma.stampCard.create({
+    data: {
+      customerId: ceciliaId,
+      venueId,
+      cycle: Math.floor(Math.random() * 1e9),
+      stampsRequired: 1,
+      stampsEarned: 1,
+      completedAt: new Date(),
+    },
+  })
+  return (
+    await prisma.stampReward.create({
+      data: {
+        stampCardId: card.id,
+        customerId: ceciliaId,
+        venueId,
+        rewardType: 'FIXED_AMOUNT',
+        rewardValue: 20,
+        rewardLabel: 'Café gratis',
+      },
+    })
+  ).id
+}
+
 const ruta = (r: string) => `/api/v1/mobile/venues/${venueId}${r}`
 
 async function crearOrden(actor: string, extra: Record<string, unknown> = {}) {
@@ -369,6 +395,14 @@ describe('POST /orders con el descuento del cliente', () => {
     expect(r.order).toBeNull()
   })
 
+  it('🔴 etiqueta + premio de sellos ⇒ 400 y no se canjea ni se crea nada (Codex r5)', async () => {
+    const premio = await premioDeCecilia()
+    const r = await crearOrden(gerenteId, { stampRewardId: premio, stampRewardAware: true })
+    expect(r.response.status).toBe(400)
+    expect(r.order).toBeNull()
+    expect((await prisma.stampReward.findUniqueOrThrow({ where: { id: premio } })).redeemedAt).toBeNull()
+  })
+
   it('3f · montoCents distinto de discount ⇒ 400', async () => {
     const r = await crearOrden(gerenteId, { discount: 900 })
     expect(r.response.status).toBe(400)
@@ -393,6 +427,16 @@ describe('POST gift-cards/pay-new-order con el descuento del cliente (3m)', () =
     expect(r.response.status).toBe(200)
     expect(r.fila).toMatchObject({ isAutomatic: true, authorizedById: gerenteVenueId, appliedById: cajeraVenueId })
     expect(await saldoDe(t.id)).toBe(410)
+  })
+
+  it('🔴 etiqueta + premio de sellos ⇒ 400, saldo intacto y premio sin canjear (Codex r5)', async () => {
+    const t = await tarjeta(500)
+    const premio = await premioDeCecilia()
+    const r = await pagarConSaldo(gerenteId, t.codigo, 90, { stampRewardId: premio, stampRewardAware: true })
+    expect(r.response.status).toBe(400)
+    expect(r.order).toBeNull()
+    expect(await saldoDe(t.id)).toBe(500)
+    expect((await prisma.stampReward.findUniqueOrThrow({ where: { id: premio } })).redeemedAt).toBeNull()
   })
 
   it('🔴 sin permiso con PIN de tope menor que el monto: 403 y el saldo intacto', async () => {
