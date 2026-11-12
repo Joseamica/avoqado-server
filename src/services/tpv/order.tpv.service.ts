@@ -1033,7 +1033,7 @@ async function buildCreateOrderResponse(orderId: string): Promise<Order & { tabl
 
 const MENSAJE_PIDE_APROBACION = 'Este descuento requiere aprobación de un gerente y todavía no se puede aplicar en la terminal.'
 const descuentoDeCatalogoCambio = (nombre: string) =>
-  `El descuento «${nombre}» cambió desde que se puso en la cuenta. Quítalo y vuelve a elegir al cliente.`
+  `El descuento «${nombre}» cambió desde que se puso en la cuenta. Vuelve a elegir al cliente para actualizarlo.`
 /** D2: un % o fijo que pide aprobación no tiene aprobador (decisión pendiente del founder); una cortesía sí (`orders:comp`). */
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'

@@ -29,7 +29,7 @@ const TOKEN = '6f1c2a7e-6d8b-4c4f-9a51-2b7f0e9d1a11'
 const GERENTE = 'sv-gerente'
 const QUIEN_COBRA = 'sv-cajera'
 const AHORA = Date.now()
-const TEXTO_CAMBIO = 'El descuento «Cliente 10 %» cambió desde que se puso en la cuenta. Quítalo y vuelve a elegir al cliente.'
+const TEXTO_CAMBIO = 'El descuento «Cliente 10 %» cambió desde que se puso en la cuenta. Vuelve a elegir al cliente para actualizarlo.'
 
 const descuento = (o: Record<string, any> = {}): any => ({
   id: DESCUENTO,
