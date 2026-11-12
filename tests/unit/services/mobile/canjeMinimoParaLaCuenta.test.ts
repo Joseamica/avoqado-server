@@ -88,14 +88,34 @@ describe('getCustomerLoyalty con la regla B', () => {
     expect(await vista(2000, { ...CUENTA_95, paymentStatus: 'PARTIAL' })).toMatchObject({ minPointsRedeem: 1000, canRedeem: false })
   })
 
-  it('empate de centavo ($1, tasa 0.0201, mínimo 50): se ofrecen 49 por $0.98 — lo que llena sin prometer de más — y se prende', async () => {
+  it('Codex r3 #1: cuenta de $100 con saldo justo de 50 (mínimo 50, tasa 0.0201): la cuenta da para el mínimo ⇒ no baja; apagado', async () => {
+    const r = await vista(
+      50,
+      { total: 100, subtotal: 100, discountAmount: 0, status: 'PENDING', paymentStatus: 'PENDING' },
+      cfg({ redemptionRate: 0.0201, minPointsRedeem: 50 }),
+    )
+    expect(r).toMatchObject({ maxRedeemablePoints: 49, minPointsRedeem: 50, canRedeem: false })
+    expect(minimoParaCanjear(50, 50, 0.0201, 100)).toBe(50)
+  })
+
+  it('empate de centavo ($1, tasa 0.0201, mínimo 50): 50 puntos valen $1.00 y caben en la cuenta ⇒ el mínimo no baja; apagado como antes (pintaría «$1.01»)', async () => {
     const r = await vista(
       500,
       { total: 1, subtotal: 1, discountAmount: 0, status: 'PENDING', paymentStatus: 'PENDING' },
       cfg({ redemptionRate: 0.0201, minPointsRedeem: 50 }),
     )
-    expect(r).toMatchObject({ maxRedeemablePoints: 49, minPointsRedeem: 49, canRedeem: true })
-    expect(previaDelCanje(49, r)).toEqual({ ok: true, puntos: 49, monto: 0.98 })
+    expect(r).toMatchObject({ maxRedeemablePoints: 49, minPointsRedeem: 50, canRedeem: false })
+  })
+
+  it('cuenta de $0.50 (mínimo 50, tasa 0.0201): la cuenta vale menos que el mínimo ⇒ se prende con lo que la llena', async () => {
+    const r = await vista(
+      500,
+      { total: 0.5, subtotal: 0.5, discountAmount: 0, status: 'PENDING', paymentStatus: 'PENDING' },
+      cfg({ redemptionRate: 0.0201, minPointsRedeem: 50 }),
+    )
+    expect(r.canRedeem).toBe(true)
+    expect(r.minPointsRedeem).toBe(r.maxRedeemablePoints)
+    expect(previaDelCanje(r.maxRedeemablePoints, r)).toMatchObject({ ok: true, puntos: r.maxRedeemablePoints })
   })
 
   it('la vista previa del MCP usa el mismo mínimo: 950 sí, 949 no', async () => {
@@ -113,6 +133,25 @@ describe('redeemPointsToOrderInTransaction con la regla B', () => {
     const tx = txFalso(2000, CUENTA_95)
     const r = await redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 950, undefined, config as any)
     expect(r).toMatchObject({ pointsToBurn: 950, discountAmount: 95 })
+  })
+
+  it('Codex r3 #2: abajo del mínimo, la quema exige que el saldo SIGA llegando al mínimo del negocio (dos cajas a la vez)', async () => {
+    const tx = txFalso(2000, CUENTA_95)
+    await redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 950, undefined, config as any)
+    expect(tx.customer.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'c1', loyaltyPoints: { gte: 1000 } } }))
+    // Si otra caja ya gastó parte del saldo, la quema no encuentra la fila y el canje se rechaza sin escribir el descuento.
+    const tx2 = txFalso(2000, CUENTA_95)
+    tx2.customer.updateMany.mockResolvedValue({ count: 0 })
+    await expect(redeemPointsToOrderInTransaction(tx2, 'v1', 'o1', 'c1', 950, undefined, config as any)).rejects.toThrow(
+      'Puntos insuficientes',
+    )
+    expect(tx2.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
+  it('canje normal (sobre el mínimo): la quema sólo exige los puntos que quema, como siempre', async () => {
+    const tx = txFalso(2000, { ...CUENTA_95, subtotal: 500, total: 550 })
+    await redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 1200, undefined, config as any)
+    expect(tx.customer.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'c1', loyaltyPoints: { gte: 1200 } } }))
   })
 
   it('abajo del mínimo para la cuenta sigue el 400 de siempre', async () => {

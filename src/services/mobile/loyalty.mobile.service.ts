@@ -97,6 +97,9 @@ export function puntosQueCaben(valor: number, valorPorPunto: number, saldo: numb
  */
 export function minimoParaCanjear(minNegocio: number, saldo: number, valorPorPunto: number, base: number): number {
   if (saldo < minNegocio) return minNegocio
+  // Sólo cuando es la CUENTA la que no da para el mínimo (los puntos del mínimo valen más de lo que queda por descontar). Si lo que
+  // limita es el saldo o un empate de centavo en pantalla, el mínimo no baja (Codex r3 #1: cuenta de $100, saldo justo de 50).
+  if (money(minNegocio * valorPorPunto) <= base) return minNegocio
   const llenan = puntosQueCaben(puntosQueSeCanjean(saldo, valorPorPunto, base).monto, valorPorPunto, saldo)
   return llenan > 0 ? Math.min(minNegocio, llenan) : minNegocio
 }
@@ -307,8 +310,11 @@ export async function redeemPointsToOrderInTransaction(
   // 🔴 Carrera de doble canje: el saldo leído arriba no reserva nada, así que el
   // decremento debe ser CONDICIONAL — dos canjes concurrentes (sobre órdenes
   // distintas) no pueden quemar los mismos puntos (auditoría 2026-07-18).
+  // Regla B (Codex r3 #2): un canje abajo del mínimo del negocio sólo vale con el saldo AÚN en ese mínimo; si otra caja ya gastó parte
+  // (dos cuentas chicas a la vez), la quema no encuentra la fila y se rechaza aquí, igual que en fila.
+  const saldoParaQuemar = Math.max(pointsToBurn, points < effectiveConfig.minPointsRedeem ? effectiveConfig.minPointsRedeem : 0)
   const burned = await tx.customer.updateMany({
-    where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
+    where: { id: customerId, loyaltyPoints: { gte: saldoParaQuemar } },
     data: { loyaltyPoints: { decrement: pointsToBurn } },
   })
   if (burned.count === 0) {

@@ -199,10 +199,10 @@ describe('puntosQueCaben — lo que ANDROID pinta al abrir es lo que se descuent
     expect(puntosQueCaben(1, 0.0201, 500)).toBe(49)
   })
 
-  it('cuenta de $1, tasa 0.0201, mínimo 50: se ofrecen 49 por $0.98, nunca 50 «$1.01»; con la regla B (12-nov) el mínimo de esa cuenta es 49 y se prende', async () => {
+  it('cuenta de $1, tasa 0.0201, mínimo 50: «Recompensas» sale apagado (50 puntos valen $1.00 y caben, así que la regla B no baja el mínimo; nunca 50 «$1.01»)', async () => {
     preparar({ saldo: 500, orden: { total: 1, subtotal: 1, discountAmount: 0 }, cfg: { redemptionRate: 0.0201, minPointsRedeem: 50 } })
     const r = await getCustomerLoyalty('v1', 'c1', 'o1')
-    expect(r).toMatchObject({ maxRedeemablePoints: 49, minPointsRedeem: 49, canRedeem: true })
+    expect(r).toMatchObject({ maxRedeemablePoints: 49, minPointsRedeem: 50, canRedeem: false })
     preparar({ saldo: 500, orden: { total: 1, subtotal: 1, discountAmount: 0 }, cfg: { redemptionRate: 0.0201, minPointsRedeem: 49 } })
     expect(await getCustomerLoyalty('v1', 'c1', 'o1')).toMatchObject({ maxRedeemablePoints: 49, canRedeem: true })
   })
