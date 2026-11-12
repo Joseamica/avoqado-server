@@ -24,8 +24,7 @@ import {
   aCentavos,
   comoJson,
   estaRegalado,
-  filasCubrenLaCuenta,
-  importesDeLasFilas,
+  devolverLoTopado,
   nuevoRepartoDeCuenta,
   nuevoRepartoDirigido,
   reduccionDeImpuestoCobrado,
@@ -1232,10 +1231,6 @@ export async function removeDiscountFromOrder(
         const premio = await refundStampRewardForOrderDiscount(tx, order.venueId, orderDiscount)
         // R3-2: si la fila era espejo, su renglón deja de traer el descuento.
         await revertirDescuentoDelRenglon(tx, orderId, orderDiscount)
-        // W7 A1: con la cuenta cubierta, `importesDeLasFilas` pudo haber topado un % re-derivado; al liberar lugar se re-deriva con
-        // la regla de los recalculadores (como al quitarlo en el móvil) y la cabecera suma lo que creció. Si no, como siempre.
-        const renglones = await renglonesParaReparto(tx, orderId)
-        const cubierta = filasCubrenLaCuenta(renglones, await filasDeLaOrden(tx, orderId))
         await tx.orderDiscount.delete({ where: { id: orderDiscountId } })
         // Codex r2 N2: quitar CUALQUIER fila libera lugar (las no espejo también consumen capacidad): las demás se re-reparten
         // siempre, en esta misma transacción y antes de escribir los totales.
@@ -1243,18 +1238,22 @@ export async function removeDiscountFromOrder(
         // se re-reparten (siempre) y al final se escriben los totales.
         const devueltoDeLaFila = new Prisma.Decimal(orderDiscount.taxReduction ?? 0)
         if (devueltoDeLaFila.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: devueltoDeLaFila } } })
-        const filas = cubierta ? await filasDeLaOrden(tx, orderId) : null
-        const { montosRederivados } = filas ? importesDeLasFilas(renglones, filas) : { montosRederivados: new Map<string, number>() }
-        const sincronizado = await sincronizarRepartos(tx, orderId, filas ? { renglones, filas, montosRederivados } : {})
-        const crecioCents = (filas ?? []).reduce(
-          (s, f) => s + (montosRederivados.has(f.id) ? aCentavos(montosRederivados.get(f.id)) - aCentavos(f.amount) : 0),
-          0,
-        )
+        // W7 A1 (Codex r1 #1, r2 #1): aquí no se recalcula; lo que el tope de la cuenta le quitó a un % re-derivado (su `topado`)
+        // vuelve con el lugar que libera esta fila, como si se recalculara, y la cabecera lo suma. Un % que nunca se topó, como hoy.
+        const renglones = await renglonesParaReparto(tx, orderId)
+        const filas = await filasDeLaOrden(tx, orderId)
+        const devuelto = devolverLoTopado(renglones, filas)
+        const sincronizado = await sincronizarRepartos(tx, orderId, {
+          renglones,
+          filas,
+          montosRederivados: devuelto.montos,
+          topados: devuelto.topados,
+        })
 
         // Update order totals
         const newDiscountAmount = Math.max(
           0,
-          Math.round((Number(order.discountAmount) - Number(orderDiscount.amount)) * 100 + crecioCents) / 100,
+          Math.round((Number(order.discountAmount) - Number(orderDiscount.amount)) * 100 + devuelto.devueltoCents) / 100,
         )
         const newTaxAmount = new Prisma.Decimal(order.taxAmount).plus(devueltoDeLaFila).plus(sincronizado.impuestoDevuelto)
         // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,

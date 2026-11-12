@@ -10,7 +10,7 @@ import {
   capacidadRestante,
   enAmbito,
   estaRegalado,
-  filasCubrenLaCuenta,
+  devolverLoTopado,
   importesDeLasFilas,
   impuestoQueSeLlevan,
   leerReparto,
@@ -348,10 +348,65 @@ describe('🔴 W7 A1 — Σ de las filas nunca pasa de la cuenta: el % re-deriva
     expect(res.montosRederivados.size).toBe(0)
     expect(res.descuento).toBe(120)
   })
-  it('filasCubrenLaCuenta: sólo con Σ filas ≥ Σ renglones (y alguna fila); quitar en la TPV re-deriva sólo entonces', () => {
-    expect(filasCubrenLaCuenta([hamburguesa, cafe], [fijo('a', 15, 1), pct('c', 10, 15, 2), premio('p', 129, 'h', 3)])).toBe(true)
-    expect(filasCubrenLaCuenta([hamburguesa, cafe], [fijo('a', 15, 1), pct('c', 10, 14.4, 2)])).toBe(false)
-    expect(filasCubrenLaCuenta([], [])).toBe(false)
+  it('lo que el tope quita queda en `topados` (centavos), y el reparto canónico lo guarda como `topado` sólo en esa fila', () => {
+    const filas = [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2), premio('premio', 129, 'h', 3)]
+    const res = importesDeLasFilas([hamburguesa, cafe], filas)
+    expect([...res.topados]).toEqual([['cupon', 90]])
+    const m = repartosDeLaOrden(
+      [hamburguesa, cafe],
+      filas.map(f => (res.montosRederivados.has(f.id) ? { ...f, amount: res.montosRederivados.get(f.id)! } : f)),
+      { rederivadas: new Set(res.montosRederivados.keys()), topados: res.topados },
+    )
+    expect(m.get('cupon')?.topado).toBe(90)
+    expect(m.get('premio')).not.toHaveProperty('topado')
+    expect(m.get('asignado')).not.toHaveProperty('topado')
+    // Sin exceso no hay `topados`, y un recálculo sin tope borra la marca vieja.
+    expect(importesDeLasFilas([hamburguesa, cafe], [fijo('asignado', 15, 1), pct('cupon', 10, 14.4, 2)]).topados.size).toBe(0)
+    const marcada = fila('cupon', 15, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 }, { type: 'PERCENTAGE', value: 10 })
+    expect(repartosDeLaOrden([hamburguesa, cafe], [marcada], { rederivadas: new Set(['cupon']) }).get('cupon')).not.toHaveProperty('topado')
+  })
+  it('leerReparto conserva `topado` (entero ≥ 0) y rechaza basura; mismoReparto lo compara', () => {
+    const base = { ...nuevoRepartoDeCuenta({ conPromociones: false }), renglones: { c: 1500 } }
+    expect(leerReparto({ ...base, topado: 90 })?.topado).toBe(90)
+    expect(leerReparto({ ...base, topado: 0 })).not.toHaveProperty('topado')
+    expect(leerReparto({ ...base, topado: 1.5 })).toBeNull()
+    expect(leerReparto({ ...base, topado: -1 })).toBeNull()
+    expect(mismoReparto(leerReparto({ ...base, topado: 90 }), leerReparto(base))).toBe(false)
+  })
+  it('🔴 devolverLoTopado (quitar en la TPV): quitar el premio devuelve los 90 ¢ al cupón ($15.90), nada más', () => {
+    const cupon = fila(
+      'cupon',
+      15,
+      { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado: 90 },
+      { type: 'PERCENTAGE', value: 10, createdAt: t(2) },
+    )
+    const r = devolverLoTopado([hamburguesa, cafe], [fijo('asignado', 15, 1), cupon])
+    expect([...r.montos]).toEqual([['cupon', 15.9]])
+    expect([...r.topados]).toEqual([['cupon', 0]])
+    expect(r.devueltoCents).toBe(90)
+  })
+  it('🔴 Codex r2 #1 — control: un % que nunca se topó (nació sobre lo que quedaba) no se toca al liberar lugar', () => {
+    const r = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [fijo('f50', 50, 1), pct('pct', 10, 5, 2)])
+    expect(r.montos.size).toBe(0)
+    expect(r.devueltoCents).toBe(0)
+  })
+  it('devolverLoTopado reparte el lugar del más viejo al más nuevo y sólo lo que cabe', () => {
+    const marca = (id: string, amount: number, topado: number, s: number) =>
+      fila(id, amount, { ...nuevoRepartoDeCuenta({ conPromociones: false }), topado }, { type: 'PERCENTAGE', value: 10, createdAt: t(s) })
+    const r = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [marca('viejo', 5, 500, 1), marca('nuevo', 0, 1000, 2), fijo('f', 88, 3)])
+    // Quedan 700 ¢: 500 al viejo (todo lo suyo) y 200 al nuevo.
+    expect([...r.montos]).toEqual([
+      ['viejo', 10],
+      ['nuevo', 2],
+    ])
+    expect([...r.topados]).toEqual([
+      ['viejo', 0],
+      ['nuevo', 800],
+    ])
+    expect(r.devueltoCents).toBe(700)
+    const poco = devolverLoTopado([rp('a', 100, 'pa', 'c1')], [marca('viejo', 5, 500, 1), fijo('f', 93, 3)])
+    expect([...poco.montos]).toEqual([['viejo', 7]])
+    expect([...poco.topados]).toEqual([['viejo', 300]])
   })
 })
 

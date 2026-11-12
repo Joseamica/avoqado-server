@@ -22,7 +22,7 @@ import * as motor from '@/services/dashboard/discountEngine.service'
 import { applyAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 import * as pedidos from '@/services/online-ordering/order.service'
 import { crearCuentaDelPedidoEnTx, toQuoteSnapshot } from '@/services/online-ordering/order.service'
-import { quoteCart } from '@/services/online-ordering/quote.service'
+import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import {
   SIMULACION,
   aplicarBeneficiosEnTx,
@@ -324,6 +324,8 @@ describe("S10 · la cotización = el modo estricto, con la regla vigente de la c
       ['PREMIO', '1.00'],
       ['PUNTOS', '18.22'],
     ])
+    // W7: la oferta ya no dice «5,000 puntos (−$50)»: dice los que el canje usa y quema abajo (1,822, −$18.22).
+    expect(q.oferta?.puntos).toMatchObject({ maxPuntos: 5000, usables: { puntos: 1822, monto: 18.22 } })
 
     const real = await estricto(cafe, e.clientaId, eleccion)
     expect(PESOS(real.total)).toBe('0.00')
@@ -474,6 +476,47 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     return { e, carro: carroA1, eleccion: { cupon: e.codigo, premioId: e.premioId } }
   }
 
+  it('🔴 Codex r2 #1 — control: cuenta llena SIN tope (fijo $50 + 10 % de lo que queda + fijo $45); quitar el $45 en la TPV cobra $45, como hoy', async () => {
+    const venta = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `A1C${++ciclo}`,
+        type: 'PICKUP',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        subtotal: 100,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 100,
+        remainingBalance: 100,
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        items: { create: [{ productId: combo, productName: 'Combo', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 }] },
+      },
+    })
+    for (const [tipo, valor] of [
+      ['FIXED_AMOUNT', 50],
+      ['PERCENTAGE', 10],
+      ['FIXED_AMOUNT', 45],
+    ] as const) {
+      expect(
+        await motor.applyManualDiscount(venta.id, tipo, valor, `${tipo} ${valor}`, undefined, undefined, 'A1', venueId, true),
+      ).toMatchObject({
+        success: true,
+      })
+    }
+    const filas = await prisma.orderDiscount.findMany({ where: { orderId: venta.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    expect(filas.map(f => PESOS(f.amount))).toEqual(['50.00', '5.00', '45.00'])
+
+    await motor.removeDiscountFromOrder(venta.id, filas[2].id, undefined, venueId)
+
+    const quedan = await prisma.orderDiscount.findMany({ where: { orderId: venta.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    expect(quedan.map(f => PESOS(f.amount))).toEqual(['50.00', '5.00'])
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: venta.id }, select: { discountAmount: true, total: true } })
+    expect(PESOS(cuenta.discountAmount)).toBe('55.00')
+    expect(PESOS(cuenta.total)).toBe('45.00')
+    ;(bitacora.logAction as jest.Mock).mockClear()
+  })
+
   it('🔴 W7 A1: quitar después el premio libera lugar y el cupón vuelve a lo suyo ($128.10), igual en la TPV que en el móvil', async () => {
     for (const quitar of [
       (orderId: string, filaId: string) => motor.removeDiscountFromOrder(orderId, filaId, undefined, venueId),
@@ -494,6 +537,43 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     }
     // `logAction` es un jest.fn() global de la integración: sus llamadas de quitar no deben llegar al espía de «no deja rastro».
     ;(bitacora.logAction as jest.Mock).mockClear()
+  })
+
+  it('🔴 W7 puntos usables: la cotización dice los puntos que el canje de verdad usa, en el mismo punto de la cadena', async () => {
+    // Sin premio: el motor deja $144 y el cupón $129.60; 20,000 puntos ($200) sólo usan lo que queda.
+    const { e, carro } = await escenaW2UJM()
+    await prisma.customer.update({ where: { id: e.clientaId }, data: { loyaltyPoints: 20000 } })
+    const q = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: { cupon: e.codigo } })
+    const usables = q.oferta!.puntos!.usables!
+    expect(q.oferta!.puntos!.maxPuntos).toBe(20000)
+    expect(usables.monto).toBe(129.6)
+    expect(usables.puntos).toBeLessThan(20000)
+    expect(toPublicQuote(q).oferta?.puntos?.usables).toEqual(usables)
+    // Eligiéndolos, la cotización aplica exactamente eso…
+    const conPuntos = await cotizarConBeneficios(venueId, carro, { customerId: e.clientaId, eleccion: { cupon: e.codigo, puntos: 20000 } })
+    expect(conPuntos.aplicados!.find(a => a.tipo === 'PUNTOS')!.monto.toNumber()).toBe(usables.monto)
+    expect(PESOS(conPuntos.totalConBeneficios!)).toBe('0.00')
+    // …y el canje real quema esos mismos puntos y descuenta lo mismo; los % no pasan de la cuenta.
+    const real = await estrictoCon(carro, e.clientaId, { cupon: e.codigo, puntos: 20000 })
+    expect(real.aplicados.find(a => a.tipo === 'PUNTOS')!.monto.toNumber()).toBe(usables.monto)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: e.clientaId } })).loyaltyPoints).toBe(20000 - usables.puntos)
+    const { orderId } = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: real.aplicados[0].orderDiscountId } })
+    expect(PESOS((await prisma.orderDiscount.aggregate({ where: { orderId }, _sum: { amount: true } }))._sum.amount!)).toBe('159.00')
+
+    // Con el premio, ya no queda nada: la oferta dice 0 y el canje los rechaza (descartados al cotizar, rechazo en estricto).
+    const otra = await escenaW2UJM()
+    await prisma.customer.update({ where: { id: otra.e.clientaId }, data: { loyaltyPoints: 300 } })
+    const sinLugar = await cotizarConBeneficios(venueId, otra.carro, { customerId: otra.e.clientaId, eleccion: otra.eleccion })
+    expect(sinLugar.oferta!.puntos!.usables).toEqual({ puntos: 0, monto: 0 })
+    const pidiendo = await cotizarConBeneficios(venueId, otra.carro, {
+      customerId: otra.e.clientaId,
+      eleccion: { ...otra.eleccion, puntos: 300 },
+    })
+    expect(pidiendo.descartados).toEqual(['PUNTOS'])
+    await expect(estrictoCon(otra.carro, otra.e.clientaId, { ...otra.eleccion, puntos: 300 })).rejects.toMatchObject({
+      code: 'BENEFIT_UNAVAILABLE',
+      details: { cual: 'PUNTOS' },
+    })
   })
 
   it('🔴 W7 A1 (folio W2UJM): $15 del motor + cupón 10 % + café gratis sobre $159 ⇒ 15 + 15.00 + 129 = $159 (hoy el cupón $15.90 y Σ $159.90), igual que el estricto', async () => {
@@ -518,6 +598,9 @@ describe('D8 · en qué renglón del carrito cae el premio de producto gratis (c
     expect(PESOS(cuenta.subtotal)).toBe('159.00')
     expect(PESOS(cuenta.discountAmount)).toBe('159.00')
     expect(PESOS(filas._sum.amount!)).toBe('159.00')
+    // Lo que el tope le quitó al cupón queda marcado en su reparto (para devolvérselo si se libera lugar sin recalcular).
+    const cupon = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: real.aplicados[1].orderDiscountId } })
+    expect(cupon.reparto).toMatchObject({ topado: 90, renglones: expect.any(Object) })
   })
 })
 

@@ -33,6 +33,20 @@ function money(value: number): number {
 }
 
 /**
+ * La regla del canje de puntos (la usa `redeemPointsToOrderInTransaction`, y la cotización de la tienda para decir cuántos se
+ * usarían de verdad): el valor de `puntos` topado a lo que queda por descontar (`base` = subtotal − descuentos); si se topó, sólo se
+ * queman los que se usan (⌈monto / valor por punto⌉). `monto` 0 = el canje lo rechaza.
+ */
+export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: number): { puntos: number; monto: number } {
+  const rawValue = money(puntos * valorPorPunto)
+  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total incluye cobros por servicio que el descuento no puede
+  // compensar — topar contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
+  const monto = money(Math.min(rawValue, Math.max(0, base)))
+  // If the value was capped, only burn the points actually used.
+  return { puntos: monto < rawValue && valorPorPunto > 0 ? Math.ceil(monto / valorPorPunto) : puntos, monto }
+}
+
+/**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
  * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
  * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
@@ -166,17 +180,11 @@ export async function redeemPointsToOrderInTransaction(
   }
 
   const redemptionRate = Number(effectiveConfig.redemptionRate)
-  const rawValue = money(points * redemptionRate)
-  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
-  // incluye cobros por servicio que el descuento no puede compensar — topar
-  // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
   const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
-  const discountAmount = money(Math.min(rawValue, redeemableBase))
+  const { monto: discountAmount, puntos: pointsToBurn } = puntosQueSeCanjean(points, redemptionRate, redeemableBase)
   if (discountAmount <= 0) {
     throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
   }
-  // If the value was capped, only burn the points actually used.
-  const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
 
   const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
 
