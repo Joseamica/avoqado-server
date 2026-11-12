@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { MovementType, RawMaterialMovementType } from '@prisma/client'
 import { existingId } from '../common/existingId.schema'
 import {
   RawMaterialCategory,
