@@ -446,6 +446,9 @@ export async function reconcileDeliveryOrderFromProvider(
         return { outcome: 'BLOCKED_EXCEEDS_REFUNDABLE' as const }
       }
       const { refundPaymentId, replay } = await writeRefundInTx(tx, {
+        // D19: es la plataforma bajando lo que cobra (su `reprecio` reescribe los totales), no un abono que se regresa: nadie va a
+        // pagar la diferencia, así que no vuelve a deberse.
+        reabreSaldo: false,
         bloqueado: cobro,
         originalPaymentId: original.id,
         venueId,

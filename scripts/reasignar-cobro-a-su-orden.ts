@@ -147,7 +147,7 @@ const SELECT_ORDEN = {
   onlineOrder: { select: { id: true } },
   payments: {
     where: { status: 'COMPLETED' as const },
-    select: { id: true, status: true, type: true, amount: true, tipAmount: true },
+    select: { id: true, status: true, type: true, amount: true, tipAmount: true, reopenedAmount: true, reopenedTipAmount: true },
   },
 } as const
 

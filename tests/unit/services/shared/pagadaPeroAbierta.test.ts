@@ -10,6 +10,7 @@ import {
   laCocinaLoTerminoSql,
   momentoDeCerrarUnPedidoDePlataformaSql,
   pedidoDePlataformaAceptadoSql,
+  pagadoQueCubreSql,
   pedidoDePlataformaQueBDejaAbiertoSql,
   seAcaboSuDiaDelNegocioSql,
 } from '@/services/shared/pagadaPeroAbierta'
@@ -30,13 +31,19 @@ describe('criterio SQL «pagada pero abierta»', () => {
   it('exige al menos un cobro REGULAR o FAST positivo; la suma ignora el tipo salvo REFUND', () => {
     expect(sql).toMatch(/p\.type IN \('REGULAR', ?'FAST'\)/)
     expect(sql).toMatch(/p\.amount > 0/)
-    expect(sql).toMatch(/SUM\(p\.amount\)[\s\S]*?p\.status = 'COMPLETED' AND p\.type IS DISTINCT FROM 'REFUND'/)
+    // Un `type` NULL cae en el ELSE y cuenta (la asimetría de `IS DISTINCT FROM` de antes, intacta).
+    expect(pagadoQueCubreSql('o')).toMatch(/CASE WHEN p\.type = 'REFUND' THEN [\s\S]*? ELSE p\.amount END/)
+    expect(pagadoQueCubreSql('o')).toMatch(/WHERE p\."orderId" = o\.id AND p\.status = 'COMPLETED'\)$/)
   })
 
-  it('compara la suma de cobros COMPLETED que NO son REFUND contra lo que la cuenta DEBE, con tolerancia de un centavo', () => {
-    expect(sql).toMatch(
-      /SELECT COALESCE\(SUM\(p\.amount\), 0\) FROM "Payment" p\s+WHERE p\."orderId" = o\.id AND p\.status = 'COMPLETED' AND p\.type IS DISTINCT FROM 'REFUND'\s*\)\s*>=/,
-    )
+  it('compara lo pagado que cubre (cobros COMPLETED menos lo reabierto) contra lo que la cuenta DEBE, con tolerancia de un centavo', () => {
+    expect(sql).toContain(`AND ${pagadoQueCubreSql('o')} >= ${baseQueDebeCubrirseSql('o')} - 0.01`)
+  })
+
+  it('🔴 D19: un REFUND resta SÓLO lo que reabrió (`reopenedAmount`, en positivo); sin marca no resta nada (18-ago)', () => {
+    expect(pagadoQueCubreSql('o')).toContain(`WHEN p.type = 'REFUND' THEN -ABS(COALESCE(p."reopenedAmount", 0))`)
+    // Nunca el importe del REFUND: una devolución de producto sobre una venta cubierta no reabre nada.
+    expect(pagadoQueCubreSql('o')).not.toMatch(/THEN p\.amount/)
   })
 
   /**

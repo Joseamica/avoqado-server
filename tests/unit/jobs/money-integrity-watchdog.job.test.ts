@@ -26,7 +26,7 @@ import {
 } from '@/jobs/money-integrity-watchdog.job'
 import {
   baseQueDebeCubrirseSql,
-  COBRO_QUE_CUBRE,
+  pagadoQueCubreSql,
   criterioPagadaPeroAbiertaSql,
   instanteUtcSql,
   pedidoDePlataformaQueBDejaAbiertoSql,
@@ -124,9 +124,8 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(VENTANA_DEL_BARRIDO_MIN).toBe(15) // gracia del barrido (5) + un ciclo suyo (10)
     // Y el número del detalle sale de la MISMA regla de dinero (REFUND fuera), no de una copia:
     // si sumara distinto, explicaría la alerta con una cifra que no fue la que la disparó.
-    expect(pagadaAbierta).toContain(
-      `' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})`,
-    )
+    // D19: la misma suma que el criterio (cobros menos lo reabierto por un abono devuelto).
+    expect(pagadaAbierta).toContain(`' pagado=' || ${pagadoQueCubreSql('o')}`)
     // 🔴 Y el OTRO lado de la comparación, por el mismo motivo: `base=` se re-derivaba a mano
     // (`GREATEST(0, subtotal − descuento)`, sin el cargo por servicio) mientras el criterio que
     // eligió la orden sí lo cuenta desde el arreglo del 2-sep-2026. La alerta explicaría la

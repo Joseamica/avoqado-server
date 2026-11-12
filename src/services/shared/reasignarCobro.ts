@@ -84,7 +84,8 @@ export interface CobroFoto {
   tenderSystemKind: string | null
 }
 
-export interface CobroDeOrdenFoto extends CompletedPaymentForBalance {
+// D19: `type` y no `interface … extends`: `CompletedPaymentForBalance` es una unión (con o sin lo reabierto).
+export type CobroDeOrdenFoto = CompletedPaymentForBalance & {
   id: string
   status: string
 }
@@ -172,7 +173,14 @@ export function validarReasignacion(caso: CasoReasignacion, cobro: CobroFoto, or
     motivos.push(`el destino está ${destino.status}/${destino.paymentStatus}: ya está pagada o cerrada`)
   }
 
-  const pagoComoCobro: CompletedPaymentForBalance = { amount: cobro.amount, tipAmount: cobro.tipAmount, type: cobro.type }
+  // El cobro que se mueve nunca es un REFUND (`esCobroQueCuenta`): no trae nada reabierto.
+  const pagoComoCobro: CompletedPaymentForBalance = {
+    amount: cobro.amount,
+    tipAmount: cobro.tipAmount,
+    type: cobro.type ?? null,
+    reopenedAmount: null,
+    reopenedTipAmount: null,
+  }
   // Codex r6 #1 / founder 3-oct: una cancelada no debe IVA (P12); medir el destino CANCELADO aceptaba $100 sobre una cuenta de
   // $100 + $16 aparte —que reabierta quedaba debiendo $16— y rechazaba los $116 correctos. Se mide como se va a reconciliar: el
   // cobro que se mueve ya está capturado y reabre la cancelada (`estadoAlRecibirDinero`, la misma regla de la Tarea 6a). La

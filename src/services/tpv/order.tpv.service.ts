@@ -1,5 +1,6 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
+import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -3415,11 +3416,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // otra decisión). Lo cobrado se relee BAJO el candado: el de la orden y el de los `Payment` registrados, el mayor,
       // porque hay órdenes históricas con pagos COMPLETED y `paidAmount` desfasado. Mismo filtro que el registro del
       // dinero: pagos no-reembolso (`type` nulo incluido), importe + propina — igual que `newTotal`, que lleva la propina.
-      const pagosRegistrados = await tx.payment.aggregate({
-        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-        _sum: { amount: true, tipAmount: true },
-      })
-      const pagadoPorPagos = new Prisma.Decimal(pagosRegistrados?._sum?.amount ?? 0).plus(pagosRegistrados?._sum?.tipAmount ?? 0)
+      // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`).
+      const pagosRegistrados = await cobradoQueCubreEnTx(tx, { venueId, orderId })
+      const pagadoPorPagos = pagosRegistrados.amount.plus(pagosRegistrados.tipAmount)
       const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {

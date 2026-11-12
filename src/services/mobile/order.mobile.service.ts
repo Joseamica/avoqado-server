@@ -703,10 +703,23 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         // ADITIVO (reembolso): sólo los COMPLETED y pocas columnas; el array NO sale en la respuesta.
         payments: {
           where: { status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, type: true, status: true, thirdPartyCashAmount: true, tenderType: { select: { systemKind: true } } },
+          select: {
+            amount: true,
+            tipAmount: true,
+            type: true,
+            reopenedAmount: true,
+            reopenedTipAmount: true,
+            status: true,
+            thirdPartyCashAmount: true,
+            tenderType: { select: { systemKind: true } },
+          },
         },
         // Marcas de la lista (tarjeta 1b S-1; D12: vale por `areaTicketLineId`, el INMEDIATO no guarda código): 2 bastan, no se mezclan.
-        items: { where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] }, select: { giftCardId: true, areaTicketLineId: true, releasedAreaTicketLineId: true }, take: 2 },
+        items: {
+          where: { OR: [WHERE_RENGLON_DE_TARJETA, { areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] },
+          select: { giftCardId: true, areaTicketLineId: true, releasedAreaTicketLineId: true },
+          take: 2,
+        },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -2257,6 +2270,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
           // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
           type: true,
+          // D19: lo que un reembolso de abono volvió a deber (no se serializa en `payments[]`; sólo alimenta el saldo).
+          reopenedAmount: true,
+          reopenedTipAmount: true,
           // 1b Q27/Q28: qué cobro es saldo de tarjeta.
           tenderType: { select: { systemKind: true } },
           // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
@@ -4000,7 +4016,16 @@ export interface CuentaBajoCandado {
     /** Rappi 2b: el carril de efectivo con dinero de terceros (lo lee el cobro con saldo para rechazarlo). */
     thirdPartyCashDue: Prisma.Decimal | null
   }>
-  readonly previousPayments: ReadonlyArray<Readonly<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>>
+  readonly previousPayments: ReadonlyArray<
+    Readonly<{
+      amount: Prisma.Decimal
+      tipAmount: Prisma.Decimal
+      type: PaymentType | null
+      /** D19: lo que un reembolso de abono volvió a deber (sólo en REFUND). */
+      reopenedAmount: Prisma.Decimal | null
+      reopenedTipAmount: Prisma.Decimal | null
+    }>
+  >
 }
 
 /** Lo que el núcleo recibe ya resuelto FUERA de la transacción (una caída de settings jamás revierte un cobro). */
@@ -4278,7 +4303,7 @@ export async function registrarAbonoEnTx(
   // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
   const previousPayments = await tx.payment.findMany({
     where: { orderId, status: 'COMPLETED' },
-    select: { amount: true, tipAmount: true, type: true, thirdPartyCashAmount: true },
+    select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true, thirdPartyCashAmount: true },
   })
 
   // Tarea A7: el cobro con saldo bloquea aquí sus sobres (Order → sobres → turno) y valida el monto contra el saldo.
@@ -4357,6 +4382,8 @@ export async function registrarAbonoEnTx(
   // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
   // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
   // sin devoluciones, es exactamente el saldo.
+  // 🔴 D19 (Codex plan r2 #1): lo devuelto que REABRIÓ ya está dentro del saldo; sumarlo otra vez se comía el cambio ($100 de
+  // cuenta, abono $50 devuelto, entregan $150: registraba $150 y cambio $0). Se suma sólo lo devuelto que no reabrió.
   const saldoAntes = computeOrderBalance(cuenta, previousPayments)
   // Recheck after the Order lock: the zero-payment preflight balance can be stale.
   if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
@@ -4364,7 +4391,11 @@ export async function registrarAbonoEnTx(
       `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
     )
   }
-  const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
+  const devueltoQueNoReabrio = saldoAntes.refundedAmount.minus(saldoAntes.reopenedAmount)
+  const saldoCents = Math.max(
+    0,
+    pesosToCents(saldoAntes.remainingBalance.plus(devueltoQueNoReabrio.isNegative() ? 0 : devueltoQueNoReabrio).toNumber()),
+  )
   // 🔴 S2: sólo el cobro NUEVO (efectivo de cajón en vivo) se recorta al saldo de HOY. Lo ya capturado —la cola sin red manda lo
   // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
   // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
@@ -6482,6 +6513,8 @@ export async function returnGiftBalanceAndCancelOrder(
       let escritas = 0
       for (const p of porDevolver) {
         const { refundPaymentId } = await writeRefundInTx(tx, {
+          // D19 (Codex plan r2 #3): SÍ se fija lo reabierto aunque la cuenta se cancele aquí mismo: si después la revive dinero ya
+          // capturado (efectivo de la cola sin red de otra caja), el saldo devuelto no puede volver a contar como cobrado.
           originalPaymentId: p.cobro.id,
           venueId,
           salesRefundCents: p.ventaCents,
