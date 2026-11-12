@@ -103,3 +103,46 @@ it('PATCH sin targetType: no toca el alcance (igual que hoy)', async () => {
   const data = appUpdate.update.mock.calls[0][0].data
   expect(data).toEqual({ updateMode: 'FORCE' })
 })
+
+// Auditoría de apps viejas antes de publicar (Codex r1→r3, 11-nov): una obligatoria dirigida no se puede hacer cumplir en las
+// TPV que no mandan su serial ni vuelven a preguntar por versiones; parchearlo en el 426 y en check-update dejaba otro hueco
+// cada ronda. Rediseño: una versión OBLIGATORIA siempre sale para todas; «Aplica a» queda para las opcionales, e «Instalar
+// versión» sigue sirviendo por terminal.
+it('POST obligatoria con sucursales: 400 y no se crea', async () => {
+  const r = await alta({ updateMode: 'FORCE', targetType: 'VENUES', targetVenueIds: [V1] })
+
+  expect(r.status).toBe(400)
+  expect(r.body.error).toMatch(/obligatoria/i)
+  expect(appUpdate.create).not.toHaveBeenCalled()
+})
+
+it('POST obligatoria para todas y opcional con sucursales: se aceptan', async () => {
+  expect((await alta({ updateMode: 'FORCE' })).status).toBe(201)
+  expect((await alta({ updateMode: 'BANNER', targetType: 'VENUES', targetVenueIds: [V1] })).status).toBe(201)
+})
+
+it('PATCH a obligatoria de una fila dirigida: 400 y no cambia', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'VENUES', updateMode: 'BANNER' })
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ updateMode: 'FORCE' })
+
+  expect(r.status).toBe(400)
+  expect(appUpdate.update).not.toHaveBeenCalled()
+})
+
+it('PATCH de una obligatoria para todas a sucursales: 400 y no cambia', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'ALL', updateMode: 'FORCE' })
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ targetType: 'VENUES', targetVenueIds: [V1] })
+
+  expect(r.status).toBe(400)
+  expect(appUpdate.update).not.toHaveBeenCalled()
+})
+
+it('PATCH de una dirigida a obligatoria Y para todas a la vez: se acepta', async () => {
+  appUpdate.findUnique.mockResolvedValue({ ...fila, platform: 'ANDROID_TPV', targetType: 'VENUES', updateMode: 'BANNER' })
+
+  const r = await request(app).patch(`/${ROW_ID}`).send({ updateMode: 'FORCE', targetType: 'ALL', targetVenueIds: [] })
+
+  expect(r.status).toBe(200)
+})

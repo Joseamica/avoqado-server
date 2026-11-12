@@ -7,7 +7,12 @@ import crypto from 'crypto'
 import { ambienteDeCampo, extractApkMetadata, PAQUETE_DE_CAMPO, validatePackageName } from '../../services/apk-parser.service'
 import { HUELLA_DE_FIRMA_DE_CAMPO, huellaDelCertificadoDeclarado } from '../../services/apk/certificadoDeclarado'
 import prisma from '../../utils/prismaClient'
-import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../services/appUpdate/audienceTargeting'
+import {
+  normalizeTargeting,
+  esObligatoriaDirigida,
+  OBLIGATORIA_SOLO_PARA_TODAS,
+  type AppUpdateTargetTypeValue,
+} from '../../services/appUpdate/audienceTargeting'
 
 /**
  * AppUpdate Controller
@@ -317,6 +322,9 @@ export async function createAppUpdate(req: Request, res: Response) {
     if ('error' in targeting) {
       return res.status(400).json({ success: false, error: targeting.error })
     }
+    if (esObligatoriaDirigida(updateMode, targeting.targetType)) {
+      return res.status(400).json({ success: false, error: OBLIGATORIA_SOLO_PARA_TODAS, message: OBLIGATORIA_SOLO_PARA_TODAS })
+    }
 
     // Create database record (la llave única resuelve dos altas simultáneas: la que pierde es 409, no 500)
     const appUpdate = await prisma.appUpdate.create({
@@ -452,6 +460,9 @@ export async function updateAppUpdate(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: result.error })
       }
       targeting = result
+    }
+    if (esObligatoriaDirigida(updateMode ?? existing.updateMode, targeting?.targetType ?? existing.targetType)) {
+      return res.status(400).json({ success: false, error: OBLIGATORIA_SOLO_PARA_TODAS, message: OBLIGATORIA_SOLO_PARA_TODAS })
     }
 
     const updated = await prisma.appUpdate.update({
