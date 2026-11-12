@@ -2,7 +2,8 @@
  * D16: `cuentaConBeneficios` (el campo de `/ordering/info` que decide si la tienda invita a «Entrar») contra Postgres REAL.
  *  - Cada fuente prendida dice `true`; apagada, vencida, gastada o de OTRO negocio, `false`.
  *  - Los cupones dicen exactamente lo mismo que la oferta de la tienda (`ofertaDeBeneficios().cupon`), caso por caso.
- *  - Con `false`, «Mi cuenta» (`getCustomerPortal`) y la oferta de una clienta no tienen nada que enseñar: el campo nunca esconde algo real.
+ *  - Con `false`, «Mi cuenta» (`getCustomerPortal`) y la oferta de una clienta no tienen nada VIVO que enseñar (sus pedidos, sus
+ *    reservas y lo ya muerto no cuentan): el campo nunca esconde algo que se pueda usar.
  */
 import cuid from 'cuid'
 import { Prisma } from '@prisma/client'
@@ -47,7 +48,7 @@ async function cupon(
   await prisma.couponCode.create({ data: { discountId: id, code: `C${run}${++n}`.toUpperCase(), ...c } })
 }
 
-async function tarjeta(venueId: string, customerId: string | null = null) {
+async function tarjeta(venueId: string, customerId: string | null = null, extra: Partial<Prisma.GiftCardUncheckedCreateInput> = {}) {
   n += 1
   await prisma.giftCard.create({
     data: {
@@ -63,6 +64,7 @@ async function tarjeta(venueId: string, customerId: string | null = null) {
       status: 'ACTIVE',
       termsVersion: '2026-10-14',
       deliveryChannel: 'PRINTED',
+      ...extra,
     },
   })
 }
@@ -122,6 +124,26 @@ describe('D16 · cuentaConBeneficios', () => {
       await tarjeta(venueId, customerId)
       expect(await cuentaConBeneficios(venueId)).toBe(true)
     })
+    it('una tarjeta de nadie, viva y con dinero, se puede guardar: true; bloqueada con dinero: true', async () => {
+      const a = await negocio()
+      await tarjeta(a.venueId)
+      expect(await cuentaConBeneficios(a.venueId)).toBe(true)
+      const b = await negocio()
+      await tarjeta(b.venueId, b.customerId, { status: 'BLOCKED' })
+      expect(await cuentaConBeneficios(b.venueId)).toBe(true)
+    })
+    it.each<[string, Partial<Prisma.GiftCardUncheckedCreateInput>]>([
+      ['una venta cancelada antes de cobrar (sin dueña, desactivada y en $0)', { status: 'DEACTIVATED', balance: D(0) }],
+      ['una venta sin cobrar (PENDING)', { status: 'PENDING', balance: D(0) }],
+      ['una tarjeta gastada ($0)', { balance: D(0) }],
+      ['una tarjeta vencida', { expiresAt: ayer() }],
+      ['una tarjeta desactivada con saldo', { status: 'DEACTIVATED' }],
+    ])('con la función apagada, sólo %s: false (codex-r1 #2)', async (_n, extra) => {
+      const { venueId } = await negocio()
+      await prisma.giftCardSettings.create({ data: { venueId, enabled: false } })
+      await tarjeta(venueId, null, extra)
+      expect(await cuentaConBeneficios(venueId)).toBe(false)
+    })
   })
 
   describe('paquetes', () => {
@@ -168,10 +190,23 @@ describe('D16 · cuentaConBeneficios', () => {
       if (asignado) await prisma.customerDiscount.create({ data: { customerId, discountId: d.id } })
       expect(await cuentaConBeneficios(venueId)).toBe(false)
     })
-    it('con la asignación apagada: false', async () => {
+    it.each<[string, Partial<Prisma.CustomerDiscountUncheckedCreateInput>, Partial<Prisma.DiscountUncheckedCreateInput>]>([
+      ['la asignación apagada', { active: false }, {}],
+      ['la asignación vencida (codex-r1 #3)', { validUntil: ayer() }, {}],
+      ['la asignación que todavía no empieza', { validFrom: manana() }, {}],
+      ['la asignación agotada', { maxUses: 1, usageCount: 1 }, {}],
+      ['el descuento agotado para todas', {}, { maxTotalUses: 5, currentUses: 5 }],
+    ])('con %s: false, y el portal tampoco lo enseña', async (_n, asignacion, extra) => {
       const { venueId, customerId } = await negocio()
-      const d = await descuento(venueId)
-      await prisma.customerDiscount.create({ data: { customerId, discountId: d.id, active: false } })
+      const d = await descuento(venueId, extra)
+      await prisma.customerDiscount.create({ data: { customerId, discountId: d.id, ...asignacion } })
+      expect(await cuentaConBeneficios(venueId)).toBe(false)
+      expect(((await getCustomerPortal(venueId, customerId, { contactos: [] })) as any).descuentos.items).toHaveLength(0)
+    })
+    it('de un grupo sin nadie: false', async () => {
+      const { venueId } = await negocio()
+      const grupo = await prisma.customerGroup.create({ data: { venueId, name: `G${++n}` } })
+      await descuento(venueId, { scope: 'CUSTOMER_GROUP', customerGroupId: grupo.id })
       expect(await cuentaConBeneficios(venueId)).toBe(false)
     })
   })
