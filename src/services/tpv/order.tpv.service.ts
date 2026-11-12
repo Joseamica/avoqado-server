@@ -1244,16 +1244,17 @@ export async function createOrderWithItems(
   const totalPesos = roundPesos(grossSubtotalPesos - discountAmountPesos)
 
   assertClosePesos('subtotal', input.subtotal, grossSubtotalPesos)
+  // En centavos enteros (restar pesos flotantes da 0.0100000002) y con un centavo de tolerancia, como `assertClosePesos`.
+  const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
   if (cupon) {
-    // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta. En
-    // centavos enteros: restar pesos flotantes da 0.0100000002 y un centavo de redondeo se leía como otro cupón.
-    const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
+    // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta.
     if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos))
       throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
   } else if (orderDiscount) {
-    // Descuento del cliente: centavos exactos contra lo que la terminal mostró; si no cuadra, el descuento cambió en el catálogo.
-    if (Math.round((input.discount || 0) * 100) !== Math.round(orderDiscountPesos * 100))
-      throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
+    // Descuento del catálogo (del cliente o no): contra lo que la terminal mostró; más de un centavo ⇒ cambió en el catálogo. El
+    // centavo de tolerancia es el de producción: las TPV 2.7.1–2.16.0 mandan `discount: 0` y un descuento de $0.01 debe pasar
+    // (revisión de apps viejas, 12-nov). La fila guarda siempre el monto exacto del servidor.
+    if (difiere(input.discount || 0, orderDiscountPesos)) throw new BadRequestError(descuentoDeCatalogoCambio(orderDiscount.name))
     assertClosePesos('total', input.total, totalPesos)
   } else {
     assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
