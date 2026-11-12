@@ -53,6 +53,18 @@ describe('alta V1 con la venta suelta cerrada', () => {
     expect(mockVfCreate).not.toHaveBeenCalled()
   })
 
+  it('🔴 D5 · bloque P: con la venta abierta y Stripe caído, el respaldo sin cobro nunca concede un código de piloto', async () => {
+    mockVentaAbierta.mockReturnValue(true)
+    mockCreateTrial.mockRejectedValue(new Error('Stripe caído'))
+    const prisma = jest.requireMock('../../../../src/utils/prismaClient').default
+    prisma.feature.findMany.mockResolvedValueOnce([{ id: 'f-piloto', code: 'MESAS_SIN_RED', monthlyPrice: 0 }])
+
+    await enablePremiumFeatures('venue-1', 'a@b.mx', 'Cafe', ['MESAS_SIN_RED'])
+
+    expect(mockVfCreate).not.toHaveBeenCalled()
+    expect(mockCreateTrial).not.toHaveBeenCalled()
+  })
+
   it('con la venta abierta sigue funcionando como antes', async () => {
     mockVentaAbierta.mockReturnValue(true)
 

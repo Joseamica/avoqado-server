@@ -21,4 +21,18 @@ describe('enableAllFeaturesForLiveDemo', () => {
     const prendidas = (prisma.venueFeature.create as jest.Mock).mock.calls.map(([arg]) => arg.data.featureId)
     expect(prendidas).toEqual(['f-premium', 'f-lealtad'])
   })
+
+  it('🔴 D5 · R5-2: nunca prende un código de piloto (MESAS_SIN_RED sólo lo concede el superadmin, negocio por negocio)', async () => {
+    ;(prisma.feature.findMany as jest.Mock).mockResolvedValue([
+      { id: 'f-premium', code: 'PLAN_PREMIUM' },
+      { id: 'f-piloto', code: 'MESAS_SIN_RED' },
+      { id: 'f-lealtad', code: 'LOYALTY_PROGRAM' },
+    ])
+    ;(prisma.venueFeature.create as jest.Mock).mockResolvedValue({})
+
+    await enableAllFeaturesForLiveDemo('v-demo')
+
+    const prendidas = (prisma.venueFeature.create as jest.Mock).mock.calls.map(([arg]) => arg.data.featureId)
+    expect(prendidas).toEqual(['f-premium', 'f-lealtad'])
+  })
 })

@@ -95,6 +95,18 @@ export const PREMIUM_ONLY_CODES = [
 export const PREMIUM_ONLY_SIN_CATALOGO = ['SHOPIFY_INTEGRATION'] as const
 
 /**
+ * Funciones de PILOTO: las concede SÓLO el superadmin, negocio por negocio (diálogo «Activar función»). $0, fuera de
+ * `FEATURE_CATALOG` y de toda lista de plan. 🔴 No van en ninguna lista de arriba: cualquiera de ellas las concedería por plan.
+ * Se excluyen de todo lo que concede «todas las funciones» (demo en vivo, semilla, alta), de la concesión ficticia por exención
+ * del estado de funciones del panel y de la sincronización con Stripe. Las apps las leen de `grantedFeatureCodes`, que sólo trae
+ * concesiones reales.
+ *
+ * MESAS_SIN_RED — D5 (11-nov-2026): la tablet que tomó una mesa la cobra en efectivo sin internet; piloto en 3–5 restaurantes
+ * (docs/audit/2026-11-11-mesas-cobro-sin-red/rulings-r5.md, R5-2 y R5-3). Al terminar el piloto se quitan el código y su fila.
+ */
+export const CODIGOS_DE_PILOTO = ['MESAS_SIN_RED'] as const
+
+/**
  * Free-tier codes (Feature.code): capabilities the FREE plan PROMISES (dashboard
  * catalog FREE `includes`), granted to EVERY venue regardless of plan — even with
  * no base plan at all. Without this, a brand-new Free venue gets 403 on routes the

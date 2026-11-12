@@ -17,6 +17,7 @@ import {
   PAID_PLAN_TIER_CODES,
   FREE_TIER_CODES,
   PREMIUM_ONLY_SIN_CATALOGO,
+  CODIGOS_DE_PILOTO,
 } from '@/services/access/basePlan.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { grantedCapabilityCodes } from '@/services/access/capabilityGrants.service'
@@ -532,6 +533,9 @@ export async function getVenueFeatureStatus(venueId: string) {
   // grantedByPlan = grandfathered || FREE_TIER_CODES || tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
   const tierGrants = (code: string): boolean => {
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
+    // 🔴 D5 · R5-3: un código de piloto sólo existe con la concesión real del superadmin (ANDROID lee la lista exacta). Fingirlo
+    // concedido por la exención lo enseñaba prendido en el diálogo y no dejaba activarlo.
+    if ((CODIGOS_DE_PILOTO as readonly string[]).includes(code)) return false
     if (isGrandfathered) return true // grandfathered → every non-tier feature granted, no paywall
     if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // Free-tier promises: everyone
     return baseTier != null && elPlanConcede(baseTier, code)
