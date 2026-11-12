@@ -236,3 +236,46 @@ describe('recordFastPayment — la venta rápida da lealtad (Amaena, 14-sep-2026
     expect(award).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * La venta de la COLA de la terminal se fecha a la hora en que se vendió, no a la de su llegada (lo mismo que el POS con
+ * `horaDeLaVenta`): una venta de anoche subida hoy no cuenta en el tope de sellos de hoy. En la MISMA escritura que
+ * `loyaltyEligibleAt`.
+ */
+describe('recordFastPayment — hora de la venta de la cola (loyaltySaleAt)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    installFakes()
+  })
+
+  it('de la cola: guarda la hora que capturó la terminal', async () => {
+    const { txOrderUpdate } = installTransaction()
+    const anoche = Date.now() - 10 * 3_600_000
+
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: anoche }), 'user-1')
+
+    expect(marcaDeLealtad(txOrderUpdate).data.loyaltySaleAt).toEqual(new Date(anoche))
+  })
+
+  it('de la cola con reloj adelantado: nunca después de la llegada', async () => {
+    const { txOrderUpdate } = installTransaction()
+    const antes = Date.now()
+
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: String(antes + 86_400_000) }), 'user-1')
+
+    const marca = marcaDeLealtad(txOrderUpdate).data
+    expect(marca.loyaltySaleAt.getTime()).toBeGreaterThanOrEqual(antes)
+    expect(marca.loyaltySaleAt.getTime()).toBeLessThanOrEqual(marca.loyaltyEligibleAt.getTime())
+  })
+
+  it('en línea (sin isOfflineReplay) o terminal vieja (sin createdAtLocal): como hoy, sin loyaltySaleAt', async () => {
+    const { txOrderUpdate } = installTransaction()
+
+    await recordFastPayment(VENUE, cobroRapido({ createdAtLocal: Date.now() - 3_600_000 }), 'user-1')
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true }), 'user-1')
+
+    const marcas = txOrderUpdate.mock.calls.map(c => c[0]).filter((a: any) => a?.data && 'loyaltyEligibleAt' in a.data)
+    expect(marcas).toHaveLength(2)
+    for (const m of marcas) expect(m.data).not.toHaveProperty('loyaltySaleAt')
+  })
+})

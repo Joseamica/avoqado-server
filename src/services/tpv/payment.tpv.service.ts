@@ -448,6 +448,7 @@ import type { CustomerAttributionActor } from '../shared/customerAttributionPoli
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
+import { horaDeLaVenta } from '../mobile/precioQueVioElCliente'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -1411,6 +1412,8 @@ export async function settleStandalonePaymentInTx(
   marcarCocina = false,
   /** Codex r10 #6: `false` ⇒ sólo los totales, sin los efectos de saldar (lealtad, marca de cocina, vale de inventario). */
   efectosDeCierre = true,
+  /** La hora de la venta de la cola (`horaDeLaVentaDeLaCola`); se escribe junto con `loyaltyEligibleAt`. */
+  loyaltySaleAt?: Date,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1477,6 +1480,7 @@ export async function settleStandalonePaymentInTx(
       ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+      ...(firstSettlement && loyaltySaleAt && { loyaltySaleAt }),
       ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
@@ -1588,6 +1592,8 @@ async function updateOrderTotalsForStandalonePayment(
      * finalización del vale, o —cuenta con vale sin sesión— la escritura de esta misma función.
      */
     marcarCocina?: boolean
+    /** La hora de la venta de la cola (`horaDeLaVentaDeLaCola`); se escribe junto con `loyaltyEligibleAt`. */
+    loyaltySaleAt?: Date
   },
 ): Promise<OrderInventoryWarning | null> {
   // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
@@ -2046,6 +2052,7 @@ async function updateOrderTotalsForStandalonePayment(
                     completedAt: new Date(),
                   }),
                 ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+                ...(debeRegistrarPosting && options?.loyaltySaleAt && { loyaltySaleAt: options.loyaltySaleAt }),
                 ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
               },
               include: {
@@ -2866,6 +2873,16 @@ function avisoDeVentaApartada(
   }
 }
 
+/**
+ * La hora de la venta que sube de la cola de la terminal, para la lealtad (`Order.loyaltySaleAt`, en la MISMA escritura que
+ * `loyaltyEligibleAt`): la que capturó el aparato, nunca después de la llegada (`horaDeLaVenta`, la misma regla del POS). En línea o
+ * sin `createdAtLocal` (terminal ≤ 2.16) ⇒ `undefined`: la venta queda fechada a la llegada, como hoy.
+ */
+function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date = new Date()): Date | undefined {
+  if (paymentData.isOfflineReplay !== true || paymentData.createdAtLocal == null) return undefined
+  return horaDeLaVenta(paymentData, llegada)
+}
+
 interface PaymentCreationData {
   venueId: string
   amount: number // Amount in cents
@@ -2890,6 +2907,8 @@ interface PaymentCreationData {
   shiftIdDeLaVenta?: string | null
   /** S3: la caja que el POS tenía abierta al cobrar (sólo cuenta con `isOfflineReplay === true`). */
   cashDrawerSessionId?: string | null
+  /** Epoch ms del aparato al cobrar la venta de su cola; sólo cuenta con `isOfflineReplay === true` (`horaDeLaVentaDeLaCola`). */
+  createdAtLocal?: number | string | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3627,6 +3646,8 @@ export async function recordOrderPayment(
   // `elapsedMs` para que un cobro lento se pueda atribuir a un tramo, no adivinar.
   const startedAt = Date.now()
   const elapsedMs = () => Date.now() - startedAt
+  // La venta de la cola de la terminal se fecha, para la lealtad, a la hora que capturó el aparato (acotada a esta llegada).
+  const loyaltySaleAt = horaDeLaVentaDeLaCola(paymentData, new Date(startedAt))
 
   // 🔴 Este camino cobra CONTRA UNA ORDEN desde la terminal, y la terminal es un
   // aparato de tarjeta: sus medios son efectivo y tarjeta, no el catálogo de tipos
@@ -4367,6 +4388,8 @@ export async function recordOrderPayment(
             newPayment,
             validatedStaffId,
             marcarCocina,
+            true,
+            loyaltySaleAt,
           )
         }
 
@@ -4954,6 +4977,7 @@ export async function recordOrderPayment(
             // Codex 3.6 (S3): una cuenta con vale no pasa por ese saldado; aquí el pago ya es COMPLETED, así que la
             // salda (y la marca) la escritura de `updateOrderTotalsForStandalonePayment`.
             marcarCocina: marcarCocina && (Boolean(committedStandaloneSettlement) || hasAreaTicketLines),
+            loyaltySaleAt,
           },
         )
       }
@@ -6032,7 +6056,12 @@ export async function recordFastPayment(
         }
 
         if (newPayment.status === 'COMPLETED') {
-          await tx.order.update({ where: { id: order.id }, data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId } })
+          const llegada = new Date()
+          const loyaltySaleAt = horaDeLaVentaDeLaCola(paymentData, llegada)
+          await tx.order.update({
+            where: { id: order.id },
+            data: { loyaltyEligibleAt: llegada, loyaltyStaffId: validatedStaffId, ...(loyaltySaleAt && { loyaltySaleAt }) },
+          })
           await enqueueCommittedPaymentEffects(
             tx,
             newPayment,
