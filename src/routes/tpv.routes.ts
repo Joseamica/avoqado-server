@@ -5241,6 +5241,23 @@ router.post(
  *                       customerGroup:
  *                         type: object
  *                         nullable: true
+ *                       descuentoDelCliente:
+ *                         type: object
+ *                         nullable: true
+ *                         description: Descuento asignado al cliente (opcional; terminales viejas lo ignoran)
+ *                         properties:
+ *                           discountId:
+ *                             type: string
+ *                           name:
+ *                             type: string
+ *                           type:
+ *                             type: string
+ *                             enum: [PERCENTAGE, FIXED_AMOUNT]
+ *                           value:
+ *                             type: number
+ *                           maxDiscountAmount:
+ *                             type: number
+ *                             nullable: true
  *                 count:
  *                   type: integer
  */

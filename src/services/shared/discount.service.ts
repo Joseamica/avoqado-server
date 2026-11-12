@@ -80,6 +80,42 @@ export function calculateDiscountCents(discount: any, baseCents: number): number
 }
 
 /**
+ * El descuento de catálogo de la CUENTA al centavo exacto, con la MISMA regla que la TPV (`Discount.calculateAmount` +
+ * `CartState.calculateDiscountCents`): % = base × valor / 100 en decimal exacto; fijo = mín(valor, base); COMP = la base; luego
+ * el tope (`maxDiscountAmount`); luego centavos «medio hacia arriba»; nunca más que la base. En `Prisma.Decimal`, nunca en
+ * flotantes: 2135 ¢ al 10 % son 214 ¢ (no 213) y 375 ¢ al 9.2 % son 35 ¢ (no 34). La compra mínima se juzga igual que
+ * `calculateDiscountPesos`, con el mismo error.
+ */
+export function calcularDescuentoExactoCents(
+  discount: {
+    type: string
+    value: Prisma.Decimal.Value
+    maxDiscountAmount?: Prisma.Decimal.Value | null
+    minPurchaseAmount?: Prisma.Decimal.Value | null
+    name: string
+  },
+  baseCents: number,
+): number {
+  if (baseCents <= 0) return 0
+  const base = new Prisma.Decimal(baseCents)
+  const centavos = (pesos: Prisma.Decimal.Value) => new Prisma.Decimal(pesos).mul(100)
+
+  if (discount.minPurchaseAmount != null && base.lt(centavos(discount.minPurchaseAmount))) {
+    throw new BadRequestError(`Discount "${discount.name}" requires a minimum purchase amount`)
+  }
+
+  let monto: Prisma.Decimal
+  if (discount.type === 'PERCENTAGE') monto = base.mul(discount.value).div(100)
+  else if (discount.type === 'FIXED_AMOUNT') monto = Prisma.Decimal.min(centavos(discount.value), base)
+  else if (discount.type === 'COMP') monto = base
+  else throw new BadRequestError(`Unsupported discount type: ${discount.type}`)
+
+  if (discount.maxDiscountAmount != null) monto = Prisma.Decimal.min(monto, centavos(discount.maxDiscountAmount))
+
+  return Prisma.Decimal.min(monto.toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP), base).toNumber()
+}
+
+/**
  * Validate that a `Discount` row is currently usable: active, within its
  * validity window, and under its total-use cap.
  *

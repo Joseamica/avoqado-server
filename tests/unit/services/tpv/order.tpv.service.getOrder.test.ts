@@ -38,6 +38,7 @@ jest.mock('@/config/logger', () => ({
 
 import prisma from '@/utils/prismaClient'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
+import { SELECT_DESCUENTO_DE_LA_CUENTA } from '@/services/tpv/order.tpv.service'
 
 const findUniqueMock = (prisma as any).order.findUnique as jest.Mock
 
@@ -100,11 +101,28 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     expect(findUniqueMock).toHaveBeenCalledWith(
       expect.objectContaining({
         include: expect.objectContaining({
-          orderDiscounts: { select: { id: true, name: true, amount: true } },
+          orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
           serviceCharges: true,
         }),
       }),
     )
+  })
+
+  // QA del descuento del cliente en la PAX (11-nov): el mapper de la TPV (`OrderDiscountDto`) exige `type`; con la línea
+  // recortada a { id, name, amount } truena al releer la venta tras cobrar y la pantalla final dice «Queda por pagar» con lo
+  // ya pagado. Se manda lo que la TPV lee, sin quitar nada de lo que ya iba.
+  it('manda en cada descuento lo que la TPV lee (tipo, valor y de qué descuento viene), además de id, nombre y monto', () => {
+    expect(SELECT_DESCUENTO_DE_LA_CUENTA).toEqual({
+      id: true,
+      name: true,
+      amount: true,
+      orderId: true,
+      discountId: true,
+      couponCodeId: true,
+      type: true,
+      value: true,
+      appliedById: true,
+    })
   })
 
   it('returns the discount breakdown with money in pesos (not cents)', async () => {
