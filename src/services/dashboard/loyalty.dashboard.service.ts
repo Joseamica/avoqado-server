@@ -27,6 +27,8 @@ import { grantStamp, type GrantStampResult } from '../wallet/stampLedger.service
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
+import { decidirPromoDeLaVentaEnTx, registrarUsoEnTx } from '../loyalty/promotions/promoDeLaVenta'
+import { puntosConPromo } from '../loyalty/promotions/evaluarPromo'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -194,13 +196,14 @@ export async function updateLoyaltyConfig(
 
 /**
  * Lo que da una venta de `amount` pesos: el gasto (`amount * pointsPerDollar`) y el bono por visita, una vez por venta. Una venta en
- * $0 no da bono. Es también la vista previa del panel: lo que promete y lo que se acredita salen de aquí.
+ * $0 no da bono. Es también la vista previa del panel: lo que promete y lo que se acredita salen de aquí. La promo de lealtad va
+ * encima, al acreditar (depende de la decisión bajo el candado de la clienta); la vista previa no la incluye.
  */
-async function calcularPuntosDeLaVenta(venueId: string, amount: number): Promise<{ total: number; bono: number }> {
+async function calcularPuntosDeLaVenta(venueId: string, amount: number): Promise<{ total: number; bono: number; pointsPerDollar: number }> {
   const config = await getOrCreateLoyaltyConfig(venueId)
-  if (!config.active || amount <= 0) return { total: 0, bono: 0 }
+  if (!config.active || amount <= 0) return { total: 0, bono: 0, pointsPerDollar: config.pointsPerDollar }
   const bono = Number(config.pointsPerVisit) || 0
-  return { total: Math.floor(amount * config.pointsPerDollar) + bono, bono }
+  return { total: Math.floor(amount * config.pointsPerDollar) + bono, bono, pointsPerDollar: config.pointsPerDollar }
 }
 
 /**
@@ -274,7 +277,8 @@ export async function canRedeemPoints(venueId: string, customerId: string, point
  *     (`ORDER_LOCK_WAIT_BUDGET.timeout`, `paymentShiftClaim.ts`). El trabajo de adentro son cuatro lecturas por índice y dos
  *     escrituras; lo que puede tardar es la espera del candado de la venta (otro intento de la MISMA venta) o de la fila del
  *     cliente (otro movimiento de su saldo), y ambas son cortas.
- * Lo usa también la transacción de `grantStamp`, que espera el mismo candado de la venta.
+ * Lo usa también la transacción de `grantStamp`, que espera el mismo candado de la venta. Desde las promos de lealtad (Task 7) los
+ * puntos esperan además el candado de la clienta, que retiene otra venta suya mientras sella o acredita: igual de corta.
  */
 export const PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA = { maxWait: 10_000, timeout: 15_000 } as const
 
@@ -465,7 +469,8 @@ async function acreditarPuntosTrasElSello(ctx: {
     })
   }
 
-  const { total: pointsEarned, bono } = await calcularPuntosDeLaVenta(venueId, amount)
+  // Los puntos de la regla normal (regla 8: sin ellos, la promo tampoco da). La promo se suma dentro de la transacción.
+  const { total: pointsEarned, bono, pointsPerDollar } = await calcularPuntosDeLaVenta(venueId, amount)
 
   if (pointsEarned === 0) {
     // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:
@@ -486,10 +491,14 @@ async function acreditarPuntosTrasElSello(ctx: {
   // If concurrent calls occur, the DB will reject duplicates with P2002
   try {
     // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): la escritura de los puntos y su comprobación van en UNA transacción
-    // con el candado de la VENTA como PRIMERA sentencia (el mismo que toma `grantStamp` después del suyo). Dos intentos que
-    // validaron a clientes distintos se forman aquí: el segundo ve los puntos o el sello del primero y no acredita. La
-    // deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
+    // con el candado de la VENTA. Dos intentos que validaron a clientes distintos se forman aquí: el segundo ve los puntos o el
+    // sello del primero y no acredita. La deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
+    // 🔴 Promos de lealtad (spec §4.3 regla 14): ANTES, como primera sentencia, el candado de la CLIENTA, para contar su límite
+    // («1 vez al día», «1 sola vez») sin que dos ventas a la vez se lo salten, también en negocios que sólo dan puntos. Mismo orden
+    // global que `grantStamp`: candado de la clienta → candado de la venta; nadie toma el inverso (la reversa de sellos y la de
+    // puntos toman el de la venta SOLO, en su propia transacción).
     const escribirPuntos = async (tx: TxConReintento) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
       const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
         where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
@@ -508,27 +517,54 @@ async function acreditarPuntosTrasElSello(ctx: {
       // candado, y la reversa de puntos (`puntosAlReembolsar`) toma el mismo: o esto ve el reembolso y no otorga, o la reversa ve estos
       // puntos y los quita. Sin él, una reversa que corrió antes de existir el EARN dejaba los puntos vivos.
       if (await ventaTieneReembolso(tx, { venueId, orderId })) return { tipo: 'VENTA_DEVUELTA' as const }
+
+      // ── Promo de lealtad (spec §4.3): DESPUÉS de las reglas normales (regla 8) y bajo el candado de la clienta. La hora es la de la
+      // venta (regla 3), la misma que usa el sello; el monto, el mismo sin propina (regla 5). Si la mitad de los sellos ya registró
+      // el uso de esta venta, la decisión devuelve ESA promo (regla 14); si el tope del día bloqueó el sello, se decide aquí.
+      const venta = await tx.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { loyaltySaleAt: true, loyaltyEligibleAt: true },
+      })
+      const soldAt = venta?.loyaltySaleAt ?? venta?.loyaltyEligibleAt ?? new Date()
+      const decision = await decidirPromoDeLaVentaEnTx(tx, { venueId, customerId, orderId, soldAt, amount })
+      const conPromo = puntosConPromo({ total: pointsEarned, bono, pointsPerDollar }, decision)
+      // Sin bono no hay promo que anotar ni límite que gastar (r2 #3): los puntos de siempre.
+      const promo = decision && conPromo.bonusPoints > 0 ? { decision, ...conPromo } : null
+      const puntos = promo?.total ?? pointsEarned
+      // Ruling 3: el bono por visita va YA con la promo, así la devolución parcial de D7 (`puntosAlReembolsar`) lo conserva.
+      const bonoPorVisita = promo?.visitBonusPoints ?? bono
+      const regla = (d: NonNullable<typeof decision>) => (d.kind === 'MULTIPLY' ? `×${d.multiplier}` : `+${d.extraPoints}`)
+
       await tx.loyaltyTransaction.create({
         data: {
           customerId,
           type: LoyaltyTransactionType.EARN,
-          points: pointsEarned,
+          points: puntos,
           orderId,
-          reason:
-            bono > 0
+          reason: promo
+            ? `Ganó ${puntos} puntos por compra de $${amount.toFixed(2)}: ${pointsEarned} normales` +
+              (bono > 0 ? ` (incluye ${bono} de bono por visita)` : '') +
+              ` y ${promo.bonusPoints} de la promoción «${promo.decision.name}» (${regla(promo.decision)})`
+            : bono > 0
               ? `Ganó ${pointsEarned} puntos por compra de $${amount.toFixed(2)} (incluye ${bono} de bono por visita)`
               : `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
-          ...(bono > 0 ? { visitBonusPoints: bono } : {}),
+          ...(bonoPorVisita > 0 ? { visitBonusPoints: bonoPorVisita } : {}),
+          // Regla 12: qué promo dio el bono y cuánto; editar o terminar la promo después no toca esto.
+          ...(promo ? { promotionId: promo.decision.promotionId, bonusPoints: promo.bonusPoints } : {}),
           // D6: la base de la proporción de un reembolso. Lo que dio puntos, no lo que dicen los cobros (un pago manual con descuento guarda
           // el importe antes del descuento).
           baseAmount: new Prisma.Decimal(amount.toFixed(2)),
           createdById: staffId,
         },
       })
+      // Regla 14: el límite de la clienta se gasta si CUALQUIER mitad dio bono; se suma a la fila del sello si ya existe.
+      if (promo) {
+        await registrarUsoEnTx(tx, { venueId, customerId, orderId, soldAt, decision: promo.decision, pointsBonus: promo.bonusPoints })
+      }
       const customer = await tx.customer.update({
         where: { id: customerId },
         data: {
-          loyaltyPoints: { increment: pointsEarned },
+          loyaltyPoints: { increment: puntos },
         },
         select: {
           loyaltyPoints: true,
@@ -540,9 +576,9 @@ async function acreditarPuntosTrasElSello(ctx: {
         const { quitarDevolucionesDelCambioEnTx } = await import('../shared/puntosAlReembolsar')
         await quitarDevolucionesDelCambioEnTx(tx, venueId, orderId)
         const alCorriente = await tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
-        return { tipo: 'ACREDITADO' as const, saldo: alCorriente.loyaltyPoints }
+        return { tipo: 'ACREDITADO' as const, saldo: alCorriente.loyaltyPoints, puntos }
       }
-      return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints }
+      return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints, puntos }
     }
 
     // 🔴 Cuarta ola: presupuesto explícito y, si aun así la transacción se vence (P2028), un reintento ACOTADO. Es
@@ -577,7 +613,7 @@ async function acreditarPuntosTrasElSello(ctx: {
     }
     return finish(
       {
-        pointsEarned,
+        pointsEarned: escrito.puntos,
         newBalance: escrito.saldo,
       },
       true,
