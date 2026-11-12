@@ -25,12 +25,18 @@ function buildRes() {
   return res
 }
 
-const req = (headers: Record<string, string>) =>
+const req = (headers: Record<string, string>, terminalSerialNumber: string | null = 'AVQD-1') =>
   ({
     params: { venueId: 'venue-1' },
     headers,
-    body: { staffId: 'staff-1', source: 'TPV', isOfflineReplay: true, items: [{ name: 'Otro importe', unitPrice: 2135, quantity: 1 }] },
-    authContext: { userId: 'staff-1' },
+    body: {
+      staffId: 'staff-1',
+      source: 'TPV',
+      isOfflineReplay: true,
+      total: 1922,
+      items: [{ name: 'Otro importe', unitPrice: 2135, quantity: 1 }],
+    },
+    authContext: { userId: 'staff-1', ...(terminalSerialNumber ? { terminalSerialNumber } : {}) },
   }) as unknown as Request
 
 describe('createOrder — la marca de la TPV que trunca el descuento', () => {
@@ -47,6 +53,13 @@ describe('createOrder — la marca de la TPV que trunca el descuento', () => {
     ['ANDROID con build 125', { 'x-app-version-code': '125', 'x-device-platform': 'ANDROID' }, false],
   ])('%s ⇒ %s', async (_caso, headers, marca) => {
     await createOrder(req(headers), buildRes(), jest.fn() as NextFunction)
-    expect(createOrderWithItemsMock).toHaveBeenCalledWith('venue-1', expect.objectContaining({ descuentoTruncadoDeTpvVieja: marca }))
+    expect(createOrderWithItemsMock).toHaveBeenCalledWith(
+      'venue-1',
+      expect.objectContaining({ ventaDeTerminal: { truncaPorVersion: marca, totalCents: 1922 } }),
+    )
+  })
+  it('🔴 Codex r2 #1: sin el token de una terminal (una sesión del POS), nada de la excepción aunque mande encabezado y cuerpo de TPV', async () => {
+    await createOrder(req({ 'x-app-version-code': '125' }, null), buildRes(), jest.fn() as NextFunction)
+    expect(createOrderWithItemsMock.mock.calls[0][1]).not.toHaveProperty('ventaDeTerminal')
   })
 })

@@ -356,10 +356,12 @@ export interface CreateOrderInput {
   /** Cola sin red / reserva del efectivo: «la venta ya ocurrió». Nunca recibe el 409 de precio cambiado. */
   isOfflineReplay?: boolean
   /**
-   * D2 · B (server-owned, de los encabezados): la TPV 2.14.0–2.16.1 truncó el % de catálogo y no conocía el tope. En su venta sin red
-   * (`source: 'TPV'` + `isOfflineReplay`) se registra lo que cobró (`descuentoComoLoCobroLaTpvVieja`).
+   * D2 · B (server-owned: sólo con el token de una TERMINAL): la TPV 2.14.0–2.16.1 truncó el % de catálogo y no conocía el tope. En su
+   * venta sin red (`source: 'TPV'` + `isOfflineReplay`) se registra lo que cobró (`descuentoComoLoCobroLaTpvVieja`) si su versión lo dice
+   * (`truncaPorVersion`) o si el total que cobró (`totalCents`, del cuerpo) es el truncado y no el exacto: una venta guardada por la 2.16.1
+   * puede subir ya actualizada a 2.16.2 (Codex r2 #2).
    */
-  descuentoTruncadoDeTpvVieja?: boolean
+  ventaDeTerminal?: { truncaPorVersion: boolean; totalCents: number | null }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -1788,9 +1790,14 @@ export async function crearVentaDeMostradorEnTx(
   // El de catálogo; también lanza bajo el mínimo de compra, como siempre.
   const delCatalogo = orderDiscount && !cupon ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts) : 0
   // D2 · B: la venta sin red de una TPV ≤ 2.16.1 registra el % como lo cobró esa terminal (truncado, sin tope); lo demás, la regla de hoy.
+  const terminal = enLaCola && input.source === 'TPV' && !cupon ? input.ventaDeTerminal : undefined
+  const truncado = terminal && orderDiscount ? descuentoComoLoCobroLaTpvVieja(orderDiscount, remainingAfterItemDiscounts) : null
+  const totalCon = (descuentoPesos: number) => aCentavos(remainingAfterItemDiscounts) - aCentavos(descuentoPesos)
   const comoLoCobroLaTpv =
-    orderDiscount && !cupon && enLaCola && input.source === 'TPV' && input.descuentoTruncadoDeTpvVieja === true
-      ? descuentoComoLoCobroLaTpvVieja(orderDiscount, remainingAfterItemDiscounts)
+    terminal &&
+    truncado !== null &&
+    (terminal.truncaPorVersion || (terminal.totalCents === totalCon(truncado) && terminal.totalCents !== totalCon(delCatalogo)))
+      ? truncado
       : null
   const orderLevelDiscountDecimal = cupon
     ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)

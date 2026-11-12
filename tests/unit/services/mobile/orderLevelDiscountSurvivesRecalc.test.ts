@@ -373,7 +373,7 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
 
   it('🔴 TPV 2.16.0: $2.13 (trunca), y la cuenta cierra con los $19.22 que cobró', async () => {
     const db = baseEnMemoria()
-    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true }))
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
     const orden = db.orden(creada.id)
     expect(orden.discountAmount).toBe(2.13)
     const saldo = cierraCon(orden, 19.22, 0)
@@ -398,13 +398,13 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
           }
         : null,
     )
-    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true }))
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
     expect(db.orden(creada.id).discountAmount).toBe(2.13)
   })
 
   it('TPV 2.16.2 en adelante (sin la marca): $2.14 exacto, cierra con $19.21', async () => {
     const db = baseEnMemoria()
-    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1921 } }))
     const orden = db.orden(creada.id)
     expect(orden.discountAmount).toBe(2.14)
     expect(cierraCon(orden, 19.21, 0).isFullyPaid).toBe(true)
@@ -412,13 +412,56 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
 
   it('control — la marca sólo vale en una venta sin red de la TPV: con otra fuente, exacto ($2.14)', async () => {
     const db = baseEnMemoria()
-    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true, source: 'AVOQADO_ANDROID' }))
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, source: 'AVOQADO_ANDROID' }),
+    )
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 Codex r2 #2: venta guardada por la 2.16.1 que sube ya actualizada (build ≥ 127): su total ($19.22) dice que truncó ⇒ $2.13', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1922 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    expect(cierraCon(orden, 19.22, 0).isFullyPaid).toBe(true)
+  })
+
+  it('🔴 Codex r2 #1: sin el token de una terminal no hay excepción, aunque el cuerpo diga TPV sin red ($2.14, y con tope $1.00)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+    const db2 = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const otra = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db2.orden(otra.id).discountAmount).toBe(1)
+  })
+
+  it('control — terminal nueva sin versión vieja y con un total que no es el truncado: exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: null } }))
     expect(db.orden(creada.id).discountAmount).toBe(2.14)
   })
 
   it('control — y no en línea: sin `isOfflineReplay`, exacto ($2.14)', async () => {
     const db = baseEnMemoria()
-    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ descuentoTruncadoDeTpvVieja: true, isOfflineReplay: false }))
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, isOfflineReplay: false }),
+    )
     expect(db.orden(creada.id).discountAmount).toBe(2.14)
   })
 })

@@ -421,8 +421,16 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       orderMobileService.createOrderWithItems(venueId, {
         ...venta.input,
         ...autoridad,
-        // D2 · B: la TPV ≤ 2.16.1 truncó el % de catálogo; su venta sin red se registra como lo cobró (de los encabezados, nunca del cuerpo).
-        descuentoTruncadoDeTpvVieja: esTpvQueTruncaElDescuento(req.headers),
+        // D2 · B: la TPV ≤ 2.16.1 truncó el % de catálogo; su venta sin red se registra como lo cobró. Sólo con el token de una
+        // TERMINAL (Codex r2 #1: una sesión del POS no puede pedir la excepción con encabezados o cuerpo armados).
+        ...(req.authContext?.terminalSerialNumber
+          ? {
+              ventaDeTerminal: {
+                truncaPorVersion: esTpvQueTruncaElDescuento(req.headers),
+                totalCents: Number.isInteger(req.body?.total) ? (req.body.total as number) : null,
+              },
+            }
+          : {}),
         ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}),
         // El gerente del PIN o la membresía de QUIEN COBRA (nunca el vendedor elegido), sólo si hay descuento de cuenta libre.
         regaloAutorizadoPor:
