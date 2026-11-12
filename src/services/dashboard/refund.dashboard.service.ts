@@ -1840,6 +1840,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         reopenedAmount: result.saldoReabierto.reopenedAmount.toNumber(), // pesos
         reopenedTipAmount: result.saldoReabierto.reopenedTipAmount.toNumber(),
         source: 'DASHBOARD',
+        // D649: la sesión de vales que se puso al día (versión, y PARTIALLY_PAID si seguía MATERIALIZED).
+        ...(result.saldoReabierto.sesionDeVales ? { sesionDeVales: result.saldoReabierto.sesionDeVales } : {}),
       },
     })
   }

@@ -9,7 +9,8 @@
  * Una devolución de producto sobre una venta cubierta o cerrada no reabre nada (regla del 18-ago).
  */
 import { Prisma } from '@prisma/client'
-import { saldoQueReabreElReembolso } from '@/services/shared/saldoReabiertoAlReembolsar'
+import { fijarSaldoReabiertoEnTx, saldoQueReabreElReembolso } from '@/services/shared/saldoReabiertoAlReembolsar'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const d = (v: string | number) => new Prisma.Decimal(v)
 
@@ -131,5 +132,74 @@ describe('saldoQueReabreElReembolso — D19', () => {
     it('sin cobros previos (nada que reabrir): 0', () => {
       expect(decide(cuenta(), [], '10.00')).toEqual({ importe: '0', propina: '0', reabre: false })
     })
+  })
+})
+
+/**
+ * D649 (Codex apps-viejas r3): el POS (ANDROID ≥2.25.22, WINDOWS, iOS 1.15.x) descarta una respuesta de la venta de vales con la
+ * MISMA versión y menos pagado, y una «sin abono» (ni PARTIALLY_PAID ni pagado > 0) sobre una copia «con abono». Al reabrir, la
+ * sesión de vales viva de la cuenta sube su versión y, si seguía MATERIALIZED (el abono entró por otro canal), dice PARTIALLY_PAID.
+ */
+describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)', () => {
+  const txFalso = (sesiones: Array<{ id: string; status: string }>, order = cuenta()) => ({
+    order: {
+      findFirst: jest.fn().mockResolvedValue({ ...order, thirdPartyCashDue: null, cashTipDue: null, payments: [cobro('50.00')] }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    payment: { update: jest.fn().mockResolvedValue({}) },
+    $queryRaw: jest.fn().mockResolvedValue(sesiones),
+    areaTicketCheckoutSession: { update: jest.fn().mockResolvedValue({}) },
+  })
+  const fijar = (tx: ReturnType<typeof txFalso>) =>
+    fijarSaldoReabiertoEnTx(tx as unknown as TxConReintento, {
+      venueId: 'venue-1',
+      orderId: 'order-1',
+      refundPaymentId: 'refund-1',
+      devueltoImporte: d('50.00'),
+      devueltoPropina: d('0.00'),
+    })
+
+  it('🔴 sesión MATERIALIZED (abono por otro canal): sube la versión y pasa a PARTIALLY_PAID, en la misma transacción', async () => {
+    const tx = txFalso([{ id: 'ses-1', status: 'MATERIALIZED' }])
+
+    const r = await fijar(tx)
+
+    expect(tx.areaTicketCheckoutSession.update).toHaveBeenCalledWith({
+      where: { id: 'ses-1' },
+      data: { version: { increment: 1 }, status: 'PARTIALLY_PAID' },
+    })
+    expect(r.sesionDeVales).toEqual({ id: 'ses-1', estadoAntes: 'MATERIALIZED' })
+    // Se toma sin esperar (la cuenta ya está bloqueada; la jerarquía es sesión → vales → cuenta) y sólo la de ESTA cuenta.
+    const [sql, ...valores] = tx.$queryRaw.mock.calls[0]
+    expect((sql as string[]).join('?')).toMatch(/FOR UPDATE SKIP LOCKED/)
+    expect(valores).toEqual(expect.arrayContaining(['order-1', 'venue-1']))
+  })
+
+  it('sesión PARTIALLY_PAID (abono por la sesión): sólo sube la versión', async () => {
+    const tx = txFalso([{ id: 'ses-1', status: 'PARTIALLY_PAID' }])
+
+    await fijar(tx)
+
+    expect(tx.areaTicketCheckoutSession.update).toHaveBeenCalledWith({ where: { id: 'ses-1' }, data: { version: { increment: 1 } } })
+  })
+
+  it('cuenta sin sesión de vales viva (o tomada por otra caja en ese instante): no escribe ninguna sesión', async () => {
+    const tx = txFalso([])
+
+    const r = await fijar(tx)
+
+    expect(r.reabre).toBe(true)
+    expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+    expect(r.sesionDeVales).toBeUndefined()
+  })
+
+  it('si no reabre (venta cerrada), ni busca la sesión', async () => {
+    const tx = txFalso([{ id: 'ses-1', status: 'MATERIALIZED' }], cuenta({ paymentStatus: 'PAID' }))
+
+    const r = await fijar(tx)
+
+    expect(r.reabre).toBe(false)
+    expect(tx.$queryRaw).not.toHaveBeenCalled()
+    expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
   })
 })
