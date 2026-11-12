@@ -22,6 +22,10 @@ describe('createPermissionOverrideSchema — operationKey', () => {
     expect(r.success && r.data.body.operationKey).toBe(`descuento-cliente:${CLIENTE}:${DESCUENTO}`)
   })
 
+  it.each(['0', '1000', '999999999999'])('con tope :%s pasa', tope => {
+    expect(emision(`descuento-cliente:${CLIENTE}:${DESCUENTO}:${tope}`).success).toBe(true)
+  })
+
   it('pay-out:… sigue pasando (retiro de caja)', () => {
     expect(emision('pay-out:loc-1:500000').success).toBe(true)
   })
@@ -34,6 +38,11 @@ describe('createPermissionOverrideSchema — operationKey', () => {
     'descuento-cliente:x',
     `descuento-cliente:${CLIENTE}`,
     `descuento-cliente:${CLIENTE}:${DESCUENTO}:extra`,
+    `descuento-cliente:${CLIENTE}:${DESCUENTO}:-1`,
+    `descuento-cliente:${CLIENTE}:${DESCUENTO}:1.5`,
+    `descuento-cliente:${CLIENTE}:${DESCUENTO}:abc`,
+    `descuento-cliente:${CLIENTE}:${DESCUENTO}:`,
+    `descuento-cliente:${CLIENTE}:${DESCUENTO}:1:2`,
     `descuento-cliente: ${CLIENTE}:${DESCUENTO}`,
     `descuento-cliente:${CLIENTE} :${DESCUENTO}`,
     `descuento-cliente:${CLIENTE}:no-es-cuid`,
