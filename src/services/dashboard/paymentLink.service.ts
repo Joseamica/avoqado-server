@@ -57,7 +57,6 @@ import {
 } from '@/services/dashboard/paymentLinkDiscount'
 import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
-import type Stripe from 'stripe'
 import {
   attachIntent,
   consumeHoldInTx,
@@ -66,6 +65,12 @@ import {
   takeOrReuseHold,
   variantAvailability,
 } from './paymentLinkStockHold.service'
+
+// Sólo el tipo: `import type … from 'stripe'` haría que la guarda del candado demo tomara TODO este archivo por una salida a
+// Stripe. Los cobros cargan el SDK dentro de cada función (`await import('stripe')`).
+type Stripe = import('stripe').Stripe
+type PaymentIntent = import('stripe').Stripe.PaymentIntent
+type PaymentIntentCreateParams = import('stripe').Stripe.PaymentIntentCreateParams
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUNDLE VALIDATION (shared by create + update)
@@ -1798,7 +1803,7 @@ const EN_CURSO = 'Tu pago se está procesando. Espera unos segundos.'
 /** ¿La ficha congeló los mismos datos de la clienta (correo del recibo y campos personalizados) que trae este POST? */
 function mismosDatosDeLaClienta(
   hold: Pick<PaymentLinkStockHold, 'intentParams' | 'checkoutSnapshot'>,
-  intentParams: Stripe.PaymentIntentCreateParams,
+  intentParams: PaymentIntentCreateParams,
   foto: FotoDeCobro,
 ): boolean {
   const congelados = hold.intentParams as { receipt_email?: string | null } | null
@@ -1822,7 +1827,7 @@ async function cerrarIntentoPrevio(
 ): Promise<{ alreadyPaid: true; paymentIntentId: string } | null> {
   const id = h.stripePaymentIntentId as string
   const opciones = { stripeAccount: h.stripeAccountId as string }
-  let pi: Stripe.PaymentIntent
+  let pi: PaymentIntent
   try {
     pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
     if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
@@ -1911,7 +1916,7 @@ async function cobrarPrendaConApartado(args: {
   amountCents: number
   stripeAccountId: string
   publishableKey: string
-  intentParams: Stripe.PaymentIntentCreateParams
+  intentParams: PaymentIntentCreateParams
   checkoutSnapshot: FotoDeCobro
 }) {
   const { paymentLink, productId, browserToken, amountCents, publishableKey } = args
@@ -2024,7 +2029,7 @@ async function cobrarPrendaConApartado(args: {
     if (congelada.status !== 'ACTIVE') throw new ConflictError(APARTADO_CAMBIO, 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
     const cuenta = congelada.stripeAccountId as string
     const foto = congelada.checkoutSnapshot as unknown as FotoDeCobro
-    const pi = await stripe.paymentIntents.create(congelada.intentParams as unknown as Stripe.PaymentIntentCreateParams, {
+    const pi = await stripe.paymentIntents.create(congelada.intentParams as unknown as PaymentIntentCreateParams, {
       stripeAccount: cuenta,
       idempotencyKey: `plhold:${hold.id}`,
     })
