@@ -448,7 +448,7 @@ import type { CustomerAttributionActor } from '../shared/customerAttributionPoli
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
-import { horaDeLaVenta, horaDeLaVentaQueSalda } from '../mobile/precioQueVioElCliente'
+import { horaDeLaVenta } from '../mobile/precioQueVioElCliente'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -1469,10 +1469,6 @@ export async function settleStandalonePaymentInTx(
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
   const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid.cobros > 1 && previous.isFullyPaid)
-  const loyaltySaleAt =
-    firstSettlement && horaCapturada
-      ? await horaDeLaVentaQueSalda(tx, { venueId, orderId, paymentId: payment.id }, horaCapturada)
-      : undefined
   await tx.order.update({
     where: { id: orderId, venueId },
     data: {
@@ -1484,7 +1480,7 @@ export async function settleStandalonePaymentInTx(
       ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-      ...(loyaltySaleAt && { loyaltySaleAt }),
+      ...(firstSettlement && horaCapturada && { loyaltySaleAt: horaCapturada }),
       ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
@@ -2034,10 +2030,6 @@ async function updateOrderTotalsForStandalonePayment(
               reabiertaEnEstaPasada = estadoTrasCobro !== current.status
             }
 
-            const loyaltySaleAt =
-              debeRegistrarPosting && options?.horaCapturada
-                ? await horaDeLaVentaQueSalda(tx, { venueId: order.venueId, orderId, paymentId: currentPaymentId }, options.horaCapturada)
-                : undefined
             const updated = await tx.order.update({
               where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
               data: {
@@ -2060,7 +2052,7 @@ async function updateOrderTotalsForStandalonePayment(
                     completedAt: new Date(),
                   }),
                 ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-                ...(loyaltySaleAt && { loyaltySaleAt }),
+                ...(debeRegistrarPosting && options?.horaCapturada && { loyaltySaleAt: options.horaCapturada }),
                 ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
               },
               include: {
@@ -2883,9 +2875,11 @@ function avisoDeVentaApartada(
 
 /**
  * La hora capturada de la venta que sube de la cola de la terminal: la del aparato, nunca después de `llegada` (`horaDeLaVenta`, la
- * misma regla del POS). `llegada` se toma al ENTRAR la petición, no al escribir (Codex r1 #4). Quien salda la pasa por
- * `horaDeLaVentaQueSalda` (nunca antes del último cobro de los demás) y la escribe en la MISMA escritura que `loyaltyEligibleAt`.
- * En línea o sin `createdAtLocal` (terminal vieja, o un cobro con tarjeta) ⇒ `undefined`: la venta queda fechada a la llegada, como hoy.
+ * misma regla del POS). `llegada` la toma el controlador al ENTRAR la petición, antes de cualquier espera (Codex r1 #4, r2 #3).
+ * Quien salda la escribe en la MISMA escritura que `loyaltyEligibleAt`. En línea o sin `createdAtLocal` (terminal vieja, o un cobro
+ * con tarjeta) ⇒ `undefined`: la venta queda fechada a la llegada, como hoy.
+ * Límite aceptado (Codex r1 #1, controlador 12-nov): una cuenta pagada en dos partes que cruza la medianoche, cuya parte sin red
+ * sube DESPUÉS de la parte en línea, queda con la hora local de la parte sin red (el día anterior). Raro y sólo fecha la lealtad.
  */
 function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date): Date | undefined {
   if (paymentData.isOfflineReplay !== true || paymentData.createdAtLocal == null) return undefined
@@ -3648,7 +3642,7 @@ export async function recordOrderPayment(
   paymentData: PaymentCreationData,
   userId?: string,
   _orgId?: string,
-  /** Cuándo llegó la petición (cota de `loyaltySaleAt`); `recordFastPayment` pasa la suya al delegar. */
+  /** Cuándo ENTRÓ la petición (cota de `loyaltySaleAt`): la pasa el controlador; `recordFastPayment`, la suya al delegar. */
   llegada: Date = new Date(),
 ) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
@@ -5229,7 +5223,7 @@ export async function recordFastPayment(
   userId?: string,
   _orgId?: string,
   customerActor: CustomerAttributionActor = {},
-  /** Cuándo llegó la petición: la cota de `loyaltySaleAt` se toma aquí, nunca dentro de la transacción (Codex r1 #4). */
+  /** Cuándo ENTRÓ la petición (cota de `loyaltySaleAt`): la toma el controlador antes de cualquier espera (Codex r2 #3). */
   llegada: Date = new Date(),
 ) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
@@ -6070,9 +6064,7 @@ export async function recordFastPayment(
         }
 
         if (newPayment.status === 'COMPLETED') {
-          const horaCapturada = horaDeLaVentaDeLaCola(paymentData, llegada)
-          const loyaltySaleAt =
-            horaCapturada && (await horaDeLaVentaQueSalda(tx, { venueId, orderId: order.id, paymentId: newPayment.id }, horaCapturada))
+          const loyaltySaleAt = horaDeLaVentaDeLaCola(paymentData, llegada)
           await tx.order.update({
             where: { id: order.id },
             data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId, ...(loyaltySaleAt && { loyaltySaleAt }) },

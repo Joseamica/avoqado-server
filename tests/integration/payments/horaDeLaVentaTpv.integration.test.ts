@@ -129,9 +129,8 @@ async function cuenta(n: Negocio, piezas: number) {
 }
 
 /**
- * Codex r1 #1: cuenta de $200. La terminal A cobra $100 sin red a las 23:55 (CDMX); la caja B cobra los otros $100 EN LÍNEA a las
- * 00:05. A sube después y SALDA: la venta es de las 00:05 (cuando de verdad quedó pagada), nunca de las 23:55 del día anterior.
- * La hora de B se fija en la base para que el cruce de medianoche sea exacto.
+ * Codex r1 #1 (LÍMITE ACEPTADO, controlador 12-nov): cuenta de $200. La terminal A cobra $100 sin red a las 23:55 (CDMX); la caja B
+ * cobra los otros $100 EN LÍNEA a las 00:05. A sube después y SALDA. La hora de B se fija en la base para el cruce exacto.
  */
 async function partidaCruzandoMedianoche(n: Negocio, pagarB: (orderId: string) => Promise<string>) {
   const orderId = await cuenta(n, 4)
@@ -195,9 +194,12 @@ describe('hora de la venta de la cola de la terminal (loyaltySaleAt) — por HTT
     expect(orden.loyaltySaleAt).toEqual(new Date(anoche))
   })
 
-  it('5. /tpv/orders partida: A sin red 23:55 + B en línea 00:05 ⇒ la venta es de las 00:05', async () => {
+  // LÍMITE ACEPTADO (Codex r1 #1; se descartó el piso «último cobro de los demás» en r2 por sus dos regresiones): la venta queda
+  // con la hora local del cobro sin red que salda (23:55 del día anterior), no con la del cobro en línea (00:05). Raro y sólo fecha
+  // la lealtad. Si un día se arregla, esta prueba es la que cambia.
+  it('5. /tpv/orders partida A sin red 23:55 + B en línea 00:05: queda la hora de A (límite aceptado)', async () => {
     const n = await negocio()
-    const { orderId, b, a } = await partidaCruzandoMedianoche(n, async id => {
+    const { orderId, a } = await partidaCruzandoMedianoche(n, async id => {
       const enLinea = cobroDeTerminal(n, { amount: 10000 })
       expect((await request(app).post(`/api/v1/tpv/venues/${n.venueId}/orders/${id}`).set(n.como).send(enLinea)).status).toBe(201)
       return (
@@ -215,26 +217,6 @@ describe('hora de la venta de la cola de la terminal (loyaltySaleAt) — por HTT
 
     const orden = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
     expect(orden.paymentStatus).toBe('PAID')
-    expect(orden.loyaltySaleAt).toEqual(b)
-  })
-
-  it('6. POS (mobile /pay) partida: la misma regla que la terminal', async () => {
-    const n = await negocio()
-    const pagar = (id: string, extra: Record<string, unknown>) =>
-      request(app)
-        .post(`/api/v1/mobile/venues/${n.venueId}/orders/${id}/pay`)
-        .set(n.como)
-        .send({ amount: 10000, tip: 0, staffId: n.staffId, idempotencyKey: `cobro-${randomUUID()}`, ...extra })
-    const { orderId, b, a } = await partidaCruzandoMedianoche(n, async id => {
-      const r = await pagar(id, {})
-      expect(r.status).toBe(200)
-      return r.body.payment.paymentId
-    })
-
-    expect((await pagar(orderId, { isOfflineReplay: true, createdAtLocal: a })).status).toBe(200)
-
-    const orden = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
-    expect(orden.paymentStatus).toBe('PAID')
-    expect(orden.loyaltySaleAt).toEqual(b)
+    expect(orden.loyaltySaleAt).toEqual(new Date(a))
   })
 })

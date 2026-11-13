@@ -72,31 +72,6 @@ export function horaDeLaVenta(input: { isOfflineReplay?: boolean; createdAtLocal
   return capturada < llegada ? capturada : llegada
 }
 
-/**
- * `Order.loyaltySaleAt` cuando un cobro de la cola SALDA la cuenta (POS y terminal): la hora capturada ya acotada a la llegada
- * (`horaDeLaVenta`), pero nunca antes del último cobro COMPLETED de los DEMÁS: la cuenta no quedó pagada antes de él (Codex r1 #1:
- * A cobra $100 sin red a las 23:55 y B los otros $100 a las 00:05 ⇒ la venta es de las 00:05). Los demás cuentan a su llegada al
- * servidor (nunca adelantan la venta). Las devoluciones no cuentan. `paymentId`: el cobro que salda, si ya está escrito.
- */
-export async function horaDeLaVentaQueSalda(
-  db: Pick<Prisma.TransactionClient, 'payment'>,
-  cobro: { venueId: string; orderId: string; paymentId?: string },
-  capturada: Date,
-): Promise<Date> {
-  const ultimo = await db.payment.findFirst({
-    where: {
-      venueId: cobro.venueId,
-      orderId: cobro.orderId,
-      status: 'COMPLETED',
-      type: { not: 'REFUND' },
-      ...(cobro.paymentId ? { id: { not: cobro.paymentId } } : {}),
-    },
-    orderBy: { createdAt: 'desc' },
-    select: { createdAt: true },
-  })
-  return ultimo && ultimo.createdAt > capturada ? ultimo.createdAt : capturada
-}
-
 /** `llegada` sólo de la cola: con ella, la hora de la línea es la de `horaDeLaLinea` y un catálogo posterior no se reconoce. */
 export function clasificarLinea(a: {
   actualCents: number
