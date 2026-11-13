@@ -3143,6 +3143,23 @@ test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CH
     .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
   expect(bien.status).toBe(200)
   expect(bien.body.data).toMatchObject({ pointsRedeemed: 100, discountAmount: 1, newBalance: 19900 })
+
+  // Otra caja anuló la cuenta (la guarda compartida, real): con lo enseñado también es el 409 del candado (Codex candado-r2 #1).
+  const anulada = await plainOrder()
+  await ligarCliente(anulada.id, c.id)
+  await prisma.order.update({ where: { id: anulada.id }, data: { status: 'CANCELLED' } })
+  const r409 = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${anulada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(r409.status).toBe(409)
+  expect(r409.body.code).toBe('LOYALTY_OFFER_CHANGED')
+  const r400 = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${anulada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100 })
+  expect(r400.status).toBe(400)
+  expect(r400.body.code).toBe('ORDER_CANCELLED_NO_EDIT')
 })
 test('Task4 remove discount stores original refund amount and created ADJUST id once', async () => {
   const { redeemPointsToOrder } = await import('@/services/mobile/loyalty.mobile.service')

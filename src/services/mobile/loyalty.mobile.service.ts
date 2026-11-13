@@ -54,8 +54,11 @@ export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: 
  */
 export function puntosQueCubren(monto: number, valorPorPunto: number, maximo: number): number {
   if (!(valorPorPunto > 0) || !(monto > 0) || maximo <= 0) return 0
-  // Tolerancia de flotante, muy por debajo de un centavo: 14 × 0.01 = 0.14000000000000001 sí cubre $0.14.
-  const cubre = (p: number) => p * valorPorPunto >= monto - 1e-9
+  // En decimal exacto (los valores como se escriben): 14 × 0.01 cubre $0.14, y con importes enormes ($27,000,000 a $0.018) no aparece
+  // el error binario que agregaba un punto (Codex candado-r2 #2).
+  const valor = new Prisma.Decimal(String(valorPorPunto))
+  const meta = new Prisma.Decimal(String(monto))
+  const cubre = (p: number) => valor.mul(p).gte(meta)
   let p = Math.min(maximo, Math.max(0, Math.ceil(monto / valorPorPunto)))
   while (p > 0 && cubre(p - 1)) p--
   while (p < maximo && !cubre(p)) p++
@@ -311,7 +314,15 @@ export async function redeemPointsToOrderInTransaction(
   // siempre. Lo que no depende de la oferta (cuenta inexistente, importada, de tarjetas, con tarjeta apartada) sigue igual.
   const negativa = (mensaje: string) => (esperado ? new OfertaDeCanjeCambio(`La cuenta cambió: ${mensaje}`) : new BadRequestError(mensaje))
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  let existe: boolean
+  try {
+    existe = await bloquearCuentaParaEditar(tx, { venueId, orderId })
+  } catch (error) {
+    // La guarda compartida rechaza una cuenta anulada antes que todo; con lo enseñado es una oferta que cambió (Codex candado-r2 #1).
+    if (esperado && error instanceof BadRequestError && error.code === 'ORDER_CANCELLED_NO_EDIT') throw negativa(error.message)
+    throw error
+  }
+  if (!existe) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({

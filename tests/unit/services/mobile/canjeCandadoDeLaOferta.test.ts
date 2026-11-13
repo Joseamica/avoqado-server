@@ -14,6 +14,8 @@ jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({ rechazarSiEsCuentaDe
 jest.mock('@/services/shared/repartoDescuentoTx', () => ({ conservarDescuentoHistorico: jest.fn() }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ recalculateOrderTotals: jest.fn().mockResolvedValue({}) }))
 
+import { BadRequestError } from '@/errors/AppError'
+import { bloquearCuentaParaEditar } from '@/services/shared/cuentaCancelada'
 import {
   minimoParaCanjear,
   puntosQueCaben,
@@ -96,6 +98,11 @@ describe('D2 · al recortar se queman los MENOS puntos que cubren el descuento',
     }
   })
 
+  it('con importes enormes no quema un punto de más (Codex candado-r2 #2): $27,000,000 a $0.018 = 1,500,000,000', () => {
+    expect(puntosQueCubren(27_000_000, 0.018, 2_000_000_000)).toBe(1_500_000_000)
+    expect(puntosQueSeCanjean(2_000_000_000, 0.018, 27_000_000)).toEqual({ puntos: 1_500_000_000, monto: 27_000_000 })
+  })
+
   it('nunca pasa del máximo ni inventa puntos con valores raros', () => {
     expect(puntosQueCubren(0.14, 0.01, 10)).toBe(10)
     expect(puntosQueCubren(0, 0.01, 10)).toBe(0)
@@ -171,7 +178,6 @@ describe('Candado de la oferta · la tablet sólo canjea exactamente lo que most
       ['apagaron el programa', () => txFalso(cuenta(500)), { ...config, active: false }, 'El programa de lealtad no está activo'],
       ['la clienta ya no está en la cuenta', () => txFalso({ ...cuenta(500), customerId: 'beto' }), config, 'no está en esta cuenta'],
       ['registraron un abono', () => txFalso({ ...cuenta(500), paymentStatus: 'PARTIAL' }), config, 'ya pagada'],
-      ['anularon la cuenta', () => txFalso({ ...cuenta(500), status: 'CANCELLED' }), config, 'cancelada'],
       ['ya no queda nada que descontar', () => txFalso(cuenta(100, 100)), config, 'no genera descuento'],
       ['subieron el mínimo', () => txFalso(cuenta(500)), { ...config, minPointsRedeem: 1000 }, 'al menos'],
     ]
@@ -182,6 +188,24 @@ describe('Candado de la oferta · la tablet sólo canjea exactamente lo que most
       await expect(rechazo).rejects.toThrow('La cuenta cambió')
       await expect(rechazo).rejects.toThrow(motivo)
       nadaSeQuemo(tx)
+    })
+
+    it('anularon la cuenta: la guarda compartida (`bloquearCuentaParaEditar`) la rechaza y con lo enseñado es el 409 (Codex candado-r2 #1)', async () => {
+      const anulada = () => new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
+      ;(bloquearCuentaParaEditar as jest.Mock).mockRejectedValueOnce(anulada())
+      const tx = txFalso(cuenta(500))
+      const rechazo = redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, esperado)
+      await expect(rechazo).rejects.toMatchObject({ statusCode: 409, code: 'LOYALTY_OFFER_CHANGED' })
+      await expect(rechazo).rejects.toThrow('La cuenta cambió: Esta cuenta está cancelada')
+      nadaSeQuemo(tx)
+      // Sin lo enseñado, el 400 de siempre.
+      ;(bloquearCuentaParaEditar as jest.Mock).mockRejectedValueOnce(anulada())
+      await expect(
+        redeemPointsToOrderInTransaction(txFalso(cuenta(500)), 'v1', 'o1', 'c1', 500, undefined, config as any),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'ORDER_CANCELLED_NO_EDIT',
+      })
     })
 
     it('otro canje ganó la quema al mismo tiempo: también 409, y nada queda (se deshace con la transacción)', async () => {
