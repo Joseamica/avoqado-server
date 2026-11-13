@@ -174,7 +174,7 @@ describe('setPricing · tarifa de la organización', () => {
     expect(activas[0].effectiveFrom.getTime()).toBeLessThanOrEqual(Date.now())
   })
 
-  it('lo mismo pero programado para una fecha futura se escribe como siempre (Codex r3 H5)', async () => {
+  it('lo mismo pero con una fecha futura o pasada pedida a propósito se escribe como siempre (Codex r3 H5, r4 #2)', async () => {
     const o = await org()
     await prisma.organizationPricingStructure.create({
       data: {
@@ -189,8 +189,11 @@ describe('setPricing · tarifa de la organización', () => {
     })
 
     await llamar(o, delWizard({ effectiveFrom: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString() }))
-
     expect(await filas(o)).toHaveLength(2)
+
+    // …y una fecha PASADA pedida a propósito también (Codex r4 #2).
+    await llamar(o, delWizard({ effectiveFrom: '2026-10-01T00:00:00.000Z' }))
+    expect(await filas(o)).toHaveLength(3)
   })
 
   it('el fin de vigencia que no se manda se conserva en la sustituta (Codex r2 #5)', async () => {

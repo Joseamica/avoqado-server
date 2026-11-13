@@ -1024,7 +1024,7 @@ export async function autoFetchBlumonCredentials(req: Request, res: Response, ne
   } catch (error: any) {
     if (error instanceof AppError && error.statusCode < 500) {
       // Dato mal escrito (p. ej. serial que Blumon no conoce, D20): aviso, sin stack.
-      logger.warn('[Blumon Auto-Fetch] Rechazado', { statusCode: error.statusCode, message: error.message })
+      logger.warn('[Blumon Auto-Fetch] Rechazado', { statusCode: error.statusCode, motivo: error.message }) // `message` en el meta pisaría el texto (winston)
     } else {
       logger.error('[Blumon Auto-Fetch] Failed', {
         error: error instanceof Error ? error.message : error,
@@ -2339,7 +2339,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       logger.warn('[Full Setup] El candado de posiciones pide confirmar o recargar', { code: error.code, message: error.message })
     } else if (error instanceof AppError && error.statusCode < 500) {
       // Dato mal escrito (p. ej. serial que Blumon no conoce, D20): aviso, sin stack.
-      logger.warn('[Full Setup] Rechazado', { statusCode: error.statusCode, message: error.message })
+      logger.warn('[Full Setup] Rechazado', { statusCode: error.statusCode, motivo: error.message }) // `message` en el meta pisaría el texto (winston)
     } else {
       logger.error('[Full Setup] Failed', {
         error: error instanceof Error ? error.message : error,
