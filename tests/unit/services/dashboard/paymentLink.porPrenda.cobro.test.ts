@@ -30,6 +30,19 @@ jest.mock('@/services/dashboard/paymentLinkStockHold.service', () => ({
   attachIntent: jest.fn(),
   releaseHold: jest.fn(),
   variantAvailability: jest.fn(),
+  consumeHoldInTx: jest.fn(),
+}))
+// Task 6: el cierre (`finalizePaymentLinkCheckout`). El vale y la comisión se observan, no se prueban aquí.
+const crearVale = jest.fn()
+const aplicarVale = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...a: unknown[]) => crearVale(...a),
+  applySalePosting: (...a: unknown[]) => aplicarVale(...a),
+}))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn(),
 }))
 
 import {
@@ -39,10 +52,12 @@ import {
   createStripeCheckoutForPaymentLink,
   createStripePaymentIntentForPaymentLink,
   executeMercadoPagoPaymentForPaymentLink,
+  finalizePaymentLinkCheckout,
   getPaymentLinkByShortCode,
 } from '../../../../src/services/dashboard/paymentLink.service'
 import {
   attachIntent,
+  consumeHoldInTx,
   freezeIntentParams,
   releaseHold,
   takeOrReuseHold,
@@ -163,6 +178,7 @@ beforeEach(() => {
   prismaMock.checkoutSession.createMany.mockResolvedValue({ count: 1 } as any)
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
   fichas.findUnique.mockReset()
+  fichas.findFirst.mockReset().mockResolvedValue(null)
   fichas.findMany.mockReset().mockResolvedValue([])
   fichas.updateMany.mockReset().mockResolvedValue({ count: 1 })
   ;(prismaMock as any).paymentLinkStockHold = fichas
@@ -172,7 +188,7 @@ beforeEach(() => {
  * El mock global de Prisma no trae la tabla de fichas. `findMany` = las fichas previas del navegador con intento (se revisan
  * en Stripe antes de apartar otra); `updateMany` = marcarlas; `findUnique` = releer tras un choque de `attachIntent`.
  */
-const fichas = { findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn() }
+const fichas = { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), updateMany: jest.fn() }
 
 const sesionCreada = () => prismaMock.checkoutSession.createMany.mock.calls.at(-1)![0] as any
 
@@ -456,6 +472,37 @@ describe('POST payment-intent de la liga por prenda', () => {
         expect.objectContaining({ data: { status: 'RELEASED', releasedReason: 'intento_cancelado' } }),
       )
       expect(piCreate).toHaveBeenCalledTimes(1)
+    })
+
+    // Task 6 (regla 4): un error PERMANENTE de Stripe para ESE intento no puede trabar al navegador para siempre en la liga.
+    it.each([
+      ['el intento ya no existe (resource_missing)', { type: 'StripeInvalidRequestError', code: 'resource_missing', statusCode: 404 }],
+      ['la cuenta congelada ya no da acceso (permiso)', { type: 'StripePermissionError', statusCode: 403 }],
+      ['la cuenta congelada es inválida (account_invalid)', { type: 'StripePermissionError', code: 'account_invalid', statusCode: 403 }],
+    ])('previa con error permanente: %s → se marca «intento_cancelado» y se aparta otra', async (_n, e) => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockRejectedValueOnce(Object.assign(new Error('stripe dice que no'), e))
+      const r = await pagar()
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: 'chold0000000000000000000p', status: { in: ['ACTIVE', 'RELEASED'] } },
+        data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+      })
+      expect(take).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+    })
+
+    it.each([
+      ['Stripe caído (conexión)', { type: 'StripeConnectionError' }],
+      ['error de Stripe (api_error)', { type: 'StripeAPIError', statusCode: 500 }],
+      ['límite de peticiones', { type: 'StripeRateLimitError', statusCode: 429 }],
+      ['nuestra llave de plataforma falla (401: no es de la cuenta)', { type: 'StripeAuthenticationError', statusCode: 401 }],
+    ])('previa con error PASAJERO (%s) → el error sube, no se marca ni se aparta', async (_n, e) => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockRejectedValueOnce(Object.assign(new Error('pasajero'), e))
+      await expect(pagar()).rejects.toThrow('pasajero')
+      expect(fichas.updateMany).not.toHaveBeenCalled()
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
     })
 
     it('regresión: la previa que se reusa (misma talla, importe y datos, vigente) no se cancela: se devuelve su intento', async () => {
@@ -833,5 +880,108 @@ describe('GET público de la liga por prenda', () => {
     expect(r.productGroup).toBeUndefined()
     expect(r.baseAmount).toBe(1000)
     expect(prismaMock.productGroup.findFirst).not.toHaveBeenCalled()
+  })
+})
+
+describe('cierre del cobro de la liga por prenda (Task 6)', () => {
+  const consumir = consumeHoldInTx as jest.Mock
+  const sesion = (merchant: Record<string, unknown> = {}) => ({
+    id: 'csess0000000000000000001',
+    sessionId: 'pi_talla',
+    ecommerceMerchantId: 'cmerch0000000000000000001',
+    paymentLinkId: 'cplink00000000000000000001',
+    attributedCustomerId: null,
+    amount: new Decimal(550),
+    currency: 'MXN',
+    description: 'Blusa',
+    customerEmail: null,
+    customerPhone: null,
+    customerName: null,
+    applicationFeeCents: 580,
+    status: 'PENDING',
+    metadata: {
+      tipAmount: 50,
+      items: [{ productId: TALLA_M, productName: 'Blusa · M', quantity: 1, unitPrice: 500, modifiers: [] }],
+    },
+    paymentLink: {
+      id: 'cplink00000000000000000001',
+      venueId: VENUE,
+      purpose: 'ITEM',
+      shortCode: 'abc12345',
+      createdById: 'cstaff0000000000000000001',
+      attributions: [],
+    },
+    ecommerceMerchant: {
+      id: 'cmerch0000000000000000001',
+      providerCredentials: { connectAccountId: 'acct_HOY' },
+      provider: { code: 'STRIPE_CONNECT' },
+      ...merchant,
+    },
+  })
+  let txClient: any
+
+  beforeEach(() => {
+    consumir.mockReset().mockResolvedValue(1)
+    crearVale.mockReset().mockResolvedValue({ id: 'cposting00000000000000001' })
+    aplicarVale.mockReset().mockResolvedValue({ applied: true })
+    prismaMock.checkoutSession.findUnique.mockResolvedValue(sesion() as any)
+    prismaMock.checkoutSession.update.mockResolvedValue({} as any)
+    prismaMock.paymentLink.update.mockResolvedValue({} as any)
+    prismaMock.order.create.mockResolvedValue({ id: 'corder000000000000000001', items: [{ id: 'oi', productId: TALLA_M }] } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'cpay00000000000000000001' } as any)
+    piRetrieve.mockResolvedValue({ id: 'pi_talla', latest_charge: null })
+    txClient = { ...prismaMock, __tx: true }
+    prismaMock.$transaction.mockImplementation((cb: any) => cb(txClient))
+  })
+  afterEach(() => prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock)))
+
+  const cerrar = () =>
+    finalizePaymentLinkCheckout({
+      stripeSessionId: 'pi_talla',
+      paymentIntentId: 'pi_talla',
+      amountPaidCents: 55000,
+      stripePaymentMethodType: 'card',
+    })
+
+  it('consume la ficha del intento DENTRO de la transacción del cobro', async () => {
+    await cerrar()
+    expect(consumir).toHaveBeenCalledTimes(1)
+    expect(consumir).toHaveBeenCalledWith(txClient, 'pi_talla')
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('ficha ya vencida o soltada (consume 0) → la venta se registra igual: orden, cobro y vale', async () => {
+    consumir.mockResolvedValue(0)
+    await cerrar()
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(crearVale).toHaveBeenCalledTimes(1)
+    expect(aplicarVale).toHaveBeenCalledWith('cposting00000000000000001', expect.anything())
+  })
+
+  it('el cargo se consulta con la cuenta CONGELADA en la ficha, no con la de hoy del negocio', async () => {
+    fichas.findFirst.mockResolvedValue({ stripeAccountId: 'acct_CONGELADA' })
+    await cerrar()
+    expect(fichas.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { stripePaymentIntentId: 'pi_talla' } }))
+    expect(piRetrieve).toHaveBeenCalledWith('pi_talla', { expand: ['latest_charge'] }, { stripeAccount: 'acct_CONGELADA' })
+  })
+
+  it('con ficha congelada aunque el negocio ya no tenga cuenta conectada → igual consulta el cargo con la congelada', async () => {
+    prismaMock.checkoutSession.findUnique.mockResolvedValue(sesion({ providerCredentials: {} }) as any)
+    fichas.findFirst.mockResolvedValue({ stripeAccountId: 'acct_CONGELADA' })
+    await cerrar()
+    expect(piRetrieve).toHaveBeenCalledWith('pi_talla', { expand: ['latest_charge'] }, { stripeAccount: 'acct_CONGELADA' })
+  })
+
+  it('regresión: sin ficha (liga de siempre) → la cuenta de hoy del negocio', async () => {
+    await cerrar()
+    expect(piRetrieve).toHaveBeenCalledWith('pi_talla', { expand: ['latest_charge'] }, { stripeAccount: 'acct_HOY' })
+  })
+
+  it('regresión: sesión ya COMPLETED (aviso repetido) → no consume ni crea nada', async () => {
+    prismaMock.checkoutSession.findUnique.mockResolvedValue({ ...sesion(), status: 'COMPLETED' } as any)
+    await cerrar()
+    expect(consumir).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 })

@@ -109,6 +109,9 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
     'services/b4bit/',
     'services/dashboard/cryptoConfig.dashboard.service.ts',
     'services/financial-connections/',
+    // Liga por prenda: el intento de la talla nace en el cobro público (403 en un demo); sin intento el barrido no llama a Stripe.
+    'services/dashboard/paymentLink.service.ts',
+    'jobs/payment-link-hold-sweeper.job.ts',
   ].map(
     (p): [string, string] => [
       p,

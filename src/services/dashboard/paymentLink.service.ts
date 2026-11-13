@@ -58,7 +58,14 @@ import {
 import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 import type Stripe from 'stripe'
-import { attachIntent, freezeIntentParams, releaseHold, takeOrReuseHold, variantAvailability } from './paymentLinkStockHold.service'
+import {
+  attachIntent,
+  consumeHoldInTx,
+  freezeIntentParams,
+  releaseHold,
+  takeOrReuseHold,
+  variantAvailability,
+} from './paymentLinkStockHold.service'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUNDLE VALIDATION (shared by create + update)
@@ -1815,18 +1822,46 @@ async function cerrarIntentoPrevio(
 ): Promise<{ alreadyPaid: true; paymentIntentId: string } | null> {
   const id = h.stripePaymentIntentId as string
   const opciones = { stripeAccount: h.stripeAccountId as string }
-  let pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
-  if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
+  let pi: Stripe.PaymentIntent
+  try {
+    pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
+    if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
+  } catch (err) {
+    // Lo pasajero sube (no se aparta nada nuevo). Lo PERMANENTE para este intento (ya no existe, o la cuenta congelada ya no da
+    // acceso) nunca se va a poder revisar: se da por cerrado para no trabar a este navegador en la liga para siempre.
+    if (!errorPermanenteDelIntento(err)) throw err
+    logger.warn('Intento previo de la liga que Stripe ya no deja consultar: se da por cancelado', {
+      holdId: h.id,
+      paymentIntentId: id,
+      stripeAccountId: h.stripeAccountId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    await marcarIntentoCancelado(h.id)
+    return null
+  }
   if (pi.status === 'succeeded') {
     await prisma.paymentLinkStockHold.updateMany({ where: { id: h.id, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
     return { alreadyPaid: true, paymentIntentId: pi.id }
   }
   if (pi.status !== 'canceled') throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
-  await prisma.paymentLinkStockHold.updateMany({
-    where: { id: h.id, status: { in: ['ACTIVE', 'RELEASED'] } },
+  await marcarIntentoCancelado(h.id)
+  return null
+}
+
+const marcarIntentoCancelado = (holdId: string) =>
+  prisma.paymentLinkStockHold.updateMany({
+    where: { id: holdId, status: { in: ['ACTIVE', 'RELEASED'] } },
     data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
   })
-  return null
+
+/**
+ * Error de Stripe que no cambia al reintentar, para ESE intento: no existe (`resource_missing`) o la cuenta conectada congelada ya
+ * no da acceso (403 de permiso, `account_invalid`). 🔴 Un 401 (`StripeAuthenticationError`) NO entra: es nuestra llave de
+ * plataforma, no la cuenta, y darlo por cancelado podría dejar sin revisar un intento ya cobrado.
+ */
+function errorPermanenteDelIntento(err: unknown): boolean {
+  const e = err as { type?: string; code?: string } | null
+  return e?.code === 'resource_missing' || e?.code === 'account_invalid' || e?.type === 'StripePermissionError'
 }
 
 /** El 409 cuando la ficha cambió mientras se cobraba (otra pestaña cambió de talla o venció): la página recarga la liga. */
@@ -2694,7 +2729,15 @@ export async function finalizePaymentLinkCheckout(args: {
     /** Tipo real del cobro (`oxxo`, `card`, `customer_balance`…). El webhook casi nunca lo trae: no expande objetos. */
     tipo: string | null
   } = { cardBrand: null, last4: null, receiptUrl: null, tipo: null }
-  const connectAccountId = (session.ecommerceMerchant?.providerCredentials as { connectAccountId?: string })?.connectAccountId
+  // Liga por prenda: el intento se creó en la cuenta CONGELADA en su ficha de apartado; se consulta ahí aunque el negocio la cambie.
+  const fichaDelIntento = args.paymentIntentId
+    ? await prisma.paymentLinkStockHold.findFirst({
+        where: { stripePaymentIntentId: args.paymentIntentId },
+        select: { stripeAccountId: true },
+      })
+    : null
+  const connectAccountId =
+    fichaDelIntento?.stripeAccountId ?? (session.ecommerceMerchant?.providerCredentials as { connectAccountId?: string })?.connectAccountId
   if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant?.provider?.code === 'STRIPE_CONNECT') {
     try {
       const Stripe = (await import('stripe')).default
@@ -2770,6 +2813,9 @@ export async function finalizePaymentLinkCheckout(args: {
           } as unknown as Prisma.InputJsonValue,
         },
       })
+      // Liga por prenda: la ficha de apartado del intento pasa a CONSUMED. 0 filas (vencida, soltada o liga sin talla): la venta
+      // se registra igual, el dinero ya se movió.
+      if (stripePaymentIntentId) await consumeHoldInTx(tx, stripePaymentIntentId)
 
       // 2. Update payment link counters
       await tx.paymentLink.update({

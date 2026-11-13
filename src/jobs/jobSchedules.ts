@@ -114,4 +114,7 @@ export const DATABASE_JOB_SCHEDULES = {
   exportRunner: '28,58 * * * * *',
   // Limpieza diaria de archivos de exporte vencidos (7 días). 04:27:27 CDMX, fuera de las horas de venta.
   exportCleanup: '27 27 4 * * *',
+  // Liga por prenda: suelta los apartados vencidos (15 min) y cierra su intento en Stripe. Cada minuto en el segundo :57, libre en
+  // todo el archivo (vecinos :56 gcal y :58 exportes). Entrada por el índice (status, expiresAt), tope de 100.
+  paymentLinkHoldSweeper: '57 * * * * *',
 } as const

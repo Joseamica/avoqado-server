@@ -474,6 +474,8 @@ const prismaMock: any = {
   customerApprovalDelivery: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
+  // Liga por prenda: el cierre de toda liga de Stripe busca la ficha del intento y la consume (0 filas en las ligas de siempre).
+  paymentLinkStockHold: createMockModel(),
   checkoutSession: createMockModel(),
   ecommerceMerchant: createMockModel(),
   paymentProvider: createMockModel(),
@@ -706,6 +708,7 @@ prismaMock.loyaltyPromotion.findMany.mockResolvedValue([])
 prismaMock.stampEvent.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
+  prismaMock.paymentLinkStockHold.updateMany.mockResolvedValue({ count: 0 })
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)
   prismaMock.staffScheduleException.findMany.mockResolvedValue([])
   prismaMock.productStaff.findMany.mockResolvedValue([])

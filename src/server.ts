@@ -89,6 +89,7 @@ import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchd
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
+import { paymentLinkHoldSweeperJob } from './jobs/payment-link-hold-sweeper.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
@@ -199,6 +200,7 @@ const gracefulShutdown = async (signal: string) => {
       shiftCloseWatchdogJob.stop()
       cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
+      paymentLinkHoldSweeperJob.stop()
       loyaltyReconciliationJob.stop()
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
@@ -571,6 +573,8 @@ const startApplication = async (retries = 3) => {
       // El outbox de deducciones de inventario recupera lo que un crash dejó
       // PENDING/APPLYING — sin este job el posting durable es solo un registro.
       inventoryPostingSweeperJob.start()
+      // Liga por prenda: suelta los apartados de talla vencidos y cierra su intento en Stripe.
+      paymentLinkHoldSweeperJob.start()
       loyaltyReconciliationJob.start()
       // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
       kitchenTicketsReconciliationJob.start()

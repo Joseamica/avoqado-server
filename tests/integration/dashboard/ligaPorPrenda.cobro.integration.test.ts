@@ -49,6 +49,7 @@ jest.mock('stripe', () => ({
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createStripePaymentIntentForPaymentLink, finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import { PaymentLinkHoldSweeperJob } from '@/jobs/payment-link-hold-sweeper.job'
 import { borrarMundoComisiones, categoria, crearMundoComisiones, MundoComisiones } from '../commission/_mundoComisiones'
 
 let m: MundoComisiones
@@ -151,6 +152,8 @@ it.each([
   expect(piCreate.mock.calls.length).toBe(llamadas)
 
   await finalizePaymentLinkCheckout({ stripeSessionId: r.paymentIntentId, paymentIntentId: r.paymentIntentId, amountPaidCents: 55000 })
+  // Task 6: el cierre consume la ficha en la misma transacción del cobro.
+  expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: ficha.id } })).toMatchObject({ status: 'CONSUMED' })
 
   const orden = await prisma.order.findFirstOrThrow({ where: { venueId: m.venueId, source: 'PAYMENT_LINK' }, include: { items: true } })
   expect(orden.items.map(i => i.productId)).toEqual([m1])
@@ -172,4 +175,67 @@ it('dos POST simultáneos del mismo navegador y talla → una ficha, un intento 
   await expect(
     createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: m1, browserToken: 'tok_otro_navegador_0123456789' } as any),
   ).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_VARIANT_SOLD_OUT' })
+})
+
+describe('Task 6: cerrar y vencer', () => {
+  const navegador = 'tok_vencer_0123456789abcdef'
+  const apartar = async (productId: string) =>
+    (await createStripePaymentIntentForPaymentLink(liga.shortCode, { productId, browserToken: navegador } as any)) as any
+  /** El barrido con un Stripe propio (la cuenta con que se llama queda registrada). */
+  const barrido = (stripe: { retrieve: jest.Mock; cancel: jest.Mock }) =>
+    new PaymentLinkHoldSweeperJob({ cron: { start: jest.fn(), stop: jest.fn() } as any, stripe: { paymentIntents: stripe } as any })
+
+  it('el barrido suelta la ficha vencida, cancela su intento con la cuenta congelada y la pieza vuelve a contar', async () => {
+    const m1 = await talla('V', 500, 1)
+    const r = await apartar(m1)
+    const ficha = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { venueId: m.venueId } })
+    await prisma.paymentLinkStockHold.update({ where: { id: ficha.id }, data: { expiresAt: new Date(Date.now() - 1000) } })
+    const stripe = {
+      retrieve: jest.fn(async (id: string) => ({ id, status: 'requires_payment_method' })),
+      cancel: jest.fn(async (id: string) => ({ id, status: 'canceled' })),
+    }
+    const res = await barrido(stripe).runNow()
+    expect(res).toMatchObject({ errors: 0 })
+    expect(stripe.cancel).toHaveBeenCalledWith(r.paymentIntentId, undefined, { stripeAccount: 'acct_talla' })
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: ficha.id } })).toMatchObject({
+      status: 'RELEASED',
+      releasedReason: 'intento_cancelado',
+    })
+    // La única pieza vuelve a estar libre para otro navegador.
+    await expect(
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: m1, browserToken: 'tok_otra_clienta_0123456789' } as any),
+    ).resolves.toMatchObject({ paymentIntentId: expect.any(String) })
+  })
+
+  it('el cobro llega con la ficha ya vencida y soltada → la venta se registra igual y la ficha no revive', async () => {
+    const m1 = await talla('W', 500, 2)
+    const r = await apartar(m1)
+    const ficha = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { venueId: m.venueId } })
+    await prisma.paymentLinkStockHold.update({ where: { id: ficha.id }, data: { status: 'RELEASED', releasedReason: 'vencida' } })
+
+    await finalizePaymentLinkCheckout({ stripeSessionId: r.paymentIntentId, paymentIntentId: r.paymentIntentId, amountPaidCents: 50000 })
+
+    expect(await prisma.order.count({ where: { venueId: m.venueId, source: 'PAYMENT_LINK' } })).toBe(1)
+    expect(await prisma.payment.count({ where: { venueId: m.venueId, processorId: r.paymentIntentId } })).toBe(1)
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: ficha.id } })).toMatchObject({
+      status: 'RELEASED',
+      releasedReason: 'vencida',
+    })
+  })
+
+  it('regresión: el aviso repetido de Stripe (P2002 del cobro) no deja dos órdenes ni dos vales', async () => {
+    const m1 = await talla('X', 500, 2)
+    const r = await apartar(m1)
+    const cerrar = () =>
+      finalizePaymentLinkCheckout({ stripeSessionId: r.paymentIntentId, paymentIntentId: r.paymentIntentId, amountPaidCents: 50000 })
+    await cerrar()
+    // El segundo aviso se cuela antes de ver la sesión COMPLETED (dos réplicas a la vez): lo detiene el índice único del cobro.
+    await prisma.checkoutSession.update({ where: { sessionId: r.paymentIntentId }, data: { status: 'PENDING' } })
+    await expect(cerrar()).rejects.toMatchObject({ code: 'P2002' })
+
+    expect(await prisma.order.count({ where: { venueId: m.venueId, source: 'PAYMENT_LINK' } })).toBe(1)
+    expect(await prisma.payment.count({ where: { venueId: m.venueId, processorId: r.paymentIntentId } })).toBe(1)
+    expect(await prisma.inventoryPosting.count({ where: { venueId: m.venueId } })).toBe(1)
+    expect(await prisma.paymentLinkStockHold.count({ where: { venueId: m.venueId, status: 'CONSUMED' } })).toBe(1)
+  })
 })
