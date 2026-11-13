@@ -3,7 +3,8 @@ import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { conNegocio } from '../services/demo/candadoDemo'
-import { buscarComercioDeMercadoPago, procesarPagoDeMercadoPago } from '../services/mercado-pago/payment-flow.service'
+import { loadCredentials } from '../services/mercado-pago/connection.service'
+import { procesarPagoDeMercadoPago, type DesenlaceDePagoMp } from '../services/mercado-pago/payment-flow.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
@@ -45,7 +46,7 @@ interface Dependencias {
   now: () => Date
   retryEntry: typeof retry
   procesar: typeof procesarPagoDeMercadoPago
-  buscarComercio: typeof buscarComercioDeMercadoPago
+  cargarCredenciales: typeof loadCredentials
   logAction: typeof logAction
 }
 
@@ -54,7 +55,7 @@ const defaults: Dependencias = {
   now: () => new Date(),
   retryEntry: retry,
   procesar: procesarPagoDeMercadoPago,
-  buscarComercio: buscarComercioDeMercadoPago,
+  cargarCredenciales: loadCredentials,
   logAction,
 }
 
@@ -182,55 +183,133 @@ export class MercadoPagoCierrePerdidoJob {
         grupos.set(clave, [...(grupos.get(clave) ?? []), e])
       }
 
+      // Comercio y credenciales UNA vez por vendedor en esta vuelta (Codex código r1 #2: era una búsqueda por pago).
+      const vendedores = [...new Set(eventos.map(e => e.mpUserId))]
+      const comercios =
+        vendedores.length === 0
+          ? []
+          : await this.d.prisma.ecommerceMerchant.findMany({
+              where: { providerMerchantId: { in: vendedores }, provider: { code: 'MERCADO_PAGO' } },
+              select: { id: true, venueId: true, providerMerchantId: true },
+              take: vendedores.length,
+            })
+      const comercioDe = new Map(comercios.map(c => [c.providerMerchantId, c]))
+      const credenciales = new Map<string, ReturnType<typeof loadCredentials>>()
+      const credencialesDe = (merchantId: string) => {
+        if (!credenciales.has(merchantId)) credenciales.set(merchantId, this.d.cargarCredenciales(merchantId))
+        return credenciales.get(merchantId)!
+      }
+
+      const resueltos: Array<{
+        ids: string[]
+        dataId: string
+        venueId: string
+        intentos: number
+        desenlace: DesenlaceDePagoMp
+        mpUserId: string
+      }> = []
       for (const grupo of grupos.values()) {
         r.pagos += 1
         const { mpUserId, dataId } = grupo[0]
         const ids = grupo.map(e => e.id)
         const intentos = Math.max(...grupo.map(e => intentosDe(e.errorMessage))) + 1
-        let venueId: string | null = null
+        const comercio = comercioDe.get(mpUserId)
         try {
-          const comercio = await this.d.buscarComercio(mpUserId)
-          venueId = comercio?.venueId ?? null
-          // candado demo, capa 3: el cierre corre con el negocio de su cobro en el contexto.
-          const desenlace = comercio
-            ? await conNegocio(comercio.venueId, () => this.d.procesar(comercio, dataId))
-            : { estado: 'error' as const, razon: 'merchant_not_found', detalle: `no merchant matches mpUserId ${mpUserId}` }
-
-          if (desenlace.estado !== 'error') {
-            // Bitácora ANTES de marcar el evento: si el marcado falla, el reintento ve la venta hecha (ventaCreada=false)
-            // y el renglón ya existe; al revés se perdía para siempre (Codex r2 #2).
-            if (desenlace.ventaCreada) {
-              r.recuperados += 1
-              logger.warn('[MP barrido] Cobro aprobado sin venta RECUPERADO', {
-                venueId,
-                mpPaymentId: dataId,
-                checkoutSessionId: desenlace.checkoutSessionId,
-                intentos,
-              })
-              await this.d.logAction({
-                venueId,
-                action: 'MERCADOPAGO_CHARGE_RECOVERED',
-                entity: 'CheckoutSession',
-                entityId: desenlace.checkoutSessionId,
-                data: { mpPaymentId: dataId, eventIds: ids, intentos },
-              })
-            }
-            await this.d.prisma.mercadoPagoWebhookEvent.updateMany({
-              where: { id: { in: ids } },
-              data: { processingStatus: desenlace.estado, errorMessage: desenlace.estado === 'ignored' ? desenlace.detalle : null },
-            })
+          if (!comercio) {
+            await this.fallo(r, { ids, mpUserId, dataId, venueId: null, intentos, razon: `no merchant matches mpUserId ${mpUserId}` })
             continue
           }
-          await this.fallo(r, { ids, mpUserId, dataId, venueId, intentos, razon: desenlace.detalle ?? desenlace.razon })
+          // candado demo, capa 3: el cierre corre con el negocio de su cobro en el contexto.
+          const creds = await credencialesDe(comercio.id)
+          const desenlace = await conNegocio(comercio.venueId, () => this.d.procesar(comercio, dataId, { creds }))
+          if (desenlace.estado === 'error') {
+            await this.fallo(r, { ids, mpUserId, dataId, venueId: comercio.venueId, intentos, razon: desenlace.detalle ?? desenlace.razon })
+            continue
+          }
+          resueltos.push({ ids, dataId, venueId: comercio.venueId, intentos, desenlace, mpUserId })
         } catch (error) {
           await this.fallo(r, {
             ids,
             mpUserId,
             dataId,
-            venueId,
+            venueId: comercio?.venueId ?? null,
             intentos,
             razon: error instanceof Error ? error.message : String(error),
           })
+        }
+      }
+
+      // Bitácora durable e idempotente (Codex código r1 #1): un pago cuya sesión YA tiene venta no marca su evento como
+      // terminado hasta que exista su renglón MERCADOPAGO_CHARGE_RECOVERED. Si el proceso muere entre la venta y la
+      // bitácora, o el INSERT falla, el evento sigue en `error` y la próxima vuelta lo completa (la venta ya existe, sólo
+      // falta el renglón). Se busca antes de escribir: nunca dos renglones por sesión. Escritura directa (no `logAction`,
+      // que se traga el error).
+      const porAuditar = resueltos.filter(x => x.desenlace.conVenta && x.desenlace.checkoutSessionId)
+      let terminados = resueltos
+      if (porAuditar.length > 0) {
+        try {
+          const yaAuditadas = await this.d.prisma.activityLog.findMany({
+            where: {
+              action: 'MERCADOPAGO_CHARGE_RECOVERED',
+              entity: 'CheckoutSession',
+              entityId: { in: porAuditar.map(x => x.desenlace.checkoutSessionId!) },
+            },
+            select: { entityId: true },
+            take: porAuditar.length,
+          })
+          const auditada = new Set(yaAuditadas.map(a => a.entityId))
+          // Una por sesión aunque varios pagos de la vuelta apunten a la misma.
+          const faltan = [
+            ...new Map(
+              porAuditar.filter(x => !auditada.has(x.desenlace.checkoutSessionId!)).map(x => [x.desenlace.checkoutSessionId!, x]),
+            ).values(),
+          ]
+          if (faltan.length > 0) {
+            await this.d.prisma.activityLog.createMany({
+              data: faltan.map(x => ({
+                venueId: x.venueId,
+                action: 'MERCADOPAGO_CHARGE_RECOVERED',
+                entity: 'CheckoutSession',
+                entityId: x.desenlace.checkoutSessionId!,
+                data: { mpPaymentId: x.dataId, eventIds: x.ids, intentos: x.intentos, ventaCreadaPorElBarrido: !!x.desenlace.ventaCreada },
+              })),
+            })
+          }
+        } catch (error) {
+          const razon = `venta hecha, falta la bitácora: ${error instanceof Error ? error.message : String(error)}`
+          for (const x of porAuditar)
+            await this.fallo(r, { ids: x.ids, mpUserId: x.mpUserId, dataId: x.dataId, venueId: x.venueId, intentos: x.intentos, razon })
+          terminados = resueltos.filter(x => !porAuditar.includes(x))
+        }
+      }
+
+      // Sesiones revisadas en esta vuelta: su próxima revisión por el punto 2 también espera 15 min (medido contra Postgres
+      // real: una sesión cerrada por su propio evento volvía a entrar en la vuelta siguiente).
+      const revisadas = terminados.map(x => x.desenlace.checkoutSessionId).filter((id): id is string => !!id)
+      if (revisadas.length > 0) {
+        await this.d.prisma.checkoutSession
+          .updateMany({ where: { id: { in: revisadas } }, data: { updatedAt: now } })
+          .catch(error => logger.warn('[MP barrido] No se pudo espaciar la revisión de sesiones', { error }))
+      }
+
+      for (const x of terminados) {
+        if (x.desenlace.ventaCreada) {
+          r.recuperados += 1
+          logger.warn('[MP barrido] Cobro aprobado sin venta RECUPERADO', {
+            venueId: x.venueId,
+            mpPaymentId: x.dataId,
+            checkoutSessionId: x.desenlace.checkoutSessionId,
+            intentos: x.intentos,
+          })
+        }
+        try {
+          await this.d.prisma.mercadoPagoWebhookEvent.updateMany({
+            where: { id: { in: x.ids } },
+            data: { processingStatus: x.desenlace.estado, errorMessage: x.desenlace.estado === 'ignored' ? x.desenlace.detalle : null },
+          })
+        } catch (error) {
+          // El evento sigue abierto: la próxima vuelta lo cierra sin repetir venta ni bitácora (las dos son idempotentes).
+          logger.error('[MP barrido] No se pudo marcar el evento; se reintenta', { eventIds: x.ids, error })
         }
       }
 

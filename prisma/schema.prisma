@@ -6919,6 +6919,9 @@ model CheckoutSession {
   // indexes from `@unique` above; only mpMerchantOrderId needs its own (the
   // webhook IPN looks sessions up by merchant_order during status polling).
   @@index([mpMerchantOrderId])
+  // Barrido del cierre perdido de MP: índice PARCIAL "CheckoutSession_mp_sin_venta_createdAt_idx" ON ("createdAt")
+  // WHERE "paymentId" IS NULL AND "mpPaymentId" IS NOT NULL — Prisma 6 no declara índices parciales; vive sólo en la
+  // migración 20261112230010 (mismo patrón que PosSyncIntent_cancelEffects_pending_idx).
 }
 
 /// Mapping between a venue and the merchant accounts it should use.
@@ -17831,6 +17834,8 @@ model MercadoPagoWebhookEvent {
   @@unique([mpUserId, dataId, requestId])
   @@index([dataId])
   @@index([createdAt])
+  /// Barrido del cierre perdido de MP: eventos en error/pending por fecha (mercadopago-cierre-perdido.job).
+  @@index([processingStatus, createdAt, id])
 }
 
 enum ReferralStatus {

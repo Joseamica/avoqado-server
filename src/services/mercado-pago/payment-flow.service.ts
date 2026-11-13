@@ -20,7 +20,7 @@
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { getPayment, mpToCheckoutStatus } from './payment.service'
-import { loadCredentials } from './connection.service'
+import { loadCredentials, type DecryptedCredentials } from './connection.service'
 import type { MercadoPagoWebhookPayload } from './types'
 
 export interface HandleIpnParams {
@@ -119,6 +119,8 @@ export interface DesenlaceDePagoMp {
   mpStatus?: string
   /** true sólo si ESTA llamada creó la venta (Order + Payment). */
   ventaCreada?: boolean
+  /** La sesión tiene venta al terminar (la creó esta llamada o ya existía): el barrido la audita. */
+  conVenta?: boolean
 }
 
 /**
@@ -128,8 +130,13 @@ export interface DesenlaceDePagoMp {
  * Nunca lanza por un fallo de MP o del cierre: lo devuelve como 'error' para que
  * el evento quede reintentable.
  */
-export async function procesarPagoDeMercadoPago(merchant: { id: string }, dataId: string): Promise<DesenlaceDePagoMp> {
-  const creds = await loadCredentials(merchant.id)
+export async function procesarPagoDeMercadoPago(
+  merchant: { id: string },
+  dataId: string,
+  /** El barrido las carga una vez por vendedor y vuelta; el aviso las carga aquí. */
+  precargadas?: { creds: DecryptedCredentials | null },
+): Promise<DesenlaceDePagoMp> {
+  const creds = precargadas ? precargadas.creds : await loadCredentials(merchant.id)
   if (!creds) {
     return { estado: 'error', razon: 'credentials_missing', detalle: 'merchant credentials missing' }
   }
@@ -180,7 +187,7 @@ export async function procesarPagoDeMercadoPago(merchant: { id: string }, dataId
       mpPaymentId: payment.id,
       paymentTypeId: payment.payment_type_id,
     })
-    return { estado: 'processed', razon: 'processed', detalle: null, ventaCreada, ...base }
+    return { estado: 'processed', razon: 'processed', detalle: null, ventaCreada, conVenta: ventaCreada || !!session.paymentId, ...base }
   } catch (err) {
     // Cobrado en MP sin venta local: el evento queda 'error' y el barrido lo reintenta.
     const detalle = err instanceof Error ? err.message : String(err)

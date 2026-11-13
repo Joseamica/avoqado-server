@@ -198,7 +198,9 @@ it('IPN sólo encuentra sesión del merchant propietario', async () => {
 // reembolso. Promesa: Avoqado/docs/audit/2026-11-12-mp-cierre-perdido/promesa.md.
 describe('cierre perdido de MP: un cobro aprobado nunca se queda sin venta', () => {
   let eventos: any[]
+  let auditoria: any[]
   const logAction = jest.fn()
+  const recuperadas = () => auditoria.filter(a => a.action === 'MERCADOPAGO_CHARGE_RECOVERED')
   let barrido: MercadoPagoCierrePerdidoJob
   const aprobado = () => ({ id: 777, status: 'approved', status_detail: 'test', external_reference: session.sessionId, order: null })
   const conEstado = (status: string) => ({ ...aprobado(), status })
@@ -206,6 +208,17 @@ describe('cierre perdido de MP: un cobro aprobado nunca se queda sin venta', () 
 
   beforeEach(() => {
     eventos = []
+    auditoria = []
+    prismaMock.activityLog.findMany.mockImplementation(async ({ where }: any) =>
+      auditoria.filter(a => a.action === where.action && a.entity === where.entity && where.entityId.in.includes(a.entityId)),
+    )
+    prismaMock.activityLog.createMany.mockImplementation(async ({ data }: any) => {
+      auditoria.push(...data)
+      return { count: data.length }
+    })
+    prismaMock.ecommerceMerchant.findMany.mockImplementation(async ({ where }: any) =>
+      where.providerMerchantId.in.includes('123') ? [{ id: 'em-1', venueId: 'v-1', providerMerchantId: '123' }] : [],
+    )
     const mismo = (e: any, k: any) => e.mpUserId === k.mpUserId && e.dataId === k.dataId && e.requestId === k.requestId
     prismaMock.mercadoPagoWebhookEvent.create.mockImplementation(async ({ data }: any) => {
       if (eventos.some(e => mismo(e, data))) throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
@@ -260,9 +273,14 @@ describe('cierre perdido de MP: un cobro aprobado nunca se queda sin venta', () 
     expect(r).toMatchObject({ pagos: 1, recuperados: 1, errores: 0 })
     expect(session.paymentId).toBe('payment-1')
     expect(delPago().every(e => e.processingStatus === 'processed')).toBe(true)
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ venueId: 'v-1', action: 'MERCADOPAGO_CHARGE_RECOVERED', entity: 'CheckoutSession', entityId: 'cs-db-1' }),
-    )
+    expect(recuperadas()).toEqual([
+      expect.objectContaining({
+        venueId: 'v-1',
+        entity: 'CheckoutSession',
+        entityId: 'cs-db-1',
+        data: expect.objectContaining({ ventaCreadaPorElBarrido: true }),
+      }),
+    ])
 
     // (4) Idempotencia: otra vuelta y otro aviso no crean otra venta.
     expect(await barrido.runNow()).toMatchObject({ pagos: 0, recuperados: 0 })
@@ -270,7 +288,7 @@ describe('cierre perdido de MP: un cobro aprobado nunca se queda sin venta', () 
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(2) // el que tronó + el del barrido
     expect(prismaMock.checkoutSession.update).toHaveBeenCalledWith({ where: { id: 'cs-db-1' }, data: { paymentId: 'payment-1' } })
     expect(prismaMock.paymentLink.update).toHaveBeenCalledTimes(1)
-    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(recuperadas()).toHaveLength(1)
   })
 
   for (const camino of ['liga', 'venue'] as const) {
@@ -372,18 +390,74 @@ describe('cierre perdido de MP: un cobro aprobado nunca se queda sin venta', () 
     expect(paymentService.getPayment).not.toHaveBeenCalled()
   })
 
-  it('(1b) si marcar el evento falla después de recuperar, la bitácora ya quedó (Codex r2 #2)', async () => {
+  it('(1b) si marcar el evento falla después de recuperar, la bitácora ya quedó y la próxima vuelta lo cierra sin duplicar', async () => {
     providerStatus = 'approved'
     prismaMock.payment.create.mockRejectedValueOnce(new Error('se cayó la base a media transacción'))
     await execute('IPN')
-    const marcar = prismaMock.mercadoPagoWebhookEvent.updateMany.getMockImplementation()!
-    prismaMock.mercadoPagoWebhookEvent.updateMany.mockImplementationOnce(async () => {
-      throw new Error('se cayó la base al marcar')
-    })
+    prismaMock.mercadoPagoWebhookEvent.updateMany.mockRejectedValueOnce(new Error('se cayó la base al marcar'))
     await barrido.runNow()
     expect(session.paymentId).toBe('payment-1')
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'MERCADOPAGO_CHARGE_RECOVERED' }))
-    prismaMock.mercadoPagoWebhookEvent.updateMany.mockImplementation(marcar)
+    expect(recuperadas()).toHaveLength(1)
+    expect(delPago()[0].processingStatus).toBe('error')
+
+    await barrido.runNow()
+    expect(delPago()[0].processingStatus).toBe('processed')
+    expect(recuperadas()).toHaveLength(1)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('(1c) la venta quedó pero la bitácora no (proceso muerto o INSERT fallido): el evento sigue abierto y la próxima vuelta la completa (Codex código r1 #1)', async () => {
+    providerStatus = 'approved'
+    prismaMock.payment.create.mockRejectedValueOnce(new Error('se cayó la base a media transacción'))
+    await execute('IPN')
+    prismaMock.activityLog.createMany.mockRejectedValueOnce(new Error('se cayó la base en la bitácora'))
+    expect(await barrido.runNow()).toMatchObject({ recuperados: 0, errores: 1 })
+    expect(session.paymentId).toBe('payment-1') // la venta sí quedó
+    expect(recuperadas()).toHaveLength(0)
+    expect(delPago()[0]).toMatchObject({
+      processingStatus: 'error',
+      errorMessage: expect.stringMatching(/^\[barrido 1\/\d+\] venta hecha, falta la bitácora/),
+    })
+
+    // Reintento: el cierre ve la venta (ventaCreada=false) pero la sesión tiene venta: se audita y entonces se cierra.
+    await barrido.runNow()
+    expect(recuperadas()).toEqual([
+      expect.objectContaining({ entityId: 'cs-db-1', data: expect.objectContaining({ ventaCreadaPorElBarrido: false }) }),
+    ])
+    expect(delPago()[0].processingStatus).toBe('processed')
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('(1d) la bitácora se busca antes de escribirla: nunca dos renglones por sesión', async () => {
+    providerStatus = 'approved'
+    prismaMock.payment.create.mockRejectedValueOnce(new Error('se cayó la base a media transacción'))
+    await execute('IPN')
+    auditoria.push({ action: 'MERCADOPAGO_CHARGE_RECOVERED', entity: 'CheckoutSession', entityId: 'cs-db-1' })
+    await barrido.runNow()
+    expect(prismaMock.activityLog.createMany).not.toHaveBeenCalled()
+    expect(recuperadas()).toHaveLength(1)
+  })
+
+  it('(7) varios pagos del mismo vendedor: comercio y credenciales se cargan UNA vez por vuelta (Codex código r1 #2)', async () => {
+    providerStatus = 'approved'
+    for (const dataId of ['777', '778', '779']) {
+      eventos.push({
+        id: `ev-${dataId}`,
+        mpUserId: '123',
+        dataId,
+        requestId: `r-${dataId}`,
+        eventType: 'payment',
+        processingStatus: 'error',
+        errorMessage: null,
+      })
+    }
+    jest.mocked(connectionService.loadCredentials).mockClear()
+    await barrido.runNow()
+    expect(prismaMock.ecommerceMerchant.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.ecommerceMerchant.findFirst).not.toHaveBeenCalled()
+    expect(connectionService.loadCredentials).toHaveBeenCalledTimes(1)
+    expect(paymentService.getPayment).toHaveBeenCalledTimes(3)
+    expect(recuperadas()).toHaveLength(1) // los tres apuntan a la misma sesión: un solo renglón
   })
 
   it('(5) una aprobación vieja no revive un reembolso ya escrito ni crea venta (Codex r1 #2)', async () => {
