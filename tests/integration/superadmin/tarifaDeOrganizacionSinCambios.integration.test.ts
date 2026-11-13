@@ -9,6 +9,8 @@
 import cuid from 'cuid'
 import prisma from '@/utils/prismaClient'
 import { setPricing } from '@/controllers/dashboard/organization-payment.superadmin.controller'
+import { setPricingSchema } from '@/routes/superadmin/organization.routes'
+import { validateRequest } from '@/middlewares/validation'
 import { logAction } from '@/services/dashboard/activity-log.service' // la integración lo finge (integration-setup.ts)
 
 jest.setTimeout(60000)
@@ -37,15 +39,20 @@ const delWizard = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 })
 
+/** Como la ruta: primero la validación de la ruta (que quita lo que su esquema no conoce) y luego el controlador. */
 async function llamar(organizationId: string, body: Record<string, unknown>) {
   let falla: unknown
   let json: any
+  const req: any = { params: { organizationId }, body, query: {}, authContext: { userId: null }, user: { uid: null } }
   const res: any = { status: () => res, json: (b: unknown) => (json = b) }
-  await setPricing(
-    { params: { organizationId }, body, authContext: { userId: null }, user: { uid: null } } as any,
-    res,
-    ((err: unknown) => (falla = err)) as any,
-  )
+  let paso = false
+  await validateRequest(setPricingSchema)(req, res, ((err?: unknown) => {
+    if (err) falla = err
+    else paso = true
+  }) as any)
+  if (falla) throw falla
+  if (!paso) throw new Error(`la validación de la ruta rechazó la petición: ${JSON.stringify(json)}`)
+  await setPricing(req, res, ((err: unknown) => (falla = err)) as any)
   if (falla) throw falla
   return json
 }
@@ -143,6 +150,82 @@ describe('setPricing · tarifa de la organización', () => {
     const activas = (await filas(o)).filter(f => f.active)
     expect(activas).toHaveLength(1)
     expect(activas[0].includesTax).toBeNull()
+  })
+
+  it('una activa programada para MAÑANA no es la vigente: pedir lo mismo hoy sí crea la de hoy (Codex r2 #4)', async () => {
+    const o = await org()
+    const manana = new Date(Date.now() + 24 * 3600 * 1000)
+    await prisma.organizationPricingStructure.create({
+      data: {
+        organizationId: o,
+        accountType: 'PRIMARY',
+        debitRate: 0.022,
+        creditRate: 0.025,
+        amexRate: 0.035,
+        internationalRate: 0.038,
+        effectiveFrom: manana,
+      },
+    })
+
+    await llamar(o, delWizard())
+
+    const activas = (await filas(o)).filter(f => f.active)
+    expect(activas).toHaveLength(1)
+    expect(activas[0].effectiveFrom.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('el fin de vigencia que no se manda se conserva en la sustituta (Codex r2 #5)', async () => {
+    const o = await org()
+    const finDeMes = new Date('2099-12-31T23:59:59.000Z')
+    await prisma.organizationPricingStructure.create({
+      data: {
+        organizationId: o,
+        accountType: 'PRIMARY',
+        debitRate: 0.022,
+        creditRate: 0.025,
+        amexRate: 0.035,
+        internationalRate: 0.038,
+        effectiveFrom: new Date('2026-01-01'),
+        effectiveTo: finDeMes,
+      },
+    })
+
+    await llamar(o, delWizard({ creditRate: 2.6 / 100 }))
+
+    const activas = (await filas(o)).filter(f => f.active)
+    expect(activas).toHaveLength(1)
+    expect(activas[0].effectiveTo?.toISOString()).toBe(finDeMes.toISOString())
+  })
+
+  it('un cargo guardado en 0 (no null) y mandado en 0 cuenta como sin cambios', async () => {
+    const o = await org()
+    const vigente = await prisma.organizationPricingStructure.create({
+      data: {
+        organizationId: o,
+        accountType: 'PRIMARY',
+        debitRate: 0.022,
+        creditRate: 0.025,
+        amexRate: 0.035,
+        internationalRate: 0.038,
+        fixedFeePerTransaction: 0,
+        monthlyServiceFee: 0,
+        effectiveFrom: new Date('2026-01-01'),
+      },
+    })
+
+    await llamar(o, delWizard())
+
+    expect(await filas(o)).toEqual([vigente])
+  })
+
+  it('el IVA que manda la pantalla pasa la validación de la ruta y se guarda (antes la validación lo quitaba)', async () => {
+    const o = await org()
+
+    await llamar(o, delWizard({ includesTax: false, taxRate: 0.08 }))
+
+    const [creada] = await filas(o)
+    expect(creada.includesTax).toBe(false)
+    expect(Number(creada.taxRate)).toBe(0.08)
   })
 
   it('sin tarifa previa la crea (primera vez), y dos guardados iguales al mismo tiempo dejan UNA sola vigente', async () => {

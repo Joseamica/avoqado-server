@@ -189,7 +189,13 @@ const ESCALA = {
   volumePenalty: 2,
 } as const
 
-function mismoNumero(a: unknown, b: unknown, escala: number): boolean {
+/** Cargos opcionales: el endpoint guarda `0` como null (`|| null`), así que una fila vieja con 0 es lo mismo que null. */
+const OPCIONALES = new Set<keyof typeof ESCALA>(['fixedFeePerTransaction', 'monthlyServiceFee', 'minimumMonthlyVolume', 'volumePenalty'])
+
+function mismoNumero(a: unknown, b: unknown, escala: number, opcional = false): boolean {
+  const cero = (v: unknown) => v != null && new Prisma.Decimal(String(v)).isZero()
+  if (opcional && cero(a)) a = null
+  if (opcional && cero(b)) b = null
   if (a == null || b == null) return a == null && b == null
   return new Prisma.Decimal(String(a)).toDecimalPlaces(escala).equals(new Prisma.Decimal(String(b)).toDecimalPlaces(escala))
 }
@@ -222,12 +228,20 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
 
     const { pricing, previousId } = await prisma.$transaction(async tx => {
       await tomarCandado(tx, { organizationId })
-      const activas = await tx.organizationPricingStructure.findMany({
-        where: { organizationId, accountType: b.accountType, active: true },
+      // La que rige HOY, con la regla del cobro (`getEffectivePricingForSlot`): de ella se conserva lo que no se manda y sólo
+      // contra ella hay «sin cambios» (Codex r2 #4: una activa programada para mañana no cuenta como vigente).
+      const ahora = new Date()
+      const vigente = await tx.organizationPricingStructure.findFirst({
+        where: {
+          organizationId,
+          accountType: b.accountType,
+          active: true,
+          effectiveFrom: { lte: ahora },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: ahora } }],
+        },
         orderBy: [{ effectiveFrom: 'desc' }, { id: 'asc' }],
-        take: 2,
       })
-      const vigente = activas[0] ?? null
+      const activas = await tx.organizationPricingStructure.count({ where: { organizationId, accountType: b.accountType, active: true } })
       const opcional = <T>(enviado: T | undefined, actual: T | null | undefined) =>
         enviado !== undefined ? enviado || null : (actual ?? null)
       const datos = {
@@ -241,15 +255,16 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
         monthlyServiceFee: opcional(b.monthlyServiceFee, vigente?.monthlyServiceFee),
         minimumMonthlyVolume: opcional(b.minimumMonthlyVolume, vigente?.minimumMonthlyVolume),
         volumePenalty: opcional(b.volumePenalty, vigente?.volumePenalty),
-        effectiveTo: b.effectiveTo ? new Date(b.effectiveTo) : null,
+        // Codex r2 #5: si no se manda, se conserva el fin que tenía la vigente (antes la sustituta nacía sin vencimiento).
+        effectiveTo: b.effectiveTo !== undefined ? (b.effectiveTo ? new Date(b.effectiveTo) : null) : (vigente?.effectiveTo ?? null),
         contractReference: opcional(b.contractReference, vigente?.contractReference),
         notes: opcional(b.notes, vigente?.notes),
       }
 
       const sinCambios =
-        activas.length === 1 &&
+        activas === 1 &&
         vigente !== null &&
-        (Object.keys(ESCALA) as (keyof typeof ESCALA)[]).every(k => mismoNumero(datos[k], vigente[k], ESCALA[k])) &&
+        (Object.keys(ESCALA) as (keyof typeof ESCALA)[]).every(k => mismoNumero(datos[k], vigente[k], ESCALA[k], OPCIONALES.has(k))) &&
         datos.includesTax === vigente.includesTax &&
         datos.contractReference === vigente.contractReference &&
         datos.notes === vigente.notes &&

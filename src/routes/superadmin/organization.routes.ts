@@ -111,7 +111,7 @@ const setPaymentConfigSchema = z.object({
   }),
 })
 
-const setPricingSchema = z.object({
+export const setPricingSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('ID de organización inválido'),
   }),

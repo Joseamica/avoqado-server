@@ -17,7 +17,8 @@ export async function credencialesDeBlumon(
   try {
     return await createBlumonTpvService(environment).fetchMerchantCredentials(serialNumber, brand, model)
   } catch (error) {
-    if (error instanceof Error && /Usuario no encontrado/i.test(error.message)) {
+    // Sólo el mensaje exacto del paso de token (Codex r2): cualquier otra falla con otra forma sigue su camino.
+    if (error instanceof Error && error.message === 'Failed to authenticate with Blumon: Usuario no encontrado') {
       const ambiente = environment === 'PRODUCTION' ? 'producción' : 'sandbox'
       throw new BadRequestError(
         `No encontré esa terminal en Blumon (${ambiente}): serial ${serialNumber}, ${brand} ${model}. ` +
