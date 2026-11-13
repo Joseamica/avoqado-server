@@ -184,6 +184,7 @@ export async function updateLoyaltyConfig(
       ...(data.stampRewardType !== undefined ? { stampRewardType: config.stampRewardType } : {}),
       ...(data.stampRewardValue !== undefined ? { stampRewardValue: Number(config.stampRewardValue ?? 0) } : {}),
       ...(data.stampRewardLabel !== undefined ? { stampRewardLabel: config.stampRewardLabel } : {}),
+      ...(data.maxStampsPerDay !== undefined ? { maxStampsPerDay: config.maxStampsPerDay } : {}),
     },
   })
 

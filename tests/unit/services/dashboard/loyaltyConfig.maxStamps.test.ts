@@ -2,10 +2,12 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('../../../../src/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn().mockResolvedValue(true) }))
 
 import { updateLoyaltyConfig } from '../../../../src/services/dashboard/loyalty.dashboard.service'
 import { UpdateLoyaltyConfigSchema } from '../../../../src/schemas/dashboard/loyalty.schema'
+import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { BadRequestError } from '../../../../src/errors/AppError'
 
 const cfg = (o: Record<string, unknown> = {}) =>
@@ -20,6 +22,13 @@ describe('maxStampsPerDay', () => {
   it('el servicio acepta 0 (sin límite)', async () => {
     await updateLoyaltyConfig('v1', { maxStampsPerDay: 0 })
     expect(prismaMock.loyaltyConfig.update).toHaveBeenCalledWith(expect.objectContaining({ data: { maxStampsPerDay: 0 } }))
+  })
+
+  it('el registro de actividad anota maxStampsPerDay (0 incluido)', async () => {
+    await updateLoyaltyConfig('v1', { maxStampsPerDay: 0 })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'LOYALTY_CONFIG_UPDATED', data: expect.objectContaining({ maxStampsPerDay: 0 }) }),
+    )
   })
 
   it('el servicio rechaza -1 con mensaje en español', async () => {
