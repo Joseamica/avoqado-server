@@ -448,7 +448,7 @@ import type { CustomerAttributionActor } from '../shared/customerAttributionPoli
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
-import { horaDeLaVenta } from '../mobile/precioQueVioElCliente'
+import { horaDeLaVenta, horaDeLaVentaQueSalda } from '../mobile/precioQueVioElCliente'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -1412,8 +1412,8 @@ export async function settleStandalonePaymentInTx(
   marcarCocina = false,
   /** Codex r10 #6: `false` ⇒ sólo los totales, sin los efectos de saldar (lealtad, marca de cocina, vale de inventario). */
   efectosDeCierre = true,
-  /** La hora de la venta de la cola (`horaDeLaVentaDeLaCola`); se escribe junto con `loyaltyEligibleAt`. */
-  loyaltySaleAt?: Date,
+  /** La hora capturada del cobro de la cola (`horaDeLaVentaDeLaCola`); si salda, `loyaltySaleAt` junto con `loyaltyEligibleAt`. */
+  horaCapturada?: Date,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1469,6 +1469,10 @@ export async function settleStandalonePaymentInTx(
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
   const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid.cobros > 1 && previous.isFullyPaid)
+  const loyaltySaleAt =
+    firstSettlement && horaCapturada
+      ? await horaDeLaVentaQueSalda(tx, { venueId, orderId, paymentId: payment.id }, horaCapturada)
+      : undefined
   await tx.order.update({
     where: { id: orderId, venueId },
     data: {
@@ -1480,7 +1484,7 @@ export async function settleStandalonePaymentInTx(
       ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-      ...(firstSettlement && loyaltySaleAt && { loyaltySaleAt }),
+      ...(loyaltySaleAt && { loyaltySaleAt }),
       ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
@@ -1592,8 +1596,8 @@ async function updateOrderTotalsForStandalonePayment(
      * finalización del vale, o —cuenta con vale sin sesión— la escritura de esta misma función.
      */
     marcarCocina?: boolean
-    /** La hora de la venta de la cola (`horaDeLaVentaDeLaCola`); se escribe junto con `loyaltyEligibleAt`. */
-    loyaltySaleAt?: Date
+    /** La hora capturada del cobro de la cola (`horaDeLaVentaDeLaCola`); si salda, `loyaltySaleAt` junto con `loyaltyEligibleAt`. */
+    horaCapturada?: Date
   },
 ): Promise<OrderInventoryWarning | null> {
   // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
@@ -2030,6 +2034,10 @@ async function updateOrderTotalsForStandalonePayment(
               reabiertaEnEstaPasada = estadoTrasCobro !== current.status
             }
 
+            const loyaltySaleAt =
+              debeRegistrarPosting && options?.horaCapturada
+                ? await horaDeLaVentaQueSalda(tx, { venueId: order.venueId, orderId, paymentId: currentPaymentId }, options.horaCapturada)
+                : undefined
             const updated = await tx.order.update({
               where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
               data: {
@@ -2052,7 +2060,7 @@ async function updateOrderTotalsForStandalonePayment(
                     completedAt: new Date(),
                   }),
                 ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-                ...(debeRegistrarPosting && options?.loyaltySaleAt && { loyaltySaleAt: options.loyaltySaleAt }),
+                ...(loyaltySaleAt && { loyaltySaleAt }),
                 ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
               },
               include: {
@@ -2874,11 +2882,12 @@ function avisoDeVentaApartada(
 }
 
 /**
- * La hora de la venta que sube de la cola de la terminal, para la lealtad (`Order.loyaltySaleAt`, en la MISMA escritura que
- * `loyaltyEligibleAt`): la que capturó el aparato, nunca después de la llegada (`horaDeLaVenta`, la misma regla del POS). En línea o
- * sin `createdAtLocal` (terminal ≤ 2.16) ⇒ `undefined`: la venta queda fechada a la llegada, como hoy.
+ * La hora capturada de la venta que sube de la cola de la terminal: la del aparato, nunca después de `llegada` (`horaDeLaVenta`, la
+ * misma regla del POS). `llegada` se toma al ENTRAR la petición, no al escribir (Codex r1 #4). Quien salda la pasa por
+ * `horaDeLaVentaQueSalda` (nunca antes del último cobro de los demás) y la escribe en la MISMA escritura que `loyaltyEligibleAt`.
+ * En línea o sin `createdAtLocal` (terminal vieja, o un cobro con tarjeta) ⇒ `undefined`: la venta queda fechada a la llegada, como hoy.
  */
-function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date = new Date()): Date | undefined {
+function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date): Date | undefined {
   if (paymentData.isOfflineReplay !== true || paymentData.createdAtLocal == null) return undefined
   return horaDeLaVenta(paymentData, llegada)
 }
@@ -3639,6 +3648,8 @@ export async function recordOrderPayment(
   paymentData: PaymentCreationData,
   userId?: string,
   _orgId?: string,
+  /** Cuándo llegó la petición (cota de `loyaltySaleAt`); `recordFastPayment` pasa la suya al delegar. */
+  llegada: Date = new Date(),
 ) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
@@ -3646,8 +3657,8 @@ export async function recordOrderPayment(
   // `elapsedMs` para que un cobro lento se pueda atribuir a un tramo, no adivinar.
   const startedAt = Date.now()
   const elapsedMs = () => Date.now() - startedAt
-  // La venta de la cola de la terminal se fecha, para la lealtad, a la hora que capturó el aparato (acotada a esta llegada).
-  const loyaltySaleAt = horaDeLaVentaDeLaCola(paymentData, new Date(startedAt))
+  // La venta de la cola de la terminal se fecha, para la lealtad, a la hora que capturó el aparato (acotada a la llegada).
+  const horaCapturada = horaDeLaVentaDeLaCola(paymentData, llegada)
 
   // 🔴 Este camino cobra CONTRA UNA ORDEN desde la terminal, y la terminal es un
   // aparato de tarjeta: sus medios son efectivo y tarjeta, no el catálogo de tipos
@@ -4389,7 +4400,7 @@ export async function recordOrderPayment(
             validatedStaffId,
             marcarCocina,
             true,
-            loyaltySaleAt,
+            horaCapturada,
           )
         }
 
@@ -4977,7 +4988,7 @@ export async function recordOrderPayment(
             // Codex 3.6 (S3): una cuenta con vale no pasa por ese saldado; aquí el pago ya es COMPLETED, así que la
             // salda (y la marca) la escritura de `updateOrderTotalsForStandalonePayment`.
             marcarCocina: marcarCocina && (Boolean(committedStandaloneSettlement) || hasAreaTicketLines),
-            loyaltySaleAt,
+            horaCapturada,
           },
         )
       }
@@ -5218,6 +5229,8 @@ export async function recordFastPayment(
   userId?: string,
   _orgId?: string,
   customerActor: CustomerAttributionActor = {},
+  /** Cuándo llegó la petición: la cota de `loyaltySaleAt` se toma aquí, nunca dentro de la transacción (Codex r1 #4). */
+  llegada: Date = new Date(),
 ) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
@@ -5334,6 +5347,7 @@ export async function recordFastPayment(
           },
           userId,
           _orgId,
+          llegada,
         )
         // El cliente que eligió el cajero también cuenta cuando el cobro pertenece a una
         // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
@@ -6056,11 +6070,12 @@ export async function recordFastPayment(
         }
 
         if (newPayment.status === 'COMPLETED') {
-          const llegada = new Date()
-          const loyaltySaleAt = horaDeLaVentaDeLaCola(paymentData, llegada)
+          const horaCapturada = horaDeLaVentaDeLaCola(paymentData, llegada)
+          const loyaltySaleAt =
+            horaCapturada && (await horaDeLaVentaQueSalda(tx, { venueId, orderId: order.id, paymentId: newPayment.id }, horaCapturada))
           await tx.order.update({
             where: { id: order.id },
-            data: { loyaltyEligibleAt: llegada, loyaltyStaffId: validatedStaffId, ...(loyaltySaleAt && { loyaltySaleAt }) },
+            data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId, ...(loyaltySaleAt && { loyaltySaleAt }) },
           })
           await enqueueCommittedPaymentEffects(
             tx,

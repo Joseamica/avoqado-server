@@ -278,4 +278,39 @@ describe('recordFastPayment — hora de la venta de la cola (loyaltySaleAt)', ()
     expect(marcas).toHaveLength(2)
     for (const m of marcas) expect(m.data).not.toHaveProperty('loyaltySaleAt')
   })
+
+  // Codex r1 #4: la llegada se toma al ENTRAR la petición, no dentro de la transacción. Con un reloj adelantado, la cota es la
+  // entrada aunque la escritura ocurra 2 s después (cruce de medianoche).
+  it('reloj adelantado: la cota es la hora en que ENTRÓ la petición, no la de la escritura', async () => {
+    jest.useFakeTimers({
+      doNotFake: [
+        'nextTick',
+        'setImmediate',
+        'clearImmediate',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'queueMicrotask',
+        'hrtime',
+        'performance',
+      ],
+    })
+    try {
+      const entrada = new Date('2026-11-13T05:59:59.000Z') // 23:59:59 en CDMX
+      jest.setSystemTime(entrada)
+      const { txOrderUpdate } = installTransaction()
+      const callback = prismaMock.$transaction.getMockImplementation()
+      prismaMock.$transaction.mockImplementation(async (cb: any) => {
+        jest.setSystemTime(entrada.getTime() + 2_000) // la transacción llega a escribir a las 00:00:01
+        return callback(cb)
+      })
+
+      await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: entrada.getTime() + 86_400_000 }), 'user-1')
+
+      expect(marcaDeLealtad(txOrderUpdate).data.loyaltySaleAt).toEqual(entrada)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
 })

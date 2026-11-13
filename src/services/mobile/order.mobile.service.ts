@@ -187,6 +187,7 @@ import {
   cambiosDeOrdenExistente,
   clasificarLinea,
   horaDeLaVenta,
+  horaDeLaVentaQueSalda,
   precioDeExtraMostrado,
   precioMostradoValido,
   preciosDeExtrasQueFueronVigentes,
@@ -4144,6 +4145,8 @@ export async function registrarAbonoEnTx(
 ): Promise<AbonoEnTx> {
   // Los mismos nombres que tenía el cuerpo dentro de `payCashOrder`: lo de abajo se movió tal cual.
   const { venueId, orderId, effectiveStaffId, marcarCocina } = ctx
+  // La cota de `loyaltySaleAt` (cobro de la cola sin red): se toma al entrar, no al escribir (Codex r1 #4 de la terminal).
+  const llegada = new Date()
   const amount = entrada.amountCents
   const tip = entrada.tipCents
   const paymentMethod = entrada.method
@@ -4489,6 +4492,11 @@ export async function registrarAbonoEnTx(
     remainingBalance: Math.max(0, remainingAfterPayment),
   })
   const saldaAqui = isFullyPaid && !cobro.cerrada
+  // La hora de la venta sin red, nunca antes del último cobro de los demás: la cuenta no quedó pagada antes (Codex r1 #1).
+  const loyaltySaleAt =
+    saldaAqui && entrada.isOfflineReplay
+      ? await horaDeLaVentaQueSalda(tx, { venueId, orderId }, horaDeLaVenta(entrada, llegada))
+      : undefined
 
   // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
   //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
@@ -4514,7 +4522,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
-      ...(saldaAqui && entrada.isOfflineReplay ? { loyaltySaleAt: horaDeLaVenta(entrada, new Date()) } : {}),
+      ...(loyaltySaleAt ? { loyaltySaleAt } : {}),
       ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,

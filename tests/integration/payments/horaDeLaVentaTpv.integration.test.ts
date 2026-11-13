@@ -112,6 +112,35 @@ async function rapido(n: Negocio, extra: Record<string, unknown>) {
   return pago.order!
 }
 
+/** Una cuenta abierta de `piezas` × $50, creada en línea por el POS. */
+async function cuenta(n: Negocio, piezas: number) {
+  const creada = await request(app)
+    .post(`/api/v1/mobile/venues/${n.venueId}/orders`)
+    .set(n.como)
+    .send({
+      staffId: n.staffId,
+      source: 'TPV',
+      orderType: 'TAKEOUT',
+      externalId: `venta-${randomUUID()}`,
+      items: [{ productId: n.productId, quantity: piezas }],
+    })
+  expect(creada.status).toBe(201)
+  return creada.body.order.id as string
+}
+
+/**
+ * Codex r1 #1: cuenta de $200. La terminal A cobra $100 sin red a las 23:55 (CDMX); la caja B cobra los otros $100 EN LÍNEA a las
+ * 00:05. A sube después y SALDA: la venta es de las 00:05 (cuando de verdad quedó pagada), nunca de las 23:55 del día anterior.
+ * La hora de B se fija en la base para que el cruce de medianoche sea exacto.
+ */
+async function partidaCruzandoMedianoche(n: Negocio, pagarB: (orderId: string) => Promise<string>) {
+  const orderId = await cuenta(n, 4)
+  const paymentIdB = await pagarB(orderId)
+  const b = new Date(Date.now() - 2 * 3_600_000)
+  await prisma.payment.update({ where: { id: paymentIdB }, data: { createdAt: b } })
+  return { orderId, b, a: b.getTime() - 10 * 60_000 }
+}
+
 afterAll(async () => {
   await prisma.$disconnect()
 })
@@ -151,18 +180,7 @@ describe('hora de la venta de la cola de la terminal (loyaltySaleAt) — por HTT
 
   it('4. /tpv/orders/:orderId de la cola (Mesas): la cuenta saldada guarda la hora de la venta', async () => {
     const n = await negocio()
-    const creada = await request(app)
-      .post(`/api/v1/mobile/venues/${n.venueId}/orders`)
-      .set(n.como)
-      .send({
-        staffId: n.staffId,
-        source: 'TPV',
-        orderType: 'TAKEOUT',
-        externalId: `venta-${randomUUID()}`,
-        items: [{ productId: n.productId, quantity: 2 }],
-      })
-    expect(creada.status).toBe(201)
-    const orderId = creada.body.order.id
+    const orderId = await cuenta(n, 2)
     const anoche = Date.now() - 10 * 3_600_000
 
     const subida = await request(app)
@@ -175,5 +193,48 @@ describe('hora de la venta de la cola de la terminal (loyaltySaleAt) — por HTT
     expect(orden.paymentStatus).toBe('PAID')
     expect(orden.loyaltyEligibleAt).not.toBeNull()
     expect(orden.loyaltySaleAt).toEqual(new Date(anoche))
+  })
+
+  it('5. /tpv/orders partida: A sin red 23:55 + B en línea 00:05 ⇒ la venta es de las 00:05', async () => {
+    const n = await negocio()
+    const { orderId, b, a } = await partidaCruzandoMedianoche(n, async id => {
+      const enLinea = cobroDeTerminal(n, { amount: 10000 })
+      expect((await request(app).post(`/api/v1/tpv/venues/${n.venueId}/orders/${id}`).set(n.como).send(enLinea)).status).toBe(201)
+      return (
+        await prisma.payment.findUniqueOrThrow({
+          where: { venueId_idempotencyKey: { venueId: n.venueId, idempotencyKey: enLinea.idempotencyKey } },
+        })
+      ).id
+    })
+
+    const subida = await request(app)
+      .post(`/api/v1/tpv/venues/${n.venueId}/orders/${orderId}`)
+      .set(n.como)
+      .send(cobroDeTerminal(n, { amount: 10000, isOfflineReplay: true, createdAtLocal: a }))
+    expect(subida.status).toBe(201)
+
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(orden.paymentStatus).toBe('PAID')
+    expect(orden.loyaltySaleAt).toEqual(b)
+  })
+
+  it('6. POS (mobile /pay) partida: la misma regla que la terminal', async () => {
+    const n = await negocio()
+    const pagar = (id: string, extra: Record<string, unknown>) =>
+      request(app)
+        .post(`/api/v1/mobile/venues/${n.venueId}/orders/${id}/pay`)
+        .set(n.como)
+        .send({ amount: 10000, tip: 0, staffId: n.staffId, idempotencyKey: `cobro-${randomUUID()}`, ...extra })
+    const { orderId, b, a } = await partidaCruzandoMedianoche(n, async id => {
+      const r = await pagar(id, {})
+      expect(r.status).toBe(200)
+      return r.body.payment.paymentId
+    })
+
+    expect((await pagar(orderId, { isOfflineReplay: true, createdAtLocal: a })).status).toBe(200)
+
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(orden.paymentStatus).toBe('PAID')
+    expect(orden.loyaltySaleAt).toEqual(b)
   })
 })
