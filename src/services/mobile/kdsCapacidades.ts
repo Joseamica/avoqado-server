@@ -10,6 +10,13 @@ import { parseServiceCourseSnapshot } from '@/services/service-courses/serviceCo
 import { reservaViva } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { adapterFor } from '@/services/delivery-channels/core/adapterRegistry'
 import { proveedorDelPedido } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import {
+  idsDeEstaciones,
+  leerImpresion,
+  resolverImpresionReparto,
+  type EstacionElegible,
+  type ImpresionReparto,
+} from '@/services/delivery-channels/core/impresionDelCanal'
 
 /** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
 export const REINTENTO_TRAS_MS = 15 * 60_000
@@ -98,6 +105,8 @@ export type VentaDeComanda = PedidoVivo & {
   tableNumber: string | null
   /** El tiempo («Aperitivos») de cada renglón, por `OrderItem.id`. Sólo los que tienen. */
   cursos: Map<string, string>
+  /** Dónde se imprime este reparto de proveedor (la elección de su canal). `null` si no es reparto de proveedor. */
+  impresionReparto: ImpresionReparto | null
 }
 
 type ComandaCruda = { orderId: string | null; items?: Array<{ orderItemId?: string | null }> }
@@ -152,7 +161,7 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
     linkIds.length
       ? db.deliveryChannelLink.findMany({
           where: { id: { in: linkIds }, venueId },
-          select: { id: true, provider: true },
+          select: { id: true, provider: true, config: true },
           take: linkIds.length,
         })
       : [],
@@ -179,6 +188,18 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       : [],
   ])
   const linkPorId = new Map(links.map(l => [l.id, l]))
+  // UNA consulta extra por llamada, y sólo si algún canal del lote eligió estaciones.
+  const estacionIds = [...new Set(links.flatMap(l => idsDeEstaciones(leerImpresion(l.config))))]
+  const estaciones = new Map<string, EstacionElegible>(
+    (estacionIds.length
+      ? await db.printStation.findMany({
+          where: { venueId, id: { in: estacionIds } },
+          select: { id: true, active: true, sendsComanda: true },
+          take: estacionIds.length,
+        })
+      : []
+    ).map(e => [e.id, e]),
+  )
   const accionesDe = agrupar(acciones)
   const renglonesDe = agrupar(renglones)
   const cursosDe = agrupar(cursos)
@@ -200,6 +221,7 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       retiros: new Map(propias.filter(a => a.action === 'REMOVE_ITEM').map(a => [a.lineId, a])),
       renglones: new Map((renglonesDe.get(v.id) ?? []).map(r => [r.id, r])),
       tableNumber: table?.number ?? null,
+      impresionReparto: origen ? resolverImpresionReparto(origen.provider, leerImpresion(link?.config), estaciones) : null,
       cursos: new Map(
         (cursosDe.get(v.id) ?? []).flatMap(r => {
           let label = r.course
@@ -261,7 +283,12 @@ export function capacidadesDeComanda(k: ComandaConRenglones, v: VentaDeComanda) 
 export function anexarCapacidades<B extends { items: Array<{ id: string }> }>(base: B, k: ComandaConRenglones, v: VentaDeComanda) {
   if (v.type !== OrderType.DELIVERY || !v.conProveedor) return base
   const { comanda, renglones } = capacidadesDeComanda(k, v)
-  return { ...base, ...comanda, items: base.items.map(item => ({ ...item, ...renglones.get(item.id) })) }
+  return {
+    ...base,
+    ...comanda,
+    impresionReparto: v.impresionReparto,
+    items: base.items.map(item => ({ ...item, ...renglones.get(item.id) })),
+  }
 }
 
 function capacidadesDelRenglon(item: NonNullable<ComandaConRenglones['items']>[number], comandaStatus: string, v: VentaDeComanda) {

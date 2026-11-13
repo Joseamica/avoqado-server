@@ -333,6 +333,57 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     expect(filtrada.items[0]).toMatchObject({ canReportOutOfStock: false })
   })
 
+  describe('impresionReparto (dónde se imprime el reparto del canal)', () => {
+    const conConfig = (config: object | null) =>
+      prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { config: config ?? undefined } })
+    const impresionDe = async (s: Semilla) => {
+      const k = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: s.kds.id }, include: { items: true } })
+      return (await ventasDeComandas(prisma, venueId, [k])).get(s.order.id)!.impresionReparto
+    }
+    afterEach(() => conConfig({}))
+
+    it('canal con UNA_ESTACION y empaque NO: la estación elegida viaja y el empaque no', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra delivery', active: true, sendsComanda: true } })
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NO' } })
+      expect(await impresionDe(await sembrar())).toEqual({
+        proveedor: 'UBER_EATS',
+        estacionUnicaId: est.id,
+        empaque: false,
+        empaqueEstacionId: null,
+      })
+    })
+
+    it('canal sin impresion: como en el salón y empaque del negocio', async () => {
+      await conConfig({})
+      expect(await impresionDe(await sembrar())).toEqual({
+        proveedor: 'UBER_EATS',
+        estacionUnicaId: null,
+        empaque: true,
+        empaqueEstacionId: null,
+      })
+    })
+
+    it('estación elegida desactivada después: estacionUnicaId null', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra apagada', active: false, sendsComanda: true } })
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NEGOCIO' } })
+      expect((await impresionDe(await sembrar()))?.estacionUnicaId).toBeNull()
+    })
+
+    it('a lo más UNA consulta extra de printStation por llamada, y ninguna si nadie eligió estación', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra 2', active: true, sendsComanda: true } })
+      const s1 = await sembrar()
+      const s2 = await sembrar()
+      const ks = await prisma.kdsOrder.findMany({ where: { id: { in: [s1.kds.id, s2.kds.id] } }, include: { items: true } })
+      const espia = jest.spyOn(prisma.printStation, 'findMany')
+      await conConfig({})
+      await ventasDeComandas(prisma, venueId, ks)
+      expect(espia).toHaveBeenCalledTimes(0)
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NEGOCIO' } })
+      await ventasDeComandas(prisma, venueId, ks)
+      expect(espia).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('PUT …/status y bump devuelven la comanda con las MISMAS capacidades que el tablero', async () => {
     const s = await sembrar()
     const put = await request(server)
