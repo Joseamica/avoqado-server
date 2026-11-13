@@ -602,6 +602,7 @@ model Venue {
   // PAYMENT LINKS
   // ==========================================
   paymentLinks PaymentLink[]
+  paymentLinkStockHolds PaymentLinkStockHold[]
 
   // ==========================================
   // CASH DRAWER
@@ -2070,6 +2071,7 @@ model Product {
   orderItems       OrderItem[]
   areaTicketLines  AreaTicketLine[]
   paymentLinkItems PaymentLinkItem[]
+  paymentLinkStockHolds PaymentLinkStockHold[]
   modifierGroups   ProductModifierGroup[]
   recipe           Recipe? // ✅ NEW: Recipe composition
   pricingPolicy    PricingPolicy? // ✅ NEW: Pricing strategy
@@ -16357,9 +16359,17 @@ model PaymentLink {
 
   checkoutSessions CheckoutSession[]
 
+  /// Liga por prenda con talla: la familia (ProductGroup) cuyas variantes elige
+  /// el cliente en la página de pago. Null = liga de siempre.
+  productGroupId String?
+  productGroup   ProductGroup? @relation(fields: [productGroupId], references: [id], onDelete: SetNull)
+
+  stockHolds PaymentLinkStockHold[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([productGroupId])
   @@index([venueId, customerId, createdAt, id])
   @@unique([venueId, createdById, creationKey])
   @@index([venueId])
@@ -16394,6 +16404,40 @@ model PaymentLinkItem {
 
   @@unique([paymentLinkId, productId])
   @@index([productId])
+}
+
+enum PaymentLinkStockHoldStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+}
+
+/// Ficha de apartado: aparta una pieza de una variante mientras el cliente paga una liga por prenda.
+model PaymentLinkStockHold {
+  id                    String                     @id @default(cuid())
+  venueId               String
+  venue                 Venue                      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  paymentLinkId         String
+  paymentLink           PaymentLink                @relation(fields: [paymentLinkId], references: [id], onDelete: Cascade)
+  productId             String
+  product               Product                    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity              Int                        @default(1)
+  browserToken          String                     @db.VarChar(64)
+  stripePaymentIntentId String?
+  amountCents           Int?
+  stripeAccountId       String?
+  intentParams          Json?
+  checkoutSnapshot      Json?
+  status                PaymentLinkStockHoldStatus @default(ACTIVE)
+  expiresAt             DateTime
+  releasedReason        String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+
+  @@index([productId, status, expiresAt])
+  @@index([browserToken])
+  @@index([stripePaymentIntentId])
+  @@index([status, expiresAt])
 }
 
 /// Pre-selected modifier for a bundle line item. Joins PaymentLinkItem ↔
@@ -16669,6 +16713,7 @@ model ProductGroup {
   options        ProductGroupOption[]
   modifierGroups ProductGroupModifierGroup[]
   products       Product[]
+  paymentLinks   PaymentLink[]
 
   /// (venueId, source, externalId) es único sólo entre vivas: índice parcial "ProductGroup_venueId_source_externalId_vivo_key"
   /// de la migración 20261018120000. Prisma no expresa el WHERE, así que no se declara aquí (como StaffPayTipWindow_una_abierta).
