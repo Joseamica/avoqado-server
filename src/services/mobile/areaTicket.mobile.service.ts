@@ -52,7 +52,13 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { importesDeLasFilas, leerReparto } from '../shared/repartoDescuento'
 import { RENGLON_PARA_REPARTO_SELECT, filasDeLaOrden, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { buildOrderItemsData, CreateOrderItemInput, type CreateOrderInput } from './order.mobile.service'
+import {
+  buildOrderItemsData,
+  CreateOrderItemInput,
+  membresiaDeLaSesion,
+  pideAprobacionDeGerente,
+  type CreateOrderInput,
+} from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
 
 // MARK: - Constantes de contrato
@@ -448,7 +454,7 @@ export async function assignDevicePartition(venueId: string, input: AssignPartit
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets
 
-export interface OpenAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface OpenAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   /** Código ACUÑADO POR EL CLIENTE (`9 PP NNNNNN C`). El server lo valida, no lo inventa. */
   code: string
   deviceUid: string
@@ -472,6 +478,8 @@ async function crearEspejosDelVale(
     staffId: string | null | undefined
     renglones: Array<{ id: string; appliedDiscountId: string | null; discountAmount: Prisma.Decimal }>
     discounts: Array<{ id: string; [key: string]: any }>
+    /** D4: la sesión que aprobó con su permiso propio (aquí no hay PIN) los descuentos que piden aprobación. */
+    apruebaLaSesion?: string
   },
 ): Promise<void> {
   const conDescuento = p.renglones.filter(r => r.appliedDiscountId)
@@ -479,17 +487,20 @@ async function crearEspejosDelVale(
   const otorgadoPor = p.staffId
     ? await tx.staffVenue.findFirst({ where: { staffId: p.staffId, venueId: p.venueId }, select: { id: true } })
     : null
+  // D4 (Codex r2 #5): quien aplicó y aprobó un descuento con «Requiere aprobación» es la sesión que tiene el permiso.
+  const aprobo = p.discounts.some(pideAprobacionDeGerente) ? await membresiaDeLaSesion(tx, p.venueId, p.apruebaLaSesion) : null
   for (const r of conDescuento) {
     const discount = p.discounts.find(d => d.id === r.appliedDiscountId)
     if (!discount) continue
+    const fila = buildItemDiscountRow({
+      orderId: p.orderId,
+      itemId: r.id,
+      discount,
+      discountAmountPesos: Number(r.discountAmount),
+      appliedById: otorgadoPor?.id ?? null,
+    })
     await tx.orderDiscount.create({
-      data: buildItemDiscountRow({
-        orderId: p.orderId,
-        itemId: r.id,
-        discount,
-        discountAmountPesos: Number(r.discountAmount),
-        appliedById: otorgadoPor?.id ?? null,
-      }),
+      data: aprobo && pideAprobacionDeGerente(discount) ? { ...fila, appliedById: aprobo, authorizedById: aprobo } : fila,
     })
   }
 }
@@ -586,7 +597,14 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
         },
         include: areaTicketInclude,
       })
-      await crearEspejosDelVale(tx, { venueId, orderId: order.id, staffId, renglones: order.items, discounts })
+      await crearEspejosDelVale(tx, {
+        venueId,
+        orderId: order.id,
+        staffId,
+        renglones: order.items,
+        discounts,
+        ...(input.aprobacionDelDescuento && input.performedBy ? { apruebaLaSesion: input.performedBy } : {}),
+      })
 
       // El máximo visto sube DENTRO de la misma transacción que crea la cuenta: si el
       // insert falla, el contador no avanza y el dispositivo puede reintentar el mismo
@@ -648,7 +666,7 @@ export async function resolveAreaTicket(venueId: string, rawCode: string): Promi
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets/:code/items
 
-export interface AddAreaTicketItemsInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface AddAreaTicketItemsInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   deviceUid: string
   staffId?: string | null
   items: CreateOrderItemInput[]
@@ -727,7 +745,14 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
       )
     }
     // P5: el renglón nuevo con descuento de artículo lleva su fila ESPEJO, como al abrir el vale.
-    await crearEspejosDelVale(tx, { venueId, orderId: order.id, staffId: input.staffId, renglones: creados, discounts })
+    await crearEspejosDelVale(tx, {
+      venueId,
+      orderId: order.id,
+      staffId: input.staffId,
+      renglones: creados,
+      discounts,
+      ...(input.aprobacionDelDescuento && input.performedBy ? { apruebaLaSesion: input.performedBy } : {}),
+    })
 
     // 🔴 Los totales se RECOMPUTAN desde TODOS los renglones, no se incrementan a ciegas: recomputar es correcto aunque otro
     // flujo (cortesía, descuento de cuenta) haya pasado por en medio, y preserva propina y cargo por servicio. Desde B2c (P5)

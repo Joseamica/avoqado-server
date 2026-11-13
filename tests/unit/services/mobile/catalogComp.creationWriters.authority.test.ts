@@ -249,6 +249,8 @@ describe('R1 — todos los escritores de creación que consumen Discount mutable
     })
     prismaMock.terminal.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) => {
+      // D4: la pregunta del candado de aprobación (`checkAprobacionDelDescuento`); este catálogo nunca la pide.
+      if (where.requiresApproval === true) return catalog.requiresApproval === true && catalog.type !== 'COMP' ? { id: discountId } : null
       if (where.type === 'COMP') {
         trace.push(`precheck:${catalog.type}`)
         return catalog.type === 'COMP' && where.id.in.includes(discountId) ? { id: discountId } : null

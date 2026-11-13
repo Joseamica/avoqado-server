@@ -18,6 +18,7 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
+import { aprobacionPorPermisoPropio } from '../../middlewares/cortesiaPidePermiso.middleware'
 import * as areaTicketService from '../../services/mobile/areaTicket.mobile.service'
 
 /**
@@ -59,6 +60,11 @@ export const openAreaTicket = async (req: Request, res: Response, next: NextFunc
       staffId: readStaffId(req, req.body),
       items,
       canCompItems: items.some((item: any) => !!item.discountId) && (await tienePermisoEnVenue(req, 'orders:comp')),
+      // D4: un % o fijo con «Requiere aprobación» en un vale lo aplica sólo quien tiene `tpv-orders:discount` (aquí no hay PIN).
+      aprobacionDelDescuento: await aprobacionPorPermisoPropio(
+        req,
+        items.some((item: any) => !!item.discountId),
+      ),
       performedBy: req.authContext?.userId,
       customerName,
       note,
@@ -109,6 +115,11 @@ export const addAreaTicketItems = async (req: Request, res: Response, next: Next
       staffId: readStaffId(req, req.body),
       items,
       canCompItems: items.some((item: any) => !!item.discountId) && (await tienePermisoEnVenue(req, 'orders:comp')),
+      // D4: un % o fijo con «Requiere aprobación» en un vale lo aplica sólo quien tiene `tpv-orders:discount` (aquí no hay PIN).
+      aprobacionDelDescuento: await aprobacionPorPermisoPropio(
+        req,
+        items.some((item: any) => !!item.discountId),
+      ),
       performedBy: req.authContext?.userId,
     })
 
