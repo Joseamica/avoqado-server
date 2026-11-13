@@ -173,7 +173,7 @@ export async function assertSinCobroDobleAlSubir(venueId: string, tier: BaseTier
  */
 const TRIAL_ALA_CARTE_DIAS = 5
 
-export async function addFeaturesToVenue(venueId: string, featureCodes: string[], paymentMethodId?: string) {
+export async function addFeaturesToVenue(venueId: string, featureCodes: string[], paymentMethodId?: string, actorId?: string) {
   // 🔴 Un PLAN no se contrata por la puerta de las funciones sueltas. Los planes son filas de la
   // MISMA tabla `Feature` (`PLAN_PRO`, `PLAN_PREMIUM`), así que sin este corte esta ruta permitía
   // contratar un segundo plan saltándose el guard del checkout —que sí rechaza un plan activo— y
@@ -335,12 +335,14 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
       },
     })
 
+    // D36 (12-nov): QUIÉN del negocio contrató, y las filas creadas (una compra puede traer varias funciones).
     logAction({
+      staffId: actorId ?? null,
       venueId,
       action: 'FEATURES_ADDED',
       entity: 'VenueFeature',
       entityId: venueId,
-      data: { featureCodes: newFeatureCodes },
+      data: { featureCodes: newFeatureCodes, venueFeatureIds: createdFeatures.map(f => f.id) },
     })
 
     return createdFeatures
@@ -360,7 +362,7 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
  * @param venueId - Venue ID
  * @param featureId - Feature ID to remove
  */
-export async function removeFeatureFromVenue(venueId: string, featureId: string) {
+export async function removeFeatureFromVenue(venueId: string, featureId: string, actorId?: string) {
   logger.info('Removing feature from venue', { venueId, featureId })
 
   // Get VenueFeature record
@@ -455,11 +457,13 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
     )
   }
 
+  // D36 (12-nov): QUIÉN del negocio la quitó, y la fila de la función (antes, el id del catálogo).
   logAction({
+    staffId: actorId ?? null,
     venueId,
     action: 'FEATURE_REMOVED',
     entity: 'VenueFeature',
-    entityId: featureId,
+    entityId: venueFeature.id,
     data: { featureCode: venueFeature.feature.code },
   })
 
