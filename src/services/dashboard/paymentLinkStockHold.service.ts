@@ -168,6 +168,19 @@ export async function attachIntent(holdId: string, paymentIntentId: string): Pro
     throw new ConflictError('La ficha de apartado ya no está activa o tiene otro intento de pago', 'PAYMENT_LINK_HOLD_INTENT_MISMATCH')
 }
 
+/**
+ * Devuelve a ACTIVE una ficha que `takeOrReuseHold` soltó por cambio de compra cuando su intento NO se pudo confirmar cancelado
+ * (sigue cobrando, ya cobró sin cierre, o Stripe no contestó). CAS: sólo si sigue `RELEASED/cambio_de_compra` y vigente; si ya
+ * se cerró, venció o la tomó el barrido, no hace nada. Peor caso: un apartado de más hasta su vencimiento (lado seguro).
+ */
+export async function restoreReleasedHold(holdId: string, now: Date = new Date()): Promise<boolean> {
+  const { count } = await prisma.paymentLinkStockHold.updateMany({
+    where: { id: holdId, status: 'RELEASED', releasedReason: 'cambio_de_compra', expiresAt: { gt: now } },
+    data: { status: 'ACTIVE', releasedReason: null },
+  })
+  return count > 0
+}
+
 export async function releaseHold(holdId: string, reason: string): Promise<void> {
   await prisma.paymentLinkStockHold.updateMany({
     where: { id: holdId, status: 'ACTIVE' },

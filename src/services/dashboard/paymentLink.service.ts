@@ -62,6 +62,7 @@ import {
   consumeHoldInTx,
   freezeIntentParams,
   releaseHold,
+  restoreReleasedHold,
   takeOrReuseHold,
   variantAvailability,
 } from './paymentLinkStockHold.service'
@@ -1824,21 +1825,38 @@ function mismosDatosDeLaClienta(
 async function cerrarIntentoPrevio(
   stripe: Stripe,
   h: Pick<PaymentLinkStockHold, 'id' | 'stripePaymentIntentId' | 'stripeAccountId'>,
+  opciones: { restaurarSiSigue?: boolean } = {},
 ): Promise<{ alreadyPaid: true; paymentIntentId: string } | null> {
   const id = h.stripePaymentIntentId as string
-  const opciones = { stripeAccount: h.stripeAccountId as string }
+  const cuenta = { stripeAccount: h.stripeAccountId as string }
+  // Codex código r2: una ficha que acaba de soltar `takeOrReuseHold` y cuyo intento NO quedó confirmado cancelado vuelve a
+  // ACTIVE (la pieza sigue apartada mientras ese pago se resuelve). Un error al restaurar sólo se registra: el de Stripe manda.
+  const sigueViva = async () => {
+    if (!opciones.restaurarSiSigue) return
+    await restoreReleasedHold(h.id).catch(err =>
+      logger.error('No se pudo restaurar la ficha soltada con su intento sin cerrar', {
+        holdId: h.id,
+        paymentIntentId: id,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  }
   let pi: PaymentIntent
   try {
-    pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
-    if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
+    pi = await stripe.paymentIntents.retrieve(id, undefined, cuenta)
+    if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, cuenta)
   } catch (err) {
     // Cambió de estado entre consultar y cancelar (la clienta lo está confirmando): el mismo 409 «en curso», no el error de Stripe.
     if ((err as { code?: string } | null)?.code === 'payment_intent_unexpected_state') {
+      await sigueViva()
       throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
     }
     // Lo pasajero sube (no se aparta nada nuevo). Lo PERMANENTE para este intento (ya no existe, o la cuenta congelada ya no da
     // acceso) nunca se va a poder revisar: se da por cerrado para no trabar a este navegador en la liga para siempre.
-    if (!errorPermanenteDelIntento(err)) throw err
+    if (!errorPermanenteDelIntento(err)) {
+      await sigueViva()
+      throw err
+    }
     logger.warn('Intento previo de la liga que Stripe ya no deja consultar: se da por cancelado', {
       holdId: h.id,
       paymentIntentId: id,
@@ -1849,10 +1867,17 @@ async function cerrarIntentoPrevio(
     return null
   }
   if (pi.status === 'succeeded') {
-    await prisma.paymentLinkStockHold.updateMany({ where: { id: h.id, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
+    // Cobrado sin cierre todavía: la ficha soltada vuelve a ACTIVE para que el cierre la consuma (sin la marca «cobrado»).
+    if (opciones.restaurarSiSigue) await sigueViva()
+    else {
+      await prisma.paymentLinkStockHold.updateMany({ where: { id: h.id, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
+    }
     return { alreadyPaid: true, paymentIntentId: pi.id }
   }
-  if (pi.status !== 'canceled') throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+  if (pi.status !== 'canceled') {
+    await sigueViva()
+    throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+  }
   await marcarIntentoCancelado(h.id)
   return null
 }
@@ -1964,7 +1989,7 @@ async function cobrarPrendaConApartado(args: {
       if (pagada) return pagada
     }
 
-    const { hold, released } = await takeOrReuseHold({
+    const { hold, reused, released } = await takeOrReuseHold({
       paymentLinkId: paymentLink.id,
       venueId: paymentLink.venueId,
       productId,
@@ -1975,21 +2000,27 @@ async function cobrarPrendaConApartado(args: {
     // mismo navegador con otra talla) y ya estar cobrando. Cada una se cierra en estricto, con SU cuenta, igual que las previas;
     // si no queda confirmada como cancelada (en curso, ya cobrada o Stripe sin contestar), se suelta la ficha NUEVA y no se
     // crea ni devuelve intento: nunca dos cobros posibles antes de vencer.
+    // Codex código r2: la ficha soltada cuyo intento sigue vivo vuelve a ACTIVE (dentro de `cerrarIntentoPrevio`). La ficha de
+    // ESTE POST se suelta, salvo que sea una reusada cuyo intento ya está en su pestaña: ésa se deja como estaba.
+    const soltarLaNueva = async (motivo: string) => {
+      if (reused && hold.stripePaymentIntentId) return
+      await releaseHold(hold.id, motivo)
+    }
     for (const r of released) {
       if (!r.stripePaymentIntentId || !r.stripeAccountId) continue
       let pagada: Awaited<ReturnType<typeof cerrarIntentoPrevio>>
       try {
-        pagada = await cerrarIntentoPrevio(stripe, {
-          id: r.holdId,
-          stripePaymentIntentId: r.stripePaymentIntentId,
-          stripeAccountId: r.stripeAccountId,
-        })
+        pagada = await cerrarIntentoPrevio(
+          stripe,
+          { id: r.holdId, stripePaymentIntentId: r.stripePaymentIntentId, stripeAccountId: r.stripeAccountId },
+          { restaurarSiSigue: true },
+        )
       } catch (err) {
-        await releaseHold(hold.id, 'intento_previo_sin_cerrar')
+        await soltarLaNueva('intento_previo_sin_cerrar')
         throw err
       }
       if (pagada) {
-        await releaseHold(hold.id, 'intento_previo_cobrado')
+        await soltarLaNueva('intento_previo_cobrado')
         return pagada
       }
     }

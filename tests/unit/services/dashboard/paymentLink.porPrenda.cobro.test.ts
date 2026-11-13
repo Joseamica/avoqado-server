@@ -29,6 +29,7 @@ jest.mock('@/services/dashboard/paymentLinkStockHold.service', () => ({
   freezeIntentParams: jest.fn(),
   attachIntent: jest.fn(),
   releaseHold: jest.fn(),
+  restoreReleasedHold: jest.fn(),
   variantAvailability: jest.fn(),
   consumeHoldInTx: jest.fn(),
 }))
@@ -60,6 +61,7 @@ import {
   consumeHoldInTx,
   freezeIntentParams,
   releaseHold,
+  restoreReleasedHold,
   takeOrReuseHold,
   variantAvailability,
 } from '../../../../src/services/dashboard/paymentLinkStockHold.service'
@@ -78,6 +80,7 @@ const take = takeOrReuseHold as jest.Mock
 const freeze = freezeIntentParams as jest.Mock
 const attach = attachIntent as jest.Mock
 const release = releaseHold as jest.Mock
+const restaurar = restoreReleasedHold as jest.Mock
 const disponibilidad = variantAvailability as jest.Mock
 const plan = venueHasFeatureAccess as jest.Mock
 
@@ -167,6 +170,7 @@ beforeEach(() => {
   freezeReal()
   attach.mockReset().mockResolvedValue(undefined)
   release.mockReset().mockResolvedValue(undefined)
+  restaurar.mockReset().mockResolvedValue(true)
   disponibilidad.mockReset()
   piCreate.mockReset().mockResolvedValue({ id: 'pi_nuevo', client_secret: 'secret_nuevo', status: 'requires_payment_method' })
   piRetrieve.mockReset()
@@ -392,33 +396,87 @@ describe('POST payment-intent de la liga por prenda', () => {
       expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
     })
 
-    it('M ya está en processing → 409 IN_PROGRESS, se suelta la ficha nueva y no se crea intento', async () => {
+    const M = 'chold00000000000000000001'
+    /** Codex código r2: la ficha de M NO se queda soltada mientras su pago sigue: se restaura (CAS) y nadie más la aparta. */
+    const mSeRestauraYNoSeMarcaCobrada = () => {
+      expect(restaurar).toHaveBeenCalledWith(M)
+      expect(restaurar).not.toHaveBeenCalledWith('chold00000000000000000003')
+      expect(fichas.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ releasedReason: 'intento_cobrado' }) }),
+      )
+      expect(fichas.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ releasedReason: 'intento_cancelado' }) }),
+      )
+    }
+
+    it('M ya está en processing → 409 IN_PROGRESS, M vuelve a ACTIVE, se suelta la ficha nueva y no se crea intento', async () => {
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
       await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
       expect(piCancel).not.toHaveBeenCalled()
       expect(piCreate).not.toHaveBeenCalled()
       expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      mSeRestauraYNoSeMarcaCobrada()
     })
 
-    it('Stripe rechaza la cancelación porque M ya empezó a cobrar → 409 IN_PROGRESS, ficha nueva suelta, sin intento', async () => {
+    it('Stripe rechaza la cancelación porque M ya empezó a cobrar → 409 IN_PROGRESS, M vuelve a ACTIVE, ficha nueva suelta', async () => {
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_action' })
       piCancel.mockRejectedValue(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }))
       await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
       expect(piCreate).not.toHaveBeenCalled()
       expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      mSeRestauraYNoSeMarcaCobrada()
     })
 
-    it('M ya cobró → alreadyPaid con SU intento, ficha nueva suelta, sin intento', async () => {
+    it('cancelar responde sin «canceled» → 409, M vuelve a ACTIVE', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      mSeRestauraYNoSeMarcaCobrada()
+    })
+
+    it('M ya cobró (sin cierre todavía) → alreadyPaid con SU intento, M vuelve a ACTIVE antes de cualquier marca, ficha nueva suelta', async () => {
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'succeeded' })
       await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_de_m' })
       expect(piCreate).not.toHaveBeenCalled()
       expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      mSeRestauraYNoSeMarcaCobrada()
     })
 
-    it('Stripe caído al revisar la de M → sube el error, ficha nueva suelta, sin intento', async () => {
+    it('Stripe caído al revisar la de M → sube el error, M vuelve a ACTIVE, ficha nueva suelta, sin intento', async () => {
       piRetrieve.mockRejectedValue(new Error('Stripe caído'))
       await expect(pagar()).rejects.toThrow('Stripe caído')
       expect(piCreate).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      mSeRestauraYNoSeMarcaCobrada()
+    })
+
+    it('M confirmada cancelada → NO se restaura (la pieza se libera de verdad)', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_de_m', status: 'canceled' })
+      await pagar()
+      expect(restaurar).not.toHaveBeenCalled()
+    })
+
+    it('L reusada con su intento ya entregado a la pestaña: con M en processing → 409, M vuelve a ACTIVE y L se queda como estaba', async () => {
+      take.mockResolvedValue({
+        hold: ficha({ id: NUEVA, stripePaymentIntentId: 'pi_de_l', stripeAccountId: 'acct_A' }),
+        reused: true,
+        released: [{ holdId: M, stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' }],
+      })
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(release).not.toHaveBeenCalled()
+      expect(restaurar).toHaveBeenCalledWith(M)
+    })
+
+    it('L reusada SIN intento todavía: sí se suelta', async () => {
+      take.mockResolvedValue({
+        hold: ficha({ id: NUEVA }),
+        reused: true,
+        released: [{ holdId: M, stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' }],
+      })
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
       expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
     })
   })

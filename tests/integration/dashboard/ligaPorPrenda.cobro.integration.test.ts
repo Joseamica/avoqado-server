@@ -16,6 +16,8 @@ jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
 }))
 let n = 0
+/** Estado de cada intento en el Stripe simulado (por omisión, todavía se puede confirmar). */
+const estados = new Map<string, string>()
 /** Como Stripe: la misma llave de idempotencia devuelve el MISMO intento. */
 const porLlave = new Map<string, { id: string; client_secret: string; status: string; amount: number }>()
 const piCreate = jest.fn(async (params: { amount: number }, opciones: { idempotencyKey: string }) => {
@@ -38,7 +40,7 @@ jest.mock('stripe', () => ({
       retrieve: jest.fn(async (id: string) => ({
         id,
         client_secret: `secret_${id}`,
-        status: 'requires_payment_method',
+        status: estados.get(id) ?? 'requires_payment_method',
         latest_charge: null,
       })),
       cancel: jest.fn(async (id: string) => ({ id, status: 'canceled' })),
@@ -117,6 +119,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  estados.clear()
   if (m?.venueId) await prisma.paymentLinkStockHold.deleteMany({ where: { venueId: m.venueId } })
   await borrarMundoComisiones(m)
 })
@@ -237,5 +240,89 @@ describe('Task 6: cerrar y vencer', () => {
     expect(await prisma.payment.count({ where: { venueId: m.venueId, processorId: r.paymentIntentId } })).toBe(1)
     expect(await prisma.inventoryPosting.count({ where: { venueId: m.venueId } })).toBe(1)
     expect(await prisma.paymentLinkStockHold.count({ where: { venueId: m.venueId, status: 'CONSUMED' } })).toBe(1)
+  })
+})
+
+/**
+ * 🔴 Codex código r2 (#2 a medias): dos pestañas del mismo navegador, M y L. La de L revisa sus fichas cuando la de M todavía no
+ * ligaba su intento; luego M lo liga y empieza a pagar (processing). L suelta la ficha de M en `takeOrReuseHold` y, al ver su
+ * intento en curso, contesta 409. Antes la ficha de M se quedaba RELEASED: OTRA compradora apartaba la última M y la pagaba
+ * mientras M seguía pagando dentro de sus 15 minutos. Ahora la ficha de M vuelve a ACTIVE (CAS) y la última M sigue apartada.
+ */
+describe('carrera M/L: la ficha de M no se suelta mientras su pago sigue', () => {
+  const navegador = 'tok_carrera_ml_0123456789ab'
+  let espia: jest.SpyInstance | null = null
+  afterEach(() => {
+    espia?.mockRestore()
+    espia = null
+  })
+  /** La revisión de previas de L corre ANTES de que M ligue su intento: no la ve. */
+  function previasSinM(idM: string) {
+    const real = prisma.paymentLinkStockHold.findMany.bind(prisma.paymentLinkStockHold)
+    espia = jest.spyOn(prisma.paymentLinkStockHold, 'findMany').mockImplementationOnce((async (args: any) => {
+      const filas = (await real(args)) as Array<{ id: string }>
+      return filas.filter(f => f.id !== idM)
+    }) as any)
+  }
+
+  it('M en processing → 409 a L, M sigue ACTIVE y una tercera compradora NO puede apartar la última M', async () => {
+    const tallaM = await talla('CM', 500, 1)
+    const tallaL = await talla('CL', 520, 1)
+    const rM: any = await createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaM, browserToken: navegador } as any)
+    const fichaM = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { stripePaymentIntentId: rM.paymentIntentId } })
+    estados.set(rM.paymentIntentId, 'processing')
+
+    previasSinM(fichaM.id)
+    await expect(
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaL, browserToken: navegador } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: fichaM.id } })).toMatchObject({
+      status: 'ACTIVE',
+      releasedReason: null,
+      expiresAt: fichaM.expiresAt,
+    })
+    // La ficha nueva de L (sin intento entregado) se soltó: L no queda apartada.
+    expect(await prisma.paymentLinkStockHold.count({ where: { venueId: m.venueId, productId: tallaL, status: 'ACTIVE' } })).toBe(0)
+    await expect(
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaM, browserToken: 'tok_tercera_compradora_0123' } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_VARIANT_SOLD_OUT' })
+  })
+
+  it('L reusada con su intento ya entregado: con M en processing → 409, M vuelve a ACTIVE y L se queda como estaba', async () => {
+    const tallaM = await talla('RM', 500, 1)
+    const tallaL = await talla('RL', 520, 1)
+    // Primero L (su pestaña ya tiene su intento) y después M, con el mismo navegador: apartar M suelta L y la de M queda viva.
+    const rL: any = await createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaL, browserToken: navegador } as any)
+    const fichaL = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { stripePaymentIntentId: rL.paymentIntentId } })
+    // Escenario de la carrera: las dos fichas vivas a la vez (la de L ya entregada a su pestaña, la de M pagando).
+    const fichaM = await prisma.paymentLinkStockHold.create({
+      data: {
+        venueId: m.venueId,
+        paymentLinkId: fichaL.paymentLinkId,
+        productId: tallaM,
+        browserToken: navegador,
+        amountCents: 50000,
+        quantity: 1,
+        expiresAt: new Date(Date.now() + 14 * 60_000),
+        stripePaymentIntentId: 'pi_m_en_curso',
+        stripeAccountId: 'acct_talla',
+      },
+    })
+    estados.set('pi_m_en_curso', 'processing')
+
+    previasSinM(fichaM.id)
+    await expect(
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaL, browserToken: navegador } as any),
+    ).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: fichaM.id } })).toMatchObject({ status: 'ACTIVE' })
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: fichaL.id } })).toMatchObject({
+      status: 'ACTIVE',
+      stripePaymentIntentId: rL.paymentIntentId,
+    })
+    await expect(
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaM, browserToken: 'tok_tercera_compradora_0456' } as any),
+    ).rejects.toMatchObject({ code: 'PAYMENT_LINK_VARIANT_SOLD_OUT' })
   })
 })
