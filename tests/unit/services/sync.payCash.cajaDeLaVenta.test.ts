@@ -231,28 +231,77 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'MESA_SIN_RED_EN_CUENTA_APARTE' }))
   })
 
-  it('D51 · Codex r2 #2: con propiedad de mesa, una cuenta AJENA que nació antes del candado rechaza igual (sin cuenta aparte ni nota)', async () => {
-    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
-    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue(null) // la revisión de antes del candado no la vio
-    const tx = {
-      activityLog: { create: jest.fn() },
+  // D71 (hz:8024bc1c:D71, founder 13-nov: «A, cuenta propia»): con «propiedad de mesa» encendida, la mesa abierta SIN red sobre una
+  // mesa que ya es de otro mesero ya no se rechaza (su efectivo quedaba en cuarentena): nace en su cuenta propia, a su nombre.
+  // Reemplaza a «D51 · Codex r2 #2» (que rechazaba bajo el candado): ahora assignTable nunca adopta una cuenta ajena.
+  describe('D71 · propiedad de mesa encendida', () => {
+    const tx = () => ({
+      activityLog: { create: jest.fn().mockResolvedValue({}) },
       posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      order: { findFirst: jest.fn().mockResolvedValue({ servedBy: { firstName: 'Pedro', lastName: 'Mesa' } }) },
-    }
-    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
-      await args[5](tx, { orderId: 'cuenta-propia', isNewOrder: true, otrasCuentas: ['cuenta-de-pedro'] })
-      return { order: { id: 'cuenta-propia', orderNumber: 'A-2', version: 1 }, isNewOrder: true }
+      order: { findMany: jest.fn().mockResolvedValue([{ id: 'cuenta-de-pedro' }]) },
     })
-    const acks = await processIntents(
-      baseParams([{ id: 'i-mesa-pedro', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: Date.now() - 60_000 }]),
-    )
-    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
-    expect(tx.order.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: VENUE, id: { in: ['cuenta-de-pedro'] }, servedById: { not: STAFF } } }),
-    )
-    expect(tx.activityLog.create).not.toHaveBeenCalled()
-    expect(tx.posSyncIntent.updateMany).not.toHaveBeenCalled()
+    beforeEach(() => {
+      ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+      ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
+      // La revisión de antes del candado SÍ ve la cuenta de otro mesero.
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ servedBy: { firstName: 'Pedro', lastName: 'Mesa' } })
+    })
+
+    it('con la hora, la mesa de otro mesero ya no rechaza: assignTable sólo puede adoptar cuentas de ESTE mesero (9.º)', async () => {
+      const t = tx()
+      ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+        await args[5](t, { orderId: 'cuenta-propia', isNewOrder: true, otrasCuentas: ['cuenta-de-pedro'] })
+        return { order: { id: 'cuenta-propia', orderNumber: 'A-2', version: 1 }, isNewOrder: true }
+      })
+      const acks = await processIntents(
+        baseParams([
+          {
+            id: 'i-mesa-pedro',
+            type: 'OPEN_TABLE',
+            payload: { tableId: 't1', covers: 2, localOrderId: 'L-9' },
+            createdAtLocal: Date.now() - 60_000,
+          },
+        ]),
+      )
+      expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'cuenta-propia', localOrderId: 'L-9', isNewOrder: true } })
+      const llamada = (tableService.assignTable as jest.Mock).mock.calls[0]
+      expect(llamada).toHaveLength(9)
+      expect(llamada[8]).toBe(STAFF)
+      // La nota dice cuáles de las otras cuentas son de otro mesero (medido bajo el candado, en la misma transacción).
+      expect(t.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: VENUE, id: { in: ['cuenta-de-pedro'] }, servedById: { not: STAFF } } }),
+      )
+      expect(t.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
+          staffId: STAFF,
+          entityId: 'cuenta-propia',
+          data: expect.objectContaining({ otrasCuentas: ['cuenta-de-pedro'], cuentasDeOtroMesero: ['cuenta-de-pedro'] }),
+        }),
+      })
+      expect(t.posSyncIntent.updateMany).toHaveBeenCalledTimes(1)
+    })
+
+    it('sin la hora (petición a mano, cliente sin createdAtLocal) sigue rechazando como hoy, sin abrir nada', async () => {
+      const acks = await processIntents(baseParams([{ id: 'i-mesa-sin-hora', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 } }]))
+      expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(tableService.assignTable).not.toHaveBeenCalled()
+    })
+
+    it('un gerente (tables:manage-all) sigue con la regla de D51: assignTable no recibe el 9.º', async () => {
+      ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+      ;(tableService.assignTable as jest.Mock).mockResolvedValue({
+        order: { id: 'cuenta-A', orderNumber: 'A-1', version: 1 },
+        isNewOrder: false,
+      })
+      const acks = await processIntents(
+        baseParams([
+          { id: 'i-mesa-gerente', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: Date.now() - 60_000 },
+        ]),
+      )
+      expect(acks[0].status).toBe('ACKED')
+      expect((tableService.assignTable as jest.Mock).mock.calls[0]).toHaveLength(8)
+    })
   })
 
   it('D51: adoptada (sin otras cuentas), no deja nota', async () => {
