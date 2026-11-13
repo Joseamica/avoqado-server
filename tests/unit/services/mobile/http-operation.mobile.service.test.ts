@@ -339,6 +339,14 @@ test('split receipt exact whole UTF8 budget retains child and last ref detached'
   expect(serialized.affectedRefs[serialized.affectedRefs.length - 1].id).not.toBe(last.id)
   expect(() => serializeEnvelope(e)).toThrow('RECEIPT_TOO_LARGE')
 })
+test('D18 candado: redeemLoyaltyPoints acepta expectedDiscountAmount opcional, finito y no negativo', () => {
+  const m = (payload: unknown) =>
+    manifestSchema.safeParse({ action: 'redeemLoyaltyPoints', refs: { orderId: 'o', customerId: 'c' }, payload }).success
+  expect(m({ points: 10 })).toBe(true)
+  expect(m({ points: 10, expectedDiscountAmount: 1.5 })).toBe(true)
+  expect(m({ points: 10, expectedDiscountAmount: 0 })).toBe(true)
+  for (const expectedDiscountAmount of [NaN, Infinity, -1, '1.5', null]) expect(m({ points: 10, expectedDiscountAmount })).toBe(false)
+})
 test('finite payloads, strict refs, comp reason and split elements reject malformed input', () => {
   for (const covers of [NaN, Infinity, -Infinity, 0, 201, '2']) {
     expect(manifestSchema.safeParse({ action: 'updateOrderDetails', refs: { orderId: 'o' }, payload: { covers } }).success).toBe(false)
