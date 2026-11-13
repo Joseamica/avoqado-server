@@ -132,6 +132,12 @@ export async function leerCuentasActuales(
   if (!venue) throw new BadRequestError('El negocio no existe')
   if (bloquear) {
     await formarseEnLaOrganizacion(db, otraOrganizacion ? [venue.organizationId, otraOrganizacion] : [venue.organizationId])
+    // Codex p12-r4 #3: la organización se leyó ANTES de formarse; un traslado que terminó mientras tanto la cambia. Se relee ya
+    // con el candado (el traslado lo retiene hasta su commit) y, si cambió, la pantalla tiene que recargar.
+    const ahoraEs = await db.venue.findUnique({ where: { id: objetivo.venueId }, select: { organizationId: true } })
+    if (ahoraEs?.organizationId !== venue.organizationId) {
+      throw new ConflictError('Este negocio acaba de cambiar de organización. Recarga y vuelve a intentarlo.', POSICION_DESACTUALIZADA)
+    }
     await db.$queryRaw`SELECT id FROM "VenuePaymentConfig" WHERE "venueId" = ${objetivo.venueId} FOR UPDATE`
     await db.$queryRaw`SELECT id FROM "OrganizationPaymentConfig" WHERE "organizationId" = ${venue.organizationId} FOR UPDATE`
   }

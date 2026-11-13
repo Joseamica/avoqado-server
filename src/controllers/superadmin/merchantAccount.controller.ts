@@ -2150,6 +2150,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
 
     // Batch assign additional terminals
     let batchAttached = 0
+    const skippedTerminals: Array<{ id: string; reason: string }> = []
     if (additionalTerminalIds.length > 0) {
       for (const terminalId of additionalTerminalIds) {
         const terminal = await prisma.terminal.findUnique({
@@ -2157,9 +2158,18 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           select: { id: true, assignedMerchantIds: true },
         })
         if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
-          // Provider ↔ device-brand compatibility guard (Task 11 / validation
-          // point #2). Explicit operator-selected terminal — fail hard.
-          await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+          // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2). Explicit operator-selected terminal: la
+          // validación que rechaza va ANTES de escribir la posición (candado de posiciones, Codex p12-r3 #1). Si la terminal
+          // cambió de marca después de eso (Codex p12-r4 #4), aquí ya no se lanza un error con la posición guardada: se salta y
+          // se avisa en el resumen.
+          try {
+            await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+          } catch (err) {
+            if (!(err instanceof IncompatibleDeviceError)) throw err
+            logger.warn('[Full Setup] Terminal elegida ya no es compatible; no se asignó', { terminalId, merchantAccountId })
+            skippedTerminals.push({ id: terminalId, reason: err.message })
+            continue
+          }
 
           await prisma.terminal.update({
             where: { id: terminalId },
@@ -2292,6 +2302,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
         autoAttached: autoAttached.length,
         batchAttached,
         total: autoAttached.length + batchAttached,
+        ...(skippedTerminals.length > 0 && { skipped: skippedTerminals }),
       },
       costStructure: costStructureResult ? { id: costStructureResult.id } : null,
       paymentConfig: paymentConfig ? { id: paymentConfig.id, slot: accountSlot } : null,

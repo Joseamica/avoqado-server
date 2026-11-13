@@ -444,6 +444,34 @@ describe('paso 1 · KYC, traslado y carreras (Codex p12-r3)', () => {
     expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).organizationId).toBe(destino)
   })
 
+  it('si el negocio cambió de organización mientras esperaba el candado, 409 y no guarda (Codex p12-r4 #3)', async () => {
+    const origen = await org('mudanza origen')
+    const destino = await org('mudanza destino')
+    const venueId = await negocio(origen, 'Se mueve en medio')
+    const [a, b] = [await cuenta(blumonId, 'A'), await cuenta(blumonId, 'B')]
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: origen, primaryAccountId: a } })
+    let soltar!: () => void
+    const tomado = new Promise<void>(r => (soltar = r))
+    // «Traslado»: retiene el candado de la organización de origen, mueve el negocio y confirma después.
+    const traslado = prisma.$transaction(async tx => {
+      await tomarCandado(tx, { venueId }, destino)
+      await tx.venue.update({ where: { id: venueId }, data: { organizationId: destino } })
+      soltar()
+      await new Promise(r => setTimeout(r, 800))
+    })
+    await tomado
+    const e = await errorDe(
+      venuePricing.createVenuePaymentConfig({
+        venueId,
+        primaryAccountId: b,
+        positionConfirmations: { PRIMARY: { previousAccountId: a, inheritingTerminals: 0 } },
+      }),
+    )
+    await traslado
+    expect(e.code).toBe(POSICION_DESACTUALIZADA)
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toBeNull()
+  })
+
   it('mientras un guardado del negocio tiene el candado, nadie cambia la configuración de su organización', async () => {
     const orgId = await org('carrera')
     const venueId = await negocio(orgId, 'Carrera')

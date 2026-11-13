@@ -166,27 +166,13 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
         await bloquearOrganizacion(tx, organizationId, presupuesto)
       }
 
-      // 2b. Candado de posiciones (tarifa al comercio, paso 1): DESPUÉS de las organizaciones (que no chocan con quien inserta
-      // filas que apuntan a ellas) y ANTES del candado exclusivo del negocio. Los demás guardados de posiciones toman este
-      // candado antes de insertar filas que apuntan al negocio, así que nadie lo retiene mientras espera al negocio
-      // (Codex p12-r3 #3). Tomarlo antes de las organizaciones frenaba a otro traslado detrás de uno que espera una
-      // organización (prueba «dos traslados A→B y A→C a la vez»).
+      // 2b. Candado de posiciones (tarifa al comercio, paso 1; Codex p12-r1 #1): sin configuración propia el negocio pasa a las
+      // cuentas de la organización destino, y su tarifa de respaldo también cambia; eso se confirma antes de mover. Va DESPUÉS
+      // de las organizaciones (no chocan con quien inserta filas que apuntan a ellas) y ANTES del candado exclusivo del negocio
+      // (Codex p12-r3 #3 y r4 #1): así nadie del candado espera al negocio, y el negocio bloqueado —que hace esperar a los cobros
+      // que insertan su pago— no espera ningún candado de posiciones ni de tarifas. Si otro traslado lo movió mientras tanto,
+      // la relectura del paso 3 lo rechaza.
       await tomarCandadoDePosiciones(tx, { venueId }, targetOrganizationId as string)
-
-      // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
-      const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
-      if (relectura?.organizationId !== fromOrganizationId) throw negocioCambioDeOrganizacionError()
-
-      await assertVenueHasNoDocumentLinksTx(tx, venueId)
-
-      // 3b. Su historia de pago al personal, en OTRA sentencia y ya con el candado: ve lo que confirmó quien esperaba.
-      if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('trasladar')
-
-      // 4. Quién trabaja en el negocio, leído dentro de la transacción.
-      const staffIds = (await tx.staffVenue.findMany({ where: { venueId }, select: { staffId: true } })).map(sv => sv.staffId)
-
-      // 4b. Candado de posiciones (tarifa al comercio, paso 1; Codex p12-r1 #1): sin configuración propia el negocio pasa a
-      // las cuentas de la organización destino, y su tarifa de respaldo también cambia. Eso se confirma antes de mover.
       const configPropia = await tx.venuePaymentConfig.findUnique({
         where: { venueId },
         select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
@@ -200,6 +186,18 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
         siguienteCalculado: true,
         confirmaciones: req.body.positionConfirmations,
       })
+
+      // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
+      const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
+      if (relectura?.organizationId !== fromOrganizationId) throw negocioCambioDeOrganizacionError()
+
+      await assertVenueHasNoDocumentLinksTx(tx, venueId)
+
+      // 3b. Su historia de pago al personal, en OTRA sentencia y ya con el candado: ve lo que confirmó quien esperaba.
+      if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('trasladar')
+
+      // 4. Quién trabaja en el negocio, leído dentro de la transacción.
+      const staffIds = (await tx.staffVenue.findMany({ where: { venueId }, select: { staffId: true } })).map(sv => sv.staffId)
 
       // 5. Move venue to target org (el trigger `Venue_trasladoIva_guard` impone la barrera de IVA)
       await tx.venue.update({

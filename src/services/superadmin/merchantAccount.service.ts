@@ -1791,6 +1791,8 @@ export async function approveDiscoveredAngelPayMerchant(input: {
   // ---- Transaction: flip active + assign slot ----
   let positionChanges: CambioDePosicion[] = []
   const result = await prisma.$transaction(async tx => {
+    // Codex p12-r4 #2: el candado de posiciones ANTES de tocar la cuenta, en el mismo orden que el asistente AngelPay.
+    await tomarCandado(tx, { venueId })
     await assertAngelPayLoginsInVenue(venueId, [merchantAccountId], tx)
     const updatedMerchant = await tx.merchantAccount.update({
       where: { id: merchantAccountId },
@@ -1798,7 +1800,6 @@ export async function approveDiscoveredAngelPayMerchant(input: {
       include: { provider: true },
     })
 
-    await tomarCandado(tx, { venueId })
     const existingConfig = await tx.venuePaymentConfig.findUnique({
       where: { venueId },
     })
