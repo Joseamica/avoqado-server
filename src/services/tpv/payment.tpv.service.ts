@@ -2215,6 +2215,7 @@ async function updateOrderTotalsForStandalonePayment(
     // tras 10 min), los renglones del vale los descuenta su dueño, no este cobro — antes se descontaban dos veces.
     let tpvClaimStamp: Date | null = null
     let tpvValeAjeno = false
+    let tpvValeIlegible = false
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
@@ -2228,10 +2229,13 @@ async function updateOrderTotalsForStandalonePayment(
         else tpvValeAjeno = true
       }
     } catch (postingError: any) {
-      // El posting es OBSERVABILIDAD durable: si falla, la deducción sigue igual
-      // que antes de la fase 2 — jamás puede impedir que la mercancía se descuente.
-      logger.error('[InventoryPosting] No se pudo registrar el posting del cobro TPV (la deducción continúa)', {
+      // 🔴 Codex código r1 #1 (liga con talla): con el vale ya creado pero ilegible o sin reclamar, descontar aquí dejaba
+      // movimientos sin `postingLineId` ni cerca y el barredor, al aplicar el vale PENDING, descontaba otra vez (10 → 9 → 8).
+      // Ahora el vale es el dueño de la venta: el barredor lo aplica una sola vez. El cobro nunca se tumba por esto.
+      if (tpvPostingId) tpvValeIlegible = true
+      logger.error('[InventoryPosting] No se pudo leer o reclamar el vale del cobro TPV (lo descuenta el barredor)', {
         orderId,
+        postingId: tpvPostingId,
         error: postingError?.message,
       })
     }
@@ -2327,6 +2331,10 @@ async function updateOrderTotalsForStandalonePayment(
         // restock below so a rollback returns exactly what was deducted.
         const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
         const tpvLineId = tpvPostingLines.get(item.id)
+        if (tpvValeIlegible) {
+          logger.info('⏭️ Vale ilegible — el renglón lo descuenta el barredor', { orderId, orderItemId: item.id })
+          continue
+        }
         if (tpvLineId && tpvValeAjeno) {
           logger.info('⏭️ Renglón del vale en manos de otro trabajador — lo descuenta su dueño', { orderId, orderItemId: item.id })
           continue

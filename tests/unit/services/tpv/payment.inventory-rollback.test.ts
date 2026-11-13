@@ -378,7 +378,11 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
     if (lecturaFalla) (prisma.inventoryPostingLine.findMany as jest.Mock).mockRejectedValueOnce(new Error('lectura temporalmente caída'))
     ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
     await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd4' } as any, 'user-1')
-    expect((productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls.map(call => call[1])).toEqual(['prod-normal'])
+    // Codex código r1 #1 (liga con talla): con el vale ilegible el TPV ya no descuenta ni el renglón normal — lo aplica el
+    // barredor con su cerca (antes iba sin `postingLineId` y el barredor lo descontaba otra vez).
+    expect((productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls.map(call => call[1])).toEqual(
+      lecturaFalla ? [] : ['prod-normal'],
+    )
     if (lecturaFalla) {
       expect(prisma.inventoryPosting.updateMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
@@ -781,5 +785,55 @@ describe('recordOrderPayment — la cerca del vale en el cobro del TPV', () => {
     expect(cierreDelVale()).toEqual([])
     expect(result.inventoryWarning).toBeUndefined()
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'INVENTORY_DEDUCTION_FAILED' }))
+  })
+})
+
+/**
+ * 🔴 Codex código r1 #1 (liga con talla): el vale existe, pero leer sus renglones (o reclamarlo) falla de forma transitoria.
+ * Antes el `catch` seguía descontando con el mapa vacío: movimientos SIN `postingLineId` ni cerca; el vale quedaba PENDING y
+ * el barredor lo aplicaba otra vez (10 → 9 → 8). Ahora, si hay vale y no se pudo leer o reclamar, el TPV no descuenta: lo
+ * descuenta el dueño del vale (el barredor), una sola vez.
+ */
+describe('recordOrderPayment — vale ilegible: el TPV no descuenta a ciegas', () => {
+  beforeEach(() => {
+    const order = makeOrder([makeItem('item-a', 'prod-a', 1), makeItem('item-b', 'prod-b', 1)])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
+    ;(prisma.inventoryPostingLine.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.payment.findUnique as jest.Mock).mockReset()
+  })
+
+  it('falla la lectura de los renglones: no descuenta nada y el cobro sigue igual', async () => {
+    ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockRejectedValueOnce(new Error('connection reset'))
+
+    const result: any = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'vale-ilegible' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-1', status: 'COMPLETED' })
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+  })
+
+  it('se leen los renglones pero falla el reclamo: tampoco descuenta sin cerca', async () => {
+    ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValue([
+      { effectKey: 'item-a', id: 'line-a' },
+      { effectKey: 'item-b', id: 'line-b' },
+    ])
+    ;(prisma.inventoryPosting.updateMany as jest.Mock).mockRejectedValueOnce(new Error('connection reset'))
+
+    const result: any = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'vale-sin-reclamo' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-1', status: 'COMPLETED' })
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
   })
 })
