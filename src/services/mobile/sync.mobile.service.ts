@@ -45,6 +45,7 @@ import * as tableService from '../tpv/table.tpv.service'
 import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
@@ -1062,16 +1063,55 @@ async function applyOpenTable(
     }
   }
 
-  const { order, isNewOrder } = await tableService.assignTable(
-    venueId,
-    tableId,
-    staffId,
-    covers,
-    undefined,
-    dejarHuella ? (tx, admitida) => dejarHuella(tx, admitida) : undefined,
-    // Sin caja, la llamada de hoy byte a byte (sin un séptimo argumento).
-    ...(typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? [{ cashDrawerSessionId: cajaDeLaMesa }] : []),
-  )
+  // D51 (hz:8024bc1c:D51): la hora en que el aparato abrió la mesa sin red. Con ella, una cuenta que nació DESPUÉS en esa mesa no se
+  // adopta: lo de este aparato nace en su propia cuenta junto a ella. Sólo se recorta el futuro (un reloj adelantado = como hoy); el
+  // piso de 24 h de `clampSoldAt` NO, porque convertiría en «anterior» una cuenta posterior tras un día sin red (Codex r1 #2).
+  const horaLocal = intent.createdAtLocal === undefined || intent.createdAtLocal === null ? NaN : new Date(intent.createdAtLocal).getTime()
+  const abiertaSinRedEn = Number.isFinite(horaLocal) ? new Date(Math.min(horaLocal, Date.now())) : undefined
+  const caja = typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? { cashDrawerSessionId: cajaDeLaMesa } : undefined
+  // La cuenta aparte, dentro de la transacción de assignTable (bajo el candado de la mesa):
+  //  · propiedad de mesa otra vez (Codex r2 #2): una cuenta ajena que nació entre la revisión de arriba y el candado se rechaza igual;
+  //  · la nota para el gerente (Codex r1 #3): una caída después del commit no la pierde.
+  const huellaYNota: Parameters<typeof tableService.assignTable>[5] = async (tx, admitida) => {
+    if (admitida.otrasCuentas?.length && (await isTableOwnershipEnforced(venueId))) {
+      const ajena = await tx.order.findFirst({
+        where: { venueId, id: { in: admitida.otrasCuentas }, servedById: { not: staffId } },
+        select: { servedBy: { select: { firstName: true, lastName: true } } },
+      })
+      if (ajena && !(await staffCanManageAllTables(staffId, venueId)))
+        throw errorMesaAjena({
+          ownerName: ajena.servedBy ? `${ajena.servedBy.firstName} ${ajena.servedBy.lastName}`.trim() : 'otro mesero',
+        })
+    }
+    if (admitida.otrasCuentas?.length)
+      await writeLegacyActivityAuditTx(tx, {
+        staffId,
+        venueId,
+        action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
+        entity: 'Order',
+        entityId: admitida.orderId,
+        data: {
+          tableId,
+          otrasCuentas: admitida.otrasCuentas,
+          localOrderId,
+          intentId: intent.id,
+          abiertaSinRedEn: abiertaSinRedEn?.toISOString() ?? null,
+        },
+      })
+    await dejarHuella?.(tx, admitida)
+  }
+  // Sin caja ni hora, la llamada de hoy byte a byte (sin un séptimo argumento).
+  const { order, isNewOrder } = abiertaSinRedEn
+    ? await tableService.assignTable(venueId, tableId, staffId, covers, undefined, huellaYNota, caja, abiertaSinRedEn)
+    : await tableService.assignTable(
+        venueId,
+        tableId,
+        staffId,
+        covers,
+        undefined,
+        dejarHuella ? (tx, admitida) => dejarHuella(tx, admitida) : undefined,
+        ...(caja ? [caja] : []),
+      )
   if (localOrderId) localRefMap.set(localOrderId, order.id)
   return {
     id: intent.id,
