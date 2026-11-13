@@ -21,8 +21,8 @@ import {
  * - Por eso la columna manda, y la propina cobrada sólo se descuenta cuando es SEGURO que la columna la trae: el total coincide
  *   al centavo con la regla común CON las propinas cobradas y `Order.tipAmount` es exactamente esas propinas (así escriben los
  *   cobros y D19), y la cuenta nació en Avoqado. Si no, se calcula como antes (sin restar propina): la garantía es «arreglado cuando es seguro, igual que
- *   antes cuando no». Quedan como antes, sin arreglar (Codex r3 #1): un abono cripto con propina después de otro con tarjeta
- *   (B4Bit no reescribe `total` ni `tipAmount`), y una venta cancelada y cerrada con IVA aparte que recibe una propina sola.
+ *   antes cuando no». Una cuenta con un abono cripto (B4Bit no reescribe `total` ni `tipAmount`) queda como antes, y también
+ *   una venta cancelada y cerrada con IVA aparte que recibe una propina sola (Codex r3 #1).
  *   Los arregla que todos los escritores de `Order.total` lo guarden igual (anotado en el pizarrón).
  *
  * Lo cobrado es la regla común (`summarizeRefunds` de los COMPLETED): un reembolso no reabre la venta (founder, 18-ago) salvo lo
@@ -30,7 +30,12 @@ import {
  * su importe, como antes: si no, otra terminal ofrecería cobrarlo otra vez (Codex r2 #2). Uno FAILED ya no aparta nada.
  * Nunca negativo: la TPV lee ≤ 0 como «no falta nada».
  */
-export type PagoParaElRestante = CompletedPaymentForBalance & { status: string | null }
+export type PagoParaElRestante = CompletedPaymentForBalance & {
+  status: string | null
+  /** Para reconocer un abono cripto (B4Bit), que guarda su propina sin reescribir el total. */
+  method?: string | null
+  processor?: string | null
+}
 
 export function restanteDeLaMesa(
   orden: Omit<StoredOrderTotalAmounts, 'tipAmount'> & {
@@ -64,8 +69,15 @@ export function restanteDeLaMesa(
   // coincidir CON propinas exige que las traiga. Una de canal de entrega (Deliverect), SoftRestaurant o Shopify guarda en
   // `total` cosas que ninguna columna explica (el envío del canal) y en `tipAmount` la propina del canal: un envío igual a la
   // propina pasaba las dos señales. Esas quedan como antes.
+  // Y sin abonos cripto (Codex r5 y la pasada exhaustiva del 13-nov): de los escritores de un cobro con propina sobre una cuenta
+  // existente, sólo B4Bit la deja COMPLETED sin reescribir `total` ni `tipAmount` (a propósito, `b4bit.service.ts`). Todos los
+  // empates que encontró Codex (r3 #2, r4, r5) tomaban su propina de ahí. Con uno, la cuenta queda como antes.
+  const hayAbonoCripto = completados.some(
+    p => p.type !== 'REFUND' && (p.method === 'CRYPTOCURRENCY' || (p.processor ?? '').toUpperCase() === 'B4BIT'),
+  )
   const elTotalTraeLasPropinas =
     orden.originSystem === 'AVOQADO' &&
+    !hayAbonoCripto &&
     centavos(totalGuardado).equals(centavos(totalConPropinas)) &&
     centavos(new Prisma.Decimal(orden.tipAmount ?? 0)).equals(centavos(cobrado.netTipAmount))
 

@@ -252,6 +252,25 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
     expect(result.amount_left).toBe(35)
   })
 
+  it('una cuenta con un abono cripto queda como antes, aunque las señales coincidan (Codex r5: IVA de SoftRestaurant = propina)', async () => {
+    // Cuenta de Avoqado con IVA incluido que la sincronización dejó en total 116 (100 + IVA 16) y tipAmount 16; abono cripto
+    // $50 + $16. B4Bit no reescribe total ni tipAmount: las dos señales coinciden por casualidad. Antes $66; sigue $66.
+    findUniqueMock.mockResolvedValue(
+      cuenta({
+        subtotal: new Decimal('100.00'),
+        taxAmount: new Decimal('16.00'),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        total: new Decimal('116.00'),
+        tipAmount: new Decimal('16.00'),
+        payments: [pago('50.00', '16.00', { id: 'cripto', method: 'CRYPTOCURRENCY', processor: 'B4BIT' })],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(66)
+  })
+
   it('si no es seguro que el total traiga la propina, queda como antes (abono cripto con propina tras uno con tarjeta)', async () => {
     // $100; tarjeta $25 + $10 (total 110, tipAmount 10); cripto $25 + $5 (B4Bit deja 110 y 10). Antes: 110 − 50 = $60; sigue $60.
     findUniqueMock.mockResolvedValue(
@@ -259,7 +278,10 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
         subtotal: new Decimal('100.00'),
         total: new Decimal('110.00'),
         tipAmount: new Decimal('10.00'),
-        payments: [pago('25.00', '5.00', { id: 'cripto' }), pago('25.00', '10.00', { id: 'tarjeta' })],
+        payments: [
+          pago('25.00', '5.00', { id: 'cripto', method: 'CRYPTOCURRENCY', processor: 'B4BIT' }),
+          pago('25.00', '10.00', { id: 'tarjeta' }),
+        ],
       }),
     )
 
