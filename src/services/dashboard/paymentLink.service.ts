@@ -126,7 +126,8 @@ async function validateBundleItems(
               minSelections: true,
               maxSelections: true,
               modifiers: {
-                where: archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
+                where:
+                  archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
                 select: { id: true, active: true },
               },
             },
@@ -3965,6 +3966,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
   const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
+  const { escribirDesenlaceDeMercadoPago } = await import('@/services/mercado-pago/payment-flow.service')
 
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },
@@ -4015,14 +4017,8 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   // webhook will confirm the authoritative state later.
   const optimisticStatus = mpToCheckoutStatus(payment.status)
 
-  await prisma.checkoutSession.update({
-    where: { id: session.id },
-    data: {
-      mpPaymentId: String(payment.id),
-      status: optimisticStatus,
-      completedAt: optimisticStatus === 'COMPLETED' ? new Date() : null,
-    },
-  })
+  // CAS: si el aviso de MP ya marcó COMPLETED mientras esperábamos esta respuesta, un «pendiente» viejo no lo baja.
+  await escribirDesenlaceDeMercadoPago({ sessionDbId: session.id, mpPaymentId: String(payment.id), status: optimisticStatus })
 
   // Record the Payment + Order now if the charge is already approved. The MP
   // IPN webhook does the same on its authoritative callback — both are
@@ -4097,7 +4093,7 @@ export async function finalizeMercadoPagoCheckout(args: {
   sessionId: string
   mpPaymentId: string | number
   paymentTypeId?: string | null
-}): Promise<void> {
+}): Promise<boolean> {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId: args.sessionId },
     include: {
@@ -4118,9 +4114,9 @@ export async function finalizeMercadoPagoCheckout(args: {
   })
   if (!session) {
     logger.warn('⚠️ [MP FINALIZE] No checkout session found', { sessionId: args.sessionId })
-    return
+    return false
   }
-  if (session.paymentId) return // already finalized — idempotent no-op
+  if (session.paymentId) return false // already finalized — idempotent no-op
 
   const isLink = !!session.paymentLink
   const venueId = session.paymentLink?.venueId ?? session.ecommerceMerchant.venueId
@@ -4161,10 +4157,14 @@ export async function finalizeMercadoPagoCheckout(args: {
       async tx => {
         let orderIdForReferral: string | null = null
         let postingId: string | null = null
-        // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
-        // can't both create an Order.
-        const fresh = await tx.checkoutSession.findUnique({ where: { id: session.id }, select: { paymentId: true } })
-        if (fresh?.paymentId) return { postingId, orderIdForReferral }
+        // Reclamo dentro de la tx: la sesión sigue COMPLETED y sin venta. El UPDATE deja la fila bloqueada hasta el commit,
+        // así que dos cierres a la vez (optimista + aviso + barrido) no crean dos órdenes, y un reembolso (FAILED) que ya
+        // se escribió —o una aprobación vieja que llega tarde— no crea una venta sobre un cobro devuelto (Codex r1 #2).
+        const reclamo = await tx.checkoutSession.updateMany({
+          where: { id: session.id, status: 'COMPLETED', paymentId: null },
+          data: { updatedAt: new Date() },
+        })
+        if (reclamo.count === 0) return { postingId, orderIdForReferral }
 
         // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
         //
@@ -4346,6 +4346,8 @@ export async function finalizeMercadoPagoCheckout(args: {
       venueId,
       isLink,
     })
+    // Sólo quien creó la orden la devuelve (otro cierre que ganó la carrera sale por el `paymentId` ya sellado).
+    return orderIdForReferral !== null
   } catch (err: any) {
     // Only the Payment idempotencyKey collision means "already finalized".
     // Any OTHER unique violation is a real bug — surface it, don't mask it as
@@ -4355,7 +4357,7 @@ export async function finalizeMercadoPagoCheckout(args: {
       err?.code === 'P2002' && (Array.isArray(target) ? target.includes('idempotencyKey') : String(target ?? '').includes('idempotencyKey'))
     if (isIdempotencyCollision) {
       logger.info('ℹ️ [MP FINALIZE] Duplicate finalize ignored (idempotent)', { sessionId: args.sessionId, mpPaymentId: processorId })
-      return
+      return false
     }
     throw err
   }
