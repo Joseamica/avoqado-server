@@ -4,7 +4,8 @@
  * - quien tiene `tpv-orders:discount` lo aplica directo;
  * - quien no, recibe el 403 canónico (`required` + `overridable`) y no se escribe nada; con el token del PIN de un gerente, entra;
  * - la fila guarda quién lo aplicó y quién lo aprobó;
- * - una venta de la cola sin el permiso se rechaza (403), y una llave que ya existe devuelve su venta sin pedir nada;
+ * - D4 r5: una venta de la cola sin el permiso YA se cobró: entra sin aprobador y con rastro (antes, 403 = efectivo sin venta); en
+ *   línea sigue el 403; una llave que ya existe devuelve su venta sin pedir nada;
  * - una venta que necesita cortesía Y aprobación lleva los dos tokens y cada revisión gasta el suyo.
  * Sólo se sustituyen transportes Socket.IO/wallet y el aviso. El runner crea y destruye SU base.
  */
@@ -260,10 +261,48 @@ describe('D4 · Mostrador: la venta nueva', () => {
     expect([Number(fila.amount), fila.authorizedById]).toEqual([20, gerenteVenueId])
   })
 
-  it('venta de la cola (isOfflineReplay) de una sesión sin el permiso: 403, nada se escribe', async () => {
-    const { response, externalId } = await vender('cajera', { ...etiqueta(), isOfflineReplay: true, createdAtLocal: Date.now() })
-    expect(response.status).toBe(403)
-    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(0)
+  // D4 r5 (Codex, apps viejas): la cajera cobró $90 de $100 en efectivo SIN RED con un descuento por producto que pide aprobación.
+  // Al volver la red la cola reproduce la venta: el dinero ya está en la caja, así que entra (como antes de #423), sin aprobador.
+  it('venta de la cola (isOfflineReplay) de una sesión sin el permiso: 201, sin aprobador y con rastro en la bitácora', async () => {
+    const renglon = await prisma.discount.create({
+      data: {
+        venueId,
+        name: '10% producto gerencial',
+        type: 'PERCENTAGE',
+        value: new Prisma.Decimal(10),
+        scope: 'ITEM',
+        requiresApproval: true,
+      },
+    })
+    const items = [{ productId, quantity: 1, externalId: cuid(), discountId: renglon.id }]
+    const { response, externalId } = await vender('cajera', { items, isOfflineReplay: true, createdAtLocal: Date.now() })
+    expect(response.status).toBe(201)
+    expect(response.body.order).toMatchObject({ discountAmount: 10, total: 90 })
+    const orderId = response.body.order.id
+    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(1)
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: renglon.id } })
+    expect([Number(fila.amount), fila.appliedById, fila.authorizedById]).toEqual([10, cajeraVenueId, null])
+    const rastro = await prisma.activityLog.findFirstOrThrow({
+      where: { venueId, action: 'DESCUENTO_SIN_APROBACION_SIN_RED', entityId: orderId },
+    })
+    expect(rastro.data).toMatchObject({ orderId, discountId: renglon.id, nombre: '10% producto gerencial', importePesos: 10 })
+    // En línea (sin `isOfflineReplay`) la misma venta sigue pidiendo el PIN.
+    const enLinea = await vender('cajera', { items: [{ ...items[0], externalId: cuid() }] })
+    expect(enLinea.response.status).toBe(403)
+    expect(enLinea.response.body).toMatchObject({ required: 'tpv-orders:discount', overridable: true })
+    expect(await prisma.order.count({ where: { venueId, externalId: enLinea.externalId } })).toBe(0)
+  })
+
+  it('venta de la cola con la etiqueta del descuento de cuenta, sin el permiso: entra sin aprobador', async () => {
+    const { response } = await vender('cajera', { ...etiqueta(), isOfflineReplay: true, createdAtLocal: Date.now() })
+    expect(response.status).toBe(201)
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: response.body.order.id } })
+    expect([fila.name, Number(fila.amount), fila.appliedById, fila.authorizedById]).toEqual([
+      'Descuento de la cuenta',
+      10,
+      cajeraVenueId,
+      null,
+    ])
   })
 
   it('venta de la cola de una sesión con el permiso: entra y el aprobador es esa sesión', async () => {
