@@ -1427,14 +1427,14 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
   const SEMILLAS = Array.from({ length: 150 }, (_, i) => i + 1)
 
   it.each([
-    ['misma talla ×3, sin intento ligado', () => undefined, [T_L, T_L, T_L], 'nada'],
-    ['misma talla ×3, la clienta confirma lo que se le entrega', () => undefined, [T_L, T_L, T_L], 'confirma'],
-    ['tallas distintas (L, M, L) desde cero', () => undefined, [T_L, T_M, T_L], 'confirma'],
+    ['misma talla ×3, sin intento ligado', 'desde-cero', [T_L, T_L, T_L], 'nada'],
+    ['misma talla ×3, la clienta confirma lo que se le entrega', 'desde-cero', [T_L, T_L, T_L], 'confirma'],
+    ['tallas distintas (L, M, L) desde cero', 'desde-cero', [T_L, T_M, T_L], 'confirma'],
     ['M en vuelo sin intento + L, L (r3b #1)', 'm-sin-intento', [T_M, T_L, T_L], 'confirma'],
     ['M con intento cobrando + L, L, M', 'm-processing', [T_L, T_L, T_M], 'rechazo'],
     ['M con intento cancelable + L, M, L', 'm-cancelable', [T_L, T_M, T_L], 'confirma'],
     // Codex codigo-r4b: la clienta corrige su correo a media carrera (otra compra con la misma talla).
-    ['misma talla ×3 con el correo corregido a media carrera', () => undefined, [T_L, [T_L, 'nuevo@example.test'], T_L], 'confirma'],
+    ['misma talla ×3 con el correo corregido a media carrera', 'desde-cero', [T_L, [T_L, 'nuevo@example.test'], T_L], 'confirma'],
     ['tallas y correos mezclados', 'm-cancelable', [[T_M, 'nuevo@example.test'], T_L, [T_L, 'nuevo@example.test']], 'confirma'],
   ] as const)('%s: en 150 intercalaciones nunca hay dos cobros posibles', async (_n, inicio, tallas, clienta) => {
     for (const semilla of SEMILLAS) {
@@ -1444,7 +1444,7 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
       entregas = []
       candado = Promise.resolve()
       const sembrarInicio = () => {
-        if (typeof inicio === 'function') return
+        if (inicio === 'desde-cero') return
         const m = sembrar({ productId: T_M })
         if (inicio === 'm-processing') ligarM(m, 'processing')
         if (inicio === 'm-cancelable') ligarM(m, 'requires_payment_method')
