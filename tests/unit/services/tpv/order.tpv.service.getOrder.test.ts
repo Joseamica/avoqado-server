@@ -161,7 +161,16 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     findUniqueMock.mockResolvedValue(
       buildOrderFixture({
         table: { id: 'table-1', number: 5 },
-        payments: [{ id: 'pay-1', amount: new Decimal('50.00'), splitType: 'EQUALPARTS', createdAt: new Date() }],
+        payments: [
+          {
+            id: 'pay-1',
+            amount: new Decimal('50.00'),
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            splitType: 'EQUALPARTS',
+            createdAt: new Date(),
+          },
+        ],
       }),
     )
 

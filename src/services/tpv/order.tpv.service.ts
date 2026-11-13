@@ -3,7 +3,7 @@ import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
-import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma, TransactionStatus } from '@prisma/client'
 import {
   NotFoundError,
   BadRequestError,
@@ -45,7 +45,7 @@ import {
 import { descuentosDeLosClientes } from '../shared/descuentoDelCliente.service'
 import { autorizadorDelDescuentoDelCliente } from '../mobile/permission-override.mobile.service'
 import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
-import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
+import { computeStoredOrderTotal, impuestoQueSeCobraAparte, saldoPorCobrar } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
@@ -369,16 +369,14 @@ export async function getOrder(
   })
 
   // Calculate amount left to pay
-  // 🔴 D4 (hz:72be07e6:D4, 12-nov): `order.total` YA trae las propinas cobradas (`recordOrderPayment` lo reescribe con
-  // `computeStoredOrderTotal`: mercancía + propinas), así que a lo pagado se le resta `amount + tipAmount`. Restando sólo
-  // `amount`, la mesa de $50 con la parte 1 de $25 + $10 de propina decía «Restante $35» y la TPV volvía a pedir la propina.
-  // En Decimal, para no dejar «$0.0000001 por cobrar». La forma no cambia: `amount_left` sigue siendo un número.
-  const orderTotal = new Prisma.Decimal(order.total ?? 0)
-  const totalPayments = order.payments.reduce(
-    (sum, payment) => sum.plus(new Prisma.Decimal(payment.amount ?? 0)).plus(new Prisma.Decimal(payment.tipAmount ?? 0)),
-    new Prisma.Decimal(0),
-  )
-  const amount_left = orderTotal.minus(totalPayments).toNumber()
+  // 🔴 D4 (hz:72be07e6:D4, 13-nov): antes era `order.total − Σ payment.amount`. `order.total` ya trae las propinas cobradas y
+  // `amount` no: la mesa de $50 con la parte 1 de $25 + $10 de propina decía «Restante $35» y la TPV volvía a pedir la
+  // propina. Tampoco basta restar `amount + tipAmount` a la columna (Codex r1): agregar productos reescribe `order.total` SIN
+  // propina, y los intentos PENDING/FAILED (cripto) no son dinero. Ahora es la MISMA cuenta que el POS de ANDROID e iOS
+  // (`saldoPorCobrar`): mercancía + propinas de los pagos COMPLETED − lo cobrado, sin reabrir por reembolsos (salvo D19), ≥ 0.
+  // La forma no cambia: `amount_left` sigue siendo un número en pesos (las TPV viejas lo leen igual).
+  const completados = order.payments.filter(payment => payment.status === TransactionStatus.COMPLETED)
+  const amount_left = saldoPorCobrar(order, completados).toNumber()
 
   // Construct table name for display in Android app
   const tableName = order.table ? `Mesa ${order.table.number}` : null
