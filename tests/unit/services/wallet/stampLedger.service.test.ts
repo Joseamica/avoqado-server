@@ -91,10 +91,11 @@ describe('grantStamp', () => {
     // segundo. Si eso se propaga como error, el cobro se ve fallido aunque el
     // dinero entró — que es peor que no sellar.
     // La forma REAL de este índice parcial (crudo, sin nombre en el esquema): la lista de columnas, como en turnoDeCaja.ts.
+    // Desde las promos de lealtad (migración 20261112210000) el índice es (venueId, orderId, part).
     const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
       code: 'P2002',
       clientVersion: 'test',
-      meta: { modelName: 'StampEvent', target: ['venueId', 'orderId'] },
+      meta: { modelName: 'StampEvent', target: ['venueId', 'orderId', 'part'] },
     })
     prismaMock.$transaction.mockRejectedValueOnce(p2002)
 
@@ -411,10 +412,22 @@ describe('grantStamp', () => {
     expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
     expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
     // La relectura es DENTRO del candado y busca el EARN de esta orden en este negocio.
-    expect(prismaMock.stampEvent.findFirst).toHaveBeenNthCalledWith(2, {
-      where: { venueId: 'v1', orderId: 'o1', type: 'EARN' },
+    // Promos de lealtad (Task 6): una venta puede tener varias partes; «ya sellada» es su parte 0, la de siempre.
+    expect(prismaMock.stampEvent.findFirst).toHaveBeenNthCalledWith(1, {
+      where: { venueId: 'v1', orderId: 'o1', type: 'EARN', part: 0 },
       select: { id: true, stampCardId: true },
     })
+    expect(prismaMock.stampEvent.findFirst).toHaveBeenNthCalledWith(2, {
+      where: { venueId: 'v1', orderId: 'o1', type: 'EARN', part: 0 },
+      select: { id: true, stampCardId: true },
+    })
+  })
+
+  it('🔴 el tope del día cuenta VISITAS: sólo la parte 0 de cada venta (ruling 8)', async () => {
+    mockConfig({ maxStampsPerDay: 2 })
+    // Hoy: una venta ×2 que cruzó de tarjeta (partes 0 y 1). Por partes serían 2 = tope; por visitas es 1.
+    prismaMock.stampEvent.count.mockImplementation((async ({ where }: any) => (where.part === 0 ? 1 : 2)) as never)
+    expect(await grantStamp('v1', 'c1', 'o2')).toMatchObject({ granted: true })
   })
 
   it('el tope alcanzado DENTRO del candado: DAILY_LIMIT_REACHED, sin sello ni cartilla nueva', async () => {
@@ -426,14 +439,14 @@ describe('grantStamp', () => {
     expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
   })
 
-  it('el P2002 del índice del sello, reportado por NOMBRE, también es ya sellado', async () => {
+  it.each<[string, Record<string, unknown>]>([
+    ['por nombre en target', { target: 'StampEvent_venueId_orderId_part_earn_unique' }],
+    ['por nombre en constraint', { constraint: 'StampEvent_venueId_orderId_part_earn_unique' }],
+    ['por nombre en un arreglo de uno', { target: ['StampEvent_venueId_orderId_part_earn_unique'] }],
+  ])('reconoce el índice nuevo como «ya sellado» (%s)', async (_n, meta) => {
     mockConfig()
     prismaMock.$transaction.mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: 'test',
-        meta: { target: 'StampEvent_venueId_orderId_earn_unique' },
-      }),
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta }),
     )
     expect(await grantStamp('v1', 'c1', 'o1')).toEqual({ granted: false, reason: 'ALREADY_STAMPED' })
   })
@@ -481,7 +494,7 @@ describe('[repetirNoDuplica:reverseStampForOrder] reverseStampForOrder: la red p
       a?.select?.rewards
         ? { completedAt: null, rewards: [] }
         : { id: 'sc1', venueId: 'v1', customerId: 'c1', cycle: 1, stampsEarned: 2, completedAt: null }) as any)
-    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc1' } as any)
+    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc1', stampsEarned: 2 } as any)
     prismaMock.stampEvent.create.mockResolvedValue({ id: 'se2' } as any)
     prismaMock.stampCard.update.mockResolvedValue({ id: 'sc1' } as any)
     jest.spyOn(activityLog, 'logAction').mockReturnValue(undefined as any)
@@ -522,5 +535,36 @@ describe('[repetirNoDuplica:reverseStampForOrder] reverseStampForOrder: la red p
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
     expect(activityLog.logAction).toHaveBeenCalledTimes(1)
     expect(passUpdate.notifyCustomerPassUpdated).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('reverseStampForOrder: sólo el único de la REVERSA es «ya revertida» (promos de lealtad, Task 6)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockReset()
+    prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as never)
+    prismaMock.stampEvent.findFirst.mockResolvedValue({ id: 'se1', stampCardId: 'sc1', quantity: 1 } as any)
+    prismaMock.stampEvent.count.mockResolvedValue(0)
+    prismaMock.stampCard.findUnique.mockResolvedValue({ id: 'sc1', venueId: 'v1', customerId: 'c1', cycle: 1, stampsEarned: 2 } as any)
+  })
+
+  const p2002 = (meta?: Record<string, unknown>) =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['por nombre', { constraint: 'StampEvent_venueId_orderId_part_reversal_unique' }],
+    ['por columnas de StampEvent', { modelName: 'StampEvent', target: ['venueId', 'orderId', 'part'] }],
+  ])('el índice de la reversa (%s): otra reversa de la venta ganó ⇒ reversed false, sin error', async (_n, meta) => {
+    prismaMock.$transaction.mockImplementationOnce(((cb: any) => cb(prismaMock)) as never).mockRejectedValueOnce(p2002(meta))
+    expect(await reverseStampForOrder('v1', 'o1')).toEqual({ reversed: false, stampCardId: 'sc1' })
+  })
+
+  it.each<[string, Record<string, unknown> | undefined]>([
+    ['otro modelo', { modelName: 'WalletPassOutbox', target: ['venueId', 'customerId'] }],
+    ['sin descriptor (no se adivina)', undefined],
+  ])('un P2002 de OTRO único (%s) se relanza', async (_n, meta) => {
+    const otro = p2002(meta)
+    prismaMock.$transaction.mockImplementationOnce(((cb: any) => cb(prismaMock)) as never).mockRejectedValueOnce(otro)
+    await expect(reverseStampForOrder('v1', 'o1')).rejects.toBe(otro)
   })
 })

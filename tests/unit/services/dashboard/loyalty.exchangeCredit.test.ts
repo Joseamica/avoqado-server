@@ -44,6 +44,61 @@ describe('earnPoints · new sale of a product exchange', () => {
     expect(r).toEqual({ pointsEarned: 100, newBalance: 100, otorgado: { sello: false, puntos: true } })
   })
 
+  describe('con una promo ×2 vigente', () => {
+    beforeEach(() => {
+      prismaMock.loyaltyPromotion.findMany.mockResolvedValue([
+        {
+          id: 'promo-1',
+          venueId: 'v1',
+          name: 'Puntos dobles',
+          kind: 'MULTIPLY',
+          multiplier: 2,
+          extraStamps: null,
+          extraPoints: null,
+          startsAt: new Date('2020-01-01T00:00:00Z'),
+          endsAt: null,
+          endedAt: null,
+          daysOfWeek: [],
+          timeFrom: null,
+          timeUntil: null,
+          productIds: [],
+          categoryIds: [],
+          categoryProductIds: [],
+          minSpend: null,
+          limit: 'NONE',
+          createdById: null,
+          createdAt: new Date('2020-01-01T00:00:00Z'),
+          updatedAt: new Date('2020-01-01T00:00:00Z'),
+        },
+      ])
+      prismaMock.loyaltyTransaction.create.mockImplementation((async ({ data }: any) => ({ id: 'lt-1', ...data })) as never)
+    })
+    // `clearAllMocks` no borra implementaciones: sin esto la promo se colaría en las pruebas de abajo.
+    afterEach(() => prismaMock.loyaltyPromotion.findMany.mockResolvedValue([]))
+
+    // Ola final: la venta nueva de un cambio no es una visita nueva — tampoco gana promo (ni bono ni fila de uso).
+    it('skipStamp: los puntos de siempre, sin bono de la promo ni uso registrado', async () => {
+      await earnPoints('v1', 'c1', 100, 'o-new', 'sv-1', { skipStamp: true })
+
+      const data = prismaMock.loyaltyTransaction.create.mock.calls[0][0].data
+      expect(data.points).toBe(100)
+      expect(data).not.toHaveProperty('promotionId')
+      expect(data).not.toHaveProperty('bonusPoints')
+      expect(prismaMock.loyaltyPromotionUse.upsert).not.toHaveBeenCalled()
+    })
+
+    it('sin skipStamp la misma venta sí gana el ×2 (regresión)', async () => {
+      await earnPoints('v1', 'c1', 100, 'o-sale', 'sv-1')
+
+      expect(prismaMock.loyaltyTransaction.create.mock.calls[0][0].data).toMatchObject({
+        points: 200,
+        promotionId: 'promo-1',
+        bonusPoints: 100,
+      })
+      expect(prismaMock.loyaltyPromotionUse.upsert).toHaveBeenCalled()
+    })
+  })
+
   it('earnPoints without options still asks grantStamp for the stamp (regression)', async () => {
     const r = await earnPoints('v1', 'c1', 100, 'o-sale', 'sv-1')
 

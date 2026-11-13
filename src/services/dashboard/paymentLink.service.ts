@@ -30,8 +30,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
-import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
-import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
+import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
 import {
   BASE_LIGA_ABIERTA,
@@ -126,7 +125,8 @@ async function validateBundleItems(
               minSelections: true,
               maxSelections: true,
               modifiers: {
-                where: archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
+                where:
+                  archivadosPermitidos.length > 0 ? { OR: [{ active: true }, { id: { in: archivadosPermitidos } }] } : { active: true },
                 select: { id: true, active: true },
               },
             },
@@ -2104,69 +2104,69 @@ async function resolvePaymentLinkCustomerId(
  * **con IVA** (en México el precio en pantalla ya lo trae) y **sin propina** —
  * la propina es del empleado, no venta del negocio. En estos tres caminos eso es
  * exactamente `Order.total − Order.tipAmount`, que es el mismo número que queda
- * en `Payment.amount`.
+ * en `Payment.amount`, y la misma base con que el reconciliador la recupera.
  *
- * IDEMPOTENCIA (dos capas, ninguna nueva):
+ * RECUPERABLE (Task 2b): la orden nace con `loyaltyEligibleAt` en la MISMA
+ * transacción que la deja pagada (si tiene cliente), y esto pasa por el
+ * otorgamiento compartido de la terminal (`awardLoyaltyForPaidOrder`), que cierra
+ * la venta (`loyaltyProcessedAt`) al terminar bien o le deja el error. Si el
+ * proceso muere antes, el reconciliador de lealtad la otorga una sola vez.
+ *
+ * IDEMPOTENCIA (ninguna capa nueva):
  *  1. Los tres finalizadores ya son de un solo disparo — una reentrega del
  *     webhook regresa ANTES de crear una segunda orden (sesión COMPLETED en
  *     Stripe, claim CAS en Blumon, `paymentId` ya sellado en MercadoPago). Es la
  *     misma garantía de la que ya dependen la comisión y el vale de inventario.
  *  2. `earnPoints` deduplica por `(customerId, orderId, EARN)` con índice único
- *     parcial en la DB, así que dos llamadas por la MISMA orden no dan doble punto.
+ *     parcial en la DB, y `updateCustomerMetrics` por `(customerId, orderId)`.
  *
- * NUNCA lanza: un cobro aprobado no se cae porque falle un enganche de lealtad
- * (mismo patrón que comisión, referidos y el vale de inventario en este archivo).
+ * NUNCA lanza (`awardLoyaltyForPaidOrder` tampoco): un cobro aprobado no se cae
+ * porque falle un enganche de lealtad.
  *
- * `earnPoints` NO recibe staff: `LoyaltyTransaction.createdById` referencia
- * `StaffVenue.id`, y en una liga de pago el cliente cobra solo desde la web — no
- * hay cajero. Pasar el `Staff.id` del creador de la liga reventaría la FK en
- * silencio (trampa ya documentada en `manualPayment.service.ts`).
+ * SIN cajero: `LoyaltyTransaction.createdById` referencia `StaffVenue.id`, y en
+ * una liga de pago el cliente cobra solo desde la web — no hay cajero. Pasar el
+ * `Staff.id` del creador de la liga reventaría la FK en silencio (trampa ya
+ * documentada en `manualPayment.service.ts`); por eso tampoco se guarda
+ * `loyaltyStaffId` en la orden.
  */
 async function creditPaymentLinkCustomer(args: {
   venueId: string
   customerId: string
   orderId: string
   amount: Prisma.Decimal
-  channel: 'stripe' | 'blumon' | 'mercadopago'
 }): Promise<void> {
-  const base = Number(args.amount.toString())
+  await awardLoyaltyForPaidOrder({
+    venueId: args.venueId,
+    orderId: args.orderId,
+    orderTotal: Number(args.amount.toString()),
+    staffId: null,
+    legacyCustomer: { id: args.customerId, firstName: null, lastName: null },
+  })
+}
 
+/**
+ * La categoría de cada producto de una liga de productos, para `OrderItem.categoryName` (Codex r3 #1): los demás canales la
+ * guardan (`product.category?.name || null`) y los reportes por categoría la leen. Se lee al cobrar, como la terminal.
+ *
+ * NUNCA lanza (ni por un renglón malformado del snapshot): si la lectura falla, la venta se registra sin categoría. En Blumon corre
+ * ANTES del cargo; en Stripe, al finalizar la sesión ya pagada.
+ */
+export async function categoriasDeLaLiga(venueId: string, items: BundleItemSnapshot[]): Promise<Map<string, string | null>> {
   try {
-    await updateCustomerMetrics(args.customerId, base, args.orderId, args.venueId)
-    logger.info('📊 Métricas del cliente actualizadas (liga de pago)', {
-      orderId: args.orderId,
-      customerId: args.customerId,
-      channel: args.channel,
-      amount: base,
+    const ids = [...new Set(items.map(it => it.productId))]
+    if (ids.length === 0) return new Map()
+    const productos = await prisma.product.findMany({
+      where: { venueId, id: { in: ids } },
+      select: { id: true, category: { select: { name: true } } },
+      take: ids.length,
     })
-  } catch (metricsError: any) {
-    logger.error('⚠️ Falló actualizar métricas del cliente en liga de pago (el cobro sigue en pie)', {
-      orderId: args.orderId,
-      customerId: args.customerId,
-      venueId: args.venueId,
-      channel: args.channel,
-      error: metricsError?.message ?? String(metricsError),
+    return new Map((productos ?? []).map(p => [p.id, p.category?.name || null] as const))
+  } catch (err) {
+    logger.warn('No se pudo leer la categoría de los productos de una liga (la venta se registra sin ella)', {
+      venueId,
+      error: err instanceof Error ? err.message : String(err),
     })
-  }
-
-  try {
-    const loyaltyResult = await earnPoints(args.venueId, args.customerId, base, args.orderId)
-    logger.info('🎁 Puntos de lealtad acreditados (liga de pago)', {
-      orderId: args.orderId,
-      customerId: args.customerId,
-      channel: args.channel,
-      amount: base,
-      pointsEarned: loyaltyResult?.pointsEarned,
-      newBalance: loyaltyResult?.newBalance,
-    })
-  } catch (loyaltyError: any) {
-    logger.error('⚠️ Falló acreditar puntos en liga de pago (el cobro sigue en pie)', {
-      orderId: args.orderId,
-      customerId: args.customerId,
-      venueId: args.venueId,
-      channel: args.channel,
-      error: loyaltyError?.message ?? String(loyaltyError),
-    })
+    return new Map()
   }
 }
 
@@ -2285,6 +2285,8 @@ export async function finalizePaymentLinkCheckout(args: {
   )
   // Base de lealtad = lo cobrado por la venta, con IVA y SIN propina.
   const loyaltyBase = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
+  // Codex r3 #1: la categoría de cada producto, como la guardan los demás canales.
+  const categorias = isItemLink ? await categoriasDeLaLiga(venueId, sessionItems) : new Map<string, string | null>()
 
   // R65 b: lo que el cuerpo produce sale en su RETORNO; un intento abortado por 40P01 no deja nada a medias.
   const { postingId, orderIdForReferral } = await withDeadlockRetry(
@@ -2337,7 +2339,9 @@ export async function finalizePaymentLinkCheckout(args: {
           type: isPaymentOrDonation ? 'MANUAL_ENTRY' : 'TAKEOUT',
           source: 'PAYMENT_LINK',
           createdById: session.paymentLink!.createdById,
-          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+          // Task 2b: con cliente, la venta nace con su obligación de lealtad (la recupera el reconciliador si el proceso muere
+          // antes del otorgamiento). Sin `loyaltyStaffId`: una liga no tiene cajero.
+          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId, loyaltyEligibleAt: new Date() } : {}),
           customerName: session.customerName,
           customerEmail: session.customerEmail,
           subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
@@ -2360,6 +2364,7 @@ export async function finalizePaymentLinkCheckout(args: {
                 return {
                   productId: it.productId,
                   productName: it.productName,
+                  categoryName: categorias.get(it.productId) ?? null,
                   quantity: it.quantity,
                   unitPrice: new Prisma.Decimal(it.unitPrice),
                   discountAmount: 0,
@@ -2517,7 +2522,6 @@ export async function finalizePaymentLinkCheckout(args: {
       customerId: loyaltyCustomerId,
       orderId: orderIdForReferral,
       amount: loyaltyBase,
-      channel: 'stripe',
     })
   }
 
@@ -3066,6 +3070,12 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     session.customerPhone,
     session.attributedCustomerId,
   )
+  // Codex r3 #1: la categoría de cada producto se lee ANTES de cobrar; después del cobro sólo cuenta registrar la venta.
+  const itemsDeLaSesion = (session.metadata as Record<string, any> | null)?.items
+  const categorias =
+    session.paymentLink.purpose === 'ITEM' && Array.isArray(itemsDeLaSesion)
+      ? await categoriasDeLaLiga(session.paymentLink.venueId, itemsDeLaSesion as BundleItemSnapshot[])
+      : new Map<string, string | null>()
 
   // 2. Extract card token from metadata
   const metadata = session.metadata as Record<string, any>
@@ -3218,7 +3228,8 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
             type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
             source: 'PAYMENT_LINK',
             createdById: session.paymentLink!.createdById,
-            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+            // Task 2b: con cliente, la venta nace con su obligación de lealtad (sin `loyaltyStaffId`: una liga no tiene cajero).
+            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId, loyaltyEligibleAt: new Date() } : {}),
             customerName: session.customerName,
             customerEmail: session.customerEmail,
             subtotal,
@@ -3241,6 +3252,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
                   return {
                     productId: it.productId,
                     productName: it.productName,
+                    categoryName: categorias.get(it.productId) ?? null,
                     quantity: it.quantity,
                     unitPrice: new Prisma.Decimal(it.unitPrice),
                     discountAmount: 0,
@@ -3367,7 +3379,6 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       customerId: loyaltyCustomerId,
       orderId: orderIdForReferral,
       amount: loyaltyBase,
-      channel: 'blumon',
     })
   }
 
@@ -4156,6 +4167,8 @@ export async function finalizeMercadoPagoCheckout(args: {
     session.customerPhone,
     session.attributedCustomerId,
   )
+  // Codex r3 #1: la categoría de cada producto, como la guardan los demás canales.
+  const categorias = isItemLink ? await categoriasDeLaLiga(venueId, sessionItems) : new Map<string, string | null>()
   try {
     const { postingId, orderIdForReferral } = await withDeadlockRetry(
       async tx => {
@@ -4181,7 +4194,8 @@ export async function finalizeMercadoPagoCheckout(args: {
             type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
             source: isLink ? 'PAYMENT_LINK' : 'WEB',
             createdById: session.paymentLink?.createdById ?? undefined,
-            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
+            // Task 2b: con cliente, la venta nace con su obligación de lealtad (sin `loyaltyStaffId`: una liga no tiene cajero).
+            ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId, loyaltyEligibleAt: new Date() } : {}),
             customerEmail: session.customerEmail,
             subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal,
             discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
@@ -4203,6 +4217,7 @@ export async function finalizeMercadoPagoCheckout(args: {
                   return {
                     productId: it.productId,
                     productName: it.productName,
+                    categoryName: categorias.get(it.productId) ?? null,
                     quantity: it.quantity,
                     unitPrice: new Prisma.Decimal(it.unitPrice),
                     discountAmount: 0,
@@ -4336,7 +4351,6 @@ export async function finalizeMercadoPagoCheckout(args: {
         customerId: loyaltyCustomerId,
         orderId: orderIdForReferral,
         amount: subtotal,
-        channel: 'mercadopago',
       })
     }
 

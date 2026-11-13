@@ -57,6 +57,10 @@ export interface SaleStampOutcome {
    * describen la cartilla ABIERTA hoy; éste, la de la venta (Codex r1 #1-#3).
    */
   saleCard: SaleStampCard | null
+  /** Sellos que dio ESTA venta en total (suma de sus partes EARN; con promoción puede ser más de 1). Opcional: las apps viejas lo ignoran. */
+  stampsAdded?: number | null
+  /** Nombre de la promoción que se aplicó a la venta (la de su parte 0); null si fue sello normal. */
+  promotionName?: string | null
 }
 
 export interface SaleStampCard {
@@ -167,6 +171,7 @@ const VENTA_SELECT = {
   originSystem: true,
   customerId: true,
   loyaltyEligibleAt: true,
+  loyaltySaleAt: true,
   loyaltyProcessedAt: true,
   orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
   // Sólo el ÚLTIMO cobro completado que no es reembolso: es el ancla del plazo cuando `loyaltyEligibleAt` es null. Los
@@ -180,8 +185,9 @@ const VENTA_SELECT = {
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: 1,
   },
+  // Parte 0: una por venta, sea el sello o su reversa (las partes de más de una promo quedarían en el tope y esconderían la reversa).
   stampEvents: {
-    where: { type: { in: [StampEventType.EARN, StampEventType.REVERSAL] } },
+    where: { part: 0, type: { in: [StampEventType.EARN, StampEventType.REVERSAL] } },
     select: { type: true, stampCard: { select: { customerId: true } } },
     take: 10,
   },
@@ -218,7 +224,11 @@ export async function baseDeLealtadDeLaVenta(
     tipAmount: Prisma.Decimal | number | null
   },
 ): Promise<number> {
-  if (!esPedidoDePlataforma(venta)) return Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0))
+  // En Decimal (Codex r3 #3): con números de JS, 69.60 − 11.60 = 57.99999999999999 y el piso de los puntos daba 57, no 58.
+  if (!esPedidoDePlataforma(venta)) {
+    const sinPropina = new Prisma.Decimal(venta.total).minus(venta.tipAmount ?? 0).toDecimalPlaces(2)
+    return Prisma.Decimal.max(0, sinPropina).toNumber()
+  }
   const cobrado = await db.payment.aggregate({
     where: {
       orderId: venta.id,
@@ -502,16 +512,24 @@ async function leerPrograma(venueId: string): Promise<Programa> {
   return { stampsEnabled: Boolean(conPlan && config?.active && config?.stampsEnabled), maxStampsPerDay: config?.maxStampsPerDay ?? 0 }
 }
 
-/** El MISMO conteo que `grantStamp`: EARN del cliente en el día del VENUE. Tope 0 = sin tope. */
-async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, nowMs: number): Promise<boolean> {
+/** La hora de la VENTA, la misma que usa `grantStamp` para contar el día. */
+const horaDeLaVenta = (v: { loyaltySaleAt: Date | null; loyaltyEligibleAt: Date | null }, nowMs: number): Date =>
+  v.loyaltySaleAt ?? v.loyaltyEligibleAt ?? new Date(nowMs)
+
+/**
+ * El MISMO conteo que `grantStamp`: VISITAS del cliente (la parte 0 de cada venta, ruling 8) en el día del VENUE de la hora de la
+ * VENTA. Tope 0 = sin tope.
+ */
+async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, soldAt: Date): Promise<boolean> {
   if (!programa.stampsEnabled || programa.maxStampsPerDay <= 0) return false
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const tz = venue?.timezone ?? 'America/Mexico_City'
-  const ref = new Date(nowMs)
+  const ref = soldAt
   const hoy = await prisma.stampEvent.count({
     where: {
       venueId,
       type: StampEventType.EARN,
+      part: 0,
       stampCard: { customerId },
       createdAt: { gte: venueStartOfDay(tz, ref), lte: venueEndOfDay(tz, ref) },
     },
@@ -524,7 +542,7 @@ async function motivo(
   venueId: string,
   customerId: string,
   programa: Programa,
-  nowMs: number,
+  soldAt: Date,
 ): Promise<SaleStampReason | null> {
   switch (decision) {
     case 'STAMPED':
@@ -541,7 +559,7 @@ async function motivo(
     case 'NO_ANCHOR':
       return 'ERROR'
     case 'ELIGIBLE':
-      return (await topeDelDiaAlcanzado(venueId, customerId, programa, nowMs)) ? 'DAILY_LIMIT' : 'ERROR'
+      return (await topeDelDiaAlcanzado(venueId, customerId, programa, soldAt)) ? 'DAILY_LIMIT' : 'ERROR'
   }
 }
 
@@ -552,7 +570,8 @@ async function motivo(
  */
 async function cartillaDeLaVenta(venueId: string, customerId: string, orderId: string, premioDeHoy: string): Promise<SaleStampCard | null> {
   const earn = await prisma.stampEvent.findFirst({
-    where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId } },
+    // La cartilla de la parte 0: la de siempre (si la venta cruzó de cartilla con una promo, la que se llenó).
+    where: { venueId, orderId, type: StampEventType.EARN, part: 0, stampCard: { customerId } },
     select: {
       stampCard: {
         select: {
@@ -599,6 +618,21 @@ async function armarResultado(
   const tarjeta = await getStampCardStatus(venueId, customerId)
   const saleCard =
     programa.stampsEnabled && stamped && orderId ? await cartillaDeLaVenta(venueId, customerId, orderId, tarjeta.rewardLabel) : null
+  // De la base, no de GrantStampResult: un reintento (ALREADY_STAMPED) no trae esos números. Una sola lectura acotada (pocas partes).
+  const partes =
+    saleCard && orderId
+      ? ((await prisma.stampEvent.findMany({
+          where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId } },
+          select: { part: true, quantity: true, promotion: { select: { name: true } } },
+          take: 50,
+        })) ?? [])
+      : []
+  const extra = partes.length
+    ? {
+        stampsAdded: partes.reduce((n, e) => n + e.quantity, 0),
+        promotionName: partes.find(e => e.part === 0)?.promotion?.name ?? null,
+      }
+    : {}
   return {
     stampsEnabled: programa.stampsEnabled,
     stamped,
@@ -607,6 +641,7 @@ async function armarResultado(
     stampsRequired: tarjeta.stampsRequired,
     rewardReady: tarjeta.pendingRewards > 0,
     saleCard,
+    ...extra,
   }
 }
 
@@ -616,7 +651,14 @@ const minutosDesde = (settledAt: Date | null, nowMs: number): number | null =>
 async function describir(venueId: string, customerId: string, venta: Venta, programa: Programa, nowMs: number): Promise<SaleStampOutcome> {
   const decision = decideSaleStamp(fotoPara(venta, customerId), nowMs)
   const stamped = decision === 'STAMPED'
-  return armarResultado(venueId, customerId, programa, stamped, await motivo(decision, venueId, customerId, programa, nowMs), venta.id)
+  return armarResultado(
+    venueId,
+    customerId,
+    programa,
+    stamped,
+    await motivo(decision, venueId, customerId, programa, horaDeLaVenta(venta, nowMs)),
+    venta.id,
+  )
 }
 
 /** Sólo LEE: describe el sello de una venta para un cliente. No otorga nada. */
@@ -749,7 +791,7 @@ export async function awardLoyaltyForLateCustomer(args: {
       customerId,
       programa,
       stamped,
-      await motivo(decision, venueId, customerId, programa, nowMs),
+      await motivo(decision, venueId, customerId, programa, horaDeLaVenta(venta, nowMs)),
       orderId,
     )
 
@@ -896,7 +938,8 @@ export async function previewSaleStamp(args: { venueId: string; orderId: string;
     decision,
     esVentaNuevaDeCambio: foto.esVentaNuevaDeCambio,
     stampsEnabled: programa.stampsEnabled,
-    dailyLimitReached: decision === 'ELIGIBLE' ? await topeDelDiaAlcanzado(args.venueId, args.customerId, programa, nowMs) : false,
+    dailyLimitReached:
+      decision === 'ELIGIBLE' ? await topeDelDiaAlcanzado(args.venueId, args.customerId, programa, horaDeLaVenta(venta, nowMs)) : false,
     minutosDesdeElCobro: minutosDesde(foto.settledAt, nowMs),
   }
 }

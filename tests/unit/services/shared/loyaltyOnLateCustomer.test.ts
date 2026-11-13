@@ -332,10 +332,12 @@ describe('awardLoyaltyForLateCustomer', () => {
       rewardReady: false,
       saleCard: { stampsEarned: 4, stampsRequired: 7, completed: false, rewardLabel: 'Café', rewardPending: false },
     })
+    // La cartilla de la parte 0: la de siempre aunque una promo haya repartido la venta en varias (ruling 7).
     expect((prismaMock.stampEvent.findFirst as jest.Mock).mock.calls[0][0].where).toEqual({
       venueId: VENUE,
       orderId: ORDER,
       type: 'EARN',
+      part: 0,
       stampCard: { customerId: CUST },
     })
   })
