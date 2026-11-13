@@ -154,25 +154,47 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
     expect(result.amount_left).toBe(35)
   })
 
-  it('un intento que no se cobró (PENDING o FAILED, p. ej. cripto) no descuenta ni su importe ni su propina', async () => {
-    findUniqueMock.mockResolvedValue(
-      cuenta({
-        payments: [
-          pago('25.00', '10.00', { id: 'cripto-fallido', status: 'FAILED' }),
-          pago('25.00', '10.00', { id: 'cripto-en-vuelo', status: 'PENDING' }),
-        ],
-      }),
-    )
+  it('un intento que FALLÓ (p. ej. cripto vencido) no descuenta ni su importe ni su propina', async () => {
+    findUniqueMock.mockResolvedValue(cuenta({ payments: [pago('25.00', '10.00', { id: 'cripto-fallido', status: 'FAILED' })] }))
 
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
 
     expect(result.amount_left).toBe(50)
   })
 
+  it('un cobro todavía EN CURSO (QR de cripto vigente) sigue apartando su importe: otra terminal no lo vuelve a ofrecer (Codex r2 #2)', async () => {
+    findUniqueMock.mockResolvedValue(cuenta({ payments: [pago('50.00', '0.00', { id: 'cripto-en-vuelo', status: 'PENDING' })] }))
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(0)
+  })
+
+  it('un pedido de Deliverect llevado a la mesa conserva lo que sólo vive en su total (envío/comisión del canal) (Codex r2 #1)', async () => {
+    // La ingesta guarda subtotal 140, total 165 (+ $25 del canal) y cargo por servicio 0; su total nunca trae propina.
+    findUniqueMock.mockResolvedValue(cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), paymentStatus: 'PENDING' }))
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(165)
+  })
+
+  it('un pedido de Deliverect con propina cobrada no resta una propina que su total no trae', async () => {
+    findUniqueMock.mockResolvedValue(
+      cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), payments: [pago('100.00', '15.00', { id: 'externo' })] }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(65)
+  })
+
   it('un reembolso de una venta ya pagada no la vuelve a poner a deber (founder, 18-ago)', async () => {
     findUniqueMock.mockResolvedValue(
       cuenta({
         paymentStatus: 'PAID',
+        total: new Decimal('60.00'),
+        tipAmount: new Decimal('10.00'),
         payments: [
           pago('-5.00', '-2.00', { id: 'devolucion', type: 'REFUND', reopenedAmount: null, reopenedTipAmount: null }),
           pago('50.00', '10.00', { id: 'cobro' }),
@@ -186,9 +208,12 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
   })
 
   it('un abono devuelto que reabre saldo (D19) vuelve a deberse, sin la propina dos veces', async () => {
-    // Abono $25 + $10 sobre $50; se devuelven $5 + $2 marcados como reabiertos → faltan 25 + 5 = $30.
+    // Abono $25 + $10 sobre $50; se devuelven $5 + $2 marcados como reabiertos → faltan 25 + 5 = $30. D19 guarda el total con la
+    // regla común: 50 + (10 − 2) = 58.
     findUniqueMock.mockResolvedValue(
       cuenta({
+        total: new Decimal('58.00'),
+        tipAmount: new Decimal('8.00'),
         payments: [
           pago('-5.00', '-2.00', {
             id: 'devolucion',

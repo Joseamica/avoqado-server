@@ -132,7 +132,6 @@ import {
   claseDeEstado,
   computeOrderBalance,
   saldoDeCobroDeReparto,
-  saldoPorCobrar,
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
@@ -678,7 +677,9 @@ function cobrosConSaldoVivos(
 
 /** D12: la ÚNICA cuenta del saldo por cobrar (centavos, ≥ 0); la usan `getOrder` y `listOrders`. */
 function saldoPorCobrarCents(orden: any, completados: any[]): number {
-  return Math.max(0, pesosToCents(saldoPorCobrar(orden, completados).toNumber()))
+  const reparto = esVentaCerrada(orden.paymentStatus) ? null : saldoDeCobroDeReparto(orden, completados)
+  const saldo = reparto ? reparto.totalACobrar : computeOrderBalance(orden, completados).remainingBalance
+  return Math.max(0, pesosToCents(saldo.toNumber()))
 }
 
 /**

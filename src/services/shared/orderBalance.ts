@@ -471,24 +471,6 @@ export function computeOrderBalance(order: OrderAmountsForBalance, completedPaym
   }
 }
 
-/**
- * 🔴 Lo que falta por cobrar de una cuenta, en PESOS (≥ 0): la ÚNICA cuenta del saldo que leen los aparatos. La usan el
- * `getOrder`/`listOrders` de `/mobile` (POS de ANDROID e iOS, en centavos) y el `amount_left` de la TPV
- * (`order.tpv.service.ts::getOrder`). D4 (hz:72be07e6:D4, 13-nov): la TPV restaba `Σ amount` a `Order.total`, que ya traía la
- * propina, y en la mesa dividida volvía a pedirla; aquí el total sale de la mercancía + propinas COBRADAS, sin fiarse de la
- * columna `Order.total` (agregar productos la reescribe sin propina).
- *
- * `completados` son los pagos COMPLETED de la orden, con `PAGO_PARA_SALDO_SELECT` (y `thirdPartyCashAmount` si es reparto).
- * Un pedido de reparto en efectivo aún abierto cobra sus tres partes (`saldoDeCobroDeReparto`).
- */
-export function saldoPorCobrar(
-  orden: Parameters<typeof saldoDeCobroDeReparto>[0] & { paymentStatus: string | null | undefined },
-  completados: Parameters<typeof saldoDeCobroDeReparto>[1],
-): Prisma.Decimal {
-  const reparto = esVentaCerrada(orden.paymentStatus) ? null : saldoDeCobroDeReparto(orden, completados)
-  return reparto ? reparto.totalACobrar : computeOrderBalance(orden, completados).remainingBalance
-}
-
 /** Lo que falta cobrar de un pedido de reparto en efectivo, por partes (Rappi 2b). Todo en pesos. */
 export interface SaldoDeCobroDeReparto {
   /** Venta (productos + envío − descuento) que falta: el saldo común. */
