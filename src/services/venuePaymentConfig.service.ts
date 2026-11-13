@@ -33,11 +33,14 @@ interface VenuePaymentConfigUpdateInput {
 }
 
 /**
- * Get payment config for a venue (with org-level fallback)
+ * Get payment config for a venue (with org-level fallback).
+ * `configSource` dice de dónde sale: `'venue'` (propia del negocio) u `'organization'` (heredada de su organización). Sin él,
+ * las pantallas editaban la heredada como si fuera del negocio (encargo e12dc4, 13-nov-2026). Campo nuevo y opcional.
  */
 export async function getVenuePaymentConfig(venueId: string) {
   const result = await getEffectivePaymentConfig(venueId)
-  return result?.config ?? null
+  if (!result) return null
+  return { ...result.config, configSource: result.source }
 }
 
 /**

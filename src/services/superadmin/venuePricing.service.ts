@@ -84,7 +84,8 @@ export async function getVenuePaymentConfig(venueId: string) {
     hasTertiary: !!result.config.tertiaryAccount,
   })
 
-  return result.config
+  // `configSource`: propia del negocio o heredada de su organización (encargo e12dc4). Campo nuevo y opcional.
+  return { ...result.config, configSource: result.source }
 }
 
 /**
