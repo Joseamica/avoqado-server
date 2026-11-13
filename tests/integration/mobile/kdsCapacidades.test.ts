@@ -18,6 +18,8 @@ import * as capacidadesModulo from '@/services/mobile/kdsCapacidades'
 import { anexarCapacidades, ventasDeComandas } from '@/services/mobile/kdsCapacidades'
 import * as respuestaAlProveedor from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 
+const { acceptDeliveryOrder } = respuestaAlProveedor
+
 jest.setTimeout(30_000)
 
 const QUINCE_MIN = 15 * 60_000
@@ -381,7 +383,30 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
       await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NEGOCIO' } })
       await ventasDeComandas(prisma, venueId, ks)
       expect(espia).toHaveBeenCalledTimes(1)
+      espia.mockRestore()
     })
+  })
+
+  it('🔴 recorrido real: MANUAL llega sin aceptar y sin imprimir; al aceptar (2xx) se ofrece y se reclama', async () => {
+    // `sembrar` ingesta con el `link` en memoria: hay que refrescarlo, no sólo la fila.
+    link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'MANUAL' } })
+    try {
+      const s = await sembrar({ aceptado: false })
+      expect(s.order.status).toBe('PENDING')
+      expect(await comandaDe(s)).toMatchObject({ needsAcceptance: true, needsPrint: false })
+
+      jest.spyOn(uberAdapter, 'acceptOrder').mockResolvedValue({ ok: true, status: 200, raw: '' })
+      expect((await acceptDeliveryOrder(venueId, s.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(await comandaDe(s)).toMatchObject({ needsAcceptance: false, needsPrint: true })
+
+      const claim = await request(server)
+        .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/claim-print`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ deviceId: 'tablet-2b' })
+      expect(claim.body).toMatchObject({ claimed: true })
+    } finally {
+      link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'AUTO' } })
+    }
   })
 
   it('PUT …/status y bump devuelven la comanda con las MISMAS capacidades que el tablero', async () => {

@@ -27,6 +27,14 @@ const COMANDA_ABIERTA = new Set(['NEW', 'PREPARING'])
 const VENTA_CERRADA = new Set(['COMPLETED', 'CANCELLED', 'DELETED'])
 const EN_CURSO = new Set(['PENDING', 'UNCERTAIN'])
 
+/**
+ * ¿Falta aceptar este reparto de proveedor? La venta MANUAL nace `PENDING` y aceptarla sólo pone `providerAcceptedAt`
+ * (el status no cambia), así que el status solo no basta. Un solo predicado para `needsAcceptance` y `needsPrint`.
+ */
+export function faltaAceptar(v: { type: string; status: string; conProveedor: boolean; providerAcceptedAt: Date | null }): boolean {
+  return v.type === OrderType.DELIVERY && v.conProveedor && v.status === 'PENDING' && (v.providerAcceptedAt ?? null) === null
+}
+
 /** Estados de `DeliveryLineAction.status` (contrato de las apps: `lineActionState`). */
 export type EstadoRetiro = 'PENDING' | 'UNCERTAIN' | 'CONFIRMED' | 'REJECTED'
 
@@ -221,7 +229,14 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       retiros: new Map(propias.filter(a => a.action === 'REMOVE_ITEM').map(a => [a.lineId, a])),
       renglones: new Map((renglonesDe.get(v.id) ?? []).map(r => [r.id, r])),
       tableNumber: table?.number ?? null,
-      impresionReparto: origen ? resolverImpresionReparto(origen.provider, leerImpresion(link?.config), estaciones) : null,
+      // El link sólo vale si es del proveedor del pedido (misma regla que `conLink`); si no, el default (como el salón).
+      impresionReparto: origen
+        ? resolverImpresionReparto(
+            origen.provider,
+            leerImpresion(link && link.provider === origen.provider ? link.config : undefined),
+            estaciones,
+          )
+        : null,
       cursos: new Map(
         (cursosDe.get(v.id) ?? []).flatMap(r => {
           let label = r.course

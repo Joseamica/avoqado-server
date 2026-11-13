@@ -1,4 +1,4 @@
-import { anexarCapacidades, type VentaDeComanda } from '@/services/mobile/kdsCapacidades'
+import { anexarCapacidades, ventasDeComandas, type VentaDeComanda } from '@/services/mobile/kdsCapacidades'
 
 const impresion = { proveedor: 'RAPPI', estacionUnicaId: 'est1', empaque: false, empaqueEstacionId: null }
 const venta = (o: Partial<VentaDeComanda>) =>
@@ -22,5 +22,27 @@ describe('anexarCapacidades · impresionReparto', () => {
   it('lo que no es reparto de proveedor no agrega la llave', () => {
     const r = anexarCapacidades({ items: [{ id: 'i1' }] }, k, venta({ conProveedor: false }))
     expect(r).not.toHaveProperty('impresionReparto')
+  })
+})
+
+describe('ventasDeComandas · impresionReparto con un link de OTRO proveedor', () => {
+  it('no usa la config del link si su proveedor no es el del pedido: resuelve con el default', async () => {
+    const db: any = {
+      order: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'o1', type: 'DELIVERY', status: 'OPEN', externalId: 'UBER_EATS:x', deliveryChannelLinkId: 'l1', table: null },
+        ]),
+      },
+      deliveryChannelLink: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'l1', provider: 'RAPPI', config: { impresion: { comanda: 'UNA_ESTACION', estacionId: 'est1', empaque: 'NO' } } },
+        ]),
+      },
+      deliveryLineAction: { findMany: jest.fn().mockResolvedValue([]) },
+      orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+      printStation: { findMany: jest.fn().mockResolvedValue([{ id: 'est1', active: true, sendsComanda: true }]) },
+    }
+    const m = await ventasDeComandas(db, 'v1', [{ orderId: 'o1' }])
+    expect(m.get('o1')!.impresionReparto).toEqual({ proveedor: 'UBER_EATS', estacionUnicaId: null, empaque: true, empaqueEstacionId: null })
   })
 })

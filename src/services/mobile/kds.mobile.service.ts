@@ -13,7 +13,7 @@ import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrder, KdsOrderItem, KdsOrderStatus, Prisma } from '@prisma/client'
-import { anexarCapacidades, anexarMesaYTiempos, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import { anexarCapacidades, anexarMesaYTiempos, faltaAceptar, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
@@ -328,7 +328,8 @@ export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promis
 export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
   // Sólo el reparto de PROVEEDOR llegó solo: una «Entrega» marcada en la caja ya salió en papel al cobrarla.
   const esReparto = venta?.type === 'DELIVERY' && venta.conProveedor
-  const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
+  const needsAcceptance = Boolean(venta && faltaAceptar(venta))
+  const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, needsAcceptance)
   return venta ? anexarCapacidades(anexarMesaYTiempos(base, o, venta), o, venta) : base
 }
 
@@ -549,7 +550,7 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
      * demás tablets seguirían viéndolo pendiente los segundos que tarda la impresión y lo
      * reclamarían también.
      */
-    needsPrint: Boolean(order.esDeMarketplace) && comandaPendienteDeImprimir(order),
+    needsPrint: Boolean(order.esDeMarketplace) && comandaPendienteDeImprimir(order) && !needsAcceptance,
     startedAt: order.startedAt?.toISOString() || null,
     completedAt: order.completedAt?.toISOString() || null,
     createdAt: order.createdAt.toISOString(),
