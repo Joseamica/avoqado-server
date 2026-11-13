@@ -51,7 +51,7 @@ export interface SaldoReabierto {
   sesionDeVales?: { id: string; estadoAntes: string }
   /**
    * D649 segunda vuelta: la sesión de vales viva la tenía OTRA transacción y aquí no se pudo subir. Quien llama la sube DESPUÉS de su
-   * commit con `subirVersionDeValesTrasCommit`.
+   * commit con `subirVersionDeValesTrasCommit`; la red, por si esa subida no llega, ya quedó encolada aquí (`SUBIR_VERSION_DE_VALES`).
    */
   sesionDeValesOcupada?: string
 }
@@ -193,11 +193,13 @@ export async function fijarSaldoReabiertoEnTx(
  * candados con un cobro de vales (40P01). Una fila que ya tomó esta transacción sí se devuelve.
  * Segunda vuelta (Codex apps-viejas r4): si otra transacción la tiene, NO basta con que «su siguiente cambio la suba»: puede acabar
  * rechazada y revertir (`ctx.rechazoDelPersonal` de un cobro de vales se lanza ya con los candados) o sólo leerla. Entonces se
- * devuelve `sesionDeValesOcupada` y quien llama la sube tras su commit (`subirVersionDeValesTrasCommit`).
+ * devuelve `sesionDeValesOcupada` y quien llama la sube tras su commit (`subirVersionDeValesTrasCommit`). Como esa subida puede no
+ * llegar (el proceso muere, la base falla; Codex r3), aquí mismo, en la transacción del reembolso, se encola su red durable: un
+ * `SUBIR_VERSION_DE_VALES` que el trabajador de efectos corre si hace falta (subir de más no daña: la versión sólo crece).
  */
 async function avisarALaSesionDeValesEnTx(
   tx: TxConReintento,
-  input: { venueId: string; orderId: string },
+  input: { venueId: string; orderId: string; refundPaymentId: string },
 ): Promise<Pick<SaldoReabierto, 'sesionDeVales' | 'sesionDeValesOcupada'>> {
   const [sesion] = await tx.$queryRaw<Array<{ id: string; status: string }>>`
     SELECT id, status::text AS status FROM "AreaTicketCheckoutSession"
@@ -210,7 +212,19 @@ async function avisarALaSesionDeValesEnTx(
       SELECT id FROM "AreaTicketCheckoutSession"
       WHERE "orderId" = ${input.orderId} AND "venueId" = ${input.venueId}
         AND status IN ('MATERIALIZED', 'PARTIALLY_PAID', 'PAYMENT_PENDING', 'RECONCILIATION_REQUIRED')`
-    return ocupada ? { sesionDeValesOcupada: ocupada.id } : {}
+    if (!ocupada) return {}
+    const { enqueuePaymentEffect } = await import('@/services/tpv/paymentEffects.service')
+    await enqueuePaymentEffect(tx, {
+      venueId: input.venueId,
+      paymentId: input.refundPaymentId,
+      orderId: input.orderId,
+      kind: 'SUBIR_VERSION_DE_VALES',
+      dedupeKey: `vales-version:${input.refundPaymentId}:v1`,
+      payload: { sessionId: ocupada.id },
+      // La subida inmediata de quien llama va primero; el trabajador sólo la repite si hace falta (R4-4: nace diferido).
+      nextAttemptAt: new Date(Date.now() + ESPERA_DE_LA_RED_DE_VALES_MS),
+    })
+    return { sesionDeValesOcupada: ocupada.id }
   }
   await tx.areaTicketCheckoutSession.update({
     where: { id: sesion.id },
@@ -222,40 +236,52 @@ async function avisarALaSesionDeValesEnTx(
   return { sesionDeVales: { id: sesion.id, estadoAntes: sesion.status } }
 }
 
+/** Cuánto espera el trabajador antes de repetir la subida de la sesión de vales: la inmediata de quien reembolsa va primero. */
+const ESPERA_DE_LA_RED_DE_VALES_MS = 60_000
+
 /**
- * D649 segunda vuelta: la subida de una sesión que estaba tomada al reabrir, DESPUÉS del commit del reembolso. Ya sin la cuenta,
- * espera el candado de la sesión como cualquiera (sin cruzar candados) y, cuando la otra transacción termina, sube la versión y
- * MATERIALIZED → PARTIALLY_PAID, igual que `avisarALaSesionDeValesEnTx`. Subirla de más es inofensivo: la versión sólo crece y
- * sólo se compara con candado en sesiones OPEN, que aquí no se tocan. Una sesión que ya cerró (PAID, cancelada) no se toca.
- * Nunca lanza: el reembolso ya está hecho. Quien llama no la espera (la otra transacción puede tardar).
- * ponytail: no es durable; si el proceso muere o la base falla antes de que termine (la espera dura lo que tarde la otra transacción),
- * la caja propone de menos hasta el siguiente cambio de la sesión (el servidor conserva la deuda) y sólo queda el log. Si hace falta,
- * encolarla como `PaymentEffect` en la transacción del reembolso.
+ * D649: sube la versión de una sesión de vales viva y, si seguía MATERIALIZED, la pasa a PARTIALLY_PAID, igual que
+ * `avisarALaSesionDeValesEnTx`. Sin la cuenta: espera el candado de la sesión como cualquiera. Subirla de más es inofensivo: la versión
+ * sólo crece y sólo se compara con candado en sesiones OPEN, que aquí no se tocan; una sesión pagada o cancelada tampoco. LANZA si la
+ * base falla: el trabajador de efectos (`SUBIR_VERSION_DE_VALES`) lo reintenta. Devuelve si subió alguna.
+ */
+export async function subirVersionDeValesEnDb(
+  db: Pick<Prisma.TransactionClient, 'areaTicketCheckoutSession'>,
+  input: { venueId: string; sessionId: string },
+): Promise<boolean> {
+  // Primero las que ya tuvieron abono y luego la MATERIALIZED: así una sola de las dos la encuentra.
+  const subida = await db.areaTicketCheckoutSession.updateMany({
+    where: {
+      id: input.sessionId,
+      venueId: input.venueId,
+      status: {
+        in: [
+          AreaTicketCheckoutStatus.PARTIALLY_PAID,
+          AreaTicketCheckoutStatus.PAYMENT_PENDING,
+          AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED,
+        ],
+      },
+    },
+    data: { version: { increment: 1 } },
+  })
+  if (subida.count > 0) return true
+  const materializada = await db.areaTicketCheckoutSession.updateMany({
+    where: { id: input.sessionId, venueId: input.venueId, status: AreaTicketCheckoutStatus.MATERIALIZED },
+    data: { version: { increment: 1 }, status: AreaTicketCheckoutStatus.PARTIALLY_PAID },
+  })
+  return materializada.count > 0
+}
+
+/**
+ * D649 segunda vuelta: la subida de una sesión que estaba tomada al reabrir, DESPUÉS del commit del reembolso, para que la caja se
+ * entere en el momento. Quien llama no la espera (la otra transacción puede tardar) y nunca lanza: el reembolso ya está hecho. Si no
+ * llega (el proceso muere, la base falla), la sube el efecto `SUBIR_VERSION_DE_VALES` que quedó en la transacción del reembolso.
  */
 export async function subirVersionDeValesTrasCommit(input: { venueId: string; sessionId: string }): Promise<void> {
   try {
-    // Primero las que ya tuvieron abono y luego la MATERIALIZED: así una sola de las dos la encuentra.
-    const subida = await prisma.areaTicketCheckoutSession.updateMany({
-      where: {
-        id: input.sessionId,
-        venueId: input.venueId,
-        status: {
-          in: [
-            AreaTicketCheckoutStatus.PARTIALLY_PAID,
-            AreaTicketCheckoutStatus.PAYMENT_PENDING,
-            AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED,
-          ],
-        },
-      },
-      data: { version: { increment: 1 } },
-    })
-    if (subida.count > 0) return
-    await prisma.areaTicketCheckoutSession.updateMany({
-      where: { id: input.sessionId, venueId: input.venueId, status: AreaTicketCheckoutStatus.MATERIALIZED },
-      data: { version: { increment: 1 }, status: AreaTicketCheckoutStatus.PARTIALLY_PAID },
-    })
+    await subirVersionDeValesEnDb(prisma, input)
   } catch (error) {
-    logger.error('[D649] No se pudo subir tras el commit la versión de la sesión de vales de un abono devuelto', {
+    logger.error('[D649] No se pudo subir tras el commit la versión de la sesión de vales de un abono devuelto; la sube su efecto', {
       venueId: input.venueId,
       sessionId: input.sessionId,
       error: error instanceof Error ? error.message : String(error),
