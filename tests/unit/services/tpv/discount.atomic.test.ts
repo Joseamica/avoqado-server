@@ -93,7 +93,8 @@ function db() {
     orderItem: { findMany: jest.fn(async () => []) },
     discount: { findFirst: jest.fn(async () => discount), findMany: jest.fn(async () => [discount]), update: jest.fn() },
     customer: { findUnique: jest.fn(async () => ({ customerGroupId: null })) },
-    staffVenue: { findUnique: jest.fn(async () => null) },
+    // hz:87f4b879:D4: lealtad busca la membresía ACTIVA con `findFirst`.
+    staffVenue: { findUnique: jest.fn(async () => null), findFirst: jest.fn(async () => null) },
     customerDiscount: { findMany: jest.fn(async () => []) },
     venue: { findUnique: jest.fn(async () => ({ timezone: 'America/Mexico_City' })) },
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },
@@ -432,7 +433,7 @@ describe('B2 — el motor guarda a qué renglones aplicó (spec §4.1, D7)', () 
       appliedToItemIds: [],
       reparto: null,
     })
-    tx.staffVenue = { findUnique: jest.fn(async () => ({ id: 'sv' })) }
+    tx.staffVenue = { findUnique: jest.fn(async () => ({ id: 'sv' })), findFirst: jest.fn(async () => ({ id: 'sv' })) }
     tx.loyaltyTransaction = {
       findUnique: jest.fn(async () => ({ id: 'lt', customerId: 'c1', points: -1000, orderId: 'order' })),
       create: jest.fn(async () => ({ id: 'lt2' })),
