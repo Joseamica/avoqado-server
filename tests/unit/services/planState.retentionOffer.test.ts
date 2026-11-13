@@ -251,3 +251,70 @@ describe('cancelPlan — the cancellation email never invents the access date', 
     expect((emailService.sendPlanCancellationEmail as jest.Mock).mock.calls[0][1].accessUntil).toEqual(new Date('2026-07-01T00:00:00Z'))
   })
 })
+
+/**
+ * D42 (12-nov-2026): al aceptar la oferta de retención (descuento o pausa) la bitácora guardaba PLAN_RETENTION_DISCOUNT /
+ * PLAN_RETENTION_PAUSE SIN quién del negocio la aceptó (`staffId` vacío). Su vecino PLAN_CANCEL_SCHEDULED sí lo guarda.
+ * Mismo hueco que el D30 (#407, superadmin) y el D36 (#416, funciones del dueño).
+ */
+describe('D42 · bitácora: quién aceptó la oferta de retención', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+  const asiento = (action: string) => {
+    const llamadas = (logAction as jest.Mock).mock.calls.map((c: any[]) => c[0]).filter((p: any) => p.action === action)
+    expect(llamadas).toHaveLength(1)
+    return llamadas[0]
+  }
+  beforeEach(() => (logAction as jest.Mock).mockClear())
+
+  it('descuento: guarda quién, la fila del plan y el cupón', async () => {
+    await applyRetentionOffer(VENUE_ID, 'discount', 'staff-1')
+
+    expect(asiento('PLAN_RETENTION_DISCOUNT')).toEqual({
+      staffId: 'staff-1',
+      venueId: VENUE_ID,
+      action: 'PLAN_RETENTION_DISCOUNT',
+      entity: 'VenueFeature',
+      entityId: planProFeature.id,
+      data: { subscriptionId: SUB_ID, coupon: RETENTION_DISCOUNT_COUPON },
+    })
+  })
+
+  it('pausa: guarda quién y hasta cuándo', async () => {
+    await applyRetentionOffer(VENUE_ID, 'pause', 'staff-1')
+
+    expect(asiento('PLAN_RETENTION_PAUSE')).toMatchObject({
+      staffId: 'staff-1',
+      venueId: VENUE_ID,
+      entity: 'VenueFeature',
+      entityId: planProFeature.id,
+      data: { subscriptionId: SUB_ID, resumesAt: expect.any(String) },
+    })
+  })
+
+  it.each([
+    ['descuento', 'discount' as const, 'PLAN_RETENTION_DISCOUNT'],
+    ['pausa', 'pause' as const, 'PLAN_RETENTION_PAUSE'],
+  ])('%s sin actor (llamador viejo): no truena y guarda staffId null', async (_n, offer, action) => {
+    await expect(applyRetentionOffer(VENUE_ID, offer)).resolves.toBeDefined()
+    expect(asiento(action).staffId).toBeNull()
+  })
+
+  it('controlador: POST …/plan/retention-offer manda el usuario de la sesión al servicio', async () => {
+    const svc = jest.requireActual('@/services/dashboard/planState.service')
+    const spy = jest.spyOn(svc, 'applyRetentionOffer').mockResolvedValue({ hasPlan: true } as never)
+    const { applyVenueRetentionOffer } = jest.requireActual('@/controllers/dashboard/venue.dashboard.controller')
+    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+    const next = jest.fn()
+
+    await applyVenueRetentionOffer(
+      { params: { venueId: VENUE_ID }, body: { offer: 'pause' }, authContext: { userId: 'staff-1' } } as any,
+      res,
+      next,
+    )
+
+    expect(next).not.toHaveBeenCalled()
+    expect(spy).toHaveBeenCalledWith(VENUE_ID, 'pause', 'staff-1')
+    expect(res.status).toHaveBeenCalledWith(200)
+    spy.mockRestore()
+  })
+})
