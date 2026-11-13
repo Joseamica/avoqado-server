@@ -247,8 +247,9 @@ describe('takeOrReuseHold', () => {
       expect(r.pendientes).toHaveLength(2)
       // La que soltó ESTA llamada va en `released`, no repetida en `pendientes`.
       expect(r.released).toEqual([{ holdId: activa.id, stripePaymentIntentId: 'pi_a', stripeAccountId: 'acct_1' }])
-      const consulta = db.paymentLinkStockHold.findMany.mock.calls.find((c: any[]) => c[0].where.status === 'RELEASED')[0]
-      expect(consulta.take).toBe(21)
+      // Una sola lectura (activas + pendientes) con tope impuesto.
+      expect(db.paymentLinkStockHold.findMany).toHaveBeenCalledTimes(1)
+      expect(db.paymentLinkStockHold.findMany.mock.calls[0][0].take).toBe(71)
     })
 
     it('también al REUSAR la ficha nueva de otra solicitud: ve la de M que esa otra soltó y sigue revisando', async () => {
@@ -266,6 +267,42 @@ describe('takeOrReuseHold', () => {
       expect(r).toMatchObject({ reused: true, released: [] })
       expect(r.hold.id).toBe(l.id)
       expect(r.pendientes.map(p => p.holdId)).toEqual([m.id])
+    })
+
+    /** Lo que otra solicitud (sin el candado del navegador) cambia justo después de la PRIMERA lectura de fichas. */
+    const trasLaPrimeraLectura = (cambio: () => void) => {
+      const real = db.paymentLinkStockHold.findMany
+      db.paymentLinkStockHold.findMany = jest.fn(async (args: Row) => {
+        const filas = await real(args)
+        db.paymentLinkStockHold.findMany = real
+        cambio()
+        return filas.map((f: Row) => ({ ...f }))
+      })
+    }
+
+    it('Codex r4: otra solicitud RESTAURA M (soltada → ACTIVE) entre lecturas → M no se pierde de las dos listas', async () => {
+      talla('cl', 5)
+      const m = hold({
+        productId: 'cm',
+        browserToken: 'yo',
+        status: 'RELEASED',
+        releasedReason: 'cambio_de_compra',
+        stripePaymentIntentId: 'pi_m',
+        stripeAccountId: 'acct_1',
+      })
+      hold({ productId: 'cl', browserToken: 'yo' })
+      trasLaPrimeraLectura(() => Object.assign(m, { status: 'ACTIVE', releasedReason: null }))
+      const r = await tomar('cl')
+      expect([...r.released, ...r.pendientes].map(x => x.holdId)).toContain(m.id)
+    })
+
+    it('Codex r4: el barrido suelta M («vencida») entre la lectura y el soltar → M va en pendientes', async () => {
+      talla('cl', 5)
+      const m = hold({ productId: 'cm', browserToken: 'yo', stripePaymentIntentId: 'pi_m', stripeAccountId: 'acct_1' })
+      trasLaPrimeraLectura(() => Object.assign(m, { status: 'RELEASED', releasedReason: 'vencida' }))
+      const r = await tomar('cl')
+      expect(r.released).toEqual([])
+      expect(r.pendientes).toEqual([{ holdId: m.id, stripePaymentIntentId: 'pi_m', stripeAccountId: 'acct_1', releasedReason: 'vencida' }])
     })
 
     it('más de 20 pendientes → 409 «en curso» sin apartar ni soltar nada (nunca se salta una)', async () => {

@@ -88,6 +88,9 @@ export async function variantAvailability(args: {
 export const MOTIVOS_CERRADOS_CON_CERTEZA = ['intento_cancelado', 'intento_cobrado'] as const
 /** Tope de cierres pendientes que se revisan por solicitud; con más, la solicitud se detiene (409) en vez de saltarse alguno. */
 const MAX_CIERRES_PENDIENTES = 20
+/** Tope de la lectura de fichas del navegador (activas + pendientes). Llegar a él también detiene la solicitud. */
+const MAX_FICHAS_DEL_NAVEGADOR = 50 + MAX_CIERRES_PENDIENTES + 1
+const enCursoPorTope = () => new ConflictError('Tu pago se está procesando. Espera unos segundos.', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
 
 /**
  * Ficha YA soltada del mismo navegador con un intento ligado que todavía no se sabe cancelado (`cambio_de_compra` de otra
@@ -127,38 +130,33 @@ export async function takeOrReuseHold(args: {
   return prisma.$transaction(async tx => {
     // Orden fijo: navegador → producto (un mismo navegador que cambia de talla se serializa consigo mismo).
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'pl-hold-token:' + paymentLinkId + ':' + browserToken}))`
-    const own = await tx.paymentLinkStockHold.findMany({
-      where: { paymentLinkId, browserToken, status: 'ACTIVE' },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
+    // Encargo b578cd: las activas y las soltadas con intento sin cierre cierto, en UNA sola lectura (una foto). Con dos, otra
+    // solicitud sin este candado podía mover una ficha de una lista a la otra entre ambas (restaurar M, o el barrido soltarla)
+    // y que no apareciera en ninguna (Codex codigo-r4).
+    const pendiente = {
+      status: 'RELEASED' as const,
+      stripePaymentIntentId: { not: null },
+      releasedReason: { notIn: [...MOTIVOS_CERRADOS_CON_CERTEZA] },
+    }
+    const foto = await tx.paymentLinkStockHold.findMany({
+      where: { paymentLinkId, browserToken, OR: [{ status: 'ACTIVE' }, pendiente] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: MAX_FICHAS_DEL_NAVEGADOR,
     })
-    const reusable = own.find(
-      h => h.productId === productId && h.expiresAt > now && (h.amountCents === null || h.amountCents === amountCents),
-    )
-    // Encargo b578cd (Codex r3b #1): leídas con el candado del navegador, ANTES de soltar las de esta vuelta.
-    const pendientes = (
-      await tx.paymentLinkStockHold.findMany({
-        where: {
-          paymentLinkId,
-          browserToken,
-          status: 'RELEASED',
-          stripePaymentIntentId: { not: null },
-          releasedReason: { notIn: [...MOTIVOS_CERRADOS_CON_CERTEZA] },
-        },
-        select: { id: true, stripePaymentIntentId: true, stripeAccountId: true, releasedReason: true },
-        orderBy: { createdAt: 'desc' },
-        take: MAX_CIERRES_PENDIENTES + 1,
-      })
-    ).map(h => ({
+    // Falla cerrado: nunca se entrega un intento sin haber revisado TODAS las fichas del navegador.
+    if (foto.length >= MAX_FICHAS_DEL_NAVEGADOR) throw enCursoPorTope()
+    const own = foto.filter(h => h.status === 'ACTIVE')
+    const comoPendiente = (h: Pick<PaymentLinkStockHold, 'id' | 'stripePaymentIntentId' | 'stripeAccountId' | 'releasedReason'>) => ({
       holdId: h.id,
       stripePaymentIntentId: h.stripePaymentIntentId as string,
       stripeAccountId: h.stripeAccountId,
       releasedReason: h.releasedReason,
-    }))
-    // Falla cerrado: nunca se entrega un intento sin haber revisado TODOS los del navegador.
-    if (pendientes.length > MAX_CIERRES_PENDIENTES) {
-      throw new ConflictError('Tu pago se está procesando. Espera unos segundos.', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
-    }
+    })
+    const pendientes: CierrePendiente[] = foto.filter(h => h.status === 'RELEASED').map(comoPendiente)
+    if (pendientes.length > MAX_CIERRES_PENDIENTES) throw enCursoPorTope()
+    const reusable = own.find(
+      h => h.productId === productId && h.expiresAt > now && (h.amountCents === null || h.amountCents === amountCents),
+    )
     const toRelease = own.filter(h => h !== reusable).map(h => h.id)
     const released = toRelease.length
       ? (
@@ -169,6 +167,18 @@ export async function takeOrReuseHold(args: {
           })
         ).map(h => ({ holdId: h.id, stripePaymentIntentId: h.stripePaymentIntentId, stripeAccountId: h.stripeAccountId }))
       : []
+    // La que estaba activa en la foto y ya no se pudo soltar aquí la cambió otro entretanto (el barrido la venció, otra solicitud
+    // la soltó). Si quedó con un intento sin cierre cierto, también se revisa.
+    const cambiaron = toRelease.filter(id => !released.some(r => r.holdId === id))
+    if (cambiaron.length) {
+      const ahora = await tx.paymentLinkStockHold.findMany({
+        where: { id: { in: cambiaron }, ...pendiente },
+        select: { id: true, stripePaymentIntentId: true, stripeAccountId: true, releasedReason: true },
+        take: cambiaron.length,
+      })
+      pendientes.push(...ahora.map(comoPendiente))
+    }
+    if (pendientes.length > MAX_CIERRES_PENDIENTES) throw enCursoPorTope()
     if (reusable) return { hold: reusable, reused: true, released, pendientes }
 
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'pl-hold:' + productId}))`
