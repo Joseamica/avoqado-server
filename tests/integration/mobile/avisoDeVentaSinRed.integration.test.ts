@@ -396,4 +396,83 @@ describe('aviso al gerente de una venta de la cola de la terminal — por HTTP y
     expect(await prisma.notification.count({ where: { venueId: n.venueId, entityType: 'VentaSinRed' } })).toBe(2)
     expect(await bitacoraDe(n.venueId, 'VENTA_SIN_RED_RECHAZADA')).toHaveLength(1)
   })
+
+  // D22 (Codex r6 #2): desde #428 la venta de la cola con un descuento que «Requiere aprobación» entra sin ella (ya se cobró), y
+  // cualquiera podía fingir la cola EN LÍNEA para saltarse el PIN sin que nadie se enterara. Sigue entrando, y el dueño se entera.
+  it('8. venta de la cola con un descuento que pide aprobación, de una cajera sin el permiso ⇒ 201 sin aprobador, bitácora y aviso a OWNER y ADMIN una vez; en línea, 403', async () => {
+    const n = await negocio()
+    const gerencial = await prisma.discount.create({
+      data: {
+        venueId: n.venueId,
+        name: '10% gerencial',
+        type: 'PERCENTAGE',
+        value: new Prisma.Decimal(10),
+        scope: 'ITEM',
+        requiresApproval: true,
+      },
+    })
+    const llave = `venta-${randomUUID()}`
+    const venta = {
+      externalId: llave,
+      createdAtLocal: Date.now() - 90_000,
+      items: [{ productId: n.productId, quantity: 2, discountId: gerencial.id }],
+    }
+
+    const primera = await crearOrden(n, n.android, venta)
+    const reintento = await crearOrden(n, n.android, venta)
+
+    // La venta de la cola NUNCA recibe 403 por esto: lo cobrado ya está en la caja.
+    expect([primera.status, reintento.status]).toEqual([201, 201])
+    expect(reintento.body.order.id).toBe(primera.body.order.id)
+    const orderId = primera.body.order.id
+    expect(primera.body.order).toMatchObject({ discountAmount: 10, total: 90 })
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: gerencial.id } })
+    expect(fila.authorizedById).toBeNull()
+    expect(await bitacoraDe(n.venueId, 'DESCUENTO_SIN_APROBACION_SIN_RED')).toHaveLength(1)
+
+    const filas = await avisosDe(n.venueId, `DESCUENTO_SIN_APROBACION:${llave}`, 2)
+    expect(filas.map(f => f.recipientId).sort()).toEqual([n.adminId, n.ownerId].sort())
+    expect(filas[0]).toMatchObject({ type: 'ALERT', priority: 'HIGH', title: 'Un descuento que pide aprobación entró sin aprobación' })
+    expect(filas[0].actionUrl).toContain(`/orders/${orderId}`)
+    expect(filas[0].message).toContain('«10% gerencial» ($10.00)')
+    expect(filas[0].message).toContain('CASHIER Aviso')
+    expect(filas[0].message).toContain('Según el aparato')
+    // El reintento con la misma llave no avisa otra vez.
+    await new Promise(resolve => setTimeout(resolve, 500))
+    expect(await prisma.notification.count({ where: { venueId: n.venueId, entityType: 'VentaSinRed' } })).toBe(2)
+    expect(await bitacoraDe(n.venueId, 'VENTA_SIN_RED_DESCUENTO_SIN_APROBACION')).toHaveLength(1)
+
+    // Regresión: la misma venta EN LÍNEA (sin `isOfflineReplay`) sigue pidiendo el permiso o el PIN, y no avisa nada.
+    const enLinea = await crearOrden(n, n.android, { ...venta, externalId: `venta-${randomUUID()}`, isOfflineReplay: false })
+    expect(enLinea.status).toBe(403)
+    expect(enLinea.body).toMatchObject({ required: 'tpv-orders:discount' })
+    expect(await prisma.order.count({ where: { venueId: n.venueId } })).toBe(1)
+  })
+
+  it('9. la cola «Cobrar sin red» de la terminal por mobile con ese descuento ⇒ 201 y el aviso nombra a la terminal', async () => {
+    const n = await negocio()
+    const gerencial = await prisma.discount.create({
+      data: {
+        venueId: n.venueId,
+        name: '$20 gerencial',
+        type: 'FIXED_AMOUNT',
+        value: new Prisma.Decimal(20),
+        scope: 'ORDER',
+        requiresApproval: true,
+      },
+    })
+    const llave = `venta-${randomUUID()}`
+
+    const subida = await crearOrden(n, n.terminal, {
+      externalId: llave,
+      createdAtLocal: Date.now() - 60_000,
+      orderDiscountId: gerencial.id,
+    })
+
+    expect(subida.status).toBe(201)
+    const filas = await avisosDe(n.venueId, `DESCUENTO_SIN_APROBACION:${llave}`, 2)
+    expect(filas).toHaveLength(2)
+    expect(filas[0].message).toMatch(new RegExp(`^La terminal ${SERIAL} subió`))
+    expect(filas[0].message).toContain('«$20 gerencial» ($20.00)')
+  })
 })

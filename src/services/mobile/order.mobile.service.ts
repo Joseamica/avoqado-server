@@ -372,6 +372,12 @@ export interface CreateOrderInput {
    * puede subir ya actualizada a 2.16.2 (Codex r2 #2).
    */
   ventaDeTerminal?: { truncaPorVersion: boolean; totalCents: number | null }
+  /**
+   * D652 (server-owned: sólo con el token de una TERMINAL y `isOfflineReplay`): la TPV 2.14.0–2.16.1 cobró sin red con un cupón que no
+   * sabe identificar (`orderDiscountId: ""`). La venta entra a precio lleno, el cobro se registra tal cual y la cuenta queda debiendo
+   * la diferencia (founder, 13-nov: «por cobrar»). `totalCents` es lo que cobró la terminal (del cuerpo, > 0), sólo para el aviso.
+   */
+  cuponSinIdentificar?: { totalCents: number }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -929,6 +935,54 @@ function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo
 
 const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
 
+/**
+ * D22: aviso al dueño (campanita, OWNER y ADMIN) de una venta de la cola con un descuento que pedía aprobación y entró sin ella. La
+ * marca de la cola la manda el cliente, así que quien la finge EN LÍNEA para saltarse el PIN también cae aquí: el dueño se entera.
+ * Todo es de mejor esfuerzo y fuera de la transacción, también leer el nombre de quien la subió (Codex r2: dentro, su falla revertía
+ * la venta); nunca lanza. Lo que no se pierde es el rastro `DESCUENTO_SIN_APROBACION_SIN_RED`, escrito en la transacción.
+ */
+function avisarDescuentoSinAprobacion(
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  descuentos: Array<{ nombre: string; importeCents: number }>,
+  llegada: Date,
+): void {
+  void (async () => {
+    let quien = ''
+    try {
+      const sesion = input.performedBy
+        ? await prisma.staff.findUnique({ where: { id: input.performedBy }, select: { firstName: true, lastName: true } })
+        : null
+      quien = sesion ? `${sesion.firstName} ${sesion.lastName}`.trim() : ''
+    } catch {
+      // Sin el nombre, el aviso sale igual (dice la llave y la orden; la bitácora tiene a la sesión).
+    }
+    const declarada = horaQueDeclaraElAparato(input.createdAtLocal)
+    await avisarVentaSinRed(venueId, 'DESCUENTO_SIN_APROBACION', {
+      externalId: normalizeExternalId(input.externalId) ?? orderId,
+      orderId,
+      staffId: input.performedBy,
+      ...(input.terminalSerialNumber ? { terminalSerial: input.terminalSerialNumber } : {}),
+      montoCents: descuentos.reduce((suma, d) => suma + d.importeCents, 0),
+      descuentos,
+      ...(quien ? { quien } : {}),
+      ...(declarada ? { horaDelAparato: declarada.toISOString() } : {}),
+      llegada: llegada.toISOString(),
+    })
+  })().catch(error => logger.error(`[D22] no se pudo avisar el descuento sin aprobación de ${orderId}: ${(error as Error).message}`))
+}
+
+/**
+ * D22: la hora que el aparato DICE que hizo la venta (`createdAtLocal` en epoch ms, número o texto de dígitos), sin recortarla a la
+ * llegada como `horaDeLaVenta` (Codex r1 #2): sólo se muestra a una persona, nunca decide nada. `null` si falta o no se entiende.
+ */
+function horaQueDeclaraElAparato(createdAtLocal: CreateOrderInput['createdAtLocal']): Date | null {
+  const v = createdAtLocal
+  const hora = new Date(typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : Number.NaN)
+  return Number.isNaN(hora.getTime()) ? null : hora
+}
+
 /** D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación». Una COMP la cubre `orders:comp` (D1). */
 export const pideAprobacionDeGerente = (d: { readonly [key: string]: unknown } | null | undefined): boolean =>
   d?.requiresApproval === true && d.type !== 'COMP'
@@ -973,6 +1027,44 @@ async function anotarRegaloSinPermisoEnTx(
 }
 
 const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
+const AVISO_PRECIO_CAMBIADO = 'PRECIO_CAMBIADO' satisfies AvisoVentaSinRed
+
+/**
+ * D652: el rastro del cupón que la TPV vieja no identificó, en la MISMA transacción que la orden (si falla, la venta no se guarda).
+ * Es el de «precio cambiado sin red» con su propio motivo; `avisarVentaSinRed` lo encuentra por la llave y no lo repite (tampoco el
+ * aviso de «saldo pendiente» del pago, que llega con la misma llave). Nunca inventa el descuento: sólo dice cuánto falta.
+ */
+async function anotarCuponSinIdentificarEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+): Promise<Omit<DatosDelAviso, 'terminalSerial'>> {
+  const cobradoCents = input.cuponSinIdentificar!.totalCents
+  const orden = await tx.order.findUnique({ where: { id: orderId }, select: { total: true } })
+  const faltanCents = orden ? aCentavos(orden.total) - cobradoCents : null
+  const motivo =
+    'se cobró con un cupón sin conexión que la terminal no pudo identificar y la orden quedó a precio lleno' +
+    (faltanCents !== null && faltanCents > 0 ? `: revisa los $${(faltanCents / 100).toFixed(2)} que faltan` : '')
+  const externalId = normalizeExternalId(input.externalId) ?? orderId
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_PRECIO_CAMBIADO}`,
+    entity: 'VentaSinRed',
+    entityId: externalId,
+    data: {
+      terminalSerial: input.terminalSerialNumber ?? null,
+      montoCents: cobradoCents,
+      motivo,
+      orderId,
+      origen: 'CUPON_SIN_IDENTIFICAR',
+      faltanCents,
+    },
+  })
+  return { externalId, orderId, motivo, montoCents: cobradoCents }
+}
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
@@ -1497,8 +1589,12 @@ export type VentaDeMostradorEnTx =
       venta: VentaCalculada
       /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
       regaloSinPermisoPesos?: number
+      /** D22: los descuentos que pedían aprobación y entraron de la cola sin ella (pide aviso al dueño), con su importe en centavos. */
+      sinAprobacion?: Array<{ nombre: string; importeCents: number }>
       /** Descuento del cliente (fase 2): lo que se registró, para su `DISCOUNT_APPLIED` después del commit. */
       descuentoDelCliente?: { montoPesos: number; fueraDeTarifa: boolean }
+      /** D652: el cupón sin identificar ya quedó en la bitácora de la transacción; esto es su aviso, después del commit. */
+      cuponSinIdentificar?: Omit<DatosDelAviso, 'terminalSerial'>
     }
 /** La venta recién creada (no la de una llave que ya existía). */
 export type VentaDeMostradorCreada = Exclude<VentaDeMostradorEnTx, { existente: OrdenCreada }>
@@ -1838,9 +1934,12 @@ export async function crearVentaDeMostradorEnTx(
     pide && (aprobador || sinAprobacionEnLaCola)
       ? { ...fila, appliedById: sesionQueAplica ?? fila.appliedById, authorizedById: fila.authorizedById || aprobador }
       : fila
+  /** D22: lo que entró sin aprobación, para el aviso al dueño después del commit. */
+  const sinAprobacion: NonNullable<VentaDeMostradorCreada['sinAprobacion']> = []
   /** D4 r5: el rastro de un descuento que pedía aprobación y entró de la cola sin ella, en ESTA transacción (como el regalo de D2). */
   const anotarSiEntroSinAprobacion = async (fila: Prisma.OrderDiscountUncheckedCreateInput, pide: boolean): Promise<void> => {
     if (!pide || !sinAprobacionEnLaCola) return
+    sinAprobacion.push({ nombre: fila.name, importeCents: Math.round(Number(fila.amount) * 100) })
     await writeLegacyActivityAuditTx(tx, {
       staffId: validatedStaffId || null,
       venueId,
@@ -2112,9 +2211,16 @@ export async function crearVentaDeMostradorEnTx(
         venta,
         regaloSinPermisoPesos: orderLevelDiscountDecimal,
         ...registradoDelCliente,
+        ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
       }
     }
-    return { order: createdOrder, promotionTotals: null, venta, ...registradoDelCliente }
+    return {
+      order: createdOrder,
+      promotionTotals: null,
+      venta,
+      ...registradoDelCliente,
+      ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
+    }
   }
 
   // Mismo servicio que usa el reducer offline (applyAddItems), con ESTA transacción: crea sus líneas, reparte el
@@ -2222,6 +2328,7 @@ export async function crearVentaDeMostradorEnTx(
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
     ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
+    ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     ...(prep.descuentoDelCliente && !cupon && descuentoDeOrdenFinal > 0
       ? {
           descuentoDelCliente: {
@@ -2357,10 +2464,23 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // medias que anular ni llave de idempotencia envenenada, así que el reintento del POS la crea normal.
   let created: VentaDeMostradorEnTx
   try {
-    created = await withDeadlockRetry(tx => crearVentaDeMostradorEnTx(tx, venueId, input, prep), {
-      etiqueta: 'createOrderWithItems',
-      ...ORDER_LOCK_WAIT_BUDGET,
-    })
+    created = await withDeadlockRetry(
+      async tx => {
+        const venta = await crearVentaDeMostradorEnTx(tx, venueId, input, prep)
+        // D652: sólo la venta NUEVA de la cola de una terminal; la de una llave que ya existía no vuelve a anotar nada.
+        if ('existente' in venta || !input.cuponSinIdentificar || input.isOfflineReplay !== true || !input.terminalSerialNumber) {
+          return venta
+        }
+        return {
+          ...venta,
+          cuponSinIdentificar: await anotarCuponSinIdentificarEnTx(tx, venueId, input, venta.order.id, prep.validatedStaffId || null),
+        }
+      },
+      {
+        etiqueta: 'createOrderWithItems',
+        ...ORDER_LOCK_WAIT_BUDGET,
+      },
+    )
   } catch (error) {
     // Red de seguridad del índice único (venueId, externalId): con el candado de la llave, dos reintentos de ESTA ruta ya
     // no chocan, pero otro escritor de la misma llave sí puede (la orden de la terminal comparte el índice). Sólo ESE
@@ -2383,6 +2503,10 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   if ('existente' in created) return responderConOrdenExistente(venueId, created.existente, input)
   const { order } = created
   const { cambiosDePrecio } = created.venta
+
+  // D22: un descuento que pedía aprobación entró de la cola sin ella (#428: lo cobrado ya ocurrió). Recién hecho el commit, antes de
+  // lo que pueda fallar después (un reintento sale con la venta que ya está y no vuelve a avisar), y sin esperarlo.
+  if (created.sinAprobacion) avisarDescuentoSinAprobacion(venueId, input, order.id, created.sinAprobacion, llegada)
 
   await terminarVentaDeMostrador(venueId, created, prep)
 
@@ -2415,6 +2539,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     })
   }
 
+  // D652: antes que el de precio no reconocido (misma llave y mismo aviso: el primero es el que llega y explica el cupón).
+  if (created.cuponSinIdentificar) avisarSiEsDeLaColaDeTerminal(venueId, input, AVISO_PRECIO_CAMBIADO, created.cuponSinIdentificar)
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
   // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
   if (created.regaloSinPermisoPesos != null) {
