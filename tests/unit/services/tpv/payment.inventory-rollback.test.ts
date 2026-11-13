@@ -61,6 +61,8 @@ import * as paymentService from '@/services/tpv/payment.tpv.service'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
 import * as inventoryRestockService from '@/services/dashboard/inventoryRestock.service'
 import { Decimal } from '@prisma/client/runtime/library'
+import { PostingFenceLostError } from '@/services/inventory/postingFence'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -421,7 +423,8 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
       ORDER_ID,
       'staff-1',
       [],
-      { postingLineId: 'posting-line-none' },
+      // La cerca del vale (bloque 0): el renglón con línea descuenta con el sello del reclamo del TPV.
+      { postingLineId: 'posting-line-none', fence: { postingId: 'posting-test', claimStamp: expect.any(Date) } },
     )
     expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalledWith(
       VENUE_ID,
@@ -697,5 +700,86 @@ describe('recordOrderPayment — consistencia post-captura de vales por área', 
     expect(prisma.areaTicketCheckoutSession.findFirst).not.toHaveBeenCalled()
     expect(prisma.areaTicketPaymentAttempt.findFirst).not.toHaveBeenCalled()
     expect(finalizeAreaTicketPaymentMock).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 La cerca del vale también en el cobro del TPV (bloque 0 de la liga con talla, ronda de arreglo 1).
+ *
+ * El TPV reclamaba su vale con `updateMany(PENDING → APPLYING)` sin mirar `count` ni dejar sello, y luego descontaba.
+ * (i) Si el ciclo posterior al cobro se atrasaba más de 3 min, el barredor ya había reclamado y descontado el vale:
+ * el `updateMany` del TPV daba 0 filas y aun así el TPV descontaba otra vez. (ii) Si el TPV se atoraba más de 10 min,
+ * el barredor lo re-reclamaba y los dos descontaban. Ahora el TPV deja su sello, sólo descuenta los renglones del vale
+ * si lo reclamó él, y cada descuento lleva la cerca; si la pierde, deja de descontar SIN tumbar el cobro.
+ */
+describe('recordOrderPayment — la cerca del vale en el cobro del TPV', () => {
+  const lineasDelVale = [
+    { effectKey: 'item-a', id: 'line-a' },
+    { effectKey: 'item-b', id: 'line-b' },
+  ]
+  const ordenDeDos = () => makeOrder([makeItem('item-a', 'prod-a', 1), makeItem('item-b', 'prod-b', 1)])
+  const reclamoDelTpv = () =>
+    (prisma.inventoryPosting.updateMany as jest.Mock).mock.calls.find(([a]: any[]) => a?.where?.status === 'PENDING')?.[0]
+  const cierreDelVale = () =>
+    (prisma.inventoryPosting.updateMany as jest.Mock).mock.calls.filter(([a]: any[]) => a?.where?.status === 'APPLYING')
+
+  beforeEach(() => {
+    const order = ordenDeDos()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
+    ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValue(lineasDelVale)
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
+    ;(prisma.inventoryPostingLine.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    // El reintento PROCESSING de arriba deja `payment.findUnique` devolviendo su cobro: aquí no hay cobro previo.
+    ;(prisma.payment.findUnique as jest.Mock).mockReset()
+  })
+
+  it('(i) el vale ya lo reclamó el barredor (count=0): el TPV NO descuenta sus renglones ni pisa su estado', async () => {
+    ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    const result: any = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'cerca-i' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-1', status: 'COMPLETED' })
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+    expect(prisma.inventoryPostingLine.update).not.toHaveBeenCalled()
+    expect(cierreDelVale()).toEqual([])
+    expect(result.inventoryWarning).toBeUndefined()
+  })
+
+  it('el dueño del vale descuenta con la cerca de SU sello y cierra el vale cercado por ese sello', async () => {
+    await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'cerca-dueno' } as any, 'user-1')
+
+    const sello = reclamoDelTpv()?.data?.updatedAt
+    expect(sello).toBeInstanceOf(Date)
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalledTimes(2)
+    for (const [, , , , , , options] of (productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls) {
+      expect(options.fence).toEqual({ postingId: 'posting-test', claimStamp: sello })
+    }
+    expect(cierreDelVale()).toHaveLength(1)
+    expect(cierreDelVale()[0][0].where).toEqual({ id: 'posting-test', status: 'APPLYING', updatedAt: sello })
+  })
+
+  it('(ii) el TPV pierde la cerca a media orden: deja de descontar, no marca FAILED ni avisa, y el cobro sigue igual', async () => {
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockRejectedValueOnce(new PostingFenceLostError('posting-test'))
+
+    const result: any = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'cerca-ii' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-1', status: 'COMPLETED' })
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalledTimes(1) // el renglón b ya es del nuevo dueño
+    expect(prisma.inventoryPostingLine.update).not.toHaveBeenCalled()
+    expect(cierreDelVale()).toEqual([])
+    expect(result.inventoryWarning).toBeUndefined()
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'INVENTORY_DEDUCTION_FAILED' }))
   })
 })

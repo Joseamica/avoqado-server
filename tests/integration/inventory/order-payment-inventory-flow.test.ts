@@ -20,6 +20,8 @@ import prisma from '@/utils/prismaClient'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
 import { setupLimitedStock, createOrder, cleanupInventoryTestData } from '@tests/helpers/inventory-test-helpers'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { applySalePosting } from '@/services/inventory/inventoryPosting.service'
+import { __pausarAntesDeLaCercaEnPruebas } from '@/services/inventory/postingFence'
 
 // Increase timeout for integration tests (Neon cold start can be slow)
 jest.setTimeout(60000)
@@ -431,6 +433,82 @@ describe('Order → Payment → Inventory Flow Integration', () => {
         orderBy: { createdAt: 'desc' },
       })
       expect(parseFloat(finalBatch!.remainingQuantity.toString())).toBe(90)
+    })
+  })
+
+  // 🔴 Bloque 0 de la liga con talla (ronda de arreglo 1): el cobro del TPV también respeta la cerca del vale. Si se atora
+  // más de 10 min a media receta, el barredor re-reclama el vale y aplica; el TPV despierta, pierde la cerca y deja de
+  // descontar sin tumbar el cobro. Antes, los dos descontaban.
+  describe('Cerca del vale en el cobro del TPV', () => {
+    afterEach(() => __pausarAntesDeLaCercaEnPruebas(null))
+
+    it('el barredor re-reclama mientras el TPV está atorado dentro del descuento → un solo descuento y el cobro se registra', async () => {
+      const category = await prisma.menuCategory.create({
+        data: { venueId: testData.venue.id, name: 'Cerca TPV', slug: `cerca-tpv-${Date.now()}` },
+      })
+      const scenario = await setupLimitedStock(testData.venue.id, category.id, testData.staff[0].id, {
+        productName: 'Cerca Burger',
+        stockQuantity: 20,
+        recipeQuantity: 2,
+        costPerUnit: 5,
+      })
+      const order = await createOrder(testData.venue.id, testData.staff[0].id, [{ productId: scenario.product.id, quantity: 5 }])
+
+      let llego!: () => void
+      let soltar!: () => void
+      const tpvLlego = new Promise<void>(r => (llego = r))
+      const tpvSuelto = new Promise<void>(r => (soltar = r))
+      let llamadas = 0
+      __pausarAntesDeLaCercaEnPruebas(async () => {
+        if (++llamadas !== 1) return
+        llego()
+        await tpvSuelto
+      })
+
+      const cobro = recordOrderPayment(
+        testData.venue.id,
+        order.id,
+        {
+          venueId: testData.venue.id,
+          amount: parseFloat(order.total.toString()) * 100,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: 'test-tpv',
+          staffId: testData.staff[0].id,
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        testData.staff[0].id,
+      )
+      await tpvLlego
+
+      // El barredor, 11 min después: el reclamo del TPV ya venció.
+      const vale = await prisma.inventoryPosting.findFirstOrThrow({ where: { orderId: order.id, effectKind: 'SALE' } })
+      const ahora = Date.now()
+      const reloj = jest.spyOn(Date, 'now').mockImplementation(() => ahora + 11 * 60 * 1000)
+      let barredor: Awaited<ReturnType<typeof applySalePosting>>
+      try {
+        barredor = await applySalePosting(vale.id)
+      } finally {
+        reloj.mockRestore()
+        soltar()
+      }
+      const payment = await cobro
+
+      expect(payment).toBeDefined()
+      expect(barredor?.applied).toBe(true)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('COMPLETED')
+      const movimientos = await prisma.rawMaterialMovement.findMany({ where: { venueId: testData.venue.id, type: 'USAGE' } })
+      expect(movimientos).toHaveLength(1)
+      const insumo = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: scenario.rawMaterial.id } })
+      expect(parseFloat(insumo.currentStock.toString())).toBe(10) // 20 − 5 × 2, una sola vez
+      const valeFinal = await prisma.inventoryPosting.findUniqueOrThrow({ where: { id: vale.id }, include: { lines: true } })
+      expect(valeFinal.status).toBe('APPLIED')
+      expect(valeFinal.lines.map(l => l.status)).toEqual(['APPLIED'])
     })
   })
 })

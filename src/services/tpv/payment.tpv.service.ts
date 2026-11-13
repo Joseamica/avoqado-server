@@ -8,6 +8,7 @@ import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
+import { PostingFenceLostError } from '../inventory/postingFence'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -2209,16 +2210,22 @@ async function updateOrderTotalsForStandalonePayment(
     // que quedó pendiente y nunca re-deduce lo ya aplicado. El loop de abajo NO
     // se toca: lo comparten 8 features del cobro y está probado en producción.
     let tpvPostingLines = new Map<string, string>()
-    let postingLinesRead = false
+    // 🛡️ Cerca del vale (bloque 0 de la liga con talla): el reclamo deja SU sello. Sin el reclamo (0 filas: el barredor
+    // lo tomó porque este ciclo se atrasó más de 3 min) o con la cerca perdida a media orden (el barredor lo re-reclamó
+    // tras 10 min), los renglones del vale los descuenta su dueño, no este cobro — antes se descontaban dos veces.
+    let tpvClaimStamp: Date | null = null
+    let tpvValeAjeno = false
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
         tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
-        postingLinesRead = true
-        await prisma.inventoryPosting.updateMany({
+        const stamp = new Date()
+        const claim = await prisma.inventoryPosting.updateMany({
           where: { id: tpvPostingId, status: 'PENDING' },
-          data: { status: 'APPLYING', attempts: { increment: 1 } },
+          data: { status: 'APPLYING', attempts: { increment: 1 }, updatedAt: stamp },
         })
+        if (claim.count > 0) tpvClaimStamp = stamp
+        else tpvValeAjeno = true
       }
     } catch (postingError: any) {
       // El posting es OBSERVABILIDAD durable: si falla, la deducción sigue igual
@@ -2320,6 +2327,10 @@ async function updateOrderTotalsForStandalonePayment(
         // restock below so a rollback returns exactly what was deducted.
         const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
         const tpvLineId = tpvPostingLines.get(item.id)
+        if (tpvLineId && tpvValeAjeno) {
+          logger.info('⏭️ Renglón del vale en manos de otro trabajador — lo descuenta su dueño', { orderId, orderItemId: item.id })
+          continue
+        }
         await deductInventoryForProduct(
           updatedOrder.venueId,
           item.productId,
@@ -2327,7 +2338,12 @@ async function updateOrderTotalsForStandalonePayment(
           orderId,
           staffId, // staffId for tracking who processed the order
           orderModifiers,
-          tpvLineId ? { postingLineId: tpvLineId } : undefined,
+          tpvLineId
+            ? {
+                postingLineId: tpvLineId,
+                ...(tpvPostingId && tpvClaimStamp ? { fence: { postingId: tpvPostingId, claimStamp: tpvClaimStamp } } : {}),
+              }
+            : undefined,
         )
 
         // Línea aplicada: el sweeper ya no la reintenta. Fire-and-forget — el
@@ -2351,6 +2367,16 @@ async function updateOrderTotalsForStandalonePayment(
           modifiersCount: orderModifiers.length,
         })
       } catch (deductionError: any) {
+        // El barredor re-reclamó el vale mientras este cobro descontaba: se deja de descontar SIN tocar la línea, sin
+        // aviso y sin tumbar el cobro — lo que falte lo aplica el nuevo dueño (o va a conciliación manual si quedó a medias).
+        if (deductionError instanceof PostingFenceLostError) {
+          tpvValeAjeno = true
+          logger.warn('🛡️ [InventoryPosting] El cobro TPV perdió la cerca del vale — deja de descontar', {
+            orderId,
+            postingId: tpvPostingId,
+          })
+          continue
+        }
         // Collect errors instead of swallowing them
         //
         // La rama CONCURRENT_TRANSACTION antes buscaba SOLO el texto
@@ -2426,10 +2452,11 @@ async function updateOrderTotalsForStandalonePayment(
     // Estado final del posting: APPLIED si todo aplicó, PARTIAL_FAILED si algo
     // quedó pendiente (el sweeper lo recoge). Cercado por el claim APPLYING para
     // no pisar a otro worker.
-    if (tpvPostingId && (postingLinesRead || !updatedOrder.items.some(item => item.areaTicketLineId))) {
+    // Sólo el dueño cierra, y cercado por SU sello: sin él pisaba el APPLYING del barredor.
+    if (tpvPostingId && tpvClaimStamp && !tpvValeAjeno) {
       void prisma.inventoryPosting
         .updateMany({
-          where: { id: tpvPostingId, status: 'APPLYING' },
+          where: { id: tpvPostingId, status: 'APPLYING', updatedAt: tpvClaimStamp },
           data:
             deductionErrors.length > 0
               ? { status: 'PARTIAL_FAILED', lastError: deductionErrors[0]?.error ?? 'línea fallida' }
