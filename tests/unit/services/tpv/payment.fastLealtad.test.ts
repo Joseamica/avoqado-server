@@ -236,3 +236,81 @@ describe('recordFastPayment — la venta rápida da lealtad (Amaena, 14-sep-2026
     expect(award).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * La venta de la COLA de la terminal se fecha a la hora en que se vendió, no a la de su llegada (lo mismo que el POS con
+ * `horaDeLaVenta`): una venta de anoche subida hoy no cuenta en el tope de sellos de hoy. En la MISMA escritura que
+ * `loyaltyEligibleAt`.
+ */
+describe('recordFastPayment — hora de la venta de la cola (loyaltySaleAt)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    installFakes()
+  })
+
+  it('de la cola: guarda la hora que capturó la terminal', async () => {
+    const { txOrderUpdate } = installTransaction()
+    const anoche = Date.now() - 10 * 3_600_000
+
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: anoche }), 'user-1')
+
+    expect(marcaDeLealtad(txOrderUpdate).data.loyaltySaleAt).toEqual(new Date(anoche))
+  })
+
+  it('de la cola con reloj adelantado: nunca después de la llegada', async () => {
+    const { txOrderUpdate } = installTransaction()
+    const antes = Date.now()
+
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: String(antes + 86_400_000) }), 'user-1')
+
+    const marca = marcaDeLealtad(txOrderUpdate).data
+    expect(marca.loyaltySaleAt.getTime()).toBeGreaterThanOrEqual(antes)
+    expect(marca.loyaltySaleAt.getTime()).toBeLessThanOrEqual(marca.loyaltyEligibleAt.getTime())
+  })
+
+  it('en línea (sin isOfflineReplay) o terminal vieja (sin createdAtLocal): como hoy, sin loyaltySaleAt', async () => {
+    const { txOrderUpdate } = installTransaction()
+
+    await recordFastPayment(VENUE, cobroRapido({ createdAtLocal: Date.now() - 3_600_000 }), 'user-1')
+    await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true }), 'user-1')
+
+    const marcas = txOrderUpdate.mock.calls.map(c => c[0]).filter((a: any) => a?.data && 'loyaltyEligibleAt' in a.data)
+    expect(marcas).toHaveLength(2)
+    for (const m of marcas) expect(m.data).not.toHaveProperty('loyaltySaleAt')
+  })
+
+  // Codex r1 #4: la llegada se toma al ENTRAR la petición, no dentro de la transacción. Con un reloj adelantado, la cota es la
+  // entrada aunque la escritura ocurra 2 s después (cruce de medianoche).
+  it('reloj adelantado: la cota es la hora en que ENTRÓ la petición, no la de la escritura', async () => {
+    jest.useFakeTimers({
+      doNotFake: [
+        'nextTick',
+        'setImmediate',
+        'clearImmediate',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'queueMicrotask',
+        'hrtime',
+        'performance',
+      ],
+    })
+    try {
+      const entrada = new Date('2026-11-13T05:59:59.000Z') // 23:59:59 en CDMX
+      jest.setSystemTime(entrada)
+      const { txOrderUpdate } = installTransaction()
+      const callback = prismaMock.$transaction.getMockImplementation()
+      prismaMock.$transaction.mockImplementation(async (cb: any) => {
+        jest.setSystemTime(entrada.getTime() + 2_000) // la transacción llega a escribir a las 00:00:01
+        return callback(cb)
+      })
+
+      await recordFastPayment(VENUE, cobroRapido({ isOfflineReplay: true, createdAtLocal: entrada.getTime() + 86_400_000 }), 'user-1')
+
+      expect(marcaDeLealtad(txOrderUpdate).data.loyaltySaleAt).toEqual(entrada)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+})
