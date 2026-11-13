@@ -425,7 +425,18 @@ function traeDescuentoDeCuentaLibre(venta: orderMobileService.CreateOrderInput):
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const venta = leerVentaDeMostrador(req.body, { conPropinaDeOrden: true, venueId, usuario: req.authContext?.userId })
+    // D652 (founder, 13-nov: «1, por cobrar»): la TPV 2.14.0–2.16.1 sube su «Cobrar» sin red con cupón como `orderDiscountId: ""`
+    // (no sabe qué cupón fue). Sólo de la cola de una TERMINAL (token + `isOfflineReplay` literal) que COBRÓ algo (`total` en centavos
+    // > 0) entra sin descuento identificado: la venta ya ocurrió. Sin versión: una TPV ya actualizada reintenta el MISMO cuerpo. Una
+    // sesión del POS, una venta en línea o una en $0 (Codex r1 #1: su cobro de $0 no cabe en una cuenta que debe): el 400 de hoy.
+    const cuponSinIdentificar =
+      req.body?.orderDiscountId === '' &&
+      req.body?.isOfflineReplay === true &&
+      !!req.authContext?.terminalSerialNumber &&
+      Number.isInteger(req.body?.total) &&
+      req.body.total > 0
+    const cuerpo = cuponSinIdentificar ? { ...req.body, orderDiscountId: null } : req.body
+    const venta = leerVentaDeMostrador(cuerpo, { conPropinaDeOrden: true, venueId, usuario: req.authContext?.userId })
     if ('error' in venta) {
       return res.status(400).json({
         success: false,
@@ -450,6 +461,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
               },
             }
           : {}),
+        // D652: lo que cobró la terminal (centavos), para decir cuánto quedó debiendo.
+        ...(cuponSinIdentificar ? { cuponSinIdentificar: { totalCents: req.body.total as number } } : {}),
         ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}),
         // El gerente del PIN o la membresía de QUIEN COBRA (nunca el vendedor elegido), sólo si hay descuento de cuenta libre.
         regaloAutorizadoPor:
