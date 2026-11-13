@@ -228,8 +228,9 @@ async function avisarALaSesionDeValesEnTx(
  * MATERIALIZED → PARTIALLY_PAID, igual que `avisarALaSesionDeValesEnTx`. Subirla de más es inofensivo: la versión sólo crece y
  * sólo se compara con candado en sesiones OPEN, que aquí no se tocan. Una sesión que ya cerró (PAID, cancelada) no se toca.
  * Nunca lanza: el reembolso ya está hecho. Quien llama no la espera (la otra transacción puede tardar).
- * ponytail: no es durable; si el proceso muere entre el commit y esta subida la caja propone de menos hasta el siguiente cambio de la
- * sesión (el servidor conserva la deuda). Si hace falta, encolarla como `PaymentEffect` en la transacción del reembolso.
+ * ponytail: no es durable; si el proceso muere o la base falla antes de que termine (la espera dura lo que tarde la otra transacción),
+ * la caja propone de menos hasta el siguiente cambio de la sesión (el servidor conserva la deuda) y sólo queda el log. Si hace falta,
+ * encolarla como `PaymentEffect` en la transacción del reembolso.
  */
 export async function subirVersionDeValesTrasCommit(input: { venueId: string; sessionId: string }): Promise<void> {
   try {
