@@ -20,6 +20,8 @@ import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
 import { computeOrderBalance, PAGO_PARA_SALDO_SELECT } from '@/services/shared/orderBalance'
+import * as saldoReabierto from '@/services/shared/saldoReabiertoAlReembolsar'
+import { runClaimedPaymentEffect, type PaymentEffectKind } from '@/services/tpv/paymentEffects.service'
 import { limpiarVenue, sembrarCobro } from '../dashboard/sembrarCobroParaReembolso'
 
 jest.setTimeout(60000)
@@ -252,6 +254,8 @@ describe('D19 · el abono devuelto vuelve a deberse (Postgres)', () => {
       expect(await sesionAhora(sesion.id)).toEqual({ status: 'PARTIALLY_PAID', version: 4 })
       const { guardado } = await saldoDe(venueId, order.id)
       expect([guardado.paidAmount.toString(), guardado.remainingBalance.toString()]).toEqual(['0', '100'])
+      // Subida en la misma transacción: no queda la red durable.
+      expect(await prisma.paymentEffect.count({ where: { orderId: order.id, kind: 'SUBIR_VERSION_DE_VALES' } })).toBe(0)
     })
 
     it('sesión PARTIALLY_PAID (abono por la sesión): sólo sube su versión', async () => {
@@ -339,6 +343,50 @@ describe('D19 · el abono devuelto vuelve a deberse (Postgres)', () => {
       }
 
       expect(await sesionAlFinal(sesion.id, { status: 'PARTIALLY_PAID', version: 4 })).toEqual({ status: 'PARTIALLY_PAID', version: 4 })
+      const { guardado } = await saldoDe(venueId, order.id)
+      expect([guardado.paidAmount.toString(), guardado.remainingBalance.toString()]).toEqual(['0', '100'])
+    })
+
+    it('🔴 subida durable (Codex r3): la subida inmediata no llega (proceso muerto, base caída) y el efecto encolado la sube', async () => {
+      const { order, abono } = await cuentaConAbono(venueId, staffId)
+      const sesion = await sesionDeVales(order.id, 'MATERIALIZED', 3)
+      const sinSubidaInmediata = jest.spyOn(saldoReabierto, 'subirVersionDeValesTrasCommit').mockResolvedValue(undefined)
+      const otraCaja = otraCajaConLaSesion(sesion.id, async tx => {
+        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`
+        throw new Error('rechazo del personal')
+      })
+      await otraCaja.tomada
+      try {
+        expect(await reembolsoSinEsperar(venueId, abono.id)).toBe('terminó')
+      } finally {
+        otraCaja.soltar()
+        await expect(otraCaja.termina).rejects.toThrow('rechazo del personal')
+      }
+      expect(sinSubidaInmediata).toHaveBeenCalledWith({ venueId, sessionId: sesion.id })
+      sinSubidaInmediata.mockRestore()
+      // Nadie la subió: sin la red, la caja seguiría proponiendo $50.
+      expect(await sesionAhora(sesion.id)).toEqual({ status: 'MATERIALIZED', version: 3 })
+
+      const reembolso = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: 'REFUND' } })
+      const efecto = await prisma.paymentEffect.findFirstOrThrow({ where: { paymentId: reembolso.id, kind: 'SUBIR_VERSION_DE_VALES' } })
+      expect(efecto).toMatchObject({ status: 'PENDING', venueId, orderId: order.id, payload: { sessionId: sesion.id } })
+
+      // El trabajador de siempre: lo reclama (como `claimPaymentEffects`) y lo corre.
+      const claimToken = randomUUID()
+      const leaseUntil = new Date(Date.now() + 120_000)
+      await prisma.paymentEffect.update({ where: { id: efecto.id }, data: { status: 'PROCESSING', claimToken, leaseUntil, attempts: 1 } })
+      const hecho = await runClaimedPaymentEffect({
+        ...efecto,
+        kind: efecto.kind as PaymentEffectKind,
+        payload: efecto.payload as Prisma.InputJsonValue,
+        claimToken,
+        leaseUntil,
+        attempts: 1,
+      })
+
+      expect(hecho).toBe(true)
+      expect(await sesionAhora(sesion.id)).toEqual({ status: 'PARTIALLY_PAID', version: 4 })
+      expect((await prisma.paymentEffect.findUniqueOrThrow({ where: { id: efecto.id } })).status).toBe('DONE')
       const { guardado } = await saldoDe(venueId, order.id)
       expect([guardado.paidAmount.toString(), guardado.remainingBalance.toString()]).toEqual(['0', '100'])
     })

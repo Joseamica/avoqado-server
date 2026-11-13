@@ -12,10 +12,15 @@ import { Prisma } from '@prisma/client'
 import {
   fijarSaldoReabiertoEnTx,
   saldoQueReabreElReembolso,
+  subirVersionDeValesEnDb,
   subirVersionDeValesTrasCommit,
 } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { TxConReintento } from '@/utils/serializableRetry'
+import { enqueuePaymentEffect } from '@/services/tpv/paymentEffects.service'
 import { prismaMock } from '../../../__helpers__/setup'
+
+jest.mock('@/services/tpv/paymentEffects.service', () => ({ enqueuePaymentEffect: jest.fn().mockResolvedValue(undefined) }))
+const encolar = enqueuePaymentEffect as jest.Mock
 
 const d = (v: string | number) => new Prisma.Decimal(v)
 
@@ -146,6 +151,7 @@ describe('saldoQueReabreElReembolso — D19', () => {
  * sesión de vales viva de la cuenta sube su versión y, si seguía MATERIALIZED (el abono entró por otro canal), dice PARTIALLY_PAID.
  */
 describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)', () => {
+  beforeEach(() => encolar.mockClear())
   const txFalso = (sesiones: Array<{ id: string; status: string }>, order = cuenta()) => ({
     order: {
       findFirst: jest.fn().mockResolvedValue({ ...order, thirdPartyCashDue: null, cashTipDue: null, payments: [cobro('50.00')] }),
@@ -174,6 +180,8 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
       data: { version: { increment: 1 }, status: 'PARTIALLY_PAID' },
     })
     expect(r.sesionDeVales).toEqual({ id: 'ses-1', estadoAntes: 'MATERIALIZED' })
+    // Ya quedó subida en esta transacción: no hace falta la red durable.
+    expect(encolar).not.toHaveBeenCalled()
     // Se toma sin esperar (la cuenta ya está bloqueada; la jerarquía es sesión → vales → cuenta) y sólo la de ESTA cuenta.
     const [sql, ...valores] = tx.$queryRaw.mock.calls[0]
     expect((sql as string[]).join('?')).toMatch(/FOR UPDATE SKIP LOCKED/)
@@ -197,6 +205,7 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
     expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
     expect(r.sesionDeVales).toBeUndefined()
     expect(r.sesionDeValesOcupada).toBeUndefined()
+    expect(encolar).not.toHaveBeenCalled()
   })
 
   it('🔴 segunda vuelta: la sesión viva está TOMADA por otra caja: no la espera ni la escribe, y le dice a quien llama cuál subir tras el commit', async () => {
@@ -213,6 +222,25 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
     const [sql, ...valores] = tx.$queryRaw.mock.calls[1]
     expect((sql as string[]).join('?')).not.toMatch(/FOR (NO KEY )?UPDATE|FOR SHARE/)
     expect(valores).toEqual(expect.arrayContaining(['order-1', 'venue-1']))
+  })
+
+  it('🔴 subida durable (Codex r3): la sesión tomada deja en ESTA transacción el efecto que la sube aunque la subida inmediata falle', async () => {
+    const tx = txFalso([])
+    tx.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'ses-1' }])
+
+    await fijar(tx)
+
+    expect(encolar).toHaveBeenCalledTimes(1)
+    expect(encolar).toHaveBeenCalledWith(tx, {
+      venueId: 'venue-1',
+      paymentId: 'refund-1',
+      orderId: 'order-1',
+      kind: 'SUBIR_VERSION_DE_VALES',
+      dedupeKey: 'vales-version:refund-1:v1',
+      payload: { sessionId: 'ses-1' },
+      // La subida inmediata va primero; el efecto es la red si ésa falla o el proceso muere.
+      nextAttemptAt: expect.any(Date),
+    })
   })
 
   it('si no reabre (venta cerrada), ni busca la sesión', async () => {
@@ -264,6 +292,12 @@ describe('subirVersionDeValesTrasCommit', () => {
     await subirVersionDeValesTrasCommit({ venueId: 'venue-1', sessionId: 'ses-1' })
 
     expect(sesion.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('subirVersionDeValesEnDb (el núcleo del trabajador) SÍ lanza si la base falla, para que se reintente', async () => {
+    sesion.updateMany.mockRejectedValueOnce(new Error('la base se cayó'))
+
+    await expect(subirVersionDeValesEnDb(prismaMock as any, { venueId: 'venue-1', sessionId: 'ses-1' })).rejects.toThrow('la base se cayó')
   })
 
   it('nunca lanza: el reembolso ya se confirmó', async () => {
