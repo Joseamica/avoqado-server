@@ -293,6 +293,8 @@ describe('D4 · venta de la cola (isOfflineReplay) sin acreditación: entra, nun
 // la cola ya se cobró), pero el dueño recibe un aviso con qué descuento, cuánto, quién la subió y las horas del aparato y de llegada.
 describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra de la cola sin ella', () => {
   const avisos = () => (avisarVentaSinRed as jest.Mock).mock.calls.filter(([, aviso]) => aviso === 'DESCUENTO_SIN_APROBACION')
+  /** El aviso sale después de responder, sin esperarlo (lee el nombre fuera de la transacción): se le da un turno para asentarse. */
+  const asentar = () => new Promise(resolve => setImmediate(resolve))
   const HACE_UN_MINUTO = Date.now() - 60_000
   const deLaCola = (extra: Fila = {}) => venta({ isOfflineReplay: true, createdAtLocal: HACE_UN_MINUTO, performedBy: 'sesion-1', ...extra })
 
@@ -303,6 +305,7 @@ describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra 
   it('sin acreditación: entra y avisa una vez con el descuento, el monto, quién la subió y las dos horas', async () => {
     baseEnMemoria()
     const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    await asentar()
     expect(avisos()).toEqual([
       [
         VENUE,
@@ -324,6 +327,7 @@ describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra 
   it('sin hora del aparato (o ilegible), el aviso no inventa una: la deja fuera (Codex r1 #2)', async () => {
     baseEnMemoria()
     await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: 'ayer' }))
+    await asentar()
     expect(avisos()).toHaveLength(1)
     expect(avisos()[0][2].horaDelAparato).toBeUndefined()
     expect(typeof avisos()[0][2].llegada).toBe('string')
@@ -333,25 +337,44 @@ describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra 
     baseEnMemoria()
     const ADELANTADA = Date.now() + 3_600_000
     await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: String(ADELANTADA) }))
+    await asentar()
     expect(avisos()[0][2].horaDelAparato).toBe(new Date(ADELANTADA).toISOString())
   })
 
   it('la etiqueta del descuento de cuenta (importe libre) también avisa, con su nombre en la fila', async () => {
     baseEnMemoria()
     await createOrderWithItems(VENUE, deLaCola({ discount: 1000, descuentoDeCatalogoId: APROBACION }))
+    await asentar()
     expect(avisos()).toHaveLength(1)
     expect(avisos()[0][2]).toMatchObject({ montoCents: 1000, descuentos: [{ nombre: 'Descuento de la cuenta', importeCents: 1000 }] })
+  })
+
+  it('Codex r2: si falla leer el nombre de quien la subió, la venta se guarda igual y el aviso sale sin nombre', async () => {
+    const db = baseEnMemoria()
+    prismaMock.staff.findUnique.mockRejectedValue(new Error('base caída'))
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    await asentar()
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }),
+    })
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2].quien).toBeUndefined()
   })
 
   it('regresión: de la cola CON el permiso (aprobada) no avisa', async () => {
     baseEnMemoria()
     await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, aprobacionDelDescuento: {} }))
+    await asentar()
     expect(avisos()).toEqual([])
   })
 
   it('regresión: un % sin aprobación de la cola no avisa', async () => {
     baseEnMemoria()
     await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: LIBRE }))
+    await asentar()
     expect(avisos()).toEqual([])
   })
 
@@ -361,6 +384,7 @@ describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra 
       VENUE,
       venta({ orderDiscountId: APROBACION, performedBy: 'sesion-1', aprobacionDelDescuento: { porPin: 'sv-gerente' } }),
     )
+    await asentar()
     expect(avisos()).toEqual([])
   })
 })

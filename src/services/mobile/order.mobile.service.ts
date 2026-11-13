@@ -930,6 +930,44 @@ function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo
 const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
 
 /**
+ * D22: aviso al dueño (campanita, OWNER y ADMIN) de una venta de la cola con un descuento que pedía aprobación y entró sin ella. La
+ * marca de la cola la manda el cliente, así que quien la finge EN LÍNEA para saltarse el PIN también cae aquí: el dueño se entera.
+ * Todo es de mejor esfuerzo y fuera de la transacción, también leer el nombre de quien la subió (Codex r2: dentro, su falla revertía
+ * la venta); nunca lanza. Lo que no se pierde es el rastro `DESCUENTO_SIN_APROBACION_SIN_RED`, escrito en la transacción.
+ */
+function avisarDescuentoSinAprobacion(
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  descuentos: Array<{ nombre: string; importeCents: number }>,
+  llegada: Date,
+): void {
+  void (async () => {
+    let quien = ''
+    try {
+      const sesion = input.performedBy
+        ? await prisma.staff.findUnique({ where: { id: input.performedBy }, select: { firstName: true, lastName: true } })
+        : null
+      quien = sesion ? `${sesion.firstName} ${sesion.lastName}`.trim() : ''
+    } catch {
+      // Sin el nombre, el aviso sale igual (dice la llave y la orden; la bitácora tiene a la sesión).
+    }
+    const declarada = horaQueDeclaraElAparato(input.createdAtLocal)
+    await avisarVentaSinRed(venueId, 'DESCUENTO_SIN_APROBACION', {
+      externalId: normalizeExternalId(input.externalId) ?? orderId,
+      orderId,
+      staffId: input.performedBy,
+      ...(input.terminalSerialNumber ? { terminalSerial: input.terminalSerialNumber } : {}),
+      montoCents: descuentos.reduce((suma, d) => suma + d.importeCents, 0),
+      descuentos,
+      ...(quien ? { quien } : {}),
+      ...(declarada ? { horaDelAparato: declarada.toISOString() } : {}),
+      llegada: llegada.toISOString(),
+    })
+  })().catch(error => logger.error(`[D22] no se pudo avisar el descuento sin aprobación de ${orderId}: ${(error as Error).message}`))
+}
+
+/**
  * D22: la hora que el aparato DICE que hizo la venta (`createdAtLocal` en epoch ms, número o texto de dígitos), sin recortarla a la
  * llegada como `horaDeLaVenta` (Codex r1 #2): sólo se muestra a una persona, nunca decide nada. `null` si falta o no se entiende.
  */
@@ -1507,8 +1545,8 @@ export type VentaDeMostradorEnTx =
       venta: VentaCalculada
       /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
       regaloSinPermisoPesos?: number
-      /** D22: los descuentos que pedían aprobación y entraron de la cola sin ella (pide aviso al dueño), y quién subió la venta. */
-      sinAprobacion?: { descuentos: Array<{ nombre: string; importeCents: number }>; quien: string | null }
+      /** D22: los descuentos que pedían aprobación y entraron de la cola sin ella (pide aviso al dueño), con su importe en centavos. */
+      sinAprobacion?: Array<{ nombre: string; importeCents: number }>
       /** Descuento del cliente (fase 2): lo que se registró, para su `DISCOUNT_APPLIED` después del commit. */
       descuentoDelCliente?: { montoPesos: number; fueraDeTarifa: boolean }
     }
@@ -1850,16 +1888,12 @@ export async function crearVentaDeMostradorEnTx(
     pide && (aprobador || sinAprobacionEnLaCola)
       ? { ...fila, appliedById: sesionQueAplica ?? fila.appliedById, authorizedById: fila.authorizedById || aprobador }
       : fila
-  /** D22: lo que entró sin aprobación y quién subió la venta, para el aviso al dueño después del commit. */
-  const sinAprobacion: NonNullable<VentaDeMostradorCreada['sinAprobacion']> = { descuentos: [], quien: null }
+  /** D22: lo que entró sin aprobación, para el aviso al dueño después del commit. */
+  const sinAprobacion: NonNullable<VentaDeMostradorCreada['sinAprobacion']> = []
   /** D4 r5: el rastro de un descuento que pedía aprobación y entró de la cola sin ella, en ESTA transacción (como el regalo de D2). */
   const anotarSiEntroSinAprobacion = async (fila: Prisma.OrderDiscountUncheckedCreateInput, pide: boolean): Promise<void> => {
     if (!pide || !sinAprobacionEnLaCola) return
-    if (sinAprobacion.descuentos.length === 0 && input.performedBy) {
-      const sesion = await tx.staff.findUnique({ where: { id: input.performedBy }, select: { firstName: true, lastName: true } })
-      sinAprobacion.quien = sesion ? `${sesion.firstName} ${sesion.lastName}`.trim() || null : null
-    }
-    sinAprobacion.descuentos.push({ nombre: fila.name, importeCents: Math.round(Number(fila.amount) * 100) })
+    sinAprobacion.push({ nombre: fila.name, importeCents: Math.round(Number(fila.amount) * 100) })
     await writeLegacyActivityAuditTx(tx, {
       staffId: validatedStaffId || null,
       venueId,
@@ -2131,7 +2165,7 @@ export async function crearVentaDeMostradorEnTx(
         venta,
         regaloSinPermisoPesos: orderLevelDiscountDecimal,
         ...registradoDelCliente,
-        ...(sinAprobacion.descuentos.length > 0 ? { sinAprobacion } : {}),
+        ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
       }
     }
     return {
@@ -2139,7 +2173,7 @@ export async function crearVentaDeMostradorEnTx(
       promotionTotals: null,
       venta,
       ...registradoDelCliente,
-      ...(sinAprobacion.descuentos.length > 0 ? { sinAprobacion } : {}),
+      ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     }
   }
 
@@ -2248,7 +2282,7 @@ export async function crearVentaDeMostradorEnTx(
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
     ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
-    ...(sinAprobacion.descuentos.length > 0 ? { sinAprobacion } : {}),
+    ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     ...(prep.descuentoDelCliente && !cupon && descuentoDeOrdenFinal > 0
       ? {
           descuentoDelCliente: {
@@ -2411,24 +2445,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   const { order } = created
   const { cambiosDePrecio } = created.venta
 
-  // D22: un descuento que pedía aprobación entró de la cola sin ella (#428: lo cobrado ya ocurrió). La marca de la cola la manda el
-  // cliente, así que quien la finge en línea también cae aquí: el dueño se entera. Recién hecho el commit, antes de lo que pueda fallar
-  // después (un reintento sale con la venta que ya está y no vuelve a avisar), y sin esperarlo (nunca lanza);
-  // es de mejor esfuerzo, como los demás avisos de venta sin red: lo que no se pierde es su rastro en la bitácora, de la transacción.
-  if (created.sinAprobacion) {
-    const declarada = horaQueDeclaraElAparato(input.createdAtLocal)
-    void avisarVentaSinRed(venueId, 'DESCUENTO_SIN_APROBACION', {
-      externalId: normalizeExternalId(input.externalId) ?? order.id,
-      orderId: order.id,
-      staffId: input.performedBy,
-      ...(input.terminalSerialNumber ? { terminalSerial: input.terminalSerialNumber } : {}),
-      montoCents: created.sinAprobacion.descuentos.reduce((suma, d) => suma + d.importeCents, 0),
-      descuentos: created.sinAprobacion.descuentos,
-      ...(created.sinAprobacion.quien ? { quien: created.sinAprobacion.quien } : {}),
-      ...(declarada ? { horaDelAparato: declarada.toISOString() } : {}),
-      llegada: llegada.toISOString(),
-    })
-  }
+  // D22: un descuento que pedía aprobación entró de la cola sin ella (#428: lo cobrado ya ocurrió). Recién hecho el commit, antes de
+  // lo que pueda fallar después (un reintento sale con la venta que ya está y no vuelve a avisar), y sin esperarlo.
+  if (created.sinAprobacion) avisarDescuentoSinAprobacion(venueId, input, order.id, created.sinAprobacion, llegada)
 
   await terminarVentaDeMostrador(venueId, created, prep)
 
