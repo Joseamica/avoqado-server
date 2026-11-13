@@ -135,9 +135,12 @@ export const createPaymentLinkBodySchema = z
     customFields: customFieldsSchema,
     tippingConfig: tippingConfigSchema,
     discount: paymentLinkDiscountInput,
+    /** Liga por prenda: familia de productos (el cliente elige talla al pagar). Las reglas de negocio viven en el servicio. */
+    productGroupId: z.string().cuid('ID de familia inválido').nullable().optional(),
   })
   .refine(
     data => {
+      if (data.productGroupId) return true // por prenda: sin importe fijo
       if (data.amountType === 'FIXED' && (data.amount === undefined || data.amount === null)) {
         return false
       }
@@ -150,6 +153,7 @@ export const createPaymentLinkBodySchema = z
   )
   .refine(
     data => {
+      if (data.productGroupId) return true // por prenda: la familia reemplaza a los productos
       if (data.purpose === 'ITEM' && (!data.items || data.items.length === 0)) {
         return false
       }
@@ -196,6 +200,8 @@ export const updatePaymentLinkBodySchema = z.object({
   customFields: customFieldsSchema,
   tippingConfig: tippingConfigSchema,
   discount: paymentLinkDiscountInput,
+  /** Sólo para confirmar la familia de una liga por prenda; el servicio rechaza cualquier cambio de clase. */
+  productGroupId: z.string().cuid('ID de familia inválido').nullable().optional(),
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -12,7 +12,14 @@ import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetr
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
 import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  PaymentOutcomeUnknownError,
+  UnauthorizedError,
+} from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
@@ -29,6 +36,7 @@ import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.serv
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
@@ -484,6 +492,8 @@ export interface CreatePaymentLinkData {
   attributedStaffIds?: string[]
   /** Descuento de la liga: escrito a mano o tomado del catálogo. `null`/ausente = sin descuento. */
   discount?: EntradaDescuento | null
+  /** Liga por prenda (purpose ITEM, sin items): la familia cuyas tallas elige el cliente al pagar. Plan Pro y Stripe. */
+  productGroupId?: string | null
 }
 
 export interface UpdatePaymentLinkData {
@@ -509,6 +519,8 @@ export interface UpdatePaymentLinkData {
   tippingConfig?: TippingConfig | null
   /** Poner/cambiar con un objeto; `null` lo quita; ausente no lo toca. */
   discount?: EntradaDescuento | null
+  /** Sólo puede repetir la familia que la liga ya tiene; no convierte una liga en otra clase. */
+  productGroupId?: string | null
 }
 
 /** Pestañas de la lista del dashboard. «used» no es un estado de la base: es una liga de un solo uso ya cobrada (sigue ACTIVE). */
@@ -546,6 +558,8 @@ const WHERE_DE_LA_VISTA: Record<VistaDeLigas, Prisma.PaymentLinkWhereInput | nul
 /**
  * Creates a new payment link for a venue
  */
+const PRODUCT_GROUP_SELECT = { select: { id: true, name: true } } as const
+
 export async function createPaymentLink(
   venueId: string,
   data: CreatePaymentLinkData,
@@ -564,6 +578,7 @@ export async function createPaymentLink(
       include: {
         customer: { select: CUSTOMER_SUMMARY_SELECT },
         createdBy: { select: { id: true, firstName: true, lastName: true } },
+        productGroup: PRODUCT_GROUP_SELECT,
         _count: { select: { checkoutSessions: true } },
       },
     })
@@ -590,14 +605,32 @@ export async function createPaymentLink(
   //      "Configuración de pago incompleta" at checkout.
   let ecommerceMerchant: { id: string } | null = null
 
+  // Liga por prenda: reglas de negocio antes de tocar nada (la forma de la liga, el plan y la familia).
+  const porPrenda = !!data.productGroupId
+  if (porPrenda) {
+    if (data.purpose !== 'ITEM') throw new BadRequestError('Una liga por prenda debe ser de tipo artículo')
+    if (data.items && data.items.length > 0) throw new BadRequestError('Una liga por prenda no lleva productos sueltos: lleva una familia')
+    if (data.discount) throw new BadRequestError('Las ligas por prenda no admiten descuento')
+    if (!(await venueHasFeatureAccess(venueId, 'PRODUCT_VARIANTS'))) {
+      throw new ForbiddenError('Las ligas por prenda son del plan Pro', 'PLAN_REQUIRED')
+    }
+    const familia = await prisma.productGroup.findFirst({
+      where: { id: data.productGroupId!, venueId, deletedAt: null },
+      select: { id: true },
+    })
+    if (!familia) throw new BadRequestError('La familia de productos no existe o no pertenece a este negocio')
+  }
+  const sinStripe = () => new BadRequestError('Las ligas por prenda sólo funcionan con Stripe')
+
   if (data.ecommerceMerchantId) {
     ecommerceMerchant = await prisma.ecommerceMerchant.findFirst({
       where: { id: data.ecommerceMerchantId, venueId, active: true },
-      select: { id: true },
+      select: { id: true, provider: { select: { code: true } } },
     })
     if (!ecommerceMerchant) {
       throw new BadRequestError('El canal de e-commerce seleccionado no existe, no está activo, o no pertenece a este venue.')
     }
+    if (porPrenda && (ecommerceMerchant as { provider?: { code?: string } | null }).provider?.code !== 'STRIPE_CONNECT') throw sinStripe()
   } else {
     const candidates = await prisma.ecommerceMerchant.findMany({
       where: { venueId, active: true },
@@ -610,7 +643,10 @@ export async function createPaymentLink(
     })
 
     const chargeable = candidates.filter(isEcommerceMerchantChargeable)
-    ecommerceMerchant = chargeable.find(m => m.provider?.code === 'BLUMON') ?? chargeable[0] ?? null
+    ecommerceMerchant = porPrenda
+      ? (chargeable.find(m => m.provider?.code === 'STRIPE_CONNECT') ?? null)
+      : (chargeable.find(m => m.provider?.code === 'BLUMON') ?? chargeable[0] ?? null)
+    if (porPrenda && !ecommerceMerchant) throw sinStripe()
   }
 
   if (!ecommerceMerchant) {
@@ -628,7 +664,7 @@ export async function createPaymentLink(
     position: number
     modifiers: Array<{ modifierId: string; quantity: number }>
   }> = []
-  if (data.purpose === 'ITEM') {
+  if (data.purpose === 'ITEM' && !porPrenda) {
     resolvedItems = await validateBundleItems(venueId, data.items ?? [])
   }
 
@@ -695,10 +731,11 @@ export async function createPaymentLink(
         title: data.title,
         description: data.description,
         imageUrl: data.imageUrl,
-        amountType: data.amountType,
-        amount: data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
+        amountType: porPrenda ? 'FIXED' : data.amountType,
+        amount: porPrenda ? undefined : data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
         currency: data.currency || 'MXN',
-        isReusable: data.isReusable ?? false,
+        isReusable: porPrenda ? true : (data.isReusable ?? false),
+        ...(porPrenda ? { productGroupId: data.productGroupId } : {}),
         expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
         redirectUrl: data.redirectUrl,
         customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
@@ -711,6 +748,7 @@ export async function createPaymentLink(
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
+        productGroup: PRODUCT_GROUP_SELECT,
         _count: {
           select: { checkoutSessions: true },
         },
@@ -749,9 +787,10 @@ export async function createPaymentLink(
       entity: 'PaymentLink',
       entityId: paymentLink.id,
       data:
-        data.customerId || discountFoto
+        data.customerId || discountFoto || porPrenda
           ? {
               ...(data.customerId ? { customerId: data.customerId } : {}),
+              ...(porPrenda ? { productGroupId: data.productGroupId } : {}),
               ...(discountFoto ? { discount: resumenDeDescuento(discountFoto) } : {}),
             }
           : undefined,
@@ -832,6 +871,7 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
+        productGroup: PRODUCT_GROUP_SELECT,
         _count: {
           select: { checkoutSessions: true },
         },
@@ -934,6 +974,7 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
         select: { id: true, firstName: true, lastName: true },
       },
       ...BUNDLE_ITEMS_INCLUDE,
+      productGroup: PRODUCT_GROUP_SELECT,
       attributions: {
         orderBy: { createdAt: 'asc' },
         include: {
@@ -1022,6 +1063,7 @@ export async function updatePaymentLink(
       amount: true,
       isReusable: true,
       discount: true,
+      productGroupId: true,
     },
   })
 
@@ -1035,6 +1077,19 @@ export async function updatePaymentLink(
 
   if (existing.status === 'ARCHIVED') {
     throw new BadRequestError('No se puede editar una liga de pago archivada')
+  }
+
+  // Liga por prenda: editar no la convierte en otra clase ni al revés.
+  if (data.productGroupId !== undefined && data.productGroupId !== existing.productGroupId) {
+    throw new BadRequestError('No se puede cambiar el tipo de una liga: crea una nueva')
+  }
+  if (existing.productGroupId) {
+    if (data.items && data.items.length > 0) throw new BadRequestError('Una liga por prenda no lleva productos sueltos')
+    if (data.discount) throw new BadRequestError('Las ligas por prenda no admiten descuento')
+    if (data.amount != null) throw new BadRequestError('Una liga por prenda no lleva importe fijo')
+    if (data.amountType !== undefined && data.amountType !== 'FIXED')
+      throw new BadRequestError('No se puede cambiar el tipo de una liga: crea una nueva')
+    if (data.isReusable === false) throw new BadRequestError('Una liga por prenda siempre es reutilizable')
   }
 
   // Agregar cliente: sólo a una liga que no tiene. El mismo cliente otra vez no hace nada (reintento).
@@ -1170,6 +1225,7 @@ export async function updatePaymentLink(
         include: {
           customer: { select: CUSTOMER_SUMMARY_SELECT },
           createdBy: { select: { id: true, firstName: true, lastName: true } },
+          productGroup: PRODUCT_GROUP_SELECT,
           _count: { select: { checkoutSessions: true } },
         },
       })
@@ -1193,7 +1249,13 @@ export async function updatePaymentLink(
       action: 'PAYMENT_LINK_UPDATED',
       entity: 'PaymentLink',
       entityId: linkId,
-      data: discountChange ? { discount: discountChange } : undefined,
+      data:
+        discountChange || existing.productGroupId
+          ? {
+              ...(discountChange ? { discount: discountChange } : {}),
+              ...(existing.productGroupId ? { productGroupId: existing.productGroupId } : {}),
+            }
+          : undefined,
     })
   }
   if (customerAdded && auditCustomerAdded) {
