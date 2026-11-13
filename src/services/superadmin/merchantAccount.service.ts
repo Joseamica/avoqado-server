@@ -1,4 +1,10 @@
 import prisma from '../../utils/prismaClient'
+import {
+  exigirConfirmacionDePosiciones,
+  tomarCandado,
+  type CambioDePosicion,
+  type ConfirmacionDePosiciones,
+} from '@/services/shared/candadoDePosiciones'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
 import { angelPayIdentityConflict, lockAngelPayVenue } from '../../lib/angelpayIdentity'
 import logger from '../../config/logger'
@@ -1743,9 +1749,12 @@ export async function approveDiscoveredAngelPayMerchant(input: {
    * inheritance (Terminal.assignedMerchantIds=[] → fallback path).
    */
   terminalIds?: string[]
+  /** Candado de posiciones (tarifa al comercio, paso 1). */
+  positionConfirmations?: ConfirmacionDePosiciones
 }): Promise<{
   merchantAccount: Awaited<ReturnType<typeof prisma.merchantAccount.findUnique>>
   venuePaymentConfig: Awaited<ReturnType<typeof prisma.venuePaymentConfig.findUnique>>
+  positionChanges: CambioDePosicion[]
 }> {
   const { venueId, merchantAccountId, slot, terminalIds } = input
 
@@ -1780,7 +1789,10 @@ export async function approveDiscoveredAngelPayMerchant(input: {
   }
 
   // ---- Transaction: flip active + assign slot ----
+  let positionChanges: CambioDePosicion[] = []
   const result = await prisma.$transaction(async tx => {
+    // Codex p12-r4 #2: el candado de posiciones ANTES de tocar la cuenta, en el mismo orden que el asistente AngelPay.
+    await tomarCandado(tx, { venueId })
     await assertAngelPayLoginsInVenue(venueId, [merchantAccountId], tx)
     const updatedMerchant = await tx.merchantAccount.update({
       where: { id: merchantAccountId },
@@ -1790,6 +1802,14 @@ export async function approveDiscoveredAngelPayMerchant(input: {
 
     const existingConfig = await tx.venuePaymentConfig.findUnique({
       where: { venueId },
+    })
+    // Sin configuración propia se crea una con sólo PRIMARY: las cuentas heredadas de la organización dejan de usarse
+    // (Codex p12-r1 #3). Con configuración propia, sólo se llena la posición elegida (vacía o ya con esta cuenta).
+    positionChanges = await exigirConfirmacionDePosiciones(tx, {
+      objetivo: { venueId },
+      siguiente: existingConfig ? { [slot]: merchantAccountId } : { PRIMARY: merchantAccountId, SECONDARY: null, TERTIARY: null },
+      confirmaciones: input.positionConfirmations,
+      cuentaAnteriorYaVerificada: true,
     })
 
     let updatedConfig
@@ -1865,7 +1885,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
       }
     }
 
-    return { merchantAccount: updatedMerchant, venuePaymentConfig: updatedConfig }
+    return { merchantAccount: updatedMerchant, venuePaymentConfig: updatedConfig, positionChanges }
   })
 
   logger.info('AngelPay discovered merchant approved + assigned to venue slot', {
@@ -1901,7 +1921,9 @@ export async function reserveAngelPaySlot(input: {
    * matches it lazily back-fills the FK.
    */
   angelpayUserAccountId?: string
-}): Promise<{ merchantAccountId: string; slot: VenuePaymentSlot; externalMerchantId: string }> {
+  /** Candado de posiciones (tarifa al comercio, paso 1). */
+  positionConfirmations?: ConfirmacionDePosiciones
+}): Promise<{ merchantAccountId: string; slot: VenuePaymentSlot; externalMerchantId: string; positionChanges: CambioDePosicion[] }> {
   const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })
   if (!angelpayProvider) {
     throw new NotFoundError('PaymentProvider ANGELPAY not found — was seed.ts run?')
@@ -1932,9 +1954,29 @@ export async function reserveAngelPaySlot(input: {
     await assertAngelPayLoginsInVenue(input.venueId, [placeholder.id], tx)
 
     // Pick the slot: admin-specified, or first empty if not specified.
+    await tomarCandado(tx, { venueId: input.venueId })
     const existingConfig = await tx.venuePaymentConfig.findUnique({
       where: { venueId: input.venueId },
     })
+    // Candado de posiciones: la misma elección de posición que abajo, revisada antes de escribir.
+    const posicionReservada: VenuePaymentSlot | null = !existingConfig
+      ? 'PRIMARY'
+      : input.slot
+        ? input.slot
+        : !existingConfig.secondaryAccountId
+          ? 'SECONDARY'
+          : !existingConfig.tertiaryAccountId
+            ? 'TERTIARY'
+            : null
+    let positionChanges: CambioDePosicion[] = []
+    if (posicionReservada) {
+      positionChanges = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: { venueId: input.venueId },
+        siguiente: existingConfig ? { [posicionReservada]: placeholder.id } : { PRIMARY: placeholder.id, SECONDARY: null, TERTIARY: null },
+        confirmaciones: input.positionConfirmations,
+        cuentaAnteriorYaVerificada: true,
+      })
+    }
 
     let assignedSlot: VenuePaymentSlot
     if (!existingConfig) {
@@ -1987,6 +2029,7 @@ export async function reserveAngelPaySlot(input: {
       merchantAccountId: placeholder.id,
       slot: assignedSlot,
       externalMerchantId: placeholderExternalId,
+      positionChanges,
     }
   })
 }

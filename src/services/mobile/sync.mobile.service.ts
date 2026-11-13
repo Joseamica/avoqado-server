@@ -1424,7 +1424,10 @@ async function applyPayCash(
   // teclado; otra cosa se ignora, porque el efectivo ya está en el cajón y un dato de diagnóstico no puede dejarlo sin registrar.
   const saldoEsperado = intent.payload.expectedBalanceBeforeCents
   const antesCents =
-    typeof saldoEsperado === 'number' && Number.isInteger(saldoEsperado) && saldoEsperado >= 0 && saldoEsperado <= MAX_TERMINAL_PAYMENT_CENTS
+    typeof saldoEsperado === 'number' &&
+    Number.isInteger(saldoEsperado) &&
+    saldoEsperado >= 0 &&
+    saldoEsperado <= MAX_TERMINAL_PAYMENT_CENTS
       ? saldoEsperado
       : undefined
   if (saldoEsperado !== undefined && saldoEsperado !== null && antesCents === undefined) {
@@ -1586,7 +1589,16 @@ async function applyOrderMutation(
       // D1 (hz:f34960c5:D1): sin red tampoco se regala sin permiso: el servicio rechaza un COMP si quien encoló no trae
       // `orders:comp` (sin `authorizeIntent`, falla cerrado). El tipo sólo se sabe bajo el candado, por eso no va en
       // `requiredPermissionsForIntent`.
-      await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId, authorizeIntent?.(intent, 'orders:comp') === true)
+      // D4 (hz:f34960c5:D4): lo mismo para un % o fijo con «Requiere aprobación»: entra si la sesión que lo sube tiene
+      // `tpv-orders:discount`; si no, 403 PERMISSION_DENIED ⇒ REJECTED visible (sin red no hay PIN). Una caída de base sigue en RETRY.
+      await orderMobileService.applyOrderDiscount(
+        venueId,
+        orderId,
+        discountId,
+        staffId,
+        authorizeIntent?.(intent, 'orders:comp') === true,
+        authorizeIntent?.(intent, 'tpv-orders:discount') === true ? {} : undefined,
+      )
       break
     }
     case 'APPLY_SERVICE_CHARGE': {

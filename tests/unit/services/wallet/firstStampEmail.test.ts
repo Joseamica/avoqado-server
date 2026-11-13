@@ -36,7 +36,10 @@ function sembrar(over: Record<string, any> = {}) {
     cycle: 1,
     ...(over.card ?? {}),
   } as any)
-  prismaMock.stampCard.count.mockResolvedValue(over.totalCartillas ?? 1)
+  // ventas selladas distintas del cliente en el negocio (EARN, orderId distinto)
+  prismaMock.stampEvent.findMany.mockResolvedValue(
+    Array.from({ length: over.ventasSelladas ?? 1 }, (_, i) => ({ orderId: `o${i}` })) as any,
+  )
   prismaMock.customer.findFirst.mockResolvedValue(
     over.customer === null ? null : ({ id: 'c1', email: 'ana@example.com', firstName: 'Ana', ...(over.customer ?? {}) } as any),
   )
@@ -124,8 +127,31 @@ describe('sendFirstStampEmailIfDue', () => {
     )
   })
 
+  it('manda el correo cuando la primera venta dio 2 sellos (una sola venta sellada)', async () => {
+    sembrar({ card: { stampsEarned: 2 }, ventasSelladas: 1 })
+    await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
+    expect(enviar).toHaveBeenCalledTimes(1)
+  })
+
+  it('cuenta ventas por la parte 0 de su sello (una por venta), acotado en la base: sin distinct y take 2', async () => {
+    sembrar({ ventasSelladas: 1 })
+    await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
+    const args = prismaMock.stampEvent.findMany.mock.calls[0][0]
+    expect(args).toEqual({
+      where: { venueId: 'v1', type: 'EARN', part: 0, stampCard: { customerId: 'c1' } },
+      select: { id: true },
+      take: 2,
+    })
+  })
+
+  it('NO manda en la segunda venta sellada aunque la tarjeta tenga 2', async () => {
+    sembrar({ card: { stampsEarned: 2 }, ventasSelladas: 2 })
+    await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
+    expect(enviar).not.toHaveBeenCalled()
+  })
+
   it('NO manda en el segundo sello', async () => {
-    sembrar({ card: { stampsEarned: 2 } })
+    sembrar({ card: { stampsEarned: 2 }, ventasSelladas: 2 })
     await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
     expect(enviar).not.toHaveBeenCalled()
   })
@@ -134,7 +160,7 @@ describe('sendFirstStampEmailIfDue', () => {
     // 🔴 El caso que se escapa: la segunda cartilla tambien arranca en 1 de 7. Sin
     // mirar cuantas cartillas lleva, el cliente recibiria el mismo correo cada vez
     // que completa una — justo al cliente mas fiel del negocio.
-    sembrar({ card: { stampsEarned: 1, cycle: 2 }, totalCartillas: 2 })
+    sembrar({ card: { stampsEarned: 1, cycle: 2 }, ventasSelladas: 8 })
     await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
     expect(enviar).not.toHaveBeenCalled()
   })

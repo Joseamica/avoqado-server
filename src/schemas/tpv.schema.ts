@@ -196,6 +196,13 @@ export const recordPaymentBodySchema = z.object({
       // Este esquema también valida `/tpv/orders/:o` (`recordOrderPayment`), donde se IGNORA a propósito: la TPV no tiene caja y
       // manda `shiftIdDeLaVenta`. Sólo la lee `recordFastPayment` (la venta rápida del POS por `/mobile/…/fast`).
       cashDrawerSessionId: z.string().max(64, { message: 'La caja de la venta es demasiado larga.' }).nullish(),
+      // Lealtad: la hora en que el aparato capturó la venta que sube de su cola (epoch ms, número o texto de dígitos). Sólo cuenta con
+      // `isOfflineReplay === true` y nunca después de la llegada (`horaDeLaVenta`, igual que el POS). Sin declararlo, `validateRequest`
+      // lo borraría. El dinero ya se cobró: un valor ilegible se descarta (la venta queda fechada a la llegada, como hoy), nunca un 400.
+      createdAtLocal: z
+        .union([z.number(), z.string().max(20, { message: 'La hora de la venta es demasiado larga.' })])
+        .nullish()
+        .catch(undefined),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en

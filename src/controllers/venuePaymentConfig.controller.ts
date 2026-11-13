@@ -2,6 +2,19 @@ import { Request, Response } from 'express'
 import * as venuePaymentConfigService from '../services/venuePaymentConfig.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import AppError from '@/errors/AppError'
+import { CONFIRMAR_POSICION, POSICION_DESACTUALIZADA, leerConfirmaciones } from '@/services/shared/candadoDePosiciones'
+
+/** El candado de posiciones necesita su código y su detalle para que la pantalla pregunte (los demás errores, como antes). */
+function respuestaDelCandado(res: Response, error: unknown): boolean {
+  if (!(error instanceof AppError) || (error.code !== CONFIRMAR_POSICION && error.code !== POSICION_DESACTUALIZADA)) return false
+  // Respuesta normal (la pantalla pregunta o recarga): aviso, sin stack; no ensucia las alertas de errores.
+  logger.warn('Candado de posiciones: pide confirmar o recargar', { code: error.code, message: error.message })
+  res
+    .status(error.statusCode)
+    .json({ success: false, error: error.message, message: error.message, code: error.code, details: error.details })
+  return true
+}
 
 /**
  * GET /api/v1/dashboard/venues/:venueId/payment-config
@@ -56,6 +69,7 @@ export async function createVenuePaymentConfig(req: Request, res: Response) {
       tertiaryAccountId,
       routingRules,
       preferredProcessor,
+      positionConfirmations: leerConfirmaciones(req.body.positionConfirmations),
     })
 
     res.status(201).json({
@@ -63,6 +77,7 @@ export async function createVenuePaymentConfig(req: Request, res: Response) {
       data: config,
     })
   } catch (error: any) {
+    if (respuestaDelCandado(res, error)) return
     logger.error('Error creating venue payment config:', error)
     res.status(400).json({
       success: false,
@@ -86,6 +101,7 @@ export async function updateVenuePaymentConfig(req: Request, res: Response) {
       tertiaryAccountId,
       routingRules,
       preferredProcessor,
+      positionConfirmations: leerConfirmaciones(req.body.positionConfirmations),
     })
 
     res.json({
@@ -93,6 +109,7 @@ export async function updateVenuePaymentConfig(req: Request, res: Response) {
       data: config,
     })
   } catch (error: any) {
+    if (respuestaDelCandado(res, error)) return
     logger.error('Error updating venue payment config:', error)
     res.status(400).json({
       success: false,
@@ -109,13 +126,14 @@ export async function deleteVenuePaymentConfig(req: Request, res: Response) {
   try {
     const { configId } = req.params
 
-    await venuePaymentConfigService.deleteVenuePaymentConfig(configId)
+    await venuePaymentConfigService.deleteVenuePaymentConfig(configId, leerConfirmaciones(req.body?.positionConfirmations))
 
     res.json({
       success: true,
       message: 'Payment config deleted successfully',
     })
   } catch (error: any) {
+    if (respuestaDelCandado(res, error)) return
     logger.error('Error deleting venue payment config:', error)
     res.status(400).json({
       success: false,

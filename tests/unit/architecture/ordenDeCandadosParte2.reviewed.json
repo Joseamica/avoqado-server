@@ -9,7 +9,7 @@
     "efectosRevisados: archivo#función#llamada → motivo (UNA función y UNA llamada; una entrada que no coincide con nada es un hallazgo). Una llamada cuyo nombre parece un efecto (emit…, mandar…, setTimeout) pero que sólo toca la base o es un plazo; se revisa en el código antes de listarla. Techo de la prueba: los parámetros-callback que recibe un cuerpo y que ella no puede seguir (`afterCas` y `dentroDeLaTx` de `transitions.service.ts`/`capture.service.ts`) se revisan a mano; sus llamadores pasan funciones que sólo escriben con el `tx` que reciben (paso 7). `denyTx` de `bookingIngestion` queda SIN envolver: no escribe ninguna tabla protegida."
   ],
   "corridaSobreSrc": true,
-  "padresConAccionReferencial": ["Consumer", "CustomerGroup", "Order", "Staff", "StaffVenue", "Venue"],
+  "padresConAccionReferencial": ["Consumer", "CustomerGroup", "LoyaltyPromotion", "Order", "Staff", "StaffVenue", "Venue"],
   "openersGenericos": {
     "src/services/mobile/http-operation.mobile.service.ts#executeHttpOperation": {
       "cuerpo": 1,

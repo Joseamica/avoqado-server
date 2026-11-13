@@ -1,0 +1,450 @@
+/**
+ * D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación» sólo entra con la acreditación que la ruta deja en el
+ * request (`tpv-orders:discount` propio o el PIN de un gerente). El servicio la vuelve a exigir bajo su candado (falla cerrado) y
+ * guarda quién lo aplicó y quién lo aprobó. Lo que no pide aprobación sigue exactamente igual.
+ *
+ * Doble EN MEMORIA con estado (como `orderLevelDiscountSurvivesRecalc.test.ts`): la creación y el descuento reales escriben y
+ * leen las mismas filas.
+ */
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: jest.fn(() => null) },
+}))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
+}))
+jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
+  ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
+  avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
+}))
+
+import { Prisma } from '@prisma/client'
+import { ForbiddenError } from '@/errors/AppError'
+import { avisarVentaSinRed } from '@/services/mobile/avisoDeVentaSinRed'
+import { applyOrderDiscount, buildOrderItemsData, createOrderWithItems } from '@/services/mobile/order.mobile.service'
+import { prismaMock } from '../../../__helpers__/setup'
+
+type Fila = Record<string, any>
+
+const VENUE = 'venue-1'
+const APROBACION = 'desc-gerente' // 10 %, «Requiere aprobación»
+const LIBRE = 'desc-libre' // 10 %, sin aprobación
+const RENGLON_APROBACION = 'desc-renglon-gerente'
+
+const aNumero = (v: any) => (v && typeof v === 'object' && typeof v.toNumber === 'function' ? v.toNumber() : v)
+
+function coincide(fila: Fila, where: Fila = {}): boolean {
+  return Object.entries(where).every(([k, v]) => {
+    if (v !== null && typeof v === 'object' && !(v instanceof Date))
+      throw new Error(`doble en memoria: operador no soportado en where.${k}`)
+    return fila[k] === v
+  })
+}
+
+const catalogo: Record<string, Fila> = {
+  [APROBACION]: {
+    id: APROBACION,
+    venueId: VENUE,
+    name: '10% gerencial',
+    type: 'PERCENTAGE',
+    value: 10,
+    scope: 'ORDER',
+    active: true,
+    requiresApproval: true,
+  },
+  [LIBRE]: {
+    id: LIBRE,
+    venueId: VENUE,
+    name: '10% frecuente',
+    type: 'PERCENTAGE',
+    value: 10,
+    scope: 'ORDER',
+    active: true,
+    requiresApproval: false,
+  },
+}
+
+function baseEnMemoria() {
+  const ordenes = new Map<string, Fila>()
+  const renglones: Fila[] = []
+  const descuentos: Fila[] = []
+  let seq = 0
+  const nuevoId = (p: string) => `${p}-${++seq}`
+  const plano = (o: Fila) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, aNumero(v)]))
+  const conRenglones = (o: Fila) => ({
+    ...o,
+    items: renglones.filter(r => r.orderId === o.id).map(r => ({ ...r, product: null, modifiers: [] })),
+    promotions: [],
+  })
+  const buscarOrden = async ({ where }: any) => {
+    if (where.venueId_externalId) return null
+    const o = ordenes.get(where.id)
+    return o && (!where.venueId || o.venueId === where.venueId) ? conRenglones(o) : null
+  }
+  prismaMock.order.findUnique.mockImplementation(buscarOrden)
+  prismaMock.order.findFirst.mockImplementation(buscarOrden)
+  prismaMock.order.create.mockImplementation(async ({ data }: any) => {
+    const { items, ...cabecera } = data
+    delete cabecera.orderCustomers
+    const o = { id: nuevoId('orden'), paidAmount: 0, serviceChargeAmount: 0, ...plano(cabecera) }
+    ordenes.set(o.id, o)
+    for (const r of items?.create ?? []) renglones.push({ id: nuevoId('renglon'), orderId: o.id, orderPromotionId: null, ...plano(r) })
+    return conRenglones(o)
+  })
+  prismaMock.order.update.mockImplementation(async ({ where, data }: any) => {
+    const o = ordenes.get(where.id)!
+    for (const [k, v] of Object.entries(data as Fila))
+      o[k] = k === 'version' && typeof v === 'object' ? (o.version ?? 0) + v.increment : aNumero(v)
+    return conRenglones(o)
+  })
+  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
+    const [orderId, venueId] = valores
+    const o = ordenes.get(orderId)
+    return o && o.venueId === venueId ? [{ id: orderId }] : []
+  })
+  prismaMock.orderItem.findMany.mockImplementation(async ({ where }: any) => renglones.filter(r => coincide(r, where)))
+  prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
+  prismaMock.orderDiscount.findMany.mockImplementation(async ({ where }: any) => descuentos.filter(d => coincide(d, where)))
+  prismaMock.orderDiscount.findFirst.mockImplementation(async ({ where }: any) => descuentos.find(d => coincide(d, where)) ?? null)
+  prismaMock.orderDiscount.create.mockImplementation(async ({ data }: any) => {
+    const fila = { id: nuevoId('od'), appliedToItemIds: [], discountId: null, ...plano(data) }
+    descuentos.push(fila)
+    return fila
+  })
+  prismaMock.orderDiscount.update.mockImplementation(async ({ where, data }: any) => {
+    const fila = descuentos.find(d => d.id === where.id)
+    Object.assign(fila!, plano(data))
+    return fila
+  })
+  prismaMock.venue.findUnique.mockResolvedValue({ id: VENUE, name: 'Tienda de prueba', salesEnabled: true })
+  // La membresía de cada persona en el negocio: la vendedora (`staff-1`) y la sesión que cobra (`sesion-1`).
+  prismaMock.staffVenue.findFirst.mockImplementation(async ({ where }: any) =>
+    where.venueId === VENUE ? { id: `sv-${where.staffId}`, staffId: where.staffId, venueId: VENUE, active: true, staff: {} } : null,
+  )
+  prismaMock.shift.findFirst.mockResolvedValue(null)
+  prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) => {
+    const d = catalogo[where.id]
+    return d && d.venueId === where.venueId ? { ...d, value: new Prisma.Decimal(d.value) } : null
+  })
+  return { descuentos, ordenes: () => [...ordenes.values()] }
+}
+
+/** Una venta de $100 en un renglón «Otro importe». */
+const venta = (extra: Fila = {}) =>
+  ({ staffId: 'staff-1', items: [{ name: 'Otro importe', quantity: 1, unitPrice: 10000 }], ...extra }) as any
+
+async function cuentaAbierta(db: ReturnType<typeof baseEnMemoria>) {
+  const creada = await createOrderWithItems(VENUE, venta())
+  return { id: creada.id, filas: () => db.descuentos.filter(d => d.orderId === creada.id) }
+}
+
+describe('D4 · Mesas: aplicar un % o fijo que pide aprobación a la cuenta abierta', () => {
+  it('sin acreditación: 403 PERMISSION_DENIED y la cuenta no cambia', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    const intento = applyOrderDiscount(VENUE, cuenta.id, APROBACION, 'sesion-1')
+    await expect(intento).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(applyOrderDiscount(VENUE, cuenta.id, APROBACION, 'sesion-1')).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(cuenta.filas()).toEqual([])
+  })
+
+  it('con el PIN de un gerente: entra y guarda quién lo aplicó y quién lo aprobó', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    const r = await applyOrderDiscount(VENUE, cuenta.id, APROBACION, 'sesion-1', false, { porPin: 'sv-gerente' })
+    expect(r.amount).toBe(10)
+    expect(cuenta.filas()).toEqual([
+      expect.objectContaining({ discountId: APROBACION, appliedById: 'sv-sesion-1', authorizedById: 'sv-gerente' }),
+    ])
+  })
+
+  it('con el permiso propio (sin PIN): la sesión queda como quien lo aprobó', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    await applyOrderDiscount(VENUE, cuenta.id, APROBACION, 'sesion-1', false, {})
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ authorizedById: 'sv-sesion-1' })])
+  })
+
+  it('regresión: un % sin «Requiere aprobación» entra sin acreditación y sin aprobador', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    const r = await applyOrderDiscount(VENUE, cuenta.id, LIBRE, 'sesion-1')
+    expect(r.amount).toBe(10)
+    const [fila] = cuenta.filas()
+    expect(fila.authorizedById ?? null).toBeNull()
+    expect(fila.appliedById).toBe('sv-sesion-1')
+  })
+})
+
+describe('D4 · Mostrador: la venta nueva con un descuento que pide aprobación', () => {
+  it('la etiqueta del descuento de cuenta (importe libre) sin acreditación: 403 y no nace la venta', async () => {
+    const db = baseEnMemoria()
+    await expect(
+      createOrderWithItems(VENUE, venta({ discount: 1000, descuentoDeCatalogoId: APROBACION, performedBy: 'sesion-1' })),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(db.ordenes()).toEqual([])
+  })
+
+  it('la etiqueta con el PIN de un gerente: el importe sigue siendo el de la caja y la fila guarda al aprobador', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(
+      VENUE,
+      venta({
+        discount: 1000,
+        descuentoDeCatalogoId: APROBACION,
+        performedBy: 'sesion-1',
+        aprobacionDelDescuento: { porPin: 'sv-gerente' },
+      }),
+    )
+    const filas = db.descuentos.filter(d => d.orderId === creada.id)
+    // Codex r2 #4: quien lo aplicó es la sesión (`sesion-1`), no la vendedora elegida (`staff-1`).
+    expect(filas).toEqual([
+      expect.objectContaining({ name: 'Descuento de la cuenta', amount: 10, appliedById: 'sv-sesion-1', authorizedById: 'sv-gerente' }),
+    ])
+  })
+
+  it('regresión: la etiqueta de un % sin aprobación no pide nada ni pone aprobador', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, venta({ discount: 1000, descuentoDeCatalogoId: LIBRE, performedBy: 'sesion-1' }))
+    const [fila] = db.descuentos.filter(d => d.orderId === creada.id)
+    expect(fila.amount).toBe(10)
+    expect(fila.authorizedById ?? null).toBeNull()
+  })
+
+  it('`orderDiscountId` (cola de la TPV) que pide aprobación: sin acreditación 403; con permiso propio, aprobador = la sesión', async () => {
+    const db = baseEnMemoria()
+    await expect(createOrderWithItems(VENUE, venta({ orderDiscountId: APROBACION, performedBy: 'sesion-1' }))).rejects.toMatchObject({
+      code: 'PERMISSION_DENIED',
+    })
+    const creada = await createOrderWithItems(
+      VENUE,
+      venta({ orderDiscountId: APROBACION, performedBy: 'sesion-1', aprobacionDelDescuento: {} }),
+    )
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, authorizedById: 'sv-sesion-1' }),
+    ])
+  })
+})
+
+// D4 r5 (Codex, apps viejas antes de publicar): la venta de la cola YA se cobró (efectivo en la caja). Rechazarla la dejaba sin
+// registrar. Se registra como antes de #423, sin aprobador, con la sesión como quien lo aplicó y un rastro en la bitácora.
+describe('D4 · venta de la cola (isOfflineReplay) sin acreditación: entra, nunca 403', () => {
+  const deLaCola = (extra: Fila = {}) => venta({ isOfflineReplay: true, createdAtLocal: Date.now(), performedBy: 'sesion-1', ...extra })
+
+  it('`orderDiscountId` (cola de la TPV): nace con el importe del catálogo, sin aprobador y con su renglón en la bitácora', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, amount: 10, appliedById: 'sv-sesion-1', authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        venueId: VENUE,
+        action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+        entity: 'Order',
+        entityId: creada.id,
+        data: expect.objectContaining({
+          orderId: creada.id,
+          discountId: APROBACION,
+          nombre: '10% gerencial',
+          importePesos: 10,
+          subidaPor: 'sesion-1',
+        }),
+      }),
+    })
+  })
+
+  it('la etiqueta del descuento de cuenta (importe libre): igual, sin aprobador y con rastro', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ discount: 1000, descuentoDeCatalogoId: APROBACION }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ name: 'Descuento de la cuenta', amount: 10, appliedById: 'sv-sesion-1', authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+        data: expect.objectContaining({ discountId: APROBACION, importePesos: 10 }),
+      }),
+    })
+  })
+
+  it('regresión: de quien sí tiene el permiso, el aprobador es la sesión y no hay rastro de «sin aprobación»', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, aprobacionDelDescuento: {} }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, authorizedById: 'sv-sesion-1' }),
+    ])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }) }),
+    )
+  })
+
+  it('regresión: un % sin aprobación de la cola no deja rastro', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: LIBRE }))
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }) }),
+    )
+  })
+})
+
+// D22 (Codex r6 #2): desde #428, mandar `isOfflineReplay` EN LÍNEA salta el PIN y nadie se enteraba. La venta sigue entrando (la de
+// la cola ya se cobró), pero el dueño recibe un aviso con qué descuento, cuánto, quién la subió y las horas del aparato y de llegada.
+describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra de la cola sin ella', () => {
+  const avisos = () => (avisarVentaSinRed as jest.Mock).mock.calls.filter(([, aviso]) => aviso === 'DESCUENTO_SIN_APROBACION')
+  /** El aviso sale después de responder, sin esperarlo (lee el nombre fuera de la transacción): se le da un turno para asentarse. */
+  const asentar = () => new Promise(resolve => setImmediate(resolve))
+  const HACE_UN_MINUTO = Date.now() - 60_000
+  const deLaCola = (extra: Fila = {}) => venta({ isOfflineReplay: true, createdAtLocal: HACE_UN_MINUTO, performedBy: 'sesion-1', ...extra })
+
+  beforeEach(() => {
+    prismaMock.staff.findUnique.mockResolvedValue({ firstName: 'Cajera', lastName: 'Uno' } as any)
+  })
+
+  it('sin acreditación: entra y avisa una vez con el descuento, el monto, quién la subió y las dos horas', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    await asentar()
+    expect(avisos()).toEqual([
+      [
+        VENUE,
+        'DESCUENTO_SIN_APROBACION',
+        expect.objectContaining({
+          // Sin llave, la del aviso es la orden (como el aviso de D2).
+          externalId: creada.id,
+          orderId: creada.id,
+          staffId: 'sesion-1',
+          montoCents: 1000,
+          descuentos: [{ nombre: '10% gerencial', importeCents: 1000 }],
+          quien: 'Cajera Uno',
+          horaDelAparato: new Date(HACE_UN_MINUTO).toISOString(),
+        }),
+      ],
+    ])
+  })
+
+  it('sin hora del aparato (o ilegible), el aviso no inventa una: la deja fuera (Codex r1 #2)', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: 'ayer' }))
+    await asentar()
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2].horaDelAparato).toBeUndefined()
+    expect(typeof avisos()[0][2].llegada).toBe('string')
+  })
+
+  it('la hora del aparato adelantada se muestra tal cual (no se recorta a la llegada como para el precio)', async () => {
+    baseEnMemoria()
+    const ADELANTADA = Date.now() + 3_600_000
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: String(ADELANTADA) }))
+    await asentar()
+    expect(avisos()[0][2].horaDelAparato).toBe(new Date(ADELANTADA).toISOString())
+  })
+
+  it('la etiqueta del descuento de cuenta (importe libre) también avisa, con su nombre en la fila', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ discount: 1000, descuentoDeCatalogoId: APROBACION }))
+    await asentar()
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2]).toMatchObject({ montoCents: 1000, descuentos: [{ nombre: 'Descuento de la cuenta', importeCents: 1000 }] })
+  })
+
+  it('Codex r2: si falla leer el nombre de quien la subió, la venta se guarda igual y el aviso sale sin nombre', async () => {
+    const db = baseEnMemoria()
+    prismaMock.staff.findUnique.mockRejectedValue(new Error('base caída'))
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    await asentar()
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }),
+    })
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2].quien).toBeUndefined()
+  })
+
+  it('regresión: de la cola CON el permiso (aprobada) no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, aprobacionDelDescuento: {} }))
+    await asentar()
+    expect(avisos()).toEqual([])
+  })
+
+  it('regresión: un % sin aprobación de la cola no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: LIBRE }))
+    await asentar()
+    expect(avisos()).toEqual([])
+  })
+
+  it('regresión: en línea con el PIN no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(
+      VENUE,
+      venta({ orderDiscountId: APROBACION, performedBy: 'sesion-1', aprobacionDelDescuento: { porPin: 'sv-gerente' } }),
+    )
+    await asentar()
+    expect(avisos()).toEqual([])
+  })
+})
+
+describe('D4 · el descuento de un RENGLÓN (también vales): `buildOrderItemsData` falla cerrado', () => {
+  const producto = {
+    id: 'prod-1',
+    venueId: VENUE,
+    name: 'Playera',
+    price: new Prisma.Decimal(100),
+    categoryId: 'cat-1',
+    category: { name: 'Ropa' },
+  }
+  const delRenglon = {
+    id: RENGLON_APROBACION,
+    venueId: VENUE,
+    name: '$20 gerencial',
+    type: 'FIXED_AMOUNT',
+    value: new Prisma.Decimal(20),
+    scope: 'ITEM',
+    targetItemIds: [],
+    targetCategoryIds: [],
+    active: true,
+    requiresApproval: true,
+  }
+  const items = [{ productId: 'prod-1', quantity: 1, discountId: RENGLON_APROBACION }] as any
+
+  beforeEach(() => {
+    prismaMock.product.findMany.mockResolvedValue([producto] as any)
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([delRenglon] as any)
+  })
+
+  it('sin acreditación: 403 PERMISSION_DENIED', async () => {
+    await expect(
+      buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, { performedBy: 'sesion-1' }),
+    ).rejects.toMatchObject({
+      code: 'PERMISSION_DENIED',
+    })
+  })
+
+  it('con acreditación: calcula el renglón como siempre', async () => {
+    const r = await buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, {
+      performedBy: 'sesion-1',
+      aprobacionDelDescuento: {},
+    })
+    expect(r.itemDiscountTotal).toBe(20)
+  })
+
+  it('D4 r5: de la cola (`isOfflineReplay`) sin acreditación, calcula el renglón (lo cobrado ya ocurrió)', async () => {
+    const r = await buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, {
+      performedBy: 'sesion-1',
+      isOfflineReplay: true,
+    })
+    expect(r.itemDiscountTotal).toBe(20)
+  })
+
+  it('regresión: un descuento de renglón sin aprobación no pide nada', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([{ ...delRenglon, requiresApproval: false }] as any)
+    const r = await buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, {})
+    expect(r.itemDiscountTotal).toBe(20)
+  })
+})

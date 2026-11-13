@@ -210,7 +210,8 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
 
   /**
    * hz:87f4b879:D1: un canje de puntos DIRIGIDO al renglón que se anula o se regala. El recorte lo retira y devuelve sus 500
-   * puntos; la membresía de quien firma la devolución sale de `staffVenue.findUnique` (A = sesión ⇒ sv-A, B = vendedor ⇒ sv-B).
+   * puntos; la membresía ACTIVA de quien firma la devolución sale de `staffVenue.findFirst` (A = sesión ⇒ sv-A, B = vendedor ⇒
+   * sv-B; hz:87f4b879:D4: una dada de baja no firma).
    */
   function conCanjeDePuntosEnItem1() {
     const canje = {
@@ -232,16 +233,16 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       { id: 'item-1', appliedDiscountId: null, isCortesia: false, discountAmount: new Decimal(10) },
     ])
     mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
-    mockPrisma.staffVenue.findUnique.mockImplementation(async ({ where }: any) =>
-      where.staffId_venueId.venueId !== VENUE_ID ? null : { id: where.staffId_venueId.staffId === 'user-A' ? 'sv-A' : 'sv-B' },
+    mockPrisma.staffVenue.findFirst.mockImplementation(async ({ where }: any) =>
+      where.venueId !== VENUE_ID || where.active !== true ? null : { id: where.staffId === 'user-A' ? 'sv-A' : 'sv-B' },
     )
     mockPrisma.loyaltyTransaction.findUnique.mockResolvedValue({ id: 'lt-1', customerId: 'cust-1', points: -500, orderId: ORDER_ID })
   }
 
   /** La devolución: los MISMOS 500 puntos de siempre, firmada por la membresía `svEsperada`. */
   function esperaDevolucionDePuntosFirmadaPor(svEsperada: string, staffEsperado: string) {
-    expect(mockPrisma.staffVenue.findUnique).toHaveBeenCalledWith({
-      where: { staffId_venueId: { staffId: staffEsperado, venueId: VENUE_ID } },
+    expect(mockPrisma.staffVenue.findFirst).toHaveBeenCalledWith({
+      where: { staffId: staffEsperado, venueId: VENUE_ID, active: true },
       select: { id: true },
     })
     expect(mockPrisma.loyaltyTransaction.create).toHaveBeenCalledTimes(1)
@@ -790,7 +791,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
   // ── removeOrderItem ────────────────────────────────────────────────────────
 
   describe('removeOrderItem → ITEM_REMOVED', () => {
-    it('fires logAction with action ITEM_REMOVED (no staffId in function signature)', async () => {
+    it('fires logAction with action ITEM_REMOVED (sin sesión, sin autor: como antes)', async () => {
       const order = makeOrder()
       mockPrisma.order.findUnique.mockResolvedValue(order)
       mockPrisma.orderItem.delete.mockResolvedValue({})
@@ -804,10 +805,29 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
           entity: 'Order',
           entityId: ORDER_ID,
           venueId: VENUE_ID,
-          staffId: null, // no staffId param in removeOrderItem
+          staffId: null, // sin `actorId` (llamadas internas y pruebas viejas)
           data: expect.objectContaining({ itemId: 'item-1', amount: 60 }),
         }),
       )
+    })
+
+    it('hz:87f4b879:D5: con la sesión (`actorId`), ITEM_REMOVED queda a su nombre', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.orderItem.delete.mockResolvedValue({})
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder({ subtotal: new Decimal(40), total: new Decimal(40) }))
+
+      await removeOrderItem(VENUE_ID, ORDER_ID, 'item-1', 1, { actorId: STAFF_ID })
+
+      expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_REMOVED', staffId: STAFF_ID }))
+    })
+
+    it('🔴 D5: quitar un renglón con canje de puntos ⇒ los puntos vuelven a nombre de la sesión', async () => {
+      conCanjeDePuntosEnItem1()
+
+      await removeOrderItem(VENUE_ID, ORDER_ID, 'item-1', 1, { actorId: 'user-A' })
+
+      esperaDevolucionDePuntosFirmadaPor('sv-A', 'user-A')
     })
 
     it('does NOT fire logAction when item is not found', async () => {

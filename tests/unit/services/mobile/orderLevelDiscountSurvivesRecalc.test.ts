@@ -30,12 +30,18 @@ jest.mock('@/communication/sockets', () => ({
   __esModule: true,
   default: { getBroadcastingService: jest.fn(() => null) },
 }))
+// D652: el aviso al dueño sale después del commit; aquí sólo se mira que se pida.
+jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
+  ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
+  avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
 }))
 
 import { applyOrderDiscount, createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { computeOrderBalance } from '@/services/shared/orderBalance'
+import { avisarVentaSinRed } from '@/services/mobile/avisoDeVentaSinRed'
 import { prismaMock } from '../../../__helpers__/setup'
 
 type Fila = Record<string, any>
@@ -73,7 +79,12 @@ function baseEnMemoria() {
   })
 
   const buscarOrden = async ({ where }: any) => {
-    if (where.venueId_externalId) return null
+    if (where.venueId_externalId) {
+      // D652: la llave de la venta (`@@unique([venueId, externalId])`), para el reintento.
+      const { venueId, externalId } = where.venueId_externalId
+      const o = [...ordenes.values()].find(x => x.venueId === venueId && x.externalId === externalId)
+      return o ? conRenglones(o) : null
+    }
     const o = ordenes.get(where.id)
     return o && (!where.venueId || o.venueId === where.venueId) ? conRenglones(o) : null
   }
@@ -97,6 +108,8 @@ function baseEnMemoria() {
   })
   // El candado de la orden (`lockExistingOrderForPayment`) es un SELECT … FOR UPDATE crudo.
   prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    // D652: el candado de la llave de la venta (`candadoDeLaLlave`, un `Prisma.Sql`); en memoria no hay concurrencia que serializar.
+    if (!Array.isArray(strings) && String((strings as any)?.sql).includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: '' }]
     if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
     const [orderId, venueId] = valores
     const o = ordenes.get(orderId)
@@ -331,5 +344,257 @@ describe('el tope del catálogo vale para cualquier tipo de descuento de cuenta 
     const [fila] = db.descuentosDe(creada.id)
     expect(fila.amount).toBe(10)
     expect(fila.reparto?.tope).toBeUndefined()
+  })
+})
+
+// D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el % en centavos enteros, mitad hacia arriba, como la TPV y ANDROID. En pesos flotantes
+// 2.135 × 100 = 213.49999999999997 y el 10 % de una cuenta de $21.35 daba $2.13.
+describe('D2 — el % de cuenta en centavos: 10 % de $21.35 = $2.14 (antes $2.13)', () => {
+  const ventaDe2135 = (extra: Fila = {}) => venta({ items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }], tip: 0, ...extra })
+
+  it('🔴 mesa de ANDROID (catálogo en cuenta abierta): $2.14 en la fila y en la cuenta', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135())
+    const aplicado = await applyOrderDiscount(VENUE, creada.id, DESCUENTO_10, 'staff-1')
+    expect(aplicado.amount).toBe(2.14)
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 venta sin red de la TPV con `orderDiscountId`: $2.14 y la cuenta cierra con los $19.21 que cobró la terminal', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135({ orderDiscountId: DESCUENTO_10, discount: 0, source: 'TPV' }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    const saldo = cierraCon(orden, 19.21, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+  })
+})
+
+// D2 · B (coordinador, 12-nov): la venta sin red registra lo que la TPV YA cobró. 2.16.0/2.16.1 truncan y no conocen el tope.
+describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según su versión', () => {
+  const ventaSinRedDeTpv = (extra: Fila = {}) =>
+    venta({
+      items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }],
+      tip: 0,
+      orderDiscountId: DESCUENTO_10,
+      discount: 0,
+      source: 'TPV',
+      isOfflineReplay: true,
+      ...extra,
+    })
+
+  it('🔴 TPV 2.16.0: $2.13 (trunca), y la cuenta cierra con los $19.22 que cobró', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    const saldo = cierraCon(orden, 19.22, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+    expect(Number(orden.total)).toBeCloseTo(19.22, 2) // el doble en memoria no redondea como la columna Decimal(10,2)
+  })
+
+  it('🔴 Codex r3: TPV 2.16.0 con tope de $1 en el catálogo: $1.00 (el tope se respeta; esta excepción nunca descuenta más que la exacta)', async () => {
+    const db = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
+    expect(db.orden(creada.id).discountAmount).toBe(1)
+  })
+
+  it('TPV 2.16.2 en adelante (sin la marca): $2.14 exacto, cierra con $19.21', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1921 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    expect(cierraCon(orden, 19.21, 0).isFullyPaid).toBe(true)
+  })
+
+  it('control — la marca sólo vale en una venta sin red de la TPV: con otra fuente, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, source: 'AVOQADO_ANDROID' }),
+    )
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 Codex r2 #2: venta guardada por la 2.16.1 que sube ya actualizada (build ≥ 127): su total ($19.22) dice que truncó ⇒ $2.13', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1922 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    expect(cierraCon(orden, 19.22, 0).isFullyPaid).toBe(true)
+  })
+
+  it('🔴 Codex r2 #1: sin el token de una terminal no hay excepción, aunque el cuerpo diga TPV sin red ($2.14, y con tope $1.00)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+    const db2 = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const otra = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db2.orden(otra.id).discountAmount).toBe(1)
+  })
+
+  it('🔴 Codex r4: con un tope inválido (negativo) la excepción tampoco da más que la regla exacta', async () => {
+    const conTopeNegativo = () =>
+      prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+        where.id === DESCUENTO_10
+          ? {
+              id: DESCUENTO_10,
+              venueId: VENUE,
+              name: 'tope -1',
+              type: 'PERCENTAGE',
+              value: 10,
+              scope: 'ORDER',
+              active: true,
+              maxDiscountAmount: -1,
+            }
+          : null,
+      )
+    const dbExacta = baseEnMemoria()
+    conTopeNegativo()
+    const exacta = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    const dbVieja = baseEnMemoria()
+    conTopeNegativo()
+    const vieja = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 2135 } }))
+    expect(dbVieja.orden(vieja.id).discountAmount).toBe(dbExacta.orden(exacta.id).discountAmount)
+  })
+
+  it('control — terminal nueva sin versión vieja y con un total que no es el truncado: exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: null } }))
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('control — y no en línea: sin `isOfflineReplay`, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, isOfflineReplay: false }),
+    )
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+})
+
+// D652 (founder, 13-nov: «1, por cobrar»): la TPV 2.14.0–2.16.1 cobró $90 sin red de una cuenta de $100 con un cupón que no sabe
+// identificar. El controlador ya volvió su `orderDiscountId: ""` «sin descuento» y marcó `cuponSinIdentificar` (sólo token de terminal).
+describe('D652 — venta sin red de la TPV vieja con un cupón sin identificar', () => {
+  /** Lo que llega al servicio desde el cuerpo real de `armarPedidoParaMobile` (v2.16.1), ya leído por el controlador. */
+  const ventaConCuponSinId = (extra: Fila = {}) =>
+    venta({
+      externalId: 'llave-1',
+      items: [{ externalId: 'llave-1:0', name: 'Otro importe', unitPrice: 10000, quantity: 1, modifierIds: [] }],
+      tip: 0,
+      discount: 0,
+      orderDiscountId: null,
+      source: 'TPV',
+      orderType: 'TAKEOUT',
+      isOfflineReplay: true,
+      createdAtLocal: 1762990000000,
+      terminalSerialNumber: 'AVQD-1',
+      cuponSinIdentificar: { totalCents: 9000 },
+      ...extra,
+    })
+  const anotaciones = () =>
+    prismaMock.activityLog.create.mock.calls.map(([arg]: any) => arg.data).filter((d: any) => d.entity === 'VentaSinRed')
+  const avisos = avisarVentaSinRed as jest.MockedFunction<typeof avisarVentaSinRed>
+
+  beforeEach(() => avisos.mockClear())
+
+  it('🔴 la orden nace a $100 sin descuento y, con los $90 que cobró la terminal, queda debiendo $10', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    const orden = db.orden(creada.id)
+    expect(orden.total).toBe(100)
+    expect(orden.discountAmount).toBe(0)
+    expect(db.descuentosDe(creada.id)).toHaveLength(0) // nunca se inventa el descuento
+    const saldo = cierraCon(orden, 90, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(10)
+    expect(saldo.isFullyPaid).toBe(false)
+  })
+
+  it('🔴 la bitácora de «precio cambiado sin red» queda en la transacción, con el motivo y los $10 que faltan', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(anotaciones()).toEqual([
+      expect.objectContaining({
+        venueId: VENUE,
+        action: 'VENTA_SIN_RED_PRECIO_CAMBIADO',
+        entityId: 'llave-1',
+        data: expect.objectContaining({
+          orderId: creada.id,
+          terminalSerial: 'AVQD-1',
+          montoCents: 9000,
+          faltanCents: 1000,
+          origen: 'CUPON_SIN_IDENTIFICAR',
+          motivo: expect.stringContaining('cupón sin conexión que la terminal no pudo identificar'),
+        }),
+      }),
+    ])
+    expect(anotaciones()[0].data.motivo).toContain('revisa los $10.00 que faltan')
+  })
+
+  it('🔴 y avisa a dueño y admin después del commit, con la misma llave que usará el pago', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(avisos).toHaveBeenCalledTimes(1)
+    expect(avisos).toHaveBeenCalledWith(
+      VENUE,
+      'PRECIO_CAMBIADO',
+      expect.objectContaining({ externalId: 'llave-1', orderId: creada.id, montoCents: 9000, terminalSerial: 'AVQD-1' }),
+    )
+  })
+
+  it('🔴 el reintento con el mismo cuerpo devuelve LA misma orden: una sola venta, una sola anotación, un solo aviso', async () => {
+    baseEnMemoria()
+    const primera = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    const reintento = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(reintento.id).toBe(primera.id)
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(anotaciones()).toHaveLength(1)
+    expect(avisos).toHaveBeenCalledTimes(1)
+  })
+
+  it('defensa: la marca sin el serial de una terminal (o fuera de la cola) no anota ni avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, ventaConCuponSinId({ terminalSerialNumber: null }))
+    await createOrderWithItems(VENUE, ventaConCuponSinId({ externalId: 'llave-2', isOfflineReplay: false }))
+    expect(anotaciones()).toHaveLength(0)
+    expect(avisos).not.toHaveBeenCalled()
+  })
+
+  it('regresión: la venta sin red sin la marca nace igual que hoy, sin anotación', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId({ cuponSinIdentificar: undefined }))
+    expect(db.orden(creada.id).total).toBe(100)
+    expect(anotaciones()).toHaveLength(0)
   })
 })

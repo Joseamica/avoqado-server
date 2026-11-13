@@ -51,7 +51,14 @@ import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarC
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
-import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import {
+  aCentavos,
+  comoJson,
+  importesDeLasFilas,
+  nuevoRepartoDeCuenta,
+  nuevoRepartoDirigido,
+  porcentajeEnCentavos,
+} from '../shared/repartoDescuento'
 import {
   conservarDescuentoHistorico,
   filasDeLaOrden,
@@ -2693,8 +2700,11 @@ export async function removeOrderItem(
   orderId: string,
   orderItemId: string,
   expectedVersion: number,
+  /** Server-owned (hz:87f4b879:D5): el `userId` de la sesión que lo quita. Sin él (llamadas internas), sin autor, como antes. */
+  opciones: { actorId?: string } = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
+  const autor = opciones.actorId
 
   const { updatedOrder, itemToRemove, recorte } = await withDeadlockRetry(
     async tx => {
@@ -2762,7 +2772,7 @@ export async function removeOrderItem(
       // P4 (founder, 1-oct): lo dirigido al renglón que se borra —su descuento propio, su parte de un 2×1, un premio— se recorta
       // o se retira con sus beneficios ANTES de borrarlo; si no, su importe se quedaba restando sobre los demás renglones. Va
       // DESPUÉS de R9: la reducción que devuelva una fila retirada ya no encuentra en la cabecera el IVA del renglón que se fue.
-      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId })
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId, staffId: autor })
 
       // Delete the order item (Prisma will cascade delete modifiers)
       await tx.orderItem.delete({
@@ -2895,7 +2905,7 @@ export async function removeOrderItem(
   )
 
   void logAction({
-    staffId: null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_REMOVED',
     entity: 'Order',
@@ -3806,7 +3816,8 @@ export async function applyDiscount(
         const itemsSubtotal = itemsToDiscount.reduce((sum, item) => sum + Number(item.total), 0)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (itemsSubtotal * input.value) / 100
+          // D2 (12-nov): centavos enteros, mitad hacia arriba, como la TPV (en pesos flotantes 10 % de $21.35 daba $2.13).
+          discountAmount = porcentajeEnCentavos(aCentavos(itemsSubtotal), input.value) / 100
         } else {
           discountAmount = Math.min(input.value, itemsSubtotal) // Can't discount more than item total
         }
@@ -3815,7 +3826,7 @@ export async function applyDiscount(
         const orderSubtotal = Number(order.subtotal)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (orderSubtotal * input.value) / 100
+          discountAmount = porcentajeEnCentavos(aCentavos(orderSubtotal), input.value) / 100 // D2: ídem
         } else {
           discountAmount = Math.min(input.value, orderSubtotal) // Can't discount more than order total
         }

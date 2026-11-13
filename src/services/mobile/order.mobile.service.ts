@@ -76,7 +76,8 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
-import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -324,6 +325,16 @@ export interface CreateOrderInput {
   descuentoDelCliente?: { discountId: string; montoCents: number } | null
   /** Server-owned: la sesión tiene `discounts:apply` (lo comprobó el guard de la ruta en ESTE request). Nunca del cuerpo. */
   descuentoConPermisoPropio?: boolean
+  /**
+   * D4 (server-owned): la sesión puede aplicar un % o fijo con «Requiere aprobación»: tiene `tpv-orders:discount` (`{}`) o la
+   * aprobó un gerente con su PIN (`porPin`, su membresía). Sólo lo pone la ruta (`aprobacionDelDescuento(req)`); nunca del cuerpo.
+   */
+  aprobacionDelDescuento?: { porPin?: string }
+  /**
+   * D4: la etiqueta del descuento de CUENTA del catálogo que la caja manda como importe libre (`discount`). No cambia el dinero:
+   * sólo hace que se revise su aprobación y que la fila guarde quién la dio.
+   */
+  descuentoDeCatalogoId?: string | null
   /** El token del PIN de gerente que autoriza un descuento, del CUERPO (no del `X-Permission-Override`). Se lee sin gastar. */
   autorizacionDelDescuento?: string | null
   tip?: number // cents
@@ -354,6 +365,19 @@ export interface CreateOrderInput {
   stampRewardExpectedDiscount?: number | null
   /** Cola sin red / reserva del efectivo: «la venta ya ocurrió». Nunca recibe el 409 de precio cambiado. */
   isOfflineReplay?: boolean
+  /**
+   * D2 · B (server-owned: sólo con el token de una TERMINAL): la TPV 2.14.0–2.16.1 truncó el % de catálogo y no conocía el tope. En su
+   * venta sin red (`source: 'TPV'` + `isOfflineReplay`) se registra lo que cobró (`descuentoComoLoCobroLaTpvVieja`) si su versión lo dice
+   * (`truncaPorVersion`) o si el total que cobró (`totalCents`, del cuerpo) es el truncado y no el exacto: una venta guardada por la 2.16.1
+   * puede subir ya actualizada a 2.16.2 (Codex r2 #2).
+   */
+  ventaDeTerminal?: { truncaPorVersion: boolean; totalCents: number | null }
+  /**
+   * D652 (server-owned: sólo con el token de una TERMINAL y `isOfflineReplay`): la TPV 2.14.0–2.16.1 cobró sin red con un cupón que no
+   * sabe identificar (`orderDiscountId: ""`). La venta entra a precio lleno, el cobro se registra tal cual y la cuenta queda debiendo
+   * la diferencia (founder, 13-nov: «por cobrar»). `totalCents` es lo que cobró la terminal (del cuerpo, > 0), sólo para el aviso.
+   */
+  cuponSinIdentificar?: { totalCents: number }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -911,6 +935,72 @@ function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo
 
 const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
 
+/**
+ * D22: aviso al dueño (campanita, OWNER y ADMIN) de una venta de la cola con un descuento que pedía aprobación y entró sin ella. La
+ * marca de la cola la manda el cliente, así que quien la finge EN LÍNEA para saltarse el PIN también cae aquí: el dueño se entera.
+ * Todo es de mejor esfuerzo y fuera de la transacción, también leer el nombre de quien la subió (Codex r2: dentro, su falla revertía
+ * la venta); nunca lanza. Lo que no se pierde es el rastro `DESCUENTO_SIN_APROBACION_SIN_RED`, escrito en la transacción.
+ */
+function avisarDescuentoSinAprobacion(
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  descuentos: Array<{ nombre: string; importeCents: number }>,
+  llegada: Date,
+): void {
+  void (async () => {
+    let quien = ''
+    try {
+      const sesion = input.performedBy
+        ? await prisma.staff.findUnique({ where: { id: input.performedBy }, select: { firstName: true, lastName: true } })
+        : null
+      quien = sesion ? `${sesion.firstName} ${sesion.lastName}`.trim() : ''
+    } catch {
+      // Sin el nombre, el aviso sale igual (dice la llave y la orden; la bitácora tiene a la sesión).
+    }
+    const declarada = horaQueDeclaraElAparato(input.createdAtLocal)
+    await avisarVentaSinRed(venueId, 'DESCUENTO_SIN_APROBACION', {
+      externalId: normalizeExternalId(input.externalId) ?? orderId,
+      orderId,
+      staffId: input.performedBy,
+      ...(input.terminalSerialNumber ? { terminalSerial: input.terminalSerialNumber } : {}),
+      montoCents: descuentos.reduce((suma, d) => suma + d.importeCents, 0),
+      descuentos,
+      ...(quien ? { quien } : {}),
+      ...(declarada ? { horaDelAparato: declarada.toISOString() } : {}),
+      llegada: llegada.toISOString(),
+    })
+  })().catch(error => logger.error(`[D22] no se pudo avisar el descuento sin aprobación de ${orderId}: ${(error as Error).message}`))
+}
+
+/**
+ * D22: la hora que el aparato DICE que hizo la venta (`createdAtLocal` en epoch ms, número o texto de dígitos), sin recortarla a la
+ * llegada como `horaDeLaVenta` (Codex r1 #2): sólo se muestra a una persona, nunca decide nada. `null` si falta o no se entiende.
+ */
+function horaQueDeclaraElAparato(createdAtLocal: CreateOrderInput['createdAtLocal']): Date | null {
+  const v = createdAtLocal
+  const hora = new Date(typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : Number.NaN)
+  return Number.isNaN(hora.getTime()) ? null : hora
+}
+
+/** D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación». Una COMP la cubre `orders:comp` (D1). */
+export const pideAprobacionDeGerente = (d: { readonly [key: string]: unknown } | null | undefined): boolean =>
+  d?.requiresApproval === true && d.type !== 'COMP'
+
+/** D4: el 403 del servicio cuando falta la acreditación de la ruta (el de la ruta, con PIN, sale antes de llegar aquí). */
+const sinAprobacionDelDescuento = () =>
+  new ForbiddenError('Este descuento necesita la aprobación de un gerente (permiso «Aplicar descuentos en TPV»).', 'PERMISSION_DENIED')
+
+/** D4: la membresía activa de la sesión (quien aplica y, sin PIN, quien aprueba con su propio permiso). */
+export async function membresiaDeLaSesion(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  sesion: string | undefined,
+): Promise<string | null> {
+  if (!sesion) return null
+  return (await tx.staffVenue.findFirst({ where: { venueId, staffId: sesion, active: true }, select: { id: true } }))?.id ?? null
+}
+
 /** hz:e0b12f00:D2: el rastro de un regalo sin permiso, en la MISMA transacción. `avisarVentaSinRed` lo encuentra y no lo repite. */
 async function anotarRegaloSinPermisoEnTx(
   tx: TxConReintento,
@@ -937,6 +1027,44 @@ async function anotarRegaloSinPermisoEnTx(
 }
 
 const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
+const AVISO_PRECIO_CAMBIADO = 'PRECIO_CAMBIADO' satisfies AvisoVentaSinRed
+
+/**
+ * D652: el rastro del cupón que la TPV vieja no identificó, en la MISMA transacción que la orden (si falla, la venta no se guarda).
+ * Es el de «precio cambiado sin red» con su propio motivo; `avisarVentaSinRed` lo encuentra por la llave y no lo repite (tampoco el
+ * aviso de «saldo pendiente» del pago, que llega con la misma llave). Nunca inventa el descuento: sólo dice cuánto falta.
+ */
+async function anotarCuponSinIdentificarEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+): Promise<Omit<DatosDelAviso, 'terminalSerial'>> {
+  const cobradoCents = input.cuponSinIdentificar!.totalCents
+  const orden = await tx.order.findUnique({ where: { id: orderId }, select: { total: true } })
+  const faltanCents = orden ? aCentavos(orden.total) - cobradoCents : null
+  const motivo =
+    'se cobró con un cupón sin conexión que la terminal no pudo identificar y la orden quedó a precio lleno' +
+    (faltanCents !== null && faltanCents > 0 ? `: revisa los $${(faltanCents / 100).toFixed(2)} que faltan` : '')
+  const externalId = normalizeExternalId(input.externalId) ?? orderId
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_PRECIO_CAMBIADO}`,
+    entity: 'VentaSinRed',
+    entityId: externalId,
+    data: {
+      terminalSerial: input.terminalSerialNumber ?? null,
+      montoCents: cobradoCents,
+      motivo,
+      orderId,
+      origen: 'CUPON_SIN_IDENTIFICAR',
+      faltanCents,
+    },
+  })
+  return { externalId, orderId, motivo, montoCents: cobradoCents }
+}
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
@@ -985,7 +1113,7 @@ export async function buildOrderItemsData(
   fulfillmentAreaId?: string | null,
   precioMostrado?: { horaDeLaVenta: Date; llegada?: Date; rechazarSiNoSeReconoce: boolean },
   db?: Prisma.TransactionClient,
-  compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy'>,
+  compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento' | 'isOfflineReplay'>,
 ): Promise<{
   itemsData: any[]
   subtotal: number
@@ -1086,6 +1214,12 @@ export async function buildOrderItemsData(
   // Estos son los descuentos que se van a calcular, no la foto previa del middleware. También protege a los cuatro callers de vales.
   if (discounts.some(discount => discount.type === 'COMP') && (compAuthority?.canCompItems !== true || !compAuthority.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
+
+  // D4: un % o fijo que pide aprobación, con la acreditación de la ruta (PIN o `tpv-orders:discount`); también en los vales. D4 r5:
+  // una venta de la cola ya se cobró y entra sin ella (la creación la registra sin aprobador y con rastro).
+  if (discounts.some(pideAprobacionDeGerente) && !compAuthority?.aprobacionDelDescuento && compAuthority?.isOfflineReplay !== true) {
+    throw sinAprobacionDelDescuento()
   }
 
   // «Se cobra el precio que vio el cliente» (`precioQueVioElCliente.ts`): el precio de cada línea es el de la base, salvo
@@ -1455,8 +1589,12 @@ export type VentaDeMostradorEnTx =
       venta: VentaCalculada
       /** hz:e0b12f00:D2: el descuento de cuenta que regala y se registró SIN permiso (cola o app vieja), en pesos: pide aviso. */
       regaloSinPermisoPesos?: number
+      /** D22: los descuentos que pedían aprobación y entraron de la cola sin ella (pide aviso al dueño), con su importe en centavos. */
+      sinAprobacion?: Array<{ nombre: string; importeCents: number }>
       /** Descuento del cliente (fase 2): lo que se registró, para su `DISCOUNT_APPLIED` después del commit. */
       descuentoDelCliente?: { montoPesos: number; fueraDeTarifa: boolean }
+      /** D652: el cupón sin identificar ya quedó en la bitácora de la transacción; esto es su aviso, después del commit. */
+      cuponSinIdentificar?: Omit<DatosDelAviso, 'terminalSerial'>
     }
 /** La venta recién creada (no la de una llave que ya existía). */
 export type VentaDeMostradorCreada = Exclude<VentaDeMostradorEnTx, { existente: OrdenCreada }>
@@ -1772,6 +1910,53 @@ export async function crearVentaDeMostradorEnTx(
   if (orderDiscount?.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
+  // D4: el de cuenta que pide aprobación — de catálogo, del cupón o la etiqueta del importe libre (sin catálogo ni cupón; su dinero
+  // sigue siendo `discount`) —, con la acreditación de la ruta. Bajo esta transacción: lo que valga es lo de ahora.
+  const etiquetaDeCuenta =
+    !orderDiscount && input.descuentoDeCatalogoId && (input.discount ?? 0) > 0
+      ? await tx.discount.findFirst({ where: { id: input.descuentoDeCatalogoId, venueId }, select: { requiresApproval: true, type: true } })
+      : null
+  const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
+  // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.
+  const sinAprobacionEnLaCola = enLaCola && !input.aprobacionDelDescuento
+  if (cuentaPideAprobacion && !input.aprobacionDelDescuento && !sinAprobacionEnLaCola) throw sinAprobacionDelDescuento()
+  // D4: quien lo aplicó es la SESIÓN (no el vendedor elegido, Codex r2 #4); quien lo aprobó, el gerente del PIN o la sesión.
+  const sesionQueAplica =
+    (input.aprobacionDelDescuento || sinAprobacionEnLaCola) && (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente))
+      ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
+      : null
+  const aprobador = input.aprobacionDelDescuento ? (input.aprobacionDelDescuento.porPin ?? sesionQueAplica) : null
+  /**
+   * D4: la fila de un descuento que pidió aprobación lleva a la sesión y a su aprobador (si no trae ya otro: el del regalo de D2).
+   * D4 r5: de la cola sin acreditación, a la sesión y sin aprobador.
+   */
+  const conAprobador = <T extends { appliedById?: string | null; authorizedById?: string | null }>(fila: T, pide: boolean): T =>
+    pide && (aprobador || sinAprobacionEnLaCola)
+      ? { ...fila, appliedById: sesionQueAplica ?? fila.appliedById, authorizedById: fila.authorizedById || aprobador }
+      : fila
+  /** D22: lo que entró sin aprobación, para el aviso al dueño después del commit. */
+  const sinAprobacion: NonNullable<VentaDeMostradorCreada['sinAprobacion']> = []
+  /** D4 r5: el rastro de un descuento que pedía aprobación y entró de la cola sin ella, en ESTA transacción (como el regalo de D2). */
+  const anotarSiEntroSinAprobacion = async (fila: Prisma.OrderDiscountUncheckedCreateInput, pide: boolean): Promise<void> => {
+    if (!pide || !sinAprobacionEnLaCola) return
+    sinAprobacion.push({ nombre: fila.name, importeCents: Math.round(Number(fila.amount) * 100) })
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: validatedStaffId || null,
+      venueId,
+      action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+      entity: 'Order',
+      entityId: fila.orderId,
+      data: {
+        orderId: fila.orderId,
+        discountId: fila.discountId ?? input.descuentoDeCatalogoId ?? null,
+        nombre: fila.name,
+        importePesos: Number(fila.amount),
+        externalId,
+        subidaPor: input.performedBy ?? null,
+        source: fuente,
+      },
+    })
+  }
 
   // Order-level discount composes additively with the per-item reductions above (cortesías
   // included) — same shape as TPV's `discountAmount = itemDiscountPesos + orderDiscountPesos`
@@ -1779,10 +1964,23 @@ export async function crearVentaDeMostradorEnTx(
   // the order can never go negative. With `orderDiscountId` the catalog discount decides the
   // amount and `discount` is not added (in /tpv it only repeated that same amount); without it,
   // `discount` (cents) is the flat amount, clamped.
+  // El de catálogo; también lanza bajo el mínimo de compra, como siempre.
+  const delCatalogo = orderDiscount && !cupon ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts) : 0
+  // D2 · B: la venta sin red de una TPV ≤ 2.16.1 registra el % como lo cobró esa terminal (truncado, sin tope); lo demás, la regla de hoy.
+  const terminal = enLaCola && input.source === 'TPV' && !cupon ? input.ventaDeTerminal : undefined
+  const truncado = terminal && orderDiscount ? descuentoComoLoCobroLaTpvVieja(orderDiscount, remainingAfterItemDiscounts) : null
+  const totalCon = (descuentoPesos: number) => aCentavos(remainingAfterItemDiscounts) - aCentavos(descuentoPesos)
+  const comoLoCobroLaTpv =
+    terminal &&
+    truncado !== null &&
+    (terminal.truncaPorVersion || (terminal.totalCents === totalCon(truncado) && terminal.totalCents !== totalCon(delCatalogo)))
+      ? // Codex r3/r4: por construcción nunca más que la regla exacta (también con un tope inválido): fingir una TPV vieja no rinde.
+        Math.min(truncado, delCatalogo)
+      : null
   const orderLevelDiscountDecimal = cupon
     ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)
     : orderDiscount
-      ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+      ? (comoLoCobroLaTpv ?? delCatalogo)
       : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
   if (orderDiscount && !cupon && (input.discount ?? 0) > 0) {
     logger.warn('[ORDER.MOBILE] Llegaron orderDiscountId y discount: manda el de catálogo y el libre no se suma', {
@@ -1887,15 +2085,18 @@ export async function crearVentaDeMostradorEnTx(
   for (const item of discountedItems) {
     const discount = discounts.find(d => d.id === item.appliedDiscountId)
     if (!discount) continue
-    await tx.orderDiscount.create({
-      data: buildItemDiscountRow({
+    const fila = conAprobador(
+      buildItemDiscountRow({
         orderId: createdOrder.id,
         itemId: item.id,
         discount,
         discountAmountPesos: Number(item.discountAmount) - (ajusteDelRenglon.get(item.id) ?? 0),
         appliedById: appliedByStaffVenue?.id || null,
       }),
-    })
+      pideAprobacionDeGerente(discount),
+    )
+    await tx.orderDiscount.create({ data: fila })
+    await anotarSiEntroSinAprobacion(fila, pideAprobacionDeGerente(discount))
   }
   // D12: UNA fila «Ajuste de precio» con todos los renglones ajustados (el descuento ya vive en cada uno ⇒ espejo).
   if (ajustesDePrecio.length > 0) {
@@ -1971,7 +2172,7 @@ export async function crearVentaDeMostradorEnTx(
     // catálogo, sobre los renglones sin cortesía (como `/tpv/with-items`).
     if (orderLevelDiscountDecimal > 0) {
       const appliedById = appliedByStaffVenue?.id ?? null
-      const fila = orderDiscount
+      const filaSinAprobador = orderDiscount
         ? filaDeDescuentoDeCatalogoEnCuenta({
             orderId: createdOrder.id,
             discount: orderDiscount,
@@ -1988,7 +2189,9 @@ export async function crearVentaDeMostradorEnTx(
             montoPesos: orderLevelDiscountDecimal,
             ...firmasDelDescuentoLibre(appliedById, regaloSinPromociones, prep.descuentoDelCliente),
           })
+      const fila = conAprobador(filaSinAprobador, cuentaPideAprobacion)
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+      await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
     const registradoDelCliente =
@@ -2008,9 +2211,16 @@ export async function crearVentaDeMostradorEnTx(
         venta,
         regaloSinPermisoPesos: orderLevelDiscountDecimal,
         ...registradoDelCliente,
+        ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
       }
     }
-    return { order: createdOrder, promotionTotals: null, venta, ...registradoDelCliente }
+    return {
+      order: createdOrder,
+      promotionTotals: null,
+      venta,
+      ...registradoDelCliente,
+      ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
+    }
   }
 
   // Mismo servicio que usa el reducer offline (applyAddItems), con ESTA transacción: crea sus líneas, reparte el
@@ -2088,12 +2298,16 @@ export async function crearVentaDeMostradorEnTx(
   const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
   // B2: la fila nace aquí, con el importe reafirmado contra el subtotal CON promociones, y se sincroniza sobre el combo.
   if (descuentoDeOrdenFinal > 0) {
-    const fila = filaDeDescuentoDeCuenta({
-      orderId: createdOrder.id,
-      montoPesos: descuentoDeOrdenFinal,
-      ...firmasDelDescuentoLibre(appliedByStaffVenue?.id ?? null, regaloConPromociones, cupon ? null : prep.descuentoDelCliente),
-    })
+    const fila = conAprobador(
+      filaDeDescuentoDeCuenta({
+        orderId: createdOrder.id,
+        montoPesos: descuentoDeOrdenFinal,
+        ...firmasDelDescuentoLibre(appliedByStaffVenue?.id ?? null, regaloConPromociones, cupon ? null : prep.descuentoDelCliente),
+      }),
+      cuentaPideAprobacion,
+    )
     await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
+    await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     await sincronizarRepartos(tx, createdOrder.id)
   }
   if (regaloConPromociones === 'SIN_PERMISO') {
@@ -2114,6 +2328,7 @@ export async function crearVentaDeMostradorEnTx(
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
     ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
+    ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     ...(prep.descuentoDelCliente && !cupon && descuentoDeOrdenFinal > 0
       ? {
           descuentoDelCliente: {
@@ -2249,10 +2464,23 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // medias que anular ni llave de idempotencia envenenada, así que el reintento del POS la crea normal.
   let created: VentaDeMostradorEnTx
   try {
-    created = await withDeadlockRetry(tx => crearVentaDeMostradorEnTx(tx, venueId, input, prep), {
-      etiqueta: 'createOrderWithItems',
-      ...ORDER_LOCK_WAIT_BUDGET,
-    })
+    created = await withDeadlockRetry(
+      async tx => {
+        const venta = await crearVentaDeMostradorEnTx(tx, venueId, input, prep)
+        // D652: sólo la venta NUEVA de la cola de una terminal; la de una llave que ya existía no vuelve a anotar nada.
+        if ('existente' in venta || !input.cuponSinIdentificar || input.isOfflineReplay !== true || !input.terminalSerialNumber) {
+          return venta
+        }
+        return {
+          ...venta,
+          cuponSinIdentificar: await anotarCuponSinIdentificarEnTx(tx, venueId, input, venta.order.id, prep.validatedStaffId || null),
+        }
+      },
+      {
+        etiqueta: 'createOrderWithItems',
+        ...ORDER_LOCK_WAIT_BUDGET,
+      },
+    )
   } catch (error) {
     // Red de seguridad del índice único (venueId, externalId): con el candado de la llave, dos reintentos de ESTA ruta ya
     // no chocan, pero otro escritor de la misma llave sí puede (la orden de la terminal comparte el índice). Sólo ESE
@@ -2275,6 +2503,10 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   if ('existente' in created) return responderConOrdenExistente(venueId, created.existente, input)
   const { order } = created
   const { cambiosDePrecio } = created.venta
+
+  // D22: un descuento que pedía aprobación entró de la cola sin ella (#428: lo cobrado ya ocurrió). Recién hecho el commit, antes de
+  // lo que pueda fallar después (un reintento sale con la venta que ya está y no vuelve a avisar), y sin esperarlo.
+  if (created.sinAprobacion) avisarDescuentoSinAprobacion(venueId, input, order.id, created.sinAprobacion, llegada)
 
   await terminarVentaDeMostrador(venueId, created, prep)
 
@@ -2307,6 +2539,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     })
   }
 
+  // D652: antes que el de precio no reconocido (misma llave y mismo aviso: el primero es el que llega y explica el cupón).
+  if (created.cuponSinIdentificar) avisarSiEsDeLaColaDeTerminal(venueId, input, AVISO_PRECIO_CAMBIADO, created.cuponSinIdentificar)
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
   // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
   if (created.regaloSinPermisoPesos != null) {
@@ -2745,9 +2979,12 @@ export async function applyOrderDiscountInTransaction(
   venueId: string,
   orderId: string,
   discountId: string,
-  _staffId?: string,
+  /** La sesión que lo aplica (su membresía queda en `appliedById`). */
+  staffId?: string,
   /** Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, un descuento COMP es 403. */
   puedeRegalar = false,
+  /** D4: la acreditación de la ruta o de la cola (PIN o `tpv-orders:discount`). Falla cerrado: sin ella, un % o fijo que pide aprobación es 403. */
+  aprobacion?: { porPin?: string },
 ) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
@@ -2774,6 +3011,9 @@ export async function applyOrderDiscountInTransaction(
   validateDiscountActive(discount)
   // D1 (hz:f34960c5:D1): el tipo se lee bajo el candado; regalar la cuenta pide el permiso de cortesía, como `/comp` y D14.
   if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+  // D4 (hz:f34960c5:D4): también bajo el candado; el de la ruta ya pidió el PIN si hacía falta.
+  const pideAprobacion = pideAprobacionDeGerente(discount)
+  if (pideAprobacion && !aprobacion) throw sinAprobacionDelDescuento()
   if (discount.scope !== 'ORDER') {
     throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
   }
@@ -2799,7 +3039,9 @@ export async function applyOrderDiscountInTransaction(
   // `remainingDiscountable` que ya usan discount.tpv.service.ts y
   // discountEngine.service.ts.
   const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+  // D2 (12-nov): el % en centavos enteros, mitad hacia arriba (en pesos flotantes 10 % de $21.35 daba $2.13).
+  const rawAmount =
+    discount.type === 'PERCENTAGE' ? porcentajeEnCentavos(aCentavos(subtotal), discount.value) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
   // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope
@@ -2807,6 +3049,12 @@ export async function applyOrderDiscountInTransaction(
   const topeDelCatalogo = discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
   const tope = discount.type === 'PERCENTAGE' ? topeDelCatalogo : null
   const amount = Math.min(rawAmount, topeDelCatalogo ?? Infinity, remainingDiscountable)
+
+  // D4: quién lo aplicó (la membresía de la sesión) y, si pedía aprobación, quién la dio (el gerente del PIN o la propia sesión).
+  const aplico = staffId
+    ? ((await tx.staffVenue.findFirst({ where: { venueId, staffId, active: true }, select: { id: true } }))?.id ?? null)
+    : null
+  const aprobo = pideAprobacion && aprobacion ? (aprobacion.porPin ?? aplico) : null
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -2820,17 +3068,26 @@ export async function applyOrderDiscountInTransaction(
       amount,
       // Su recálculo, en esta misma tx, la sincroniza (y la vuelve regla de recálculo) respetando el tope.
       reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
+      appliedById: aplico,
+      ...(aprobo ? { authorizedById: aprobo } : {}),
     },
-    select: { id: true, name: true, amount: true },
+    select: { id: true, name: true, amount: true, authorizedById: true },
   })
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
   return { row, totals }
 }
 
-export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string, puedeRegalar = false) {
+export async function applyOrderDiscount(
+  venueId: string,
+  orderId: string,
+  discountId: string,
+  staffId?: string,
+  puedeRegalar = false,
+  aprobacion?: { porPin?: string },
+) {
   const { row, totals } = await prisma.$transaction(
-    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar),
+    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion),
     ORDER_LOCK_WAIT_BUDGET,
   )
 
@@ -2840,7 +3097,7 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
     entityId: orderId,
     staffId,
     venueId,
-    data: { discountId, name: row.name, amount: Number(row.amount) },
+    data: { discountId, name: row.name, amount: Number(row.amount), ...(row.authorizedById ? { aprobadoPor: row.authorizedById } : {}) },
   })
 
   return { orderDiscountId: row.id, name: row.name, amount: Number(row.amount), ...totals }

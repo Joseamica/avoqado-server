@@ -280,7 +280,8 @@ beforeEach(() => {
   tx.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 4000 })
   tx.loyaltyTransaction.create.mockResolvedValue({ id: 'lt-new' })
   tx.loyaltyTransaction.findUnique.mockResolvedValue({ id: 'lt', customerId: 'customer', points: -1000, orderId: 'order' })
-  tx.staffVenue.findUnique.mockResolvedValue({ id: 'sv' })
+  // hz:87f4b879:D4: la membresía que firma el canje y su devolución se busca ACTIVA (`findFirst` con `active: true`).
+  tx.staffVenue.findFirst.mockResolvedValue({ id: 'sv' })
   tx.stampReward.findFirst.mockImplementation(async ({ where }: any) =>
     where.orderDiscountId ? { id: 'rw-od', customerId: 'customer', rewardLabel: 'Premio' } : { ...REWARD },
   )
@@ -308,7 +309,7 @@ beforeEach(() => {
     discount: ['findFirst'],
     customer: ['findFirst', 'updateMany', 'update'],
     loyaltyTransaction: ['create'],
-    staffVenue: ['findUnique'],
+    staffVenue: ['findUnique', 'findFirst'],
     stampReward: ['findFirst', 'updateMany', 'update'],
     walletPassOutbox: ['create'],
   })) {
@@ -750,9 +751,22 @@ describe('writer-specific fresh decisions', () => {
     expect(tx.loyaltyTransaction.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ points: -500, createdById: 'sv' }) }),
     )
-    expect(tx.staffVenue.findUnique).toHaveBeenCalled()
+    expect(tx.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId: 'staff', venueId: 'venue', active: true } }),
+    )
     expect(tx.customer.findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: 'customer' }, select: { loyaltyPoints: true } })
     expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('redeemPoints reads the program INSIDE the TX after the Order lock: one turned off meanwhile does not redeem (Codex candado-r1 #3)', async () => {
+    // Antes de tomar el candado el programa estaba prendido; un administrador lo apagó mientras se esperaba.
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(CONFIG)
+    tx.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false })
+    await expect(redeemPointsToOrder('venue', 'order', 'customer', 1000, 'staff')).rejects.toThrow(
+      'El programa de lealtad no está activo en esta sucursal',
+    )
+    expect(tx.customer.updateMany).not.toHaveBeenCalled()
+    expect(tx.loyaltyConfig.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
   })
 
   it('redeemPoints losing the customer CAS creates no discount and no totals', async () => {

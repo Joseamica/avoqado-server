@@ -66,6 +66,7 @@ import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
 import { registerLoyaltyTools } from './tools/loyalty'
+import { registerLoyaltyPromotionTools } from './tools/loyaltyPromotions'
 import { registerLateStampTools } from './tools/lateStamp'
 import { registerReferralTools } from './tools/referrals'
 import { registerSeatTools } from './tools/seats'
@@ -175,6 +176,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPaymentLinkTools(server, scope)
   registerSeatTools(server, scope)
   registerLoyaltyTools(server, scope)
+  registerLoyaltyPromotionTools(server, scope) // promociones de lealtad: sólo /mcp libre (no está en src/mcp/directory/catalog.ts)
   registerLateStampTools(server, scope) // sello tardío: sólo /mcp libre (no está en src/mcp/directory/catalog.ts)
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)

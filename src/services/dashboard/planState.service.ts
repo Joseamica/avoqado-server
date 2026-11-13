@@ -569,7 +569,7 @@ export type RetentionOffer = 'discount' | 'pause'
  * Does NOT touch the VenueFeature row — the venue keeps the same plan/entitlement.
  * Returns the fresh PlanState (same envelope as cancel/reactivate).
  */
-export async function applyRetentionOffer(venueId: string, offer: RetentionOffer = 'discount'): Promise<PlanState> {
+export async function applyRetentionOffer(venueId: string, offer: RetentionOffer = 'discount', actorId?: string): Promise<PlanState> {
   // Active base plan required (any paid tier).
   const tier = await getVenueBaseTier(venueId)
   if (tier === null) throw new BadRequestError('Este venue no tiene un plan base activo.')
@@ -600,7 +600,9 @@ export async function applyRetentionOffer(venueId: string, offer: RetentionOffer
     resumesAt.setMonth(resumesAt.getMonth() + RETENTION_PAUSE_MONTHS)
     await pauseSubscriptionCollection(subscriptionId, resumesAt)
 
+    // D42 (12-nov): QUIÉN del negocio aceptó la pausa, como PLAN_CANCEL_SCHEDULED.
     logAction({
+      staffId: actorId ?? null,
       venueId,
       action: 'PLAN_RETENTION_PAUSE',
       entity: 'VenueFeature',
@@ -610,7 +612,9 @@ export async function applyRetentionOffer(venueId: string, offer: RetentionOffer
   } else {
     await applySubscriptionCoupon(subscriptionId, RETENTION_DISCOUNT_COUPON)
 
+    // D42 (12-nov): QUIÉN del negocio aceptó el descuento.
     logAction({
+      staffId: actorId ?? null,
       venueId,
       action: 'PLAN_RETENTION_DISCOUNT',
       entity: 'VenueFeature',

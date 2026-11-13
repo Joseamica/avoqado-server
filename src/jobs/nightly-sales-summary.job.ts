@@ -20,7 +20,7 @@ import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard
 import emailService from '../services/email.service'
 import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
-import { isItemLevelDiscountSql, lineRevenueSql } from '../services/dashboard/lineRevenue'
+import { lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { FRONTEND_URL } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
@@ -450,7 +450,7 @@ export async function getCategoryBreakdown(
 }
 
 /**
- * Orders whose giveaways exceed their own subtotal — the ones `GREATEST(…, 0)`
+ * Orders whose discount exceeds their own subtotal — the ones `LEAST(discount, subtotal)`
  * clamps in `getOrderSourcesBreakdown`.
  *
  * A clamp that corrects in silence is how a damaged row stays damaged forever:
@@ -471,20 +471,16 @@ async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Da
         o.id,
         o."orderNumber",
         o.subtotal,
-        o."discountAmount" + (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
-          WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) as discounts,
-        o.subtotal - o."discountAmount"
-          - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
-             WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) as net_sales
+        o."discountAmount" as discounts,
+        o.subtotal - o."discountAmount" as net_sales
       FROM "Order" o
       WHERE o."venueId" = ${venueId}
         AND o."createdAt" >= ${utcTs(startDate)}
         AND o."createdAt" <= ${utcTs(endDate)}
         AND o.status NOT IN ('CANCELLED')
         AND o."paymentStatus" NOT IN ('REFUNDED')
-        AND o.subtotal - o."discountAmount"
-            - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
-               WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) < 0
+        -- D43: the same per-order net as getOrderSourcesBreakdown (a table cortesía is already out of the subtotal).
+        AND o.subtotal - o."discountAmount" < 0
         -- B2c F2: desde B2/B2c la cabecera es Σ filas SIN tope; una cortesía sobre un fijo (160 sobre 150, total 0) es legítima.
         -- Sólo es daño la cabecera que sus FILAS no explican: sin filas (ORD-1779465117373) o Σ filas ≠ cabecera.
         AND (SELECT SUM(od.amount) FROM "OrderDiscount" od WHERE od."orderId" = o.id) IS DISTINCT FROM o."discountAmount"
@@ -538,23 +534,22 @@ export async function getOrderSourcesBreakdown(
       -- label: this summed Order.subtotal, which is GROSS of every giveaway.
       -- A 100%-cortesía order that charged 0 was reported as a full sale.
       --
-      -- subtotal already includes the modifiers, so the fix is to take the two
-      -- discounts off it. The item-level term subtracts ONLY the line discounts
-      -- that are not already inside Order.discountAmount (a "Cobrar" cortesía
-      -- books its giveaway in BOTH places) — the same rule the discount report
-      -- uses, hence the shared predicate. Per-ORDER subqueries, never a JOIN:
-      -- joining OrderItem here would fan out and multiply the sale by its line
-      -- count, which is exactly the bug fixed in historical-reports.service.
-      -- GREATEST clamps a single order at zero. 3 orders in live data carry a
+      -- 🔴 D43 (12-nov-2026): the per-order net is the SAME one the Sales Summary
+      -- uses (its netSales is the email's headline): subtotal − LEAST(discount,
+      -- subtotal), plus the IVA charged on top. It used to also subtract the
+      -- line discounts of «net» lines (isItemLevelDiscountSql), but a table
+      -- cortesía from the POS (compOrderItem → subtotal = Σ OrderItem.total)
+      -- is ALREADY out of the subtotal: the Agua was taken off twice and a
+      -- $49.50 check read $29.50. A «Cobrar»/terminal cortesía keeps its line
+      -- gross and books the giveaway in Order.discountAmount (COMP row), so the
+      -- same formula covers both. Header-only on purpose: imported orders have
+      -- no OrderItem rows, and no JOIN means no fan-out by line count.
+      -- LEAST caps a single order at zero: 3 orders in live data carry a
       -- discount larger than their own subtotal (one has subtotal 0 with a 300
-      -- discount) — real data damage, but an order that sold NOTHING must read
-      -- as 0 in the owner's email, never as a negative that quietly cancels out
-      -- a real sale somewhere else in the same bucket.
-      COALESCE(SUM(GREATEST(
-        o.subtotal - o."discountAmount"
-        - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
-           WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())})
-      , 0)
+      -- discount) — an order that sold NOTHING must read as 0 in the owner's
+      -- email, never as a negative that cancels a real sale in the same bucket.
+      COALESCE(SUM(
+        o.subtotal - LEAST(o."discountAmount", o.subtotal)
       -- D16: the IVA an order charged ON TOP is part of what the customer paid (same rule as the summary's netSales),
       -- added outside the clamp like computeStoredOrderTotal does.
       + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}), 0) as net_sales

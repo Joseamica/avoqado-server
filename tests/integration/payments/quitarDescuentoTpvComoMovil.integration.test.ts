@@ -267,7 +267,7 @@ describe('W7 A1 · B: quitar un descuento en la TPV = quitarlo en el móvil (mis
     },
   )
 
-  it('🔴 Codex r7 #1: A $15, B $0.50 y C $0.99 regalada, 1 % de categoría ($0.15); la cuenta NO está llena: quitar A retira el %, como develop ($0.50)', async () => {
+  it('🔴 Codex r7 #1: A $15, B $0.50 y C $0.99 regalada, 1 % de categoría ($0.16 desde D2); la cuenta NO está llena: quitar A retira el %, como develop ($0.50)', async () => {
     const orderId = await cuenta([
       ['Quince', 15],
       ['Medio', 0.5],
@@ -275,7 +275,8 @@ describe('W7 A1 · B: quitar un descuento en la TPV = quitarlo en el móvil (mis
     ])
     await compItems(venueId, orderId, { itemIds: [(await renglonDe(orderId, productos.Casi)).id], reason: 'Invitación', staffId })
     const uno = await catalogo('1 % pizzas r7', { value: 1, scope: 'CATEGORY', targetCategoryIds: [categoriaId] })
-    expect(await applyDiscountToOrder(orderId, uno.id, staffVenueId, undefined, venueId)).toMatchObject({ success: true, amount: 0.15 })
+    // D2 (hz:dcc49fe5:D2): 1 % de $15.50 = $0.155 ⇒ $0.16 mitad hacia arriba (en pesos flotantes daba $0.15).
+    expect(await applyDiscountToOrder(orderId, uno.id, staffVenueId, undefined, venueId)).toMatchObject({ success: true, amount: 0.16 })
 
     await removeOrderItem(venueId, orderId, (await renglonDe(orderId, productos.Quince)).id, await version(orderId))
 

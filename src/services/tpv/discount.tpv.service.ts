@@ -23,7 +23,7 @@ import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
-import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 
 // ==========================================
@@ -135,7 +135,7 @@ export async function getAvailableDiscounts(venueId: string, orderId: string, cu
 
     // Simple estimation based on order total
     if (discount.type === 'PERCENTAGE') {
-      estimatedSavings = (orderTotal * discount.value) / 100
+      estimatedSavings = porcentajeEnCentavos(aCentavos(orderTotal), discount.value) / 100 // D2: lo mismo que se aplica
     } else if (discount.type === 'FIXED_AMOUNT') {
       estimatedSavings = Math.min(discount.value, orderTotal)
     } else if (discount.type === 'COMP') {
@@ -438,7 +438,8 @@ export async function applyCouponCode(
 
       let discountAmount = 0
       if (discount.type === 'PERCENTAGE') {
-        discountAmount = (remainingDiscountable * Number(discount.value)) / 100
+        // D2: en centavos enteros, mitad hacia arriba, como la TPV y la venta nueva (`montoDelCupon`): antes $2.13 por 10 % de $21.35.
+        discountAmount = porcentajeEnCentavos(aCentavos(remainingDiscountable), discount.value) / 100
       } else if (discount.type === 'FIXED_AMOUNT') {
         discountAmount = Math.min(Number(discount.value), remainingDiscountable)
       } else if (discount.type === 'COMP') {
@@ -664,7 +665,7 @@ export async function validateCoupon(
   // Calculate estimated savings
   let estimatedSavings = 0
   if (discount.type === 'PERCENTAGE') {
-    estimatedSavings = (orderTotal * Number(discount.value)) / 100
+    estimatedSavings = porcentajeEnCentavos(aCentavos(orderTotal), discount.value) / 100 // D2: lo mismo que se aplica
   } else if (discount.type === 'FIXED_AMOUNT') {
     estimatedSavings = Math.min(Number(discount.value), orderTotal)
   } else if (discount.type === 'COMP') {

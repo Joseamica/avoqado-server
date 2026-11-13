@@ -74,7 +74,7 @@ export interface AreaTicketLineInput {
   discountId?: string | null
 }
 
-export interface IssueAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface IssueAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   idempotencyKey: string
   deviceUid: string
   staffId?: string | null
@@ -93,7 +93,9 @@ export interface CheckoutMutationInput {
   staffId?: string | null
 }
 
-export interface MaterializeCheckoutInput extends CheckoutMutationInput, Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
+export interface MaterializeCheckoutInput
+  extends CheckoutMutationInput,
+    Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
   normalItems?: CreateOrderItemInput[]
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'POS'
   customerName?: string | null

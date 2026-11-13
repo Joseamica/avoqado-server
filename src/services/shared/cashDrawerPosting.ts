@@ -128,6 +128,12 @@ export function cashSaleDrawerLocalId(paymentId: string): string {
   return `${SERVER_CASH_SALE_LOCAL_ID_PREFIX}${paymentId}`
 }
 
+/** El inverso de [cashSaleDrawerLocalId]: el `paymentId` de una venta que escribió el SERVIDOR, o `null` si la llave no es de las suyas. */
+export function paymentIdDeLaVentaDelServidor(localId: string | null | undefined): string | null {
+  if (!localId?.startsWith(SERVER_CASH_SALE_LOCAL_ID_PREFIX)) return null
+  return localId.slice(SERVER_CASH_SALE_LOCAL_ID_PREFIX.length) || null
+}
+
 /** La llave de la entrada de caja de lo cobrado por cuenta de un tercero (Rappi 2b). Determinista: mismo pago → misma llave. */
 export function cashThirdPartyDrawerLocalId(paymentId: string): string {
   return `${SERVER_THIRD_PARTY_LOCAL_ID_PREFIX}${paymentId}`

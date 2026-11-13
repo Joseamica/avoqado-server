@@ -17,7 +17,12 @@ import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/serv
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { conCortesiaSiRegala, tieneCortesiaAutorizada, tieneDescuentoConPermisoPropio } from '@/middlewares/cortesiaPidePermiso.middleware'
+import {
+  aprobacionDelDescuento,
+  conCortesiaSiRegala,
+  tieneCortesiaAutorizada,
+  tieneDescuentoConPermisoPropio,
+} from '@/middlewares/cortesiaPidePermiso.middleware'
 import { membresiaDeQuienLlama } from '@/services/tpv/discount.tpv.service'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
@@ -25,6 +30,7 @@ import { payLaterDesdeMetodoDePago } from '@/services/shared/porCobrar'
 import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
 import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/services/mobile/cortesia-pendiente.public'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
+import { esTpvQueTruncaElDescuento } from '../../services/shared/descuentoDeTpvVieja'
 
 /** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
 export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
@@ -269,6 +275,14 @@ export function leerVentaDeMostrador(
   }
   const delCliente = descuentoDelClienteDelCuerpo(body)
   if ('error' in delCliente) return delCliente
+  // D4: la etiqueta del descuento de cuenta del catálogo que viaja como importe (`discount`). Sólo dispara la revisión de su aprobación.
+  const { descuentoDeCatalogoId } = body
+  if (
+    descuentoDeCatalogoId != null &&
+    (typeof descuentoDeCatalogoId !== 'string' || !descuentoDeCatalogoId || descuentoDeCatalogoId.length > 64)
+  ) {
+    return { error: 'descuentoDeCatalogoId debe ser el id de un descuento' }
+  }
   // D5 (Codex r1 #3): el premio cambia el total después de crear la cuenta y la caja ajusta sólo su parte; con un cupón que el servidor
   // recalcula, lo cobrado podía no ser la cuenta. Hasta resolverlo junto, no se combinan.
   if (couponCode != null && typeof stampRewardId === 'string') {
@@ -317,6 +331,7 @@ export function leerVentaDeMostrador(
       orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
       // D5: validado arriba; el servicio lo revalida y calcula en línea.
       couponCode: typeof couponCode === 'string' ? couponCode.trim() : null,
+      ...(typeof descuentoDeCatalogoId === 'string' ? { descuentoDeCatalogoId } : {}),
       // Descuento del cliente (fase 2): la etiqueta de `discount`, validada arriba. La autorización la decide la sesión (el guard)
       // o el PIN del cuerpo; el marcador del permiso propio nunca sale del cuerpo (`autoridadDeLaVenta`). Sin ellos, el input de hoy.
       ...(delCliente.valor ? { descuentoDelCliente: delCliente.valor } : {}),
@@ -365,7 +380,10 @@ export async function autoridadDeLaVenta(
   req: Request,
   venta: orderMobileService.CreateOrderInput,
 ): Promise<
-  Pick<orderMobileService.CreateOrderInput, 'canCompItems' | 'performedBy' | 'terminalSerialNumber' | 'descuentoConPermisoPropio'>
+  Pick<
+    orderMobileService.CreateOrderInput,
+    'canCompItems' | 'performedBy' | 'terminalSerialNumber' | 'descuentoConPermisoPropio' | 'aprobacionDelDescuento'
+  >
 > {
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
   // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
@@ -383,6 +401,8 @@ export async function autoridadDeLaVenta(
     ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
     // Descuento del cliente (fase 2): `discounts:apply` propio, sólo si lo comprobó el guard de ESTE request (`/orders` y pay-new-order).
     ...(venta.descuentoDelCliente ? { descuentoConPermisoPropio: tieneDescuentoConPermisoPropio(req) } : {}),
+    // D4: la aprobación de un % o fijo con «Requiere aprobación», sólo si la comprobó el guard de ESTE request (PIN o permiso propio).
+    ...(aprobacionDelDescuento(req) ? { aprobacionDelDescuento: aprobacionDelDescuento(req) } : {}),
     // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
     terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
   }
@@ -405,7 +425,18 @@ function traeDescuentoDeCuentaLibre(venta: orderMobileService.CreateOrderInput):
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const venta = leerVentaDeMostrador(req.body, { conPropinaDeOrden: true, venueId, usuario: req.authContext?.userId })
+    // D652 (founder, 13-nov: «1, por cobrar»): la TPV 2.14.0–2.16.1 sube su «Cobrar» sin red con cupón como `orderDiscountId: ""`
+    // (no sabe qué cupón fue). Sólo de la cola de una TERMINAL (token + `isOfflineReplay` literal) que COBRÓ algo (`total` en centavos
+    // > 0) entra sin descuento identificado: la venta ya ocurrió. Sin versión: una TPV ya actualizada reintenta el MISMO cuerpo. Una
+    // sesión del POS, una venta en línea o una en $0 (Codex r1 #1: su cobro de $0 no cabe en una cuenta que debe): el 400 de hoy.
+    const cuponSinIdentificar =
+      req.body?.orderDiscountId === '' &&
+      req.body?.isOfflineReplay === true &&
+      !!req.authContext?.terminalSerialNumber &&
+      Number.isInteger(req.body?.total) &&
+      req.body.total > 0
+    const cuerpo = cuponSinIdentificar ? { ...req.body, orderDiscountId: null } : req.body
+    const venta = leerVentaDeMostrador(cuerpo, { conPropinaDeOrden: true, venueId, usuario: req.authContext?.userId })
     if ('error' in venta) {
       return res.status(400).json({
         success: false,
@@ -420,6 +451,18 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       orderMobileService.createOrderWithItems(venueId, {
         ...venta.input,
         ...autoridad,
+        // D2 · B: la TPV ≤ 2.16.1 truncó el % de catálogo; su venta sin red se registra como lo cobró. Sólo con el token de una
+        // TERMINAL (Codex r2 #1: una sesión del POS no puede pedir la excepción con encabezados o cuerpo armados).
+        ...(req.authContext?.terminalSerialNumber
+          ? {
+              ventaDeTerminal: {
+                truncaPorVersion: esTpvQueTruncaElDescuento(req.headers),
+                totalCents: Number.isInteger(req.body?.total) ? (req.body.total as number) : null,
+              },
+            }
+          : {}),
+        // D652: lo que cobró la terminal (centavos), para decir cuánto quedó debiendo.
+        ...(cuponSinIdentificar ? { cuponSinIdentificar: { totalCents: req.body.total as number } } : {}),
         ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}),
         // El gerente del PIN o la membresía de QUIEN COBRA (nunca el vendedor elegido), sólo si hay descuento de cuenta libre.
         regaloAutorizadoPor:
@@ -972,7 +1015,14 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
     }
     const operation = parseHttpOperation(req.body)
     if (!operation) {
-      const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId, tieneCortesiaAutorizada(req))
+      const result = await orderMobileService.applyOrderDiscount(
+        venueId,
+        orderId,
+        discountId,
+        staffId,
+        tieneCortesiaAutorizada(req),
+        aprobacionDelDescuento(req),
+      )
       return res.json({ success: true, data: result })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
@@ -988,6 +1038,7 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
         manifest.refs.discountId,
         staffId,
         tieneCortesiaAutorizada(req),
+        aprobacionDelDescuento(req),
       )
       const auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
       return {

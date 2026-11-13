@@ -132,8 +132,8 @@ export async function beneficioRegresado(orderId: string, o: Partial<Filas>): Pr
 
 /**
  * Codex r1 #3: el sello de la venta (su EARN) y si una devolución lo quitó (su REVERSAL): dos búsquedas, cada una por SU índice
- * parcial único `(venueId, orderId)` (`StampEvent_venueId_orderId_earn_unique` y `…_reversal_unique`). El tipo va escrito en el
- * texto, no como parámetro: así el planificador prueba el predicado del índice también con un plan genérico. Codex r1 #2: de la
+ * parcial único `(venueId, orderId, part)` (`StampEvent_venueId_orderId_part_earn_unique` y `…_part_reversal_unique`). El tipo va
+ * escrito en el texto, no como parámetro: así el planificador prueba el predicado del índice también con un plan genérico. Codex r1 #2: de la
  * cartilla que acreditó ese EARN sale su contador CANÓNICO de hoy (`stampsEarned`, el que cada movimiento mueve en su transacción) y su
  * meta congelada; nunca se reconstruye por fechas (el EARN guarda la hora de la venta, no la del otorgamiento).
  */
@@ -144,7 +144,7 @@ export const sqlSelloDeLaVenta = (venueId: string, orderId: string) => Prisma.sq
     ) AS "revertido"
   FROM "StampEvent" se
   JOIN "StampCard" sc ON sc."id" = se."stampCardId"
-  WHERE se."venueId" = ${venueId} AND se."orderId" = ${orderId} AND se."type" = 'EARN'
+  WHERE se."venueId" = ${venueId} AND se."orderId" = ${orderId} AND se."type" = 'EARN' AND se."part" = 0
   LIMIT 1`
 
 interface SelloDeLaVenta {

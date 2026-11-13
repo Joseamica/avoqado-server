@@ -12,6 +12,17 @@ import prisma from '@/utils/prismaClient'
 import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { IncompatibleDeviceError } from '@/errors/AppError'
 import { fullSetupAngelPaySchema, registerAngelPayWebhookSchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
+import {
+  CUENTA_NUEVA,
+  POSICIONES,
+  esRespuestaDelCandado,
+  exigirConfirmacionDePosiciones,
+  leerConfirmaciones,
+  tomarCandado,
+  type CambioDePosicion,
+  type Objetivo,
+  type Posicion,
+} from '../../services/shared/candadoDePosiciones'
 import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
 import { registrarAvisoAngelPay } from '../../services/superadmin/angelpayWebhookRegistration.service'
 import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '../../services/integrations/angelpay-integrations-api.client'
@@ -1891,6 +1902,36 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       accountSlot,
     })
 
+    // Candado de posiciones (tarifa al comercio, paso 1): revisión previa SIN escribir nada, antes del paso 1, para no crear la
+    // cuenta ni tocar terminales si la posición pide confirmar algo. La revisión definitiva va con la escritura del paso 5.
+    const objetivoDelCandado: Objetivo = target.type === 'venue' ? { venueId: target.id } : { organizationId: target.id }
+    if (!POSICIONES.includes(accountSlot)) throw new BadRequestError('accountSlot debe ser PRIMARY, SECONDARY o TERTIARY')
+    const posicionDelCandado = accountSlot as Posicion
+    const confirmacionesDelCandado = leerConfirmaciones(req.body.positionConfirmations)
+    {
+      const proveedor = await prisma.paymentProvider.findUnique({ where: { code: 'BLUMON' }, select: { id: true } })
+      const yaExiste = proveedor
+        ? await prisma.merchantAccount.findFirst({
+            where: { providerId: proveedor.id, externalMerchantId: `blumon_${serialNumber}` },
+            select: { id: true },
+          })
+        : null
+      const configPropia =
+        target.type === 'venue'
+          ? await prisma.venuePaymentConfig.findUnique({ where: { venueId: target.id }, select: { id: true } })
+          : await prisma.organizationPaymentConfig.findUnique({ where: { organizationId: target.id }, select: { id: true } })
+      const cuenta = yaExiste?.id ?? CUENTA_NUEVA
+      await exigirConfirmacionDePosiciones(prisma, {
+        objetivo: objetivoDelCandado,
+        siguiente: configPropia
+          ? { [posicionDelCandado]: cuenta }
+          : { PRIMARY: null, SECONDARY: null, TERTIARY: null, [posicionDelCandado]: cuenta },
+        confirmaciones: confirmacionesDelCandado,
+        tarifaCapturada: venuePricing ? [posicionDelCandado] : [],
+        soloRevisar: true,
+      })
+    }
+
     // Step 1: Auto-fetch Blumon credentials
     const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
     const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
@@ -1967,6 +2008,117 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       logger.info('[Full Setup] Step 2: Merchant account already exists', { id: merchantAccountId })
     }
 
+    // Candado de posiciones (Codex p12-r2 #1): la posición (paso 5, con su revisión definitiva) y la tarifa capturada (paso 6,
+    // sin cambios) van ANTES de tocar terminales y costo. Si el candado rechaza, sólo queda la cuenta del paso 2, sin posición
+    // ni terminales; el reintento la reutiliza. Cuando sale bien, el resultado final es el mismo de siempre.
+    // Step 5: Create/update payment config (venue or org)
+    let paymentConfig: any = null
+    const accountSlotField =
+      accountSlot === 'PRIMARY' ? 'primaryAccountId' : accountSlot === 'SECONDARY' ? 'secondaryAccountId' : 'tertiaryAccountId'
+
+    // Codex p12-r3 #1: las terminales que el operador eligió se validan (sólo lectura) ANTES de escribir la posición, para que
+    // una incompatible no deje la cuenta y la tarifa puestas con el asistente en error. El paso 3 vuelve a validar al asignar.
+    for (const terminalId of additionalTerminalIds as string[]) {
+      const terminal = await prisma.terminal.findUnique({ where: { id: terminalId }, select: { assignedMerchantIds: true } })
+      if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
+        await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+      }
+    }
+
+    // Misma escritura que antes, ahora dentro de una transacción con la revisión definitiva del candado.
+    let positionChanges: CambioDePosicion[] = []
+    paymentConfig = await prisma.$transaction(async tx => {
+      await tomarCandado(tx, objetivoDelCandado)
+      const existingConfig =
+        target.type === 'venue'
+          ? await tx.venuePaymentConfig.findUnique({ where: { venueId: target.id } })
+          : await tx.organizationPaymentConfig.findUnique({ where: { organizationId: target.id } })
+      positionChanges = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: objetivoDelCandado,
+        // Sin configuración propia se crea una con sólo esta posición: las otras dejan de heredarse (Codex p12-r1 #3).
+        siguiente: existingConfig
+          ? { [posicionDelCandado]: merchantAccountId }
+          : { PRIMARY: null, SECONDARY: null, TERTIARY: null, [posicionDelCandado]: merchantAccountId },
+        confirmaciones: confirmacionesDelCandado,
+        tarifaCapturada: venuePricing ? [posicionDelCandado] : [],
+      })
+      if (target.type === 'venue') {
+        if (existingConfig) {
+          return tx.venuePaymentConfig.update({
+            where: { venueId: target.id },
+            data: { [accountSlotField]: merchantAccountId },
+          })
+        }
+        // primaryAccountId is required for create — set to merchantAccountId if PRIMARY slot, otherwise need a primary
+        return tx.venuePaymentConfig.create({
+          data: {
+            venueId: target.id,
+            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
+            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
+            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
+          },
+        })
+      }
+      if (existingConfig) {
+        return tx.organizationPaymentConfig.update({
+          where: { organizationId: target.id },
+          data: { [accountSlotField]: merchantAccountId },
+        })
+      }
+      return tx.organizationPaymentConfig.create({
+        data: {
+          organizationId: target.id,
+          primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
+          ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
+          ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
+        },
+      })
+    })
+
+    logger.info('[Full Setup] Step 5: Payment config saved', {
+      configId: paymentConfig?.id,
+      slot: accountSlot,
+    })
+
+    // Step 6: Create venue/org pricing structure
+    let pricingStructure: any = null
+    if (venuePricing) {
+      const pricingData = {
+        accountType: accountSlot as 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
+        debitRate: venuePricing.debitRate / 100,
+        creditRate: venuePricing.creditRate / 100,
+        amexRate: venuePricing.amexRate / 100,
+        internationalRate: venuePricing.internationalRate / 100,
+        // Flag IVA del wizard. Default null = legacy.
+        includesTax: (venuePricing as any).includesTax ?? null,
+        ...((venuePricing as any).taxRate !== undefined ? { taxRate: (venuePricing as any).taxRate } : {}),
+        fixedFeePerTransaction: venuePricing.fixedFeePerTransaction || null,
+        monthlyServiceFee: venuePricing.monthlyServiceFee || null,
+        effectiveFrom: new Date(),
+        active: true,
+        notes: 'Creado via Payment Setup Wizard',
+      }
+
+      if (target.type === 'venue') {
+        pricingStructure = await prisma.venuePricingStructure.create({
+          data: { venueId: target.id, ...pricingData },
+        })
+      } else {
+        pricingStructure = await prisma.organizationPricingStructure.create({
+          data: { organizationId: target.id, ...pricingData },
+        })
+      }
+    }
+
+    // La bitácora del candado apunta a la tarifa que se capturó en el paso 6, no a la que tenía la posición (full-testing D4).
+    if (pricingStructure) {
+      for (const c of positionChanges) if (c.rate === 'CAPTURADA' && c.slot === posicionDelCandado) c.pricingId = pricingStructure.id
+    }
+
+    logger.info('[Full Setup] Step 6: Pricing structure', {
+      created: !!pricingStructure,
+    })
+
     // Step 3: Auto-attach terminals by serial + batch assign additional
     const autoAttached: string[] = []
     const terminalsWithSerial = await prisma.terminal.findMany({
@@ -2004,6 +2156,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
 
     // Batch assign additional terminals
     let batchAttached = 0
+    const skippedTerminals: Array<{ id: string; reason: string }> = []
     if (additionalTerminalIds.length > 0) {
       for (const terminalId of additionalTerminalIds) {
         const terminal = await prisma.terminal.findUnique({
@@ -2011,9 +2164,18 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           select: { id: true, assignedMerchantIds: true },
         })
         if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
-          // Provider ↔ device-brand compatibility guard (Task 11 / validation
-          // point #2). Explicit operator-selected terminal — fail hard.
-          await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+          // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2). Explicit operator-selected terminal: la
+          // validación que rechaza va ANTES de escribir la posición (candado de posiciones, Codex p12-r3 #1). Si la terminal
+          // cambió de marca después de eso (Codex p12-r4 #4), aquí ya no se lanza un error con la posición guardada: se salta y
+          // se avisa en el resumen.
+          try {
+            await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+          } catch (err) {
+            if (!(err instanceof IncompatibleDeviceError)) throw err
+            logger.warn('[Full Setup] Terminal elegida ya no es compatible; no se asignó', { terminalId, merchantAccountId })
+            skippedTerminals.push({ id: terminalId, reason: err.message })
+            continue
+          }
 
           await prisma.terminal.update({
             where: { id: terminalId },
@@ -2098,93 +2260,6 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       created: !!costStructureResult,
     })
 
-    // Step 5: Create/update payment config (venue or org)
-    let paymentConfig: any = null
-    const accountSlotField =
-      accountSlot === 'PRIMARY' ? 'primaryAccountId' : accountSlot === 'SECONDARY' ? 'secondaryAccountId' : 'tertiaryAccountId'
-
-    if (target.type === 'venue') {
-      const existingConfig = await prisma.venuePaymentConfig.findUnique({
-        where: { venueId: target.id },
-      })
-
-      if (existingConfig) {
-        paymentConfig = await prisma.venuePaymentConfig.update({
-          where: { venueId: target.id },
-          data: { [accountSlotField]: merchantAccountId },
-        })
-      } else {
-        // primaryAccountId is required for create — set to merchantAccountId if PRIMARY slot, otherwise need a primary
-        paymentConfig = await prisma.venuePaymentConfig.create({
-          data: {
-            venueId: target.id,
-            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
-            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
-            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
-          },
-        })
-      }
-    } else {
-      const existingConfig = await prisma.organizationPaymentConfig.findUnique({
-        where: { organizationId: target.id },
-      })
-
-      if (existingConfig) {
-        paymentConfig = await prisma.organizationPaymentConfig.update({
-          where: { organizationId: target.id },
-          data: { [accountSlotField]: merchantAccountId },
-        })
-      } else {
-        paymentConfig = await prisma.organizationPaymentConfig.create({
-          data: {
-            organizationId: target.id,
-            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
-            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
-            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
-          },
-        })
-      }
-    }
-
-    logger.info('[Full Setup] Step 5: Payment config saved', {
-      configId: paymentConfig?.id,
-      slot: accountSlot,
-    })
-
-    // Step 6: Create venue/org pricing structure
-    let pricingStructure: any = null
-    if (venuePricing) {
-      const pricingData = {
-        accountType: accountSlot as 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
-        debitRate: venuePricing.debitRate / 100,
-        creditRate: venuePricing.creditRate / 100,
-        amexRate: venuePricing.amexRate / 100,
-        internationalRate: venuePricing.internationalRate / 100,
-        // Flag IVA del wizard. Default null = legacy.
-        includesTax: (venuePricing as any).includesTax ?? null,
-        ...((venuePricing as any).taxRate !== undefined ? { taxRate: (venuePricing as any).taxRate } : {}),
-        fixedFeePerTransaction: venuePricing.fixedFeePerTransaction || null,
-        monthlyServiceFee: venuePricing.monthlyServiceFee || null,
-        effectiveFrom: new Date(),
-        active: true,
-        notes: 'Creado via Payment Setup Wizard',
-      }
-
-      if (target.type === 'venue') {
-        pricingStructure = await prisma.venuePricingStructure.create({
-          data: { venueId: target.id, ...pricingData },
-        })
-      } else {
-        pricingStructure = await prisma.organizationPricingStructure.create({
-          data: { organizationId: target.id, ...pricingData },
-        })
-      }
-    }
-
-    logger.info('[Full Setup] Step 6: Pricing structure', {
-      created: !!pricingStructure,
-    })
-
     // Step 7: Create settlement configurations.
     // Always create them (using Blumon defaults if the client didn't send any)
     // so every venue with a merchant account has a valid settlement schedule.
@@ -2233,6 +2308,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
         autoAttached: autoAttached.length,
         batchAttached,
         total: autoAttached.length + batchAttached,
+        ...(skippedTerminals.length > 0 && { skipped: skippedTerminals }),
       },
       costStructure: costStructureResult ? { id: costStructureResult.id } : null,
       paymentConfig: paymentConfig ? { id: paymentConfig.id, slot: accountSlot } : null,
@@ -2245,7 +2321,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       action: 'MERCHANT_ACCOUNT_PROVISIONED_BLUMON',
       entity: 'MerchantAccount',
       entityId: merchantAccountId,
-      data: { venueId: target?.id, serialNumber, accountSlot, environment, merchantCreated },
+      data: { venueId: target?.id, serialNumber, accountSlot, environment, merchantCreated, positionChanges },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
     })
@@ -2256,10 +2332,15 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       message: `Setup completo: merchant ${merchantCreated ? 'creado' : 'existente'}, ${summary.terminals.total} terminales, pricing y settlement configurados`,
     })
   } catch (error: any) {
-    logger.error('[Full Setup] Failed', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined,
-    })
+    if (esRespuestaDelCandado(error)) {
+      // Respuesta normal del candado de posiciones (la pantalla pregunta o recarga): aviso, sin stack.
+      logger.warn('[Full Setup] El candado de posiciones pide confirmar o recargar', { code: error.code, message: error.message })
+    } else {
+      logger.error('[Full Setup] Failed', {
+        error: error instanceof Error ? error.message : error,
+        stack: error instanceof Error ? error.stack : undefined,
+      })
+    }
     next(error)
   }
 }
@@ -2340,6 +2421,7 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
         loginMode: parsed.data.login.mode,
         merchantMode: parsed.data.merchant.mode,
         webhookRegistered: result.webhookRegistered,
+        positionChanges: result.positionChanges,
       },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
