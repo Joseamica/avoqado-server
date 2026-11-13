@@ -56,7 +56,7 @@ import {
   mandarCambiosARevisarEnTx,
   sobresDeSaldoDelCobroEnTx,
 } from '../exchanges/exchangeTerminalRefund'
-import { fijarSaldoReabiertoEnTx } from '../shared/saldoReabiertoAlReembolsar'
+import { fijarSaldoReabiertoEnTx, subirVersionDeValesTrasCommit } from '../shared/saldoReabiertoAlReembolsar'
 import { anotarRegresoDeLaVentaEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
 import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 
@@ -1258,6 +1258,11 @@ export async function recordRefund(
   const result = transactionResult.refundPayment
   const postCommitAuthority = transactionResult.postCommitAuthority
 
+  // D649 segunda vuelta: la sesión de vales estaba tomada por otra caja al reabrir el saldo; se sube ahora, ya sin la cuenta. Sin
+  // `await`: espera a que esa otra transacción termine. No lanza.
+  if (postCommitAuthority.saldoReabierto?.sesionDeValesOcupada)
+    void subirVersionDeValesTrasCommit({ venueId, sessionId: postCommitAuthority.saldoReabierto.sesionDeValesOcupada })
+
   logger.info('Refund payment created', {
     refundPaymentId: result.id,
     originalPaymentId: refundData.originalPaymentId,
@@ -1352,6 +1357,9 @@ export async function recordRefund(
         source: 'TPV',
         // D649: la sesión de vales que se puso al día (versión, y PARTIALLY_PAID si seguía MATERIALIZED).
         ...(postCommitAuthority.saldoReabierto.sesionDeVales ? { sesionDeVales: postCommitAuthority.saldoReabierto.sesionDeVales } : {}),
+        ...(postCommitAuthority.saldoReabierto.sesionDeValesOcupada
+          ? { sesionDeValesSubidaTrasCommit: postCommitAuthority.saldoReabierto.sesionDeValesOcupada }
+          : {}),
       },
     })
   }

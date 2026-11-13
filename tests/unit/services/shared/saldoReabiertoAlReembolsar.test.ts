@@ -9,8 +9,18 @@
  * Una devolución de producto sobre una venta cubierta o cerrada no reabre nada (regla del 18-ago).
  */
 import { Prisma } from '@prisma/client'
-import { fijarSaldoReabiertoEnTx, saldoQueReabreElReembolso } from '@/services/shared/saldoReabiertoAlReembolsar'
+import {
+  fijarSaldoReabiertoEnTx,
+  saldoQueReabreElReembolso,
+  subirVersionDeValesEnDb,
+  subirVersionDeValesTrasCommit,
+} from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { TxConReintento } from '@/utils/serializableRetry'
+import { enqueuePaymentEffect } from '@/services/tpv/paymentEffects.service'
+import { prismaMock } from '../../../__helpers__/setup'
+
+jest.mock('@/services/tpv/paymentEffects.service', () => ({ enqueuePaymentEffect: jest.fn().mockResolvedValue(undefined) }))
+const encolar = enqueuePaymentEffect as jest.Mock
 
 const d = (v: string | number) => new Prisma.Decimal(v)
 
@@ -141,6 +151,7 @@ describe('saldoQueReabreElReembolso — D19', () => {
  * sesión de vales viva de la cuenta sube su versión y, si seguía MATERIALIZED (el abono entró por otro canal), dice PARTIALLY_PAID.
  */
 describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)', () => {
+  beforeEach(() => encolar.mockClear())
   const txFalso = (sesiones: Array<{ id: string; status: string }>, order = cuenta()) => ({
     order: {
       findFirst: jest.fn().mockResolvedValue({ ...order, thirdPartyCashDue: null, cashTipDue: null, payments: [cobro('50.00')] }),
@@ -169,6 +180,8 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
       data: { version: { increment: 1 }, status: 'PARTIALLY_PAID' },
     })
     expect(r.sesionDeVales).toEqual({ id: 'ses-1', estadoAntes: 'MATERIALIZED' })
+    // Ya quedó subida en esta transacción: no hace falta la red durable.
+    expect(encolar).not.toHaveBeenCalled()
     // Se toma sin esperar (la cuenta ya está bloqueada; la jerarquía es sesión → vales → cuenta) y sólo la de ESTA cuenta.
     const [sql, ...valores] = tx.$queryRaw.mock.calls[0]
     expect((sql as string[]).join('?')).toMatch(/FOR UPDATE SKIP LOCKED/)
@@ -183,7 +196,7 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
     expect(tx.areaTicketCheckoutSession.update).toHaveBeenCalledWith({ where: { id: 'ses-1' }, data: { version: { increment: 1 } } })
   })
 
-  it('cuenta sin sesión de vales viva (o tomada por otra caja en ese instante): no escribe ninguna sesión', async () => {
+  it('cuenta sin sesión de vales viva: no escribe ninguna sesión ni pide subirla después', async () => {
     const tx = txFalso([])
 
     const r = await fijar(tx)
@@ -191,6 +204,43 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
     expect(r.reabre).toBe(true)
     expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
     expect(r.sesionDeVales).toBeUndefined()
+    expect(r.sesionDeValesOcupada).toBeUndefined()
+    expect(encolar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 segunda vuelta: la sesión viva está TOMADA por otra caja: no la espera ni la escribe, y le dice a quien llama cuál subir tras el commit', async () => {
+    const tx = txFalso([])
+    tx.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'ses-1' }])
+
+    const r = await fijar(tx)
+
+    expect(r.reabre).toBe(true)
+    expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+    expect(r.sesionDeVales).toBeUndefined()
+    expect(r.sesionDeValesOcupada).toBe('ses-1')
+    // La segunda lectura sólo pregunta si existe: sin candado (esperarlo cruzaría sesión → vales → cuenta).
+    const [sql, ...valores] = tx.$queryRaw.mock.calls[1]
+    expect((sql as string[]).join('?')).not.toMatch(/FOR (NO KEY )?UPDATE|FOR SHARE/)
+    expect(valores).toEqual(expect.arrayContaining(['order-1', 'venue-1']))
+  })
+
+  it('🔴 subida durable (Codex r3): la sesión tomada deja en ESTA transacción el efecto que la sube aunque la subida inmediata falle', async () => {
+    const tx = txFalso([])
+    tx.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'ses-1' }])
+
+    await fijar(tx)
+
+    expect(encolar).toHaveBeenCalledTimes(1)
+    expect(encolar).toHaveBeenCalledWith(tx, {
+      venueId: 'venue-1',
+      paymentId: 'refund-1',
+      orderId: 'order-1',
+      kind: 'SUBIR_VERSION_DE_VALES',
+      dedupeKey: 'vales-version:refund-1:v1',
+      payload: { sessionId: 'ses-1' },
+      // La subida inmediata va primero; el efecto es la red si ésa falla o el proceso muere.
+      nextAttemptAt: expect.any(Date),
+    })
   })
 
   it('si no reabre (venta cerrada), ni busca la sesión', async () => {
@@ -201,5 +251,58 @@ describe('fijarSaldoReabiertoEnTx — la sesión de vales viva se entera (D649)'
     expect(r.reabre).toBe(false)
     expect(tx.$queryRaw).not.toHaveBeenCalled()
     expect(tx.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * D649 segunda vuelta (Codex apps-viejas r4): la sesión que estaba tomada se sube DESPUÉS del commit del reembolso, ya sin la cuenta,
+ * esperando su candado como cualquiera. Una sola subida por llamada (la MATERIALIZED dice PARTIALLY_PAID) y nunca lanza: el
+ * reembolso ya está hecho.
+ */
+describe('subirVersionDeValesTrasCommit', () => {
+  const sesion = prismaMock.areaTicketCheckoutSession
+
+  beforeEach(() => {
+    sesion.updateMany.mockReset()
+    sesion.updateMany.mockResolvedValue({ count: 0 })
+  })
+
+  it('🔴 sube la versión de la sesión viva de ESTE negocio; si seguía MATERIALIZED, además dice PARTIALLY_PAID', async () => {
+    await subirVersionDeValesTrasCommit({ venueId: 'venue-1', sessionId: 'ses-1' })
+
+    expect(sesion.updateMany.mock.calls).toEqual([
+      [
+        {
+          where: { id: 'ses-1', venueId: 'venue-1', status: { in: ['PARTIALLY_PAID', 'PAYMENT_PENDING', 'RECONCILIATION_REQUIRED'] } },
+          data: { version: { increment: 1 } },
+        },
+      ],
+      [
+        {
+          where: { id: 'ses-1', venueId: 'venue-1', status: 'MATERIALIZED' },
+          data: { version: { increment: 1 }, status: 'PARTIALLY_PAID' },
+        },
+      ],
+    ])
+  })
+
+  it('si la primera ya la subió, la segunda no la encuentra (el orden evita subirla dos veces)', async () => {
+    sesion.updateMany.mockResolvedValueOnce({ count: 1 })
+
+    await subirVersionDeValesTrasCommit({ venueId: 'venue-1', sessionId: 'ses-1' })
+
+    expect(sesion.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('subirVersionDeValesEnDb (el núcleo del trabajador) SÍ lanza si la base falla, para que se reintente', async () => {
+    sesion.updateMany.mockRejectedValueOnce(new Error('la base se cayó'))
+
+    await expect(subirVersionDeValesEnDb(prismaMock as any, { venueId: 'venue-1', sessionId: 'ses-1' })).rejects.toThrow('la base se cayó')
+  })
+
+  it('nunca lanza: el reembolso ya se confirmó', async () => {
+    sesion.updateMany.mockRejectedValueOnce(new Error('la base se cayó'))
+
+    await expect(subirVersionDeValesTrasCommit({ venueId: 'venue-1', sessionId: 'ses-1' })).resolves.toBeUndefined()
   })
 })

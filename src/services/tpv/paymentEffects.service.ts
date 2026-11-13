@@ -7,12 +7,20 @@ import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
 import { esVentaNuevaDeCambio, sqlOrigenEconomico } from '@/services/exchanges/exchangeMarks'
-import { ORDER_LOCK_WAIT_BUDGET, esVentaDeCajaCerrada, esVentaDeTurnoCerrado, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import {
+  ORDER_LOCK_WAIT_BUDGET,
+  esVentaDeCajaCerrada,
+  esVentaDeTurnoCerrado,
+  lockExistingOrderForPayment,
+} from '@/services/shared/paymentShiftClaim'
 import { aCentavos } from '@/services/shared/repartoDescuento'
 
 /**
  * `AVISO_TURNO_CERRADO` (S3 «Efectivo sin red en el turno correcto»): el aviso al gerente de una venta de la cola que quedó APARTE
  * porque su turno (o su caja sin turno) ya se había cerrado. Nace en la transacción del cobro y es el ÚNICO emisor de ese aviso.
+ *
+ * `SUBIR_VERSION_DE_VALES` (D649, Codex r3): nace en la transacción de un reembolso que reabrió el saldo de una venta de vales cuya
+ * sesión tenía otra caja. Sube la versión de esa sesión para que el POS acepte el saldo nuevo, si la subida inmediata no llegó.
  */
 export type PaymentEffectKind =
   | 'REVIEW'
@@ -23,6 +31,7 @@ export type PaymentEffectKind =
   | 'AVISO_TURNO_CERRADO'
   | 'LOYALTY_POINTS_REVERSAL'
   | 'STAMP_REVERSAL'
+  | 'SUBIR_VERSION_DE_VALES'
 export type PaymentEffectInput = {
   venueId: string
   paymentId: string
@@ -62,6 +71,8 @@ function codigoDelErrorDelAviso(error: unknown): string {
   return typeof codigo === 'string' ? codigo : error instanceof Error ? error.name : 'ERROR'
 }
 const LEASE_MS = 120_000
+/** D649: lo que el trabajador espera el candado de una sesión de vales antes de soltarla y reintentar más tarde. */
+const ESPERA_DE_CANDADO_DE_VALES_MS = 5_000
 
 /**
  * Codex bloque A r1 [P1]: congelar una comisión espera candados (la orden, la fila de StaffVenue de cada persona). Sin tope,
@@ -216,7 +227,17 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       id: claim.id,
       claimToken: claim.claimToken,
       status: 'PROCESSING',
-      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO', 'LOYALTY_POINTS_REVERSAL', 'STAMP_REVERSAL'] },
+      kind: {
+        in: [
+          'RECEIPT',
+          'REFERRAL',
+          'TRANSACTION_COST',
+          'AVISO_TURNO_CERRADO',
+          'LOYALTY_POINTS_REVERSAL',
+          'STAMP_REVERSAL',
+          'SUBIR_VERSION_DE_VALES',
+        ],
+      },
     },
   })
   if (external) {
@@ -313,6 +334,21 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
         })
         throw error
       }
+    } else if (external.kind === 'SUBIR_VERSION_DE_VALES') {
+      // D649 (Codex r3): la red de la subida de la sesión de vales que estaba tomada al reabrir un saldo. SIN la cuenta (la jerarquía
+      // es sesión → vales → cuenta) y con la espera del candado acotada: un candado vencido lanza y se reintenta, sin trabar el barrido.
+      // Una sesión OPEN, pagada o cancelada no se toca y el efecto termina igual.
+      const { sessionId } = external.payload as { sessionId?: unknown }
+      if (typeof sessionId !== 'string') throw new Error('VALES_SESSION_REQUIRED')
+      const { subirVersionDeValesEnDb } = await import('../shared/saldoReabiertoAlReembolsar')
+      await db.$transaction(
+        async tx => {
+          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_DE_CANDADO_DE_VALES_MS}ms'`)
+          await subirVersionDeValesEnDb(tx, { venueId: external.venueId, sessionId })
+        },
+        // Que venza el candado (55P03, se reintenta) antes que la transacción.
+        { timeout: ESPERA_DE_CANDADO_DE_VALES_MS * 3 },
+      )
     } else if ((external.payload as { operation?: string }).operation === 'REFUND') {
       const { revertQualifiedReferral } = await import('../referrals/referralRefund.service')
       await revertQualifiedReferral({ orderId: external.orderId!, venueId: external.venueId, reason: 'ORDER_REFUNDED' })

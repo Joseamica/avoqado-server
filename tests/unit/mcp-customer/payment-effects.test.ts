@@ -70,6 +70,12 @@ describe('payment effect operator tool', () => {
     // El filtro es el mismo de hoy: la herramienta está en el directorio certificado y su entrada no cambia.
     expect(esquema!.kind.safeParse('STAMP_REVERSAL').success).toBe(false)
   })
+  it('D649: list_payment_effects nombra SUBIR_VERSION_DE_VALES en español, sin cambiar su entrada (herramienta certificada)', () => {
+    handler()
+    expect(descripcion).toContain('SUBIR_VERSION_DE_VALES')
+    expect(descripcion).toContain('Avisar a la caja de vales de un abono devuelto')
+    expect(esquema!.kind.safeParse('SUBIR_VERSION_DE_VALES').success).toBe(false)
+  })
   it('exposes page metadata and passes the exact status, payment and cursor filters to the bounded service', async () => {
     const input = { venueId: 'own', status: 'DEAD_LETTER', paymentId: 'payment', limit: 1000000, cursor: 'cursor' }
     const response = await handler()(input)
