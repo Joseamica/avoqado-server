@@ -1,5 +1,6 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
+import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -50,7 +51,14 @@ import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarC
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
-import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import {
+  aCentavos,
+  comoJson,
+  importesDeLasFilas,
+  nuevoRepartoDeCuenta,
+  nuevoRepartoDirigido,
+  porcentajeEnCentavos,
+} from '../shared/repartoDescuento'
 import {
   conservarDescuentoHistorico,
   filasDeLaOrden,
@@ -2692,8 +2700,11 @@ export async function removeOrderItem(
   orderId: string,
   orderItemId: string,
   expectedVersion: number,
+  /** Server-owned (hz:87f4b879:D5): el `userId` de la sesión que lo quita. Sin él (llamadas internas), sin autor, como antes. */
+  opciones: { actorId?: string } = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
+  const autor = opciones.actorId
 
   const { updatedOrder, itemToRemove, recorte } = await withDeadlockRetry(
     async tx => {
@@ -2761,7 +2772,7 @@ export async function removeOrderItem(
       // P4 (founder, 1-oct): lo dirigido al renglón que se borra —su descuento propio, su parte de un 2×1, un premio— se recorta
       // o se retira con sus beneficios ANTES de borrarlo; si no, su importe se quedaba restando sobre los demás renglones. Va
       // DESPUÉS de R9: la reducción que devuelva una fila retirada ya no encuentra en la cabecera el IVA del renglón que se fue.
-      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId })
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId, staffId: autor })
 
       // Delete the order item (Prisma will cascade delete modifiers)
       await tx.orderItem.delete({
@@ -2894,7 +2905,7 @@ export async function removeOrderItem(
   )
 
   void logAction({
-    staffId: null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_REMOVED',
     entity: 'Order',
@@ -3039,10 +3050,11 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
       // P5 (founder, 1-oct): lo DIRIGIDO a los renglones que se regalan —su descuento propio, un 2×1, un premio— se recorta o
       // retira con sus beneficios ANTES de marcarlos: la cortesía ya regala el renglón entero y no se le encima otro descuento.
+      // hz:87f4b879:D1: los puntos que devuelve el recorte van a nombre de la sesión, como el resto de la cortesía (D5).
       const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
         renglones: itemsToComp.map(item => item.id),
         venueId,
-        staffId: input.staffId,
+        staffId: autor,
       })
 
       // Calculate discount amount (total of comped items)
@@ -3268,9 +3280,12 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 interface VoidItemsInput {
   itemIds: string[] // Items to void
   reason: string // Required: "Wrong item entered", "Customer changed mind", etc.
-  staffId: string // Staff member performing the action
+  staffId: string // Vendedor elegido en la terminal (del cuerpo)
   expectedVersion: number // Optimistic locking
-  /** Quien está autenticado (`authContext.userId`): firma la bitácora si anular todo suelta los vales de la venta (D2). */
+  /**
+   * Quien está autenticado (`authContext.userId`). Es el AUTOR de la anulación (hz:87f4b879:D1, como D5): OrderAction, bitácoras,
+   * vales soltados (D2) y los canjes que se devuelven. Sin él, como antes: el `staffId` del cuerpo (los vales soltados, sin autor).
+   */
   actorId?: string
 }
 
@@ -3284,6 +3299,8 @@ interface VoidItemsInput {
  */
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
+  // hz:87f4b879:D1: el autor es la sesión; `staffId` del cuerpo sigue siendo el vendedor (se valida abajo y va como nota).
+  const autor = input.actorId ?? input.staffId
 
   // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
   const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados } = await withDeadlockRetry(
@@ -3359,7 +3376,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         if (await esCuentaDeFolioEnTx(tx, { venueId, orderId })) {
           throw new BadRequestError(MENSAJE_FOLIO_SE_CANCELA_COMO_PEDIDO, FOLIO_SE_CANCELA_COMO_PEDIDO)
         }
-        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
+        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: autor, camino: 'voidItems' })
         order = await leerOrden()
         if (!order) throw new NotFoundError('Order not found')
       }
@@ -3452,7 +3469,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
       // P4 (founder, 1-oct): lo dirigido a lo que se anula se recorta o se retira con sus beneficios ANTES de borrar los platos
       // (y DESPUÉS de R9, como en `removeOrderItem`).
-      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: input.itemIds, venueId, staffId: input.staffId })
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: input.itemIds, venueId, staffId: autor })
 
       // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
       // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
@@ -3519,11 +3536,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // otra decisión). Lo cobrado se relee BAJO el candado: el de la orden y el de los `Payment` registrados, el mayor,
       // porque hay órdenes históricas con pagos COMPLETED y `paidAmount` desfasado. Mismo filtro que el registro del
       // dinero: pagos no-reembolso (`type` nulo incluido), importe + propina — igual que `newTotal`, que lleva la propina.
-      const pagosRegistrados = await tx.payment.aggregate({
-        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-        _sum: { amount: true, tipAmount: true },
-      })
-      const pagadoPorPagos = new Prisma.Decimal(pagosRegistrados?._sum?.amount ?? 0).plus(pagosRegistrados?._sum?.tipAmount ?? 0)
+      // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`).
+      const pagosRegistrados = await cobradoQueCubreEnTx(tx, { venueId, orderId })
+      const pagadoPorPagos = pagosRegistrados.amount.plus(pagosRegistrados.tipAmount)
       const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
@@ -3636,7 +3651,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     data: {
       orderId,
       actionType: 'VOID',
-      performedById: input.staffId,
+      performedById: autor,
       reason: input.reason,
       metadata: {
         itemIds: input.itemIds,
@@ -3649,7 +3664,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     },
   })
   void logAction({
-    staffId: input.staffId ?? null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_VOIDED',
     entity: 'Order',
@@ -3659,6 +3674,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       amount: Number(voidAmount),
       reason: input.reason ?? undefined,
       ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+      ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
     },
   })
 
@@ -3800,7 +3816,8 @@ export async function applyDiscount(
         const itemsSubtotal = itemsToDiscount.reduce((sum, item) => sum + Number(item.total), 0)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (itemsSubtotal * input.value) / 100
+          // D2 (12-nov): centavos enteros, mitad hacia arriba, como la TPV (en pesos flotantes 10 % de $21.35 daba $2.13).
+          discountAmount = porcentajeEnCentavos(aCentavos(itemsSubtotal), input.value) / 100
         } else {
           discountAmount = Math.min(input.value, itemsSubtotal) // Can't discount more than item total
         }
@@ -3809,7 +3826,7 @@ export async function applyDiscount(
         const orderSubtotal = Number(order.subtotal)
 
         if (input.type === 'PERCENTAGE') {
-          discountAmount = (orderSubtotal * input.value) / 100
+          discountAmount = porcentajeEnCentavos(aCentavos(orderSubtotal), input.value) / 100 // D2: ídem
         } else {
           discountAmount = Math.min(input.value, orderSubtotal) // Can't discount more than order total
         }

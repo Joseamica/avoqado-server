@@ -79,6 +79,17 @@ export function aCentavos(pesos: unknown): number {
 }
 
 /**
+ * D2 (12-nov): el % de dinero, la regla ÚNICA del SERVIDOR: centavos enteros, mitad hacia arriba, en decimal exacto (la de la TPV,
+ * BigDecimal). 2135 ¢ al 10 % = 214 ¢: en pesos flotantes 2.135 × 100 = 213.49999999999997 daba 213. En % entero es idéntica a
+ * `Math.round(¢ × % / 100)` de ANDROID y `calculateDiscountCents`; con decimales ANDROID difiere a veces (375 ¢ al 9.2 %: 34 ¢ contra
+ * 35 ¢), por eso lo que iguala a ANDROID sigue en `calculateDiscountCents` (decisión del founder pendiente).
+ */
+export function porcentajeEnCentavos(baseCents: number, porcentaje: unknown): number {
+  const pct = new Prisma.Decimal(typeof porcentaje === 'number' ? porcentaje : String(porcentaje ?? 0))
+  return new Prisma.Decimal(baseCents).mul(pct).div(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+}
+
+/**
  * Lo que el renglón aporta: una cortesía, 0 — primero, porque una promoción regalada después con `compItems` conserva
  * `orderPromotionId` con total 80 y `discountAmount` 80 (B3a r2 N1) —; una promoción, su total (neto); los demás, total − su
  * descuento propio (bruto). Nunca < 0.
@@ -295,7 +306,8 @@ const aPesosRedondeados = (x: number) => Math.round(x * 100) / 100
  */
 function importeSinTope(renglones: RenglonParaReparto[], fila: FilaParaReparto): number | null {
   // R8 (founder, 2-oct): la base de un % —de cuenta o dentro de su ámbito— deja fuera lo ya regalado.
-  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + Number(x.total ?? 0), 0)
+  // D2: en centavos enteros, como el escritor de la fila (antes en pesos flotantes: $21.35 al 10 % se re-derivaba a $2.13).
+  const suma = (lista: RenglonParaReparto[]) => lista.filter(x => !estaRegalado(x)).reduce((s, x) => s + aCentavos(x.total), 0)
   let base: number | null = null
   if (seRecalculaComoPorcentajeDeCuenta(fila)) base = suma(renglones.filter(x => !x.orderPromotionId))
   else if (seRecalculaDentroDeSuAmbito(fila)) {
@@ -305,7 +317,7 @@ function importeSinTope(renglones: RenglonParaReparto[], fila: FilaParaReparto):
   if (base === null) return null
   // R6 (founder, 2-oct): el tope del catálogo vale también al recalcular, sea de cuenta o dirigido.
   const tope = leerReparto(fila.reparto)?.tope ?? null
-  const calculado = aPesosRedondeados((base * Number(fila.value)) / 100)
+  const calculado = porcentajeEnCentavos(base, fila.value) / 100
   return tope === null ? calculado : Math.min(calculado, tope)
 }
 

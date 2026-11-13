@@ -170,7 +170,7 @@ export interface GrantStampOptions {
 
 /**
  * Los índices que garantizan «cada parte de un pago se sella una vez» y «se revierte una vez» (parciales y crudos: Prisma no
- * los conoce por nombre). El del sello era `(venueId, orderId)` (20260826145859); desde las promos de lealtad (20261112190000)
+ * los conoce por nombre). El del sello era `(venueId, orderId)` (20260826145859); desde las promos de lealtad (20261112210000)
  * los dos son `(venueId, orderId, part)`.
  */
 const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_part_earn_unique'

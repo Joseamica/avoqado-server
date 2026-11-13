@@ -56,6 +56,7 @@ import {
   mandarCambiosARevisarEnTx,
   sobresDeSaldoDelCobroEnTx,
 } from '../exchanges/exchangeTerminalRefund'
+import { fijarSaldoReabiertoEnTx } from '../shared/saldoReabiertoAlReembolsar'
 import { anotarRegresoDeLaVentaEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
 import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 
@@ -1094,6 +1095,18 @@ export async function recordRefund(
         // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
         await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+        // 🔴 D19 (founder 10-nov «A»): si la cuenta todavía debía, el abono devuelto vuelve a deberse. Una vez, aquí, con la orden ya
+        // bloqueada (`lockExistingOrderForPayment`, arriba) y sus cobros de este momento; reescribe lo guardado en esta transacción.
+        // Una venta cerrada o cubierta no cambia (18-ago). Un replay por llave regresa antes de llegar aquí.
+        const saldoReabierto = locked.orderId
+          ? await fijarSaldoReabiertoEnTx(tx, {
+              venueId,
+              orderId: locked.orderId,
+              refundPaymentId: refundPayment.id,
+              devueltoImporte: new Decimal(reparto.salesRefundCents).div(100),
+              devueltoPropina: new Decimal(reparto.tipRefundCents).div(100),
+            })
+          : undefined
         // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
         // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
         const tarjetas = locked.orderId
@@ -1152,6 +1165,7 @@ export async function recordRefund(
           salesRefund,
           postCommitAuthority: Object.freeze({
             regreso,
+            saldoReabierto: saldoReabierto?.reabre ? saldoReabierto : null,
             orderId: locked.orderId,
             method: locked.method,
             fundsFlow: locked.fundsFlow,
@@ -1322,6 +1336,25 @@ export async function recordRefund(
       source: 'TPV',
     },
   })
+
+  // D19: la cuenta todavía debía y este reembolso devolvió un abono: vuelve a deberse.
+  if (postCommitAuthority.saldoReabierto && postCommitAuthority.orderId) {
+    void logAction({
+      staffId: userId,
+      venueId,
+      action: 'ORDER_BALANCE_REOPENED_BY_REFUND',
+      entity: 'Order',
+      entityId: postCommitAuthority.orderId,
+      data: {
+        refundPaymentId: result.id,
+        reopenedAmount: postCommitAuthority.saldoReabierto.reopenedAmount.toNumber(), // pesos
+        reopenedTipAmount: postCommitAuthority.saldoReabierto.reopenedTipAmount.toNumber(),
+        source: 'TPV',
+        // D649: la sesión de vales que se puso al día (versión, y PARTIALLY_PAID si seguía MATERIALIZED).
+        ...(postCommitAuthority.saldoReabierto.sesionDeVales ? { sesionDeVales: postCommitAuthority.saldoReabierto.sesionDeVales } : {}),
+      },
+    })
+  }
 
   // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
   if (postCommitAuthority.cuentaDeTarjetasCancelada && postCommitAuthority.orderId) {

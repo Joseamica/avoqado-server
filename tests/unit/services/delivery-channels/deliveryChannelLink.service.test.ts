@@ -628,6 +628,60 @@ describe('deliveryChannelLink.service', () => {
       expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
     })
 
+    it('🔴 rechaza una lista de productos del canal vacía o con basura (un menú vacío borra el del proveedor)', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+
+      await expect(updateChannelLink('venue1', 'link1', { config: { productos: [] } })).rejects.toThrow(ValidationError)
+      await expect(updateChannelLink('venue1', 'link1', { config: { productos: ['LATTE', 7] } })).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 Codex r1 #3: guardar horario y margen desde el DASHBOARD (`precios` sin `overrides`) NO borra los precios por SKU', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        { config: { productos: ['LATTE'], precios: { markupPercent: 10, overrides: { LATTE: 60 } } } },
+      ])
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      // Lo que manda ChannelSettingsDialog: con margen en blanco, `precios: {}`; con margen, `{ markupPercent }`.
+      await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK, precios: {} } })
+      await updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 25 } } })
+      // Quitar los precios por SKU sigue siendo posible, mandándolos explícitos.
+      await updateChannelLink('venue1', 'link1', { config: { precios: { overrides: {} } } })
+
+      const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config.precios)
+      expect(escritos[0]).toEqual({ overrides: { LATTE: 60 } })
+      expect(escritos[1]).toEqual({ markupPercent: 25, overrides: { LATTE: 60 } })
+      expect(escritos[2]).toEqual({ overrides: {} })
+    })
+
+    it('🔴 Codex r1 #4: crear un canal valida su `config` igual que editarlo (lista de productos incluida)', async () => {
+      await expect(
+        createChannelLink('venue1', { provider: 'UBER_EATS', externalLocationId: 'store-x', config: { productos: [] } } as any),
+      ).rejects.toThrow(ValidationError)
+      expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
+    })
+
+    it('`agotarPorInventario` acepta sí/no (o null = como siempre) y rechaza otra cosa', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+      await expect(updateChannelLink('venue1', 'link1', { config: { agotarPorInventario: 'no' } })).rejects.toThrow(ValidationError)
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('acepta una lista de productos del canal y `null` (= vuelve a todo el catálogo)', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { precios: { markupPercent: 30 } } }])
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ id: 'link1' })
+
+      await updateChannelLink('venue1', 'link1', { config: { productos: ['LATTE'] } })
+      await updateChannelLink('venue1', 'link1', { config: { productos: null } })
+
+      const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config)
+      expect(escritos[0]).toEqual({ precios: { markupPercent: 30 }, productos: ['LATTE'] })
+      expect(escritos[1]).toEqual({ precios: { markupPercent: 30 }, productos: null })
+    })
+
     it('rechaza un override de precio negativo (regalaría el producto)', async () => {
       ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
 

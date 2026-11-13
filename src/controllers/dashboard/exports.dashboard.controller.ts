@@ -115,7 +115,7 @@ export async function pedirExporte(req: Request, res: Response, next: NextFuncti
     const columnas = Array.isArray(body.columns)
       ? [...new Set(body.columns.filter((c): c is string => typeof c === 'string' && conocidas.has(c)))]
       : exp.columnas.map(c => c.id)
-    if (columnas.length === 0) throw new BadRequestError('No valid columns requested for export')
+    if (columnas.length === 0) throw new BadRequestError('Elige al menos una columna válida para exportar')
     await responderPedido(req, res, exp, { formato: body.format, columnas, filtrosCrudos: body.filters })
   } catch (e) {
     next(e)

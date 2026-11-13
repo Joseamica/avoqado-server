@@ -2,6 +2,7 @@ import { performance } from 'node:perf_hooks'
 import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
 import logger from '../../config/logger'
 import { finalizeCouponsForOrder } from '../shared/cuponDeLaVenta'
+import { cobradoQueCubreEnTx } from '../shared/saldoReabiertoAlReembolsar'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
@@ -403,7 +404,7 @@ import {
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
   esVentaCerrada,
-  REFUND_PAYMENT_TYPE,
+  PAGO_PARA_SALDO_SELECT,
   type CompletedPaymentForBalance,
 } from '../shared/orderBalance'
 // Founder 3-oct (Tarea 6a): cobrar una cuenta CANCELADA — el cobro nuevo se rechaza; lo ya capturado la reabre.
@@ -1417,13 +1418,11 @@ export async function settleStandalonePaymentInTx(
     where: { id: orderId, venueId },
     include: { items: { include: { modifiers: { include: { modifier: true } } } } },
   })
-  const paid = await tx.payment.aggregate({
-    where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }] },
-    _sum: { amount: true, tipAmount: true },
-    _count: true,
-  })
-  const amount = paid._sum.amount ?? new Prisma.Decimal(0)
-  const tipAmount = paid._sum.tipAmount ?? new Prisma.Decimal(0)
+  // D19: lo cobrado MENOS lo que los reembolsos de abonos volvieron a deber (`cobradoQueCubreEnTx`); sin eso, una cuenta con su abono
+  // devuelto se cerraba con dinero de menos.
+  const paid = await cobradoQueCubreEnTx(tx, { venueId, orderId })
+  const amount = paid.amount
+  const tipAmount = paid.tipAmount
   // 🔴 Founder 3-oct / Codex r9 #2: el dinero de la terminal YA está capturado. Una cancelada de Avoqado se reabre y se calcula
   // como la viva que es —con su IVA—, y estado y totales se guardan en esta misma transacción. Una cancelada de Avoqado nunca
   // queda saldada; una de la plataforma o de SoftRestaurant, como hoy (Codex r12 #5).
@@ -1466,7 +1465,7 @@ export async function settleStandalonePaymentInTx(
   })
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
-  const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid._count > 1 && previous.isFullyPaid)
+  const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid.cobros > 1 && previous.isFullyPaid)
   await tx.order.update({
     where: { id: orderId, venueId },
     data: {
@@ -1603,7 +1602,7 @@ async function updateOrderTotalsForStandalonePayment(
     // pagado. Se leen TODOS los COMPLETED sin filtrar por `type` en la
     // consulta —igual que los otros tres canales— porque el resumen
     // compartido necesita los REFUND para reportar `refundState`.
-    select: { amount: true, tipAmount: true, type: true },
+    select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
   } satisfies Prisma.Order$paymentsArgs
 
   // Get current order with payment information
@@ -4071,9 +4070,7 @@ export async function recordOrderPayment(
             // — el único olvido de esta lista que vuelve la regla MÁS agresiva, no inerte.
             select: {
               id: true,
-              amount: true,
-              tipAmount: true,
-              type: true,
+              ...PAGO_PARA_SALDO_SELECT, // importe, propina, tipo y lo reabierto (D19)
               method: true,
               createdAt: true,
               terminalId: true,
@@ -4379,16 +4376,9 @@ export async function recordOrderPayment(
           if (!suppressExchangeSaleEffects && !expectsSettlement && !committedStandaloneSettlement) {
             // SR and area-ticket flows retain their settlement owner. Freeze the
             // expectation now so their referral survives a delayed settlement.
-            const sums = await tx.payment.aggregate({
-              where: {
-                venueId,
-                orderId: activeOrder.id,
-                status: 'COMPLETED',
-                OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }],
-              },
-              _sum: { amount: true, tipAmount: true },
-            })
-            expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
+            // D19: menos lo reabierto por un abono devuelto (`cobradoQueCubreEnTx`).
+            const sums = await cobradoQueCubreEnTx(tx, { venueId, orderId: activeOrder.id })
+            expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums.amount, tipAmount: sums.tipAmount }]).isFullyPaid
           }
           await enqueueCommittedPaymentEffects(
             tx,

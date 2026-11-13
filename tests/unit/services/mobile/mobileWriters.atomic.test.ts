@@ -280,7 +280,8 @@ beforeEach(() => {
   tx.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 4000 })
   tx.loyaltyTransaction.create.mockResolvedValue({ id: 'lt-new' })
   tx.loyaltyTransaction.findUnique.mockResolvedValue({ id: 'lt', customerId: 'customer', points: -1000, orderId: 'order' })
-  tx.staffVenue.findUnique.mockResolvedValue({ id: 'sv' })
+  // hz:87f4b879:D4: la membresía que firma el canje y su devolución se busca ACTIVA (`findFirst` con `active: true`).
+  tx.staffVenue.findFirst.mockResolvedValue({ id: 'sv' })
   tx.stampReward.findFirst.mockImplementation(async ({ where }: any) =>
     where.orderDiscountId ? { id: 'rw-od', customerId: 'customer', rewardLabel: 'Premio' } : { ...REWARD },
   )
@@ -308,7 +309,7 @@ beforeEach(() => {
     discount: ['findFirst'],
     customer: ['findFirst', 'updateMany', 'update'],
     loyaltyTransaction: ['create'],
-    staffVenue: ['findUnique'],
+    staffVenue: ['findUnique', 'findFirst'],
     stampReward: ['findFirst', 'updateMany', 'update'],
     walletPassOutbox: ['create'],
   })) {
@@ -750,7 +751,9 @@ describe('writer-specific fresh decisions', () => {
     expect(tx.loyaltyTransaction.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ points: -500, createdById: 'sv' }) }),
     )
-    expect(tx.staffVenue.findUnique).toHaveBeenCalled()
+    expect(tx.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId: 'staff', venueId: 'venue', active: true } }),
+    )
     expect(tx.customer.findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: 'customer' }, select: { loyaltyPoints: true } })
     expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
   })

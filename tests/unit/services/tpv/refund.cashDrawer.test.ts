@@ -56,7 +56,12 @@ function armar(method: 'CASH' | 'CREDIT_CARD', tip = 0) {
     // con un TypeError que se lleva por delante el PAY_OUT al cajón — justo lo que mide este test.
     findUniqueOrThrow: jest.fn().mockResolvedValue({ ...original, id: 'pay-refund' }),
   }
-  ;(prismaMock as any).order = { findUnique: jest.fn().mockResolvedValue({ id: 'order-1', venueId: VENUE }), update: jest.fn() }
+  ;(prismaMock as any).order = {
+    findUnique: jest.fn().mockResolvedValue({ id: 'order-1', venueId: VENUE }),
+    // D19: el reembolso pregunta si la cuenta todavía debía; este doble no la tiene ⇒ no reabre nada.
+    findFirst: jest.fn().mockResolvedValue(null),
+    update: jest.fn(),
+  }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock as any).$queryRaw = jest.fn(async (sql: unknown) =>
     Array.isArray(sql) && sql.join('').includes('ancestors(id) AS') ? [{ id: original.orderId }] : [original],

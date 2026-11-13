@@ -973,7 +973,10 @@ describe('R44 · folio con su abono reembolsado completo (cuenta PARTIAL, dinero
     await issueRefund({ venueId: f.venueId, paymentId: abono.paymentId, amount: CINCUENTA, reason: 'RETURNED_GOODS', staffId: f.staffId })
     expect(await prisma.payment.count({ where: { orderId, type: 'REFUND', status: 'COMPLETED' } })).toBe(1)
     const antes = await cuenta(orderId)
-    expect(antes).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' }) // el reembolso no la recalcula (deuda ajena)
+    // D19 (12-nov): el abono devuelto vuelve a deberse. El estado de cobro NO se toca (sigue PARTIAL: así R44 la vence sin
+    // cancelarla); los importes sí: pagado $0 y falta $100.
+    expect(antes).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
+    expect([antes.paidAmount.toString(), antes.remainingBalance.toString()]).toEqual(['0', '100'])
     expect(await porPagar()).toContain(orderId) // dentro del plazo sigue «Por pagar»
 
     await vencerPlazo(onlineOrderId)
@@ -985,7 +988,11 @@ describe('R44 · folio con su abono reembolsado completo (cuenta PARTIAL, dinero
     expect(despues.paidAmount.toString()).toBe(antes.paidAmount.toString())
     expect(await porPagar()).not.toContain(orderId)
 
-    // Llega dinero después: el cobro salda la cuenta y la pasada lo revive a «Por entregar» (`syncPaidClosedFolios`), como hoy.
+    // Llega dinero después. 🔴 D19 (el encargo 8ddf42): $50 ya NO la saldan (antes quedaba PAGADA con $50 netos de $100 y se
+    // entregaba el pedido completo cobrando la mitad); faltan otros $50. Con los $100 netos, la pasada lo revive a «Por entregar».
+    await efectivoDelPos(orderId, CINCUENTA)
+    const aMedias = await cuenta(orderId)
+    expect([aMedias.paymentStatus, aMedias.remainingBalance.toString()]).toEqual(['PARTIAL', '50'])
     await efectivoDelPos(orderId, CINCUENTA)
     expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
     await pasada()

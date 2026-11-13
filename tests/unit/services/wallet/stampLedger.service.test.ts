@@ -91,7 +91,7 @@ describe('grantStamp', () => {
     // segundo. Si eso se propaga como error, el cobro se ve fallido aunque el
     // dinero entró — que es peor que no sellar.
     // La forma REAL de este índice parcial (crudo, sin nombre en el esquema): la lista de columnas, como en turnoDeCaja.ts.
-    // Desde las promos de lealtad (migración 20261112190000) el índice es (venueId, orderId, part).
+    // Desde las promos de lealtad (migración 20261112210000) el índice es (venueId, orderId, part).
     const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
       code: 'P2002',
       clientVersion: 'test',

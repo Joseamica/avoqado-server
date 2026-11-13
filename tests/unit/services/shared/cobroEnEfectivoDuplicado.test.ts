@@ -32,6 +32,8 @@ function pago(id: string, amount: number, extra: Partial<PagoPrevio> = {}): Pago
     amount: new Decimal(amount),
     tipAmount: new Decimal(0),
     type: 'REGULAR',
+    reopenedAmount: null,
+    reopenedTipAmount: null,
     method: 'CASH',
     terminalId: 'term-A',
     createdAt: new Date('2026-09-04T00:18:08Z'),

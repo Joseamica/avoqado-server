@@ -245,6 +245,11 @@ const prismaMock: any = {
   platformCharge: createMockModel(),
   platformChargeOccurrence: createMockModel(),
   platformChargeDigest: createMockModel(),
+  posAppVersionPolicy: createMockModel(),
+  // Actualizador del POS (r7): la política crea y archiva sus avisos de actualizar como anuncios de plataforma. Las entregas
+  // están para que una prueba pueda afirmar que NUNCA se crean (las pruebas de anuncios usan su propio `jest.mock`).
+  platformAnnouncement: createMockModel(),
+  platformAnnouncementDelivery: createMockModel(),
   // Token budget models
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),

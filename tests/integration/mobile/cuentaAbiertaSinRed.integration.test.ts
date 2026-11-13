@@ -188,7 +188,7 @@ describe('D12 · lo que el servidor da por hecho', () => {
     expect(await rastro(n, orderId, 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toHaveLength(1)
   })
 
-  it('(d) D19 heredado (AJENO, no lo arregla D12): un abono de $40 devuelto completo NO vuelve a deberse', async () => {
+  it('(d) D19 (12-nov): un abono de $40 devuelto completo vuelve a deberse: la lista dice que faltan los $100', async () => {
     const n = await negocio()
     const orderId = await cuentaDe100(n)
     const cobro = await abono(n, orderId, 4000)
@@ -201,8 +201,8 @@ describe('D12 · lo que el servidor da por hecho', () => {
       staffId: n.staffId,
     })
 
-    // cambia cuando se arregle D19 (hz:433063d4:D19)
-    expect((await filaDeLista(n, orderId))?.saldoPendienteCents).toBe(6000)
+    // Antes de D19 decía 6000: el abono devuelto seguía contando como cobrado.
+    expect((await filaDeLista(n, orderId))?.saldoPendienteCents).toBe(10000)
   })
 
   it('(e) juntar: el efectivo sobre la cuenta ABSORBIDA se acepta y deja rastro (el dinero no se pierde)', async () => {

@@ -174,7 +174,11 @@ function txSobre(e: Estado): TxConReintento {
         return data
       }),
     },
-    staffVenue: { findUnique: jest.fn(async () => ({ id: 'cstaffvenue00000000000001' })) },
+    // hz:87f4b879:D4: lealtad busca la membresía ACTIVA con `findFirst`.
+    staffVenue: {
+      findUnique: jest.fn(async () => ({ id: 'cstaffvenue00000000000001' })),
+      findFirst: jest.fn(async () => ({ id: 'cstaffvenue00000000000001' })),
+    },
     loyaltyTransaction: {
       findUnique: jest.fn(async ({ where }: any) => e.movimientos.find(m => m.id === where.id) ?? null),
       create: jest.fn(async ({ data }: any) => {

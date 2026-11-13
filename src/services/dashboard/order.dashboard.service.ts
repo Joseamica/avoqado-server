@@ -151,7 +151,7 @@ export async function getOrders(
         // pagar por dato que nadie pinta. El array se descarta al serializar.
         payments: {
           where: { status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, type: true },
+          select: { amount: true, tipAmount: true, type: true, reopenedAmount: true, reopenedTipAmount: true },
         },
         // ADITIVO y opt-in — «Nueva factura»: las facturas que deciden si la venta ya está facturada (la regla del candado de
         // emisión, en `facturaDeLaVenta.ts`). Una consulta más por página (`orderId IN (…)`, índice `Cfdi(orderId)`), no N+1;
