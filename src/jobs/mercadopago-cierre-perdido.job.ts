@@ -23,7 +23,7 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  *      cuando MP dice rechazado/cancelado/reembolsado el evento queda `ignored` y la sesión ya no se revisa.
  *      A cada una le abre su evento `barrido:<sessionId>` y entra por el punto 1.
  * Por cada pago vuelve a preguntarle a MP y, si está aprobado, corre el cierre (idempotente por `session.paymentId` y
- * `Payment.idempotencyKey = mpPaymentId`). Un cobro recuperado deja `ActivityLog`.
+ * `Payment.idempotencyKey = mpPaymentId`). Un cobro recuperado deja `ActivityLog` en la misma transacción que su venta.
  *
  * Tope VISIBLE sin migración: el contador vive en el propio evento (`errorMessage = "[barrido N/MAX] razón"`); al tope el
  * evento pasa a `abandonado` con `logger.error` y `ActivityLog`. Reabrirlo a mano = volver a ponerlo en `error`.
@@ -221,7 +221,9 @@ export class MercadoPagoCierrePerdidoJob {
           }
           // candado demo, capa 3: el cierre corre con el negocio de su cobro en el contexto.
           const creds = await credencialesDe(comercio.id)
-          const desenlace = await conNegocio(comercio.venueId, () => this.d.procesar(comercio, dataId, { creds }))
+          const desenlace = await conNegocio(comercio.venueId, () =>
+            this.d.procesar(comercio, dataId, { creds, auditoriaDeRecuperacion: { eventIds: ids, intentos } }),
+          )
           if (desenlace.estado === 'error') {
             await this.fallo(r, { ids, mpUserId, dataId, venueId: comercio.venueId, intentos, razon: desenlace.detalle ?? desenlace.razon })
             continue
@@ -239,60 +241,18 @@ export class MercadoPagoCierrePerdidoJob {
         }
       }
 
-      // Bitácora durable e idempotente (Codex código r1 #1): un pago cuya sesión YA tiene venta no marca su evento como
-      // terminado hasta que exista su renglón MERCADOPAGO_CHARGE_RECOVERED. Si el proceso muere entre la venta y la
-      // bitácora, o el INSERT falla, el evento sigue en `error` y la próxima vuelta lo completa (la venta ya existe, sólo
-      // falta el renglón). Se busca antes de escribir: nunca dos renglones por sesión. Escritura directa (no `logAction`,
-      // que se traga el error).
-      const porAuditar = resueltos.filter(x => x.desenlace.conVenta && x.desenlace.checkoutSessionId)
-      let terminados = resueltos
-      if (porAuditar.length > 0) {
-        try {
-          const yaAuditadas = await this.d.prisma.activityLog.findMany({
-            where: {
-              action: 'MERCADOPAGO_CHARGE_RECOVERED',
-              entity: 'CheckoutSession',
-              entityId: { in: porAuditar.map(x => x.desenlace.checkoutSessionId!) },
-            },
-            select: { entityId: true },
-            take: porAuditar.length,
-          })
-          const auditada = new Set(yaAuditadas.map(a => a.entityId))
-          // Una por sesión aunque varios pagos de la vuelta apunten a la misma.
-          const faltan = [
-            ...new Map(
-              porAuditar.filter(x => !auditada.has(x.desenlace.checkoutSessionId!)).map(x => [x.desenlace.checkoutSessionId!, x]),
-            ).values(),
-          ]
-          if (faltan.length > 0) {
-            await this.d.prisma.activityLog.createMany({
-              data: faltan.map(x => ({
-                venueId: x.venueId,
-                action: 'MERCADOPAGO_CHARGE_RECOVERED',
-                entity: 'CheckoutSession',
-                entityId: x.desenlace.checkoutSessionId!,
-                data: { mpPaymentId: x.dataId, eventIds: x.ids, intentos: x.intentos, ventaCreadaPorElBarrido: !!x.desenlace.ventaCreada },
-              })),
-            })
-          }
-        } catch (error) {
-          const razon = `venta hecha, falta la bitácora: ${error instanceof Error ? error.message : String(error)}`
-          for (const x of porAuditar)
-            await this.fallo(r, { ids: x.ids, mpUserId: x.mpUserId, dataId: x.dataId, venueId: x.venueId, intentos: x.intentos, razon })
-          terminados = resueltos.filter(x => !porAuditar.includes(x))
-        }
-      }
-
+      // La bitácora MERCADOPAGO_CHARGE_RECOVERED ya nació dentro de la transacción del cierre (venta y bitácora son todo o
+      // nada, Codex código r2): aquí sólo se cierran los eventos.
       // Sesiones revisadas en esta vuelta: su próxima revisión por el punto 2 también espera 15 min (medido contra Postgres
       // real: una sesión cerrada por su propio evento volvía a entrar en la vuelta siguiente).
-      const revisadas = terminados.map(x => x.desenlace.checkoutSessionId).filter((id): id is string => !!id)
+      const revisadas = resueltos.map(x => x.desenlace.checkoutSessionId).filter((id): id is string => !!id)
       if (revisadas.length > 0) {
         await this.d.prisma.checkoutSession
           .updateMany({ where: { id: { in: revisadas } }, data: { updatedAt: now } })
           .catch(error => logger.warn('[MP barrido] No se pudo espaciar la revisión de sesiones', { error }))
       }
 
-      for (const x of terminados) {
+      for (const x of resueltos) {
         if (x.desenlace.ventaCreada) {
           r.recuperados += 1
           logger.warn('[MP barrido] Cobro aprobado sin venta RECUPERADO', {
@@ -308,7 +268,7 @@ export class MercadoPagoCierrePerdidoJob {
             data: { processingStatus: x.desenlace.estado, errorMessage: x.desenlace.estado === 'ignored' ? x.desenlace.detalle : null },
           })
         } catch (error) {
-          // El evento sigue abierto: la próxima vuelta lo cierra sin repetir venta ni bitácora (las dos son idempotentes).
+          // El evento sigue abierto: la próxima vuelta lo cierra sin repetir venta ni bitácora (el cierre es idempotente y su bitácora va con la venta).
           logger.error('[MP barrido] No se pudo marcar el evento; se reintenta', { eventIds: x.ids, error })
         }
       }

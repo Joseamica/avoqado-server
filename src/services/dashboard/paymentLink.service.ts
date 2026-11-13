@@ -4093,6 +4093,12 @@ export async function finalizeMercadoPagoCheckout(args: {
   sessionId: string
   mpPaymentId: string | number
   paymentTypeId?: string | null
+  /**
+   * Sólo el barrido del cierre perdido (`mercadopago-cierre-perdido.job`): su `ActivityLog MERCADOPAGO_CHARGE_RECOVERED`
+   * nace en la MISMA transacción que la venta, así venta y bitácora son todo o nada (Codex código r2). Los demás llamadores
+   * no lo pasan y no cambian.
+   */
+  auditoriaDeRecuperacion?: Record<string, unknown>
 }): Promise<boolean> {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId: args.sessionId },
@@ -4287,6 +4293,17 @@ export async function finalizeMercadoPagoCheckout(args: {
           items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
         })
 
+        if (args.auditoriaDeRecuperacion) {
+          await tx.activityLog.create({
+            data: {
+              venueId,
+              action: 'MERCADOPAGO_CHARGE_RECOVERED',
+              entity: 'CheckoutSession',
+              entityId: session.id,
+              data: { mpPaymentId: processorId, paymentId: createdPayment.id, ...args.auditoriaDeRecuperacion } as Prisma.InputJsonValue,
+            },
+          })
+        }
         await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
 
         if (isLink) {

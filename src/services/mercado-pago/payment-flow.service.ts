@@ -119,8 +119,6 @@ export interface DesenlaceDePagoMp {
   mpStatus?: string
   /** true sólo si ESTA llamada creó la venta (Order + Payment). */
   ventaCreada?: boolean
-  /** La sesión tiene venta al terminar (la creó esta llamada o ya existía): el barrido la audita. */
-  conVenta?: boolean
 }
 
 /**
@@ -133,10 +131,10 @@ export interface DesenlaceDePagoMp {
 export async function procesarPagoDeMercadoPago(
   merchant: { id: string },
   dataId: string,
-  /** El barrido las carga una vez por vendedor y vuelta; el aviso las carga aquí. */
-  precargadas?: { creds: DecryptedCredentials | null },
+  /** Sólo el barrido: credenciales ya cargadas (una vez por vendedor y vuelta) y la bitácora de recuperación del cierre. */
+  barrido?: { creds: DecryptedCredentials | null; auditoriaDeRecuperacion?: Record<string, unknown> },
 ): Promise<DesenlaceDePagoMp> {
-  const creds = precargadas ? precargadas.creds : await loadCredentials(merchant.id)
+  const creds = barrido ? barrido.creds : await loadCredentials(merchant.id)
   if (!creds) {
     return { estado: 'error', razon: 'credentials_missing', detalle: 'merchant credentials missing' }
   }
@@ -186,8 +184,9 @@ export async function procesarPagoDeMercadoPago(
       sessionId: session.sessionId,
       mpPaymentId: payment.id,
       paymentTypeId: payment.payment_type_id,
+      auditoriaDeRecuperacion: barrido?.auditoriaDeRecuperacion,
     })
-    return { estado: 'processed', razon: 'processed', detalle: null, ventaCreada, conVenta: ventaCreada || !!session.paymentId, ...base }
+    return { estado: 'processed', razon: 'processed', detalle: null, ventaCreada, ...base }
   } catch (err) {
     // Cobrado en MP sin venta local: el evento queda 'error' y el barrido lo reintenta.
     const detalle = err instanceof Error ? err.message : String(err)

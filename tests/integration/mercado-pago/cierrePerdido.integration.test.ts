@@ -109,6 +109,7 @@ it('elige sesiones de MP sin venta (PENDING, CANCELLED, COMPLETED) y deja fuera 
   expect(procesar).toHaveBeenCalledTimes(4)
   expect(procesar).toHaveBeenCalledWith(expect.objectContaining({ id: canalId, venueId: m.venueId }), conEvento.mpPaymentId, {
     creds: null,
+    auditoriaDeRecuperacion: { eventIds: [expect.any(String)], intentos: 1 },
   })
   expect(cargarCredenciales).toHaveBeenCalledTimes(1)
   const procesados = await prisma.mercadoPagoWebhookEvent.count({ where: { mpUserId, processingStatus: 'processed' } })
