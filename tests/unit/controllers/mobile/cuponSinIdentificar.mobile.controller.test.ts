@@ -74,15 +74,13 @@ describe('createOrder — D652: el cupón sin id de la TPV vieja', () => {
     expect(createOrderWithItemsMock.mock.calls[0][1].cuponSinIdentificar).toEqual({ totalCents: 9000 })
   })
 
-  it('un total que no es un entero de centavos viaja como desconocido (null), nunca inventado', async () => {
-    await createOrder(req(cuerpoDeLaTpv({ total: '90' })), buildRes(), jest.fn() as NextFunction)
-    expect(createOrderWithItemsMock.mock.calls[0][1].cuponSinIdentificar).toEqual({ totalCents: null })
-  })
-
   it.each([
     ['una sesión del POS (sin serial de terminal)', cuerpoDeLaTpv(), null],
     ['una venta en línea de la terminal (sin isOfflineReplay)', cuerpoDeLaTpv({ isOfflineReplay: undefined }), 'AVQD-1'],
     ['isOfflineReplay que no es el true literal', cuerpoDeLaTpv({ isOfflineReplay: 'true' }), 'AVQD-1'],
+    // Codex r1 #1: con un cupón que cubrió todo, la terminal paga $0 y ese cobro no cabe en una cuenta que debe: sigue como hoy.
+    ['🔴 una venta en $0 (el cupón cubrió todo)', cuerpoDeLaTpv({ total: 0 }), 'AVQD-1'],
+    ['un total que no es un entero de centavos', cuerpoDeLaTpv({ total: '90' }), 'AVQD-1'],
   ])('%s con `orderDiscountId: ""` ⇒ el 400 de hoy', async (_caso, body, serial) => {
     const res = buildRes()
     await createOrder(req(body, serial), res, jest.fn() as NextFunction)

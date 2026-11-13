@@ -583,13 +583,6 @@ describe('D652 — venta sin red de la TPV vieja con un cupón sin identificar',
     expect(avisos).toHaveBeenCalledTimes(1)
   })
 
-  it('sin saber cuánto cobró la terminal: entra igual y la bitácora no inventa la diferencia', async () => {
-    baseEnMemoria()
-    await createOrderWithItems(VENUE, ventaConCuponSinId({ cuponSinIdentificar: { totalCents: null } }))
-    expect(anotaciones()[0].data).toEqual(expect.objectContaining({ montoCents: null, faltanCents: null }))
-    expect(anotaciones()[0].data.motivo).not.toContain('faltan')
-  })
-
   it('defensa: la marca sin el serial de una terminal (o fuera de la cola) no anota ni avisa', async () => {
     baseEnMemoria()
     await createOrderWithItems(VENUE, ventaConCuponSinId({ terminalSerialNumber: null }))

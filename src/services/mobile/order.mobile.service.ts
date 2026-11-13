@@ -375,9 +375,9 @@ export interface CreateOrderInput {
   /**
    * D652 (server-owned: sólo con el token de una TERMINAL y `isOfflineReplay`): la TPV 2.14.0–2.16.1 cobró sin red con un cupón que no
    * sabe identificar (`orderDiscountId: ""`). La venta entra a precio lleno, el cobro se registra tal cual y la cuenta queda debiendo
-   * la diferencia (founder, 13-nov: «por cobrar»). `totalCents` es lo que cobró la terminal (del cuerpo), sólo para el aviso.
+   * la diferencia (founder, 13-nov: «por cobrar»). `totalCents` es lo que cobró la terminal (del cuerpo, > 0), sólo para el aviso.
    */
-  cuponSinIdentificar?: { totalCents: number | null }
+  cuponSinIdentificar?: { totalCents: number }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -993,9 +993,9 @@ async function anotarCuponSinIdentificarEnTx(
   orderId: string,
   vendedor: string | null,
 ): Promise<Omit<DatosDelAviso, 'terminalSerial'>> {
-  const cobradoCents = input.cuponSinIdentificar?.totalCents ?? null
+  const cobradoCents = input.cuponSinIdentificar!.totalCents
   const orden = await tx.order.findUnique({ where: { id: orderId }, select: { total: true } })
-  const faltanCents = orden && cobradoCents !== null ? aCentavos(orden.total) - cobradoCents : null
+  const faltanCents = orden ? aCentavos(orden.total) - cobradoCents : null
   const motivo =
     'se cobró con un cupón sin conexión que la terminal no pudo identificar y la orden quedó a precio lleno' +
     (faltanCents !== null && faltanCents > 0 ? `: revisa los $${(faltanCents / 100).toFixed(2)} que faltan` : '')
@@ -1015,7 +1015,7 @@ async function anotarCuponSinIdentificarEnTx(
       faltanCents,
     },
   })
-  return { externalId, orderId, motivo, ...(cobradoCents !== null ? { montoCents: cobradoCents } : {}) }
+  return { externalId, orderId, motivo, montoCents: cobradoCents }
 }
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
