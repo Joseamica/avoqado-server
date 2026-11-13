@@ -187,6 +187,41 @@ describe('D71 · propiedad de mesa encendida: la mesa sin red de otro mesero nac
     expect(await huellaDe(propia)).toEqual({ renglones: 1, pagos: 1 })
     expect((await notaDe(propia))!.data).toMatchObject({ cuentasDeOtroMesero: [cuentaY] })
   })
+
+  it('Codex r2 #1: en la mesa hay, además de la de Y, una cuenta SIN mesero (anterior y quieta): X no se une a ella, nace la suya', async () => {
+    const t = await mesa()
+    const sinMesero = (await assignTable(venueId, t, meseroY, 2)).order.id
+    await prisma.order.update({ where: { id: sinMesero }, data: { servedById: null } }) // «Sin mesero», como deja el panel o la API
+    await conRenglon(sinMesero)
+    await nacidaHace(sinMesero, 10 * 60_000)
+    const cuentaY = (
+      await prisma.order.create({
+        data: {
+          venueId,
+          tableId: t,
+          orderNumber: `ORD-${randomUUID().slice(0, 8)}`,
+          servedById: meseroY,
+          status: 'PENDING',
+          total: 0,
+          subtotal: 0,
+          taxAmount: 0,
+        },
+      })
+    ).id
+    await nacidaHace(cuentaY, 9 * 60_000)
+    await prisma.table.update({ where: { id: t }, data: { currentOrderId: cuentaY } })
+    await mesaQuietaDesde(t, 9 * 60_000)
+
+    const o = open(t, Date.now() - 60_000)
+    const acks = await replay([o, add(o.payload.localOrderId), pay(o.payload.localOrderId, 24000)])
+
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED'])
+    const propia = String(acks[0].result!.orderId)
+    expect([sinMesero, cuentaY]).not.toContain(propia)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: propia } })).toMatchObject({ servedById: meseroX, paymentStatus: 'PAID' })
+    expect(await huellaDe(sinMesero)).toEqual({ renglones: 1, pagos: 0 })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ currentOrderId: cuentaY })
+  })
 })
 
 describe('D71 · lo que sigue como hoy', () => {
