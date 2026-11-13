@@ -458,6 +458,9 @@ export async function redeemPointsToOrder(
 
   // Codex candado-r1 #3: el programa (activo, tasa, mínimo) se lee dentro de la transacción, después del candado de la cuenta, como en
   // la operación HTTP: una lectura de antes podía canjear con un programa que un administrador ya apagó mientras se esperaba el candado.
+  // Pero el camino plano siempre dejó creada la configuración INACTIVA del negocio aunque el canje fallara (integración «Task4 … legacy
+  // still inactive lazy-create»): se crea aquí, fuera de la transacción, y su resultado no decide nada.
+  await getOrCreateLoyaltyConfig(venueId)
   const { pointsToBurn, discountAmount, newBalance, totals } = await withDeadlockRetry(
     tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, undefined, esperado),
     { etiqueta: 'redeemPointsToOrder', ...ORDER_LOCK_WAIT_BUDGET },
