@@ -4,10 +4,11 @@ import * as merchantAccountService from '../../services/superadmin/merchantAccou
 import * as settlementConfigService from '../../services/superadmin/settlementConfiguration.service'
 import logger from '../../config/logger'
 import { logAction } from '../../services/dashboard/activity-log.service'
-import { BadRequestError } from '../../errors/AppError'
+import AppError, { BadRequestError } from '../../errors/AppError'
 import { blumonApiService } from '../../services/blumon/blumonApi.service'
 import type { BlumonEnvironment } from '../../services/blumon/types'
 import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
+import { credencialesDeBlumon } from '../../services/superadmin/credencialesDeBlumon'
 import prisma from '@/utils/prismaClient'
 import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { IncompatibleDeviceError } from '@/errors/AppError'
@@ -732,12 +733,9 @@ export async function autoFetchBlumonCredentials(req: Request, res: Response, ne
       skipCostStructure,
     })
 
-    // Create Blumon TPV service for specified environment
-    const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
-
-    // Auto-fetch credentials from Blumon API
+    // Auto-fetch credentials from Blumon API (D20: serial desconocido ⇒ 400 en español)
     logger.info('[Blumon Auto-Fetch] Step 1: Fetching credentials from Blumon API...')
-    const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+    const merchantInfo = await credencialesDeBlumon(environment as 'SANDBOX' | 'PRODUCTION', serialNumber, brand, model)
 
     logger.info('[Blumon Auto-Fetch] Step 2: Credentials fetched successfully', {
       posId: merchantInfo.posId,
@@ -1024,10 +1022,15 @@ export async function autoFetchBlumonCredentials(req: Request, res: Response, ne
       message,
     })
   } catch (error: any) {
-    logger.error('[Blumon Auto-Fetch] Failed', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined,
-    })
+    if (error instanceof AppError && error.statusCode < 500) {
+      // Dato mal escrito (p. ej. serial que Blumon no conoce, D20): aviso, sin stack.
+      logger.warn('[Blumon Auto-Fetch] Rechazado', { statusCode: error.statusCode, message: error.message })
+    } else {
+      logger.error('[Blumon Auto-Fetch] Failed', {
+        error: error instanceof Error ? error.message : error,
+        stack: error instanceof Error ? error.stack : undefined,
+      })
+    }
 
     next(error)
   }
@@ -1932,9 +1935,8 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       })
     }
 
-    // Step 1: Auto-fetch Blumon credentials
-    const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
-    const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+    // Step 1: Auto-fetch Blumon credentials (D20: serial desconocido ⇒ 400 en español)
+    const merchantInfo = await credencialesDeBlumon(environment as 'SANDBOX' | 'PRODUCTION', serialNumber, brand, model)
 
     logger.info('[Full Setup] Step 1: Credentials fetched', {
       posId: merchantInfo.posId,
@@ -2335,6 +2337,9 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
     if (esRespuestaDelCandado(error)) {
       // Respuesta normal del candado de posiciones (la pantalla pregunta o recarga): aviso, sin stack.
       logger.warn('[Full Setup] El candado de posiciones pide confirmar o recargar', { code: error.code, message: error.message })
+    } else if (error instanceof AppError && error.statusCode < 500) {
+      // Dato mal escrito (p. ej. serial que Blumon no conoce, D20): aviso, sin stack.
+      logger.warn('[Full Setup] Rechazado', { statusCode: error.statusCode, message: error.message })
     } else {
       logger.error('[Full Setup] Failed', {
         error: error instanceof Error ? error.message : error,

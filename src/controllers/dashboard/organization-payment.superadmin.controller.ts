@@ -8,11 +8,12 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import logger from '@/config/logger'
 import { getOrganizationPaymentConfig, getOrganizationPricing, getVenueConfigSources } from '@/services/organization-payment-config.service'
-import { exigirConfirmacionDePosiciones, leerConfirmaciones } from '@/services/shared/candadoDePosiciones'
+import { exigirConfirmacionDePosiciones, leerConfirmaciones, tomarCandado } from '@/services/shared/candadoDePosiciones'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
@@ -175,28 +176,38 @@ export async function deletePaymentConfig(req: Request, res: Response, next: Nex
   }
 }
 
+/** Escala con que Postgres guarda cada número de la tarifa de organización: así se compara «¿cambió algo?» (D18). */
+const ESCALA = {
+  debitRate: 4,
+  creditRate: 4,
+  amexRate: 4,
+  internationalRate: 4,
+  taxRate: 4,
+  fixedFeePerTransaction: 4,
+  monthlyServiceFee: 2,
+  minimumMonthlyVolume: 2,
+  volumePenalty: 2,
+} as const
+
+function mismoNumero(a: unknown, b: unknown, escala: number): boolean {
+  if (a == null || b == null) return a == null && b == null
+  return new Prisma.Decimal(String(a)).toDecimalPlaces(escala).equals(new Prisma.Decimal(String(b)).toDecimalPlaces(escala))
+}
+
 /**
  * PUT /:orgId/payment-config/pricing
  * Set/update org pricing structure.
+ *
+ * D18 (13-nov-2026): antes cerraba la vigente y creaba otra en CADA llamada, aunque fuera idéntica (el Wizard de Pagos la
+ * llamaba en cada «Guardar»), sin bitácora, y la nueva perdía lo que la pantalla no manda (IVA, mínimos, contrato, notas).
+ * Ahora: lo que no se manda se conserva de la vigente; si queda idéntica a la vigente no se escribe nada; si cambia, se
+ * cierra y se crea como siempre y queda en la bitácora. Va en el candado de posiciones de la organización: dos guardados a la
+ * vez se forman (no quedan dos vigentes) y la huella que confirma el candado no cambia a media confirmación.
  */
 export async function setPricing(req: Request, res: Response, next: NextFunction) {
   try {
     const { organizationId } = req.params
-    const {
-      accountType,
-      debitRate,
-      creditRate,
-      amexRate,
-      internationalRate,
-      fixedFeePerTransaction,
-      monthlyServiceFee,
-      minimumMonthlyVolume,
-      volumePenalty,
-      effectiveFrom,
-      effectiveTo,
-      contractReference,
-      notes,
-    } = req.body
+    const b = req.body
 
     // Verify organization exists
     const org = await prisma.organization.findUnique({
@@ -207,35 +218,80 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
       return res.status(404).json({ error: 'Organization not found' })
     }
 
-    const effectiveDate = new Date(effectiveFrom)
+    const effectiveDate = new Date(b.effectiveFrom)
 
-    // Deactivate previous pricing for same accountType
-    await prisma.organizationPricingStructure.updateMany({
-      where: { organizationId, accountType, active: true },
-      data: { active: false, effectiveTo: effectiveDate },
+    const { pricing, previousId } = await prisma.$transaction(async tx => {
+      await tomarCandado(tx, { organizationId })
+      const activas = await tx.organizationPricingStructure.findMany({
+        where: { organizationId, accountType: b.accountType, active: true },
+        orderBy: [{ effectiveFrom: 'desc' }, { id: 'asc' }],
+        take: 2,
+      })
+      const vigente = activas[0] ?? null
+      const opcional = <T>(enviado: T | undefined, actual: T | null | undefined) =>
+        enviado !== undefined ? enviado || null : (actual ?? null)
+      const datos = {
+        debitRate: b.debitRate,
+        creditRate: b.creditRate,
+        amexRate: b.amexRate,
+        internationalRate: b.internationalRate,
+        includesTax: b.includesTax !== undefined ? b.includesTax : (vigente?.includesTax ?? null),
+        taxRate: b.taxRate !== undefined ? b.taxRate : vigente?.taxRate, // sin vigente: el default de la columna (0.16)
+        fixedFeePerTransaction: opcional(b.fixedFeePerTransaction, vigente?.fixedFeePerTransaction),
+        monthlyServiceFee: opcional(b.monthlyServiceFee, vigente?.monthlyServiceFee),
+        minimumMonthlyVolume: opcional(b.minimumMonthlyVolume, vigente?.minimumMonthlyVolume),
+        volumePenalty: opcional(b.volumePenalty, vigente?.volumePenalty),
+        effectiveTo: b.effectiveTo ? new Date(b.effectiveTo) : null,
+        contractReference: opcional(b.contractReference, vigente?.contractReference),
+        notes: opcional(b.notes, vigente?.notes),
+      }
+
+      const sinCambios =
+        activas.length === 1 &&
+        vigente !== null &&
+        (Object.keys(ESCALA) as (keyof typeof ESCALA)[]).every(k => mismoNumero(datos[k], vigente[k], ESCALA[k])) &&
+        datos.includesTax === vigente.includesTax &&
+        datos.contractReference === vigente.contractReference &&
+        datos.notes === vigente.notes &&
+        (datos.effectiveTo?.getTime() ?? null) === (vigente.effectiveTo?.getTime() ?? null)
+      if (sinCambios) return { pricing: vigente, previousId: undefined }
+
+      // Deactivate previous pricing for same accountType
+      await tx.organizationPricingStructure.updateMany({
+        where: { organizationId, accountType: b.accountType, active: true },
+        data: { active: false, effectiveTo: effectiveDate },
+      })
+      const creada = await tx.organizationPricingStructure.create({
+        data: { organizationId, accountType: b.accountType, ...datos, effectiveFrom: effectiveDate, active: true },
+      })
+      return { pricing: creada, previousId: vigente?.id ?? null }
     })
 
-    const pricing = await prisma.organizationPricingStructure.create({
+    if (previousId === undefined) {
+      logger.info(`Organization pricing unchanged for org ${organizationId}, accountType ${b.accountType}: nothing written`)
+      return res.json(pricing)
+    }
+
+    logger.info(`Organization pricing set for org ${organizationId}, accountType ${b.accountType}`)
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      organizationId,
+      action: 'ORGANIZATION_PRICING_SET',
+      entity: 'OrganizationPricingStructure',
+      entityId: pricing.id,
       data: {
-        organizationId,
-        accountType,
-        debitRate,
-        creditRate,
-        amexRate,
-        internationalRate,
-        fixedFeePerTransaction: fixedFeePerTransaction || null,
-        monthlyServiceFee: monthlyServiceFee || null,
-        minimumMonthlyVolume: minimumMonthlyVolume || null,
-        volumePenalty: volumePenalty || null,
-        effectiveFrom: effectiveDate,
-        effectiveTo: effectiveTo ? new Date(effectiveTo) : null,
-        contractReference: contractReference || null,
-        notes: notes || null,
-        active: true,
+        accountType: b.accountType,
+        previousId,
+        debitRate: String(pricing.debitRate),
+        creditRate: String(pricing.creditRate),
+        amexRate: String(pricing.amexRate),
+        internationalRate: String(pricing.internationalRate),
+        includesTax: pricing.includesTax,
+        taxRate: String(pricing.taxRate),
       },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
     })
-
-    logger.info(`Organization pricing set for org ${organizationId}, accountType ${accountType}`)
     return res.json(pricing)
   } catch (error) {
     next(error)

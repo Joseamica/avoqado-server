@@ -121,6 +121,9 @@ const setPricingSchema = z.object({
     creditRate: z.number().min(0).max(1),
     amexRate: z.number().min(0).max(1),
     internationalRate: z.number().min(0).max(1),
+    // D18: el IVA de la tarifa (null = sin definir). Antes la validación lo quitaba y la tarifa nueva nacía en null.
+    includesTax: z.boolean().nullable().optional(),
+    taxRate: z.number().min(0).max(1).optional(),
     fixedFeePerTransaction: z.number().optional().nullable(),
     monthlyServiceFee: z.number().optional().nullable(),
     minimumMonthlyVolume: z.number().optional().nullable(),
