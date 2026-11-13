@@ -312,27 +312,27 @@ describe("S10 · la cotización = el modo estricto, con la regla vigente de la c
     expect((await prisma.customer.findUnique({ where: { id: e.clientaId } }))!.loyaltyPoints).toBe(200)
   })
 
-  it('r2 #1 con la regla de hoy: $21.35, cupón 10 %, premio $1 y 5,000 puntos ⇒ 2.13 + 1.00 + 18.22, 1,822 puntos y $0', async () => {
+  it('r2 #1 con D2: $21.35, cupón 10 %, premio $1 y 5,000 puntos ⇒ 2.14 + 1.00 + 18.21, 1,821 puntos y $0', async () => {
     const e = await escena({ puntos: 5000, automatico: { active: false } })
     const eleccion = { cupon: e.codigo, premioId: e.premioId, puntos: 5000 }
-    // A mano: el cupón nace en $2.14 (centavos de `montoDelCupon`); el recálculo del premio lo vuelve $2.13 (flotantes) y la cuenta
-    // vale $18.22; los puntos topan en $18.22 y queman ⌈18.22 / 0.01⌉ = 1,822 (con flotantes). Deuda de BASE: hz:dcc49fe5:D2.
+    // A mano: el cupón nace en $2.14 (centavos de `montoDelCupon`) y, desde D2 (hz:dcc49fe5:D2), el recálculo del premio lo deja en
+    // $2.14 (antes lo volvía $2.13 en flotantes); la cuenta vale $18.21 y los puntos topan ahí: queman 18.21 / 0.01 = 1,821.
     const q = await cotizarConBeneficios(venueId, carrito(cafe), { customerId: e.clientaId, eleccion })
     expect(PESOS(q.totalConBeneficios!)).toBe('0.00')
     expect(montos(q.aplicados!)).toEqual([
-      ['CUPON', '2.13'],
+      ['CUPON', '2.14'],
       ['PREMIO', '1.00'],
-      ['PUNTOS', '18.22'],
+      ['PUNTOS', '18.21'],
     ])
-    // W7: la oferta ya no dice «5,000 puntos (−$50)»: dice los que el canje usa y quema abajo (1,822, −$18.22).
-    expect(q.oferta?.puntos).toMatchObject({ maxPuntos: 5000, usables: { puntos: 1822, monto: 18.22 } })
+    // W7: la oferta ya no dice «5,000 puntos (−$50)»: dice los que el canje usa y quema abajo (1,821, −$18.21).
+    expect(q.oferta?.puntos).toMatchObject({ maxPuntos: 5000, usables: { puntos: 1821, monto: 18.21 } })
 
     const real = await estricto(cafe, e.clientaId, eleccion)
     expect(PESOS(real.total)).toBe('0.00')
     expect(montos(real.aplicados)).toEqual(montos(q.aplicados!))
-    expect((await prisma.customer.findUnique({ where: { id: e.clientaId } }))!.loyaltyPoints).toBe(5000 - 1822)
+    expect((await prisma.customer.findUnique({ where: { id: e.clientaId } }))!.loyaltyPoints).toBe(5000 - 1821)
     const movimiento = await prisma.loyaltyTransaction.findFirst({ where: { customerId: e.clientaId, type: 'REDEEM' } })
-    expect(movimiento?.points).toBe(-1822)
+    expect(movimiento?.points).toBe(-1821)
   })
 
   it('E7: un cupón por producto se rechaza como en caja (descartado al cotizar; BENEFIT_UNAVAILABLE en estricto)', async () => {

@@ -15,7 +15,7 @@
 
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
-import { comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from './repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido, porcentajeEnCentavos } from './repartoDescuento'
 import type { DescuentoDeLiga } from '../dashboard/paymentLinkDiscount'
 
 /**
@@ -34,22 +34,25 @@ export function calculateDiscountPesos(discount: any, basePesos: number): number
     throw new BadRequestError(`Discount "${discount.name}" requires a minimum purchase amount`)
   }
 
-  let amountPesos: number
+  // D2 (12-nov): en centavos enteros con la regla de la TPV (`porcentajeEnCentavos`): en pesos flotantes 10 % de $21.35 daba $2.13
+  // y la TPV sin red, que manda `orderDiscountId` a `/mobile/orders`, ya había cobrado con $2.14. Tope y clamp, los de siempre.
+  const baseCents = aCentavos(basePesos)
+  let amountCents: number
   if (discount.type === 'PERCENTAGE') {
-    amountPesos = roundPesos((basePesos * Number(discount.value)) / 100)
+    amountCents = porcentajeEnCentavos(baseCents, discount.value)
   } else if (discount.type === 'FIXED_AMOUNT') {
-    amountPesos = roundPesos(Number(discount.value))
+    amountCents = aCentavos(discount.value)
   } else if (discount.type === 'COMP') {
-    amountPesos = basePesos
+    amountCents = baseCents
   } else {
     throw new BadRequestError(`Unsupported discount type: ${discount.type}`)
   }
 
   if (discount.maxDiscountAmount) {
-    amountPesos = Math.min(amountPesos, Number(discount.maxDiscountAmount))
+    amountCents = Math.min(amountCents, aCentavos(discount.maxDiscountAmount))
   }
 
-  return roundPesos(Math.min(amountPesos, basePesos))
+  return Math.min(amountCents, baseCents) / 100
 }
 
 /**

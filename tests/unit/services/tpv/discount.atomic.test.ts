@@ -1166,3 +1166,51 @@ describe('D5 — manual y cupón dejan su bitácora, a nombre de la sesión y tr
     expect(logAction).not.toHaveBeenCalled()
   })
 })
+
+// D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el % en centavos enteros, mitad hacia arriba, como la TPV (BigDecimal) y ANDROID. En pesos
+// flotantes 2.135 × 100 = 213.49999999999997: el 10 % de una cuenta de $21.35 daba $2.13 y la terminal mostraba $2.14.
+describe('D2 — el % de la TPV en centavos: 10 % de una cuenta de $21.35 = $2.14 (antes $2.13)', () => {
+  const cuenta = (extra: Record<string, unknown> = {}) => ({ ...order(), subtotal: 21.35, total: 21.35, taxAmount: 0, ...extra })
+  const renglon = { id: 'n', total: 21.35, discountAmount: 0, orderPromotionId: null, taxAmount: 0 }
+  beforeEach(() => {
+    tx.order.findUnique.mockImplementation(async () => cuenta())
+    globalDb.order.findUnique.mockImplementation(async () => cuenta())
+    tx.orderItem.findMany.mockResolvedValue([renglon])
+  })
+  const guardado = () => tx.orderDiscount.create.mock.calls[0][0].data.amount
+
+  it('🔴 cupón en cuenta abierta: $2.14 en la fila y en la cuenta', async () => {
+    await tpv.applyCouponCode('venue', 'order', 'TEN', 'staff')
+    expect(Number(guardado())).toBe(2.14)
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ discountAmount: 2.14 }) }))
+  })
+  it('cupón con tope de $2.00: $2.00', async () => {
+    const cupon = await tx.couponCode.findFirst()
+    tx.couponCode.findFirst.mockResolvedValue({ ...cupon, discount: { ...discount, maxDiscountAmount: 2 } })
+    await tpv.applyCouponCode('venue', 'order', 'TEN', 'staff')
+    expect(Number(guardado())).toBe(2)
+  })
+  it('🔴 descuento manual del 10 % (motor): $2.14', async () => {
+    await tpv.applyManualDiscount('venue', 'order', 'PERCENTAGE', 10, 'Diez', 'staff')
+    expect(Number(guardado())).toBe(2.14)
+  })
+  it('🔴 descuento del catálogo del 10 % (motor): $2.14', async () => {
+    tx.order.findUnique.mockImplementation(async () =>
+      cuenta({
+        items: [
+          { ...renglon, productId: 'p', product: { id: 'p', categoryId: 'c', taxRate: 0 }, quantity: 1, unitPrice: 21.35, modifiers: [] },
+        ],
+      }),
+    )
+    await tpv.applyPredefinedDiscount('venue', 'order', 'discount', 'staff')
+    expect(Number(guardado())).toBe(2.14)
+  })
+  it('🔴 la vista previa del cupón dice lo mismo que se aplica: $2.14', async () => {
+    const r = await tpv.validateCoupon('venue', 'TEN', 21.35)
+    expect(r.estimatedSavings).toBe(2.14)
+  })
+  it('🔴 la lista de descuentos disponibles estima $2.14', async () => {
+    const r = await tpv.getAvailableDiscounts('venue', 'order')
+    expect(r.find(d => d.id === 'discount')?.estimatedSavings).toBe(2.14)
+  })
+})

@@ -76,7 +76,8 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
-import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -354,6 +355,13 @@ export interface CreateOrderInput {
   stampRewardExpectedDiscount?: number | null
   /** Cola sin red / reserva del efectivo: «la venta ya ocurrió». Nunca recibe el 409 de precio cambiado. */
   isOfflineReplay?: boolean
+  /**
+   * D2 · B (server-owned: sólo con el token de una TERMINAL): la TPV 2.14.0–2.16.1 truncó el % de catálogo y no conocía el tope. En su
+   * venta sin red (`source: 'TPV'` + `isOfflineReplay`) se registra lo que cobró (`descuentoComoLoCobroLaTpvVieja`) si su versión lo dice
+   * (`truncaPorVersion`) o si el total que cobró (`totalCents`, del cuerpo) es el truncado y no el exacto: una venta guardada por la 2.16.1
+   * puede subir ya actualizada a 2.16.2 (Codex r2 #2).
+   */
+  ventaDeTerminal?: { truncaPorVersion: boolean; totalCents: number | null }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -1779,10 +1787,23 @@ export async function crearVentaDeMostradorEnTx(
   // the order can never go negative. With `orderDiscountId` the catalog discount decides the
   // amount and `discount` is not added (in /tpv it only repeated that same amount); without it,
   // `discount` (cents) is the flat amount, clamped.
+  // El de catálogo; también lanza bajo el mínimo de compra, como siempre.
+  const delCatalogo = orderDiscount && !cupon ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts) : 0
+  // D2 · B: la venta sin red de una TPV ≤ 2.16.1 registra el % como lo cobró esa terminal (truncado, sin tope); lo demás, la regla de hoy.
+  const terminal = enLaCola && input.source === 'TPV' && !cupon ? input.ventaDeTerminal : undefined
+  const truncado = terminal && orderDiscount ? descuentoComoLoCobroLaTpvVieja(orderDiscount, remainingAfterItemDiscounts) : null
+  const totalCon = (descuentoPesos: number) => aCentavos(remainingAfterItemDiscounts) - aCentavos(descuentoPesos)
+  const comoLoCobroLaTpv =
+    terminal &&
+    truncado !== null &&
+    (terminal.truncaPorVersion || (terminal.totalCents === totalCon(truncado) && terminal.totalCents !== totalCon(delCatalogo)))
+      ? // Codex r3/r4: por construcción nunca más que la regla exacta (también con un tope inválido): fingir una TPV vieja no rinde.
+        Math.min(truncado, delCatalogo)
+      : null
   const orderLevelDiscountDecimal = cupon
     ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)
     : orderDiscount
-      ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+      ? (comoLoCobroLaTpv ?? delCatalogo)
       : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
   if (orderDiscount && !cupon && (input.discount ?? 0) > 0) {
     logger.warn('[ORDER.MOBILE] Llegaron orderDiscountId y discount: manda el de catálogo y el libre no se suma', {
@@ -2799,7 +2820,9 @@ export async function applyOrderDiscountInTransaction(
   // `remainingDiscountable` que ya usan discount.tpv.service.ts y
   // discountEngine.service.ts.
   const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+  // D2 (12-nov): el % en centavos enteros, mitad hacia arriba (en pesos flotantes 10 % de $21.35 daba $2.13).
+  const rawAmount =
+    discount.type === 'PERCENTAGE' ? porcentajeEnCentavos(aCentavos(subtotal), discount.value) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
   // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope

@@ -333,3 +333,160 @@ describe('el tope del catálogo vale para cualquier tipo de descuento de cuenta 
     expect(fila.reparto?.tope).toBeUndefined()
   })
 })
+
+// D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el % en centavos enteros, mitad hacia arriba, como la TPV y ANDROID. En pesos flotantes
+// 2.135 × 100 = 213.49999999999997 y el 10 % de una cuenta de $21.35 daba $2.13.
+describe('D2 — el % de cuenta en centavos: 10 % de $21.35 = $2.14 (antes $2.13)', () => {
+  const ventaDe2135 = (extra: Fila = {}) => venta({ items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }], tip: 0, ...extra })
+
+  it('🔴 mesa de ANDROID (catálogo en cuenta abierta): $2.14 en la fila y en la cuenta', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135())
+    const aplicado = await applyOrderDiscount(VENUE, creada.id, DESCUENTO_10, 'staff-1')
+    expect(aplicado.amount).toBe(2.14)
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 venta sin red de la TPV con `orderDiscountId`: $2.14 y la cuenta cierra con los $19.21 que cobró la terminal', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaDe2135({ orderDiscountId: DESCUENTO_10, discount: 0, source: 'TPV' }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    const saldo = cierraCon(orden, 19.21, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+  })
+})
+
+// D2 · B (coordinador, 12-nov): la venta sin red registra lo que la TPV YA cobró. 2.16.0/2.16.1 truncan y no conocen el tope.
+describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según su versión', () => {
+  const ventaSinRedDeTpv = (extra: Fila = {}) =>
+    venta({
+      items: [{ name: 'Otro importe', quantity: 1, unitPrice: 2135 }],
+      tip: 0,
+      orderDiscountId: DESCUENTO_10,
+      discount: 0,
+      source: 'TPV',
+      isOfflineReplay: true,
+      ...extra,
+    })
+
+  it('🔴 TPV 2.16.0: $2.13 (trunca), y la cuenta cierra con los $19.22 que cobró', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    const saldo = cierraCon(orden, 19.22, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(0)
+    expect(saldo.isFullyPaid).toBe(true)
+    expect(Number(orden.total)).toBeCloseTo(19.22, 2) // el doble en memoria no redondea como la columna Decimal(10,2)
+  })
+
+  it('🔴 Codex r3: TPV 2.16.0 con tope de $1 en el catálogo: $1.00 (el tope se respeta; esta excepción nunca descuenta más que la exacta)', async () => {
+    const db = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 } }))
+    expect(db.orden(creada.id).discountAmount).toBe(1)
+  })
+
+  it('TPV 2.16.2 en adelante (sin la marca): $2.14 exacto, cierra con $19.21', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1921 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.14)
+    expect(cierraCon(orden, 19.21, 0).isFullyPaid).toBe(true)
+  })
+
+  it('control — la marca sólo vale en una venta sin red de la TPV: con otra fuente, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, source: 'AVOQADO_ANDROID' }),
+    )
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('🔴 Codex r2 #2: venta guardada por la 2.16.1 que sube ya actualizada (build ≥ 127): su total ($19.22) dice que truncó ⇒ $2.13', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: 1922 } }))
+    const orden = db.orden(creada.id)
+    expect(orden.discountAmount).toBe(2.13)
+    expect(cierraCon(orden, 19.22, 0).isFullyPaid).toBe(true)
+  })
+
+  it('🔴 Codex r2 #1: sin el token de una terminal no hay excepción, aunque el cuerpo diga TPV sin red ($2.14, y con tope $1.00)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+    const db2 = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === DESCUENTO_10
+        ? {
+            id: DESCUENTO_10,
+            venueId: VENUE,
+            name: '10% tope 1',
+            type: 'PERCENTAGE',
+            value: 10,
+            scope: 'ORDER',
+            active: true,
+            maxDiscountAmount: 1,
+          }
+        : null,
+    )
+    const otra = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    expect(db2.orden(otra.id).discountAmount).toBe(1)
+  })
+
+  it('🔴 Codex r4: con un tope inválido (negativo) la excepción tampoco da más que la regla exacta', async () => {
+    const conTopeNegativo = () =>
+      prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+        where.id === DESCUENTO_10
+          ? {
+              id: DESCUENTO_10,
+              venueId: VENUE,
+              name: 'tope -1',
+              type: 'PERCENTAGE',
+              value: 10,
+              scope: 'ORDER',
+              active: true,
+              maxDiscountAmount: -1,
+            }
+          : null,
+      )
+    const dbExacta = baseEnMemoria()
+    conTopeNegativo()
+    const exacta = await createOrderWithItems(VENUE, ventaSinRedDeTpv())
+    const dbVieja = baseEnMemoria()
+    conTopeNegativo()
+    const vieja = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 2135 } }))
+    expect(dbVieja.orden(vieja.id).discountAmount).toBe(dbExacta.orden(exacta.id).discountAmount)
+  })
+
+  it('control — terminal nueva sin versión vieja y con un total que no es el truncado: exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: false, totalCents: null } }))
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+
+  it('control — y no en línea: sin `isOfflineReplay`, exacto ($2.14)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(
+      VENUE,
+      ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, isOfflineReplay: false }),
+    )
+    expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+})
