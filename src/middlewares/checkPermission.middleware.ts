@@ -456,11 +456,13 @@ export const checkPermission = (requiredPermission: string) => {
         if (typeof overrideToken === 'string' && overrideToken.length > 0) {
           // D4 (Codex r1 #4): una venta puede traer varios tokens separados por coma (cortesía y descuento con aprobación). Cada
           // token está atado a UN permiso al consumirse, así que esta revisión sólo gasta el suyo y deja los demás para la suya.
+          // Tope de 4: hoy una venta trae a lo más 2; sin tope, un encabezado largo serían cientos de consultas por petición.
           let consumed: Awaited<ReturnType<typeof consumePermissionOverride>> = null
           for (const token of overrideToken
             .split(',')
             .map(t => t.trim())
-            .filter(Boolean)) {
+            .filter(Boolean)
+            .slice(0, 4)) {
             consumed = await consumePermissionOverride({
               token,
               venueId,
