@@ -264,6 +264,9 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
       const sinCambios =
         activas === 1 &&
         vigente !== null &&
+        // Codex r3 H5: sólo «aplicar ya» (con 5 min de margen por el reloj del navegador). Una fecha futura pedida a propósito
+        // se escribe como siempre.
+        effectiveDate.getTime() <= ahora.getTime() + 5 * 60_000 &&
         (Object.keys(ESCALA) as (keyof typeof ESCALA)[]).every(k => mismoNumero(datos[k], vigente[k], ESCALA[k], OPCIONALES.has(k))) &&
         datos.includesTax === vigente.includesTax &&
         datos.contractReference === vigente.contractReference &&

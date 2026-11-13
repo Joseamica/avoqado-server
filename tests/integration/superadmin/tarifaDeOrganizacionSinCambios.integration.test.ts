@@ -174,6 +174,25 @@ describe('setPricing · tarifa de la organización', () => {
     expect(activas[0].effectiveFrom.getTime()).toBeLessThanOrEqual(Date.now())
   })
 
+  it('lo mismo pero programado para una fecha futura se escribe como siempre (Codex r3 H5)', async () => {
+    const o = await org()
+    await prisma.organizationPricingStructure.create({
+      data: {
+        organizationId: o,
+        accountType: 'PRIMARY',
+        debitRate: 0.022,
+        creditRate: 0.025,
+        amexRate: 0.035,
+        internationalRate: 0.038,
+        effectiveFrom: new Date('2026-01-01'),
+      },
+    })
+
+    await llamar(o, delWizard({ effectiveFrom: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString() }))
+
+    expect(await filas(o)).toHaveLength(2)
+  })
+
   it('el fin de vigencia que no se manda se conserva en la sustituta (Codex r2 #5)', async () => {
     const o = await org()
     const finDeMes = new Date('2099-12-31T23:59:59.000Z')
