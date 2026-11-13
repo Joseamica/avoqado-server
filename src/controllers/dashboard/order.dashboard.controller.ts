@@ -111,17 +111,41 @@ export async function getOrder(req: Request<{ venueId: string; orderId: string }
   }
 }
 
+/** D70: el cuerpo del PUT sin fecha ni folio si quien edita no es SUPERADMIN y sólo los reenvía; 403 si intenta cambiarlos. */
+async function sinFechaNiFolioAjenos(req: Request<{ venueId: string; orderId: string }>, venueId: string, orderId: string) {
+  const body = req.body ?? {}
+  if (body.createdAt === undefined && body.orderNumber === undefined) return body
+  const authContext = (req as any).authContext
+  if (authContext?.userId && !authContext.isImpersonating && (await esSuperadminReal(authContext.userId))) return body
+
+  const actual = await orderDashboardService.fechaYFolioActuales(venueId, orderId)
+  if (actual) {
+    const fechaPedida = body.createdAt === undefined ? null : new Date(body.createdAt)
+    const cambiaFecha =
+      fechaPedida !== null && (Number.isNaN(fechaPedida.getTime()) || fechaPedida.getTime() !== actual.createdAt.getTime())
+    const cambiaFolio = body.orderNumber !== undefined && String(body.orderNumber) !== actual.orderNumber
+    if (cambiaFecha || cambiaFolio) throw new ForbiddenError('Sólo un superadministrador puede cambiar la fecha o el folio de una venta')
+  }
+  const { createdAt, orderNumber, ...resto } = body
+  logger.warn('[ORDER.DASHBOARD] updateOrder ignoró fecha/folio reenviados sin cambio por quien no es superadmin (D70)', {
+    venueId,
+    orderId,
+    staffId: authContext?.userId,
+    createdAt,
+    orderNumber,
+  })
+  return resto
+}
+
 export async function updateOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
     const { venueId, orderId } = req.params
-    // 🔴 D70: la fecha y el folio de una venta mueven reportes, cortes, comisiones y a qué visita se une una mesa sin red.
-    // `orders:update` lo traen de fábrica mesero, cajero y cocina; sólo un SUPERADMIN de verdad (en la base, sin impersonar)
-    // los cambia, igual que el diálogo del DASHBOARD. Si la consulta falla, no se escribe (falla cerrado).
-    if (req.body?.createdAt !== undefined || req.body?.orderNumber !== undefined) {
-      const authContext = (req as any).authContext
-      const esSuperadmin = !!authContext?.userId && !authContext.isImpersonating && (await esSuperadminReal(authContext.userId))
-      if (!esSuperadmin) throw new ForbiddenError('Sólo un superadministrador puede cambiar la fecha o el folio de una venta')
-    }
+    // 🔴 D70 (founder, 13-nov): la fecha y el folio de una venta mueven reportes, cortes, comisiones y a qué visita se une una
+    // mesa sin red. `orders:update` lo traen de fábrica mesero, cajero y cocina; sólo un SUPERADMIN de verdad (en la base, sin
+    // impersonar) los CAMBIA, igual que el diálogo del DASHBOARD. Quien no lo es y los manda IGUALES a los de la venta (un
+    // cliente que reenvía todo) no tumba el PUT: se ignoran y queda en el log. Distintos ⇒ 403. Si una consulta falla, no se
+    // escribe (falla cerrado).
+    const body = await sinFechaNiFolioAjenos(req, venueId, orderId)
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae `customerId`.
     const opciones = {
@@ -130,7 +154,7 @@ export async function updateOrder(req: Request<{ venueId: string; orderId: strin
       // D2: quien cancela una venta de vales firma la bitácora de los vales que quedan libres.
       staffId: (req as any).authContext?.userId as string | undefined,
     }
-    const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, req.body, opciones)
+    const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, body, opciones)
     res.status(200).json(updatedOrder)
   } catch (error) {
     next(error)
