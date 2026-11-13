@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CUSTOM FIELD & TIPPING SCHEMAS
@@ -136,7 +137,7 @@ export const createPaymentLinkBodySchema = z
     tippingConfig: tippingConfigSchema,
     discount: paymentLinkDiscountInput,
     /** Liga por prenda: familia de productos (el cliente elige talla al pagar). Las reglas de negocio viven en el servicio. */
-    productGroupId: z.string().cuid('ID de familia inválido').nullable().optional(),
+    productGroupId: existingId('ID de familia inválido').nullable().optional(),
   })
   .refine(
     data => {
@@ -201,7 +202,7 @@ export const updatePaymentLinkBodySchema = z.object({
   tippingConfig: tippingConfigSchema,
   discount: paymentLinkDiscountInput,
   /** Sólo para confirmar la familia de una liga por prenda; el servicio rechaza cualquier cambio de clase. */
-  productGroupId: z.string().cuid('ID de familia inválido').nullable().optional(),
+  productGroupId: existingId('ID de familia inválido').nullable().optional(),
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -497,7 +498,7 @@ export const publicStripePaymentIntentSchema = z.object({
     customFieldResponses: z.record(z.string()).optional(),
     expectedTotal: z.number().positive().optional(),
     /** Liga por prenda: la talla elegida y el token de la pestaña que la aparta. */
-    productId: z.string().cuid('Talla inválida').optional(),
+    productId: existingId('Talla inválida').optional(),
     browserToken: browserTokenSchema.optional(),
   }),
 })

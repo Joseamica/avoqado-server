@@ -1827,6 +1827,10 @@ async function cerrarIntentoPrevio(
     pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
     if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
   } catch (err) {
+    // Cambió de estado entre consultar y cancelar (la clienta lo está confirmando): el mismo 409 «en curso», no el error de Stripe.
+    if ((err as { code?: string } | null)?.code === 'payment_intent_unexpected_state') {
+      throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+    }
     // Lo pasajero sube (no se aparta nada nuevo). Lo PERMANENTE para este intento (ya no existe, o la cuenta congelada ya no da
     // acceso) nunca se va a poder revisar: se da por cerrado para no trabar a este navegador en la liga para siempre.
     if (!errorPermanenteDelIntento(err)) throw err

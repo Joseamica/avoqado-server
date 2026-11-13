@@ -446,11 +446,33 @@ describe('POST payment-intent de la liga por prenda', () => {
       expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
     })
 
-    it('previa que Stripe no deja cancelar (pasó a processing a medio camino) → no se aparta ni se crea', async () => {
+    it('previa que cambia de estado entre consultar y cancelar (payment_intent_unexpected_state) → 409 IN_PROGRESS, sin el error crudo', async () => {
       fichas.findMany.mockResolvedValue([previa()])
       piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'requires_action' })
-      piCancel.mockRejectedValue(Object.assign(new Error('This PaymentIntent could not be canceled'), { statusCode: 400 }))
-      await expect(pagar()).rejects.toThrow('could not be canceled')
+      piCancel.mockRejectedValue(
+        Object.assign(new Error('This PaymentIntent could not be canceled'), {
+          type: 'StripeInvalidRequestError',
+          code: 'payment_intent_unexpected_state',
+          statusCode: 400,
+        }),
+      )
+      const err = await pagar().catch(e => e)
+      expect(err).toBeInstanceOf(ConflictError)
+      expect(err).toMatchObject({
+        statusCode: 409,
+        code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS',
+        message: 'Tu pago se está procesando. Espera unos segundos.',
+      })
+      expect(fichas.updateMany).not.toHaveBeenCalled()
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('regresión: otro rechazo de Stripe al cancelar (sin ese código) sube tal cual, no se aparta ni se crea', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'requires_action' })
+      piCancel.mockRejectedValue(Object.assign(new Error('otro rechazo'), { type: 'StripeInvalidRequestError', statusCode: 400 }))
+      await expect(pagar()).rejects.toThrow('otro rechazo')
       expect(take).not.toHaveBeenCalled()
       expect(piCreate).not.toHaveBeenCalled()
     })

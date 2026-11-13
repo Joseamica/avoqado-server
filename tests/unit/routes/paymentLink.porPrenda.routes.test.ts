@@ -138,11 +138,18 @@ it('POST payment-intent: productId y browserToken pasan el validador', async () 
   expect(mockPi).toHaveBeenCalledWith('abc12345', expect.objectContaining(body))
 })
 
-it('POST payment-intent: un productId que no es cuid → 400', async () => {
+// IQ (13-oct): productos con ids históricos que no empiezan con «c»; sus tallas también se tienen que poder escoger.
+it('POST payment-intent: una talla con id histórico (no empieza con «c») pasa el validador', async () => {
+  const body = { productId: 'k9QzR4tLm2vXb7Hn', browserToken: TOKEN }
+  await request(app).post('/api/v1/public/payment-links/abc12345/payment-intent').set('CF-Connecting-IP', ip()).send(body).expect(201)
+  expect(mockPi).toHaveBeenCalledWith('abc12345', expect.objectContaining(body))
+})
+
+it.each(['', 'no es un id', "x'; drop", 'a/b'])('POST payment-intent: un productId mal formado (%p) → 400', async productId => {
   await request(app)
     .post('/api/v1/public/payment-links/abc12345/payment-intent')
     .set('CF-Connecting-IP', ip())
-    .send({ productId: 'x', browserToken: TOKEN })
+    .send({ productId, browserToken: TOKEN })
     .expect(400)
   expect(mockPi).not.toHaveBeenCalled()
 })
