@@ -18,6 +18,8 @@ import * as capacidadesModulo from '@/services/mobile/kdsCapacidades'
 import { anexarCapacidades, ventasDeComandas } from '@/services/mobile/kdsCapacidades'
 import * as respuestaAlProveedor from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 
+const { acceptDeliveryOrder } = respuestaAlProveedor
+
 jest.setTimeout(30_000)
 
 const QUINCE_MIN = 15 * 60_000
@@ -331,6 +333,100 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     expect(invertida.items.find(i => i.id !== s.itemB.id)).toMatchObject({ canReportOutOfStock: false })
     expect(filtrada.items).toHaveLength(1)
     expect(filtrada.items[0]).toMatchObject({ canReportOutOfStock: false })
+  })
+
+  describe('impresionReparto (dónde se imprime el reparto del canal)', () => {
+    const conConfig = (config: object | null) =>
+      prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { config: config ?? undefined } })
+    const impresionDe = async (s: Semilla) => {
+      const k = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: s.kds.id }, include: { items: true } })
+      return (await ventasDeComandas(prisma, venueId, [k])).get(s.order.id)!.impresionReparto
+    }
+    afterEach(() => conConfig({}))
+
+    it('canal con UNA_ESTACION y empaque NO: la estación elegida viaja y el empaque no', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra delivery', active: true, sendsComanda: true } })
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NO' } })
+      expect(await impresionDe(await sembrar())).toEqual({
+        proveedor: 'UBER_EATS',
+        estacionUnicaId: est.id,
+        empaque: false,
+        empaqueEstacionId: null,
+      })
+    })
+
+    it('canal sin impresion: como en el salón y empaque del negocio', async () => {
+      await conConfig({})
+      expect(await impresionDe(await sembrar())).toEqual({
+        proveedor: 'UBER_EATS',
+        estacionUnicaId: null,
+        empaque: true,
+        empaqueEstacionId: null,
+      })
+    })
+
+    it('estación elegida desactivada después: estacionUnicaId null', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra apagada', active: false, sendsComanda: true } })
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NEGOCIO' } })
+      expect((await impresionDe(await sembrar()))?.estacionUnicaId).toBeNull()
+    })
+
+    it('a lo más UNA consulta extra de printStation por llamada, y ninguna si nadie eligió estación', async () => {
+      const est = await prisma.printStation.create({ data: { venueId, name: 'Barra 2', active: true, sendsComanda: true } })
+      const s1 = await sembrar()
+      const s2 = await sembrar()
+      const ks = await prisma.kdsOrder.findMany({ where: { id: { in: [s1.kds.id, s2.kds.id] } }, include: { items: true } })
+      const espia = jest.spyOn(prisma.printStation, 'findMany')
+      await conConfig({})
+      await ventasDeComandas(prisma, venueId, ks)
+      expect(espia).toHaveBeenCalledTimes(0)
+      await conConfig({ impresion: { comanda: 'UNA_ESTACION', estacionId: est.id, empaque: 'NEGOCIO' } })
+      await ventasDeComandas(prisma, venueId, ks)
+      expect(espia).toHaveBeenCalledTimes(1)
+      espia.mockRestore()
+    })
+  })
+
+  it('🔴 recorrido real: MANUAL llega sin aceptar y sin imprimir; al aceptar (2xx) se ofrece y se reclama', async () => {
+    // `sembrar` ingesta con el `link` en memoria: hay que refrescarlo, no sólo la fila.
+    link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'MANUAL' } })
+    try {
+      const s = await sembrar({ aceptado: false })
+      expect(s.order.status).toBe('PENDING')
+      expect(await comandaDe(s)).toMatchObject({ needsAcceptance: true, needsPrint: false })
+
+      jest.spyOn(uberAdapter, 'acceptOrder').mockResolvedValue({ ok: true, status: 200, raw: '' })
+      expect((await acceptDeliveryOrder(venueId, s.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(leerPedido).not.toHaveBeenCalled() // un 2xx acredita solo: no se le pregunta a Uber
+      expect(await comandaDe(s)).toMatchObject({ needsAcceptance: false, needsPrint: true })
+
+      const claim = await request(server)
+        .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/claim-print`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ deviceId: 'tablet-2b' })
+      expect(claim.body).toMatchObject({ claimed: true })
+    } finally {
+      link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'AUTO' } })
+    }
+  })
+
+  it('🔴 MANUAL: el accept contesta 409 y Uber dice ACEPTADO → se recupera la marca y se imprime', async () => {
+    link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'MANUAL' } })
+    try {
+      const s = await sembrar({ aceptado: false })
+      jest.spyOn(uberAdapter, 'acceptOrder').mockResolvedValue({ ok: true, status: 409, raw: '{"code":"resource_status_conflict"}' })
+      leerPedido.mockResolvedValue({ providerAccepted: true })
+      expect((await acceptDeliveryOrder(venueId, s.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(await comandaDe(s)).toMatchObject({ needsAcceptance: false, needsPrint: true })
+
+      // Si leer a Uber falla, el accept sigue contestando ACCEPTED (no se vuelve error para el mesero).
+      const t = await sembrar({ aceptado: false })
+      leerPedido.mockRejectedValue(new Error('sin red en la prueba'))
+      expect((await acceptDeliveryOrder(venueId, t.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(await comandaDe(t)).toMatchObject({ needsAcceptance: true, needsPrint: false })
+    } finally {
+      link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'AUTO' } })
+    }
   })
 
   it('PUT …/status y bump devuelven la comanda con las MISMAS capacidades que el tablero', async () => {

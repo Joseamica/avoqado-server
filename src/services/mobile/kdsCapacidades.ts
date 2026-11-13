@@ -10,6 +10,13 @@ import { parseServiceCourseSnapshot } from '@/services/service-courses/serviceCo
 import { reservaViva } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { adapterFor } from '@/services/delivery-channels/core/adapterRegistry'
 import { proveedorDelPedido } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import {
+  idsDeEstaciones,
+  leerImpresion,
+  resolverImpresionReparto,
+  type EstacionElegible,
+  type ImpresionReparto,
+} from '@/services/delivery-channels/core/impresionDelCanal'
 
 /** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
 export const REINTENTO_TRAS_MS = 15 * 60_000
@@ -19,6 +26,14 @@ export const reintentableDesde = (lastAttemptAt: Date) => new Date(lastAttemptAt
 const COMANDA_ABIERTA = new Set(['NEW', 'PREPARING'])
 const VENTA_CERRADA = new Set(['COMPLETED', 'CANCELLED', 'DELETED'])
 const EN_CURSO = new Set(['PENDING', 'UNCERTAIN'])
+
+/**
+ * ¿Falta aceptar este reparto de proveedor? La venta MANUAL nace `PENDING` y aceptarla sólo pone `providerAcceptedAt`
+ * (el status no cambia), así que el status solo no basta. Un solo predicado para `needsAcceptance` y `needsPrint`.
+ */
+export function faltaAceptar(v: { type: string; status: string; conProveedor: boolean; providerAcceptedAt: Date | null }): boolean {
+  return v.type === OrderType.DELIVERY && v.conProveedor && v.status === 'PENDING' && (v.providerAcceptedAt ?? null) === null
+}
 
 /** Estados de `DeliveryLineAction.status` (contrato de las apps: `lineActionState`). */
 export type EstadoRetiro = 'PENDING' | 'UNCERTAIN' | 'CONFIRMED' | 'REJECTED'
@@ -98,6 +113,8 @@ export type VentaDeComanda = PedidoVivo & {
   tableNumber: string | null
   /** El tiempo («Aperitivos») de cada renglón, por `OrderItem.id`. Sólo los que tienen. */
   cursos: Map<string, string>
+  /** Dónde se imprime este reparto de proveedor (la elección de su canal). `null` si no es reparto de proveedor. */
+  impresionReparto: ImpresionReparto | null
 }
 
 type ComandaCruda = { orderId: string | null; items?: Array<{ orderItemId?: string | null }> }
@@ -152,7 +169,7 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
     linkIds.length
       ? db.deliveryChannelLink.findMany({
           where: { id: { in: linkIds }, venueId },
-          select: { id: true, provider: true },
+          select: { id: true, provider: true, config: true },
           take: linkIds.length,
         })
       : [],
@@ -179,6 +196,18 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       : [],
   ])
   const linkPorId = new Map(links.map(l => [l.id, l]))
+  // UNA consulta extra por llamada, y sólo si algún canal del lote eligió estaciones.
+  const estacionIds = [...new Set(links.flatMap(l => idsDeEstaciones(leerImpresion(l.config))))]
+  const estaciones = new Map<string, EstacionElegible>(
+    (estacionIds.length
+      ? await db.printStation.findMany({
+          where: { venueId, id: { in: estacionIds } },
+          select: { id: true, active: true, sendsComanda: true },
+          take: estacionIds.length,
+        })
+      : []
+    ).map(e => [e.id, e]),
+  )
   const accionesDe = agrupar(acciones)
   const renglonesDe = agrupar(renglones)
   const cursosDe = agrupar(cursos)
@@ -200,6 +229,14 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       retiros: new Map(propias.filter(a => a.action === 'REMOVE_ITEM').map(a => [a.lineId, a])),
       renglones: new Map((renglonesDe.get(v.id) ?? []).map(r => [r.id, r])),
       tableNumber: table?.number ?? null,
+      // El link sólo vale si es del proveedor del pedido (misma regla que `conLink`); si no, el default (como el salón).
+      impresionReparto: origen
+        ? resolverImpresionReparto(
+            origen.provider,
+            leerImpresion(link && link.provider === origen.provider ? link.config : undefined),
+            estaciones,
+          )
+        : null,
       cursos: new Map(
         (cursosDe.get(v.id) ?? []).flatMap(r => {
           let label = r.course
@@ -261,7 +298,12 @@ export function capacidadesDeComanda(k: ComandaConRenglones, v: VentaDeComanda) 
 export function anexarCapacidades<B extends { items: Array<{ id: string }> }>(base: B, k: ComandaConRenglones, v: VentaDeComanda) {
   if (v.type !== OrderType.DELIVERY || !v.conProveedor) return base
   const { comanda, renglones } = capacidadesDeComanda(k, v)
-  return { ...base, ...comanda, items: base.items.map(item => ({ ...item, ...renglones.get(item.id) })) }
+  return {
+    ...base,
+    ...comanda,
+    impresionReparto: v.impresionReparto,
+    items: base.items.map(item => ({ ...item, ...renglones.get(item.id) })),
+  }
 }
 
 function capacidadesDelRenglon(item: NonNullable<ComandaConRenglones['items']>[number], comandaStatus: string, v: VentaDeComanda) {

@@ -302,6 +302,16 @@ export async function acceptDeliveryOrder(venueId: string, orderId: string, staf
     return { outcome: 'FAILED', error: muerto ? 'PEDIDO_YA_NO_ACTIVO' : `HTTP ${r.status}` }
   }
 
+  // 409 = "ya estaba aceptado / el estado es otro": no acredita, así que se lee a Uber para estampar la marca. Sin ella el
+  // pedido «falta aceptar» para siempre (no imprime, el botón sigue). Un fallo aquí no vuelve error el accept.
+  if (r.status === 409) {
+    try {
+      await recuperarAceptacionDesdeProveedor(venueId, orderId)
+    } catch (e) {
+      logger.warn('[Delivery] no se pudo recuperar la aceptación tras un 409', { orderId, error: String(e) })
+    }
+  }
+
   logger.info('👍 [Delivery] pedido aceptado a mano', { orderId, orderNumber: ctx.order.orderNumber, staffId })
   return { outcome: 'ACCEPTED' }
 }
