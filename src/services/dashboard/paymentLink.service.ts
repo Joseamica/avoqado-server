@@ -1844,9 +1844,20 @@ async function cerrarIntentoPrevio(
   let pi: PaymentIntent
   try {
     pi = await stripe.paymentIntents.retrieve(id, undefined, cuenta)
-    if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, cuenta)
+    if (INTENTO_REUSABLE.has(pi.status)) {
+      try {
+        pi = await stripe.paymentIntents.cancel(id, undefined, cuenta)
+      } catch (err) {
+        // Encargo 51ecc0 (13-nov): Stripe contesta `payment_intent_unexpected_state` si el intento cambió entre consultar y
+        // cancelar. Puede ser que la clienta lo esté confirmando… o que OTRA solicitud de este mismo navegador ya lo canceló
+        // (StrictMode, dos pestañas tras cambiar de talla). Se vuelve a consultar y manda su estado real (abajo: cancelado →
+        // sigue; cobrado → alreadyPaid; cualquier otro → 409 «en curso»).
+        if ((err as { code?: string } | null)?.code !== 'payment_intent_unexpected_state') throw err
+        pi = await stripe.paymentIntents.retrieve(id, undefined, cuenta)
+      }
+    }
   } catch (err) {
-    // Cambió de estado entre consultar y cancelar (la clienta lo está confirmando): el mismo 409 «en curso», no el error de Stripe.
+    // Defensa: si este código llega de cualquier otra llamada, es el mismo 409 «en curso», no el error crudo de Stripe.
     if ((err as { code?: string } | null)?.code === 'payment_intent_unexpected_state') {
       await sigueViva()
       throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')

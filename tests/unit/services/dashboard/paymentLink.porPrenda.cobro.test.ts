@@ -427,6 +427,17 @@ describe('POST payment-intent de la liga por prenda', () => {
       mSeRestauraYNoSeMarcaCobrada()
     })
 
+    it('Stripe rechaza la cancelación porque OTRA solicitud ya canceló M (al volver a consultar «canceled») → sigue con la ficha nueva, M no se restaura', async () => {
+      piRetrieve
+        .mockResolvedValueOnce({ id: 'pi_de_m', status: 'requires_payment_method' })
+        .mockResolvedValueOnce({ id: 'pi_de_m', status: 'canceled' })
+      piCancel.mockRejectedValue(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }))
+      const r = await pagar()
+      expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+      expect(restaurar).not.toHaveBeenCalled()
+      expect(release).not.toHaveBeenCalled()
+    })
+
     it('cancelar responde sin «canceled» → 409, M vuelve a ACTIVE', async () => {
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_payment_method' })
       piCancel.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
@@ -647,6 +658,77 @@ describe('POST payment-intent de la liga por prenda', () => {
       expect(fichas.updateMany).not.toHaveBeenCalled()
       expect(piCreate).not.toHaveBeenCalled()
       expect(r).toMatchObject({ paymentIntentId: 'pi_viejo', connectAccountId: 'acct_A' })
+    })
+
+    // Encargo 51ecc0 (13-nov): Stripe contesta `payment_intent_unexpected_state` también cuando el intento YA quedó cancelado
+    // (otra solicitud del mismo navegador lo canceló un instante antes). Eso no es «en curso»: se vuelve a consultar y manda
+    // su estado real.
+    const yaCancelado = () =>
+      Object.assign(new Error('You cannot cancel this PaymentIntent because it has a status of canceled.'), {
+        type: 'StripeInvalidRequestError',
+        code: 'payment_intent_unexpected_state',
+        statusCode: 400,
+      })
+
+    it('previa que OTRA solicitud ya canceló (unexpected_state y al volver a consultar «canceled») → se marca y se aparta otra', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve
+        .mockResolvedValueOnce({ id: 'pi_previo', status: 'requires_payment_method' })
+        .mockResolvedValueOnce({ id: 'pi_previo', status: 'canceled' })
+      piCancel.mockRejectedValue(yaCancelado())
+      const r = await pagar()
+      expect(piRetrieve).toHaveBeenNthCalledWith(2, 'pi_previo', undefined, { stripeAccount: 'acct_A' })
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: 'chold0000000000000000000p', status: { in: ['ACTIVE', 'RELEASED'] } },
+        data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+      })
+      expect(take).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+    })
+
+    it('unexpected_state y al volver a consultar ya cobró → alreadyPaid con SU intento, sin apartar ni crear', async () => {
+      fichas.findMany.mockResolvedValue([previa({ status: 'RELEASED', releasedReason: 'vencida' })])
+      piRetrieve
+        .mockResolvedValueOnce({ id: 'pi_previo', status: 'requires_action' })
+        .mockResolvedValueOnce({ id: 'pi_previo', status: 'succeeded' })
+      piCancel.mockRejectedValue(yaCancelado())
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_previo' })
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('unexpected_state y al volver a consultar Stripe no contesta → sube ese error, no se marca ni se aparta', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve
+        .mockResolvedValueOnce({ id: 'pi_previo', status: 'requires_payment_method' })
+        .mockRejectedValueOnce(Object.assign(new Error('Stripe caído'), { type: 'StripeConnectionError' }))
+      piCancel.mockRejectedValue(yaCancelado())
+      await expect(pagar()).rejects.toThrow('Stripe caído')
+      expect(fichas.updateMany).not.toHaveBeenCalled()
+      expect(take).not.toHaveBeenCalled()
+    })
+
+    it('reproduce el aviso falso: dos POST a la vez tras cambiar de talla (StrictMode o dos pestañas) → los dos reciben el intento nuevo', async () => {
+      // Stripe simulado con estado: cancelar un intento ya cancelado contesta unexpected_state, como el de verdad.
+      const estado: Record<string, string> = { pi_previo: 'requires_payment_method' }
+      piRetrieve.mockImplementation(async (id: string) => ({ id, status: estado[id] }))
+      piCancel.mockImplementation(async (id: string) => {
+        await new Promise(r => setImmediate(r))
+        if (estado[id] === 'canceled') throw yaCancelado()
+        estado[id] = 'canceled'
+        return { id, status: 'canceled' }
+      })
+      // Las dos ven todavía la ficha de la talla vieja con su intento.
+      fichas.findMany.mockResolvedValue([previa()])
+      const L = ficha({ id: 'chold0000000000000000000l' })
+      take.mockResolvedValueOnce({ hold: L, reused: false, released: [] }).mockResolvedValueOnce({ hold: L, reused: true, released: [] })
+      piCreate.mockResolvedValue({ id: 'pi_de_l', client_secret: 'secret_l', status: 'requires_payment_method' })
+      const [a, b] = await Promise.allSettled([pagar(), pagar()])
+      expect(a).toMatchObject({ status: 'fulfilled', value: { paymentIntentId: 'pi_de_l' } })
+      expect(b).toMatchObject({ status: 'fulfilled', value: { paymentIntentId: 'pi_de_l' } })
+      // Una sola cancelación real; la otra sólo confirmó el estado.
+      expect(estado.pi_previo).toBe('canceled')
+      expect(piCreate.mock.calls.every(c => c[1].idempotencyKey === 'plhold:chold0000000000000000000l')).toBe(true)
     })
   })
 
