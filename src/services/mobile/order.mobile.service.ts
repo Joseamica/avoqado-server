@@ -1021,7 +1021,7 @@ export async function buildOrderItemsData(
   fulfillmentAreaId?: string | null,
   precioMostrado?: { horaDeLaVenta: Date; llegada?: Date; rechazarSiNoSeReconoce: boolean },
   db?: Prisma.TransactionClient,
-  compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'>,
+  compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento' | 'isOfflineReplay'>,
 ): Promise<{
   itemsData: any[]
   subtotal: number
@@ -1124,8 +1124,11 @@ export async function buildOrderItemsData(
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
 
-  // D4: un % o fijo que pide aprobación, con la acreditación de la ruta (PIN o `tpv-orders:discount`); también en los vales.
-  if (discounts.some(pideAprobacionDeGerente) && !compAuthority?.aprobacionDelDescuento) throw sinAprobacionDelDescuento()
+  // D4: un % o fijo que pide aprobación, con la acreditación de la ruta (PIN o `tpv-orders:discount`); también en los vales. D4 r5:
+  // una venta de la cola ya se cobró y entra sin ella (la creación la registra sin aprobador y con rastro).
+  if (discounts.some(pideAprobacionDeGerente) && !compAuthority?.aprobacionDelDescuento && compAuthority?.isOfflineReplay !== true) {
+    throw sinAprobacionDelDescuento()
+  }
 
   // «Se cobra el precio que vio el cliente» (`precioQueVioElCliente.ts`): el precio de cada línea es el de la base, salvo
   // que la tablet haya mostrado uno MENOR que fue real en su ventana. Cada línea se decide sola (el mismo producto puede
@@ -1818,18 +1821,43 @@ export async function crearVentaDeMostradorEnTx(
       ? await tx.discount.findFirst({ where: { id: input.descuentoDeCatalogoId, venueId }, select: { requiresApproval: true, type: true } })
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
-  if (cuentaPideAprobacion && !input.aprobacionDelDescuento) throw sinAprobacionDelDescuento()
+  // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.
+  const sinAprobacionEnLaCola = enLaCola && !input.aprobacionDelDescuento
+  if (cuentaPideAprobacion && !input.aprobacionDelDescuento && !sinAprobacionEnLaCola) throw sinAprobacionDelDescuento()
   // D4: quien lo aplicó es la SESIÓN (no el vendedor elegido, Codex r2 #4); quien lo aprobó, el gerente del PIN o la sesión.
   const sesionQueAplica =
-    input.aprobacionDelDescuento && (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente))
+    (input.aprobacionDelDescuento || sinAprobacionEnLaCola) && (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente))
       ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
       : null
-  const aprobador = input.aprobacionDelDescuento?.porPin ?? sesionQueAplica
-  /** D4: la fila de un descuento que pidió aprobación lleva a la sesión y a su aprobador (si no trae ya otro: el del regalo de D2). */
+  const aprobador = input.aprobacionDelDescuento ? (input.aprobacionDelDescuento.porPin ?? sesionQueAplica) : null
+  /**
+   * D4: la fila de un descuento que pidió aprobación lleva a la sesión y a su aprobador (si no trae ya otro: el del regalo de D2).
+   * D4 r5: de la cola sin acreditación, a la sesión y sin aprobador.
+   */
   const conAprobador = <T extends { appliedById?: string | null; authorizedById?: string | null }>(fila: T, pide: boolean): T =>
-    pide && aprobador
+    pide && (aprobador || sinAprobacionEnLaCola)
       ? { ...fila, appliedById: sesionQueAplica ?? fila.appliedById, authorizedById: fila.authorizedById || aprobador }
       : fila
+  /** D4 r5: el rastro de un descuento que pedía aprobación y entró de la cola sin ella, en ESTA transacción (como el regalo de D2). */
+  const anotarSiEntroSinAprobacion = async (fila: Prisma.OrderDiscountUncheckedCreateInput, pide: boolean): Promise<void> => {
+    if (!pide || !sinAprobacionEnLaCola) return
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: validatedStaffId || null,
+      venueId,
+      action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+      entity: 'Order',
+      entityId: fila.orderId,
+      data: {
+        orderId: fila.orderId,
+        discountId: fila.discountId ?? input.descuentoDeCatalogoId ?? null,
+        nombre: fila.name,
+        importePesos: Number(fila.amount),
+        externalId,
+        subidaPor: input.performedBy ?? null,
+        source: fuente,
+      },
+    })
+  }
 
   // Order-level discount composes additively with the per-item reductions above (cortesías
   // included) — same shape as TPV's `discountAmount = itemDiscountPesos + orderDiscountPesos`
@@ -1958,18 +1986,18 @@ export async function crearVentaDeMostradorEnTx(
   for (const item of discountedItems) {
     const discount = discounts.find(d => d.id === item.appliedDiscountId)
     if (!discount) continue
-    await tx.orderDiscount.create({
-      data: conAprobador(
-        buildItemDiscountRow({
-          orderId: createdOrder.id,
-          itemId: item.id,
-          discount,
-          discountAmountPesos: Number(item.discountAmount) - (ajusteDelRenglon.get(item.id) ?? 0),
-          appliedById: appliedByStaffVenue?.id || null,
-        }),
-        pideAprobacionDeGerente(discount),
-      ),
-    })
+    const fila = conAprobador(
+      buildItemDiscountRow({
+        orderId: createdOrder.id,
+        itemId: item.id,
+        discount,
+        discountAmountPesos: Number(item.discountAmount) - (ajusteDelRenglon.get(item.id) ?? 0),
+        appliedById: appliedByStaffVenue?.id || null,
+      }),
+      pideAprobacionDeGerente(discount),
+    )
+    await tx.orderDiscount.create({ data: fila })
+    await anotarSiEntroSinAprobacion(fila, pideAprobacionDeGerente(discount))
   }
   // D12: UNA fila «Ajuste de precio» con todos los renglones ajustados (el descuento ya vive en cada uno ⇒ espejo).
   if (ajustesDePrecio.length > 0) {
@@ -2064,6 +2092,7 @@ export async function crearVentaDeMostradorEnTx(
           })
       const fila = conAprobador(filaSinAprobador, cuentaPideAprobacion)
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+      await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
     const registradoDelCliente =
@@ -2172,6 +2201,7 @@ export async function crearVentaDeMostradorEnTx(
       cuentaPideAprobacion,
     )
     await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
+    await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     await sincronizarRepartos(tx, createdOrder.id)
   }
   if (regaloConPromociones === 'SIN_PERMISO') {

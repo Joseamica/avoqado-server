@@ -6,6 +6,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { aprobacionDelDescuento, checkAprobacionDelDescuento } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import prisma from '@/utils/prismaClient'
 
 let mockPermissionResult: 'granted' | 'denied' = 'granted'
@@ -18,6 +19,7 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
     return next()
   }),
 }))
+jest.mock('@/middlewares/permissionFlag.middleware', () => ({ tienePermisoEnVenue: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: { discount: { findFirst: jest.fn() }, order: { findUnique: jest.fn() } },
@@ -25,9 +27,10 @@ jest.mock('@/utils/prismaClient', () => ({
 
 const findDiscount = prisma.discount.findFirst as jest.Mock
 const findOrder = prisma.order.findUnique as jest.Mock
+const permisoPropio = tienePermisoEnVenue as jest.Mock
 
-function request(body: Record<string, unknown>): Request {
-  return { params: { venueId: 'venue-1' }, authContext: { userId: 'cajera-1' }, body } as unknown as Request
+function request(body: Record<string, unknown>, params: Record<string, string> = {}): Request {
+  return { params: { venueId: 'venue-1', ...params }, authContext: { userId: 'cajera-1' }, body } as unknown as Request
 }
 
 async function run(req: Request) {
@@ -48,6 +51,7 @@ beforeEach(() => {
   mockPinConsumido = undefined
   findDiscount.mockResolvedValue(null)
   findOrder.mockResolvedValue(null)
+  permisoPropio.mockResolvedValue(false)
 })
 
 describe('D4: % o fijo con «Requiere aprobación» pide tpv-orders:discount', () => {
@@ -183,5 +187,41 @@ describe('D4: % o fijo con «Requiere aprobación» pide tpv-orders:discount', (
     await run(req)
     ;(req as any).authContext.userId = 'otra-sesion'
     expect(aprobacionDelDescuento(req)).toBeUndefined()
+  })
+
+  // D4 r5 (Codex, apps viejas antes de publicar): la venta de la cola YA se cobró. Rechazarla dejaba el efectivo sin venta.
+  describe('venta de la cola (isOfflineReplay): nunca se rechaza por esto (como el cupón, D5)', () => {
+    const deLaCola = () => request({ isOfflineReplay: true, items: [{ productId: 'p1', discountId: 'disc-gerente' }] })
+
+    it('sin el permiso: no pide nada, no contesta 403 ni acredita (el servicio la registra sin aprobador)', async () => {
+      findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+      mockPermissionResult = 'denied'
+      const req = deLaCola()
+      const { res, next } = await run(req)
+      expect(checkPermission).not.toHaveBeenCalled()
+      expect(res.status).not.toHaveBeenCalled()
+      expect(next).toHaveBeenCalledWith()
+      expect(aprobacionDelDescuento(req)).toBeUndefined()
+    })
+
+    it('con el permiso propio de la sesión: queda aprobada sin PIN', async () => {
+      findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+      permisoPropio.mockResolvedValue(true)
+      const req = deLaCola()
+      const { next } = await run(req)
+      expect(permisoPropio).toHaveBeenCalledWith(req, 'tpv-orders:discount')
+      expect(checkPermission).not.toHaveBeenCalled()
+      expect(next).toHaveBeenCalledWith()
+      expect(aprobacionDelDescuento(req)).toEqual({})
+    })
+
+    it('regresión: en Mesas (`:orderId`, sin dinero cobrado) `isOfflineReplay` no cambia nada: sigue el 403 con PIN', async () => {
+      findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+      mockPermissionResult = 'denied'
+      const { res, next } = await run(request({ isOfflineReplay: true, discountId: 'disc-gerente' }, { orderId: 'order-1' }))
+      expect(res.statusCode).toBe(403)
+      expect(next).not.toHaveBeenCalled()
+      expect(permisoPropio).not.toHaveBeenCalled()
+    })
   })
 })

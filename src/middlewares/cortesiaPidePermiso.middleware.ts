@@ -240,7 +240,8 @@ const idValido = (id: unknown): id is string => typeof id === 'string' && id.len
  *
  * Mira, en UNA consulta, los descuentos de catálogo que trae el cuerpo: `discountId` (Mesas), `orderDiscountId` (cola de la TPV),
  * `items[].discountId` (renglón), la etiqueta `descuentoDeCatalogoId` (el de cuenta que ANDROID manda como importe) y el cupón en
- * línea (en la cola el servicio lo ignora). Sin ninguno que pida aprobación no pide nada. Si la venta ya existe con su llave
+ * línea (en la cola el servicio lo ignora). Sin ninguno que pida aprobación no pide nada. Una venta de la cola no se rechaza (D4 r5,
+ * abajo). Si la venta ya existe con su llave
  * (`externalId`: reintento tras una respuesta perdida), tampoco: el servicio devuelve la que ya está sin aplicar nada nuevo. El
  * servicio vuelve a mirar bajo su candado y falla cerrado sin la acreditación. Si la base falla: error, nunca 403.
  */
@@ -272,6 +273,14 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
       return next()
     }
     const userId = req.authContext?.userId
+    // D4 r5 (Codex, apps viejas): una venta NUEVA de la cola ya se cobró (efectivo en la caja): nunca se rechaza por esto, como el
+    // cupón (D5). Con `tpv-orders:discount` propio queda aprobada; sin él, el servicio la registra sin aprobador y con rastro en la
+    // bitácora. Mandar `isOfflineReplay` en línea no da nada nuevo: es lo de antes de #423 (y con `discounts:apply` la misma cajera
+    // ya pone un descuento libre del mismo importe), y queda el rastro. Mesas (`:orderId`, sin dinero cobrado) sigue igual.
+    if (body.isOfflineReplay === true && !req.params.orderId) {
+      if (userId && (await aprobacionPorPermisoPropio(req, true))) aprobacionesDelRequest.set(req, { venueId, userId })
+      return next()
+    }
     // Sólo cuenta el PIN que gastó ESTE check (el token es de un solo uso y de un solo permiso).
     return exigirConPin(req, res, next, PERMISO_QUE_APRUEBA_DESCUENTOS, porPin => {
       if (userId) aprobacionesDelRequest.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })

@@ -222,6 +222,68 @@ describe('D4 · Mostrador: la venta nueva con un descuento que pide aprobación'
   })
 })
 
+// D4 r5 (Codex, apps viejas antes de publicar): la venta de la cola YA se cobró (efectivo en la caja). Rechazarla la dejaba sin
+// registrar. Se registra como antes de #423, sin aprobador, con la sesión como quien lo aplicó y un rastro en la bitácora.
+describe('D4 · venta de la cola (isOfflineReplay) sin acreditación: entra, nunca 403', () => {
+  const deLaCola = (extra: Fila = {}) => venta({ isOfflineReplay: true, createdAtLocal: Date.now(), performedBy: 'sesion-1', ...extra })
+
+  it('`orderDiscountId` (cola de la TPV): nace con el importe del catálogo, sin aprobador y con su renglón en la bitácora', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, amount: 10, appliedById: 'sv-sesion-1', authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        venueId: VENUE,
+        action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+        entity: 'Order',
+        entityId: creada.id,
+        data: expect.objectContaining({
+          orderId: creada.id,
+          discountId: APROBACION,
+          nombre: '10% gerencial',
+          importePesos: 10,
+          subidaPor: 'sesion-1',
+        }),
+      }),
+    })
+  })
+
+  it('la etiqueta del descuento de cuenta (importe libre): igual, sin aprobador y con rastro', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ discount: 1000, descuentoDeCatalogoId: APROBACION }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ name: 'Descuento de la cuenta', amount: 10, appliedById: 'sv-sesion-1', authorizedById: null }),
+    ])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'DESCUENTO_SIN_APROBACION_SIN_RED',
+        data: expect.objectContaining({ discountId: APROBACION, importePesos: 10 }),
+      }),
+    })
+  })
+
+  it('regresión: de quien sí tiene el permiso, el aprobador es la sesión y no hay rastro de «sin aprobación»', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, aprobacionDelDescuento: {} }))
+    expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([
+      expect.objectContaining({ discountId: APROBACION, authorizedById: 'sv-sesion-1' }),
+    ])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }) }),
+    )
+  })
+
+  it('regresión: un % sin aprobación de la cola no deja rastro', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: LIBRE }))
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }) }),
+    )
+  })
+})
+
 describe('D4 · el descuento de un RENGLÓN (también vales): `buildOrderItemsData` falla cerrado', () => {
   const producto = {
     id: 'prod-1',
@@ -263,6 +325,14 @@ describe('D4 · el descuento de un RENGLÓN (también vales): `buildOrderItemsDa
     const r = await buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, {
       performedBy: 'sesion-1',
       aprobacionDelDescuento: {},
+    })
+    expect(r.itemDiscountTotal).toBe(20)
+  })
+
+  it('D4 r5: de la cola (`isOfflineReplay`) sin acreditación, calcula el renglón (lo cobrado ya ocurrió)', async () => {
+    const r = await buildOrderItemsData(VENUE, items, undefined, undefined, prismaMock as any, {
+      performedBy: 'sesion-1',
+      isOfflineReplay: true,
     })
     expect(r.itemDiscountTotal).toBe(20)
   })
