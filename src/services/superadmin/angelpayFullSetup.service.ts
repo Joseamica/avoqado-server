@@ -330,6 +330,8 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
             },
           })
           pricingStructureId = pricing.id
+          // La bitácora del candado apunta a la tarifa que se capturó aquí, no a la que tenía la posición (full-testing D4).
+          for (const c of positionChanges) if (c.rate === 'CAPTURADA' && c.slot === input.slot.accountType) c.pricingId = pricing.id
         }
 
         // ---- 7. Settlement (one config per main card type) ----

@@ -9,6 +9,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 jest.mock('@/services/shared/candadoDePosiciones', () => ({
   ...jest.requireActual('@/services/shared/candadoDePosiciones'),
@@ -69,6 +70,12 @@ describe('asistente Blumon: revisión previa del candado antes del paso 1', () =
       expect.objectContaining({ objetivo: { venueId: 'venue-1' }, siguiente: { PRIMARY: '__CUENTA_NUEVA__' }, soloRevisar: true }),
     )
     expect(mockedBlumon).not.toHaveBeenCalled()
+    // full-testing D3: es una respuesta normal, no un error con stack
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('candado de posiciones'),
+      expect.objectContaining({ code: CONFIRMAR_POSICION }),
+    )
+    expect(logger.error).not.toHaveBeenCalledWith('[Full Setup] Failed', expect.anything())
     expect(mockedPrisma.merchantAccount.create).not.toHaveBeenCalled()
     expect(mockedPrisma.venuePaymentConfig.update).not.toHaveBeenCalled()
     expect(mockedPrisma.terminal.update).not.toHaveBeenCalled()
@@ -107,6 +114,12 @@ describe('controlador del DASHBOARD de configuración de pagos: código y detall
     await updateVenuePaymentConfig(req, r)
     expect(r.status).toHaveBeenCalledWith(400)
     expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ code: CONFIRMAR_POSICION, details, error: 'Confirma la tarifa' }))
+    // full-testing D3: aviso sin stack, nunca `error`
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Candado de posiciones'),
+      expect.objectContaining({ code: CONFIRMAR_POSICION }),
+    )
+    expect(logger.error).not.toHaveBeenCalled()
   })
 
   it('409 POSICION_DESACTUALIZADA conserva su 409', async () => {
@@ -124,6 +137,7 @@ describe('controlador del DASHBOARD de configuración de pagos: código y detall
     await updateVenuePaymentConfig(req, r)
     expect(r.status).toHaveBeenCalledWith(400)
     expect(r.json).toHaveBeenCalledWith({ success: false, error: 'Payment config not found' })
+    expect(logger.error).toHaveBeenCalled() // un error de verdad sigue registrándose como error
   })
 
   it('una confirmación mal formada se rechaza en español', async () => {

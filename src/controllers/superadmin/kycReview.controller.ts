@@ -6,6 +6,7 @@
  */
 
 import { Request, Response } from 'express'
+import { esRespuestaDelCandado } from '@/services/shared/candadoDePosiciones'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import logger from '@/config/logger'
 import { comoErrorDeUsuarioDemo } from '@/services/demo/candadoDemo'
@@ -104,7 +105,12 @@ export async function assignProcessorAndApprove(req: Request, res: Response) {
     })
   } catch (caught: any) {
     const error = comoErrorDeUsuarioDemo(caught) // hz:f26b3afc:D5, igual que approveKyc
-    logger.error(`Error assigning processor to venue ${req.params.venueId}:`, error)
+    if (esRespuestaDelCandado(error)) {
+      // Respuesta normal del candado de posiciones (confirmar o recargar): aviso, sin stack.
+      logger.warn(`Candado de posiciones al asignar procesador al negocio ${req.params.venueId}`, { code: error.code })
+    } else {
+      logger.error(`Error assigning processor to venue ${req.params.venueId}:`, error)
+    }
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Failed to assign processor',

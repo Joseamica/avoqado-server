@@ -8,6 +8,8 @@ import { CONFIRMAR_POSICION, POSICION_DESACTUALIZADA, leerConfirmaciones } from 
 /** El candado de posiciones necesita su código y su detalle para que la pantalla pregunte (los demás errores, como antes). */
 function respuestaDelCandado(res: Response, error: unknown): boolean {
   if (!(error instanceof AppError) || (error.code !== CONFIRMAR_POSICION && error.code !== POSICION_DESACTUALIZADA)) return false
+  // Respuesta normal (la pantalla pregunta o recarga): aviso, sin stack; no ensucia las alertas de errores.
+  logger.warn('Candado de posiciones: pide confirmar o recargar', { code: error.code, message: error.message })
   res
     .status(error.statusCode)
     .json({ success: false, error: error.message, message: error.message, code: error.code, details: error.details })
@@ -75,8 +77,8 @@ export async function createVenuePaymentConfig(req: Request, res: Response) {
       data: config,
     })
   } catch (error: any) {
-    logger.error('Error creating venue payment config:', error)
     if (respuestaDelCandado(res, error)) return
+    logger.error('Error creating venue payment config:', error)
     res.status(400).json({
       success: false,
       error: error.message || 'Failed to create payment config',
@@ -107,8 +109,8 @@ export async function updateVenuePaymentConfig(req: Request, res: Response) {
       data: config,
     })
   } catch (error: any) {
-    logger.error('Error updating venue payment config:', error)
     if (respuestaDelCandado(res, error)) return
+    logger.error('Error updating venue payment config:', error)
     res.status(400).json({
       success: false,
       error: error.message || 'Failed to update payment config',
@@ -131,8 +133,8 @@ export async function deleteVenuePaymentConfig(req: Request, res: Response) {
       message: 'Payment config deleted successfully',
     })
   } catch (error: any) {
-    logger.error('Error deleting venue payment config:', error)
     if (respuestaDelCandado(res, error)) return
+    logger.error('Error deleting venue payment config:', error)
     res.status(400).json({
       success: false,
       error: error.message || 'Failed to delete payment config',

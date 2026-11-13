@@ -34,6 +34,15 @@ export const NOMBRE_DE_POSICION: Record<Posicion, string> = { PRIMARY: 'Principa
 
 export const CONFIRMAR_POSICION = 'CONFIRMAR_POSICION'
 export const POSICION_DESACTUALIZADA = 'POSICION_DESACTUALIZADA'
+
+/** El 400/409 del candado es una respuesta NORMAL (la pantalla pregunta o recarga): se registra como aviso, sin stack. */
+export function esRespuestaDelCandado(error: unknown): error is BadRequestError | ConflictError {
+  const code = (error as { code?: unknown } | null)?.code
+  return (
+    (error instanceof BadRequestError || error instanceof ConflictError) &&
+    (code === CONFIRMAR_POSICION || code === POSICION_DESACTUALIZADA)
+  )
+}
 /** La cuenta todavía no existe (asistente que la crea después de revisar): siempre distinta de la actual. */
 export const CUENTA_NUEVA = '__CUENTA_NUEVA__'
 /** Terminales de COBRO (las POS_* no cobran con tarjeta ni reciben cuentas). */

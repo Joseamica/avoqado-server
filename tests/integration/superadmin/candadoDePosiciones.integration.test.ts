@@ -384,6 +384,39 @@ describe('paso 1 · organización y herencia (Codex p12-r1 #3 y #7)', () => {
     creadas.cuentas.push(r.merchantAccountId)
     expect((await prisma.venuePaymentConfig.findUniqueOrThrow({ where: { venueId } })).secondaryAccountId).toBe(r.merchantAccountId)
   })
+
+  it('AngelPay con `pricing`: no pide tarifa y la bitácora apunta a la tarifa CAPTURADA, no a la vieja (full-testing D4)', async () => {
+    const orgId = await org('angelpay capturada')
+    const venueId = await negocio(orgId, 'AngelPay capturada')
+    const P = await cuenta(blumonId, 'P')
+    await prisma.venuePaymentConfig.create({ data: { venueId, primaryAccountId: P } })
+    const vieja = await tarifa(venueId, 'SECONDARY', 0.05)
+    const r = await fullSetupAngelPayMerchant({
+      venueId,
+      login: { mode: 'new', email: `cand-${cuid()}@avoqado.io`, pin: '123456', environment: 'QA' },
+      merchant: {
+        mode: 'create',
+        externalMerchantId: `${(Date.now() + 11) % 1_000_000_000}`,
+        name: 'AP2',
+        affiliation: 'AF2',
+        displayName: 'AP2',
+      },
+      slot: { accountType: 'SECONDARY', mode: 'fill' },
+      pricing: {
+        debitRate: 0.03,
+        creditRate: 0.03,
+        amexRate: 0.03,
+        internationalRate: 0.03,
+        includesTax: true,
+        taxRate: 0.16,
+        effectiveFrom: new Date().toISOString(),
+      },
+    })
+    creadas.cuentas.push(r.merchantAccountId)
+    expect(r.pricingStructureId).toBeDefined()
+    expect(r.positionChanges).toEqual([expect.objectContaining({ slot: 'SECONDARY', rate: 'CAPTURADA', pricingId: r.pricingStructureId })])
+    expect(r.pricingStructureId).not.toBe(vieja.id)
+  })
 })
 
 describe('paso 1 · KYC, traslado y carreras (Codex p12-r3)', () => {
@@ -523,6 +556,12 @@ describe('paso 2 · reporte de posiciones (sólo lectura)', () => {
       },
     })
     await tarifa(ids.sinCuenta, 'TERTIARY', 0.04)
+    // Alta bien hecha: la tarifa la captura el asistente con la hora del navegador, ~100 ms ANTES de que exista la cuenta.
+    ids.altaDelAsistente = await negocio(orgId, 'R alta del asistente')
+    const recien = await cuenta(blumonId, 'Recién creada')
+    const creada = (await prisma.merchantAccount.findUniqueOrThrow({ where: { id: recien } })).createdAt
+    await prisma.venuePaymentConfig.create({ data: { venueId: ids.altaDelAsistente, primaryAccountId: recien } })
+    await tarifa(ids.altaDelAsistente, 'PRIMARY', 0.025, new Date(creada.getTime() - 100))
     ids.otroProcesador = await negocio(orgId, 'R PAX con AngelPay')
     await prisma.venuePaymentConfig.create({ data: { venueId: ids.otroProcesador, primaryAccountId: angel } })
     await prisma.venuePricingStructure.create({
@@ -546,9 +585,11 @@ describe('paso 2 · reporte de posiciones (sólo lectura)', () => {
     const r = await reporteDePosiciones(reportePosicionesQuerySchema.parse({ organizationId: orgId }))
     expect(flagsDe(r, ids.sano)).toEqual([])
     expect(flagsDe(r, ids.anterior)).toContain('TARIFA_ANTERIOR_A_LA_CUENTA')
+    // full-testing D1: una tarifa que empieza unos instantes antes que su cuenta (mismo alta) no es «anterior a la cuenta».
+    expect(flagsDe(r, ids.altaDelAsistente)).toEqual([])
     expect(flagsDe(r, ids.sinCuenta)).toContain('SIN_CUENTA_CON_TARIFA')
     expect(flagsDe(r, ids.otroProcesador)).toContain('TERMINALES_DE_OTRO_PROCESADOR')
-    expect(r.meta.total).toBe(4)
+    expect(r.meta.total).toBe(5)
   })
 
   it('filtra por marca en la base antes de paginar, con total exacto', async () => {
@@ -565,10 +606,10 @@ describe('paso 2 · reporte de posiciones (sólo lectura)', () => {
     const p1 = await reporteDePosiciones(reportePosicionesQuerySchema.parse({ organizationId: orgId, pageSize: 3, page: 1 }))
     const p2 = await reporteDePosiciones(reportePosicionesQuerySchema.parse({ organizationId: orgId, pageSize: 3, page: 2 }))
     expect(p1.data).toHaveLength(3)
-    expect(p2.data).toHaveLength(1)
-    expect(p2.meta.total).toBe(4)
+    expect(p2.data).toHaveLength(2)
+    expect(p2.meta.total).toBe(5)
     const p9 = await reporteDePosiciones(reportePosicionesQuerySchema.parse({ organizationId: orgId, pageSize: 3, page: 9 }))
-    expect(p9).toMatchObject({ data: [], meta: { total: 4 } })
+    expect(p9).toMatchObject({ data: [], meta: { total: 5 } })
   })
 
   it('no escribe nada', async () => {

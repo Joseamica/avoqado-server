@@ -5,7 +5,7 @@
  * Por negocio y posición: la cuenta efectiva (propia o de su organización, como `getEffectivePaymentConfig`), la tarifa
  * vigente (del negocio o, de respaldo, de la organización, como `getEffectivePricingForSlot`) y las terminales de cobro que
  * heredan las posiciones. Marca lo raro, sin corregir nada:
- *   - TARIFA_ANTERIOR_A_LA_CUENTA: la tarifa vigente empezó antes de que existiera la cuenta (posible herencia; no hay
+ *   - TARIFA_ANTERIOR_A_LA_CUENTA: la tarifa vigente empezó (más de 10 min) antes de que existiera la cuenta (posible herencia; no hay
  *     historial de quién ocupó la posición, así que es una sospecha, no una prueba);
  *   - SIN_CUENTA_CON_TARIFA: la tarifa espera a la próxima cuenta que llegue a esa posición;
  *   - CUENTA_SIN_TARIFA;
@@ -80,6 +80,13 @@ type Fila = {
 }
 
 const num = (d: Prisma.Decimal | null) => (d === null ? null : Number(d))
+
+/**
+ * Una tarifa capturada en el MISMO alta que la cuenta (asistentes AngelPay/Blumon, KYC) puede empezar unos instantes ANTES de
+ * que exista la cuenta: la fecha la pone el navegador o un paso anterior (medido ~100 ms en el full-testing del 13-nov). Sólo
+ * se marca «tarifa anterior a la cuenta» si empezó más de estos minutos antes.
+ */
+export const TOLERANCIA_MINUTOS = 10
 
 export async function reporteDePosiciones(q: ReportePosicionesQuery) {
   const ahora = utcTs(new Date())
@@ -167,7 +174,8 @@ export async function reporteDePosiciones(q: ReportePosicionesQuery) {
     ),
     marcado AS (
       SELECT det.*,
-        (det."accountId" IS NOT NULL AND det."pricingId" IS NOT NULL AND det."pricingFrom" < det."accountCreatedAt") AS f1,
+        (det."accountId" IS NOT NULL AND det."pricingId" IS NOT NULL
+          AND det."pricingFrom" < det."accountCreatedAt" - make_interval(mins => ${TOLERANCIA_MINUTOS}::int)) AS f1,
         (det."accountId" IS NULL AND det."pricingId" IS NOT NULL) AS f2,
         (det."accountId" IS NOT NULL AND det."pricingId" IS NULL) AS f3,
         (det."accountId" IS NOT NULL AND det."otherProcessorTerminals" > 0) AS f4

@@ -15,6 +15,7 @@ import { fullSetupAngelPaySchema, registerAngelPayWebhookSchema } from '../../sc
 import {
   CUENTA_NUEVA,
   POSICIONES,
+  esRespuestaDelCandado,
   exigirConfirmacionDePosiciones,
   leerConfirmaciones,
   tomarCandado,
@@ -2109,6 +2110,11 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       }
     }
 
+    // La bitácora del candado apunta a la tarifa que se capturó en el paso 6, no a la que tenía la posición (full-testing D4).
+    if (pricingStructure) {
+      for (const c of positionChanges) if (c.rate === 'CAPTURADA' && c.slot === posicionDelCandado) c.pricingId = pricingStructure.id
+    }
+
     logger.info('[Full Setup] Step 6: Pricing structure', {
       created: !!pricingStructure,
     })
@@ -2326,10 +2332,15 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       message: `Setup completo: merchant ${merchantCreated ? 'creado' : 'existente'}, ${summary.terminals.total} terminales, pricing y settlement configurados`,
     })
   } catch (error: any) {
-    logger.error('[Full Setup] Failed', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined,
-    })
+    if (esRespuestaDelCandado(error)) {
+      // Respuesta normal del candado de posiciones (la pantalla pregunta o recarga): aviso, sin stack.
+      logger.warn('[Full Setup] El candado de posiciones pide confirmar o recargar', { code: error.code, message: error.message })
+    } else {
+      logger.error('[Full Setup] Failed', {
+        error: error instanceof Error ? error.message : error,
+        stack: error instanceof Error ? error.stack : undefined,
+      })
+    }
     next(error)
   }
 }
