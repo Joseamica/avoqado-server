@@ -124,6 +124,8 @@ export const setPricingSchema = z.object({
     // D18: el IVA de la tarifa (null = sin definir). Antes la validación lo quitaba y la tarifa nueva nacía en null.
     includesTax: z.boolean().nullable().optional(),
     taxRate: z.number().min(0).max(1).optional(),
+    // D18: «si queda igual a la vigente, no escribas» (y la nueva, si hace falta, empieza ahora). Lo manda el Wizard de Pagos.
+    skipIfUnchanged: z.boolean().optional(),
     fixedFeePerTransaction: z.number().optional().nullable(),
     monthlyServiceFee: z.number().optional().nullable(),
     minimumMonthlyVolume: z.number().optional().nullable(),

@@ -36,6 +36,7 @@ const delWizard = (extra: Record<string, unknown> = {}) => ({
   fixedFeePerTransaction: 0,
   monthlyServiceFee: 0,
   effectiveFrom: new Date().toISOString(),
+  skipIfUnchanged: true,
   ...extra,
 })
 
@@ -152,6 +153,26 @@ describe('setPricing · tarifa de la organización', () => {
     expect(activas[0].includesTax).toBeNull()
   })
 
+  it('un cliente viejo que no manda la bandera reescribe como antes (sin cambio de contrato)', async () => {
+    const o = await org()
+    await prisma.organizationPricingStructure.create({
+      data: {
+        organizationId: o,
+        accountType: 'PRIMARY',
+        debitRate: 0.022,
+        creditRate: 0.025,
+        amexRate: 0.035,
+        internationalRate: 0.038,
+        effectiveFrom: new Date('2026-01-01'),
+      },
+    })
+
+    await llamar(o, delWizard({ skipIfUnchanged: undefined }))
+
+    expect((await filas(o)).filter(f => f.active)).toHaveLength(1)
+    expect(await filas(o)).toHaveLength(2)
+  })
+
   it('una activa programada para MAÑANA no es la vigente: pedir lo mismo hoy sí crea la de hoy (Codex r2 #4)', async () => {
     const o = await org()
     const manana = new Date(Date.now() + 24 * 3600 * 1000)
@@ -174,7 +195,7 @@ describe('setPricing · tarifa de la organización', () => {
     expect(activas[0].effectiveFrom.getTime()).toBeLessThanOrEqual(Date.now())
   })
 
-  it('lo mismo pero con una fecha futura o pasada pedida a propósito se escribe como siempre (Codex r3 H5, r4 #2)', async () => {
+  it('sin la bandera (otros clientes), lo mismo con una fecha pedida —futura, pasada o cercana— se escribe como siempre (Codex r3 H5, r4 #2, r5 #2)', async () => {
     const o = await org()
     await prisma.organizationPricingStructure.create({
       data: {
@@ -188,12 +209,15 @@ describe('setPricing · tarifa de la organización', () => {
       },
     })
 
-    await llamar(o, delWizard({ effectiveFrom: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString() }))
+    const fecha = (effectiveFrom: string) => delWizard({ skipIfUnchanged: undefined, effectiveFrom })
+    await llamar(o, fecha(new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()))
     expect(await filas(o)).toHaveLength(2)
 
-    // …y una fecha PASADA pedida a propósito también (Codex r4 #2).
-    await llamar(o, delWizard({ effectiveFrom: '2026-10-01T00:00:00.000Z' }))
+    // …y una fecha PASADA o a dos minutos pedida a propósito también (Codex r4 #2, r5 #2): sin la bandera, como siempre.
+    await llamar(o, fecha('2026-10-01T00:00:00.000Z'))
     expect(await filas(o)).toHaveLength(3)
+    await llamar(o, fecha(new Date(Date.now() + 2 * 60_000).toISOString()))
+    expect(await filas(o)).toHaveLength(4)
   })
 
   it('el fin de vigencia que no se manda se conserva en la sustituta (Codex r2 #5)', async () => {

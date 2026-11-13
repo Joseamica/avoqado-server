@@ -224,7 +224,11 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
       return res.status(404).json({ error: 'Organization not found' })
     }
 
-    const effectiveDate = new Date(b.effectiveFrom)
+    // Codex r5 #2: «sin cambios» sólo cuando el cliente lo pide (`skipIfUnchanged`, el Wizard de Pagos): entonces la tarifa
+    // nueva, si hace falta, empieza AHORA (reloj del SERVIDOR). Sin la bandera (otros clientes y bundles viejos) todo sigue
+    // como antes: se escribe con la fecha recibida.
+    const aplicarYa = b.skipIfUnchanged === true
+    const effectiveDate = aplicarYa ? new Date() : new Date(b.effectiveFrom)
 
     const { pricing, previousId } = await prisma.$transaction(async tx => {
       await tomarCandado(tx, { organizationId })
@@ -264,9 +268,7 @@ export async function setPricing(req: Request, res: Response, next: NextFunction
       const sinCambios =
         activas === 1 &&
         vigente !== null &&
-        // Codex r3 H5 / r4 #2: sólo «aplicar ya» (±5 min por el reloj del navegador). Una fecha pasada o futura pedida a
-        // propósito se escribe como siempre.
-        Math.abs(effectiveDate.getTime() - ahora.getTime()) <= 5 * 60_000 &&
+        aplicarYa &&
         (Object.keys(ESCALA) as (keyof typeof ESCALA)[]).every(k => mismoNumero(datos[k], vigente[k], ESCALA[k], OPCIONALES.has(k))) &&
         datos.includesTax === vigente.includesTax &&
         datos.contractReference === vigente.contractReference &&
