@@ -57,7 +57,7 @@ const VENUE = 'cvenue0000000000000000001'
 const GROUP = 'cgroup0000000000000000001'
 const TALLA_M = 'ctallam000000000000000001'
 const TOKEN = 'tok_abcdefghijklmnop'
-const EXPIRA = new Date('2026-11-12T18:15:00Z')
+const EXPIRA = new Date('2099-11-12T18:15:00Z') // vigente: la revisión de previas compara contra la hora real
 
 const take = takeOrReuseHold as jest.Mock
 const freeze = freezeIntentParams as jest.Mock
@@ -162,11 +162,17 @@ beforeEach(() => {
   prismaMock.product.findFirst.mockResolvedValue(talla() as any)
   prismaMock.checkoutSession.createMany.mockResolvedValue({ count: 1 } as any)
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+  fichas.findUnique.mockReset()
+  fichas.findMany.mockReset().mockResolvedValue([])
+  fichas.updateMany.mockReset().mockResolvedValue({ count: 1 })
   ;(prismaMock as any).paymentLinkStockHold = fichas
 })
 
-/** El mock global de Prisma no trae la tabla de fichas: sólo hace falta releerla tras un choque de `attachIntent`. */
-const fichas = { findUnique: jest.fn() }
+/**
+ * El mock global de Prisma no trae la tabla de fichas. `findMany` = las fichas previas del navegador con intento (se revisan
+ * en Stripe antes de apartar otra); `updateMany` = marcarlas; `findUnique` = releer tras un choque de `attachIntent`.
+ */
+const fichas = { findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn() }
 
 const sesionCreada = () => prismaMock.checkoutSession.createMany.mock.calls.at(-1)![0] as any
 
@@ -273,7 +279,7 @@ describe('POST payment-intent de la liga por prenda', () => {
     })()
     // El segundo llega con la ficha ya congelada (el CAS no la pisa): freeze devuelve los parámetros del primero.
     freeze.mockImplementation(async () => ficha(congelada))
-    await pagar({ customerEmail: 'otra@example.test' })
+    await pagar()
     expect(piCreate).toHaveBeenCalledTimes(2)
     expect(piCreate.mock.calls[1][1]).toEqual(piCreate.mock.calls[0][1])
     expect(piCreate.mock.calls[1][0]).toEqual(piCreate.mock.calls[0][0])
@@ -335,7 +341,7 @@ describe('POST payment-intent de la liga por prenda', () => {
     expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
   })
 
-  it('otra talla u otra propina → ficha nueva con intento nuevo y el de la vieja cancelado con SU cuenta', async () => {
+  it('carrera: una ficha soltada por takeOrReuseHold con intento → se cancela con SU cuenta (mejor esfuerzo)', async () => {
     prismaMock.paymentLink.findUnique.mockResolvedValue(
       liga({ ecommerceMerchant: { ...liga().ecommerceMerchant, providerCredentials: { connectAccountId: 'acct_B' } } }) as any,
     )
@@ -352,6 +358,197 @@ describe('POST payment-intent de la liga por prenda', () => {
     expect(piCancel).toHaveBeenCalledWith('pi_viejo', undefined, { stripeAccount: 'acct_A' })
     // La ficha NUEVA sí nace con la cuenta de hoy.
     expect(piCreate.mock.calls[0][1]).toEqual({ stripeAccount: 'acct_B', idempotencyKey: 'plhold:chold00000000000000000002' })
+  })
+
+  describe('nunca un intento nuevo mientras el anterior del mismo navegador esté en curso o cobrado', () => {
+    /** Ficha previa del navegador con intento, como la devuelve la consulta de previas. */
+    const previa = (o: Record<string, unknown> = {}) =>
+      ficha({
+        id: 'chold0000000000000000000p',
+        productId: 'ctallal000000000000000001',
+        stripePaymentIntentId: 'pi_previo',
+        stripeAccountId: 'acct_A',
+        ...o,
+      })
+
+    beforeEach(() => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(
+        liga({ ecommerceMerchant: { ...liga().ecommerceMerchant, providerCredentials: { connectAccountId: 'acct_B' } } }) as any,
+      )
+    })
+
+    it('la consulta de previas es de ESTE navegador y liga, con intento, sin las ya cerradas', async () => {
+      await pagar()
+      const where = fichas.findMany.mock.calls[0][0].where
+      expect(where).toMatchObject({
+        paymentLinkId: 'cplink00000000000000000001',
+        browserToken: TOKEN,
+        stripePaymentIntentId: { not: null },
+      })
+      expect(fichas.findMany.mock.calls[0][0].take).toBeGreaterThan(0)
+    })
+
+    it.each([
+      ['de otra talla', {}],
+      ['vencida (aún ACTIVE)', { productId: TALLA_M, expiresAt: new Date('2020-01-01') }],
+      ['soltada por el barrido («vencida»)', { productId: TALLA_M, status: 'RELEASED', releasedReason: 'vencida' }],
+      ['de otro importe', { productId: TALLA_M, amountCents: 50000 + 1000 }],
+    ])('previa %s en processing → 409 IN_PROGRESS, sin apartar ni crear', async (_n, o) => {
+      fichas.findMany.mockResolvedValue([previa(o)])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(piRetrieve).toHaveBeenCalledWith('pi_previo', undefined, { stripeAccount: 'acct_A' })
+      expect(piCancel).not.toHaveBeenCalled()
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('previa ya cobrada → alreadyPaid con SU intento, sin apartar ni crear; soltada se marca «intento_cobrado»', async () => {
+      fichas.findMany.mockResolvedValue([previa({ status: 'RELEASED', releasedReason: 'vencida' })])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'succeeded' })
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_previo' })
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: 'chold0000000000000000000p', status: 'RELEASED' },
+        data: { releasedReason: 'intento_cobrado' },
+      })
+    })
+
+    it('previa cancelable → se cancela con SU cuenta, se confirma «canceled», se marca y se aparta otra', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_previo', status: 'canceled' })
+      const r = await pagar()
+      expect(piCancel).toHaveBeenCalledWith('pi_previo', undefined, { stripeAccount: 'acct_A' })
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: 'chold0000000000000000000p', status: { in: ['ACTIVE', 'RELEASED'] } },
+        data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+      })
+      expect(take).toHaveBeenCalledTimes(1)
+      expect(piCreate.mock.calls[0][1]).toEqual({ stripeAccount: 'acct_B', idempotencyKey: 'plhold:chold00000000000000000001' })
+      expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+    })
+
+    it('previa que Stripe no deja cancelar (pasó a processing a medio camino) → no se aparta ni se crea', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'requires_action' })
+      piCancel.mockRejectedValue(Object.assign(new Error('This PaymentIntent could not be canceled'), { statusCode: 400 }))
+      await expect(pagar()).rejects.toThrow('could not be canceled')
+      expect(take).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('cancelar responde sin «canceled» → 409 IN_PROGRESS, no se aparta', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_previo', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(take).not.toHaveBeenCalled()
+    })
+
+    it('previa ya cancelada en Stripe → sólo se marca y se aparta otra (sin volver a cancelar)', async () => {
+      fichas.findMany.mockResolvedValue([previa()])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'canceled' })
+      await pagar()
+      expect(piCancel).not.toHaveBeenCalled()
+      expect(fichas.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'RELEASED', releasedReason: 'intento_cancelado' } }),
+      )
+      expect(piCreate).toHaveBeenCalledTimes(1)
+    })
+
+    it('regresión: la previa que se reusa (misma talla, importe y datos, vigente) no se cancela: se devuelve su intento', async () => {
+      const misma = ficha({
+        stripePaymentIntentId: 'pi_viejo',
+        stripeAccountId: 'acct_A',
+        intentParams: { receipt_email: 'ana@example.test' },
+        checkoutSnapshot: { amount: '500.00', currency: 'MXN', applicationFeeCents: 580, metadata: {} },
+      })
+      fichas.findMany.mockResolvedValue([misma])
+      take.mockResolvedValue({ hold: misma, reused: true, released: [] })
+      piRetrieve.mockResolvedValue({ id: 'pi_viejo', client_secret: 'secret_viejo', status: 'requires_payment_method' })
+      const r = await pagar({ customerEmail: 'ana@example.test' })
+      expect(piCancel).not.toHaveBeenCalled()
+      expect(fichas.updateMany).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ paymentIntentId: 'pi_viejo', connectAccountId: 'acct_A' })
+    })
+  })
+
+  describe('la clienta corrige su correo o un campo y vuelve a «Pagar» con la misma talla e importe', () => {
+    const congelada = (o: Record<string, unknown> = {}) =>
+      ficha({
+        stripeAccountId: 'acct_A',
+        intentParams: { receipt_email: 'vieja@example.test', metadata: {} },
+        checkoutSnapshot: {
+          amount: '500.00',
+          currency: 'MXN',
+          applicationFeeCents: 580,
+          metadata: { customFieldResponses: { talla: 'x' } },
+        },
+        ...o,
+      })
+
+    it('correo distinto con intento → se cancela (confirmado) y se aparta otra con el correo nuevo', async () => {
+      const vieja = congelada({
+        stripePaymentIntentId: 'pi_viejo',
+        checkoutSnapshot: { amount: '500.00', currency: 'MXN', applicationFeeCents: 580, metadata: {} },
+      })
+      take
+        .mockResolvedValueOnce({ hold: vieja, reused: true, released: [] })
+        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [] })
+      piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_viejo', status: 'canceled' })
+      await pagar({ customerEmail: 'nueva@example.test' })
+      expect(piCancel).toHaveBeenCalledWith('pi_viejo', undefined, { stripeAccount: 'acct_A' })
+      expect(fichas.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: 'chold00000000000000000001' }),
+          data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+        }),
+      )
+      expect(take).toHaveBeenCalledTimes(2)
+      expect(piCreate).toHaveBeenCalledTimes(1)
+      expect(piCreate.mock.calls[0][0].receipt_email).toBe('nueva@example.test')
+      expect(piCreate.mock.calls[0][1].idempotencyKey).toBe('plhold:chold00000000000000000002')
+    })
+
+    it('correo distinto y el intento viejo ya está en processing → 409 IN_PROGRESS, sin crear otro', async () => {
+      take.mockResolvedValue({ hold: congelada({ stripePaymentIntentId: 'pi_viejo' }), reused: true, released: [] })
+      piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'processing' })
+      await expect(pagar({ customerEmail: 'nueva@example.test', customFieldResponses: { talla: 'x' } })).rejects.toMatchObject({
+        code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS',
+      })
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('campo personalizado distinto, ficha congelada sin intento → se suelta y se aparta otra con los datos nuevos', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(
+        liga({ customFields: [{ id: 'talla', label: 'Nota', type: 'TEXT', required: false }] }) as any,
+      )
+      take
+        .mockResolvedValueOnce({ hold: congelada({ intentParams: { metadata: {} } }), reused: true, released: [] })
+        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [] })
+      await pagar({ customFieldResponses: { talla: 'y' } })
+      expect(release).toHaveBeenCalledWith('chold00000000000000000001', 'cambio_de_compra')
+      expect(piCancel).not.toHaveBeenCalled()
+      expect(sesionCreada().data[0].metadata.customFieldResponses).toEqual({ talla: 'y' })
+      expect(piCreate.mock.calls[0][1].idempotencyKey).toBe('plhold:chold00000000000000000002')
+    })
+
+    it('regresión: mismos datos (mismo correo y campos) → reusa la ficha congelada con la misma llave', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(
+        liga({ customFields: [{ id: 'talla', label: 'Nota', type: 'TEXT', required: false }] }) as any,
+      )
+      const misma = congelada({ intentParams: { receipt_email: 'vieja@example.test', metadata: {} } })
+      take.mockResolvedValue({ hold: misma, reused: true, released: [] })
+      freeze.mockImplementation(async () => misma)
+      await pagar({ customerEmail: 'vieja@example.test', customFieldResponses: { talla: 'x' } })
+      expect(release).not.toHaveBeenCalled()
+      expect(take).toHaveBeenCalledTimes(1)
+      expect(piCreate.mock.calls[0][1].idempotencyKey).toBe('plhold:chold00000000000000000001')
+    })
   })
 
   it('cancelar el intento de la ficha soltada falla → se registra y el cobro nuevo sigue', async () => {
@@ -371,7 +568,7 @@ describe('POST payment-intent de la liga por prenda', () => {
     expect(prismaMock.checkoutSession.createMany).not.toHaveBeenCalled()
     const congelada = freeze.mock.calls[0][1]
 
-    // Entretanto cambian el correo de la clienta y la comisión del comercio, y la cuenta conectada pasa a B.
+    // Entretanto cambian la comisión del comercio y su cuenta conectada pasa a B (la clienta no cambió sus datos).
     prismaMock.paymentLink.findUnique.mockResolvedValue(
       liga({
         ecommerceMerchant: { ...liga().ecommerceMerchant, platformFeeBps: 300, providerCredentials: { connectAccountId: 'acct_B' } },
@@ -380,7 +577,7 @@ describe('POST payment-intent de la liga por prenda', () => {
     take.mockResolvedValue({ hold: ficha(congelada), reused: true, released: [] })
     freeze.mockImplementation(async () => ficha(congelada)) // el CAS no la pisa
     piCreate.mockResolvedValue({ id: 'pi_nuevo', client_secret: 'secret_nuevo' })
-    const r = await pagar({ customerEmail: 'otra@example.test' })
+    const r = await pagar({ customerEmail: 'ana@example.test' })
 
     expect(piCreate.mock.calls[1][1]).toEqual(piCreate.mock.calls[0][1])
     expect(piCreate.mock.calls[1][0]).toEqual(piCreate.mock.calls[0][0])

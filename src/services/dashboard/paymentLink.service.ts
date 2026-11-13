@@ -1786,6 +1786,49 @@ const SOLO_EN_SU_PAGINA = 'Esta liga sólo se paga con tarjeta desde su página 
 /** Un intento en estos estados todavía se puede confirmar desde la página: recargar devuelve ese mismo. */
 const INTENTO_REUSABLE = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action'])
 
+const EN_CURSO = 'Tu pago se está procesando. Espera unos segundos.'
+
+/** ¿La ficha congeló los mismos datos de la clienta (correo del recibo y campos personalizados) que trae este POST? */
+function mismosDatosDeLaClienta(
+  hold: Pick<PaymentLinkStockHold, 'intentParams' | 'checkoutSnapshot'>,
+  intentParams: Stripe.PaymentIntentCreateParams,
+  foto: FotoDeCobro,
+): boolean {
+  const congelados = hold.intentParams as { receipt_email?: string | null } | null
+  if (!congelados) return true // nada congelado todavía: este POST congela los suyos
+  const fotoCongelada = hold.checkoutSnapshot as unknown as FotoDeCobro | null
+  return (
+    (congelados.receipt_email ?? null) === (intentParams.receipt_email ?? null) &&
+    canonicalJson(fotoCongelada?.metadata?.customFieldResponses ?? null) === canonicalJson(foto.metadata.customFieldResponses ?? null)
+  )
+}
+
+/**
+ * Cierra en Stripe, con SU cuenta congelada, el intento de una ficha del navegador que ya no se va a usar (otra talla u
+ * otro importe, vencida, o con otros datos de la clienta). 🔴 Nunca se aparta otra ficha sin esto: si ese intento sigue
+ * en curso → 409; si ya cobró → `alreadyPaid` (y la ficha soltada se marca para no volver a revisarla); sólo con
+ * `canceled` confirmado por Stripe la ficha queda `intento_cancelado` y se puede comprar de nuevo.
+ */
+async function cerrarIntentoPrevio(
+  stripe: Stripe,
+  h: Pick<PaymentLinkStockHold, 'id' | 'stripePaymentIntentId' | 'stripeAccountId'>,
+): Promise<{ alreadyPaid: true; paymentIntentId: string } | null> {
+  const id = h.stripePaymentIntentId as string
+  const opciones = { stripeAccount: h.stripeAccountId as string }
+  let pi = await stripe.paymentIntents.retrieve(id, undefined, opciones)
+  if (INTENTO_REUSABLE.has(pi.status)) pi = await stripe.paymentIntents.cancel(id, undefined, opciones)
+  if (pi.status === 'succeeded') {
+    await prisma.paymentLinkStockHold.updateMany({ where: { id: h.id, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
+    return { alreadyPaid: true, paymentIntentId: pi.id }
+  }
+  if (pi.status !== 'canceled') throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+  await prisma.paymentLinkStockHold.updateMany({
+    where: { id: h.id, status: { in: ['ACTIVE', 'RELEASED'] } },
+    data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+  })
+  return null
+}
+
 /** El 409 cuando la ficha cambió mientras se cobraba (otra pestaña cambió de talla o venció): la página recarga la liga. */
 const APARTADO_CAMBIO = 'Tu apartado cambió. Vuelve a escoger tu talla.'
 
@@ -1818,6 +1861,8 @@ async function tallaDeLaLiga(
  *   → 409; `succeeded` → `alreadyPaid`; `canceled` → se suelta y se aparta otra.
  * - Ficha sin intento: se congela el cuerpo (si ya estaba congelado se usa ESE), se crea con la misma llave (Stripe devuelve
  *   el mismo intento si ya lo había creado), la sesión local sale de la foto congelada sin pisar una existente, y se liga.
+ * - Fichas previas del navegador que no se reusan: su intento se cierra en Stripe ANTES de apartar (`cerrarIntentoPrevio`).
+ * - Otro correo o campos de la clienta en la misma talla e importe = compra nueva (se cierra el intento viejo y se aparta otra).
  * 🔴 Un error al crear NO suelta la ficha: el siguiente POST del mismo navegador repite la misma petición; vence sola a los 15 min.
  */
 async function cobrarPrendaConApartado(args: {
@@ -1848,8 +1893,33 @@ async function cobrarPrendaConApartado(args: {
     }
   }
 
-  // Dos vueltas bastan: la segunda sólo ocurre si el intento de la ficha ya estaba cancelado (se suelta y se aparta otra).
-  for (let vuelta = 0; vuelta < 2; vuelta++) {
+  // Otra vuelta sólo si la ficha reusada ya no sirve (intento cancelado u otros datos de la clienta) y se aparta otra.
+  for (let vuelta = 0; vuelta < 3; vuelta++) {
+    // 🔴 Antes de apartar: toda ficha previa de este navegador con intento que NO se va a reusar se cierra en Stripe primero
+    // (incluidas las vencidas o soltadas por el barrido). Así nunca nace un intento nuevo con otro en curso o ya cobrado.
+    const ahora = new Date()
+    const previas = await prisma.paymentLinkStockHold.findMany({
+      where: {
+        paymentLinkId: paymentLink.id,
+        browserToken,
+        stripePaymentIntentId: { not: null },
+        OR: [{ status: 'ACTIVE' }, { status: 'RELEASED', releasedReason: { notIn: ['intento_cancelado', 'intento_cobrado'] } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    })
+    for (const h of previas) {
+      const seReusa =
+        h.status === 'ACTIVE' &&
+        h.productId === productId &&
+        h.expiresAt > ahora &&
+        (h.amountCents === null || h.amountCents === amountCents) &&
+        mismosDatosDeLaClienta(h, args.intentParams, args.checkoutSnapshot)
+      if (seReusa) continue
+      const pagada = await cerrarIntentoPrevio(stripe, h)
+      if (pagada) return pagada
+    }
+
     const { hold, released } = await takeOrReuseHold({
       paymentLinkId: paymentLink.id,
       venueId: paymentLink.venueId,
@@ -1874,6 +1944,17 @@ async function cobrarPrendaConApartado(args: {
         ),
     )
 
+    // La clienta corrigió su correo o un campo: es otra compra (el recibo no puede salir con los datos viejos).
+    if (!mismosDatosDeLaClienta(hold, args.intentParams, args.checkoutSnapshot)) {
+      if (hold.stripePaymentIntentId) {
+        const pagada = await cerrarIntentoPrevio(stripe, hold)
+        if (pagada) return pagada
+      } else {
+        await releaseHold(hold.id, 'cambio_de_compra')
+      }
+      continue
+    }
+
     if (hold.stripePaymentIntentId) {
       const pi = await stripe.paymentIntents.retrieve(hold.stripePaymentIntentId, undefined, {
         stripeAccount: hold.stripeAccountId as string,
@@ -1884,7 +1965,7 @@ async function cobrarPrendaConApartado(args: {
       }
       if (pi.status === 'succeeded') return { alreadyPaid: true as const, paymentIntentId: pi.id }
       if (!INTENTO_REUSABLE.has(pi.status)) {
-        throw new ConflictError('Tu pago se está procesando. Espera unos segundos.', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+        throw new ConflictError(EN_CURSO, 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
       }
       return respuesta(pi, hold)
     }

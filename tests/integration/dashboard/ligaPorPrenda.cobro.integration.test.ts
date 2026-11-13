@@ -16,12 +16,20 @@ jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
 }))
 let n = 0
-const piCreate = jest.fn(async (params: { amount: number }) => ({
-  id: `pi_talla_${process.pid}_${++n}`,
-  client_secret: `secret_${n}`,
-  status: 'requires_payment_method',
-  amount: params.amount,
-}))
+/** Como Stripe: la misma llave de idempotencia devuelve el MISMO intento. */
+const porLlave = new Map<string, { id: string; client_secret: string; status: string; amount: number }>()
+const piCreate = jest.fn(async (params: { amount: number }, opciones: { idempotencyKey: string }) => {
+  const previo = porLlave.get(opciones.idempotencyKey)
+  if (previo) return previo
+  const pi = {
+    id: `pi_talla_${process.pid}_${++n}`,
+    client_secret: `secret_${n}`,
+    status: 'requires_payment_method',
+    amount: params.amount,
+  }
+  porLlave.set(opciones.idempotencyKey, pi)
+  return pi
+})
 jest.mock('stripe', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
@@ -33,7 +41,7 @@ jest.mock('stripe', () => ({
         status: 'requires_payment_method',
         latest_charge: null,
       })),
-      cancel: jest.fn(),
+      cancel: jest.fn(async (id: string) => ({ id, status: 'canceled' })),
     },
   })),
 }))
@@ -131,12 +139,13 @@ it.each([
   const ficha = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { venueId: m.venueId } })
   expect(ficha).toMatchObject({ productId: m1, status: 'ACTIVE', stripePaymentIntentId: r.paymentIntentId, stripeAccountId: 'acct_talla' })
 
-  // Repetir el POST con el mismo navegador no crea otro intento.
+  // Repetir el POST con el mismo navegador y los mismos datos no crea otro intento.
   const llamadas = piCreate.mock.calls.length
   const otra: any = await createStripePaymentIntentForPaymentLink(liga.shortCode, {
     productId: m1,
     browserToken: 'tok_integracion_0123456789',
     tipAmount: 50,
+    customerEmail: `${m.key}-ana@example.test`,
   } as any)
   expect(otra.paymentIntentId).toBe(r.paymentIntentId)
   expect(piCreate.mock.calls.length).toBe(llamadas)
@@ -149,4 +158,18 @@ it.each([
     const lineas = await prisma.inventoryPostingLine.findMany({ where: { posting: { venueId: m.venueId } }, take: 10 })
     expect(lineas.map(l => l.productId)).toEqual([m1])
   }
+})
+
+it('dos POST simultáneos del mismo navegador y talla → una ficha, un intento y una sesión', async () => {
+  const m1 = await talla('S', 500, 1)
+  const pedir = () =>
+    createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: m1, browserToken: 'tok_concurrente_0123456789' } as any)
+  const [a, b]: any[] = await Promise.all([pedir(), pedir()])
+  expect(a.paymentIntentId).toBe(b.paymentIntentId)
+  expect(await prisma.paymentLinkStockHold.count({ where: { venueId: m.venueId, status: 'ACTIVE' } })).toBe(1)
+  expect(await prisma.checkoutSession.count({ where: { paymentLink: { venueId: m.venueId } } })).toBe(1)
+  // La única pieza sigue apartada para ESTE navegador: otro navegador la ve agotada.
+  await expect(
+    createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: m1, browserToken: 'tok_otro_navegador_0123456789' } as any),
+  ).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_VARIANT_SOLD_OUT' })
 })
