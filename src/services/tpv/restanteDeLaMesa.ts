@@ -20,7 +20,7 @@ import {
  *   propina siempre cobraba de menos tras agregar una ronda; recalcular el total perdía el envío de Deliverect.
  * - Por eso la columna manda, y la propina cobrada sólo se descuenta cuando es SEGURO que la columna la trae: el total coincide
  *   al centavo con la regla común CON las propinas cobradas y `Order.tipAmount` es exactamente esas propinas (así escriben los
- *   cobros y D19). Si no, se calcula como antes (sin restar propina): la garantía es «arreglado cuando es seguro, igual que
+ *   cobros y D19), y la cuenta nació en Avoqado. Si no, se calcula como antes (sin restar propina): la garantía es «arreglado cuando es seguro, igual que
  *   antes cuando no». Quedan como antes, sin arreglar (Codex r3 #1): un abono cripto con propina después de otro con tarjeta
  *   (B4Bit no reescribe `total` ni `tipAmount`), y una venta cancelada y cerrada con IVA aparte que recibe una propina sola.
  *   Los arregla que todos los escritores de `Order.total` lo guarden igual (anotado en el pizarrón).
@@ -37,6 +37,8 @@ export function restanteDeLaMesa(
     total: Prisma.Decimal | number | string | null | undefined
     /** La propina que la orden dice traer en su total (la columna `Order.tipAmount`). */
     tipAmount: Prisma.Decimal | number | string | null | undefined
+    /** De dónde nació la cuenta (`Order.originSystem`): el arreglo sólo aplica a las de Avoqado. */
+    originSystem: string | null | undefined
   },
   pagos: readonly PagoParaElRestante[],
 ): number {
@@ -58,7 +60,12 @@ export function restanteDeLaMesa(
   // exactamente esas propinas. Deliverect guarda en `tipAmount` la propina del canal (no la cobrada) y un cobro cripto deja
   // `total` y `tipAmount` como estaban: con una sola señal, un envío igual a la propina se leía como propina (Codex r3 #2).
   const centavos = (v: Prisma.Decimal) => v.toDecimalPlaces(2)
+  // Y sólo en una cuenta nacida en Avoqado (Codex r4): sus escritores calculan el total desde sus propias columnas, así que
+  // coincidir CON propinas exige que las traiga. Una de canal de entrega (Deliverect), SoftRestaurant o Shopify guarda en
+  // `total` cosas que ninguna columna explica (el envío del canal) y en `tipAmount` la propina del canal: un envío igual a la
+  // propina pasaba las dos señales. Esas quedan como antes.
   const elTotalTraeLasPropinas =
+    orden.originSystem === 'AVOQADO' &&
     centavos(totalGuardado).equals(centavos(totalConPropinas)) &&
     centavos(new Prisma.Decimal(orden.tipAmount ?? 0)).equals(centavos(cobrado.netTipAmount))
 

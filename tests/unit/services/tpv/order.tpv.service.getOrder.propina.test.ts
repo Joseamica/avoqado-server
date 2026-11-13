@@ -41,6 +41,7 @@ function cuenta(overrides: Record<string, any> = {}) {
     id: ORDER_ID,
     venueId: VENUE_ID,
     orderNumber: 'ORD-1794548257592',
+    originSystem: 'AVOQADO',
     status: 'CONFIRMED',
     paymentStatus: 'PARTIAL',
     type: 'DINE_IN',
@@ -173,7 +174,14 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
 
   it('un pedido de Deliverect llevado a la mesa conserva lo que sólo vive en su total (envío/comisión del canal) (Codex r2 #1)', async () => {
     // La ingesta guarda subtotal 140, total 165 (+ $25 del canal) y cargo por servicio 0; su total nunca trae propina.
-    findUniqueMock.mockResolvedValue(cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), paymentStatus: 'PENDING' }))
+    findUniqueMock.mockResolvedValue(
+      cuenta({
+        originSystem: 'DELIVERY_PLATFORM',
+        subtotal: new Decimal('140.00'),
+        total: new Decimal('165.00'),
+        paymentStatus: 'PENDING',
+      }),
+    )
 
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
 
@@ -182,7 +190,12 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
 
   it('un pedido de Deliverect con propina cobrada no resta una propina que su total no trae', async () => {
     findUniqueMock.mockResolvedValue(
-      cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), payments: [pago('100.00', '15.00', { id: 'externo' })] }),
+      cuenta({
+        originSystem: 'DELIVERY_PLATFORM',
+        subtotal: new Decimal('140.00'),
+        total: new Decimal('165.00'),
+        payments: [pago('100.00', '15.00', { id: 'externo' })],
+      }),
     )
 
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
@@ -194,12 +207,49 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
     // Productos $140 + envío $25 = total 165 (sin propina; su `tipAmount` es la del canal, 0). Abono cripto $100 + $25 de propina:
     // B4Bit no reescribe total ni tipAmount. 140 + 25 coincide con 165, pero la columna de propina no: faltan $65 (como antes).
     findUniqueMock.mockResolvedValue(
-      cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), payments: [pago('100.00', '25.00', { id: 'cripto' })] }),
+      cuenta({
+        originSystem: 'DELIVERY_PLATFORM',
+        subtotal: new Decimal('140.00'),
+        total: new Decimal('165.00'),
+        payments: [pago('100.00', '25.00', { id: 'cripto' })],
+      }),
     )
 
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
 
     expect(result.amount_left).toBe(65)
+  })
+
+  it('Deliverect con envío = propina del canal = propina cobrada (triple empate) sigue como antes (Codex r4)', async () => {
+    // Productos $140, envío $25, propina del canal $25: total 165 SIN propina y tipAmount 25. Abono cripto $100 + $25.
+    findUniqueMock.mockResolvedValue(
+      cuenta({
+        originSystem: 'DELIVERY_PLATFORM',
+        subtotal: new Decimal('140.00'),
+        total: new Decimal('165.00'),
+        tipAmount: new Decimal('25.00'),
+        payments: [pago('100.00', '25.00', { id: 'cripto' })],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(65)
+  })
+
+  it('una cuenta de SoftRestaurant o Shopify con propina cobrada queda como antes (su total no lo escribe Avoqado)', async () => {
+    findUniqueMock.mockResolvedValue(
+      cuenta({
+        originSystem: 'POS_SOFTRESTAURANT',
+        total: new Decimal('60.00'),
+        tipAmount: new Decimal('10.00'),
+        payments: [pago('25.00', '10.00')],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(35)
   })
 
   it('si no es seguro que el total traiga la propina, queda como antes (abono cripto con propina tras uno con tarjeta)', async () => {
