@@ -22,6 +22,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
 import { validarProductosDelCanal } from './productosDelCanal'
+import { leerImpresion, validarEstacionesDeImpresion, validarFormaImpresion } from './impresionDelCanal'
 import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
@@ -149,7 +150,10 @@ export async function createChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
   // Codex r1 #4: crear valida `config` igual que editar (horario, precios, lista de productos).
-  if (data.config != null) validarConfig(data.config as Prisma.InputJsonValue)
+  if (data.config != null) {
+    validarConfig(data.config as Prisma.InputJsonValue)
+    await validarEstacionesDelCanal(venueId, data.config)
+  }
 
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
@@ -340,6 +344,15 @@ function validarConfig(entrante: Prisma.InputJsonValue): void {
   if (c.agotarPorInventario !== undefined && c.agotarPorInventario !== null && typeof c.agotarPorInventario !== 'boolean') {
     throw new ValidationError('`agotarPorInventario` debe ser sí o no (true/false)')
   }
+  if (c.impresion !== undefined && c.impresion !== null) validarFormaImpresion(c.impresion)
+}
+
+/** Las estaciones de `impresion` deben ser de ESTE negocio, estar activas y llevar comanda (antes de abrir la transacción). */
+async function validarEstacionesDelCanal(venueId: string, config: unknown): Promise<void> {
+  const c = config as Record<string, unknown> | null
+  if (c && typeof c === 'object' && c.impresion !== undefined && c.impresion !== null) {
+    await validarEstacionesDeImpresion(prisma, venueId, leerImpresion({ impresion: c.impresion }))
+  }
 }
 
 export async function updateChannelLink(
@@ -348,7 +361,10 @@ export async function updateChannelLink(
   data: UpdateChannelLinkInput,
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
-  if (data.config !== undefined && data.config !== null) validarConfig(data.config)
+  if (data.config !== undefined && data.config !== null) {
+    validarConfig(data.config)
+    await validarEstacionesDelCanal(venueId, data.config)
+  }
 
   // Leer-mezclar-escribir con la fila BLOQUEADA: una transacción sola no basta (en READ COMMITTED las
   // dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
