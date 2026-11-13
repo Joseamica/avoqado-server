@@ -23,6 +23,7 @@ import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.
 import { rejectOnlineOrder } from '@/services/online-ordering/transitions.service'
 import * as avisosEnLinea from '@/services/online-ordering/notifications.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -38,6 +39,8 @@ const venueId = `itest-canjes-${randomUUID()}`
 let staffId: string
 let productId: string
 let cycle = 0
+/** hz:87f4b879:D1: el personal extra que crean sus pruebas (se borra con el de la suite, después de sus filas). */
+const personalExtra: string[] = []
 
 beforeAll(async () => {
   await prisma.organization.create({ data: { id: venueId, name: venueId, email: `${venueId}@test.example`, phone: '5500000000' } })
@@ -69,7 +72,7 @@ afterAll(async () => {
   await prisma.product.deleteMany({ where: { venueId } })
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  await prisma.staff.deleteMany({ where: { id: { in: [staffId, ...personalExtra] } } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: venueId } })
 })
@@ -520,5 +523,68 @@ describe('Anular una venta sin cobrar le devuelve al cliente sus canjes', () => 
     const o = await orderOf(orderId)
     expect(o.orderDiscounts.map(d => d.name)).toEqual(['Cortesía'])
     expect(await points(customerId)).toBe(10_000)
+  })
+})
+
+// hz:87f4b879:D1, contra Postgres real: en la terminal, quien anula es la SESIÓN (`actorId`), no el vendedor elegido (`staffId`
+// del cuerpo). Aquí truena lo que el doble no ve: `LoyaltyTransaction.createdById` es FK a StaffVenue y `performedById` a Staff.
+describe('D1: anular todo en la terminal devuelve los canjes a nombre de la sesión', () => {
+  let sesionId: string, sesionMembresiaId: string, sinMembresiaId: string, deBajaId: string
+
+  beforeAll(async () => {
+    sesionId = (await prisma.staff.create({ data: { email: `${venueId}@sesion.test`, firstName: 'Sesión', lastName: 'D1' } })).id
+    sinMembresiaId = (await prisma.staff.create({ data: { email: `${venueId}@dueno.test`, firstName: 'Dueño', lastName: 'D1' } })).id
+    deBajaId = (await prisma.staff.create({ data: { email: `${venueId}@baja.test`, firstName: 'Baja', lastName: 'D4' } })).id
+    personalExtra.push(sesionId, sinMembresiaId, deBajaId)
+    sesionMembresiaId = (await prisma.staffVenue.create({ data: { venueId, staffId: sesionId, role: 'CASHIER' } })).id
+    await prisma.staffVenue.create({ data: { venueId, staffId: deBajaId, role: 'CASHIER', active: false } })
+  })
+
+  const casos = [
+    ['con membresía', () => sesionId, () => sesionMembresiaId],
+    ['sin membresía en el negocio (dueño de la organización)', () => sinMembresiaId, () => null],
+    // hz:87f4b879:D4: una membresía dada de baja no firma: el ajuste queda sin autor, como «sin membresía» (igual que D3/D5).
+    ['con la membresía dada de baja (dueño que antes fue empleado)', () => deBajaId, () => null],
+  ] as const
+
+  it.each(casos)('sesión %s: los mismos puntos vuelven; ajuste, bitácoras y OrderAction de la sesión', async (_, sesion, membresia) => {
+    ;(logAction as jest.Mock).mockClear()
+    const customerId = await newCustomer(10_000)
+    const orderId = await newOrder(customerId)
+    await redeemPointsToOrder(venueId, orderId, customerId, 1_000, staffId)
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { items: true } })
+
+    await voidItems(venueId, orderId, {
+      itemIds: o.items.map(i => i.id),
+      reason: 'FULLTEST',
+      staffId,
+      expectedVersion: o.version,
+      actorId: sesion(),
+    })
+
+    expect((await orderOf(orderId)).status).toBe('CANCELLED')
+    expect(await points(customerId)).toBe(10_000)
+    const ajustes = await prisma.loyaltyTransaction.findMany({
+      where: { orderId, type: 'ADJUST' },
+      select: { points: true, createdById: true },
+    })
+    expect(ajustes).toEqual([{ points: 1_000, createdById: membresia() }])
+    const devolucion = await prisma.activityLog.findMany({
+      where: { venueId, entityId: orderId, action: 'ORDER_CANCEL_LOYALTY_RETURNED' },
+      select: { staffId: true },
+    })
+    expect(devolucion).toEqual([{ staffId: sesion() }])
+    expect(await prisma.orderAction.findMany({ where: { orderId, actionType: 'VOID' }, select: { performedById: true } })).toEqual([
+      { performedById: sesion() },
+    ])
+    // `logAction` está simulado en esta suite: se revisa lo que recibe, no la fila de ActivityLog.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ITEM_VOIDED',
+        entityId: orderId,
+        staffId: sesion(),
+        data: expect.objectContaining({ vendedorSegunElAparato: staffId }),
+      }),
+    )
   })
 })

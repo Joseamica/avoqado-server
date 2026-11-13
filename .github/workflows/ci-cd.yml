@@ -112,7 +112,9 @@ jobs:
 
       - name: 🔍 TypeScript compilation check
         # El chequeo completo rebasa 12 GB; el runner público tiene 16 GB. Mantener también tests/ y scripts/.
-        run: node --max-old-space-size=14336 node_modules/typescript/bin/tsc --noEmit
+        # La memoria vive SÓLO en el script de npm (hz:87f4b879:D3): el 8-nov se subió aquí y no allá, y `npm run typecheck`
+        # (avq-verify, pre-deploy-check.sh, fly-deploy.yml) se quedaba sin memoria.
+        run: npm run typecheck
 
       # S5b (red por traba): ninguna escritura de beneficios con un `tx` que no venga de withDeadlockRetry. Paso aparte: no toca los
       # shards de las unitarias, Jest ni CRONOMETRO. Lleva la memoria del typecheck dentro del propio script de npm.

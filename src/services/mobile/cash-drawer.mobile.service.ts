@@ -11,6 +11,7 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 import { logAction } from '../dashboard/activity-log.service'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
+import { paymentIdDeLaVentaDelServidor } from '../shared/cashDrawerPosting'
 import { Decimal } from '@prisma/client/runtime/library'
 import { CashDrawerEventType, Prisma } from '@prisma/client'
 
@@ -73,7 +74,7 @@ export async function getCurrentSession(venueId: string, incluirEsperado = false
     return null
   }
 
-  return formatSession(session, incluirEsperado)
+  return formatSession(session, incluirEsperado, await llavesDeLosCobros(venueId, session.events))
 }
 
 // ============================================================================
@@ -223,7 +224,7 @@ export async function openSession(params: OpenSessionParams, incluirEsperado = f
   // residuo declarado en `esMiPropiaCaja` de las dos apps). `null` = caja sin llave (app o server viejos).
   const aperturaGuardada = session.events.find((e: { type: string }) => e.type === 'OPEN')
   return {
-    ...formatSession(session, incluirEsperado),
+    ...formatSession(session, incluirEsperado, await llavesDeLosCobros(venueId, session.events)),
     shiftId: apertura.shiftId,
     cajaCreada: apertura.cajaCreada,
     shiftCreado: apertura.shiftCreado,
@@ -679,7 +680,7 @@ export async function closeSession(params: CloseSessionParams) {
   }
 
   // `shiftId` es ADITIVO: el turno que este cierre cerró, o `null` si no había ninguno abierto.
-  return { ...formatSession(closedSession), shiftId }
+  return { ...formatSession(closedSession, false, await llavesDeLosCobros(venueId, closedSession.events)), shiftId }
 }
 
 // ============================================================================
@@ -709,8 +710,13 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
     }),
   ])
 
+  // D23: una sola lectura de pagos para toda la página.
+  const llaves = await llavesDeLosCobros(
+    venueId,
+    sessions.flatMap(s => s.events),
+  )
   return {
-    sessions: sessions.map(s => formatSession(s)),
+    sessions: sessions.map(s => formatSession(s, false, llaves)),
     pagination: {
       page,
       pageSize,
@@ -1447,7 +1453,7 @@ export async function syncEvents(
 
   return {
     syncedCount: insertedCount,
-    events: allRows.map(formatEvent),
+    events: allRows.map(row => formatEvent(row)),
     rechazadosSinPermiso,
     rechazadosPorImporte,
   }
@@ -1525,7 +1531,7 @@ function dollarsToDecimal(dollars: number): Decimal {
  * Una sesión CERRADA lo revela siempre: ese es el resultado que el cajero debe ver al
  * confirmar su conteo, y por eso el cierre no necesita tratarse aparte.
  */
-function formatSession(session: any, incluirEsperado = false) {
+function formatSession(session: any, incluirEsperado = false, llaves?: Map<string, string | null>) {
   const expectedAmount = calculateExpectedAmount(session)
   const revelar = incluirEsperado || session.status !== 'OPEN'
 
@@ -1545,7 +1551,7 @@ function formatSession(session: any, incluirEsperado = false) {
     ...(revelar ? { expectedAmount: Number(expectedAmount.toFixed(2)) } : {}),
     overShort: session.overShort ? toDollars(session.overShort) : null,
     closingNote: session.closingNote,
-    events: session.events ? session.events.map(formatEvent) : [],
+    events: session.events ? session.events.map((event: any) => formatEvent(event, llaves)) : [],
   }
 }
 
@@ -1571,8 +1577,14 @@ function formatSession(session: any, incluirEsperado = false) {
  *
  * ADITIVO y OPCIONAL (contrato /mobile — nunca se quita ni se renombra un campo): `null`
  * cuando la fila no tiene llave, y una app vieja que no lo lee se comporta idéntico a hoy.
+ *
+ * 🔴 D23: `paymentIdempotencyKey` es la llave con la que el aparato mandó el cobro de una venta que escribió el SERVIDOR (ver
+ * [llavesDeLosCobros]). Igual de aditivo, y SÓLO viene cuando se leyó el pago de esa venta: con su llave, o `null` si el pago no
+ * tiene. En todo lo demás el campo NO VIENE, y eso quiere decir «no lo sé» (no es una venta del servidor, la lectura falló, el pago ya
+ * no está en esta sucursal, o es un eco de `/sync`, `pay-in` o `pay-out`). El POS sólo descarta una copia suya por identidad cuando el
+ * campo viene; sin él adivina como antes. Un `null` inventado le haría creer que la venta no es de ninguna de sus copias.
  */
-function formatEvent(event: any) {
+function formatEvent(event: any, llaves?: Map<string, string | null>) {
   return {
     id: event.id,
     sessionId: event.sessionId,
@@ -1583,7 +1595,54 @@ function formatEvent(event: any) {
     staffName: event.staffName,
     orderId: event.orderId,
     localId: event.localId ?? null,
+    ...(event.localId && llaves?.has(event.localId) ? { paymentIdempotencyKey: llaves.get(event.localId) ?? null } : {}),
     createdAt: event.createdAt.toISOString(),
+  }
+}
+
+/**
+ * 🔴 D23 (`hz:e5ee98bc:D23`): `localId` de cada venta en efectivo que escribió el SERVIDOR → la llave con la que el aparato mandó
+ * ese cobro (`Payment.idempotencyKey`).
+ *
+ * La venta del servidor se llama `srv-cash-sale:<paymentId>` y la copia que el POS escribe al cobrar se llama por la llave K de ese
+ * cobro: sin un dato común, el POS adivinaba cuál era su copia, por orden y luego por importe. Una copia escrita tarde contaba dos
+ * veces, y la venta de OTRO aparato del mismo importe se llevaba la copia de un cobro que seguía en la cola. K ya vive en el pago
+ * (todo cobro del POS la manda: el `PAY_CASH` con el id del intent, la cola de cobros con el id de su fila y el cobro con red con su
+ * llave), así que se resuelve al LEER: cubre a los 8 escritores de `postCashSaleToDrawer` y a las ventas de antes, sin migración.
+ *
+ * Devuelve sólo las ventas cuyo pago SE ENCONTRÓ (`localId` → llave, o `null` si el pago no tiene). Una sola lectura, acotada a la
+ * sucursal y con tope. Un pago que ya no está en esta sucursal (Codex r2: el job de «SIM de Evento» de PlayTelecom mueve la orden y sus
+ * pagos a otra y deja la caja) no se encontró: su venta sale SIN el campo («no lo sé»), nunca con un `null` que diga «no es tuya».
+ * NUNCA lanza: es una ayuda para la fusión del aparato; si falla, la caja contesta igual sin el campo y el POS adivina como siempre.
+ */
+async function llavesDeLosCobros(
+  venueId: string,
+  events: Array<{ type: string; localId?: string | null }>,
+): Promise<Map<string, string | null>> {
+  const ventaDelPago = new Map<string, string>() // paymentId → localId
+  for (const event of events) {
+    const paymentId = event.type === 'CASH_SALE' ? paymentIdDeLaVentaDelServidor(event.localId) : null
+    if (paymentId) ventaDelPago.set(paymentId, event.localId as string)
+  }
+  if (ventaDelPago.size === 0) return new Map()
+  try {
+    const pagos = await prisma.payment.findMany({
+      where: { venueId, id: { in: [...ventaDelPago.keys()] } },
+      select: { id: true, idempotencyKey: true },
+      take: ventaDelPago.size,
+    })
+    const llaves = new Map<string, string | null>()
+    for (const pago of pagos) {
+      const localId = ventaDelPago.get(pago.id)
+      if (localId) llaves.set(localId, pago.idempotencyKey ?? null)
+    }
+    return llaves
+  } catch (error) {
+    logger.warn('💵 [CASH-DRAWER] No se pudieron leer las llaves de los cobros; la caja sale sin ellas', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return new Map()
   }
 }
 

@@ -13,6 +13,7 @@ import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { aCentavos, capacidadRestante, comoJson, leerReparto, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import { RENGLON_PARA_REPARTO_SELECT, conservarDescuentoHistorico, filasDeLaOrden } from '../shared/repartoDescuentoTx'
+import { calculateDiscountCents } from '../shared/discount.service'
 
 /**
  * Canjear el premio de una cartilla llena.
@@ -50,7 +51,10 @@ async function calcularDescuento(
   if (reward.rewardType === StampRewardType.PERCENTAGE) {
     // 🔴 El porcentaje se aplica a la cuenta. Tratar el 20 como pesos cobra de menos
     // en una cuenta grande y de MÁS en una chica, y pasa desapercibido hasta el corte.
-    return { monto: money((base * Number(reward.rewardValue ?? 0)) / 100), renglonPremiadoId: null }
+    // D2 (12-nov): en centavos enteros con la regla con la que ANDROID e iOS lo estiman (`premioEstimadoCents`, doble precisión):
+    // en pesos flotantes 10 % de $21.35 daba $2.13 y la tablet avisaba «se aplicó por $2.13».
+    const pct = { type: 'PERCENTAGE', value: Number(reward.rewardValue ?? 0) }
+    return { monto: calculateDiscountCents(pct, aCentavos(base)) / 100, renglonPremiadoId: null }
   }
 
   if (reward.rewardType === StampRewardType.FREE_PRODUCT) {

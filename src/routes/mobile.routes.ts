@@ -121,13 +121,15 @@ import {
 } from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema'
-import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
+import { updateCustomerContact, getCustomers as getCustomersMobile } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
 import {
   checkCortesiaEnDescuento,
   checkCortesiaPermissionIfPresent,
   checkCuponPermissionIfPresent,
+  checkDescuentoDelCliente,
+  traeDescuentoDelCliente,
   traeDescuentoManual,
 } from '../middlewares/cortesiaPidePermiso.middleware'
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
@@ -682,10 +684,18 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
   const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
   const hasPromotion = items.some((item: any) => item?.promotionRef)
   if (!hasPromotion && !(revisarDescuentoManual && traeDescuentoManual(req.body))) return afterPromotion()
+  const afterPermission = () => (hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion())
+  // Descuento del cliente (fase 2): su rebaja la autoriza el permiso propio o el PIN del cuerpo atado al monto (lo valida el
+  // servicio). Ese PIN no autoriza nada más: una promoción sigue pidiendo `discounts:apply` aquí mismo. Su 403 o el error de la base
+  // (500, reintentable) cortan la cadena: se pasan tal cual.
+  if (revisarDescuentoManual && traeDescuentoDelCliente(req.body)) {
+    return checkDescuentoDelCliente(req, res, (error?: unknown) => {
+      if (error) return next(error)
+      return hasPromotion ? checkPermission('discounts:apply')(req, res, afterPermission) : afterPermission()
+    })
+  }
   // Promoción y rebaja manual comparten el permiso: una sola ficha de gerente por petición, sin consumirla dos veces.
-  return checkPermission('discounts:apply')(req, res, () =>
-    hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion(),
-  )
+  return checkPermission('discounts:apply')(req, res, afterPermission)
 }
 
 router.post(
@@ -1600,7 +1610,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *       200:
  *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
-router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
+router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), getCustomersMobile)
 
 /**
  * @openapi

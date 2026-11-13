@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { AreaTicketCheckoutStatus, Prisma } from '@prisma/client'
 import type { TxConReintento } from '@/utils/serializableRetry'
 import {
   claseDeEstado,
@@ -45,6 +45,8 @@ export interface SaldoReabierto {
   reopenedAmount: Prisma.Decimal
   /** En positivo. 0 si no reabre. */
   reopenedTipAmount: Prisma.Decimal
+  /** D649: la sesión de vales viva de la cuenta que se puso al día (para la bitácora de quien llama). */
+  sesionDeVales?: { id: string; estadoAntes: string }
 }
 
 const NADA: SaldoReabierto = { reabre: false, reopenedAmount: ZERO, reopenedTipAmount: ZERO }
@@ -96,7 +98,8 @@ export function saldoQueReabreElReembolso(input: {
 /**
  * Lo llama quien acaba de crear un `Payment type=REFUND` colgado de una cuenta, DENTRO de su transacción y con la cuenta YA
  * bloqueada (`lockExistingOrderForPayment`). Si reabre: marca la fila y reescribe pagado, propina, total y
- * lo que falta de la cuenta (su `paymentStatus` se queda igual: ya era PENDING o PARTIAL). Si no, no escribe nada. Quien llama audita después del commit con lo que regresa.
+ * lo que falta de la cuenta (su `paymentStatus` se queda igual: ya era PENDING o PARTIAL) y, si es venta de vales, pone al día su
+ * sesión viva (D649, `avisarALaSesionDeValesEnTx`). Si no, no escribe nada. Quien llama audita después del commit con lo que regresa.
  */
 export async function fijarSaldoReabiertoEnTx(
   tx: TxConReintento,
@@ -169,7 +172,40 @@ export async function fijarSaldoReabiertoEnTx(
       // la cuenta; la guarda de cancelar). Lo que cambia son los importes, que es lo que estaba mal.
     },
   })
-  return decision
+  const sesionDeVales = await avisarALaSesionDeValesEnTx(tx, input)
+  return sesionDeVales ? { ...decision, sesionDeVales } : decision
+}
+
+/**
+ * D649 (Codex apps-viejas r3): una venta de VALES también tiene su sesión de cobro, y el POS (ANDROID ≥2.25.22, WINDOWS, iOS 1.15.x)
+ * descarta una respuesta de esa sesión con la MISMA versión y menos pagado, y una «sin abono» (ni PARTIALLY_PAID ni pagado > 0)
+ * sobre una copia «con abono». Sin esto, tras devolver el abono la caja seguía proponiendo «Cobrar saldo» por lo de antes.
+ * La sesión viva de la cuenta (`orderId` es único) sube su versión y, si seguía MATERIALIZED (el abono entró por otro canal:
+ * pago manual, cripto, saldo del cliente), pasa a PARTIALLY_PAID: tuvo un abono y ya no se cancela (`CHECKOUT_HAS_PAYMENT`).
+ *
+ * 🔴 SKIP LOCKED: aquí la cuenta ya está bloqueada y la jerarquía de vales es sesión → vales → cuenta; esperar la sesión cruzaría
+ * candados con un cobro de vales (40P01). Una fila que ya tomó esta transacción sí se devuelve.
+ * ponytail: si otra caja tiene la sesión en ese mismo instante no se sube; la pone al día su siguiente cambio de versión (un cobro
+ * de vales siempre la sube). Si un día hace falta siempre, que los núcleos del reembolso tomen la jerarquía de vales primero.
+ */
+async function avisarALaSesionDeValesEnTx(
+  tx: TxConReintento,
+  input: { venueId: string; orderId: string },
+): Promise<SaldoReabierto['sesionDeVales']> {
+  const [sesion] = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+    SELECT id, status::text AS status FROM "AreaTicketCheckoutSession"
+    WHERE "orderId" = ${input.orderId} AND "venueId" = ${input.venueId}
+      AND status IN ('MATERIALIZED', 'PARTIALLY_PAID', 'PAYMENT_PENDING', 'RECONCILIATION_REQUIRED')
+    FOR UPDATE SKIP LOCKED`
+  if (!sesion) return undefined
+  await tx.areaTicketCheckoutSession.update({
+    where: { id: sesion.id },
+    data: {
+      version: { increment: 1 },
+      ...(sesion.status === AreaTicketCheckoutStatus.MATERIALIZED ? { status: AreaTicketCheckoutStatus.PARTIALLY_PAID } : {}),
+    },
+  })
+  return { id: sesion.id, estadoAntes: sesion.status }
 }
 
 /**

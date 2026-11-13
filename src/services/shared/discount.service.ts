@@ -15,7 +15,7 @@
 
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
-import { comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from './repartoDescuento'
+import { aCentavos, comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido, porcentajeEnCentavos } from './repartoDescuento'
 import type { DescuentoDeLiga } from '../dashboard/paymentLinkDiscount'
 
 /**
@@ -34,22 +34,25 @@ export function calculateDiscountPesos(discount: any, basePesos: number): number
     throw new BadRequestError(`Discount "${discount.name}" requires a minimum purchase amount`)
   }
 
-  let amountPesos: number
+  // D2 (12-nov): en centavos enteros con la regla de la TPV (`porcentajeEnCentavos`): en pesos flotantes 10 % de $21.35 daba $2.13
+  // y la TPV sin red, que manda `orderDiscountId` a `/mobile/orders`, ya había cobrado con $2.14. Tope y clamp, los de siempre.
+  const baseCents = aCentavos(basePesos)
+  let amountCents: number
   if (discount.type === 'PERCENTAGE') {
-    amountPesos = roundPesos((basePesos * Number(discount.value)) / 100)
+    amountCents = porcentajeEnCentavos(baseCents, discount.value)
   } else if (discount.type === 'FIXED_AMOUNT') {
-    amountPesos = roundPesos(Number(discount.value))
+    amountCents = aCentavos(discount.value)
   } else if (discount.type === 'COMP') {
-    amountPesos = basePesos
+    amountCents = baseCents
   } else {
     throw new BadRequestError(`Unsupported discount type: ${discount.type}`)
   }
 
   if (discount.maxDiscountAmount) {
-    amountPesos = Math.min(amountPesos, Number(discount.maxDiscountAmount))
+    amountCents = Math.min(amountCents, aCentavos(discount.maxDiscountAmount))
   }
 
-  return roundPesos(Math.min(amountPesos, basePesos))
+  return Math.min(amountCents, baseCents) / 100
 }
 
 /**
@@ -280,8 +283,13 @@ export function filaDeDescuentoDeCuenta(p: {
   orderId: string
   montoPesos: number
   appliedById: string | null
-  /** hz:e0b12f00:D1: sólo cuando el descuento deja la cuenta en $0 (una cortesía): quien la autorizó. */
+  /** hz:e0b12f00:D1: cuando el descuento deja la cuenta en $0 (una cortesía) o lo autorizó el PIN del descuento del cliente. */
   authorizedById?: string
+  /**
+   * Descuento del cliente (fase 2): el mismo descuento libre con su etiqueta. Sigue FIXED_AMOUNT (un recálculo conserva el monto
+   * que se cobró: nunca se re-deriva como % del catálogo); `discountId` sólo si existe en el negocio.
+   */
+  delCliente?: { discountId: string | null; name: string }
 }): Prisma.OrderDiscountUncheckedCreateInput {
   const monto = roundPesos(p.montoPesos)
   return {
@@ -294,6 +302,7 @@ export function filaDeDescuentoDeCuenta(p: {
     isManual: true,
     appliedById: p.appliedById,
     ...(p.authorizedById ? { authorizedById: p.authorizedById } : {}),
+    ...(p.delCliente ? { ...p.delCliente, isAutomatic: true, isManual: false } : {}),
     reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
   }
 }

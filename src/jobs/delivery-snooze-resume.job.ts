@@ -39,6 +39,8 @@ export class DeliverySnoozeResumeJob {
     this.job = scheduleJob('deliverySnoozeResume', this.CRON_PATTERN, async () => {
       await this.runOnce()
     })
+    // 🔴 `scheduleJob` crea el reloj APAGADO: sin esto el job anunciaba «started» y nunca corría (20-ago → 12-nov).
+    this.job.start()
     logger.info('⏰ Delivery snooze resume job started — cada minuto')
   }
 

@@ -62,6 +62,8 @@ export class DeliveryMenuSyncJob {
     this.job = scheduleJob('deliveryMenuSync', this.CRON_PATTERN, async () => {
       await this.runOnce()
     })
+    // 🔴 `scheduleJob` crea el reloj APAGADO: sin esto el job anunciaba «started» y nunca corría (20-ago → 12-nov).
+    this.job.start()
     logger.info('📋 Delivery menu sync job started — cada 5min, tope 20 canales')
   }
 

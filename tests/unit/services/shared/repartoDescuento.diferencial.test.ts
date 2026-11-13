@@ -8,6 +8,7 @@
  *
  * Las dos funciones de develop están copiadas TAL CUAL como oráculo (sólo cambian sus nombres); las piezas que usan no cambiaron.
  */
+import { Prisma } from '@prisma/client'
 import {
   aCentavos,
   cuentaLlena,
@@ -57,6 +58,40 @@ function importesDeDevelop(
     descuento += monto
   }
   return { montosRederivados, descuento: aPesosRedondeados(descuento) }
+}
+
+/**
+ * D2 (pizarrón hz:dcc49fe5:D2, 12-nov): el oráculo de develop con la ÚNICA diferencia buscada, escrita aparte en decimal exacto: el %
+ * re-derivado en centavos, mitad hacia arriba (develop en pesos flotantes: 2.135 × 100 = 213.49999999999997 ⇒ $2.13 en vez de $2.14).
+ */
+function importesDeDevelopEnCentavos(
+  renglones: RenglonParaReparto[],
+  filas: FilaParaReparto[],
+): { montosRederivados: Map<string, number>; descuento: number } {
+  const D = Prisma.Decimal
+  const suma = (lista: RenglonParaReparto[]) =>
+    lista.filter(x => !estaRegalado(x)).reduce((s, x) => s.plus(new D(String(x.total ?? 0))), new D(0))
+  const baseDeCuenta = suma(renglones.filter(x => !x.orderPromotionId))
+  const montosRederivados = new Map<string, number>()
+  let descuento = new D(0)
+  for (const fila of filas) {
+    let base: Prisma.Decimal | null = null
+    if (seRecalculaComoPorcentajeDeCuenta(fila)) base = baseDeCuenta
+    else if (seRecalculaDentroDeSuAmbito(fila)) {
+      const ambito = leerReparto(fila.reparto)!.ambito!
+      base = suma(renglones.filter(x => enAmbito(x, ambito)))
+    }
+    const tope = leerReparto(fila.reparto)?.tope ?? null
+    if (base === null) {
+      descuento = descuento.plus(new D(String(fila.amount)))
+      continue
+    }
+    const calculado = base.mul(String(fila.value)).div(100).toDecimalPlaces(2, D.ROUND_HALF_UP).toNumber()
+    const monto = tope === null ? calculado : Math.min(calculado, tope)
+    montosRederivados.set(fila.id, monto)
+    descuento = descuento.plus(new D(String(monto)))
+  }
+  return { montosRederivados, descuento: descuento.toDecimalPlaces(2, D.ROUND_HALF_UP).toNumber() }
 }
 
 function recorteDeDevelop(fila: FilaParaRecorte, renglones: RenglonQueCambia[]): Recorte {
@@ -294,23 +329,33 @@ describe('W7 A1 · diferencial contra develop (61125d8e0)', () => {
     expect(exactas).toBeGreaterThan(1_000) // Codex r8: también cuentas EXACTAMENTE llenas, no sólo excedidas
   })
 
-  it(`importesDeLasFilas: en ${CASOS.toLocaleString('es-MX')} cuentas generadas SIN exceso, los importes y la cabecera = develop`, () => {
+  it(`importesDeLasFilas: en ${CASOS.toLocaleString('es-MX')} cuentas generadas SIN exceso, los importes y la cabecera = develop salvo el medio centavo de D2`, () => {
     const azar = mulberry32(12112026)
     let sinExceso = 0
+    let medioCentavo = 0
     for (let i = 0; i < CASOS; i++) {
       const { renglones, filas } = cuentaAlAzar(azar)
-      const viejo = importesDeDevelop(renglones, filas)
+      const exacto = importesDeDevelopEnCentavos(renglones, filas)
       const techo = renglones.reduce((s, r) => s + aCentavos(r.total), 0)
-      const suma = filas.reduce((s, f) => s + aCentavos(viejo.montosRederivados.get(f.id) ?? f.amount), 0)
+      const suma = filas.reduce((s, f) => s + aCentavos(exacto.montosRederivados.get(f.id) ?? f.amount), 0)
       if (suma > techo) continue
       sinExceso++
       const nuevo = importesDeLasFilas(renglones, filas)
       expect({ caso: i, descuento: nuevo.descuento, montos: [...nuevo.montosRederivados] }).toEqual({
         caso: i,
-        descuento: viejo.descuento,
-        montos: [...viejo.montosRederivados],
+        descuento: exacto.descuento,
+        montos: [...exacto.montosRederivados],
       })
+      // D2: contra develop, lo único distinto es un centavo MÁS de rebaja (el medio centavo que los pesos flotantes tiraban abajo).
+      const viejo = importesDeDevelop(renglones, filas)
+      for (const [id, monto] of exacto.montosRederivados) {
+        const antes = viejo.montosRederivados.get(id)!
+        if (aCentavos(monto) === aCentavos(antes)) continue
+        medioCentavo++
+        expect({ caso: i, fila: id, diferencia: aCentavos(monto) - aCentavos(antes) }).toEqual({ caso: i, fila: id, diferencia: 1 })
+      }
     }
     expect(sinExceso).toBeGreaterThan(1_000)
+    expect(medioCentavo).toBeGreaterThan(0)
   })
 })
