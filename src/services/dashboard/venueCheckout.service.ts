@@ -342,6 +342,7 @@ export async function executeMercadoPagoPaymentForVenue(
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
   const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
+  const { escribirDesenlaceDeMercadoPago } = await import('@/services/mercado-pago/payment-flow.service')
 
   const venue = await prisma.venue.findUnique({ where: { slug: venueSlug }, select: { id: true } })
   if (!venue) throw new NotFoundError('Venue no encontrado')
@@ -383,14 +384,8 @@ export async function executeMercadoPagoPaymentForVenue(
 
   const optimisticStatus = mpToCheckoutStatus(payment.status)
 
-  await prisma.checkoutSession.update({
-    where: { id: session.id },
-    data: {
-      mpPaymentId: String(payment.id),
-      status: optimisticStatus,
-      completedAt: optimisticStatus === 'COMPLETED' ? new Date() : null,
-    },
-  })
+  // CAS: un «pendiente» de esta respuesta no baja un COMPLETED que el aviso de MP ya escribió.
+  await escribirDesenlaceDeMercadoPago({ sessionDbId: session.id, mpPaymentId: String(payment.id), status: optimisticStatus })
 
   // Record Order + Payment on approval (idempotent; IPN also calls this).
   if (optimisticStatus === 'COMPLETED') {

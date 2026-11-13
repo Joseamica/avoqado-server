@@ -163,7 +163,8 @@ async function ligaPagada(
       currency: 'MXN',
       customerEmail: w.emailCliente,
       expiresAt: new Date(Date.now() + 86_400_000),
-      status: camino === 'blumon' ? 'PROCESSING' : 'PENDING',
+      // MP: el cierre sólo vende una sesión que MP ya aprobó (COMPLETED, cierre perdido 12-nov).
+      status: camino === 'blumon' ? 'PROCESSING' : camino === 'mercadopago' ? 'COMPLETED' : 'PENDING',
       metadata: metadata as Prisma.InputJsonValue,
     },
   })
@@ -316,7 +317,10 @@ describe('T6 · la venta de una liga con descuento guarda su descuento', () => {
       // En Mercado Pago la sesión la marca COMPLETED el cobro (`executeMercadoPagoPaymentForPaymentLink`) o su aviso, no el finalizador.
       await prisma.checkoutSession.update({ where: { sessionId }, data: { status: 'COMPLETED', completedAt: new Date() } })
       // Dos pestañas a la vez la primera vez (Codex r1 #2): el candado del pago les da el mismo recibo.
-      const [primera, segunda] = await Promise.all([getSessionStatus(liga.shortCode, sessionId), getSessionStatus(liga.shortCode, sessionId)])
+      const [primera, segunda] = await Promise.all([
+        getSessionStatus(liga.shortCode, sessionId),
+        getSessionStatus(liga.shortCode, sessionId),
+      ])
       const tercera = await getSessionStatus(liga.shortCode, sessionId)
 
       // Si el generador falla, el estado lo traga (no tumba la página): aquí se exige que no haya fallado, con su motivo.
