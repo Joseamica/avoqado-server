@@ -137,13 +137,18 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  // Las bitácoras se escriben sin esperar (fire-and-forget); la de organización restringe borrar la organización.
+  await new Promise(r => setTimeout(r, 500))
+  await prisma.activityLog.deleteMany({ where: { OR: [{ organizationId: { in: creadas.orgs } }, { venueId: { in: creadas.venues } }] } })
   await prisma.terminal.deleteMany({ where: { venueId: { in: creadas.venues } } })
   await prisma.venuePricingStructure.deleteMany({ where: { venueId: { in: creadas.venues } } })
   await prisma.organizationPricingStructure.deleteMany({ where: { organizationId: { in: creadas.orgs } } })
   await prisma.venuePaymentConfig.deleteMany({ where: { venueId: { in: creadas.venues } } })
   await prisma.organizationPaymentConfig.deleteMany({ where: { organizationId: { in: creadas.orgs } } })
-  await prisma.angelPayUserAccount.deleteMany({ where: { venueId: { in: creadas.venues } } })
+  await prisma.providerCostStructure.deleteMany({ where: { merchantAccountId: { in: creadas.cuentas } } })
+  await prisma.settlementConfiguration.deleteMany({ where: { merchantAccountId: { in: creadas.cuentas } } })
   await prisma.merchantAccount.deleteMany({ where: { id: { in: creadas.cuentas } } })
+  await prisma.angelPayUserAccount.deleteMany({ where: { venueId: { in: creadas.venues } } })
   await prisma.venue.deleteMany({ where: { id: { in: creadas.venues } } })
   await prisma.organization.deleteMany({ where: { id: { in: creadas.orgs } } })
   await prisma.$disconnect()

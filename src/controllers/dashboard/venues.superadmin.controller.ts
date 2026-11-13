@@ -153,9 +153,6 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
     let positionChanges: CambioDePosicion[] = []
     const resultado = await prisma.$transaction(async tx => {
-      // Candado de posiciones (tarifa al comercio, paso 1): PRIMERO, igual que todos los guardados de posiciones (organización
-      // → filas de configuración), para no cruzarse con ellos en orden distinto al bloquear el negocio más abajo.
-      await tomarCandadoDePosiciones(tx, { venueId }, targetOrganizationId as string)
       // B9: el presupuesto de espera de TODA la transacción, creado al entrar (las dos organizaciones y el negocio).
       const presupuesto = PresupuestoDeEspera.para(TIMEOUT_TRASLADO_MS)
       // 1. El origen, ya dentro de la transacción: sigue donde se validó, o alguien lo movió.
@@ -168,6 +165,13 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       for (const organizationId of [fromOrganizationId, targetOrganizationId as string].sort()) {
         await bloquearOrganizacion(tx, organizationId, presupuesto)
       }
+
+      // 2b. Candado de posiciones (tarifa al comercio, paso 1): DESPUÉS de las organizaciones (que no chocan con quien inserta
+      // filas que apuntan a ellas) y ANTES del candado exclusivo del negocio. Los demás guardados de posiciones toman este
+      // candado antes de insertar filas que apuntan al negocio, así que nadie lo retiene mientras espera al negocio
+      // (Codex p12-r3 #3). Tomarlo antes de las organizaciones frenaba a otro traslado detrás de uno que espera una
+      // organización (prueba «dos traslados A→B y A→C a la vez»).
+      await tomarCandadoDePosiciones(tx, { venueId }, targetOrganizationId as string)
 
       // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
       const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
