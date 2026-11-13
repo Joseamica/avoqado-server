@@ -354,10 +354,27 @@ describe('D11.1: real HTTP responses omit the signing key', () => {
   it('approval with no venue config retains both returned account shapes and null optional slots', async () => {
     const merchant = await makeMerchant(secrets[2], { providerId: angelpayProviderId, externalMerchantId: '198711001', active: false })
     extraMerchantIds.push(merchant.id)
-    const response = await request(app)
+    // Tarifa al comercio, paso 1 (Codex p12-r1 #3): este negocio hereda A y B de su organización; crear su configuración con
+    // sólo PRIMARY deja de usarlas, así que el SERVIDOR pide confirmarlo (400 con el detalle) y la pantalla reenvía confirmado.
+    const sinConfirmar = await request(app)
       .post(`/api/v1/superadmin/venues/${emptyVenueId}/angelpay-merchants/${merchant.id}/approve`)
       .set('Authorization', `Bearer ${token}`)
       .send({ slot: 'PRIMARY' })
+    expect(sinConfirmar.status).toBe(400)
+    expect(sinConfirmar.body.code).toBe('CONFIRMAR_POSICION')
+    expectSanitized(sinConfirmar)
+    const positionConfirmations: Record<string, unknown> = {}
+    for (const p of sinConfirmar.body.details.positions) {
+      positionConfirmations[p.slot] = {
+        previousAccountId: p.currentAccount?.id ?? null,
+        ...(p.needs.rate && { rate: { mode: 'KEEP', fingerprint: p.pricingFingerprint } }),
+        ...(p.needs.inheritingTerminals && { inheritingTerminals: p.inheritingTerminals.total }),
+      }
+    }
+    const response = await request(app)
+      .post(`/api/v1/superadmin/venues/${emptyVenueId}/angelpay-merchants/${merchant.id}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ slot: 'PRIMARY', positionConfirmations })
     expect(response.status).toBe(200)
     expect(response.body.data).toMatchObject({
       merchantAccount: { id: merchant.id, active: true },

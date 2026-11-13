@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { confirmacionDePosicionesSchema } from '../../services/shared/candadoDePosiciones'
 import * as superadminController from '../../controllers/dashboard/superadmin.controller'
 import * as costManagementController from '../../controllers/dashboard/cost-management.controller'
 import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
@@ -203,6 +204,7 @@ const transferVenueSchema = z.object({
   }),
   body: z.object({
     targetOrganizationId: z.string().cuid('ID de organización destino inválido'),
+    positionConfirmations: confirmacionDePosicionesSchema,
   }),
 })
 

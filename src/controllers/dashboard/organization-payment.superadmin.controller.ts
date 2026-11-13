@@ -12,6 +12,8 @@ import prisma from '@/utils/prismaClient'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import logger from '@/config/logger'
 import { getOrganizationPaymentConfig, getOrganizationPricing, getVenueConfigSources } from '@/services/organization-payment-config.service'
+import { exigirConfirmacionDePosiciones, leerConfirmaciones } from '@/services/shared/candadoDePosiciones'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * GET /:orgId/payment-config
@@ -83,32 +85,50 @@ export async function setPaymentConfig(req: Request, res: Response, next: NextFu
       return res.status(400).json({ error: repetidos, code: AFILIACION_EN_VARIOS_SLOTS })
     }
 
-    const config = await prisma.organizationPaymentConfig.upsert({
-      where: { organizationId },
-      create: {
-        organizationId,
-        primaryAccountId,
-        secondaryAccountId: secondaryAccountId || null,
-        tertiaryAccountId: tertiaryAccountId || null,
-        routingRules: routingRules || null,
-        preferredProcessor: preferredProcessor || 'AUTO',
-      },
-      update: {
-        primaryAccountId,
-        secondaryAccountId: secondaryAccountId || null,
-        tertiaryAccountId: tertiaryAccountId || null,
-        routingRules: routingRules || null,
-        preferredProcessor: preferredProcessor || 'AUTO',
-      },
-      include: {
-        primaryAccount: { include: { provider: true } },
-        secondaryAccount: { include: { provider: true } },
-        tertiaryAccount: { include: { provider: true } },
-      },
+    // Candado de posiciones (tarifa al comercio, paso 1): las cuentas de la organización las heredan sus negocios sin
+    // configuración propia.
+    const { config, positionChanges } = await prisma.$transaction(async tx => {
+      const positionChanges = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: { organizationId },
+        siguiente: { PRIMARY: primaryAccountId, SECONDARY: secondaryAccountId || null, TERTIARY: tertiaryAccountId || null },
+        confirmaciones: req.body.positionConfirmations,
+      })
+      const config = await tx.organizationPaymentConfig.upsert({
+        where: { organizationId },
+        create: {
+          organizationId,
+          primaryAccountId,
+          secondaryAccountId: secondaryAccountId || null,
+          tertiaryAccountId: tertiaryAccountId || null,
+          routingRules: routingRules || null,
+          preferredProcessor: preferredProcessor || 'AUTO',
+        },
+        update: {
+          primaryAccountId,
+          secondaryAccountId: secondaryAccountId || null,
+          tertiaryAccountId: tertiaryAccountId || null,
+          routingRules: routingRules || null,
+          preferredProcessor: preferredProcessor || 'AUTO',
+        },
+        include: {
+          primaryAccount: { include: { provider: true } },
+          secondaryAccount: { include: { provider: true } },
+          tertiaryAccount: { include: { provider: true } },
+        },
+      })
+      return { config, positionChanges }
     })
 
     logger.info(`Organization payment config set for org ${organizationId}`)
-    return res.json(config)
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      organizationId,
+      action: 'ORGANIZATION_PAYMENT_CONFIG_SET',
+      entity: 'OrganizationPaymentConfig',
+      entityId: config.id,
+      data: { primaryAccountId, secondaryAccountId, tertiaryAccountId, positionChanges },
+    })
+    return res.json(Object.assign(config, { positionChanges }))
   } catch (error) {
     next(error)
   }
@@ -129,12 +149,27 @@ export async function deletePaymentConfig(req: Request, res: Response, next: Nex
       return res.status(404).json({ error: 'Organization payment config not found' })
     }
 
-    await prisma.organizationPaymentConfig.delete({
-      where: { organizationId },
+    // Candado: sus negocios sin configuración propia se quedan sin cuentas heredadas.
+    const positionChanges = await prisma.$transaction(async tx => {
+      const cambios = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: { organizationId },
+        siguiente: { PRIMARY: null, SECONDARY: null, TERTIARY: null },
+        confirmaciones: leerConfirmaciones(req.body?.positionConfirmations),
+      })
+      await tx.organizationPaymentConfig.delete({ where: { organizationId } })
+      return cambios
     })
 
     logger.info(`Organization payment config deleted for org ${organizationId}`)
-    return res.json({ success: true })
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      organizationId,
+      action: 'ORGANIZATION_PAYMENT_CONFIG_DELETED',
+      entity: 'OrganizationPaymentConfig',
+      entityId: existing.id,
+      data: { positionChanges },
+    })
+    return res.json({ success: true, positionChanges })
   } catch (error) {
     next(error)
   }

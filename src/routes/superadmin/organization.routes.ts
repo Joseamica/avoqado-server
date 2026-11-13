@@ -4,6 +4,7 @@ import * as orgPaymentController from '../../controllers/dashboard/organization-
 import { validateRequest } from '../../middlewares/validation'
 import { setOrganizationGrandfatheredSchema } from '../../schemas/superadmin/organizationGrandfathered.schema'
 import { z } from 'zod'
+import { confirmacionDePosicionesSchema } from '../../services/shared/candadoDePosiciones'
 
 const router = Router()
 
@@ -106,6 +107,7 @@ const setPaymentConfigSchema = z.object({
     tertiaryAccountId: z.string().cuid('ID de cuenta terciaria inválido').optional().nullable(),
     routingRules: z.record(z.any()).optional().nullable(),
     preferredProcessor: z.enum(['LEGACY', 'MENTA', 'CLIP', 'BANK_DIRECT', 'AUTO']).optional(),
+    positionConfirmations: confirmacionDePosicionesSchema,
   }),
 })
 
