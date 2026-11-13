@@ -1831,15 +1831,16 @@ async function cerrarIntentoPrevio(
   const cuenta = { stripeAccount: h.stripeAccountId as string }
   // Codex código r2: una ficha que acaba de soltar `takeOrReuseHold` y cuyo intento NO quedó confirmado cancelado vuelve a
   // ACTIVE (la pieza sigue apartada mientras ese pago se resuelve). Un error al restaurar sólo se registra: el de Stripe manda.
-  const sigueViva = async () => {
-    if (!opciones.restaurarSiSigue) return
-    await restoreReleasedHold(h.id).catch(err =>
+  const sigueViva = async (): Promise<boolean> => {
+    if (!opciones.restaurarSiSigue) return false
+    return restoreReleasedHold(h.id).catch(err => {
       logger.error('No se pudo restaurar la ficha soltada con su intento sin cerrar', {
         holdId: h.id,
         paymentIntentId: id,
         error: err instanceof Error ? err.message : String(err),
-      }),
-    )
+      })
+      return false
+    })
   }
   let pi: PaymentIntent
   try {
@@ -1879,8 +1880,8 @@ async function cerrarIntentoPrevio(
   }
   if (pi.status === 'succeeded') {
     // Cobrado sin cierre todavía: la ficha soltada vuelve a ACTIVE para que el cierre la consuma (sin la marca «cobrado»).
-    if (opciones.restaurarSiSigue) await sigueViva()
-    else {
+    // Si ya no se puede (vencida, o ya no es `cambio_de_compra`), se marca para no volver a revisarla en cada POST.
+    if (!(await sigueViva())) {
       await prisma.paymentLinkStockHold.updateMany({ where: { id: h.id, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
     }
     return { alreadyPaid: true, paymentIntentId: pi.id }
@@ -2008,7 +2009,11 @@ async function cobrarPrendaConApartado(args: {
         (h.amountCents === null || h.amountCents === amountCents) &&
         mismosDatosDeLaClienta(h, args.intentParams, args.checkoutSnapshot)
       if (seReusa) continue
-      const pagada = await cerrarIntentoPrevio(stripe, h)
+      // Codex codigo-r4b: una soltada por cambio de compra cuyo pago sigue (u otra solicitud la soltó con una copia vieja)
+      // vuelve a ACTIVE: la pieza sigue apartada mientras ese pago se resuelve.
+      const pagada = await cerrarIntentoPrevio(stripe, h, {
+        restaurarSiSigue: h.status === 'RELEASED' && h.releasedReason === 'cambio_de_compra',
+      })
       if (pagada) return pagada
     }
 
@@ -2066,7 +2071,15 @@ async function cobrarPrendaConApartado(args: {
         const pagada = await cerrarIntentoPrevio(stripe, hold)
         if (pagada) return pagada
       } else {
-        await releaseHold(hold.id, 'cambio_de_compra')
+        // Codex codigo-r4b: la copia de la ficha es de ANTES; otra solicitud (con los datos viejos) pudo ligarle su intento y
+        // entregarlo. Sólo se suelta si sigue sin intento; si ya tiene, ese intento se cierra como cualquier otro (en curso → 409
+        // con la ficha apartada; cobrado → alreadyPaid; cancelado con certeza → se suelta y se aparta otra).
+        await releaseHold(hold.id, 'cambio_de_compra', { soloSinIntento: true })
+        const ahora = await prisma.paymentLinkStockHold.findUnique({ where: { id: hold.id } })
+        if (ahora?.status === 'ACTIVE' && ahora.stripePaymentIntentId && ahora.stripeAccountId) {
+          const pagada = await cerrarIntentoPrevio(stripe, ahora)
+          if (pagada) return pagada
+        }
       }
       continue
     }

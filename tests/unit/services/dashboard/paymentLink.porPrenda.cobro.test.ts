@@ -611,6 +611,28 @@ describe('POST payment-intent de la liga por prenda', () => {
       expect(piCreate).not.toHaveBeenCalled()
     })
 
+    it('Codex codigo-r4b: previa soltada por cambio de compra y aún cobrando → 409 y vuelve a ACTIVE (la pieza sigue apartada)', async () => {
+      fichas.findMany.mockResolvedValue([previa({ status: 'RELEASED', releasedReason: 'cambio_de_compra' })])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(restaurar).toHaveBeenCalledWith('chold0000000000000000000p')
+      expect(take).not.toHaveBeenCalled()
+    })
+
+    it('previa soltada por cambio de compra ya cobrada: vuelve a ACTIVE para el cierre; si ya no se puede (vencida), se marca «intento_cobrado»', async () => {
+      fichas.findMany.mockResolvedValue([previa({ status: 'RELEASED', releasedReason: 'cambio_de_compra' })])
+      piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'succeeded' })
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_previo' })
+      expect(restaurar).toHaveBeenCalledWith('chold0000000000000000000p')
+      expect(fichas.updateMany).not.toHaveBeenCalled()
+      restaurar.mockResolvedValue(false)
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_previo' })
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: 'chold0000000000000000000p', status: 'RELEASED' },
+        data: { releasedReason: 'intento_cobrado' },
+      })
+    })
+
     it('previa ya cobrada → alreadyPaid con SU intento, sin apartar ni crear; soltada se marca «intento_cobrado»', async () => {
       fichas.findMany.mockResolvedValue([previa({ status: 'RELEASED', releasedReason: 'vencida' })])
       piRetrieve.mockResolvedValue({ id: 'pi_previo', status: 'succeeded' })
@@ -865,7 +887,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         .mockResolvedValueOnce({ hold: congelada({ intentParams: { metadata: {} } }), reused: true, released: [], pendientes: [] })
         .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [], pendientes: [] })
       await pagar({ customFieldResponses: { talla: 'y' } })
-      expect(release).toHaveBeenCalledWith('chold00000000000000000001', 'cambio_de_compra')
+      expect(release).toHaveBeenCalledWith('chold00000000000000000001', 'cambio_de_compra', { soloSinIntento: true })
       expect(piCancel).not.toHaveBeenCalled()
       expect(sesionCreada().data[0].metadata.customFieldResponses).toEqual({ talla: 'y' })
       expect(piCreate.mock.calls[0][1].idempotencyKey).toBe('plhold:chold00000000000000000002')
@@ -1212,8 +1234,8 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
     [...filas.values()].filter(f => f.id !== salvo && vivo(f.stripePaymentIntentId)).map(f => f.stripePaymentIntentId as string)
 
   /** Un POST de la pestaña; si entrega un intento, anota qué otros intentos ligados seguían vivos en ese instante. */
-  const pagarTalla = (productId: string) =>
-    createStripePaymentIntentForPaymentLink('abc12345', { productId, browserToken: TOKEN } as any).then(
+  const pagarTalla = (productId: string, customerEmail?: string) =>
+    createStripePaymentIntentForPaymentLink('abc12345', { productId, browserToken: TOKEN, customerEmail } as any).then(
       (r: any) => {
         if (r?.paymentIntentId && !r.alreadyPaid) {
           const suya = [...filas.values()].find(f => f.stripePaymentIntentId === r.paymentIntentId)
@@ -1329,6 +1351,39 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
     nuncaDosCobros()
   })
 
+  it('Codex codigo-r4b: B corrige el correo con una copia vieja de la ficha (sin intento) cuando A ya ligó y la clienta confirma → B no la suelta; 409', async () => {
+    const creando = puerta()
+    const soltando = puerta()
+    let enCrear = false
+    let enSoltar = false
+    pausa = async op => {
+      if (op === 'crear-respuesta' && !enCrear) {
+        enCrear = true
+        await creando.p
+      }
+      if (op === 'soltar' && !enSoltar) {
+        enSoltar = true
+        await soltando.p
+      }
+    }
+    // A congela con el correo viejo y espera la respuesta de Stripe al crear.
+    const a = pagarTalla(T_L, 'viejo@example.test')
+    await hasta(() => enCrear)
+    // B, con el correo corregido, reusa la ficha (su copia: sin intento) y se detiene justo antes de soltarla.
+    const b = pagarTalla(T_L, 'nuevo@example.test')
+    await hasta(() => enSoltar)
+    // A liga y entrega su intento; la clienta lo confirma.
+    creando.abrir()
+    const ra = await a
+    expect(ra).toMatchObject({ ok: true })
+    intentos.get((ra as any).r.paymentIntentId)!.status = 'processing'
+    soltando.abrir()
+    expect(await b).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    const ficha = [...filas.values()].find(f => f.stripePaymentIntentId === (ra as any).r.paymentIntentId)!
+    expect(ficha.status).toBe('ACTIVE')
+    nuncaDosCobros()
+  })
+
   /** PRNG con semilla (mulberry32): la misma semilla repite la misma intercalación. */
   function azar(semilla: number) {
     let a = semilla >>> 0
@@ -1345,14 +1400,15 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
    * Cada operación de fichas y de Stripe cede el turno 0-3 vueltas al azar: con muchas semillas se recorren las intercalaciones
    * de los POST (y de la clienta que confirma su intento o a quien se le rechaza la tarjeta).
    */
-  async function correr(semilla: number, inicio: () => void, tallas: string[], clienta: 'confirma' | 'rechazo' | 'nada') {
+  type Post = string | readonly [string, string]
+  async function correr(semilla: number, inicio: () => void, tallas: Post[], clienta: 'confirma' | 'rechazo' | 'nada') {
     const r = azar(semilla)
     pausa = async () => {
       const k = Math.floor(r() * 4)
       for (let i = 0; i < k; i++) await new Promise(res => setImmediate(res))
     }
     inicio()
-    const posts = tallas.map(t => pagarTalla(t))
+    const posts = tallas.map(t => (typeof t === 'string' ? pagarTalla(t) : pagarTalla(t[0], t[1])))
     const pestaña = (async () => {
       for (let i = 0; i < 30; i++) {
         await pausa('clienta')
@@ -1377,6 +1433,9 @@ describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encarg
     ['M en vuelo sin intento + L, L (r3b #1)', 'm-sin-intento', [T_M, T_L, T_L], 'confirma'],
     ['M con intento cobrando + L, L, M', 'm-processing', [T_L, T_L, T_M], 'rechazo'],
     ['M con intento cancelable + L, M, L', 'm-cancelable', [T_L, T_M, T_L], 'confirma'],
+    // Codex codigo-r4b: la clienta corrige su correo a media carrera (otra compra con la misma talla).
+    ['misma talla ×3 con el correo corregido a media carrera', () => undefined, [T_L, [T_L, 'nuevo@example.test'], T_L], 'confirma'],
+    ['tallas y correos mezclados', 'm-cancelable', [[T_M, 'nuevo@example.test'], T_L, [T_L, 'nuevo@example.test']], 'confirma'],
   ] as const)('%s: en 150 intercalaciones nunca hay dos cobros posibles', async (_n, inicio, tallas, clienta) => {
     for (const semilla of SEMILLAS) {
       filas.clear()
