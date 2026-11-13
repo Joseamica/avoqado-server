@@ -268,7 +268,7 @@ async function buscar(tx: Prisma.TransactionClient, venueId: string, id: string)
 }
 
 /** Nombres actuales de productos y categorías de toda la página: dos consultas acotadas, sin N+1. */
-async function aVista(promos: LoyaltyPromotion[], venueId: string, tz: string, ahora = new Date()): Promise<LoyaltyPromotionView[]> {
+async function aVista(promos: Omit<LoyaltyPromotion, 'categoryProductIds'>[], venueId: string, tz: string, ahora = new Date()): Promise<LoyaltyPromotionView[]> {
   const pIds = sinRepetir(promos.flatMap(p => p.productIds))
   const cIds = sinRepetir(promos.flatMap(p => p.categoryIds))
   const [productos, categorias] = await Promise.all([
@@ -333,6 +333,7 @@ export async function listLoyaltyPromotions(venueId: string, query: ListLoyaltyP
     prisma.loyaltyPromotion.findMany({
       where,
       orderBy: [{ startsAt: 'desc' }, { id: 'desc' }],
+      omit: { categoryProductIds: true }, // columna interna (hasta 5000 ids por promo): el panel no la usa
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),

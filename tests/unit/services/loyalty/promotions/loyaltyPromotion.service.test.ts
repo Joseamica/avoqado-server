@@ -388,6 +388,8 @@ describe('listar', () => {
       expect.objectContaining({ where: { venueId: V }, skip: 0, take: 100, orderBy: [{ startsAt: 'desc' }, { id: 'desc' }] }),
     )
     expect(r.items[0]).toMatchObject({ status: 'ACTIVE', products: [{ id: 'cprod1', name: 'Manicure' }] })
+    expect(prismaMock.loyaltyPromotion.findMany).toHaveBeenCalledWith(expect.objectContaining({ omit: { categoryProductIds: true } }))
+    expect(r.items[0]).not.toHaveProperty('categoryProductIds')
     expect(prismaMock.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: V, id: { in: ['cprod1'] } } }))
   })
 

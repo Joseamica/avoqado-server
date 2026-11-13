@@ -48,12 +48,20 @@ export interface PromoDecidida {
   montoQueCalifica: Prisma.Decimal
 }
 
+// La foto de productos (hasta 5000 ids) se vuelve Set una vez por promo.
+const fotos = new WeakMap<PromoCandidata, Set<string>>()
+const enFoto = (p: PromoCandidata, id: string) => {
+  let s = fotos.get(p)
+  if (!s) fotos.set(p, (s = new Set(p.categoryProductIds)))
+  return s.has(id)
+}
+
 const linea = (p: PromoCandidata, l: VentaParaPromo['lineas'][number]) =>
   l.neto.gt(0) &&
   ((l.productId !== null && p.productIds.includes(l.productId)) ||
     (l.categoryIdActual !== null && p.categoryIds.includes(l.categoryIdActual)) ||
     // Codex código r1 #2: el producto estaba en la categoría al guardar la promo (una venta sin red que sincroniza tras moverlo)
-    (l.productId !== null && p.categoryProductIds.includes(l.productId)) ||
+    (l.productId !== null && enFoto(p, l.productId)) ||
     // r2 #4: el producto pudo cambiar de categoría; el nombre guardado en el renglón sigue valiendo
     (l.categoryName !== null && p.categoryNames.includes(l.categoryName)))
 
