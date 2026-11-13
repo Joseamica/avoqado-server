@@ -54,19 +54,22 @@ describe('redeem_loyalty_on_check · candado de la oferta', () => {
     expect(out.requiresConfirmation).toBe(true)
     expect(out.preview.discount).toBe(50)
     expect(out.message).toContain('expectedDiscount: 50')
+    expect(out.message).toContain('expectedPoints: 500')
     expect(mockRedeem).not.toHaveBeenCalled()
   })
 
   it('al confirmar con el monto de la previa, el canje lleva el candado', async () => {
     mockRedeem.mockResolvedValue({ pointsRedeemed: 500, discountAmount: 50, newBalance: 0, order: { total: 450 } })
-    const out = parse(await call({ venueId: 'v1', orderId: 'o1', search: 'ana', points: 500, confirm: true, expectedDiscount: 50 }))
-    expect(mockRedeem).toHaveBeenCalledWith('v1', 'o1', 'c1', 500, 's1', 50)
+    const out = parse(
+      await call({ venueId: 'v1', orderId: 'o1', search: 'ana', points: 500, confirm: true, expectedDiscount: 50, expectedPoints: 500 }),
+    )
+    expect(mockRedeem).toHaveBeenCalledWith('v1', 'o1', 'c1', 500, 's1', { monto: 50, puntos: 500 })
     expect(out).toMatchObject({ ok: true, pointsRedeemed: 500, discountAmount: 50 })
   })
 
   it('si la cuenta cambió entre la previa y el confirm: no canjea y dice la oferta de ahora con su código', async () => {
     const { OfertaDeCanjeCambio } = jest.requireActual('@/services/mobile/loyalty.mobile.service')
-    mockRedeem.mockRejectedValue(new OfertaDeCanjeCambio(10, 1))
+    mockRedeem.mockRejectedValue(OfertaDeCanjeCambio.conOferta(10, 1))
     const out = parse(await call({ venueId: 'v1', orderId: 'o1', search: 'ana', points: 500, confirm: true, expectedDiscount: 50 }))
     expect(out).toMatchObject({ ok: false, code: 'LOYALTY_OFFER_CHANGED' })
     expect(out.error).toContain('10 puntos por $1.00')
@@ -77,5 +80,11 @@ describe('redeem_loyalty_on_check · candado de la oferta', () => {
     mockRedeem.mockResolvedValue({ pointsRedeemed: 10, discountAmount: 1, newBalance: 490, order: { total: 0 } })
     await call({ venueId: 'v1', orderId: 'o1', search: 'ana', points: 500, confirm: true })
     expect(mockRedeem).toHaveBeenCalledWith('v1', 'o1', 'c1', 500, 's1', undefined)
+  })
+
+  it('el recorte de la previa (pide 1,000, se queman 28): con expectedPoints de la previa se confirma sin 409 falso (Codex candado-r1 #1)', async () => {
+    mockRedeem.mockResolvedValue({ pointsRedeemed: 28, discountAmount: 0.14, newBalance: 972, order: { total: 99.86 } })
+    await call({ venueId: 'v1', orderId: 'o1', search: 'ana', points: 1000, confirm: true, expectedDiscount: 0.14, expectedPoints: 28 })
+    expect(mockRedeem).toHaveBeenCalledWith('v1', 'o1', 'c1', 1000, 's1', { monto: 0.14, puntos: 28 })
   })
 })

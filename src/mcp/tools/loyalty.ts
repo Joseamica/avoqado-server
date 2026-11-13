@@ -354,10 +354,16 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         .nonnegative()
         .optional()
         .describe(
-          "With confirm:true, pass the preview's `discount` here: the check is then redeemed only if it still gives exactly that (if it changed, nothing is redeemed and you get the new offer)",
+          "With confirm:true, pass the preview's `discount` here (and its `pointsToRedeem` as expectedPoints): the check is then redeemed only if it still gives exactly that (if it changed, nothing is redeemed and you get the new offer)",
         ),
+      expectedPoints: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("With confirm:true and expectedDiscount, the preview's `pointsToRedeem` (the points that will actually be burned)"),
     },
-    async ({ venueId, orderId, search, points, confirm, expectedDiscount }) => {
+    async ({ venueId, orderId, search, points, confirm, expectedDiscount, expectedPoints }) => {
       const base = guard.venueFilter(venueId)
       guard.requirePermission('orders:update', venueId)
       const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
@@ -406,7 +412,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
               newBalance: status.balance - wouldBurn,
               minPointsRedeem: status.minPointsRedeem,
             },
-            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true y expectedDiscount: ${previa.monto} para aplicar exactamente esto (si la cuenta cambió, no se canjea y te dice la oferta nueva).`,
+            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true, expectedDiscount: ${previa.monto} y expectedPoints: ${wouldBurn} para aplicar exactamente esto (si la cuenta cambió, no se canjea y te dice la oferta nueva).`,
           })
         } catch (err) {
           return text({ ok: false, error: (err as Error).message })
@@ -415,7 +421,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
       try {
         // D18: con el monto de la previa, el mismo candado que la tablet (si la cuenta cambió, no se canjea).
-        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId, expectedDiscount)
+        const esperado = expectedDiscount === undefined ? undefined : { monto: expectedDiscount, puntos: expectedPoints }
+        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId, esperado)
         await auditMcpWrite(scope, {
           action: 'LOYALTY_POINTS_REDEEMED',
           entity: 'Order',

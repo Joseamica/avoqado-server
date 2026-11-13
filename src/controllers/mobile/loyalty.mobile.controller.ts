@@ -45,7 +45,9 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
 
     const operation = parseHttpOperation(req.body)
     if (!operation) {
-      const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, montoEsperado)
+      // La tablet enseña los puntos que pide (nunca recorta): se comparan esos y el monto.
+      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points }
+      const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, esperado)
       return res.json({ success: true, data })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
@@ -63,7 +65,9 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         manifest.payload.points,
         staffId,
         undefined,
-        manifest.payload.expectedDiscountAmount,
+        manifest.payload.expectedDiscountAmount === undefined
+          ? undefined
+          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points },
       )
       const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {

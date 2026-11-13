@@ -47,14 +47,18 @@ export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: 
 }
 
 /**
- * D2 (12-nov): los MENOS puntos cuyo valor a centavos (`money(p × valor)`, como lo valora el canje) cubre `monto`, sin pasar de
- * `maximo`. `⌈monto / valor⌉` en flotante se pasaba: $0.14 a $0.01 por punto = ⌈14.000000000000002⌉ = 15 y la clienta perdía un punto.
+ * D2 (12-nov): los MENOS puntos cuyo valor (p × valor por punto) cubre `monto`, sin pasar de `maximo`. `⌈monto / valor⌉` en flotante se
+ * pasaba: $0.14 a $0.01 por punto = ⌈14.000000000000002⌉ = 15 y la clienta perdía un punto. El valor es el real, no el redondeado a
+ * centavos (Codex candado-r1 #1): con medio centavo por punto, 27 puntos «valen» $0.14 a centavos pero son $0.135, y la regla B
+ * (`puntosQueCaben`) pide 28; con el valor real se queman 28, lo mismo que la caja ofrece.
  */
 export function puntosQueCubren(monto: number, valorPorPunto: number, maximo: number): number {
   if (!(valorPorPunto > 0) || !(monto > 0) || maximo <= 0) return 0
+  // Tolerancia de flotante, muy por debajo de un centavo: 14 × 0.01 = 0.14000000000000001 sí cubre $0.14.
+  const cubre = (p: number) => p * valorPorPunto >= monto - 1e-9
   let p = Math.min(maximo, Math.max(0, Math.ceil(monto / valorPorPunto)))
-  while (p > 0 && money((p - 1) * valorPorPunto) >= monto) p--
-  while (p < maximo && money(p * valorPorPunto) < monto) p++
+  while (p > 0 && cubre(p - 1)) p--
+  while (p < maximo && !cubre(p)) p++
   return p
 }
 
@@ -67,15 +71,22 @@ export const OFERTA_DE_CANJE_CAMBIO = 'LOYALTY_OFFER_CHANGED'
  * (`executeHttpOperation`) guarda los rechazos de dominio como resultado final (`DomainRejected`) y conserva este 409.
  */
 export class OfertaDeCanjeCambio extends BadRequestError {
-  constructor(puntos: number, monto: number) {
-    super(
-      `La cuenta cambió: ahora se canjearían ${puntos} puntos por $${monto.toFixed(2)}. Revisa los puntos y vuelve a canjear.`,
-      OFERTA_DE_CANJE_CAMBIO,
-      { pointsRedeemable: puntos, discountAmount: monto },
-    )
+  constructor(message: string, details?: { pointsRedeemable: number; discountAmount: number }) {
+    super(message, OFERTA_DE_CANJE_CAMBIO, details)
     this.statusCode = 409
   }
+
+  /** La cuenta todavía admite canje, pero da otros puntos u otro monto. */
+  static conOferta(puntos: number, monto: number): OfertaDeCanjeCambio {
+    return new OfertaDeCanjeCambio(
+      `La cuenta cambió: ahora se canjearían ${puntos} puntos por $${monto.toFixed(2)}. Revisa los puntos y vuelve a canjear.`,
+      { pointsRedeemable: puntos, discountAmount: monto },
+    )
+  }
 }
+
+/** Lo que enseñó quien canjea: el descuento y, si se sabe, los puntos que se quemarían (la tablet: los pedidos; el MCP: los de su previa). */
+export type OfertaEsperada = { monto: number; puntos?: number }
 
 /**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
@@ -289,12 +300,16 @@ export async function redeemPointsToOrderInTransaction(
   points: number,
   staffId?: string,
   config?: Awaited<ReturnType<typeof getOrCreateLoyaltyConfig>>,
-  /** El monto que enseñó quien canjea (la tablet, la previa del MCP). Con él, sólo se canjea exactamente eso (candado de la oferta). */
-  montoEsperado?: number,
+  /** Lo que enseñó quien canjea (la tablet, la previa del MCP). Con ello, sólo se canjea exactamente eso (candado de la oferta). */
+  esperado?: OfertaEsperada,
 ) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
   }
+  // Codex candado-r1 #2: con lo que se enseñó, cualquier negativa que dice que la oferta ya no es la de la pantalla (saldo, programa,
+  // clienta, abono, anulada, mínimo, nada que descontar) es el 409 del candado: la tablet relee y enseña lo nuevo. Sin ello, 400 como
+  // siempre. Lo que no depende de la oferta (cuenta inexistente, importada, de tarjetas, con tarjeta apartada) sigue igual.
+  const negativa = (mensaje: string) => (esperado ? new OfertaDeCanjeCambio(`La cuenta cambió: ${mensaje}`) : new BadRequestError(mensaje))
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
@@ -316,27 +331,27 @@ export async function redeemPointsToOrderInTransaction(
   if (!order) throw new NotFoundError('Orden no encontrada')
   // 🔴 LEALTAD (hz:a8104ac8:D1, Codex r1 #2): una venta anulada ya devolvió sus puntos y es final; no recibe canjes nuevos.
   if (order.status === 'CANCELLED' || order.status === 'DELETED') {
-    throw new BadRequestError('Esta venta está cancelada: no se pueden canjear puntos.')
+    throw negativa('Esta venta está cancelada: no se pueden canjear puntos.')
   }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'canje de puntos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede modificar una orden ya pagada')
+    throw negativa('No se puede modificar una orden ya pagada')
   }
   // D650: sólo los puntos de un cliente que está en la cuenta, leído bajo su candado (tomado arriba).
-  if (!(await estaEnLaCuenta(tx, orderId, order.customerId, customerId))) throw new BadRequestError(CLIENTE_FUERA_DE_LA_CUENTA)
+  if (!(await estaEnLaCuenta(tx, orderId, order.customerId, customerId))) throw negativa(CLIENTE_FUERA_DE_LA_CUENTA)
 
   const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
-  if (!effectiveConfig.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
+  if (!effectiveConfig.active) throw negativa('El programa de lealtad no está activo en esta sucursal')
   if (points < effectiveConfig.minPointsRedeem) {
     // Regla B (`minimoParaCanjear`): abajo del mínimo del negocio sólo pasa lo que llena una cuenta más chica que ese mínimo, con el
     // saldo y la base leídos bajo el candado de la cuenta (lo mismo que la caja ofreció).
     const saldo = (await tx.customer.findFirst({ where: { id: customerId, venueId }, select: { loyaltyPoints: true } }))?.loyaltyPoints ?? 0
     const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
     const minimo = minimoParaCanjear(effectiveConfig.minPointsRedeem, saldo, Number(effectiveConfig.redemptionRate), base)
-    if (points < minimo) throw new BadRequestError(`Se requieren al menos ${minimo} puntos para canjear`)
+    if (points < minimo) throw negativa(`Se requieren al menos ${minimo} puntos para canjear`)
   }
 
   const customer = await tx.customer.findFirst({
@@ -345,19 +360,20 @@ export async function redeemPointsToOrderInTransaction(
   })
   if (!customer) throw new NotFoundError('Cliente no encontrado')
   if (customer.loyaltyPoints < points) {
-    throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
+    throw negativa(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
   }
 
   const redemptionRate = Number(effectiveConfig.redemptionRate)
   const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
   const { monto: discountAmount, puntos: pointsToBurn } = puntosQueSeCanjean(points, redemptionRate, redeemableBase)
   if (discountAmount <= 0) {
-    throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
+    throw negativa('El canje no genera descuento sobre esta cuenta')
   }
   // Candado de la oferta (D18, 12-nov): con lo que se enseñó, la cuenta (leída bajo su candado) tiene que dar exactamente eso; si no,
-  // nada se quema y el 409 dice la oferta de ahora. Sin el monto (apps viejas, tienda, panel), recorta como siempre.
-  if (montoEsperado !== undefined && (pointsToBurn !== points || discountAmount !== money(montoEsperado))) {
-    throw new OfertaDeCanjeCambio(pointsToBurn, discountAmount)
+  // nada se quema y el 409 dice la oferta de ahora. Sin lo enseñado (apps viejas, tienda, panel), recorta como siempre. Los puntos que
+  // se comparan son los que se enseñaron: la tablet, los pedidos (nunca recorta); el MCP, los de su previa (recorta a propósito).
+  if (esperado && (discountAmount !== money(esperado.monto) || (esperado.puntos !== undefined && pointsToBurn !== esperado.puntos))) {
+    throw OfertaDeCanjeCambio.conOferta(pointsToBurn, discountAmount)
   }
 
   const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
@@ -385,7 +401,7 @@ export async function redeemPointsToOrderInTransaction(
     data: { loyaltyPoints: { decrement: pointsToBurn } },
   })
   if (burned.count === 0) {
-    throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
+    throw negativa('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
   }
 
   const balance = await tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
@@ -418,16 +434,16 @@ export async function redeemPointsToOrder(
   customerId: string,
   points: number,
   staffId?: string,
-  montoEsperado?: number,
+  esperado?: OfertaEsperada,
 ) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
   }
 
-  // Venue configuration is not Order data: read before the lock; its checks keep their original order below.
-  const config = await getOrCreateLoyaltyConfig(venueId)
+  // Codex candado-r1 #3: el programa (activo, tasa, mínimo) se lee dentro de la transacción, después del candado de la cuenta, como en
+  // la operación HTTP: una lectura de antes podía canjear con un programa que un administrador ya apagó mientras se esperaba el candado.
   const { pointsToBurn, discountAmount, newBalance, totals } = await withDeadlockRetry(
-    tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, config, montoEsperado),
+    tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, undefined, esperado),
     { etiqueta: 'redeemPointsToOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
