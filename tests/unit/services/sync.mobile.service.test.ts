@@ -1071,7 +1071,7 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(
       baseParams([{ id: 'i12', type: 'APPLY_DISCOUNT', payload: { localOrderId: 'local-D', discountId: 'disc-1' } }]),
     )
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, true)
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, true, {})
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-10', version: 4 } })
   })
 
@@ -1081,7 +1081,36 @@ describe('sync.mobile.service processIntents', () => {
     params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'orders:comp')
     await processIntents(params)
     expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'APPLY_DISCOUNT' }), 'orders:comp')
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, false)
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, false, {})
+  })
+
+  it('D4: APPLY_DISCOUNT le pasa la aprobación sólo si quien encoló tiene tpv-orders:discount (sin él, nada: el servicio falla cerrado)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4 })
+    const params = baseParams([{ id: 'i12-d4', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-gerente' } }])
+    params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'tpv-orders:discount')
+    await processIntents(params)
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'APPLY_DISCOUNT' }), 'tpv-orders:discount')
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-gerente', STAFF, true, undefined)
+  })
+
+  it('D4: el 403 de aprobación en APPLY_DISCOUNT queda REJECTED (cuarentena visible), nunca RETRY', async () => {
+    ;(orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(
+      new ForbiddenError('Este descuento necesita la aprobación de un gerente (permiso «Aplicar descuentos en TPV»).', 'PERMISSION_DENIED'),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i12-d4b', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-gerente' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+  })
+
+  it('D4: una caída de base al aplicar el descuento queda RETRY, nunca 403 ni REJECTED', async () => {
+    const caida: any = new Error("Can't reach database server")
+    caida.code = 'P1001'
+    ;(orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(caida)
+    const acks = await processIntents(
+      baseParams([{ id: 'i12-d4c', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-gerente' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'RETRY' })
   })
 
   it('D1: el 403 de cortesía en APPLY_DISCOUNT queda REJECTED, nunca RETRY', async () => {

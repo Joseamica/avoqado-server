@@ -454,6 +454,10 @@ model Venue {
   stampEvents      StampEvent[]
   stampRewards     StampReward[]
 
+  // Promociones de lealtad (2026-11-12)
+  loyaltyPromotions    LoyaltyPromotion[]
+  loyaltyPromotionUses LoyaltyPromotionUse[]
+
   // Referral Program
   referralProgramConfig ReferralProgramConfig?
   referrals             Referral[]
@@ -1397,6 +1401,8 @@ model StaffVenue {
   workScheduleExceptions StaffWorkScheduleException[]
   overtimeApprovals      OvertimeApproval[]
   workShiftAssignments   WorkShiftAssignment[]
+
+  loyaltyPromotionsCreated LoyaltyPromotion[] @relation("LoyaltyPromotionCreatedBy")
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -4352,6 +4358,8 @@ model Order {
   // Instancias de promoción vendidas en esta orden.
   promotions  OrderPromotion[]
   stampEvents StampEvent[]
+
+  loyaltyPromotionUses LoyaltyPromotionUse[]
 
   @@unique([venueId, externalId])
   @@unique([venueId, areaTicketCode])
@@ -8147,6 +8155,7 @@ model Customer {
   giftCards            GiftCard[]
   stampCards           StampCard[]
   stampRewards         StampReward[]
+  loyaltyPromotionUses LoyaltyPromotionUse[]
 
   // Discount System (Phase 2)
   customerDiscounts CustomerDiscount[]
@@ -8617,6 +8626,12 @@ model LoyaltyTransaction {
   /// ADJUST que nace de un reembolso: el `Payment` REFUND que lo causó (sin FK: referencia blanda). Único: una sola reversa por reembolso.
   refundPaymentId  String? @unique
 
+  /// EARN: la promoción de lealtad que dio el bono de esta venta. Null = sin promo.
+  promotionId String?
+  promotion   LoyaltyPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+  /// EARN: cuántos de `points` son el bono de la promo. Null = sin promo.
+  bonusPoints Int?
+
   createdAt DateTime @default(now())
 
   @@index([customerId, createdAt])
@@ -9071,12 +9086,20 @@ model StampEvent {
   /// Positivo en EARN, negativo en REVERSAL. ADJUST puede ser cualquiera.
   quantity Int            @default(1)
 
-  /// La orden que lo genero. Junto con venueId forma la llave de idempotencia:
-  /// un pago produce EXACTAMENTE un sello, aunque el cobro se reintente.
+  /// La orden que lo genero. Junto con venueId y `part` forma la llave de idempotencia:
+  /// cada parte de un pago se sella EXACTAMENTE una vez, aunque el cobro se reintente.
   orderId String?
   order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
-  /// Desnormalizado para poder poner el indice unico parcial (venueId, orderId).
+  /// Una venta con promo puede dar varios sellos y pasar la meta: cada tarjeta que toca es una parte (0, 1, 2…).
+  /// 🔴 Los índices únicos parciales son (venueId, orderId, part) por EARN y por REVERSAL; la parte 0 es la de siempre.
+  part Int @default(0)
+
+  /// La promoción de lealtad que dio el bono de esta venta. Null = sin promo.
+  promotionId String?
+  promotion   LoyaltyPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  /// Desnormalizado para poder poner los indices unicos parciales (venueId, orderId, part).
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
@@ -9134,6 +9157,95 @@ model StampReward {
 
   @@index([customerId, status])
   @@index([venueId, status])
+}
+
+enum LoyaltyPromotionKind {
+  MULTIPLY
+  ADD
+}
+
+enum LoyaltyPromotionLimit {
+  NONE
+  ONCE_PER_DAY
+  ONCE_PER_PROMOTION
+}
+
+/// Una promoción de lealtad («sello doble», «puntos dobles», «+N»): la regla que programa el negocio.
+///
+/// Las columnas son 1:1 con `PromoCandidata` (src/services/loyalty/promotions/evaluarPromo.ts). Se decide con la hora de la
+/// VENTA, no la de ahora. No se borra: se termina con `endedAt`.
+model LoyaltyPromotion {
+  id String @id @default(cuid())
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name        String
+  kind        LoyaltyPromotionKind
+  /// MULTIPLY: ×2…×10.
+  multiplier  Int?
+  /// ADD: sellos y puntos extra por venta.
+  extraStamps Int?
+  extraPoints Int?
+
+  /// Instante UTC; ya es max(inicio del día, momento de guardar).
+  startsAt DateTime
+  endsAt   DateTime?
+  /// Terminada a mano. Desde aquí ya no aplica.
+  endedAt  DateTime?
+
+  daysOfWeek  Int[]                 @default([]) // 0-6 (domingo-sábado), vacío = todos, como Discount
+  timeFrom    String? // "09:00"
+  timeUntil   String? // "17:00"
+  productIds  String[]              @default([])
+  categoryIds String[]              @default([])
+  /// Foto de los productos que estaban en `categoryIds` al crear la promo o al editar sus categorías (tope 5,000). Una venta sin
+  /// red de un producto que después cambió de categoría sigue calificando (Codex código r1 #2).
+  categoryProductIds String[]       @default([])
+  minSpend    Decimal?              @db.Decimal(12, 2)
+  limit       LoyaltyPromotionLimit @default(NONE)
+
+  createdById String?
+  createdBy   StaffVenue? @relation("LoyaltyPromotionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  uses                LoyaltyPromotionUse[]
+  stampEvents         StampEvent[]
+  loyaltyTransactions LoyaltyTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, startsAt])
+}
+
+/// Qué venta recibió qué promo: una fila por venta, sólo si dio bono > 0. El límite por clienta cuenta estas filas.
+///
+/// 🔴 Es libro, no caché: si la orden se borra, el uso se queda (orderId SetNull, como StampEvent y LoyaltyTransaction),
+/// porque sus sellos y puntos de bono también se quedan.
+model LoyaltyPromotionUse {
+  id String @id @default(cuid())
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  promotionId String
+  promotion   LoyaltyPromotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  /// La hora de la venta (el «día» del límite sale de aquí, en la zona del negocio).
+  soldAt      DateTime
+  stampsBonus Int      @default(0)
+  pointsBonus Int      @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([venueId, orderId])
+  @@index([promotionId, customerId, soldAt])
 }
 
 // NOTE: REFERRAL PROGRAM

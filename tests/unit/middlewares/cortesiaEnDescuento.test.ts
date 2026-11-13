@@ -3,7 +3,12 @@
  * `orders:comp` por `checkPermission` (PIN de gerente incluido) y deja la acreditación en el request para el servicio.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { checkCortesiaEnDescuento, conCortesiaSiRegala, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import {
+  checkCortesiaEnDescuento,
+  conCortesiaSiRegala,
+  pinDeLaCortesia,
+  tieneCortesiaAutorizada,
+} from '@/middlewares/cortesiaPidePermiso.middleware'
 import { RegaloSinPermisoError } from '@/errors/AppError'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import prisma from '@/utils/prismaClient'
@@ -94,6 +99,14 @@ describe('D1: descuento suelto que regala pide orders:comp', () => {
   it('el PIN que consumió el check de cortesía queda como su autorizador', async () => {
     mockPinConsumido = 'sv-gerente'
     const req = request({ type: 'COMP', value: 100, reason: 'x' })
+    await run(req)
+    expect(pinDeLaCortesia(req)).toBe('sv-gerente')
+  })
+
+  it('D4 (Codex r2 #3): si el MISMO gerente ya autorizó otro permiso del request, su PIN de cortesía sí cuenta', async () => {
+    mockPinConsumido = 'sv-gerente'
+    const req = request({ type: 'COMP', value: 100, reason: 'x' })
+    ;(req as any).authContext.overrideAuthorizedBy = 'sv-gerente'
     await run(req)
     expect(pinDeLaCortesia(req)).toBe('sv-gerente')
   })

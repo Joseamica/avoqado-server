@@ -42,6 +42,14 @@ jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
 // branch that calls this, but importing angelpayFullSetup.service.ts still
 // statically pulls in merchantAccount.service.ts, and this keeps that import
 // from depending on any real encryption-key env var.
+// El candado de posiciones (tarifa al comercio, paso 1) tiene sus propias pruebas contra la base
+// (`tests/integration/superadmin/candadoDePosiciones.integration.test.ts`); aquí no estorba.
+jest.mock('@/services/shared/candadoDePosiciones', () => ({
+  ...jest.requireActual('@/services/shared/candadoDePosiciones'),
+  exigirConfirmacionDePosiciones: jest.fn().mockResolvedValue([]),
+  tomarCandado: jest.fn().mockResolvedValue(undefined),
+}))
+
 jest.mock('@/services/superadmin/merchantAccount.service', () => ({
   encryptCredentials: jest.fn((plaintext: unknown) => ({ encrypted: `enc(${JSON.stringify(plaintext)})`, iv: 'iv-hex' })),
 }))

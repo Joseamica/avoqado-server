@@ -363,6 +363,11 @@ const PROTEGIDAS = [
   'services/dashboard/customer.dashboard.service.ts#settleCustomerBalance:updateMany:data',
   'services/dashboard/order.dashboard.service.ts#settleOrder:updateMany:data',
   'services/dashboard/manualPayment.service.ts#createManualPayment:update:data',
+  // Task 2b (promo de lealtad): la sombra del pago manual y las tres ligas, con cliente, nacen con su obligación (recuperable).
+  'services/dashboard/manualPayment.service.ts#createManualPayment:create:data',
+  'services/dashboard/paymentLink.service.ts#completeCharge:create:data',
+  'services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout:create:data',
+  'services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout:create:data',
   'services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte:update:data',
   'services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction:update:data',
   'services/mobile/order.mobile.service.ts#registrarAbonoEnTx:updateMany:data',
@@ -379,25 +384,9 @@ const EXENTAS: Record<string, { motivo: string; prueba: string }> = {
     prueba: 'originSystem: OriginSystem.DELIVERY_PLATFORM',
   },
 
-  'services/dashboard/manualPayment.service.ts#createManualPayment:create:data': {
-    motivo: 'Sólo Modo2, INSERT de sombra MANUAL_ENTRY; Modo1 update está protegido por separado.',
-    prueba: "type: 'MANUAL_ENTRY'",
-  },
   'services/dashboard/manualSale.service.ts#createOneManualSale:create:data': {
     motivo: 'Importación de venta serializada histórica: INSERT MANUAL_ENTRY, nunca paga un folio existente.',
     prueba: "type: 'MANUAL_ENTRY'",
-  },
-  'services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout:create:data': {
-    motivo: 'INSERT de cuenta para sesión de liga, nunca update de folio.',
-    prueba: "source: 'PAYMENT_LINK'",
-  },
-  'services/dashboard/paymentLink.service.ts#completeCharge:create:data': {
-    motivo: 'Cobro directo de liga crea cuenta propia, sin OnlineOrder.',
-    prueba: "source: 'PAYMENT_LINK'",
-  },
-  'services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout:create:data': {
-    motivo: 'MercadoPago liga/checkout crea cuenta propia según isLink; ninguna rama paga un folio.',
-    prueba: "source: isLink ? 'PAYMENT_LINK' : 'WEB'",
   },
   'services/dashboard/venueCheckout.service.ts#finalizeVenueCheckout:create:data': {
     motivo: 'Checkout genérico INSERT MANUAL_ENTRY, sin folio.',

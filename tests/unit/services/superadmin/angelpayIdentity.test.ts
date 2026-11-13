@@ -28,6 +28,12 @@ jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
   angelPayIntegrationsApiClient: { auth: jest.fn(), registerWebhook: jest.fn() },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
+// El candado de posiciones (tarifa al comercio, paso 1) tiene sus pruebas contra la base; aquí no estorba a la identidad.
+jest.mock('@/services/shared/candadoDePosiciones', () => ({
+  ...jest.requireActual('@/services/shared/candadoDePosiciones'),
+  exigirConfirmacionDePosiciones: jest.fn().mockResolvedValue([]),
+  tomarCandado: jest.fn().mockResolvedValue(undefined),
+}))
 const db = prisma as any
 const login = {
   id: 'login-1',

@@ -49,7 +49,11 @@ export const UpdateLoyaltyConfigSchema = z.object({
     // `updateLoyaltyConfig`, que es por donde también entra el MCP.
     stampsEnabled: z.boolean().optional(),
     stampsRequired: z.number().int('La cartilla se cuenta en sellos enteros').min(2).max(50).optional(),
-    maxStampsPerDay: z.number().int('El tope diario se cuenta en sellos enteros').min(1).optional(),
+    maxStampsPerDay: z
+      .number()
+      .int('El tope diario se cuenta en sellos enteros')
+      .min(0, 'El tope diario no puede ser negativo (0 = sin límite)')
+      .optional(),
     stampRewardType: z
       .enum(['FREE_PRODUCT', 'FIXED_AMOUNT', 'PERCENTAGE'], {
         errorMap: () => ({ message: 'Tipo de premio inválido: FREE_PRODUCT, FIXED_AMOUNT o PERCENTAGE' }),

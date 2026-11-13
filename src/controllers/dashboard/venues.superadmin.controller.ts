@@ -1,4 +1,10 @@
 import { Request, Response, NextFunction } from 'express'
+import {
+  cuentasDeLaOrganizacion,
+  exigirConfirmacionDePosiciones,
+  tomarCandado as tomarCandadoDePosiciones,
+  type CambioDePosicion,
+} from '@/services/shared/candadoDePosiciones'
 import { assertVenueHasNoDocumentLinksTx } from '../../services/document-requests/venueLinks.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -145,6 +151,7 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
     const sourceOrgName = venue.organization.name
 
+    let positionChanges: CambioDePosicion[] = []
     const resultado = await prisma.$transaction(async tx => {
       // B9: el presupuesto de espera de TODA la transacción, creado al entrar (las dos organizaciones y el negocio).
       const presupuesto = PresupuestoDeEspera.para(TIMEOUT_TRASLADO_MS)
@@ -158,6 +165,27 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       for (const organizationId of [fromOrganizationId, targetOrganizationId as string].sort()) {
         await bloquearOrganizacion(tx, organizationId, presupuesto)
       }
+
+      // 2b. Candado de posiciones (tarifa al comercio, paso 1; Codex p12-r1 #1): sin configuración propia el negocio pasa a las
+      // cuentas de la organización destino, y su tarifa de respaldo también cambia; eso se confirma antes de mover. Va DESPUÉS
+      // de las organizaciones (no chocan con quien inserta filas que apuntan a ellas) y ANTES del candado exclusivo del negocio
+      // (Codex p12-r3 #3 y r4 #1): así nadie del candado espera al negocio, y el negocio bloqueado —que hace esperar a los cobros
+      // que insertan su pago— no espera ningún candado de posiciones ni de tarifas. Si otro traslado lo movió mientras tanto,
+      // la relectura del paso 3 lo rechaza.
+      await tomarCandadoDePosiciones(tx, { venueId }, targetOrganizationId as string)
+      const configPropia = await tx.venuePaymentConfig.findUnique({
+        where: { venueId },
+        select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+      })
+      positionChanges = await exigirConfirmacionDePosiciones(tx, {
+        objetivo: { venueId },
+        siguiente: configPropia
+          ? { PRIMARY: configPropia.primaryAccountId, SECONDARY: configPropia.secondaryAccountId, TERTIARY: configPropia.tertiaryAccountId }
+          : await cuentasDeLaOrganizacion(tx, targetOrganizationId as string),
+        organizacionDespues: targetOrganizationId as string,
+        siguienteCalculado: true,
+        confirmaciones: req.body.positionConfirmations,
+      })
 
       // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
       const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
@@ -236,6 +264,7 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       entity: 'Venue',
       entityId: venueId,
       data: {
+        positionChanges,
         fromOrganizationId: resultado.fromOrganizationId,
         toOrganizationId: resultado.toOrganizationId,
         staffMembersUpdated: resultado.staffMembersUpdated,

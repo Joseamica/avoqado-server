@@ -8,6 +8,7 @@ import { avisarEfectivoConTarjetaEnDuda } from '@/services/shared/avisoDeEfectiv
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
+import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from '@/services/shared/cierreDeLealtad'
 
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
@@ -382,7 +383,9 @@ export async function createManualPayment(
             // Optional attributions — set when admin provides them so reports
             // by table / customer pick these manual entries up too.
             ...(input.tableId ? { tableId: input.tableId } : {}),
-            ...(input.customerId ? { customerId: input.customerId } : {}),
+            // Task 2b: con cliente, la sombra nace con su obligación de lealtad en la MISMA escritura que la deja PAID (la
+            // recupera el reconciliador si el proceso muere antes de acreditarla), con quien la registró como autor del sello.
+            ...(input.customerId ? { customerId: input.customerId, loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId } : {}),
             // createdBy = the admin who recorded it (audit trail).
             // servedBy = the waiter who gets tip / commission credit.
             createdById: staffId,
@@ -704,6 +707,10 @@ export async function createManualPayment(
     }
   }
 
+  // Task 2b (Codex r3 #2): la sombra con cliente conserva sus números de siempre en línea —la visita CON propina, los puntos
+  // SIN ella— y al terminar se cierra o deja su error igual que la regla compartida (`awardLoyaltyForPaidOrder`). Con error,
+  // el reconciliador la recupera con la regla compartida (puntos sobre la misma base; la visita, si faltó, sin propina).
+  const erroresDeLealtad: string[] = []
   if (!input.orderId && metricsCustomerIds.size > 0 && metricsState.orderTotal) {
     const metricsAmount = Number(metricsState.orderTotal.toString())
     for (const customerId of metricsCustomerIds) {
@@ -715,6 +722,7 @@ export async function createManualPayment(
           amount: metricsAmount,
         })
       } catch (metricsError: any) {
+        erroresDeLealtad.push(`metrics:${customerId}:${metricsError?.message ?? String(metricsError)}`)
         logger.error('⚠️ Failed to update customer metrics on manual payment (payment still succeeded)', {
           orderId: loyaltyOrderId,
           customerId,
@@ -771,11 +779,22 @@ export async function createManualPayment(
         newBalance: loyaltyResult.newBalance,
       })
     } catch (loyaltyError: any) {
+      erroresDeLealtad.push(`loyalty:${loyaltyCustomerId}`)
       logger.error('⚠️ Failed to earn loyalty points on manual payment (payment still succeeded)', {
         orderId: loyaltyOrderId,
         customerId: loyaltyCustomerId,
         venueId,
         error: loyaltyError?.message,
+      })
+    }
+    try {
+      if (erroresDeLealtad.length === 0) await cerrarLealtadDeLaVenta(venueId, loyaltyOrderId, { leyoSinCliente: false })
+      else await registrarErrorDeLealtad(venueId, loyaltyOrderId, erroresDeLealtad.join(' | '))
+    } catch (markerError: any) {
+      logger.error('⚠️ Loyalty outcome marker failed on manual payment; reconciler will retry', {
+        orderId: loyaltyOrderId,
+        venueId,
+        error: markerError?.message ?? String(markerError),
       })
     }
   }

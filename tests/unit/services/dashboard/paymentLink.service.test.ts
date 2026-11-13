@@ -1785,11 +1785,11 @@ describe('PaymentLink Service', () => {
       await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(mockEarnPoints).toHaveBeenCalledTimes(1)
-      // (venueId, customerId, base, orderId) — la MISMA firma que usa el TPV.
-      // Sin 5º argumento a propósito: `LoyaltyTransaction.createdById` apunta a
+      // (venueId, customerId, base, orderId, staffVenueId) — la MISMA firma que usa el TPV.
+      // El 5º argumento va VACÍO a propósito: `LoyaltyTransaction.createdById` apunta a
       // StaffVenue.id y en una liga de pago no hay cajero; mandar el Staff.id del
       // creador de la liga reventaría la FK en silencio.
-      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-123')
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-123', undefined)
     })
 
     it('Blumon: la visita y el gasto del cliente se mueven con la MISMA base que los puntos', async () => {
@@ -1820,7 +1820,7 @@ describe('PaymentLink Service', () => {
 
       await completeCharge('abc12345', 'cs_pl_test123')
 
-      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 450, 'order-123')
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 450, 'order-123', undefined)
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 450, 'order-123', VENUE_ID)
     })
 
@@ -1847,7 +1847,7 @@ describe('PaymentLink Service', () => {
 
       await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
 
-      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-stripe-1')
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-stripe-1', undefined)
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-stripe-1', VENUE_ID)
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
@@ -1861,7 +1861,7 @@ describe('PaymentLink Service', () => {
 
       await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
 
-      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 500, 'order-mp-9')
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 500, 'order-mp-9', undefined)
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 500, 'order-mp-9', VENUE_ID)
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),

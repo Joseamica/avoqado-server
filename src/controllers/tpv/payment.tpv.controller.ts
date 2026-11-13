@@ -55,6 +55,8 @@ export async function getPayments(req: Request, res: Response, next: NextFunctio
  * @param next Next function for error handling
  */
 export async function recordPayment(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Cuándo ENTRÓ la petición, antes de cualquier espera: la cota de la hora de la venta de la cola (`loyaltySaleAt`, Codex r2 #3).
+  const llegada = new Date()
   try {
     const orgId = req.authContext?.orgId
     const userId = req.authContext?.userId
@@ -81,7 +83,7 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     paymentData.authenticatedTerminalSerial = req.authContext?.terminalSerialNumber ?? null
 
     // Call service to record the payment
-    const result = await paymentTpvService.recordOrderPayment(venueId, orderId, paymentData, userId, orgId)
+    const result = await paymentTpvService.recordOrderPayment(venueId, orderId, paymentData, userId, orgId, llegada)
 
     // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
     // Same logic as recordFastPayment — serialized sales can come through order payment route too
@@ -137,6 +139,8 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
  * @param next Next function for error handling
  */
 export async function recordFastPayment(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Cuándo ENTRÓ la petición, antes de cualquier espera: la cota de la hora de la venta de la cola (`loyaltySaleAt`, Codex r2 #3).
+  const llegada = new Date()
   try {
     const orgId = req.authContext?.orgId
     const userId = req.authContext?.userId
@@ -168,6 +172,7 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
       userId,
       orgId,
       paymentData.customerId ? await customerAttributionActorForRecordedPayment(req) : {},
+      llegada,
     )
 
     // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments

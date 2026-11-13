@@ -75,9 +75,11 @@ jest.mock('@/utils/prismaClient', () => ({
     venueRolePermission: { findUnique: async () => null },
     // Una sola búsqueda acotada (ids de la venta + negocio + tipo COMP).
     discount: {
-      findFirst: jest.fn(
-        async ({ where }: any) =>
-          mockState.descuentos.find(d => where.id.in.includes(d.id) && d.venueId === where.venueId && d.type === where.type) ?? null,
+      findFirst: jest.fn(async ({ where }: any) =>
+        // D4: la pregunta del candado de aprobación (`checkAprobacionDelDescuento`); ningún descuento de aquí la pide.
+        where.requiresApproval === true
+          ? null
+          : (mockState.descuentos.find(d => where.id.in.includes(d.id) && d.venueId === where.venueId && d.type === where.type) ?? null),
       ),
     },
     venue: { findUnique: async () => ({ organizationId: 'org-1', slug: 'negocio' }) },

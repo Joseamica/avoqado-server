@@ -591,6 +591,38 @@ describe('checkPermission Middleware', () => {
       expect(mockNext).not.toHaveBeenCalled()
     })
 
+    // D4 (Codex r1 #4): una venta puede necesitar dos aprobaciones (cortesía y descuento). Cada revisión gasta sólo SU token.
+    it('varios tokens separados por coma: usa el que es de ESTE permiso y no toca los demás', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_cortesia, tok_descuento' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockImplementation(async ({ where }: any) => ({
+        count: where.token === 'tok_descuento' ? 1 : 0,
+      }))
+      ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_gerente' })
+
+      await checkPermission('tpv-orders:discount')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((mockReq as any).authContext.overrideAuthorizedBy).toBe('sv_gerente')
+      const intentos = (prisma.permissionOverride.updateMany as jest.Mock).mock.calls.map(([a]) => a.where)
+      expect(intentos.map((w: any) => w.token)).toEqual(['tok_cortesia', 'tok_descuento'])
+      expect(intentos.every((w: any) => w.permission === 'tpv-orders:discount')).toBe(true)
+      expect((logAction as jest.Mock).mock.calls.some(([e]) => e.action === 'PERMISSION_OVERRIDE_REJECTED')).toBe(false)
+    })
+
+    it('varios tokens y ninguno es de este permiso: 403 y UNA sola bitácora de rechazo', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_a,tok_b' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((logAction as jest.Mock).mock.calls.filter(([e]) => e.action === 'PERMISSION_OVERRIDE_REJECTED')).toHaveLength(1)
+    })
+
     // 2. REGRESIÓN
     it('con permiso, el override ni se consulta', async () => {
       ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)

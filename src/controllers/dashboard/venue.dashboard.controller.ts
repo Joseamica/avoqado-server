@@ -600,7 +600,7 @@ export async function applyVenueRetentionOffer(
   try {
     const { venueId } = req.params
     const offer = req.body.offer ?? 'discount'
-    const planState = await planStateService.applyRetentionOffer(venueId, offer)
+    const planState = await planStateService.applyRetentionOffer(venueId, offer, req.authContext?.userId)
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error applying venue retention offer', {

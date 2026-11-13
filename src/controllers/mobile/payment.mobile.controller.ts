@@ -20,6 +20,8 @@ export async function getCashPaymentByKey(req: Request, res: Response, next: Nex
  * Used for custom amounts and quick payments from iOS app
  */
 export async function recordFastPayment(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Cuándo ENTRÓ la petición, antes de cualquier espera: la cota de la hora de la venta de la cola (`loyaltySaleAt`, Codex r2 #3).
+  const llegada = new Date()
   try {
     const orgId = req.authContext?.orgId
     const userId = req.authContext?.userId
@@ -33,6 +35,7 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
       userId,
       orgId,
       paymentData.customerId ? await customerAttributionActorForRecordedPayment(req) : {},
+      llegada,
     )
 
     res.status(201).json({

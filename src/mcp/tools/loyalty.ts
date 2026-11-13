@@ -10,7 +10,7 @@ import { adjustPoints, getLoyaltyTransactions, updateLoyaltyConfig } from '@/ser
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
-import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { OFERTA_DE_CANJE_CAMBIO, previaDelCanjeEnCuenta, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -341,15 +341,29 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'redeem_loyalty_on_check',
-    '🔴 CRITICAL (moves customer value AND money on an open check). Redeem a customer\'s loyalty points as a discount on an OPEN check of a venue you can access — the POS "Recompensas" action. Find the customer by name/email/phone and pass the orderId of the open check. Points are burned and the matching discount is applied to the check in ONE transaction; if the points are worth more than the check, only the points actually needed are burned and the rest stay in the balance. Removing that discount later refunds the points automatically. By DEFAULT this only PREVIEWS (points → discount → new balance); call again with confirm:true to apply. This WRITES — requires orders:update.',
+    '🔴 CRITICAL (moves customer value AND money on an open check). Redeem a customer\'s loyalty points as a discount on an OPEN check of a venue you can access — the POS "Recompensas" action. Find the customer by name/email/phone and pass the orderId of the open check; the customer must already be on that check (attach them first), otherwise it is rejected. Points are burned and the matching discount is applied to the check in ONE transaction; if the points are worth more than the check, only the points actually needed are burned and the rest stay in the balance. Removing that discount later refunds the points automatically. By DEFAULT this only PREVIEWS (points → discount → new balance); call again with confirm:true to apply. This WRITES — requires orders:update.',
     {
       venueId: z.string().describe('Venue that owns the check and the customer (must be in your scope)'),
       orderId: z.string().describe('The OPEN order/check to discount'),
       search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
       points: z.number().int().positive().describe('Points to redeem (positive integer)'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+      expectedDiscount: z
+        .number()
+        .finite()
+        .nonnegative()
+        .optional()
+        .describe(
+          "With confirm:true, pass the preview's `discount` here (and its `pointsToRedeem` as expectedPoints): the check is then redeemed only if it still gives exactly that (if it changed, nothing is redeemed and you get the new offer)",
+        ),
+      expectedPoints: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("With confirm:true and expectedDiscount, the preview's `pointsToRedeem` (the points that will actually be burned)"),
     },
-    async ({ venueId, orderId, search, points, confirm }) => {
+    async ({ venueId, orderId, search, points, confirm, expectedDiscount, expectedPoints }) => {
       const base = guard.venueFilter(venueId)
       guard.requirePermission('orders:update', venueId)
       const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
@@ -381,9 +395,12 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
       if (!confirm) {
         try {
-          const status = await getCustomerLoyalty(venueId, c.id, orderId)
-          const rate = status.redemptionRate
-          const wouldBurn = Math.min(points, status.maxRedeemablePoints)
+          // D18: la previa es lo que el canje hará con ESTOS `points` (los que se mandan al confirmar): su misma regla, su base y
+          // sus negativas.
+          const previa = await previaDelCanjeEnCuenta(venueId, c.id, orderId, points)
+          if (!previa.ok) return text({ ok: false, error: previa.error })
+          const status = previa.vista
+          const wouldBurn = previa.puntos
           return text({
             ok: false,
             requiresConfirmation: true,
@@ -391,11 +408,11 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
               customer: name,
               currentPoints: status.balance,
               pointsToRedeem: wouldBurn,
-              discount: Math.round(wouldBurn * rate * 100) / 100,
+              discount: previa.monto,
               newBalance: status.balance - wouldBurn,
               minPointsRedeem: status.minPointsRedeem,
             },
-            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${(Math.round(wouldBurn * rate * 100) / 100).toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true para aplicar.`,
+            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${previa.monto.toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true, expectedDiscount: ${previa.monto} y expectedPoints: ${wouldBurn} para aplicar exactamente esto (si la cuenta cambió, no se canjea y te dice la oferta nueva).`,
           })
         } catch (err) {
           return text({ ok: false, error: (err as Error).message })
@@ -403,7 +420,9 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       }
 
       try {
-        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId)
+        // D18: con el monto de la previa, el mismo candado que la tablet (si la cuenta cambió, no se canjea).
+        const esperado = expectedDiscount === undefined ? undefined : { monto: expectedDiscount, puntos: expectedPoints }
+        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId, esperado)
         await auditMcpWrite(scope, {
           action: 'LOYALTY_POINTS_REDEEMED',
           entity: 'Order',
@@ -420,7 +439,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           orderTotal: result.order.total,
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        const code = (err as { code?: string }).code
+        return text({ ok: false, ...(code === OFERTA_DE_CANJE_CAMBIO ? { code } : {}), error: (err as Error).message })
       }
     },
   )

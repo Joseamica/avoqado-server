@@ -28,7 +28,7 @@ function cartillas(lista: Cartilla[]) {
           (w.rewards?.none === undefined || c.premio !== 'PENDING'),
       )
       .sort((a, b) => b.cycle - a.cycle)
-    return ok[0] ? { id: ok[0].id } : null
+    return ok[0] ? { id: ok[0].id, stampsEarned: ok[0].stampsEarned } : null
   }) as never)
   // La relectura bajo el candado de FILA de la cartilla elegida (y la cartilla de la venta) salen de la misma lista.
   prismaMock.stampCard.findUnique.mockImplementation((async (args: any) => {
@@ -440,5 +440,26 @@ describe('reverseStampForOrder', () => {
     await reverseStampForOrder('v1', 'o1')
 
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'STAMP_REVERSED', venueId: 'v1' }))
+  })
+
+  it('la bitácora registra lo que de verdad se quitó, no lo que la venta dio (ola final)', async () => {
+    // La venta dio 3 sellos (promo ×3), pero la cartilla sólo tiene 1: se quita 1 y la bitácora dice 1.
+    prismaMock.stampEvent.findFirst.mockResolvedValue({ id: 'se1', stampCardId: 'sc1', quantity: 3 } as any)
+    const lista = [{ id: 'sc1', cycle: 1, stampsEarned: 1, llena: false }]
+    cartillas(lista)
+    // La cartilla baja de verdad: ya en 0, ningún nivel la vuelve a elegir.
+    prismaMock.stampCard.update.mockImplementation((async ({ where, data }: any) => {
+      lista.find(c => c.id === where.id)!.stampsEarned -= data.stampsEarned.decrement
+      return {}
+    }) as never)
+
+    expect(await reverseStampForOrder('v1', 'o1')).toMatchObject({ reversed: true })
+
+    expect(prismaMock.stampEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ type: 'REVERSAL', quantity: -1 }) }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'STAMP_REVERSED', data: expect.objectContaining({ orderId: 'o1', quantity: 1 }) }),
+    )
   })
 })

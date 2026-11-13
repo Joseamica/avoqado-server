@@ -758,6 +758,17 @@ describe('writer-specific fresh decisions', () => {
     expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
   })
 
+  it('redeemPoints reads the program INSIDE the TX after the Order lock: one turned off meanwhile does not redeem (Codex candado-r1 #3)', async () => {
+    // Antes de tomar el candado el programa estaba prendido; un administrador lo apagó mientras se esperaba.
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(CONFIG)
+    tx.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false })
+    await expect(redeemPointsToOrder('venue', 'order', 'customer', 1000, 'staff')).rejects.toThrow(
+      'El programa de lealtad no está activo en esta sucursal',
+    )
+    expect(tx.customer.updateMany).not.toHaveBeenCalled()
+    expect(tx.loyaltyConfig.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+  })
+
   it('redeemPoints losing the customer CAS creates no discount and no totals', async () => {
     tx.customer.updateMany.mockResolvedValue({ count: 0 })
 

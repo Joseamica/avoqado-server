@@ -584,7 +584,7 @@ describe('Loyalty Dashboard Service', () => {
         prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 7 } as any)
       })
 
-      it('🔴 el candado por VENTA es la PRIMERA sentencia de la transacción de los puntos; dentro se mira si OTRO cliente ya cobró algo', async () => {
+      it('🔴 candado de la CLIENTA y luego el de la VENTA, primeras sentencias de la transacción de los puntos (orden global, promo §4.3 regla 14); dentro se mira si OTRO cliente ya cobró algo', async () => {
         const orden: string[] = []
         let dentro = false
         prismaMock.$transaction.mockImplementation((async (cb: any) => {
@@ -616,10 +616,14 @@ describe('Loyalty Dashboard Service', () => {
         const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
 
         expect(r).toEqual({ pointsEarned: 50, newBalance: 550, otorgado: { sello: false, puntos: true } })
-        expect(orden).toEqual(['BEGIN', 'candado', 'puntos de otro', 'sello de otro', 'puntos propios', 'EARN'])
-        const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
-        expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
-        expect(valores).toEqual(['venue-123', 'order-123'])
+        expect(orden).toEqual(['BEGIN', 'candado', 'candado', 'puntos de otro', 'sello de otro', 'puntos propios', 'EARN'])
+        // Mismo orden que `grantStamp`: clienta → venta. Nadie toma el inverso.
+        const candados = prismaMock.$executeRaw.mock.calls.slice(0, 2) as unknown as [TemplateStringsArray, ...unknown[]][]
+        for (const [plantilla] of candados) expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+        expect(candados.map(([, ...valores]) => valores)).toEqual([
+          ['venue-123', 'customer-123'],
+          ['venue-123', 'order-123'],
+        ])
       })
 
       it('🔴 OTRO cliente ya tiene los PUNTOS de esta venta (ganó el otro intento): no acredita y lo dice (otroCliente)', async () => {

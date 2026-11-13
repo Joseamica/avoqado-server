@@ -29,7 +29,7 @@ import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
-import { fijarSaldoReabiertoEnTx, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
+import { fijarSaldoReabiertoEnTx, subirVersionDeValesTrasCommit, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
 import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
@@ -1691,6 +1691,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
 
   if ('replayResult' in result) return result.replayResult
 
+  // D649 segunda vuelta: la sesión de vales estaba tomada por otra caja al reabrir el saldo; se sube ahora, ya sin la cuenta. Sin
+  // `await`: espera a que esa otra transacción termine. No lanza.
+  if (result.saldoReabierto?.sesionDeValesOcupada)
+    void subirVersionDeValesTrasCommit({ venueId: input.venueId, sessionId: result.saldoReabierto.sesionDeValesOcupada })
+
   // 🔴 EL CAJÓN RESTA EL REEMBOLSO (el defecto medido en hardware el 2026-08-16).
   //
   // Este servicio es el que la app usa DE VERDAD (`POST /mobile/venues/:venueId/
@@ -1842,6 +1847,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         source: 'DASHBOARD',
         // D649: la sesión de vales que se puso al día (versión, y PARTIALLY_PAID si seguía MATERIALIZED).
         ...(result.saldoReabierto.sesionDeVales ? { sesionDeVales: result.saldoReabierto.sesionDeVales } : {}),
+        ...(result.saldoReabierto.sesionDeValesOcupada
+          ? { sesionDeValesSubidaTrasCommit: result.saldoReabierto.sesionDeValesOcupada }
+          : {}),
       },
     })
   }

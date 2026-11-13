@@ -6,6 +6,7 @@
  */
 import { z } from 'zod'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
+import { confirmacionDePosicionesSchema } from '../../services/shared/candadoDePosiciones'
 
 const rateFields = {
   debitRate: z.number().min(0).max(1),
@@ -77,6 +78,8 @@ export const fullSetupAngelPaySchema = z
       moveStrategy: z.enum(['swap', 'vacate']).optional(),
     }),
     terminalIds: z.array(z.string()).optional(),
+    // Candado de posiciones (tarifa al comercio, paso 1): tarifa y terminales confirmadas por la pantalla.
+    positionConfirmations: confirmacionDePosicionesSchema,
     cost: z
       .object({
         ...rateFields,

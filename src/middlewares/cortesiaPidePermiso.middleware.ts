@@ -148,13 +148,25 @@ export const checkCortesiaEnDescuento = async (req: Request, res: Response, next
 function exigirCortesia(req: Request, res: Response, next: NextFunction) {
   const venueId = req.params.venueId
   const userId = req.authContext?.userId
-  const pinAntes = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-  return checkPermission('orders:comp')(req, res, error => {
-    if (error) return next(error)
-    // Sólo cuenta el PIN que consumió ESTE check (el token es de un solo uso: si cambió el autorizador, fue por `orders:comp`).
-    const pinDespues = (req as any).authContext?.overrideAuthorizedBy as string | undefined
-    const porPin = pinDespues && pinDespues !== pinAntes ? pinDespues : undefined
+  return exigirConPin(req, res, next, 'orders:comp', porPin => {
     if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
+  })
+}
+
+/**
+ * `checkPermission(permiso)` y, si pasa, `alPasar` con el gerente cuyo PIN gastó ESTE check (`undefined` = el permiso es propio).
+ * D4 (Codex r2 #3): antes se comparaba `overrideAuthorizedBy` con el de antes; si el MISMO gerente autorizaba cortesía y descuento,
+ * el segundo check no veía su PIN. Ahora se vacía antes del check y, si éste no gastó ninguno, se deja el de antes.
+ */
+function exigirConPin(req: Request, res: Response, next: NextFunction, permiso: string, alPasar: (porPin: string | undefined) => void) {
+  const auth = (req as any).authContext as { overrideAuthorizedBy?: string } | undefined
+  const pinAntes = auth?.overrideAuthorizedBy
+  if (auth) auth.overrideAuthorizedBy = undefined
+  return checkPermission(permiso)(req, res, error => {
+    const porPin = auth?.overrideAuthorizedBy
+    if (auth && !porPin) auth.overrideAuthorizedBy = pinAntes
+    if (error) return next(error)
+    alPasar(porPin)
     next()
   })
 }
@@ -203,4 +215,82 @@ export async function conCortesiaSiRegala<T>(
   if (fallo) throw fallo
   if (!paso || !tieneCortesiaAutorizada(req)) return undefined
   return operacion({ porPin: pinDeLaCortesia(req) })
+}
+
+// ─── D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación» ────────────────────────────────────────────
+
+/** El permiso que aprueba un % o fijo con «Requiere aprobación» (en las apps, «Aplicar descuentos en TPV»). Una COMP la cubre `orders:comp`. */
+export const PERMISO_QUE_APRUEBA_DESCUENTOS = 'tpv-orders:discount'
+
+const aprobacionesDelRequest = new WeakMap<Request, { venueId: string; userId: string; porPin?: string }>()
+
+/** D4: la acreditación de ESTE request, negocio y sesión (`porPin` = el gerente cuyo PIN la dio). `undefined` si no la hay. */
+export function aprobacionDelDescuento(req: Request): { porPin?: string } | undefined {
+  const a = aprobacionesDelRequest.get(req)
+  if (!a || a.venueId !== req.params.venueId || a.userId !== req.authContext?.userId) return undefined
+  return a.porPin ? { porPin: a.porPin } : {}
+}
+
+const idValido = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 64
+
+/**
+ * D4 (founder «B», 12-nov): un % o fijo de catálogo con «Requiere aprobación» lo aplica quien tiene `tpv-orders:discount` (de
+ * fábrica gerente, administrador y dueño); a quien no, se lo autoriza un superior con su PIN, sin cambiar de sesión. Va por
+ * `checkPermission`: consume `X-Permission-Override` o contesta el 403 canónico (con `overridable` si el negocio tiene el PIN).
+ *
+ * Mira, en UNA consulta, los descuentos de catálogo que trae el cuerpo: `discountId` (Mesas), `orderDiscountId` (cola de la TPV),
+ * `items[].discountId` (renglón), la etiqueta `descuentoDeCatalogoId` (el de cuenta que ANDROID manda como importe) y el cupón en
+ * línea (en la cola el servicio lo ignora). Sin ninguno que pida aprobación no pide nada. Una venta de la cola no se rechaza (D4 r5,
+ * abajo). Si la venta ya existe con su llave
+ * (`externalId`: reintento tras una respuesta perdida), tampoco: el servicio devuelve la que ya está sin aplicar nada nuevo. El
+ * servicio vuelve a mirar bajo su candado y falla cerrado sin la acreditación. Si la base falla: error, nunca 403.
+ */
+export const checkAprobacionDelDescuento = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    aprobacionesDelRequest.delete(req)
+    const venueId = req.params.venueId
+    const body = req.body ?? {}
+    const items: any[] = Array.isArray(body.items) ? body.items : []
+    const ids = [
+      ...new Set(
+        [body.discountId, body.orderDiscountId, body.descuentoDeCatalogoId, ...items.map(item => item?.discountId)].filter(idValido),
+      ),
+    ]
+    const cupon = traeCuponEnLinea(body) ? (body.couponCode as string).trim().toUpperCase() : null
+    if (!venueId || (ids.length === 0 && !cupon)) return next()
+    const pideAprobacion = await prisma.discount.findFirst({
+      where: {
+        venueId,
+        requiresApproval: true,
+        type: { not: DiscountType.COMP },
+        OR: [...(ids.length > 0 ? [{ id: { in: ids } }] : []), ...(cupon ? [{ couponCodes: { some: { code: cupon } } }] : [])],
+      },
+      select: { id: true },
+    })
+    if (!pideAprobacion) return next()
+    const externalId = typeof body.externalId === 'string' ? body.externalId.trim() : ''
+    if (externalId && (await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: { id: true } }))) {
+      return next()
+    }
+    const userId = req.authContext?.userId
+    // D4 r5 (Codex, apps viejas): una venta NUEVA de la cola ya se cobró (efectivo en la caja): nunca se rechaza por esto, como el
+    // cupón (D5). Con `tpv-orders:discount` propio queda aprobada; sin él, el servicio la registra sin aprobador y con rastro en la
+    // bitácora. Mandar `isOfflineReplay` en línea no da nada nuevo: es lo de antes de #423 (y con `discounts:apply` la misma cajera
+    // ya pone un descuento libre del mismo importe), y queda el rastro. Mesas (`:orderId`, sin dinero cobrado) sigue igual.
+    if (body.isOfflineReplay === true && !req.params.orderId) {
+      if (userId && (await aprobacionPorPermisoPropio(req, true))) aprobacionesDelRequest.set(req, { venueId, userId })
+      return next()
+    }
+    // Sólo cuenta el PIN que gastó ESTE check (el token es de un solo uso y de un solo permiso).
+    return exigirConPin(req, res, next, PERMISO_QUE_APRUEBA_DESCUENTOS, porPin => {
+      if (userId) aprobacionesDelRequest.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/** D4 en los vales: ahí no hay PIN de gerente; la aprobación es el `tpv-orders:discount` propio de quien emite o cobra. */
+export async function aprobacionPorPermisoPropio(req: Request, traeDescuentos: boolean): Promise<{ porPin?: string } | undefined> {
+  return traeDescuentos && (await tienePermisoEnVenue(req, PERMISO_QUE_APRUEBA_DESCUENTOS)) ? {} : undefined
 }
