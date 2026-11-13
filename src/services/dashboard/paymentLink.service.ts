@@ -11,7 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
-import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
+import { PaymentLinkStatus, PaymentMethod, Prisma, type PaymentLinkStockHold } from '@prisma/client'
 import {
   BadRequestError,
   ConflictError,
@@ -57,6 +57,8 @@ import {
 } from '@/services/dashboard/paymentLinkDiscount'
 import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
+import type Stripe from 'stripe'
+import { attachIntent, freezeIntentParams, releaseHold, takeOrReuseHold, variantAvailability } from './paymentLinkStockHold.service'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUNDLE VALIDATION (shared by create + update)
@@ -1533,7 +1535,76 @@ type PublicDiscount = {
   validUntil: string | null
 }
 
-export async function getPaymentLinkByShortCode(shortCode: string) {
+/** Tope de tallas que la página pública lee de una familia (el mismo que la disponibilidad). */
+const MAX_TALLAS_DE_LA_LIGA = 250
+
+/**
+ * La prenda de una liga por prenda para la página pública: ejes, valores y cada talla con su precio y si se puede apartar.
+ * Nunca cantidades de existencia. Con `browserToken`, la talla que ese navegador tiene apartada sale como suya (`heldByYou`)
+ * y su propio apartado no le resta. Sin el plan, la liga se ve pero nada se puede apartar (`unavailableReason: 'PLAN'`).
+ */
+async function prendaDeLaLiga(link: { id: string; venueId: string; productGroupId: string }, browserToken?: string) {
+  const grupo = await prisma.productGroup.findFirst({
+    where: { id: link.productGroupId, venueId: link.venueId },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      imageUrl: true,
+      deletedAt: true,
+      options: {
+        orderBy: { position: 'asc' },
+        take: 20,
+        select: { name: true, values: { orderBy: { position: 'asc' }, take: 100, select: { value: true } } },
+      },
+      products: {
+        where: { deletedAt: null, active: true },
+        orderBy: { id: 'asc' },
+        take: MAX_TALLAS_DE_LA_LIGA,
+        select: {
+          id: true,
+          price: true,
+          imageUrl: true,
+          variantValues: { select: { option: { select: { name: true } }, optionValue: { select: { value: true } } } },
+        },
+      },
+    },
+  })
+  if (!grupo || grupo.deletedAt) throw new BadRequestError('Esta liga de pago no está disponible')
+
+  const conPlan = await venueHasFeatureAccess(link.venueId, 'PRODUCT_VARIANTS')
+  const disponibles = conPlan
+    ? await variantAvailability({
+        paymentLinkId: link.id,
+        productGroupId: grupo.id,
+        venueId: link.venueId,
+        ...(browserToken ? { browserToken } : {}),
+      })
+    : []
+  const porTalla = new Map(disponibles.map(d => [d.productId, d]))
+  return {
+    id: grupo.id,
+    name: grupo.name,
+    description: grupo.description,
+    imageUrl: grupo.imageUrl,
+    options: grupo.options.map(o => ({ name: o.name, values: o.values.map(v => v.value) })),
+    variants: grupo.products.map(p => {
+      const d = porTalla.get(p.id)
+      return {
+        productId: p.id,
+        values: Object.fromEntries(p.variantValues.map(v => [v.option.name, v.optionValue.value])),
+        price: Number(p.price),
+        imageUrl: p.imageUrl,
+        available: d?.available ?? false,
+        heldByYou: d?.heldByYou ?? false,
+        heldUntil: d?.heldUntil ? d.heldUntil.toISOString() : null,
+      }
+    }),
+    unavailableReason: conPlan ? null : ('PLAN' as const),
+  }
+}
+
+export async function getPaymentLinkByShortCode(shortCode: string, browserToken?: string) {
   const paymentLink = await prisma.paymentLink.findUnique({
     where: { shortCode },
     include: {
@@ -1633,6 +1704,11 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     }
   }
 
+  // Liga por prenda: la clienta escoge la talla; `baseAmount` queda null (el precio es el de la talla) e `items` vacío.
+  const productGroup = paymentLink.productGroupId
+    ? await prendaDeLaLiga({ id: paymentLink.id, venueId: paymentLink.venueId, productGroupId: paymentLink.productGroupId }, browserToken)
+    : undefined
+
   return {
     id: paymentLink.id,
     shortCode: paymentLink.shortCode,
@@ -1676,7 +1752,205 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     tippingConfig: paymentLink.tippingConfig,
     redirectUrl: paymentLink.redirectUrl,
     paymentMethod,
+    ...(productGroup && { productGroup }),
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIGA POR PRENDA: la clienta escoge la talla y se le aparta mientras paga (Stripe Elements, sólo tarjeta)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** El renglón que se cobra en una liga por prenda: la talla elegida, una pieza, sin extras (vista local de `cobroDeLiga`). */
+type LineaDeCobro = { quantity: number; product: { id: string; name: string; price: Prisma.Decimal | number }; modifiers: [] }
+
+/**
+ * Lo que se congela en la ficha junto con el cuerpo del intento: con esto se crea la sesión local y se le contesta al
+ * navegador IGUAL en cada reintento, aunque entretanto cambien el correo, la comisión o la cuenta conectada del comercio.
+ */
+interface FotoDeCobro {
+  ecommerceMerchantId: string
+  paymentLinkId: string
+  attributedCustomerId: string | null
+  /** Pesos, con dos decimales. */
+  amount: string
+  currency: string
+  description: string
+  customerEmail: string | null
+  applicationFeeCents: number
+  metadata: Record<string, unknown>
+}
+
+/** Los caminos que no son Stripe Elements no saben apartar una talla: rechazan la liga por prenda antes de crear nada. */
+const SOLO_EN_SU_PAGINA = 'Esta liga sólo se paga con tarjeta desde su página de pago'
+
+/** Un intento en estos estados todavía se puede confirmar desde la página: recargar devuelve ese mismo. */
+const INTENTO_REUSABLE = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action'])
+
+/** El 409 cuando la ficha cambió mientras se cobraba (otra pestaña cambió de talla o venció): la página recarga la liga. */
+const APARTADO_CAMBIO = 'Tu apartado cambió. Vuelve a escoger tu talla.'
+
+/**
+ * Valida la talla ANTES de apartar nada: plan del negocio, que sea de ESTA familia y negocio, y que siga viva (no archivada,
+ * encendida, familia sin borrar). `getProductInventoryMethods` no filtra borrados, por eso se revisa aquí.
+ */
+async function tallaDeLaLiga(
+  link: { venueId: string; productGroupId: string },
+  input: { productId?: string; browserToken?: string },
+): Promise<LineaDeCobro['product']> {
+  if (!input.productId || !input.browserToken) throw new BadRequestError('Escoge una talla para continuar')
+  if (!(await venueHasFeatureAccess(link.venueId, 'PRODUCT_VARIANTS'))) {
+    throw new ForbiddenError('Esta liga no está disponible por ahora', 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
+  }
+  const talla = await prisma.product.findFirst({
+    where: { id: input.productId, venueId: link.venueId, productGroupId: link.productGroupId },
+    select: { id: true, name: true, price: true, active: true, deletedAt: true, productGroup: { select: { deletedAt: true } } },
+  })
+  if (!talla) throw new BadRequestError('Esa talla no pertenece a esta prenda')
+  if (talla.deletedAt || !talla.active || talla.productGroup?.deletedAt) {
+    throw new ConflictError('Esa talla ya no está disponible', 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
+  }
+  return { id: talla.id, name: talla.name, price: talla.price }
+}
+
+/**
+ * Aparta la talla y devuelve el intento de pago de esa ficha (una ficha = un intento, llave `plhold:<ficha>`).
+ * - Ficha con intento: se consulta con la cuenta CONGELADA de la ficha y se devuelve si aún se puede confirmar; `processing`
+ *   → 409; `succeeded` → `alreadyPaid`; `canceled` → se suelta y se aparta otra.
+ * - Ficha sin intento: se congela el cuerpo (si ya estaba congelado se usa ESE), se crea con la misma llave (Stripe devuelve
+ *   el mismo intento si ya lo había creado), la sesión local sale de la foto congelada sin pisar una existente, y se liga.
+ * 🔴 Un error al crear NO suelta la ficha: el siguiente POST del mismo navegador repite la misma petición; vence sola a los 15 min.
+ */
+async function cobrarPrendaConApartado(args: {
+  paymentLink: { id: string; venueId: string; shortCode: string }
+  productId: string
+  browserToken: string
+  amountCents: number
+  stripeAccountId: string
+  publishableKey: string
+  intentParams: Stripe.PaymentIntentCreateParams
+  checkoutSnapshot: FotoDeCobro
+}) {
+  const { paymentLink, productId, browserToken, amountCents, publishableKey } = args
+  const StripeSdk = (await import('stripe')).default
+  const stripe = new StripeSdk(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2026-02-25.clover' as any })
+
+  const respuesta = (pi: { id: string; client_secret: string | null }, hold: PaymentLinkStockHold) => {
+    const foto = hold.checkoutSnapshot as unknown as FotoDeCobro
+    return {
+      paymentIntentId: pi.id,
+      clientSecret: pi.client_secret,
+      publishableKey,
+      connectAccountId: hold.stripeAccountId as string,
+      amount: Number(foto.amount),
+      currency: foto.currency,
+      applicationFeeCents: foto.applicationFeeCents,
+      holdExpiresAt: hold.expiresAt.toISOString(),
+    }
+  }
+
+  // Dos vueltas bastan: la segunda sólo ocurre si el intento de la ficha ya estaba cancelado (se suelta y se aparta otra).
+  for (let vuelta = 0; vuelta < 2; vuelta++) {
+    const { hold, released } = await takeOrReuseHold({
+      paymentLinkId: paymentLink.id,
+      venueId: paymentLink.venueId,
+      productId,
+      browserToken,
+      amountCents,
+    })
+    // Los intentos de las fichas soltadas (otra talla u otro importe) se cancelan fuera de la transacción, con SU cuenta.
+    await Promise.all(
+      released
+        .filter(r => r.stripePaymentIntentId && r.stripeAccountId)
+        .map(r =>
+          stripe.paymentIntents
+            .cancel(r.stripePaymentIntentId as string, undefined, { stripeAccount: r.stripeAccountId as string })
+            .catch(err =>
+              logger.warn('No se pudo cancelar el intento de una ficha soltada (lo acota el vencimiento)', {
+                holdId: r.holdId,
+                paymentIntentId: r.stripePaymentIntentId,
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            ),
+        ),
+    )
+
+    if (hold.stripePaymentIntentId) {
+      const pi = await stripe.paymentIntents.retrieve(hold.stripePaymentIntentId, undefined, {
+        stripeAccount: hold.stripeAccountId as string,
+      })
+      if (pi.status === 'canceled') {
+        await releaseHold(hold.id, 'intento_cancelado')
+        continue
+      }
+      if (pi.status === 'succeeded') return { alreadyPaid: true as const, paymentIntentId: pi.id }
+      if (!INTENTO_REUSABLE.has(pi.status)) {
+        throw new ConflictError('Tu pago se está procesando. Espera unos segundos.', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+      }
+      return respuesta(pi, hold)
+    }
+
+    const congelada = await freezeIntentParams(hold.id, {
+      amountCents,
+      stripeAccountId: args.stripeAccountId,
+      intentParams: args.intentParams as unknown as Prisma.InputJsonValue,
+      checkoutSnapshot: args.checkoutSnapshot as unknown as Prisma.InputJsonValue,
+    })
+    if (congelada.status !== 'ACTIVE') throw new ConflictError(APARTADO_CAMBIO, 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
+    const cuenta = congelada.stripeAccountId as string
+    const foto = congelada.checkoutSnapshot as unknown as FotoDeCobro
+    const pi = await stripe.paymentIntents.create(congelada.intentParams as unknown as Stripe.PaymentIntentCreateParams, {
+      stripeAccount: cuenta,
+      idempotencyKey: `plhold:${hold.id}`,
+    })
+    await prisma.checkoutSession.createMany({
+      data: [
+        {
+          sessionId: pi.id,
+          ecommerceMerchantId: foto.ecommerceMerchantId,
+          paymentLinkId: foto.paymentLinkId,
+          attributedCustomerId: foto.attributedCustomerId,
+          amount: new Prisma.Decimal(foto.amount),
+          currency: foto.currency,
+          description: foto.description,
+          customerEmail: foto.customerEmail,
+          applicationFeeCents: foto.applicationFeeCents,
+          metadata: foto.metadata as Prisma.InputJsonValue,
+          status: 'PENDING',
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
+        },
+      ],
+      skipDuplicates: true,
+    })
+    try {
+      await attachIntent(hold.id, pi.id)
+    } catch (err) {
+      if ((err as { code?: string })?.code !== 'PAYMENT_LINK_HOLD_INTENT_MISMATCH') throw err
+      const ahora = await prisma.paymentLinkStockHold.findUnique({
+        where: { id: hold.id },
+        select: { status: true, stripePaymentIntentId: true },
+      })
+      if (ahora?.status === 'CONSUMED' && ahora.stripePaymentIntentId === pi.id)
+        return { alreadyPaid: true as const, paymentIntentId: pi.id }
+      // Nadie más lo cancelaría: la ficha se soltó sin él.
+      await stripe.paymentIntents.cancel(pi.id, undefined, { stripeAccount: cuenta }).catch(e =>
+        logger.warn('No se pudo cancelar el intento de una ficha que ya no estaba activa', {
+          holdId: hold.id,
+          paymentIntentId: pi.id,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      )
+      throw new ConflictError(APARTADO_CAMBIO, 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
+    }
+    logger.info('Stripe PaymentIntent created for payment link (talla apartada)', {
+      paymentIntentId: pi.id,
+      paymentLinkId: paymentLink.id,
+      shortCode: paymentLink.shortCode,
+      holdId: hold.id,
+      amountCents,
+    })
+    return respuesta(pi, congelada)
+  }
+  throw new ConflictError(APARTADO_CAMBIO, 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
 }
 
 /**
@@ -1709,6 +1983,9 @@ export async function createStripePaymentIntentForPaymentLink(
     expectedTotal?: number
     customerEmail?: string
     customFieldResponses?: Record<string, string>
+    /** Liga por prenda: la talla elegida y el token de la pestaña que la aparta. */
+    productId?: string
+    browserToken?: string
   },
 ) {
   const paymentLink = await prisma.paymentLink.findUnique({
@@ -1743,9 +2020,16 @@ export async function createStripePaymentIntentForPaymentLink(
     throw new BadRequestError('La cuenta Stripe Connect del comercio no está configurada')
   }
 
+  // Liga por prenda: el cobro es UNA pieza de la talla elegida (validada antes de apartar nada).
+  const itemsDeCobro: LineaDeCobro[] | null = paymentLink.productGroupId
+    ? [{ quantity: 1, product: await tallaDeLaLiga({ ...paymentLink, productGroupId: paymentLink.productGroupId }, input), modifiers: [] }]
+    : null
+  const items = itemsDeCobro ?? paymentLink.items
+  const esPaquete = paymentLink.purpose === 'ITEM' && items.length > 0
+
   // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
   const bounds = getStripeChargeBoundsCents()
-  const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
+  const cobro = await cobroDeLiga({ ...paymentLink, items }, input, new Date(), bounds.min / 100)
   const tipAmount = cobro.propina
   const chargeAmount = cobro.total
 
@@ -1787,16 +2071,71 @@ export async function createStripePaymentIntentForPaymentLink(
     flow: 'stripe_elements',
   }
   if (tipAmount > 0) metadata.tipAmount = String(tipAmount)
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
+  if (esPaquete) {
     metadata.purpose = 'ITEM'
-    metadata.itemCount = String(paymentLink.items.length)
+    metadata.itemCount = String(items.length)
     // Stripe metadata values cap at 500 chars. The CheckoutSession.metadata
     // column has no such limit and carries the FULL snapshot (incl. modifier
     // names + prices) — Stripe metadata is just a debugging/observability hint.
-    metadata.items = JSON.stringify(buildBundleSnapshot(paymentLink.items)).slice(0, 500)
+    metadata.items = JSON.stringify(buildBundleSnapshot(items)).slice(0, 500)
   }
   if (input.customFieldResponses) {
     metadata.customFieldResponses = JSON.stringify(input.customFieldResponses).slice(0, 500)
+  }
+
+  const sessionMetadata = {
+    applicationFeeCents: applicationFeeAmount,
+    platformFeeBps: paymentLink.ecommerceMerchant.platformFeeBps,
+    vatRateBps,
+    provider: 'STRIPE_CONNECT',
+    flow: 'stripe_elements',
+    ...(tipAmount > 0 && { tipAmount }),
+    // La orden lee el descuento de aquí (no de la liga, que pudo cambiar después).
+    ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
+    ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
+    // Persist the full line-item snapshot (incl. modifiers) on the
+    // CheckoutSession so the webhook handler can replay OrderItem +
+    // OrderItemModifier creation without re-reading the link (which may
+    // have been edited between purchase and webhook arrival).
+    ...(esPaquete && { purpose: 'ITEM', items: buildBundleSnapshot(items) }),
+  }
+
+  if (itemsDeCobro) {
+    // Sin la clave publicable la página no puede pagar: se sabe ANTES de apartar o crear nada.
+    const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY
+    if (!publishableKey) {
+      throw new BadRequestError('El procesador de pagos está mal configurado (falta clave publicable). Contacta a soporte de Avoqado.')
+    }
+    return cobrarPrendaConApartado({
+      paymentLink,
+      productId: itemsDeCobro[0].product.id,
+      browserToken: input.browserToken as string,
+      amountCents: stripeAmount,
+      stripeAccountId: connectAccountId,
+      publishableKey,
+      // Sólo tarjeta (Apple Pay y Google Pay viajan como tarjeta): v1 sin OXXO ni SPEI.
+      intentParams: {
+        amount: stripeAmount,
+        currency: paymentLink.currency.toLowerCase(),
+        application_fee_amount: applicationFeeAmount,
+        payment_method_types: ['card'],
+        receipt_email: input.customerEmail,
+        description: paymentLink.title,
+        statement_descriptor_suffix: 'AVOQADO',
+        metadata,
+      },
+      checkoutSnapshot: {
+        ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
+        paymentLinkId: paymentLink.id,
+        attributedCustomerId: paymentLink.customerId ?? null,
+        amount: new Prisma.Decimal(chargeAmount).toFixed(2),
+        currency: paymentLink.currency,
+        description: paymentLink.title,
+        customerEmail: input.customerEmail ?? null,
+        applicationFeeCents: applicationFeeAmount,
+        metadata: sessionMetadata,
+      },
+    })
   }
 
   // 6. Create PaymentIntent on the connected account. `transfer_data`-style
@@ -1842,26 +2181,7 @@ export async function createStripePaymentIntentForPaymentLink(
       description: paymentLink.title,
       customerEmail: input.customerEmail,
       applicationFeeCents: applicationFeeAmount,
-      metadata: {
-        applicationFeeCents: applicationFeeAmount,
-        platformFeeBps: paymentLink.ecommerceMerchant.platformFeeBps,
-        vatRateBps,
-        provider: 'STRIPE_CONNECT',
-        flow: 'stripe_elements',
-        ...(tipAmount > 0 && { tipAmount }),
-        // La orden lee el descuento de aquí (no de la liga, que pudo cambiar después).
-        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
-        ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
-        // Persist the full line-item snapshot (incl. modifiers) on the
-        // CheckoutSession so the webhook handler can replay OrderItem +
-        // OrderItemModifier creation without re-reading the link (which may
-        // have been edited between purchase and webhook arrival).
-        ...(paymentLink.purpose === 'ITEM' &&
-          paymentLink.items.length > 0 && {
-            purpose: 'ITEM',
-            items: buildBundleSnapshot(paymentLink.items),
-          }),
-      } as unknown as Prisma.InputJsonValue,
+      metadata: sessionMetadata as unknown as Prisma.InputJsonValue,
       status: 'PENDING',
       // PaymentIntents don't have a hard expiry, but we still need a value
       // for the column. Use 24h to match the Checkout Session default — if
@@ -1902,6 +2222,7 @@ export async function createStripePaymentIntentForPaymentLink(
     amount: chargeAmount,
     currency: paymentLink.currency,
     applicationFeeCents: applicationFeeAmount,
+    holdExpiresAt: null,
   }
 }
 
@@ -2750,6 +3071,7 @@ export async function createStripeCheckoutForPaymentLink(
   })
 
   if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  if (paymentLink.productGroupId) throw new BadRequestError(SOLO_EN_SU_PAGINA)
   await assertVenueSalesEnabled(paymentLink.venueId)
   if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
   if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
@@ -2939,6 +3261,7 @@ export async function createCheckoutSession(
   if (!paymentLink) {
     throw new NotFoundError('Liga de pago no encontrada')
   }
+  if (paymentLink.productGroupId) throw new BadRequestError(SOLO_EN_SU_PAGINA)
   await assertVenueSalesEnabled(paymentLink.venueId)
 
   if (paymentLink.status !== 'ACTIVE') {
@@ -3092,6 +3415,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           shortCode: true,
           venueId: true,
           purpose: true,
+          productGroupId: true,
           createdById: true,
           // Commission attribution — same shape used in
           // finalizePaymentLinkCheckout. Empty array = no commission;
@@ -3117,6 +3441,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   if (session.paymentLink?.shortCode !== shortCode) {
     throw new BadRequestError('Sesión no pertenece a esta liga de pago')
   }
+  if (session.paymentLink.productGroupId) throw new BadRequestError(SOLO_EN_SU_PAGINA)
   await assertVenueSalesEnabled(session.paymentLink.venueId)
 
   if (session.status !== 'PROCESSING') {
@@ -3895,6 +4220,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   })
 
   if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  if (paymentLink.productGroupId) throw new BadRequestError(SOLO_EN_SU_PAGINA)
   await assertVenueSalesEnabled(paymentLink.venueId)
   if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
   if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
@@ -4053,6 +4379,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   if (session.paymentLink?.shortCode !== shortCode) {
     throw new BadRequestError('La sesión no pertenece a esta liga de pago')
   }
+  if (session.paymentLink.productGroupId) throw new BadRequestError(SOLO_EN_SU_PAGINA)
   await assertVenueSalesEnabled(session.paymentLink.venueId)
   if (session.ecommerceMerchant.provider?.code !== 'MERCADO_PAGO') {
     throw new BadRequestError('Esta sesión no usa Mercado Pago')

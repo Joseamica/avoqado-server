@@ -14,6 +14,10 @@ import logger from '@/config/logger'
 /** 409 «El precio de esta liga cambió»: el código y el desglose nuevo, para que la página muestre el total nuevo. */
 const precioCambiado = (error: any) => (error?.code === 'PAYMENT_LINK_PRICE_CHANGED' ? { code: error.code, details: error.details } : {})
 
+/** Liga por prenda: talla agotada, ya no disponible o pago en curso; con el código la página recarga o espera. */
+const CODIGOS_DE_TALLA = new Set(['PAYMENT_LINK_VARIANT_SOLD_OUT', 'PAYMENT_LINK_VARIANT_UNAVAILABLE', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS'])
+const deLaTalla = (error: any) => (CODIGOS_DE_TALLA.has(error?.code) ? { code: error.code } : {})
+
 /** 400 de una liga de un solo uso ya cobrada: el código y el resumen del pago, para que la página muestre «Pagada». */
 const yaPagada = (error: any) => (error?.code === 'PAYMENT_LINK_ALREADY_PAID' ? { code: error.code, details: error.details } : {})
 
@@ -25,7 +29,8 @@ export async function resolvePaymentLink(req: Request, res: Response) {
   try {
     const { shortCode } = req.params
 
-    const data = await paymentLinkService.getPaymentLinkByShortCode(shortCode)
+    // `t` (opcional, validado por el esquema): el token de la pestaña; la talla que tiene apartada sale como suya.
+    const data = await paymentLinkService.getPaymentLinkByShortCode(shortCode, req.query?.t as string | undefined)
 
     res.json({
       success: true,
@@ -110,7 +115,7 @@ export async function createStripeCheckout(req: Request, res: Response) {
  * the `client_secret` for the public checkout site to render Stripe Elements
  * inline. Customer never leaves `pay.avoqado.io`.
  *
- * Body: { amount?, quantity?, tipAmount?, customerEmail?, customFieldResponses? }
+ * Body: { amount?, quantity?, tipAmount?, customerEmail?, customFieldResponses?, productId?, browserToken? }
  */
 export async function createStripePaymentIntent(req: Request, res: Response) {
   try {
@@ -123,6 +128,7 @@ export async function createStripePaymentIntent(req: Request, res: Response) {
       success: false,
       error: error.message || 'Error al iniciar pago con Stripe',
       ...precioCambiado(error),
+      ...deLaTalla(error),
     })
   }
 }

@@ -393,10 +393,14 @@ export const listPaymentLinksSchema = z.object({
   }),
 })
 
+/** Token aleatorio de la pestaña (liga por prenda): con él la página ve como suya la talla que se le apartó. */
+const browserTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/, 'Token de navegador inválido')
+
 export const publicShortCodeSchema = z.object({
   params: z.object({
     shortCode: z.string().min(1, 'Código de liga inválido'),
   }),
+  query: z.object({ t: browserTokenSchema.optional() }),
 })
 
 export const publicCheckoutSchema = z.object({
@@ -492,5 +496,8 @@ export const publicStripePaymentIntentSchema = z.object({
     customerEmail: z.string().email('Email inválido').optional(),
     customFieldResponses: z.record(z.string()).optional(),
     expectedTotal: z.number().positive().optional(),
+    /** Liga por prenda: la talla elegida y el token de la pestaña que la aparta. */
+    productId: z.string().cuid('Talla inválida').optional(),
+    browserToken: browserTokenSchema.optional(),
   }),
 })
