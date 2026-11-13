@@ -580,12 +580,14 @@ describe('camino TPV — posting durable sin tocar la deducción probada', () =>
     expect(typeof updateOrderTotalsForStandalonePayment === 'function' || updateOrderTotalsForStandalonePayment === undefined).toBe(true)
   })
 
-  it('el registro del posting NUNCA bloquea la deducción (try/catch con log)', () => {
+  // Codex código r1 #1 (liga con talla): un vale ilegible ya no deja descontar a ciegas (el barredor lo aplica); el
+  // try/catch sigue: el cobro nunca se tumba por el vale.
+  it('un vale ilegible no tumba el cobro y lo descuenta el barredor (try/catch con log)', () => {
     const src = require('fs').readFileSync(
       require('path').resolve(__dirname, '../../../../src/services/tpv/payment.tpv.service.ts'),
       'utf8',
     )
-    expect(src).toContain('No se pudo registrar el posting del cobro TPV (la deducción continúa)')
+    expect(src).toContain('No se pudo leer o reclamar el vale del cobro TPV (lo descuenta el barredor)')
   })
 })
 

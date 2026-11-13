@@ -21,6 +21,7 @@ const PARAMS_SENSIBLES = new Set([
   'signature',
   'hmac', // la firma del callback OAuth de Shopify: no es la llave, pero no tiene por qué quedar en el log
   'hub.verify_token', // 🔴 el secreto del handshake de WhatsApp: Meta lo manda en el query (GET /api/v1/webhooks/whatsapp)
+  't', // 🔴 el token de la pestaña de una liga por prenda (`GET /public/payment-links/:code?t=`): recupera su apartado
 ])
 
 /**

@@ -10,6 +10,7 @@ import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 import { operationHash } from '@/utils/operationHash'
 import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostProductForUpdateV1 } from './recipe-cost-graph-lock'
 import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
+import { assertPostingFence, PostingFence } from '../inventory/postingFence'
 
 /**
  * Product Inventory Integration Service
@@ -147,7 +148,8 @@ export async function deductInventoryForProduct(
   orderModifiers?: OrderModifierForInventory[],
   // Fase 2 (posting durable): liga los movimientos QUANTITY a su línea de
   // posting. Opcional y aditivo — los callers legacy no cambian.
-  options?: { postingLineId?: string },
+  // `fence` (bloque 0): la cerca del vale; cada transacción que descuenta la revisa adentro (`postingFence.ts`).
+  options?: { postingLineId?: string; fence?: PostingFence },
 ) {
   const inventoryMethod = await getProductInventoryMethod(productId)
 
@@ -174,7 +176,15 @@ export async function deductInventoryForProduct(
     // ✅ Still process ADDITION modifiers even if product doesn't track inventory
     // Example: "Extra Bacon" on a product without recipe tracking
     if (orderModifiers?.length) {
-      await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
+      await deductStockForModifiers(
+        venueId,
+        modifierScaleQuantity,
+        orderModifiers,
+        orderId,
+        staffId,
+        options?.postingLineId,
+        options?.fence,
+      )
     }
     return {
       inventoryMethod: null,
@@ -184,10 +194,18 @@ export async function deductInventoryForProduct(
 
   switch (inventoryMethod) {
     case 'QUANTITY': {
-      const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId, options?.postingLineId)
+      const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId, options?.postingLineId, options?.fence)
       // ✅ Also deduct ADDITION modifiers for QUANTITY products
       if (orderModifiers?.length) {
-        await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
+        await deductStockForModifiers(
+          venueId,
+          modifierScaleQuantity,
+          orderModifiers,
+          orderId,
+          staffId,
+          options?.postingLineId,
+          options?.fence,
+        )
       }
       return result
     }
@@ -202,10 +220,19 @@ export async function deductInventoryForProduct(
         staffId,
         orderModifiers,
         options?.postingLineId,
+        options?.fence,
       )
       // ✅ Also deduct ADDITION modifiers (SUBSTITUTION handled in deductStockForRecipe)
       if (orderModifiers?.length) {
-        await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
+        await deductStockForModifiers(
+          venueId,
+          modifierScaleQuantity,
+          orderModifiers,
+          orderId,
+          staffId,
+          options?.postingLineId,
+          options?.fence,
+        )
       }
       return result
     }
@@ -239,8 +266,12 @@ async function deductSimpleStock(
   orderId: string,
   staffId?: string,
   postingLineId?: string,
+  fence?: PostingFence,
 ) {
   const result = await prisma.$transaction(async tx => {
+    // 0. La cerca del vale va PRIMERO y dentro de la tx: si otro trabajador ya re-reclamó, no se descuenta nada.
+    await assertPostingFence(tx, fence)
+
     // 1. Get product for metadata
     const product = await tx.product.findUnique({
       where: { id: productId },
@@ -364,9 +395,10 @@ async function deductRecipeBasedInventory(
   staffId?: string,
   orderModifiers?: OrderModifierForInventory[],
   postingLineId?: string,
+  fence?: PostingFence,
 ) {
   // Use existing recipe deduction logic with modifier support
-  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId, orderModifiers, postingLineId)
+  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId, orderModifiers, postingLineId, fence)
 
   return {
     inventoryMethod: 'RECIPE',
