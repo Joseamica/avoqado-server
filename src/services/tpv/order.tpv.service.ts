@@ -2693,8 +2693,11 @@ export async function removeOrderItem(
   orderId: string,
   orderItemId: string,
   expectedVersion: number,
+  /** Server-owned (hz:87f4b879:D5): el `userId` de la sesión que lo quita. Sin él (llamadas internas), sin autor, como antes. */
+  opciones: { actorId?: string } = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
+  const autor = opciones.actorId
 
   const { updatedOrder, itemToRemove, recorte } = await withDeadlockRetry(
     async tx => {
@@ -2762,7 +2765,7 @@ export async function removeOrderItem(
       // P4 (founder, 1-oct): lo dirigido al renglón que se borra —su descuento propio, su parte de un 2×1, un premio— se recorta
       // o se retira con sus beneficios ANTES de borrarlo; si no, su importe se quedaba restando sobre los demás renglones. Va
       // DESPUÉS de R9: la reducción que devuelva una fila retirada ya no encuentra en la cabecera el IVA del renglón que se fue.
-      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId })
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId, staffId: autor })
 
       // Delete the order item (Prisma will cascade delete modifiers)
       await tx.orderItem.delete({
@@ -2895,7 +2898,7 @@ export async function removeOrderItem(
   )
 
   void logAction({
-    staffId: null,
+    staffId: autor ?? null,
     venueId,
     action: 'ITEM_REMOVED',
     entity: 'Order',

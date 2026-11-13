@@ -172,7 +172,10 @@ export async function removeOrderItem(
     const orderItemId: string = req.params.itemId
     const expectedVersion: number = parseInt(req.query.version as string, 10)
 
-    const updatedOrder = await orderTpvService.removeOrderItem(venueId, orderId, orderItemId, expectedVersion)
+    // hz:87f4b879:D5: quien quita el producto es la sesión (el cuerpo no trae vendedor).
+    const updatedOrder = await orderTpvService.removeOrderItem(venueId, orderId, orderItemId, expectedVersion, {
+      actorId: req.authContext?.userId,
+    })
 
     res.status(200).json({
       success: true,

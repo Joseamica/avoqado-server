@@ -53,6 +53,7 @@ export function puntosQueSeCanjean(puntos: number, valorPorPunto: number, base: 
  * points and discount silently never persist. Resolve the row first; if the
  * caller has no assignment to this venue we store null rather than fail: the
  * audit attribution is nice to have, the money movement is not optional.
+ * hz:87f4b879:D4: sólo una membresía ACTIVA firma (como `membresiaDeQuienLlama` de D3/D5); una dada de baja = sin autor.
  */
 async function resolveStaffVenueId(
   db: Pick<Prisma.TransactionClient, 'staffVenue'>,
@@ -60,8 +61,8 @@ async function resolveStaffVenueId(
   staffId?: string,
 ): Promise<string | undefined> {
   if (!staffId) return undefined
-  const sv = await db.staffVenue.findUnique({
-    where: { staffId_venueId: { staffId, venueId } },
+  const sv = await db.staffVenue.findFirst({
+    where: { staffId, venueId, active: true },
     select: { id: true },
   })
   return sv?.id
@@ -276,13 +277,8 @@ export async function refundLoyaltyForOrderDiscount(
 ): Promise<{ pointsRefunded: number; customerId: string; transactionId: string } | null> {
   if (!row.loyaltyTransactionId) return null
 
-  // Same FK caveat as the redeem path (see resolveStaffVenueId).
-  const sv = staffId
-    ? await tx.staffVenue.findUnique({
-        where: { staffId_venueId: { staffId, venueId } },
-        select: { id: true },
-      })
-    : null
+  // Same FK caveat as the redeem path, and the same rule (hz:87f4b879:D4: only an ACTIVE membership signs).
+  const createdById = await resolveStaffVenueId(tx, venueId, staffId)
 
   const original = await tx.loyaltyTransaction.findUnique({
     where: { id: row.loyaltyTransactionId },
@@ -299,7 +295,7 @@ export async function refundLoyaltyForOrderDiscount(
       points: pointsRefunded,
       orderId: original.orderId,
       reason: `Devolución de ${pointsRefunded} puntos (se quitó la recompensa de la cuenta)`,
-      createdById: sv?.id,
+      createdById,
     },
   })
 
