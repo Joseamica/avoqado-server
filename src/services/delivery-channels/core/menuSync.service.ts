@@ -43,6 +43,7 @@ import {
   type MenuEnRevision,
 } from './llavesDelSistema'
 import { buildMenuSnapshot } from './menuSnapshot.service'
+import { filtrarMenuDelCanal, productosDelCanal, seleccionDelCanal } from './productosDelCanal'
 import { DeliveryWriteNotSentError, type ProblemaDeMenu, type PublicacionDeMenu } from './types'
 
 /**
@@ -113,12 +114,24 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
   const conRevision = adapter.menuConRevision === true
 
   try {
+    // 🔴 Codex r2: la copia que trae la pasada puede ser vieja (el dueño guardó su lista, precios u horario después). Se relee
+    // la configuración vigente justo antes de armar el menú. Con revisión (Rappi), la reserva bajo candado lo vuelve a
+    // comprobar; sin revisión (Uber), lo que quede de ventana se corrige solo en la siguiente pasada (la huella cambia).
+    link = await conConfigVigente(link)
     // 1. 🔴 Con un menú en revisión no se publica NADA encima, ni con `force`: el veredicto que llegue sería del menú
     // anterior y sellaría el nuevo (o lo tiraría). Es la salida barata: ni snapshot ni red.
     const enRevision = leerMenuEnRevision(link.config)
     if (enRevision) return await seguirEnRevision(link, enRevision)
 
-    const snapshot = await buildMenuSnapshot(link.venueId)
+    // Sólo los productos de ESTE canal (`config.productos`; sin lista, todo el catálogo). Va antes de la huella: cambiar la
+    // lista republica. Una lista mal escrita truena aquí y cae al catch (FAILED, sin publicar nada).
+    const delCanal = productosDelCanal(link.config)
+    const snapshot = filtrarMenuDelCanal(await buildMenuSnapshot(link.venueId), delCanal)
+    // 🔴 Codex r1 #1: una lista válida puede no dejar NINGÚN producto (SKU que ya no existen o se archivaron). Un menú vacío
+    // BORRA el de Uber (reemplaza el menú entero): no se publica, y queda a la vista como FAILED.
+    if (delCanal && snapshot.categories.length === 0) {
+      throw new Error('Ningún producto de la lista del canal (config.productos) está activo en el catálogo: no se publica un menú vacío')
+    }
 
     // 🔴 El horario va SIEMPRE, y entra en la huella: si el dueño cambia sus horas, el menú
     // se republica solo. Antes se publicaba 24/7 en silencio y nadie se enteraba de que su
@@ -145,7 +158,7 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
     // 4. Con revisión, la pendiente se reserva ANTES del POST, decidiendo con la fila bloqueada (la copia puede ser vieja).
     let reserva: Reserva | null = null
     if (conRevision) {
-      const reservada = await reservarRevision(link.id, actual, opts.force === true)
+      const reservada = await reservarRevision(link.id, actual, opts.force === true, seleccionDelCanal(link.config))
       if (!('huella' in reservada)) return { outcome: reservada.outcome, linkId: link.id }
       reserva = reservada
     }
@@ -286,10 +299,15 @@ async function reservarRevision(
   linkId: string,
   huella: string,
   force: boolean,
+  seleccion: string,
 ): Promise<Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' }> {
   let resultado: Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' } = { outcome: 'FAILED' }
   await escribirLlavesDelSistema(linkId, fila => {
     if (leerMenuEnRevision(fila.config)) resultado = { outcome: 'IN_REVIEW' }
+    // 🔴 Codex r1 #2: el dueño cambió su lista, precios u horario después de que esta pasada leyó el canal. Mandar la copia
+    // vieja dejaría EN REVISIÓN el menú equivocado (y nada se publica encima hasta el veredicto). Se salta: la siguiente
+    // pasada lee lo nuevo.
+    else if (seleccionDelCanal(fila.config) !== seleccion) resultado = { outcome: 'UNCHANGED' }
     else if (!force && fila.lastMenuHash === huella) resultado = { outcome: 'UNCHANGED' }
     else if (!force && leerMenuRechazado(fila.config)?.huella === huella) resultado = { outcome: 'REJECTED_UNCHANGED' }
     else {
@@ -539,6 +557,15 @@ export function revisionDeMenuOf(config: unknown): RevisionDeMenu {
   }
 }
 
+/**
+ * El canal con su `config` VIGENTE (Codex r2): la pasada del job lo leyó antes y el dueño pudo cambiar su lista de
+ * productos, precios u horario. Sin fila (se borró a media pasada) sigue con la copia: lo de abajo no encuentra a quién escribir.
+ */
+async function conConfigVigente(link: DeliveryChannelLink): Promise<DeliveryChannelLink> {
+  const fila = await prisma.deliveryChannelLink.findUnique({ where: { id: link.id }, select: { config: true } })
+  return fila ? { ...link, config: fila.config } : link
+}
+
 /** Los canales que deben mantenerse sincronizados: activos y con el auto-sync prendido. */
 export function syncableLinksWhere() {
   return {
@@ -583,46 +610,60 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   const adapter = adapterFor(link.provider)
   if (typeof adapter.setItemSoldOut !== 'function') return { agotados: 0, revividos: 0 }
 
-  if (!(await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING'))) return { agotados: 0, revividos: 0 }
+  // Sin INVENTORY_TRACKING los números de stock son basura: no se agota nada. Pero lo que YA estaba agotado se revive
+  // (Codex r4): antes se salía aquí y un negocio que perdió el plan quedaba con productos apagados para siempre.
+  const conInventario = await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING')
+  // Codex r2: la lista de productos (y lo ya agotado) se leen de la configuración VIGENTE, no de la copia de la pasada.
+  link = await conConfigVigente(link)
 
-  // (a) Productos con inventario PROPIO que se acabaron.
-  const sinStock = await prisma.product.findMany({
-    where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
-    select: { sku: true },
-  })
-  const deben = new Set(sinStock.map(p => p.sku).filter(Boolean) as string[])
+  // Sólo lo que está en el menú de ESTE canal: un SKU que el proveedor no tiene no se agota ni se revive allá.
+  const delCanal = productosDelCanal(link.config)
+  const enElMenu = (sku: string) => !delCanal || delCanal.has(sku)
+  const deben = new Set<string>()
+  // 🔴 Interruptor del canal (Testarudo, 12-nov): un negocio que usa recetas sólo para costear y no registra la existencia de
+  // sus insumos (todos en 0) quedaba con 28 de 38 productos «agotados» en Rappi. `false` = no agotar nada por inventario; lo
+  // que ya estaba agotado se revive solo abajo. Sin la llave (o `true`), como siempre.
+  if (conInventario && (link.config as { agotarPorInventario?: unknown } | null)?.agotarPorInventario !== false) {
+    // (a) Productos con inventario PROPIO que se acabaron.
+    const sinStock = await prisma.product.findMany({
+      where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
+      select: { sku: true },
+    })
+    for (const p of sinStock) if (p.sku) deben.add(p.sku)
 
-  // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
-  // verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la carne — y entonces
-  // TODOS los platillos que la llevan dejan de existir. Sin esto, Uber los sigue vendiendo y
-  // cada uno termina en un rechazo, que es lo que cuenta contra la tasa de inyección.
-  const conReceta = await prisma.product.findMany({
-    where: { venueId: link.venueId, active: true, recipe: { isNot: null } },
-    select: {
-      sku: true,
-      recipe: {
-        select: {
-          portionYield: true,
-          lines: {
-            // Un ingrediente OPCIONAL que falte no impide hacer el platillo — sólo sale sin
-            // él. Contarlo agotaría platillos que sí se pueden preparar.
-            where: { isOptional: false },
-            select: { quantity: true, rawMaterial: { select: { currentStock: true, name: true } } },
+    // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
+    // verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la carne — y entonces
+    // TODOS los platillos que la llevan dejan de existir. Sin esto, Uber los sigue vendiendo y
+    // cada uno termina en un rechazo, que es lo que cuenta contra la tasa de inyección.
+    const conReceta = await prisma.product.findMany({
+      where: { venueId: link.venueId, active: true, recipe: { isNot: null } },
+      select: {
+        sku: true,
+        recipe: {
+          select: {
+            portionYield: true,
+            lines: {
+              // Un ingrediente OPCIONAL que falte no impide hacer el platillo — sólo sale sin
+              // él. Contarlo agotaría platillos que sí se pueden preparar.
+              where: { isOptional: false },
+              select: { quantity: true, rawMaterial: { select: { currentStock: true, name: true } } },
+            },
           },
         },
       },
-    },
-  })
-
-  for (const p of conReceta) {
-    if (!p.sku || !p.recipe) continue
-    const porciones = p.recipe.portionYield > 0 ? p.recipe.portionYield : 1
-    const faltaAlgo = p.recipe.lines.some(l => {
-      // Lo que se necesita para UNA porción: la receta rinde `portionYield`.
-      const necesario = l.quantity.div(porciones)
-      return l.rawMaterial.currentStock.lessThan(necesario)
     })
-    if (faltaAlgo) deben.add(p.sku)
+
+    for (const p of conReceta) {
+      if (!p.sku || !p.recipe) continue
+      const porciones = p.recipe.portionYield > 0 ? p.recipe.portionYield : 1
+      const faltaAlgo = p.recipe.lines.some(l => {
+        // Lo que se necesita para UNA porción: la receta rinde `portionYield`.
+        const necesario = l.quantity.div(porciones)
+        return l.rawMaterial.currentStock.lessThan(necesario)
+      })
+      if (faltaAlgo) deben.add(p.sku)
+    }
+    for (const sku of deben) if (!enElMenu(sku)) deben.delete(sku)
   }
 
   // Lo que ya le dijimos al proveedor. Se guarda la LISTA y no una huella: hace falta el
@@ -631,7 +672,8 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
   const previo = new Set(((link.config as { soldOutSkus?: string[] } | null)?.soldOutSkus ?? []) as string[])
 
   const agotar = [...deben].filter(sku => !previo.has(sku))
-  const revivir = [...previo].filter(sku => !deben.has(sku))
+  // Un agotado que ya salió del menú del canal se queda anotado: si regresa a la lista, se revive entonces.
+  const revivir = [...previo].filter(sku => !deben.has(sku) && enElMenu(sku))
   if (agotar.length === 0 && revivir.length === 0) return { agotados: 0, revividos: 0 }
 
   const logrados = new Set(previo)
