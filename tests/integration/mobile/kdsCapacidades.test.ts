@@ -419,11 +419,20 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
       expect((await acceptDeliveryOrder(venueId, s.order.id, staffId)).outcome).toBe('ACCEPTED')
       expect(await comandaDe(s)).toMatchObject({ needsAcceptance: false, needsPrint: true })
 
-      // Si leer a Uber falla, el accept sigue contestando ACCEPTED (no se vuelve error para el mesero).
+      // Si leer a Uber falla, NO se contesta ACCEPTED (Codex c2 #2): la cocina creería que quedó y nadie imprimiría.
+      // Se contesta el error para reintentar, y el siguiente toque (409 + lectura sana) sí recupera la marca e imprime.
       const t = await sembrar({ aceptado: false })
       leerPedido.mockRejectedValue(new Error('sin red en la prueba'))
-      expect((await acceptDeliveryOrder(venueId, t.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(await acceptDeliveryOrder(venueId, t.order.id, staffId)).toEqual({ outcome: 'FAILED', error: 'ACEPTACION_SIN_CONFIRMAR' })
       expect(await comandaDe(t)).toMatchObject({ needsAcceptance: true, needsPrint: false })
+      leerPedido.mockResolvedValue({ providerAccepted: true })
+      expect((await acceptDeliveryOrder(venueId, t.order.id, staffId)).outcome).toBe('ACCEPTED')
+      expect(await comandaDe(t)).toMatchObject({ needsAcceptance: false, needsPrint: true })
+
+      // Uber contesta y NO dice aceptado (el 409 era otro estado): tampoco se finge.
+      const u = await sembrar({ aceptado: false })
+      leerPedido.mockResolvedValue({ providerAccepted: false })
+      expect((await acceptDeliveryOrder(venueId, u.order.id, staffId)).outcome).toBe('FAILED')
     } finally {
       link = await prisma.deliveryChannelLink.update({ where: { id: link.id }, data: { orderAcceptanceMode: 'AUTO' } })
     }

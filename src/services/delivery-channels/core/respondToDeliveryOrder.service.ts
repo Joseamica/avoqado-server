@@ -303,12 +303,19 @@ export async function acceptDeliveryOrder(venueId: string, orderId: string, staf
   }
 
   // 409 = "ya estaba aceptado / el estado es otro": no acredita, así que se lee a Uber para estampar la marca. Sin ella el
-  // pedido «falta aceptar» para siempre (no imprime, el botón sigue). Un fallo aquí no vuelve error el accept.
+  // pedido «falta aceptar» y no imprime. 🔴 Si no se pudo comprobar (lectura caída o Uber no dice aceptado), NO se contesta
+  // ACCEPTED (Codex c2 #2): la cocina creería que ya quedó y ninguna tablet sacaría el papel. Se contesta el error de
+  // «intenta de nuevo»: el botón «Aceptar» sigue y el siguiente toque repite el 409 y la lectura.
   if (r.status === 409) {
+    let recuperada = false
     try {
-      await recuperarAceptacionDesdeProveedor(venueId, orderId)
+      recuperada = await recuperarAceptacionDesdeProveedor(venueId, orderId)
     } catch (e) {
       logger.warn('[Delivery] no se pudo recuperar la aceptación tras un 409', { orderId, error: String(e) })
+    }
+    if (!recuperada) {
+      logger.warn('[Delivery] accept 409 sin aceptación comprobada: se contesta error para reintentar', { orderId })
+      return { outcome: 'FAILED', error: 'ACEPTACION_SIN_CONFIRMAR' }
     }
   }
 
