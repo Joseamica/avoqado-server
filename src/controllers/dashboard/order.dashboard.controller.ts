@@ -8,6 +8,7 @@ import logger from '../../config/logger'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '../../services/access/basePlan.service'
 import { esSuperadminReal } from '../../services/access/rolVigente'
+import { ForbiddenError } from '../../errors/AppError'
 import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
 import {
   LIST_PAGE_SIZE_MAX,
@@ -113,6 +114,14 @@ export async function getOrder(req: Request<{ venueId: string; orderId: string }
 export async function updateOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
     const { venueId, orderId } = req.params
+    // 🔴 D70: la fecha y el folio de una venta mueven reportes, cortes, comisiones y a qué visita se une una mesa sin red.
+    // `orders:update` lo traen de fábrica mesero, cajero y cocina; sólo un SUPERADMIN de verdad (en la base, sin impersonar)
+    // los cambia, igual que el diálogo del DASHBOARD. Si la consulta falla, no se escribe (falla cerrado).
+    if (req.body?.createdAt !== undefined || req.body?.orderNumber !== undefined) {
+      const authContext = (req as any).authContext
+      const esSuperadmin = !!authContext?.userId && !authContext.isImpersonating && (await esSuperadminReal(authContext.userId))
+      if (!esSuperadmin) throw new ForbiddenError('Sólo un superadministrador puede cambiar la fecha o el folio de una venta')
+    }
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae `customerId`.
     const opciones = {
