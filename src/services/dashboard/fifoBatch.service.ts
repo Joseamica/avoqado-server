@@ -6,6 +6,7 @@ import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
+import { assertPostingFence, PostingFence } from '../inventory/postingFence'
 
 /**
  * Generate unique batch number for a raw material
@@ -429,6 +430,7 @@ export async function deductStockFIFO(
     reference?: string
     createdBy?: string
     postingLineId?: string
+    fence?: PostingFence
   },
 ): Promise<any[]> {
   return await withSerializableRetry(
@@ -477,10 +479,15 @@ export async function deductStockFIFOInTx(
     postingLineId?: string
     wasteReportId?: string
     createdAt?: Date
+    /** La cerca del vale (`postingFence.ts`): se revisa aquí, dentro de la tx y en cada reintento de quien la posee. */
+    fence?: PostingFence
   },
   // Con el default, todo llamador que no lo pase conserva el orden FIFO de siempre.
   allocationOrder: BatchAllocationOrder = 'FIFO',
 ): Promise<DeductedBatchMovement[]> {
+  // Cerca del vale PRIMERO: todo RawMaterialMovement con postingLineId (receta y extras) pasa por aquí.
+  await assertPostingFence(tx, metadata.fence)
+
   // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
   // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
   // ajeno cruzaba tenants.

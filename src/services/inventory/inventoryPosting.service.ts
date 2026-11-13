@@ -25,6 +25,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { deductInventoryForProduct, getProductInventoryMethods } from '../dashboard/productInventoryIntegration.service'
 import { esValeRevendido } from '../shared/renglonDeVale'
+import { PostingFenceLostError } from './postingFence'
 
 /** Mismo shape estructural que OrderInventoryWarning['issues'] (payment.tpv). */
 export type InventoryPostingIssue = {
@@ -499,7 +500,8 @@ export async function applySalePosting(
         posting.orderId ?? posting.sourceId,
         staffId ?? undefined,
         orderModifiers,
-        { postingLineId: line.id },
+        // La cerca cooperativa de arriba se revisa ANTES del efecto; ésta va DENTRO de cada transacción que descuenta.
+        { postingLineId: line.id, fence: { postingId, claimStamp } },
       )
       if (typeof result?.remainingStock === 'number' && result.remainingStock < 0) {
         issues.push({
@@ -515,6 +517,12 @@ export async function applySalePosting(
         data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: null },
       })
     } catch (error: any) {
+      // Otro trabajador re-reclamó el vale mientras éste descontaba: se retira SIN tocar la línea. Lo que este
+      // trabajador alcanzó a escribir (producto sí, extra no) lo ve el nuevo dueño y va a PARTIAL_EFFECTS_MANUAL_RECONCILE.
+      if (error instanceof PostingFenceLostError) {
+        logger.warn('🛡️ [InventoryPosting] Cerca perdida dentro del descuento — este apply se retira', { postingId, lineId: line.id })
+        return null
+      }
       anyFailed = true
       issues.push({
         productId: line.productId,
