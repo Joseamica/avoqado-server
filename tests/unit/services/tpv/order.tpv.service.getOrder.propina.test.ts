@@ -127,6 +127,7 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
       cuenta({
         subtotal: new Decimal('10.30'),
         total: new Decimal('10.60'),
+        tipAmount: new Decimal('0.30'),
         payments: [pago('10.00', '0.10', { id: 'a' }), pago('0.30', '0.20', { id: 'b' })],
       }),
     )
@@ -187,6 +188,34 @@ describe('order.tpv.service.getOrder — D4: el restante no cobra la propina dos
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
 
     expect(result.amount_left).toBe(65)
+  })
+
+  it('Deliverect con envío IGUAL a la propina cobrada no se confunde: el envío no es propina (Codex r3 #2)', async () => {
+    // Productos $140 + envío $25 = total 165 (sin propina; su `tipAmount` es la del canal, 0). Abono cripto $100 + $25 de propina:
+    // B4Bit no reescribe total ni tipAmount. 140 + 25 coincide con 165, pero la columna de propina no: faltan $65 (como antes).
+    findUniqueMock.mockResolvedValue(
+      cuenta({ subtotal: new Decimal('140.00'), total: new Decimal('165.00'), payments: [pago('100.00', '25.00', { id: 'cripto' })] }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(65)
+  })
+
+  it('si no es seguro que el total traiga la propina, queda como antes (abono cripto con propina tras uno con tarjeta)', async () => {
+    // $100; tarjeta $25 + $10 (total 110, tipAmount 10); cripto $25 + $5 (B4Bit deja 110 y 10). Antes: 110 − 50 = $60; sigue $60.
+    findUniqueMock.mockResolvedValue(
+      cuenta({
+        subtotal: new Decimal('100.00'),
+        total: new Decimal('110.00'),
+        tipAmount: new Decimal('10.00'),
+        payments: [pago('25.00', '5.00', { id: 'cripto' }), pago('25.00', '10.00', { id: 'tarjeta' })],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(60)
   })
 
   it('un reembolso de una venta ya pagada no la vuelve a poner a deber (founder, 18-ago)', async () => {

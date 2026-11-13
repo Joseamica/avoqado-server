@@ -18,8 +18,12 @@ import {
  *   lo guardan CON las propinas cobradas (`computeStoredOrderTotal`); agregar o quitar productos lo reescribe SIN propina; la
  *   ingesta de Deliverect lo guarda sin propina y CON comisiones del canal que no viven en ninguna otra columna. Restar la
  *   propina siempre cobraba de menos tras agregar una ronda; recalcular el total perdía el envío de Deliverect.
- * - Por eso la columna manda, y la propina cobrada sólo se descuenta si la columna la trae: es decir, si coincide al centavo con
- *   el total de la regla común CON esas propinas. Si no coincide, la columna no la trae y no se le resta.
+ * - Por eso la columna manda, y la propina cobrada sólo se descuenta cuando es SEGURO que la columna la trae: el total coincide
+ *   al centavo con la regla común CON las propinas cobradas y `Order.tipAmount` es exactamente esas propinas (así escriben los
+ *   cobros y D19). Si no, se calcula como antes (sin restar propina): la garantía es «arreglado cuando es seguro, igual que
+ *   antes cuando no». Quedan como antes, sin arreglar (Codex r3 #1): un abono cripto con propina después de otro con tarjeta
+ *   (B4Bit no reescribe `total` ni `tipAmount`), y una venta cancelada y cerrada con IVA aparte que recibe una propina sola.
+ *   Los arregla que todos los escritores de `Order.total` lo guarden igual (anotado en el pizarrón).
  *
  * Lo cobrado es la regla común (`summarizeRefunds` de los COMPLETED): un reembolso no reabre la venta (founder, 18-ago) salvo lo
  * que D19 marcó como reabierto. Un intento todavía en curso (PENDING/PROCESSING, p. ej. un QR de cripto vigente) sigue apartando
@@ -29,7 +33,11 @@ import {
 export type PagoParaElRestante = CompletedPaymentForBalance & { status: string | null }
 
 export function restanteDeLaMesa(
-  orden: Omit<StoredOrderTotalAmounts, 'tipAmount'> & { total: Prisma.Decimal | number | string | null | undefined },
+  orden: Omit<StoredOrderTotalAmounts, 'tipAmount'> & {
+    total: Prisma.Decimal | number | string | null | undefined
+    /** La propina que la orden dice traer en su total (la columna `Order.tipAmount`). */
+    tipAmount: Prisma.Decimal | number | string | null | undefined
+  },
   pagos: readonly PagoParaElRestante[],
 ): number {
   const completados = pagos.filter(p => p.status === 'COMPLETED')
@@ -45,7 +53,14 @@ export function restanteDeLaMesa(
     status: orden.status,
     tipAmount: cobrado.netTipAmount,
   })
-  const elTotalTraeLasPropinas = totalGuardado.toDecimalPlaces(2).equals(totalConPropinas.toDecimalPlaces(2))
+  // Dos señales a la vez, las dos que escriben juntos los cobros (`recordOrderPayment`, `payCashOrder`) y la devolución que
+  // reabre (D19): el total coincide con la regla común CON las propinas cobradas, Y la columna `tipAmount` de la orden es
+  // exactamente esas propinas. Deliverect guarda en `tipAmount` la propina del canal (no la cobrada) y un cobro cripto deja
+  // `total` y `tipAmount` como estaban: con una sola señal, un envío igual a la propina se leía como propina (Codex r3 #2).
+  const centavos = (v: Prisma.Decimal) => v.toDecimalPlaces(2)
+  const elTotalTraeLasPropinas =
+    centavos(totalGuardado).equals(centavos(totalConPropinas)) &&
+    centavos(new Prisma.Decimal(orden.tipAmount ?? 0)).equals(centavos(cobrado.netTipAmount))
 
   // Lo cobrado SIN propina se resta siempre; la propina, sólo si el total la trae.
   const cobradoQueResta = elTotalTraeLasPropinas ? cobrado.netPaidAmount : cobrado.netPaidAmount.minus(cobrado.netTipAmount)
