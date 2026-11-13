@@ -1724,6 +1724,10 @@ async function plainOrder() {
     include: { items: true },
   })
 }
+/** D650: el canje sólo usa los puntos de un cliente de la cuenta. Se liga como la TPV (`OrderCustomer`): la cabecera sigue sin cliente. */
+async function ligarCliente(orderId: string, customerId: string) {
+  await prisma.orderCustomer.create({ data: { orderId, customerId, isPrimary: true } })
+}
 function operationInput<A extends HttpManifest['action']>(manifest: Extract<HttpManifest, { action: A }>): OperationInput<A> {
   return { venueId, actorId: authorId, operation: { version: 1, id: randomUUID(), deviceId: randomUUID() }, manifest }
 }
@@ -2551,6 +2555,7 @@ describe('Task3 receipt coverage', () => {
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'Comp refund', loyaltyPoints: 10000 } })
     const order = await plainOrder(),
       item = order.items.find(x => x.productName === 'A')!
+    await ligarCliente(order.id, customer.id)
     await redeemPointsToOrder(venueId, order.id, customer.id, 1000, authorId)
     const discount = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: order.id } })
     await prisma.orderDiscount.update({
@@ -3060,6 +3065,7 @@ test('Task4 loyalty receipt keeps exact balance after later customer changes', a
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Gate A', loyaltyPoints: 20000 } }),
     o = await plainOrder()
+  await ligarCliente(o.id, c.id)
   const i = operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: o.id, customerId: c.id }, payload: { points: 1000 } })
   const r = await exactReplay(i, 'post', `/orders/${o.id}/loyalty/redeem`, { customerId: c.id, points: 1000 }, () =>
     prisma.customer.update({ where: { id: c.id }, data: { loyaltyPoints: { increment: 77 } } }),
@@ -3087,6 +3093,87 @@ test('Task4 loyalty receipt keeps exact balance after later customer changes', a
     data: { customerId: c.id, points: 1000, discountAmount: 10 },
   })
 })
+test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CHANGED sin quemar (operación y plano); con la oferta de ahora, canjea', async () => {
+  await prisma.loyaltyConfig.upsert({
+    where: { venueId },
+    create: { venueId, active: true, minPointsRedeem: 100, redemptionRate: 0.01 },
+    update: { active: true, minPointsRedeem: 100, redemptionRate: 0.01 },
+  })
+  const c = await prisma.customer.create({ data: { venueId, firstName: 'Candado', loyaltyPoints: 20000 } }),
+    o = await plainOrder()
+  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1).
+  await prisma.order.update({ where: { id: o.id }, data: { customerId: c.id } })
+  // Otra caja dejó la cuenta con $1 por descontar; la tablet todavía enseña 1000 puntos por $10.
+  await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 99 } })
+  const body = { customerId: c.id, points: 1000, expectedDiscountAmount: 10 }
+  const i = operationInput({
+    action: 'redeemLoyaltyPoints',
+    refs: { orderId: o.id, customerId: c.id },
+    payload: { points: 1000, expectedDiscountAmount: 10 },
+  })
+  const r = await callHttp(i, 'post', `/orders/${o.id}/loyalty/redeem`, body)
+  expect(r.status).toBe(409)
+  expect(r.body).toMatchObject({ success: false, code: 'LOYALTY_OFFER_CHANGED' })
+  expect(r.body.message).toContain('100 puntos por $1.00')
+  expect((await stored(i))!.status).toBe('REJECTED')
+  const otraVez = await callHttp(i, 'post', `/orders/${o.id}/loyalty/redeem`, body)
+  expect(otraVez.status).toBe(409)
+  expect(otraVez.body.code).toBe('LOYALTY_OFFER_CHANGED')
+
+  const plano = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send(body)
+  expect(plano.status).toBe(409)
+  // (este app de prueba no copia `details`; el de producción, `app.ts`, sí los manda)
+  expect(plano.body).toMatchObject({ code: 'LOYALTY_OFFER_CHANGED' })
+  expect(plano.body.message).toContain('100 puntos por $1.00')
+  expect((await prisma.customer.findUniqueOrThrow({ where: { id: c.id } })).loyaltyPoints).toBe(20000)
+  expect(await prisma.loyaltyTransaction.count({ where: { orderId: o.id } })).toBe(0)
+  expect(await prisma.orderDiscount.count({ where: { orderId: o.id } })).toBe(0)
+
+  const malo = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 'diez' })
+  expect(malo.status).toBe(400)
+
+  const bien = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(bien.status).toBe(200)
+  expect(bien.body.data).toMatchObject({ pointsRedeemed: 100, discountAmount: 1, newBalance: 19900 })
+
+  // Otra caja anuló la cuenta (la guarda compartida, real): con lo enseñado también es el 409 del candado (Codex candado-r2 #1).
+  const anulada = await plainOrder()
+  await prisma.order.update({ where: { id: anulada.id }, data: { customerId: c.id, status: 'CANCELLED' } })
+
+  // Ana ligada (como la TPV) pero otra caja puso a otra clienta en la cabecera: la tablet enseña a Ana ⇒ 409, nada se quema.
+  const otra = await prisma.customer.create({ data: { venueId, firstName: 'Beto' } })
+  const cambiada = await plainOrder()
+  await ligarCliente(cambiada.id, c.id)
+  await prisma.order.update({ where: { id: cambiada.id }, data: { customerId: otra.id } })
+  const rCambio = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${cambiada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(rCambio.status).toBe(409)
+  expect(rCambio.body.code).toBe('LOYALTY_OFFER_CHANGED')
+  expect(await prisma.loyaltyTransaction.count({ where: { orderId: cambiada.id } })).toBe(0)
+  const r409 = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${anulada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(r409.status).toBe(409)
+  expect(r409.body.code).toBe('LOYALTY_OFFER_CHANGED')
+  const r400 = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${anulada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100 })
+  expect(r400.status).toBe(400)
+  expect(r400.body.code).toBe('ORDER_CANCELLED_NO_EDIT')
+})
 test('Task4 remove discount stores original refund amount and created ADJUST id once', async () => {
   const { redeemPointsToOrder } = await import('@/services/mobile/loyalty.mobile.service')
   await prisma.loyaltyConfig.upsert({
@@ -3096,6 +3183,7 @@ test('Task4 remove discount stores original refund amount and created ADJUST id 
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Refund', loyaltyPoints: 10000 } }),
     o = await plainOrder()
+  await ligarCliente(o.id, c.id)
   await redeemPointsToOrder(venueId, o.id, c.id, 1000, authorId)
   const row = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: o.id } })
   const i = operationInput({ action: 'removeOrderDiscount', refs: { orderId: o.id, orderDiscountId: row.id }, payload: {} })
@@ -3141,6 +3229,7 @@ describe('Task4 receipt coverage', () => {
     const customer = await prisma.customer.create({
       data: { venueId, firstName: 'Task4 customer', loyaltyPoints: action === 'redeemLoyaltyPoints' ? 20000 : 10000 },
     })
+    await ligarCliente(order.id, customer.id)
     if (action === 'redeemLoyaltyPoints')
       return {
         order,
@@ -3522,6 +3611,7 @@ describe('Task4 receipt coverage', () => {
     expect(await discountSnapshot(f)).toEqual(before)
     const o = await plainOrder(),
       i = operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: o.id, customerId: f.customerId! }, payload: { points: 1000 } })
+    await ligarCliente(o.id, f.customerId!)
     const tombstone = terminal(await resolveHttpOperation({ ...i, actorId: managerId }))
     const late = await callHttp(i, 'post', discountPath(i), discountBody(i))
     expect(late.body.httpOperation.outcome).toBe('REJECTED')
@@ -3545,6 +3635,7 @@ describe('Task4 receipt coverage', () => {
     await activeConfig()
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'CAS race', loyaltyPoints: 1500 } })
     const orders = [await plainOrder(), await plainOrder()]
+    for (const order of orders) await ligarCliente(order.id, customer.id)
     const inputs = orders.map(order =>
       operationInput({ action: 'redeemLoyaltyPoints', refs: { orderId: order.id, customerId: customer.id }, payload: { points: 1000 } }),
     )
@@ -3628,6 +3719,8 @@ describe('Task4 receipt coverage', () => {
     const customer = await prisma.customer.create({ data: { venueId, firstName: 'ACK original balance', loyaltyPoints: 20000 } })
     const firstOrder = await plainOrder(),
       secondOrder = await plainOrder()
+    await ligarCliente(firstOrder.id, customer.id)
+    await ligarCliente(secondOrder.id, customer.id)
     const firstInput = operationInput({
       action: 'redeemLoyaltyPoints',
       refs: { orderId: firstOrder.id, customerId: customer.id },

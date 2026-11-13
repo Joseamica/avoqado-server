@@ -28,8 +28,10 @@ export const getCustomerLoyalty = async (req: Request, res: Response, next: Next
 export const redeemPoints = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { customerId, points } = req.body || {}
+    const { customerId, points, expectedDiscountAmount } = req.body || {}
     const staffId = (req as any).authContext?.userId as string | undefined
+    // Candado de la oferta (D18): el monto que enseñó la tablet. Opcional (apps viejas no lo mandan); `null` = no vino.
+    const montoEsperado: number | undefined = expectedDiscountAmount ?? undefined
 
     if (!customerId || typeof customerId !== 'string') {
       return res.status(400).json({ success: false, message: 'customerId is required' })
@@ -37,14 +39,20 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
     if (typeof points !== 'number') {
       return res.status(400).json({ success: false, message: 'points is required' })
     }
+    if (montoEsperado !== undefined && (typeof montoEsperado !== 'number' || !Number.isFinite(montoEsperado) || montoEsperado < 0)) {
+      return res.status(400).json({ success: false, message: 'expectedDiscountAmount debe ser un número no negativo' })
+    }
 
     const operation = parseHttpOperation(req.body)
     if (!operation) {
-      const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId)
+      // La tablet enseña los puntos que pide (nunca recorta) y a la clienta de la cabecera: se comparan esos y el monto.
+      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points, deLaCabecera: true }
+      const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, esperado)
       return res.json({ success: true, data })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
-    const parsed = manifestSchema.safeParse({ action: 'redeemLoyaltyPoints', refs: { orderId, customerId }, payload: { points } })
+    const payload = montoEsperado === undefined ? { points } : { points, expectedDiscountAmount: montoEsperado }
+    const parsed = manifestSchema.safeParse({ action: 'redeemLoyaltyPoints', refs: { orderId, customerId }, payload })
     if (!parsed.success || parsed.data.action !== 'redeemLoyaltyPoints')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
@@ -56,6 +64,10 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         manifest.refs.customerId,
         manifest.payload.points,
         staffId,
+        undefined,
+        manifest.payload.expectedDiscountAmount === undefined
+          ? undefined
+          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points, deLaCabecera: true },
       )
       const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {
