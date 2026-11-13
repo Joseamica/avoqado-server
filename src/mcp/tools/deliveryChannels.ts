@@ -26,6 +26,7 @@ import {
 import { updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 
+const MAX_CANALES = 200
 const MOTIVO_ESTACION = 'La estación elegida ya no existe o está apagada: se imprime como en el salón'
 
 /** Una consulta acotada por lote: sólo las estaciones que algún canal eligió. */
@@ -191,12 +192,15 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       const links = await prisma.deliveryChannelLink.findMany({
         where: { venueId: where.venueId ?? venueId },
         select: { id: true, provider: true, status: true, config: true },
-        take: 200, // un negocio tiene un puñado de canales
+        take: MAX_CANALES + 1, // uno de más para saber si hubo recorte
       })
+      const truncated = links.length > MAX_CANALES
+      if (truncated) links.length = MAX_CANALES
       const guardadas = links.map(l => leerImpresion(l.config))
       const estaciones = await cargarEstaciones(venueId, guardadas)
       return text({
         venueId,
+        truncated,
         channels: links.map((l, i) => ({
           channelId: l.id,
           provider: l.provider,

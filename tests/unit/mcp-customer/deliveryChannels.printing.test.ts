@@ -108,6 +108,19 @@ describe('delivery_channel_printing', () => {
     expect(r.channels[0].impresion.motivo).toBe('La estación elegida ya no existe o está apagada: se imprime como en el salón')
   })
 
+  it('más de 200 canales: devuelve 200 y lo dice con truncated:true (nunca en silencio)', async () => {
+    mockLinksFind.mockResolvedValue(Array.from({ length: 201 }, (_, i) => link(`l${i}`, 'RAPPI')))
+    const r = parse(await call('delivery_channel_printing', { venueId: 'v1' }))
+    expect(mockLinksFind.mock.calls[0][0].take).toBe(201)
+    expect(r.channels).toHaveLength(200)
+    expect(r.truncated).toBe(true)
+  })
+
+  it('hasta 200 canales: truncated:false', async () => {
+    mockLinksFind.mockResolvedValue([link('l1', 'RAPPI')])
+    expect(parse(await call('delivery_channel_printing', { venueId: 'v1' })).truncated).toBe(false)
+  })
+
   it('sin estaciones elegidas no consulta estaciones', async () => {
     mockLinksFind.mockResolvedValue([link('l2', 'UBER_EATS')])
     await call('delivery_channel_printing', { venueId: 'v1' })
