@@ -369,9 +369,16 @@ export async function getOrder(
   })
 
   // Calculate amount left to pay
-  const orderTotal = Number(order.total || 0)
-  const totalPayments = order.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
-  const amount_left = orderTotal - totalPayments
+  // 🔴 D4 (hz:72be07e6:D4, 12-nov): `order.total` YA trae las propinas cobradas (`recordOrderPayment` lo reescribe con
+  // `computeStoredOrderTotal`: mercancía + propinas), así que a lo pagado se le resta `amount + tipAmount`. Restando sólo
+  // `amount`, la mesa de $50 con la parte 1 de $25 + $10 de propina decía «Restante $35» y la TPV volvía a pedir la propina.
+  // En Decimal, para no dejar «$0.0000001 por cobrar». La forma no cambia: `amount_left` sigue siendo un número.
+  const orderTotal = new Prisma.Decimal(order.total ?? 0)
+  const totalPayments = order.payments.reduce(
+    (sum, payment) => sum.plus(new Prisma.Decimal(payment.amount ?? 0)).plus(new Prisma.Decimal(payment.tipAmount ?? 0)),
+    new Prisma.Decimal(0),
+  )
+  const amount_left = orderTotal.minus(totalPayments).toNumber()
 
   // Construct table name for display in Android app
   const tableName = order.table ? `Mesa ${order.table.number}` : null
