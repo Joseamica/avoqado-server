@@ -88,8 +88,12 @@ export class OfertaDeCanjeCambio extends BadRequestError {
   }
 }
 
-/** Lo que enseñó quien canjea: el descuento y, si se sabe, los puntos que se quemarían (la tablet: los pedidos; el MCP: los de su previa). */
-export type OfertaEsperada = { monto: number; puntos?: number }
+/**
+ * Lo que enseñó quien canjea: el descuento y, si se sabe, los puntos que se quemarían (la tablet: los pedidos; el MCP: los de su
+ * previa). `deLaCabecera`: la clienta enseñada es la de la cabecera de la cuenta (la tablet sólo conoce ésa); si otra caja la cambió,
+ * aunque la anterior siga ligada (`OrderCustomer`), la oferta ya no es la que se enseñó (Codex android r10 #1).
+ */
+export type OfertaEsperada = { monto: number; puntos?: number; deLaCabecera?: boolean }
 
 /**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
@@ -353,6 +357,7 @@ export async function redeemPointsToOrderInTransaction(
   }
   // D650: sólo los puntos de un cliente que está en la cuenta, leído bajo su candado (tomado arriba).
   if (!(await estaEnLaCuenta(tx, orderId, order.customerId, customerId))) throw negativa(CLIENTE_FUERA_DE_LA_CUENTA)
+  if (esperado?.deLaCabecera && order.customerId !== customerId) throw negativa('La clienta de esta cuenta ya es otra.')
 
   const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
   if (!effectiveConfig.active) throw negativa('El programa de lealtad no está activo en esta sucursal')

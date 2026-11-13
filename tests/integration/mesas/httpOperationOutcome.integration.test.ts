@@ -3101,7 +3101,8 @@ test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CH
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Candado', loyaltyPoints: 20000 } }),
     o = await plainOrder()
-  await ligarCliente(o.id, c.id)
+  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1).
+  await prisma.order.update({ where: { id: o.id }, data: { customerId: c.id } })
   // Otra caja dejó la cuenta con $1 por descontar; la tablet todavía enseña 1000 puntos por $10.
   await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 99 } })
   const body = { customerId: c.id, points: 1000, expectedDiscountAmount: 10 }
@@ -3146,8 +3147,20 @@ test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CH
 
   // Otra caja anuló la cuenta (la guarda compartida, real): con lo enseñado también es el 409 del candado (Codex candado-r2 #1).
   const anulada = await plainOrder()
-  await ligarCliente(anulada.id, c.id)
-  await prisma.order.update({ where: { id: anulada.id }, data: { status: 'CANCELLED' } })
+  await prisma.order.update({ where: { id: anulada.id }, data: { customerId: c.id, status: 'CANCELLED' } })
+
+  // Ana ligada (como la TPV) pero otra caja puso a otra clienta en la cabecera: la tablet enseña a Ana ⇒ 409, nada se quema.
+  const otra = await prisma.customer.create({ data: { venueId, firstName: 'Beto' } })
+  const cambiada = await plainOrder()
+  await ligarCliente(cambiada.id, c.id)
+  await prisma.order.update({ where: { id: cambiada.id }, data: { customerId: otra.id } })
+  const rCambio = await request(httpApp)
+    .post(`/api/v1/mobile/venues/${venueId}/orders/${cambiada.id}/loyalty/redeem`)
+    .set('x-test-actor', authorId)
+    .send({ customerId: c.id, points: 100, expectedDiscountAmount: 1 })
+  expect(rCambio.status).toBe(409)
+  expect(rCambio.body.code).toBe('LOYALTY_OFFER_CHANGED')
+  expect(await prisma.loyaltyTransaction.count({ where: { orderId: cambiada.id } })).toBe(0)
   const r409 = await request(httpApp)
     .post(`/api/v1/mobile/venues/${venueId}/orders/${anulada.id}/loyalty/redeem`)
     .set('x-test-actor', authorId)

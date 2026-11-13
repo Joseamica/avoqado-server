@@ -45,8 +45,8 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
 
     const operation = parseHttpOperation(req.body)
     if (!operation) {
-      // La tablet enseña los puntos que pide (nunca recorta): se comparan esos y el monto.
-      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points }
+      // La tablet enseña los puntos que pide (nunca recorta) y a la clienta de la cabecera: se comparan esos y el monto.
+      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points, deLaCabecera: true }
       const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, esperado)
       return res.json({ success: true, data })
     }
@@ -67,7 +67,7 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         undefined,
         manifest.payload.expectedDiscountAmount === undefined
           ? undefined
-          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points },
+          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points, deLaCabecera: true },
       )
       const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {

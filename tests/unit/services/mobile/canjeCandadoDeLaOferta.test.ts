@@ -219,6 +219,29 @@ describe('Candado de la oferta · la tablet sólo canjea exactamente lo que most
     })
   })
 
+  it('la tablet sólo conoce a la clienta de la CABECERA: si otra caja la cambió, aunque Ana siga ligada, es el 409 (Codex android r10 #1)', async () => {
+    // Ana quedó ligada (`OrderCustomer`) y otra caja puso a Beto en la cabecera; la tablet todavía enseña a Ana.
+    const tx = txFalso({ ...cuenta(500), customerId: 'beto' })
+    tx.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-ana' })
+    const tablet = { monto: 50, puntos: 500, deLaCabecera: true }
+    const rechazo = redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, tablet)
+    await expect(rechazo).rejects.toMatchObject({ statusCode: 409, code: 'LOYALTY_OFFER_CHANGED' })
+    await expect(rechazo).rejects.toThrow('La cuenta cambió: La clienta de esta cuenta ya es otra.')
+    nadaSeQuemo(tx)
+    // Sin cabecera (sólo ligada) tampoco: la tablet nunca la enseña así.
+    const sinCabecera = txFalso({ ...cuenta(500), customerId: null })
+    sinCabecera.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-ana' })
+    await expect(
+      redeemPointsToOrderInTransaction(sinCabecera, 'v1', 'o1', 'c1', 500, undefined, config as any, tablet),
+    ).rejects.toMatchObject({ statusCode: 409 })
+    // El MCP (sin esa marca) sí canjea a una clienta ligada, como siempre (D650).
+    const mcp = txFalso({ ...cuenta(500), customerId: 'beto' })
+    mcp.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-ana' })
+    await expect(
+      redeemPointsToOrderInTransaction(mcp, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
+    ).resolves.toMatchObject({ pointsToBurn: 500 })
+  })
+
   it('el MCP recorta a propósito: con los puntos de su previa (los que se queman), canjea (Codex candado-r1 #1)', async () => {
     // Pide 500 ($50) en una cuenta con $1 por descontar: su previa dijo 10 puntos por $1.00.
     const tx = txFalso(cuenta(100, 99))
