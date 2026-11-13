@@ -930,7 +930,7 @@ function autorizarRegaloDeCuenta(input: CreateOrderInput): AutorizacionDelRegalo
 const autorizadorDelRegalo = (a: AutorizacionDelRegalo | null): { authorizedById?: string } => (a && a !== 'SIN_PERMISO' ? a : {})
 
 /** D4 (hz:f34960c5:D4): un % o fijo de catálogo con «Requiere aprobación». Una COMP la cubre `orders:comp` (D1). */
-export const pideAprobacionDeGerente = (d: { requiresApproval?: unknown; type?: unknown } | null | undefined): boolean =>
+export const pideAprobacionDeGerente = (d: { readonly [key: string]: unknown } | null | undefined): boolean =>
   d?.requiresApproval === true && d.type !== 'COMP'
 
 /** D4: el 403 del servicio cuando falta la acreditación de la ruta (el de la ruta, con PIN, sale antes de llegar aquí). */
