@@ -357,23 +357,70 @@ describe('POST payment-intent de la liga por prenda', () => {
     expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
   })
 
-  it('carrera: una ficha soltada por takeOrReuseHold con intento → se cancela con SU cuenta (mejor esfuerzo)', async () => {
-    prismaMock.paymentLink.findUnique.mockResolvedValue(
-      liga({ ecommerceMerchant: { ...liga().ecommerceMerchant, providerCredentials: { connectAccountId: 'acct_B' } } }) as any,
-    )
-    take.mockResolvedValue({
-      hold: ficha({ id: 'chold00000000000000000002' }),
-      reused: false,
-      released: [
-        { holdId: 'chold00000000000000000001', stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' },
-        { holdId: 'chold00000000000000000003', stripePaymentIntentId: null, stripeAccountId: null },
-      ],
+  /**
+   * 🔴 Codex código r1 #2: dos POST del mismo token eligen M y L. L revisa sus previas cuando M todavía no liga su intento;
+   * después M liga su intento y empieza a pagar; L suelta la ficha de M en `takeOrReuseHold`. Antes L cancelaba «a mejor
+   * esfuerzo» y, aunque Stripe lo rechazara por estar en curso, devolvía un intento nuevo: dos cobros posibles antes de vencer.
+   * Ahora cada ficha soltada con intento pasa por el mismo camino estricto que las previas; si no se confirma cancelada, se
+   * suelta la ficha NUEVA y no se crea ni devuelve intento.
+   */
+  describe('carrera M/L del mismo token: la ficha soltada por takeOrReuseHold se cierra en estricto', () => {
+    const NUEVA = 'chold00000000000000000002'
+    beforeEach(() => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(
+        liga({ ecommerceMerchant: { ...liga().ecommerceMerchant, providerCredentials: { connectAccountId: 'acct_B' } } }) as any,
+      )
+      take.mockResolvedValue({
+        hold: ficha({ id: NUEVA }),
+        reused: false,
+        released: [
+          { holdId: 'chold00000000000000000001', stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' },
+          { holdId: 'chold00000000000000000003', stripePaymentIntentId: null, stripeAccountId: null },
+        ],
+      })
     })
-    await pagar()
-    expect(piCancel).toHaveBeenCalledTimes(1)
-    expect(piCancel).toHaveBeenCalledWith('pi_viejo', undefined, { stripeAccount: 'acct_A' })
-    // La ficha NUEVA sí nace con la cuenta de hoy.
-    expect(piCreate.mock.calls[0][1]).toEqual({ stripeAccount: 'acct_B', idempotencyKey: 'plhold:chold00000000000000000002' })
+
+    it('cancelable → se consulta y cancela con SU cuenta, se confirma «canceled» y sigue con la ficha nueva', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_de_m', status: 'canceled' })
+      const r = await pagar()
+      expect(piRetrieve).toHaveBeenCalledWith('pi_de_m', undefined, { stripeAccount: 'acct_A' })
+      expect(piCancel).toHaveBeenCalledTimes(1)
+      expect(piCancel).toHaveBeenCalledWith('pi_de_m', undefined, { stripeAccount: 'acct_A' })
+      // La ficha NUEVA sí nace con la cuenta de hoy.
+      expect(piCreate.mock.calls[0][1]).toEqual({ stripeAccount: 'acct_B', idempotencyKey: `plhold:${NUEVA}` })
+      expect(r).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+    })
+
+    it('M ya está en processing → 409 IN_PROGRESS, se suelta la ficha nueva y no se crea intento', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(piCancel).not.toHaveBeenCalled()
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+    })
+
+    it('Stripe rechaza la cancelación porque M ya empezó a cobrar → 409 IN_PROGRESS, ficha nueva suelta, sin intento', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'requires_action' })
+      piCancel.mockRejectedValue(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }))
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+    })
+
+    it('M ya cobró → alreadyPaid con SU intento, ficha nueva suelta, sin intento', async () => {
+      piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'succeeded' })
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_de_m' })
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+    })
+
+    it('Stripe caído al revisar la de M → sube el error, ficha nueva suelta, sin intento', async () => {
+      piRetrieve.mockRejectedValue(new Error('Stripe caído'))
+      await expect(pagar()).rejects.toThrow('Stripe caído')
+      expect(piCreate).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+    })
   })
 
   describe('nunca un intento nuevo mientras el anterior del mismo navegador esté en curso o cobrado', () => {
@@ -618,16 +665,6 @@ describe('POST payment-intent de la liga por prenda', () => {
       expect(take).toHaveBeenCalledTimes(1)
       expect(piCreate.mock.calls[0][1].idempotencyKey).toBe('plhold:chold00000000000000000001')
     })
-  })
-
-  it('cancelar el intento de la ficha soltada falla → se registra y el cobro nuevo sigue', async () => {
-    take.mockResolvedValue({
-      hold: ficha({ id: 'chold00000000000000000002' }),
-      reused: false,
-      released: [{ holdId: 'chold00000000000000000001', stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }],
-    })
-    piCancel.mockRejectedValue(new Error('Stripe caído'))
-    await expect(pagar()).resolves.toMatchObject({ paymentIntentId: 'pi_nuevo' })
   })
 
   it('respuesta perdida al crear: el siguiente POST repite la MISMA llave y parámetros y la sesión sale de la foto congelada', async () => {

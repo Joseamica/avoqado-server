@@ -1966,22 +1966,28 @@ async function cobrarPrendaConApartado(args: {
       browserToken,
       amountCents,
     })
-    // Los intentos de las fichas soltadas (otra talla u otro importe) se cancelan fuera de la transacción, con SU cuenta.
-    await Promise.all(
-      released
-        .filter(r => r.stripePaymentIntentId && r.stripeAccountId)
-        .map(r =>
-          stripe.paymentIntents
-            .cancel(r.stripePaymentIntentId as string, undefined, { stripeAccount: r.stripeAccountId as string })
-            .catch(err =>
-              logger.warn('No se pudo cancelar el intento de una ficha soltada (lo acota el vencimiento)', {
-                holdId: r.holdId,
-                paymentIntentId: r.stripePaymentIntentId,
-                error: err instanceof Error ? err.message : String(err),
-              }),
-            ),
-        ),
-    )
+    // 🔴 Codex código r1 #2: una ficha soltada aquí pudo ligar su intento DESPUÉS de la revisión de previas (otra pestaña del
+    // mismo navegador con otra talla) y ya estar cobrando. Cada una se cierra en estricto, con SU cuenta, igual que las previas;
+    // si no queda confirmada como cancelada (en curso, ya cobrada o Stripe sin contestar), se suelta la ficha NUEVA y no se
+    // crea ni devuelve intento: nunca dos cobros posibles antes de vencer.
+    for (const r of released) {
+      if (!r.stripePaymentIntentId || !r.stripeAccountId) continue
+      let pagada: Awaited<ReturnType<typeof cerrarIntentoPrevio>>
+      try {
+        pagada = await cerrarIntentoPrevio(stripe, {
+          id: r.holdId,
+          stripePaymentIntentId: r.stripePaymentIntentId,
+          stripeAccountId: r.stripeAccountId,
+        })
+      } catch (err) {
+        await releaseHold(hold.id, 'intento_previo_sin_cerrar')
+        throw err
+      }
+      if (pagada) {
+        await releaseHold(hold.id, 'intento_previo_cobrado')
+        return pagada
+      }
+    }
 
     // La clienta corrigió su correo o un campo: es otra compra (el recibo no puede salir con los datos viejos).
     if (!mismosDatosDeLaClienta(hold, args.intentParams, args.checkoutSnapshot)) {
