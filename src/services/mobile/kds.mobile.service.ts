@@ -322,7 +322,7 @@ export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promis
  * La comanda con lo que depende de su VENTA, calculado en UN solo sitio (el tablero y la ruta
  * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
  * Un reparto de PROVEEDOR (`conProveedor`) es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
- * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
+ * necesita que alguien reclame la impresión, y sólo un reparto que `faltaAceptar` (PENDING y sin `providerAcceptedAt`) necesita que lo acepten, y mientras falte no se imprime.
  * Un reparto trae además sus capacidades (spec «Apps»), opcionales y ausentes fuera de reparto.
  */
 export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
@@ -531,8 +531,8 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?
      *
-     * Sólo es `true` en canales configurados en MANUAL: ahí la venta entra PENDING porque
-     * NADIE le ha dicho que sí al proveedor todavía, y el plazo (~11.5 min en Uber) ya está
+     * Es `faltaAceptar`: sólo en canales MANUAL, venta PENDING y SIN `providerAcceptedAt`
+     * (aceptar guarda esa marca pero la venta sigue PENDING), con el plazo (~11.5 min en Uber)
      * corriendo. En AUTO siempre es `false` — el sistema ya contestó en segundos.
      *
      * Es el dato que hace posible el botón "Aceptar" en la cocina. Sin él, el modo MANUAL
@@ -545,6 +545,9 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
      * Sólo aplica a pedidos que llegaron SOLOS (marketplace): los que manda un mesero desde
      * una tablet ya se imprimen en ese mismo gesto. Aquí no hay gesto humano — el pedido
      * aparece en todas las pantallas a la vez, y alguien tiene que reclamar el trabajo.
+     *
+     * 🔴 El papel se RETIENE mientras falte aceptar (`!needsAcceptance`): no se imprime un pedido
+     * que quizá se rechace o venza.
      *
      * `false` en cuanto alguien lo reclama, no cuando termina: si se esperara al papel, las
      * demás tablets seguirían viéndolo pendiente los segundos que tarda la impresión y lo
