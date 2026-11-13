@@ -8,6 +8,7 @@ import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 import {
   cuentasDeLaOrganizacion,
   exigirConfirmacionDePosiciones,
+  tomarCandado,
   type CambioDePosicion,
   type ConfirmacionDePosiciones,
 } from '@/services/shared/candadoDePosiciones'
@@ -269,6 +270,8 @@ export async function deleteVenuePaymentConfig(venueId: string, positionConfirma
 
   // Candado: sin configuración propia el negocio pasa a usar las cuentas de su organización (si tiene).
   const positionChanges = await prisma.$transaction(async tx => {
+    // Codex p12-r3 #2: los candados ANTES de calcular las cuentas que heredaría (la organización no cambia mientras tanto).
+    await tomarCandado(tx, { venueId })
     const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
     const deLaOrganizacion = venue ? await cuentasDeLaOrganizacion(tx, venue.organizationId) : null
     const cambios = await exigirConfirmacionDePosiciones(tx, {

@@ -108,6 +108,9 @@ export async function assignProcessorAndApprove(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Failed to assign processor',
+      // Candado de posiciones: el código y el detalle para poder confirmar y reintentar (Codex p12-r3 #4).
+      ...(error.code && { code: error.code }),
+      ...(error.details !== undefined && { details: error.details }),
     })
   }
 }

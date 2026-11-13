@@ -17,6 +17,7 @@ import {
   POSICIONES,
   exigirConfirmacionDePosiciones,
   leerConfirmaciones,
+  tomarCandado,
   type CambioDePosicion,
   type Objetivo,
   type Posicion,
@@ -2014,9 +2015,19 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
     const accountSlotField =
       accountSlot === 'PRIMARY' ? 'primaryAccountId' : accountSlot === 'SECONDARY' ? 'secondaryAccountId' : 'tertiaryAccountId'
 
+    // Codex p12-r3 #1: las terminales que el operador eligió se validan (sólo lectura) ANTES de escribir la posición, para que
+    // una incompatible no deje la cuenta y la tarifa puestas con el asistente en error. El paso 3 vuelve a validar al asignar.
+    for (const terminalId of additionalTerminalIds as string[]) {
+      const terminal = await prisma.terminal.findUnique({ where: { id: terminalId }, select: { assignedMerchantIds: true } })
+      if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
+        await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+      }
+    }
+
     // Misma escritura que antes, ahora dentro de una transacción con la revisión definitiva del candado.
     let positionChanges: CambioDePosicion[] = []
     paymentConfig = await prisma.$transaction(async tx => {
+      await tomarCandado(tx, objetivoDelCandado)
       const existingConfig =
         target.type === 'venue'
           ? await tx.venuePaymentConfig.findUnique({ where: { venueId: target.id } })

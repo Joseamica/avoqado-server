@@ -84,6 +84,9 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
     const result: FullSetupAngelPayResult = await prisma.$transaction(
       async tx => {
         await lockAngelPayVenue(tx, input.venueId)
+        // Codex p12-r3 #3: el candado de posiciones ANTES de insertar filas que apuntan al negocio (el login, la cuenta): el
+        // traslado toma este candado y luego el negocio; tomarlo después de esas inserciones podía cruzarse con él.
+        await tomarCandado(tx, { venueId: input.venueId })
         // ---- 1. Login ----
         let angelpayUserAccountId: string
         if (input.login.mode === 'new') {
@@ -186,7 +189,6 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
         }
 
         // ---- 3. Venue payment config slot ----
-        await tomarCandado(tx, { venueId: input.venueId })
         const existingConfig = await tx.venuePaymentConfig.findUnique({
           where: { venueId: input.venueId },
         })

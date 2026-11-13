@@ -7,7 +7,7 @@
  */
 
 import { Prisma, NotificationType, NotificationPriority, NotificationChannel, VenueStatus } from '@prisma/client'
-import { exigirConfirmacionDePosiciones } from '@/services/shared/candadoDePosiciones'
+import { exigirConfirmacionDePosiciones, tomarCandado, type ConfirmacionDePosiciones } from '@/services/shared/candadoDePosiciones'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -349,6 +349,8 @@ export async function assignProcessorAndApproveKyc(
   venueId: string,
   superadminId: string,
   processorData: {
+    /** Candado de posiciones (tarifa al comercio, paso 1): si el negocio heredaba cuentas de su organización. */
+    positionConfirmations?: ConfirmacionDePosiciones
     providerId: string // Payment provider ID (Blumon, Menta, etc.)
     externalMerchantId: string // Merchant ID from processor
     displayName: string // e.g., "Cuenta Principal", "Cuenta Operativa"
@@ -411,6 +413,8 @@ export async function assignProcessorAndApproveKyc(
 
   // Use transaction to ensure atomicity
   const result = await prisma.$transaction(async tx => {
+    // Candado de posiciones PRIMERO (Codex p12-r3 #3): antes de insertar la tarifa, que apunta al negocio.
+    await tomarCandado(tx, { venueId })
     // 1. Create MerchantAccount with CLABE
     const merchantAccount = await tx.merchantAccount.create({
       data: {
@@ -480,6 +484,7 @@ export async function assignProcessorAndApproveKyc(
       siguiente: { PRIMARY: merchantAccount.id, SECONDARY: null, TERTIARY: null },
       tarifaCapturada: ['PRIMARY'],
       cuentaAnteriorYaVerificada: true,
+      confirmaciones: processorData.positionConfirmations,
     })
     await tx.venuePaymentConfig.create({
       data: {

@@ -23,6 +23,9 @@ import { approveDiscoveredAngelPayMerchant, reserveAngelPaySlot } from '@/servic
 import { fullSetupAngelPayMerchant } from '@/services/superadmin/angelpayFullSetup.service'
 import { tarifaCongeladaDeLaAfiliacion } from '@/services/payments/transactionCost.service'
 import { reporteDePosiciones, reportePosicionesQuerySchema } from '@/services/superadmin/reportePosiciones.service'
+import { tomarCandado } from '@/services/shared/candadoDePosiciones'
+import { assignProcessorAndApproveKyc } from '@/services/superadmin/kycReview.service'
+import { transferVenue } from '@/controllers/dashboard/venues.superadmin.controller'
 
 jest.setTimeout(60000)
 
@@ -375,6 +378,86 @@ describe('paso 1 · organización y herencia (Codex p12-r1 #3 y #7)', () => {
     const r = await fullSetupAngelPayMerchant({ ...base, positionConfirmations: confirmarDesde(e.details) })
     creadas.cuentas.push(r.merchantAccountId)
     expect((await prisma.venuePaymentConfig.findUniqueOrThrow({ where: { venueId } })).secondaryAccountId).toBe(r.merchantAccountId)
+  })
+})
+
+describe('paso 1 · KYC, traslado y carreras (Codex p12-r3)', () => {
+  const kyc = (venueId: string, positionConfirmations?: ConfirmacionDePosiciones) =>
+    assignProcessorAndApproveKyc(venueId, 'superadmin-kyc', {
+      providerId: blumonId,
+      externalMerchantId: `kyc-${cuid()}`,
+      displayName: 'KYC',
+      credentials: { k: 'v' },
+      clabeNumber: '012345678901234567',
+      bankName: 'Banco',
+      accountHolder: 'Titular',
+      providerCosts: { debitRate: 0.01, creditRate: 0.01, amexRate: 0.01, internationalRate: 0.01, fixedCostPerTransaction: 0 },
+      venuePricing: { debitRate: 0.02, creditRate: 0.02, amexRate: 0.02, internationalRate: 0.02, fixedFeePerTransaction: 0 },
+      positionConfirmations,
+    } as Parameters<typeof assignProcessorAndApproveKyc>[2])
+
+  it('KYC en un negocio que hereda cuentas de su organización pide confirmar y con la confirmación termina', async () => {
+    const orgId = await org('kyc')
+    const venueId = await negocio(orgId, 'KYC hereda')
+    const [p, s2] = [await cuenta(blumonId, 'Org P'), await cuenta(blumonId, 'Org S')]
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: orgId, primaryAccountId: p, secondaryAccountId: s2 } })
+    await terminal(venueId, 'PAX')
+    const e = await errorDe(kyc(venueId))
+    expect(e.code).toBe(CONFIRMAR_POSICION)
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toBeNull()
+    const cuenta1 = await kyc(venueId, confirmarDesde(e.details))
+    creadas.cuentas.push(cuenta1.id)
+    expect(await prisma.venuePaymentConfig.findUniqueOrThrow({ where: { venueId } })).toMatchObject({
+      primaryAccountId: cuenta1.id,
+      secondaryAccountId: null,
+    })
+  })
+
+  it('trasladar un negocio que hereda cuentas: pide confirmar la cuenta nueva de la organización destino', async () => {
+    const origen = await org('traslado origen')
+    const destino = await org('traslado destino')
+    const venueId = await negocio(origen, 'Se muda')
+    const [a, c] = [await cuenta(blumonId, 'Origen A'), await cuenta(blumonId, 'Destino C')]
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: origen, primaryAccountId: a } })
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: destino, primaryAccountId: c } })
+    const llamar = async (positionConfirmations?: ConfirmacionDePosiciones) => {
+      let falla: unknown
+      let json: any
+      const res: any = { status: () => res, json: (b: unknown) => (json = b) }
+      await transferVenue(
+        { params: { venueId }, body: { targetOrganizationId: destino, positionConfirmations }, authContext: { userId: null } } as any,
+        res,
+        ((err: unknown) => (falla = err)) as any,
+      )
+      if (falla) throw falla
+      return json
+    }
+    const e = await errorDe(llamar())
+    expect(e.details.positions[0]).toMatchObject({ currentAccount: { id: a }, nextAccount: { id: c }, needs: { nextAccountId: true } })
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).organizationId).toBe(origen)
+    await llamar(confirmarDesde(e.details))
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).organizationId).toBe(destino)
+  })
+
+  it('mientras un guardado del negocio tiene el candado, nadie cambia la configuración de su organización', async () => {
+    const orgId = await org('carrera')
+    const venueId = await negocio(orgId, 'Carrera')
+    const [a, b] = [await cuenta(blumonId, 'A'), await cuenta(blumonId, 'B')]
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: orgId, primaryAccountId: a } })
+    const orden: string[] = []
+    let soltar!: () => void
+    const tomado = new Promise<void>(r => (soltar = r))
+    const guardado = prisma.$transaction(async tx => {
+      await tomarCandado(tx, { venueId })
+      soltar()
+      await new Promise(r => setTimeout(r, 800))
+      orden.push('guardado del negocio termina')
+    })
+    await tomado
+    await prisma.organizationPaymentConfig.update({ where: { organizationId: orgId }, data: { primaryAccountId: b } })
+    orden.push('cambio de la organización')
+    await guardado
+    expect(orden).toEqual(['guardado del negocio termina', 'cambio de la organización'])
   })
 })
 

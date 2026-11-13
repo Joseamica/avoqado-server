@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod'
+import { confirmacionDePosicionesSchema } from '../../services/shared/candadoDePosiciones'
 
 /**
  * Validates list pending KYC venues request
@@ -38,6 +39,8 @@ export const AssignProcessorSchema = z.object({
       message: 'Las credenciales no pueden estar vacías',
     }),
     providerConfig: z.record(z.any()).optional(),
+    // Candado de posiciones (tarifa al comercio, paso 1).
+    positionConfirmations: confirmacionDePosicionesSchema,
 
     // CLABE information (from onboarding)
     clabeNumber: z
