@@ -72,6 +72,7 @@ export async function validarEstacionesDeImpresion(
   const filas = await db.printStation.findMany({
     where: { venueId, id: { in: ids } },
     select: { id: true, active: true, sendsComanda: true },
+    take: ids.length,
   })
   const buenas = new Set(filas.filter(f => f.active && f.sendsComanda).map(f => f.id))
   if (ids.some(id => !buenas.has(id))) {

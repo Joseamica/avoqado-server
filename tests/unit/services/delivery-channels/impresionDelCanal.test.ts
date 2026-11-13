@@ -71,6 +71,7 @@ describe('impresionDelCanal', () => {
       expect(d.printStation.findMany).toHaveBeenCalledWith({
         where: { venueId: 'v1', id: { in: ['cA', 'cB'] } },
         select: { id: true, active: true, sendsComanda: true },
+        take: 2,
       })
     })
     it('apagada o sin comanda ⇒ lanza', async () => {
