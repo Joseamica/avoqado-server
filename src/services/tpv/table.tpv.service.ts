@@ -806,9 +806,14 @@ export async function reconcileTableAfterOrderRemovedInTransaction(
   const relevant = scope.tables.filter(t => t.id === removed?.tableId || t.currentOrderId === removedOrderId)
   const tables: TableRow[] = []
   for (const table of relevant) {
-    const sibling = scope.orders
-      .filter(o => o.id !== removedOrderId && o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status))
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+    const vivas = scope.orders.filter(
+      o => o.id !== removedOrderId && o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status),
+    )
+    // D71 (Codex r3 #1): si la cuenta que se va NO era la principal y la principal sigue viva en la mesa, se queda. Antes se
+    // re-apuntaba siempre a la más antigua: mover o cancelar la cuenta aparte de una mesa sin red le quitaba el lugar a la del otro.
+    const sibling =
+      vivas.find(o => o.id === table.currentOrderId) ??
+      vivas.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
     tables.push(
       await tx.table.update({
         where: { id: table.id },

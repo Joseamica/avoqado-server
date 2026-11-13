@@ -9,7 +9,8 @@
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
-import { assignTable } from '@/services/tpv/table.tpv.service'
+import { assignTable, moveOrderToTable } from '@/services/tpv/table.tpv.service'
+import { cancelOrder } from '@/services/mobile/order.mobile.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
 jest.setTimeout(60_000)
@@ -222,6 +223,42 @@ describe('D71 · propiedad de mesa encendida: la mesa sin red de otro mesero nac
     expect(await huellaDe(sinMesero)).toEqual({ renglones: 1, pagos: 0 })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ currentOrderId: cuentaY })
   })
+
+  it.each(['mueve', 'cancela'] as const)(
+    'Codex r3 #1: X %s después su cuenta propia y hay una cuenta más antigua en la mesa: la principal sigue siendo la de Y',
+    async accion => {
+      const t = await mesa()
+      const otraMesa = await mesa()
+      const antigua = (await assignTable(venueId, t, meseroY, 2)).order.id
+      await prisma.order.update({ where: { id: antigua }, data: { servedById: null } })
+      await nacidaHace(antigua, 10 * 60_000)
+      const cuentaY = (
+        await prisma.order.create({
+          data: {
+            venueId,
+            tableId: t,
+            orderNumber: `ORD-${randomUUID().slice(0, 8)}`,
+            servedById: meseroY,
+            status: 'PENDING',
+            total: 0,
+            subtotal: 0,
+            taxAmount: 0,
+          },
+        })
+      ).id
+      await prisma.table.update({ where: { id: t }, data: { currentOrderId: cuentaY } })
+
+      const o = open(t, Date.now() - 60_000)
+      const [ack] = await replay([o])
+      const propia = String(ack.result!.orderId)
+      expect([antigua, cuentaY]).not.toContain(propia)
+
+      if (accion === 'mueve') await moveOrderToTable(venueId, propia, otraMesa)
+      else await cancelOrder(venueId, propia, 'se fue', meseroX)
+
+      expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ status: 'OCCUPIED', currentOrderId: cuentaY })
+    },
+  )
 })
 
 describe('D71 · lo que sigue como hoy', () => {
