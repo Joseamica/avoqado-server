@@ -341,10 +341,14 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       const { sessionId } = external.payload as { sessionId?: unknown }
       if (typeof sessionId !== 'string') throw new Error('VALES_SESSION_REQUIRED')
       const { subirVersionDeValesEnDb } = await import('../shared/saldoReabiertoAlReembolsar')
-      await db.$transaction(async tx => {
-        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_DE_CANDADO_DE_VALES_MS}ms'`)
-        await subirVersionDeValesEnDb(tx, { venueId: external.venueId, sessionId })
-      })
+      await db.$transaction(
+        async tx => {
+          await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_DE_CANDADO_DE_VALES_MS}ms'`)
+          await subirVersionDeValesEnDb(tx, { venueId: external.venueId, sessionId })
+        },
+        // Que venza el candado (55P03, se reintenta) antes que la transacción.
+        { timeout: ESPERA_DE_CANDADO_DE_VALES_MS * 3 },
+      )
     } else if ((external.payload as { operation?: string }).operation === 'REFUND') {
       const { revertQualifiedReferral } = await import('../referrals/referralRefund.service')
       await revertQualifiedReferral({ orderId: external.orderId!, venueId: external.venueId, reason: 'ORDER_REFUNDED' })
