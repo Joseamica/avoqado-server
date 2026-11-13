@@ -148,3 +148,25 @@ it('disponibilidad, congelar, ligar y consumir contra la base real', async () =>
   expect(await prisma.$transaction(tx => consumeHoldInTx(tx, `pi_${s}`))).toBe(1)
   expect(await para('otro')).toMatchObject({ available: true })
 })
+
+it('soltar entre el congelado y el ligado: la ficha suelta ni se congela ni acepta intento', async () => {
+  const [m, l] = [await talla('M2', 2), await talla('L2', 2)]
+  const congelar = (id: string) =>
+    freezeIntentParams(id, { amountCents: 50000, stripeAccountId: 'acct_x', intentParams: { amount: 50000 }, checkoutSnapshot: {} })
+  // Petición 1: aparta M y congela, pero todavía no liga su intento.
+  const h1 = (await tomar(m, 'tok-carrera')).hold
+  expect((await congelar(h1.id)).status).toBe('ACTIVE')
+  // Petición 2 del mismo navegador (talla L): suelta H1 cuando aún no tenía intento.
+  const r2 = await tomar(l, 'tok-carrera')
+  expect(r2.released).toEqual([{ holdId: h1.id, stripePaymentIntentId: null, stripeAccountId: 'acct_x' }])
+  // Petición 1 sigue: ligar su intento falla (quien llama lo cancela) y la ficha no lo guarda.
+  await expect(attachIntent(h1.id, `pi_carrera_${s}`)).rejects.toMatchObject({ statusCode: 409 })
+  const despues = await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: h1.id } })
+  expect(despues).toMatchObject({ status: 'RELEASED', stripePaymentIntentId: null })
+
+  // Variante: se suelta ANTES de congelar → freeze devuelve la ficha suelta sin congelarla (quien llama no crea el intento).
+  const h3 = (await tomar(m, 'tok-carrera-2')).hold
+  await tomar(l, 'tok-carrera-2')
+  const r = await congelar(h3.id)
+  expect(r).toMatchObject({ status: 'RELEASED', intentParams: null })
+})

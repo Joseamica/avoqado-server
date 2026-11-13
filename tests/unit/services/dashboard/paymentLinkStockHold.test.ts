@@ -253,6 +253,18 @@ describe('congelar, ligar, soltar y consumir (CAS)', () => {
     expect(h.stripePaymentIntentId).toBe('pi_1')
   })
 
+  it('freezeIntentParams NO congela una ficha que ya no está ACTIVE y la devuelve con su status', async () => {
+    const h = hold({ productId: 'cm', amountCents: null, status: 'RELEASED' })
+    const r = await freezeIntentParams(h.id, params)
+    expect(r).toMatchObject({ status: 'RELEASED', intentParams: null, stripeAccountId: null })
+  })
+
+  it('attachIntent sobre una ficha suelta → 409 y no la toca', async () => {
+    const h = hold({ productId: 'cm', status: 'RELEASED' })
+    await expect(attachIntent(h.id, 'pi_1')).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_HOLD_INTENT_MISMATCH' })
+    expect(h.stripePaymentIntentId).toBeNull()
+  })
+
   it('releaseHold sólo suelta una ficha ACTIVE', async () => {
     const viva = hold({ productId: 'cm' })
     const usada = hold({ productId: 'cm', status: 'CONSUMED' })

@@ -134,22 +134,38 @@ export async function takeOrReuseHold(args: {
   })
 }
 
-/** Congela el cuerpo del PaymentIntent ANTES de llamar a Stripe. CAS: el primero gana; si ya estaba, devuelve la ficha tal cual. */
+/**
+ * Congela el cuerpo del PaymentIntent ANTES de llamar a Stripe. CAS: sólo una ficha `ACTIVE` sin `intentParams`; el primero gana.
+ * Siempre devuelve la ficha como quedó.
+ *
+ * 🔴 Contrato de quien llama: si `hold.status !== 'ACTIVE'` (otra pestaña del mismo navegador la soltó, o venció), NO crea el
+ * intento; y si sí, crea el intento con los `intentParams` DEVUELTOS (no con los suyos: si perdió la carrera son los del ganador).
+ */
 export async function freezeIntentParams(
   holdId: string,
   args: { amountCents: number; stripeAccountId: string; intentParams: Prisma.InputJsonValue; checkoutSnapshot: Prisma.InputJsonValue },
 ): Promise<PaymentLinkStockHold> {
-  await prisma.paymentLinkStockHold.updateMany({ where: { id: holdId, intentParams: { equals: Prisma.AnyNull } }, data: args })
+  await prisma.paymentLinkStockHold.updateMany({
+    where: { id: holdId, status: 'ACTIVE', intentParams: { equals: Prisma.AnyNull } },
+    data: args,
+  })
   return prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: holdId } })
 }
 
-/** Liga el intento a la ficha. CAS: sólo si no tiene o ya es ese mismo; otro intento es un error (una ficha = un intento). */
+/**
+ * Liga el intento a una ficha `ACTIVE`. CAS: sólo si no tiene intento o ya es ese mismo (una ficha = un intento).
+ *
+ * 🔴 Contrato de quien llama: un 409 `PAYMENT_LINK_HOLD_INTENT_MISMATCH` (ficha soltada o vencida mientras se creaba el intento,
+ * u otro intento ya ligado) obliga a CANCELAR en Stripe el intento recién creado y no devolverlo al navegador: nadie más lo
+ * cancelaría, porque el `released[]` que soltó la ficha salió sin él.
+ */
 export async function attachIntent(holdId: string, paymentIntentId: string): Promise<void> {
   const { count } = await prisma.paymentLinkStockHold.updateMany({
-    where: { id: holdId, OR: [{ stripePaymentIntentId: null }, { stripePaymentIntentId: paymentIntentId }] },
+    where: { id: holdId, status: 'ACTIVE', OR: [{ stripePaymentIntentId: null }, { stripePaymentIntentId: paymentIntentId }] },
     data: { stripePaymentIntentId: paymentIntentId },
   })
-  if (count === 0) throw new ConflictError('La ficha de apartado ya tiene otro intento de pago', 'PAYMENT_LINK_HOLD_INTENT_MISMATCH')
+  if (count === 0)
+    throw new ConflictError('La ficha de apartado ya no está activa o tiene otro intento de pago', 'PAYMENT_LINK_HOLD_INTENT_MISMATCH')
 }
 
 export async function releaseHold(holdId: string, reason: string): Promise<void> {
