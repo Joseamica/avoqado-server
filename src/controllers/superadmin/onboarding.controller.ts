@@ -356,6 +356,7 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
 
         if (!existingOrgConfig && payload.pricing.createOrgConfig?.primaryAccountId) {
           const createOrgConfig = payload.pricing.createOrgConfig
+          const pricing = payload.pricing // el estrechamiento de `payload.pricing` no llega dentro de la transacción
           // Configuración + tarifa PRIMARY en UNA transacción con el candado de posiciones (tarifa al comercio, paso 1): la tarifa
           // PRIMARY del formulario cuenta como capturada; SECONDARY/TERTIARY sólo se rechazan si la organización ya tenía tarifa
           // en ellas (el paso queda en error, como cualquier error de este paso).
@@ -386,14 +387,12 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
               data: {
                 organizationId,
                 accountType: AccountType.PRIMARY,
-                debitRate: new Prisma.Decimal(payload.pricing.debitRate),
-                creditRate: new Prisma.Decimal(payload.pricing.creditRate),
-                amexRate: new Prisma.Decimal(payload.pricing.amexRate),
-                internationalRate: new Prisma.Decimal(payload.pricing.internationalRate),
-                fixedFeePerTransaction: payload.pricing.fixedFeePerTransaction
-                  ? new Prisma.Decimal(payload.pricing.fixedFeePerTransaction)
-                  : null,
-                monthlyServiceFee: payload.pricing.monthlyServiceFee ? new Prisma.Decimal(payload.pricing.monthlyServiceFee) : null,
+                debitRate: new Prisma.Decimal(pricing.debitRate),
+                creditRate: new Prisma.Decimal(pricing.creditRate),
+                amexRate: new Prisma.Decimal(pricing.amexRate),
+                internationalRate: new Prisma.Decimal(pricing.internationalRate),
+                fixedFeePerTransaction: pricing.fixedFeePerTransaction ? new Prisma.Decimal(pricing.fixedFeePerTransaction) : null,
+                monthlyServiceFee: pricing.monthlyServiceFee ? new Prisma.Decimal(pricing.monthlyServiceFee) : null,
                 effectiveFrom: new Date(),
                 active: true,
               },
