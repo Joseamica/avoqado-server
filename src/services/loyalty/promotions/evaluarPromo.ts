@@ -18,6 +18,7 @@ export interface PromoCandidata {
   productIds: string[]
   categoryIds: string[]
   categoryNames: string[] // nombres ACTUALES de esas categorías
+  categoryProductIds: string[] // productos que estaban en esas categorías al guardar la promo (Codex código r1 #2)
   minSpend: number | null
   limit: LimiteDePromo
   kind: 'MULTIPLY' | 'ADD'
@@ -51,6 +52,8 @@ const linea = (p: PromoCandidata, l: VentaParaPromo['lineas'][number]) =>
   l.neto.gt(0) &&
   ((l.productId !== null && p.productIds.includes(l.productId)) ||
     (l.categoryIdActual !== null && p.categoryIds.includes(l.categoryIdActual)) ||
+    // Codex código r1 #2: el producto estaba en la categoría al guardar la promo (una venta sin red que sincroniza tras moverlo)
+    (l.productId !== null && p.categoryProductIds.includes(l.productId)) ||
     // r2 #4: el producto pudo cambiar de categoría; el nombre guardado en el renglón sigue valiendo
     (l.categoryName !== null && p.categoryNames.includes(l.categoryName)))
 

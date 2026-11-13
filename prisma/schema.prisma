@@ -9193,6 +9193,9 @@ model LoyaltyPromotion {
   timeUntil   String? // "17:00"
   productIds  String[]              @default([])
   categoryIds String[]              @default([])
+  /// Foto de los productos que estaban en `categoryIds` al crear la promo o al editar sus categorías (tope 5,000). Una venta sin
+  /// red de un producto que después cambió de categoría sigue calificando (Codex código r1 #2).
+  categoryProductIds String[]       @default([])
   minSpend    Decimal?              @db.Decimal(12, 2)
   limit       LoyaltyPromotionLimit @default(NONE)
 

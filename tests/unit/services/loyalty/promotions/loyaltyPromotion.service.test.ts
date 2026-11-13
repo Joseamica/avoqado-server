@@ -13,6 +13,7 @@ import {
   updateLoyaltyPromotion,
 } from '@/services/loyalty/promotions/loyaltyPromotion.service'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import logger from '@/config/logger'
 import { CreateLoyaltyPromotionSchema, ListLoyaltyPromotionsSchema } from '@/schemas/dashboard/loyaltyPromotion.schema'
 
 const V = 'cvenue0000000000000000001'
@@ -50,6 +51,7 @@ const fila = (o: Record<string, unknown> = {}) => ({
   timeUntil: null,
   productIds: [],
   categoryIds: [],
+  categoryProductIds: [],
   minSpend: null,
   limit: 'NONE',
   createdById: 'csv',
@@ -202,6 +204,82 @@ describe('crear', () => {
     relojEn('2026-11-12T12:00:00.000Z')
     await expect(createLoyaltyPromotion(V, { ...base, ...cambio } as any, STAFF)).rejects.toThrow(BadRequestError)
     expect(prismaMock.loyaltyPromotion.create).not.toHaveBeenCalled()
+  })
+})
+
+// Codex código r1 #2 (ruling): foto de los productos de las categorías al guardar. Una venta sin red de un producto que después
+// cambió de categoría sigue calificando por lo que el producto era cuando el dueño armó la promo.
+describe('foto de los productos de las categorías', () => {
+  const cats = ['ccat1', 'ccat2']
+
+  it('al crear con categorías guarda los productos que hoy están en ellas (consulta acotada y ordenada por id)', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+    prismaMock.menuCategory.count.mockResolvedValue(2)
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'cprod1' }, { id: 'cprod2' }])
+
+    await createLoyaltyPromotion(V, { ...base, categoryIds: cats }, STAFF)
+
+    expect(prismaMock.product.findMany).toHaveBeenCalledWith({
+      where: { venueId: V, categoryId: { in: cats } },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: 5001,
+    })
+    expect(prismaMock.loyaltyPromotion.create.mock.calls[0][0].data).toMatchObject({
+      categoryIds: cats,
+      categoryProductIds: ['cprod1', 'cprod2'],
+    })
+  })
+
+  it('más de 5,000 productos: guarda los primeros 5,000 por id y avisa en el log', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+    prismaMock.menuCategory.count.mockResolvedValue(2)
+    const muchos = Array.from({ length: 5001 }, (_, i) => ({ id: `cprod${String(i).padStart(5, '0')}` }))
+    prismaMock.product.findMany.mockResolvedValue(muchos)
+
+    await createLoyaltyPromotion(V, { ...base, categoryIds: cats }, STAFF)
+
+    const guardados = prismaMock.loyaltyPromotion.create.mock.calls[0][0].data.categoryProductIds
+    expect(guardados).toHaveLength(5000)
+    expect(guardados[4999]).toBe('cprod04999')
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('5,000'), expect.objectContaining({ venueId: V }))
+  })
+
+  it('sin categorías no consulta productos y la foto queda vacía', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+
+    await createLoyaltyPromotion(V, base, STAFF)
+
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyPromotion.create.mock.calls[0][0].data.categoryProductIds).toEqual([])
+  })
+
+  it('programada: editar las categorías vuelve a tomar la foto; editar otro campo no la toca', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+    prismaMock.loyaltyPromotion.findFirst.mockResolvedValue(fila({ categoryIds: ['ccat1'], categoryProductIds: ['cviejo'] }))
+    prismaMock.menuCategory.count.mockResolvedValue(1)
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'cnuevo' }])
+
+    await updateLoyaltyPromotion(V, P, { categoryIds: ['ccat2'] }, STAFF)
+    expect(prismaMock.loyaltyPromotion.update.mock.calls[0][0].data).toMatchObject({
+      categoryIds: ['ccat2'],
+      categoryProductIds: ['cnuevo'],
+    })
+
+    prismaMock.product.findMany.mockClear()
+    await updateLoyaltyPromotion(V, P, { name: 'Otro nombre' }, STAFF)
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyPromotion.update.mock.calls[1][0].data).not.toHaveProperty('categoryProductIds')
+  })
+
+  it('programada: pasar de categorías a productos limpia la foto', async () => {
+    relojEn('2026-11-12T12:00:00.000Z')
+    prismaMock.loyaltyPromotion.findFirst.mockResolvedValue(fila({ categoryIds: ['ccat1'], categoryProductIds: ['cviejo'] }))
+    prismaMock.product.count.mockResolvedValue(1)
+
+    await updateLoyaltyPromotion(V, P, { categoryIds: [], productIds: ['cprod1'] }, STAFF)
+
+    expect(prismaMock.loyaltyPromotion.update.mock.calls[0][0].data).toMatchObject({ productIds: ['cprod1'], categoryProductIds: [] })
   })
 })
 

@@ -1,6 +1,7 @@
 import { LoyaltyPromotion, Prisma } from '@prisma/client'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { zonaValida } from '@/utils/datetime'
@@ -19,6 +20,8 @@ export const MAX_PROMOS_VIVAS = 10
 const PAGINA_DEFAULT = 50
 const PAGINA_MAX = 100
 const MAX_IDS = 200
+/** Tope de la foto de productos de las categorías (Codex código r1 #2). */
+const MAX_PRODUCTOS_DE_CATEGORIAS = 5_000
 /** Cabe en `Decimal(12,2)`; el zod del panel tiene la misma cota. */
 const GASTO_MINIMO_MAX = 9_999_999.99
 /** Tope de página: `(page - 1) × pageSize` no desborda y nadie pagina 1,000,000 de promos. */
@@ -227,6 +230,27 @@ async function delNegocio(db: Prisma.TransactionClient, venueId: string, product
     throw mal('Alguna categoría no existe o no es de este negocio')
 }
 
+/**
+ * Codex código r1 #2 (ruling): foto de los productos que HOY están en esas categorías. Una venta sin red de un producto que cambió de
+ * categoría antes de sincronizar nace con la categoría nueva; con la foto sigue calificando. Si alguien lo saca a propósito, sigue
+ * calificando: bono de más, nunca de menos. Acotada: los primeros 5,000 por id.
+ */
+async function productosDeCategorias(db: Prisma.TransactionClient, venueId: string, categoryIds: string[]): Promise<string[]> {
+  if (categoryIds.length === 0) return []
+  const filas = await db.product.findMany({
+    where: { venueId, categoryId: { in: categoryIds } },
+    select: { id: true },
+    orderBy: { id: 'asc' },
+    take: MAX_PRODUCTOS_DE_CATEGORIAS + 1,
+  })
+  if (filas.length > MAX_PRODUCTOS_DE_CATEGORIAS)
+    logger.warn('Promo de lealtad: las categorías tienen más de 5,000 productos; la foto guarda sólo los primeros 5,000 por id', {
+      venueId,
+      categoryIds,
+    })
+  return filas.slice(0, MAX_PRODUCTOS_DE_CATEGORIAS).map(f => f.id)
+}
+
 async function zonaDelNegocio(venueId: string): Promise<string> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
@@ -355,8 +379,9 @@ export async function createLoyaltyPromotion(
     const ahoraEnTx = new Date()
     const vivas = await tx.loyaltyPromotion.count({ where: { venueId, ...whereDeEstado('VIVA', ahoraEnTx) } })
     if (vivas >= MAX_PROMOS_VIVAS) throw topeLleno()
+    const categoryProductIds = await productosDeCategorias(tx, venueId, v.categoryIds)
     return tx.loyaltyPromotion.create({
-      data: { venueId, ...columnas(v), startsAt: startsAt > ahoraEnTx ? startsAt : ahoraEnTx, endsAt, createdById },
+      data: { venueId, ...columnas(v), categoryProductIds, startsAt: startsAt > ahoraEnTx ? startsAt : ahoraEnTx, endsAt, createdById },
     })
   })
 
@@ -403,6 +428,8 @@ export async function updateLoyaltyPromotion(
       const startsAt = cambios.startDate !== undefined ? inicioDe(cambios.startDate, tz, ahora) : actual.startsAt
       const endDate = cambios.endDate !== undefined ? cambios.endDate : actual.endsAt ? diaDe(actual.endsAt, tz) : null
       data = { ...columnas(v), startsAt, endsAt: finDe(endDate, diaDe(startsAt, tz), tz) }
+      // Editar las categorías vuelve a tomar la foto (vacía si ya no hay categorías); otro campo no la toca.
+      if (cambios.categoryIds !== undefined) data.categoryProductIds = await productosDeCategorias(tx, venueId, v.categoryIds)
     }
     return { p: await tx.loyaltyPromotion.update({ where: { id, venueId }, data }), estado, cambio: true }
   })

@@ -116,6 +116,7 @@ const candidata = (p: LoyaltyPromotion, nombres: Map<string, string>): PromoCand
   productIds: p.productIds,
   categoryIds: p.categoryIds,
   categoryNames: p.categoryIds.flatMap(id => nombres.get(id) ?? []),
+  categoryProductIds: p.categoryProductIds,
   minSpend: p.minSpend === null ? null : p.minSpend.toNumber(),
   limit: p.limit,
   kind: p.kind,

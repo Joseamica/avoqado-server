@@ -34,6 +34,7 @@ CREATE TABLE "LoyaltyPromotion" (
     "timeUntil" TEXT,
     "productIds" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "categoryIds" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "categoryProductIds" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "minSpend" DECIMAL(12,2),
     "limit" "LoyaltyPromotionLimit" NOT NULL DEFAULT 'NONE',
     "createdById" TEXT,

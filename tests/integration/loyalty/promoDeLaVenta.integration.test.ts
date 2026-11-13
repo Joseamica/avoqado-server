@@ -8,6 +8,10 @@ import prisma from '@/utils/prismaClient'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { decidirPromoDeLaVentaEnTx, registrarUsoEnTx } from '@/services/loyalty/promotions/promoDeLaVenta'
 import type { PromoDecidida } from '@/services/loyalty/promotions/evaluarPromo'
+import { createLoyaltyPromotion } from '@/services/loyalty/promotions/loyaltyPromotion.service'
+
+// La bitácora del alta es fire-and-forget: sin esto escribiría después de la limpieza.
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 let orgId: string | undefined
@@ -192,6 +196,52 @@ describe('decidirPromoDeLaVentaEnTx (Postgres real)', () => {
     const d = await decidir({ venueId, customerId, orderId, soldAt, amount: 80 })
     expect(d?.promotionId).toBe(porNombre.id)
     expect(d!.montoQueCalifica.toFixed(2)).toBe('80.00')
+  })
+})
+
+// Codex código r1 #2 (ruling): foto de los productos de las categorías al guardar la promo.
+describe('promo de categoría con la foto de sus productos (Postgres real)', () => {
+  const hoy = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
+  const deBebidas = (venueId: string, categoryId: string) =>
+    createLoyaltyPromotion(
+      venueId,
+      { name: 'Bebidas ×2', kind: 'MULTIPLY', multiplier: 2, startDate: hoy(), categoryIds: [categoryId] },
+      null,
+    )
+
+  it('venta sin red de un producto de «Bebidas» que pasaron a «Postres» antes de sincronizar: sigue ×2', async () => {
+    const { venueId, customerId } = await negocio()
+    const cafe = await categoriaYProducto(venueId, 'Bebidas', 'Café')
+    const postres = await prisma.menuCategory.create({ data: { venueId, name: 'Postres', slug: `postres-${sello}-${++n}` } })
+    const p = await deBebidas(venueId, cafe.categoryId)
+    expect((await prisma.loyaltyPromotion.findUniqueOrThrow({ where: { id: p.id } })).categoryProductIds).toEqual([cafe.productId])
+
+    const soldAt = new Date() // la venta sin red, con la promo ya vigente
+    // Antes de sincronizar, el café pasa a «Postres»: el renglón nace al sincronizar, con la categoría nueva.
+    await prisma.product.update({ where: { id: cafe.productId }, data: { categoryId: postres.id } })
+    const orderId = await venta(venueId, customerId, [
+      { productId: cafe.productId, categoryName: 'Postres', quantity: 1, unitPrice: 80, total: 80 },
+    ])
+
+    const d = await decidir({ venueId, customerId, orderId, soldAt, amount: 80 })
+    expect(d).toMatchObject({ promotionId: p.id, kind: 'MULTIPLY', multiplier: 2 })
+    expect(d!.montoQueCalifica.toFixed(2)).toBe('80.00')
+  })
+
+  it('un producto que entra a la categoría DESPUÉS de crear la promo califica por su categoría actual', async () => {
+    const { venueId, customerId } = await negocio()
+    const cafe = await categoriaYProducto(venueId, 'Bebidas', 'Café')
+    const p = await deBebidas(venueId, cafe.categoryId)
+    const te = await prisma.product.create({
+      data: { venueId, sku: `SKU-${sello}-${++n}`, name: 'Té', categoryId: cafe.categoryId, price: new Prisma.Decimal(40) },
+    })
+    expect((await prisma.loyaltyPromotion.findUniqueOrThrow({ where: { id: p.id } })).categoryProductIds).not.toContain(te.id)
+
+    // Sin nombre de categoría en el renglón: sólo la categoría actual del producto lo hace calificar.
+    const orderId = await venta(venueId, customerId, [{ productId: te.id, categoryName: null, quantity: 1, unitPrice: 40, total: 40 }])
+    const d = await decidir({ venueId, customerId, orderId, soldAt: new Date(), amount: 40 })
+    expect(d?.promotionId).toBe(p.id)
+    expect(d!.montoQueCalifica.toFixed(2)).toBe('40.00')
   })
 })
 

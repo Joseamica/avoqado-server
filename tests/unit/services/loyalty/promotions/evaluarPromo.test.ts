@@ -23,6 +23,7 @@ const promo = (o: Partial<PromoCandidata> = {}): PromoCandidata => ({
   productIds: [],
   categoryIds: [],
   categoryNames: [],
+  categoryProductIds: [],
   minSpend: null,
   limit: 'NONE',
   kind: 'MULTIPLY',
@@ -110,6 +111,18 @@ describe('evaluarPromo', () => {
     const v = venta({ lineas: [{ productId: 'A', categoryIdActual: 'cOtra', categoryName: 'Bebidas', neto: D(100) }] })
     expect(evaluarPromo([p], v)).not.toBeNull()
     const v2 = venta({ lineas: [{ productId: 'A', categoryIdActual: 'cOtra', categoryName: 'Postres', neto: D(100) }] })
+    expect(evaluarPromo([p], v2)).toBeNull()
+  })
+
+  it('Codex r1 #2: producto que estaba en la categoría al guardar la promo califica aunque hoy esté en otra y el renglón diga otra', () => {
+    // Venta sin red de un café de «Bebidas»; antes de sincronizar lo pasaron a «Postres»: el renglón nace con «Postres».
+    const p = promo({ categoryIds: ['cBebidas'], categoryNames: ['Bebidas'], categoryProductIds: ['cafe'] })
+    const v = venta({ lineas: [{ productId: 'cafe', categoryIdActual: 'cPostres', categoryName: 'Postres', neto: D(100) }] })
+    const d = evaluarPromo([p], v)
+    expect(d).toMatchObject({ promotionId: 'p1', multiplier: 2 })
+    expect(d!.montoQueCalifica.toFixed(2)).toBe('100.00')
+    // Otro producto que nunca estuvo en la categoría sigue sin calificar.
+    const v2 = venta({ lineas: [{ productId: 'pan', categoryIdActual: 'cPostres', categoryName: 'Postres', neto: D(100) }] })
     expect(evaluarPromo([p], v2)).toBeNull()
   })
 
