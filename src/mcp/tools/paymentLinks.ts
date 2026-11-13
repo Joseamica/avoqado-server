@@ -69,7 +69,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_payment_links',
-    'Payment links (checkout links via pay.avoqado.io) of a venue you can access: title, purpose (generic payment / item sale / donation), fixed or open amount, currency, status (active/paused/expired/archived), short code and expiry. Defaults to active links. Answers "¿qué links de pago tengo? ¿cuáles siguen activos / ya expiraron?". Pass venueId.',
+    'Payment links (checkout links via pay.avoqado.io) of a venue you can access: title, purpose (generic payment / item sale / donation), fixed or open amount, currency, status (active/paused/expired/archived), short code, expiry and, for per-garment links, the garment name (the buyer picks the size). Defaults to active links. Answers "¿qué links de pago tengo? ¿cuáles siguen activos / ya expiraron?". Pass venueId.',
     {
       venueId: z.string().describe('Venue whose payment links to list (must be in your scope)'),
       status: z.enum(['active', 'paused', 'expired', 'archived', 'all']).optional().describe("Filter by status (default 'active')"),
@@ -95,6 +95,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           status: true,
           expiresAt: true,
           createdAt: true,
+          productGroup: { select: { name: true } },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         skip: offset,
@@ -114,6 +115,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           amount: l.amountType === 'OPEN' ? 'open' : l.amount != null ? Number(l.amount) : null,
           currency: l.currency,
           status: l.status, // ACTIVE | PAUSED | EXPIRED | ARCHIVED
+          garment: l.productGroup?.name ?? null, // liga por prenda: la clienta elige la talla al pagar
           expiresAt: l.expiresAt?.toISOString() ?? null,
           createdAt: l.createdAt.toISOString(),
         })),
@@ -123,7 +125,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'create_payment_link',
-    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount (in PESOS, e.g. 150.50) or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Because it mints a PUBLIC, shareable checkout that anyone can pay, by DEFAULT it only PREVIEWS the link; call again with confirm:true to actually create it. Returns the short code. Optionally a discount (manual % or fixed amount, or one from the venue catalog; not valid for donations): the payer is charged amount minus the discount; this additionally requires discounts:apply (and discounts:read for a catalog discount). This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
+    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount (in PESOS, e.g. 150.50) or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Because it mints a PUBLIC, shareable checkout that anyone can pay, by DEFAULT it only PREVIEWS the link; call again with confirm:true to actually create it. Returns the short code. Optionally a discount (manual % or fixed amount, or one from the venue catalog; not valid for donations): the payer is charged amount minus the discount; this additionally requires discounts:apply (and discounts:read for a catalog discount). This WRITES — requires payment-link:create. Per-garment link (Pro plan, Stripe only): pass garment (name; if several match you get the candidates and must ask which) or productGroupId — the buyer picks the size when paying; not combinable with amount, discount or donation. (Item-based links with product line items are not created here — use the dashboard.)',
     {
       venueId: z.string().describe('Venue to create the link in (must be in your scope)'),
       title: z.string().min(1).describe('What the payment is for, e.g. "Anticipo boda"'),
@@ -133,6 +135,12 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('Fixed amount to charge in PESOS (e.g. 150.50); omit for an OPEN amount the payer chooses'),
       purpose: z.enum(['payment', 'donation']).optional().describe("'payment' (default) or 'donation'"),
+      garment: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Garment name for a per-garment link (the buyer picks the size); ambiguous names return candidates'),
+      productGroupId: z.string().min(1).optional().describe('Exact garment id for a per-garment link (instead of garment)'),
       description: z.string().optional().describe('Description shown to the payer'),
       currency: z.string().optional().describe('Currency (default the venue currency, usually MXN)'),
       expiresAt: z.string().optional().describe('Expiry, ISO 8601 (e.g. 2026-07-01T00:00:00.000Z)'),
@@ -141,14 +149,63 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
       ),
       confirm: z.boolean().optional().describe('Must be true to actually create the link; without it you get a preview'),
     },
-    async ({ venueId, title, amount, purpose, description, currency, expiresAt, discount, confirm }) => {
+    async ({ venueId, title, amount, purpose, garment, productGroupId, description, currency, expiresAt, discount, confirm }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payment-link:create', venueId) // write gate (per-venue role)
       exigirPermisosDeDescuento(guard, venueId, discount) // antes del preview y del confirm
 
+      // Liga por prenda: se resuelve la familia (nunca se adivina) y las demás reglas las aplica el servicio al crear.
+      let prenda: { id: string; name: string } | null = null
+      if (garment || productGroupId) {
+        if (amount !== undefined || discount || purpose === 'donation') {
+          return text({
+            ok: false,
+            error: 'Una liga por prenda no lleva importe, descuento ni es donativo: el precio es el de la talla que elija la clienta',
+          })
+        }
+        if (productGroupId) {
+          prenda = await prisma.productGroup.findFirst({
+            where: { id: productGroupId, venueId, deletedAt: null },
+            select: { id: true, name: true },
+          })
+          if (!prenda) return text({ ok: false, error: 'La prenda no existe o no pertenece a este negocio' })
+        } else {
+          const found = await prisma.productGroup.findMany({
+            where: { venueId, deletedAt: null, name: { contains: garment!, mode: 'insensitive' } },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+            take: 6,
+          })
+          if (found.length === 0) return text({ ok: false, error: `No encontré una prenda llamada "${garment}"` })
+          if (found.length > 1) {
+            return text({
+              ok: false,
+              error: `Hay varias prendas parecidas a "${garment}": pregunta cuál y vuelve a llamar con su productGroupId`,
+              candidates: found,
+            })
+          }
+          prenda = found[0]
+        }
+      }
+
       // A payment link is a PUBLIC, shareable checkout carrying a money amount —
       // a wrong-magnitude amount (150 vs 150000) from a vague request would mint
       // a live link anyone could pay. Preview before creating (confirm-gate).
+      if (!confirm && prenda) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            title,
+            purpose: 'ITEM',
+            garment: prenda.name,
+            productGroupId: prenda.id,
+            reusable: true,
+            expiresAt: expiresAt ?? null,
+          },
+          message: `Voy a CREAR una liga pública por prenda (pay.avoqado.io): "${title}" — ${prenda.name}; la clienta elige la talla y paga su precio${expiresAt ? `, vence ${expiresAt}` : ', sin expiración'}. Cualquiera con el link podrá pagar. Vuelve a llamar con confirm:true para crearla.`,
+        })
+      }
       if (!confirm) {
         const amountLabel =
           amount !== undefined ? `monto fijo $${amount.toFixed(2)} ${currency ?? 'MXN'}` : 'monto ABIERTO (el pagador elige cuánto)'
@@ -184,7 +241,8 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           {
             title,
             amountType: amount !== undefined ? 'FIXED' : 'OPEN',
-            purpose: purpose === 'donation' ? 'DONATION' : 'PAYMENT',
+            purpose: prenda ? 'ITEM' : purpose === 'donation' ? 'DONATION' : 'PAYMENT',
+            ...(prenda ? { productGroupId: prenda.id } : {}),
             ...(amount !== undefined ? { amount } : {}),
             ...(description ? { description } : {}),
             ...(currency ? { currency } : {}),
@@ -203,6 +261,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
             amountType: amount !== undefined ? 'FIXED' : 'OPEN',
             amount: amount ?? null,
             discount: resumenDeDescuento(link.discount),
+            ...(prenda ? { productGroupId: prenda.id } : {}),
           },
         })
         return text({
