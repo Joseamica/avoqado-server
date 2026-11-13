@@ -165,7 +165,7 @@ const pagar = (input: Record<string, unknown> = {}) =>
 beforeEach(() => {
   process.env.STRIPE_PUBLISHABLE_KEY = 'fixture-public-key'
   plan.mockReset().mockResolvedValue(true)
-  take.mockReset().mockResolvedValue({ hold: ficha(), reused: false, released: [] })
+  take.mockReset().mockResolvedValue({ hold: ficha(), reused: false, released: [], pendientes: [] })
   freeze.mockReset()
   freezeReal()
   attach.mockReset().mockResolvedValue(undefined)
@@ -318,6 +318,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         }),
         reused: true,
         released: [],
+        pendientes: [],
       })
       piRetrieve.mockResolvedValue({ id: 'pi_viejo', client_secret: 'secret_viejo', status: estado })
       const r = await pagar()
@@ -336,14 +337,24 @@ describe('POST payment-intent de la liga por prenda', () => {
   })
 
   it('recarga con el intento en processing → 409 PAYMENT_LINK_PAYMENT_IN_PROGRESS, sin crear otro', async () => {
-    take.mockResolvedValue({ hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }), reused: true, released: [] })
+    take.mockResolvedValue({
+      hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }),
+      reused: true,
+      released: [],
+      pendientes: [],
+    })
     piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'processing' })
     await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
     expect(piCreate).not.toHaveBeenCalled()
   })
 
   it('recarga con el intento ya cobrado → alreadyPaid, sin crear otro', async () => {
-    take.mockResolvedValue({ hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }), reused: true, released: [] })
+    take.mockResolvedValue({
+      hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }),
+      reused: true,
+      released: [],
+      pendientes: [],
+    })
     piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'succeeded' })
     await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_viejo' })
     expect(piCreate).not.toHaveBeenCalled()
@@ -351,8 +362,13 @@ describe('POST payment-intent de la liga por prenda', () => {
 
   it('intento cancelado → suelta la ficha («intento_cancelado») y aparta otra con intento nuevo', async () => {
     take
-      .mockResolvedValueOnce({ hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }), reused: true, released: [] })
-      .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [] })
+      .mockResolvedValueOnce({
+        hold: ficha({ stripePaymentIntentId: 'pi_viejo', stripeAccountId: 'acct_A' }),
+        reused: true,
+        released: [],
+        pendientes: [],
+      })
+      .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [], pendientes: [] })
     piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'canceled' })
     const r = await pagar()
     expect(release).toHaveBeenCalledWith('chold00000000000000000001', 'intento_cancelado')
@@ -381,6 +397,7 @@ describe('POST payment-intent de la liga por prenda', () => {
           { holdId: 'chold00000000000000000001', stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' },
           { holdId: 'chold00000000000000000003', stripePaymentIntentId: null, stripeAccountId: null },
         ],
+        pendientes: [],
       })
     })
 
@@ -414,7 +431,7 @@ describe('POST payment-intent de la liga por prenda', () => {
       await expect(pagar()).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
       expect(piCancel).not.toHaveBeenCalled()
       expect(piCreate).not.toHaveBeenCalled()
-      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String), { soloSinIntento: true })
       mSeRestauraYNoSeMarcaCobrada()
     })
 
@@ -423,7 +440,7 @@ describe('POST payment-intent de la liga por prenda', () => {
       piCancel.mockRejectedValue(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }))
       await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
       expect(piCreate).not.toHaveBeenCalled()
-      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String), { soloSinIntento: true })
       mSeRestauraYNoSeMarcaCobrada()
     })
 
@@ -449,7 +466,7 @@ describe('POST payment-intent de la liga por prenda', () => {
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'succeeded' })
       await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_de_m' })
       expect(piCreate).not.toHaveBeenCalled()
-      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String), { soloSinIntento: true })
       mSeRestauraYNoSeMarcaCobrada()
     })
 
@@ -457,7 +474,7 @@ describe('POST payment-intent de la liga por prenda', () => {
       piRetrieve.mockRejectedValue(new Error('Stripe caído'))
       await expect(pagar()).rejects.toThrow('Stripe caído')
       expect(piCreate).not.toHaveBeenCalled()
-      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String), { soloSinIntento: true })
       mSeRestauraYNoSeMarcaCobrada()
     })
 
@@ -473,6 +490,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         hold: ficha({ id: NUEVA, stripePaymentIntentId: 'pi_de_l', stripeAccountId: 'acct_A' }),
         reused: true,
         released: [{ holdId: M, stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' }],
+        pendientes: [],
       })
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
       await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
@@ -485,10 +503,68 @@ describe('POST payment-intent de la liga por prenda', () => {
         hold: ficha({ id: NUEVA }),
         reused: true,
         released: [{ holdId: M, stripePaymentIntentId: 'pi_de_m', stripeAccountId: 'acct_A' }],
+        pendientes: [],
       })
       piRetrieve.mockResolvedValue({ id: 'pi_de_m', status: 'processing' })
       await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
-      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String))
+      expect(release).toHaveBeenCalledWith(NUEVA, expect.any(String), { soloSinIntento: true })
+    })
+  })
+
+  describe('encargo b578cd: también se cierran las fichas YA soltadas con intento sin cierre cierto (pendientes)', () => {
+    const L = 'chold0000000000000000000l'
+    const P = 'chold0000000000000000000q'
+    const conPendiente = (releasedReason: string, o: Record<string, unknown> = {}) =>
+      take.mockResolvedValue({
+        hold: ficha({ id: L }),
+        reused: true,
+        released: [],
+        pendientes: [{ holdId: P, stripePaymentIntentId: 'pi_pend', stripeAccountId: 'acct_A', releasedReason, ...o }],
+      })
+
+    it('cambio_de_compra en processing → 409, la pendiente vuelve a ACTIVE, la de esta solicitud se suelta (sólo sin intento) y no se crea', async () => {
+      conPendiente('cambio_de_compra')
+      piRetrieve.mockResolvedValue({ id: 'pi_pend', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(piRetrieve).toHaveBeenCalledWith('pi_pend', undefined, { stripeAccount: 'acct_A' })
+      expect(restaurar).toHaveBeenCalledWith(P)
+      expect(release).toHaveBeenCalledWith(L, 'intento_previo_sin_cerrar', { soloSinIntento: true })
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('cancelable → se cancela con SU cuenta, se marca «intento_cancelado» y recién entonces se crea el de esta ficha', async () => {
+      conPendiente('cambio_de_compra')
+      piRetrieve.mockResolvedValue({ id: 'pi_pend', status: 'requires_payment_method' })
+      piCancel.mockResolvedValue({ id: 'pi_pend', status: 'canceled' })
+      await expect(pagar()).resolves.toMatchObject({ paymentIntentId: 'pi_nuevo' })
+      expect(piCancel.mock.invocationCallOrder[0]).toBeLessThan(piCreate.mock.invocationCallOrder[0])
+      expect(fichas.updateMany).toHaveBeenCalledWith({
+        where: { id: P, status: { in: ['ACTIVE', 'RELEASED'] } },
+        data: { status: 'RELEASED', releasedReason: 'intento_cancelado' },
+      })
+      expect(restaurar).not.toHaveBeenCalled()
+    })
+
+    it('vencida (del barrido) ya cobrada → alreadyPaid, se marca «intento_cobrado» y NO se restaura', async () => {
+      conPendiente('vencida')
+      piRetrieve.mockResolvedValue({ id: 'pi_pend', status: 'succeeded' })
+      await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_pend' })
+      expect(restaurar).not.toHaveBeenCalled()
+      expect(fichas.updateMany).toHaveBeenCalledWith({ where: { id: P, status: 'RELEASED' }, data: { releasedReason: 'intento_cobrado' } })
+      expect(piCreate).not.toHaveBeenCalled()
+    })
+
+    it('la reusada con su intento ya entregado y una pendiente en processing → 409 sin devolver su intento ni soltarla', async () => {
+      take.mockResolvedValue({
+        hold: ficha({ id: L, stripePaymentIntentId: 'pi_de_l', stripeAccountId: 'acct_A' }),
+        reused: true,
+        released: [],
+        pendientes: [{ holdId: P, stripePaymentIntentId: 'pi_pend', stripeAccountId: 'acct_A', releasedReason: 'cambio_de_compra' }],
+      })
+      piRetrieve.mockResolvedValue({ id: 'pi_pend', status: 'processing' })
+      await expect(pagar()).rejects.toMatchObject({ code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(piRetrieve).not.toHaveBeenCalledWith('pi_de_l', expect.anything(), expect.anything())
+      expect(release).not.toHaveBeenCalled()
     })
   })
 
@@ -651,7 +727,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         checkoutSnapshot: { amount: '500.00', currency: 'MXN', applicationFeeCents: 580, metadata: {} },
       })
       fichas.findMany.mockResolvedValue([misma])
-      take.mockResolvedValue({ hold: misma, reused: true, released: [] })
+      take.mockResolvedValue({ hold: misma, reused: true, released: [], pendientes: [] })
       piRetrieve.mockResolvedValue({ id: 'pi_viejo', client_secret: 'secret_viejo', status: 'requires_payment_method' })
       const r = await pagar({ customerEmail: 'ana@example.test' })
       expect(piCancel).not.toHaveBeenCalled()
@@ -721,7 +797,9 @@ describe('POST payment-intent de la liga por prenda', () => {
       // Las dos ven todavía la ficha de la talla vieja con su intento.
       fichas.findMany.mockResolvedValue([previa()])
       const L = ficha({ id: 'chold0000000000000000000l' })
-      take.mockResolvedValueOnce({ hold: L, reused: false, released: [] }).mockResolvedValueOnce({ hold: L, reused: true, released: [] })
+      take
+        .mockResolvedValueOnce({ hold: L, reused: false, released: [], pendientes: [] })
+        .mockResolvedValueOnce({ hold: L, reused: true, released: [], pendientes: [] })
       piCreate.mockResolvedValue({ id: 'pi_de_l', client_secret: 'secret_l', status: 'requires_payment_method' })
       const [a, b] = await Promise.allSettled([pagar(), pagar()])
       expect(a).toMatchObject({ status: 'fulfilled', value: { paymentIntentId: 'pi_de_l' } })
@@ -752,8 +830,8 @@ describe('POST payment-intent de la liga por prenda', () => {
         checkoutSnapshot: { amount: '500.00', currency: 'MXN', applicationFeeCents: 580, metadata: {} },
       })
       take
-        .mockResolvedValueOnce({ hold: vieja, reused: true, released: [] })
-        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [] })
+        .mockResolvedValueOnce({ hold: vieja, reused: true, released: [], pendientes: [] })
+        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [], pendientes: [] })
       piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'requires_payment_method' })
       piCancel.mockResolvedValue({ id: 'pi_viejo', status: 'canceled' })
       await pagar({ customerEmail: 'nueva@example.test' })
@@ -771,7 +849,7 @@ describe('POST payment-intent de la liga por prenda', () => {
     })
 
     it('correo distinto y el intento viejo ya está en processing → 409 IN_PROGRESS, sin crear otro', async () => {
-      take.mockResolvedValue({ hold: congelada({ stripePaymentIntentId: 'pi_viejo' }), reused: true, released: [] })
+      take.mockResolvedValue({ hold: congelada({ stripePaymentIntentId: 'pi_viejo' }), reused: true, released: [], pendientes: [] })
       piRetrieve.mockResolvedValue({ id: 'pi_viejo', status: 'processing' })
       await expect(pagar({ customerEmail: 'nueva@example.test', customFieldResponses: { talla: 'x' } })).rejects.toMatchObject({
         code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS',
@@ -784,8 +862,8 @@ describe('POST payment-intent de la liga por prenda', () => {
         liga({ customFields: [{ id: 'talla', label: 'Nota', type: 'TEXT', required: false }] }) as any,
       )
       take
-        .mockResolvedValueOnce({ hold: congelada({ intentParams: { metadata: {} } }), reused: true, released: [] })
-        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [] })
+        .mockResolvedValueOnce({ hold: congelada({ intentParams: { metadata: {} } }), reused: true, released: [], pendientes: [] })
+        .mockResolvedValueOnce({ hold: ficha({ id: 'chold00000000000000000002' }), reused: false, released: [], pendientes: [] })
       await pagar({ customFieldResponses: { talla: 'y' } })
       expect(release).toHaveBeenCalledWith('chold00000000000000000001', 'cambio_de_compra')
       expect(piCancel).not.toHaveBeenCalled()
@@ -798,7 +876,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         liga({ customFields: [{ id: 'talla', label: 'Nota', type: 'TEXT', required: false }] }) as any,
       )
       const misma = congelada({ intentParams: { receipt_email: 'vieja@example.test', metadata: {} } })
-      take.mockResolvedValue({ hold: misma, reused: true, released: [] })
+      take.mockResolvedValue({ hold: misma, reused: true, released: [], pendientes: [] })
       freeze.mockImplementation(async () => misma)
       await pagar({ customerEmail: 'vieja@example.test', customFieldResponses: { talla: 'x' } })
       expect(release).not.toHaveBeenCalled()
@@ -820,7 +898,7 @@ describe('POST payment-intent de la liga por prenda', () => {
         ecommerceMerchant: { ...liga().ecommerceMerchant, platformFeeBps: 300, providerCredentials: { connectAccountId: 'acct_B' } },
       }) as any,
     )
-    take.mockResolvedValue({ hold: ficha(congelada), reused: true, released: [] })
+    take.mockResolvedValue({ hold: ficha(congelada), reused: true, released: [], pendientes: [] })
     freeze.mockImplementation(async () => ficha(congelada)) // el CAS no la pisa
     piCreate.mockResolvedValue({ id: 'pi_nuevo', client_secret: 'secret_nuevo' })
     const r = await pagar({ customerEmail: 'ana@example.test' })
@@ -924,6 +1002,400 @@ describe('POST payment-intent de la liga por prenda', () => {
     fichas.findUnique.mockResolvedValue({ status: 'CONSUMED', stripePaymentIntentId: 'pi_nuevo' } as any)
     await expect(pagar()).resolves.toEqual({ alreadyPaid: true, paymentIntentId: 'pi_nuevo' })
     expect(piCancel).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Encargo b578cd · Codex r3b #1 (13-nov): intercalaciones de 2-3 POST del mismo navegador. Las fichas y Stripe se simulan CON
+ * ESTADO y con la semántica de `paymentLinkStockHold.service` (candado por navegador en `takeOrReuseHold`, CAS de congelar,
+ * ligar, soltar y restaurar) y de Stripe (misma llave = mismo intento; cancelar algo que ya no es cancelable →
+ * `payment_intent_unexpected_state`; la respuesta de una consulta puede llegar vieja). La invariante:
+ *   ninguna solicitud ENTREGA un intento mientras OTRA ficha del navegador tenga un intento ligado que no esté cancelado con
+ *   certeza, y al final queda a lo más UN intento vivo (no cancelado) entre los ligados o entregados, con su ficha apartada.
+ */
+describe('intercalaciones del mismo navegador: nunca dos cobros posibles (encargo b578cd)', () => {
+  const LINK = 'cplink00000000000000000001'
+  const T_M = 'ctallam000000000000000001'
+  const T_L = 'ctallal000000000000000001'
+  const FINALES = ['intento_cancelado', 'intento_cobrado']
+  const REUSABLE = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action'])
+  type Fila = {
+    id: string
+    paymentLinkId: string
+    browserToken: string
+    productId: string
+    status: string
+    releasedReason: string | null
+    stripePaymentIntentId: string | null
+    stripeAccountId: string | null
+    amountCents: number | null
+    intentParams: unknown
+    checkoutSnapshot: unknown
+    expiresAt: Date
+    creada: number
+  }
+  let filas: Map<string, Fila>
+  let intentos: Map<string, { status: string; holdKey: string }>
+  let porLlave: Map<string, string>
+  let candado: Promise<unknown>
+  let n: number
+  /** Pausas por operación (para fijar una intercalación) o el azar con semilla (para recorrer muchas). */
+  let pausa: (op: string, id?: string) => Promise<void>
+  /** Cada intento entregado a una pestaña, con lo que había vivo en ese momento. */
+  let entregas: Array<{ pi: string; otrosVivos: string[] }>
+
+  const copia = (f: Fila) => ({ ...f })
+  const vivo = (pi: string | null) => !!pi && intentos.has(pi) && intentos.get(pi)!.status !== 'canceled'
+  const ref = (f: Fila) => ({
+    holdId: f.id,
+    stripePaymentIntentId: f.stripePaymentIntentId,
+    stripeAccountId: f.stripeAccountId,
+    releasedReason: f.releasedReason,
+  })
+
+  function sembrar(o: Partial<Fila> & { productId: string }): Fila {
+    const f: Fila = {
+      id: `chold${String(++n).padStart(20, '0')}`,
+      paymentLinkId: LINK,
+      browserToken: TOKEN,
+      status: 'ACTIVE',
+      releasedReason: null,
+      stripePaymentIntentId: null,
+      stripeAccountId: null,
+      amountCents: 50000,
+      intentParams: null,
+      checkoutSnapshot: null,
+      expiresAt: EXPIRA,
+      creada: n,
+      ...o,
+    }
+    filas.set(f.id, f)
+    return f
+  }
+
+  /** `where` de Prisma con lo que usa el servicio: igualdad, in, notIn, not (nulo) y OR. */
+  function cumple(f: Record<string, any>, where: Record<string, any>): boolean {
+    return Object.entries(where).every(([k, c]) => {
+      if (k === 'OR') return (c as Record<string, any>[]).some(w => cumple(f, w))
+      const v = f[k]
+      if (c && typeof c === 'object' && !(c instanceof Date)) {
+        if ('in' in c) return c.in.includes(v)
+        if ('notIn' in c) return !c.notIn.includes(v)
+        if ('not' in c) return v !== c.not
+      }
+      return v === c
+    })
+  }
+
+  beforeEach(() => {
+    filas = new Map()
+    intentos = new Map()
+    porLlave = new Map()
+    candado = Promise.resolve()
+    n = 0
+    entregas = []
+    pausa = async () => {}
+    prismaMock.product.findFirst.mockImplementation((async (args: any) => talla({ id: args.where.id })) as any)
+
+    fichas.findMany.mockImplementation(async (args: any) => {
+      await pausa('previas')
+      // `stripePaymentIntentId: { not: null }` lo resuelve `cumple` (not); el resto es igualdad y OR.
+      return [...filas.values()]
+        .filter(f => cumple(f, args.where))
+        .sort((a, b) => b.creada - a.creada)
+        .slice(0, args.take)
+        .map(copia)
+    })
+    fichas.updateMany.mockImplementation(async (args: any) => {
+      await pausa('marcar')
+      let count = 0
+      for (const f of filas.values()) {
+        if (!cumple(f, args.where)) continue
+        Object.assign(f, args.data)
+        count++
+      }
+      return { count }
+    })
+    fichas.findUnique.mockImplementation(async (args: any) => (filas.has(args.where.id) ? copia(filas.get(args.where.id)!) : null))
+
+    take.mockImplementation(async (args: any) => {
+      await pausa('take')
+      const turno = candado.then(() => {
+        const ahora = new Date()
+        const propias = [...filas.values()].filter(f => f.paymentLinkId === args.paymentLinkId && f.browserToken === args.browserToken)
+        const activas = propias.filter(f => f.status === 'ACTIVE').sort((a, b) => b.creada - a.creada)
+        const reusable = activas.find(
+          f => f.productId === args.productId && f.expiresAt > ahora && (f.amountCents === null || f.amountCents === args.amountCents),
+        )
+        const pendientes = propias
+          .filter(f => f.status === 'RELEASED' && f.stripePaymentIntentId !== null && !FINALES.includes(f.releasedReason as string))
+          .map(ref)
+        const released = activas
+          .filter(f => f !== reusable)
+          .map(f => {
+            f.status = 'RELEASED'
+            f.releasedReason = 'cambio_de_compra'
+            return ref(f)
+          })
+        if (reusable) return { hold: copia(reusable), reused: true, released, pendientes }
+        return { hold: copia(sembrar({ productId: args.productId, amountCents: args.amountCents })), reused: false, released, pendientes }
+      })
+      candado = turno.catch(() => undefined)
+      const r = await turno
+      await pausa('take-respuesta')
+      return r
+    })
+    freeze.mockImplementation(async (holdId: string, args: any) => {
+      await pausa('congelar')
+      const f = filas.get(holdId)!
+      if (f.status === 'ACTIVE' && f.intentParams === null) Object.assign(f, args)
+      return copia(f)
+    })
+    attach.mockImplementation(async (holdId: string, pi: string) => {
+      await pausa('ligar')
+      const f = filas.get(holdId)!
+      if (f.status !== 'ACTIVE' || (f.stripePaymentIntentId !== null && f.stripePaymentIntentId !== pi)) {
+        throw new ConflictError('La ficha de apartado ya no está activa', 'PAYMENT_LINK_HOLD_INTENT_MISMATCH')
+      }
+      f.stripePaymentIntentId = pi
+    })
+    release.mockImplementation(async (holdId: string, motivo: string, opciones?: { soloSinIntento?: boolean }) => {
+      await pausa('soltar')
+      const f = filas.get(holdId)!
+      if (f.status === 'ACTIVE' && (!opciones?.soloSinIntento || f.stripePaymentIntentId === null)) {
+        f.status = 'RELEASED'
+        f.releasedReason = motivo
+      }
+    })
+    restaurar.mockImplementation(async (holdId: string) => {
+      await pausa('restaurar')
+      const f = filas.get(holdId)!
+      if (f.status !== 'RELEASED' || f.releasedReason !== 'cambio_de_compra' || f.expiresAt <= new Date()) return false
+      f.status = 'ACTIVE'
+      f.releasedReason = null
+      return true
+    })
+
+    piCreate.mockImplementation(async (_params: unknown, opciones: { idempotencyKey: string }) => {
+      await pausa('crear')
+      let id = porLlave.get(opciones.idempotencyKey)
+      if (!id) {
+        id = `pi_${opciones.idempotencyKey.slice(-6)}_${++n}`
+        porLlave.set(opciones.idempotencyKey, id)
+        intentos.set(id, { status: 'requires_payment_method', holdKey: opciones.idempotencyKey })
+      }
+      const r = { id, client_secret: `secret_${id}`, status: intentos.get(id)!.status }
+      await pausa('crear-respuesta')
+      return r
+    })
+    piRetrieve.mockImplementation(async (id: string) => {
+      await pausa('consultar', id)
+      // La foto se toma AHORA; la respuesta puede llegar cuando Stripe ya cambió (vieja).
+      const r = { id, client_secret: `secret_${id}`, status: intentos.get(id)!.status }
+      await pausa('consultar-respuesta', id)
+      return r
+    })
+    piCancel.mockImplementation(async (id: string) => {
+      await pausa('cancelar', id)
+      const i = intentos.get(id)!
+      if (!REUSABLE.has(i.status)) {
+        throw Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' })
+      }
+      i.status = 'canceled'
+      await pausa('cancelar-respuesta', id)
+      return { id, status: 'canceled' }
+    })
+  })
+
+  /** Intentos ligados a una ficha que siguen vivos. */
+  const ligadosVivos = (salvo?: string) =>
+    [...filas.values()].filter(f => f.id !== salvo && vivo(f.stripePaymentIntentId)).map(f => f.stripePaymentIntentId as string)
+
+  /** Un POST de la pestaña; si entrega un intento, anota qué otros intentos ligados seguían vivos en ese instante. */
+  const pagarTalla = (productId: string) =>
+    createStripePaymentIntentForPaymentLink('abc12345', { productId, browserToken: TOKEN } as any).then(
+      (r: any) => {
+        if (r?.paymentIntentId && !r.alreadyPaid) {
+          const suya = [...filas.values()].find(f => f.stripePaymentIntentId === r.paymentIntentId)
+          entregas.push({ pi: r.paymentIntentId, otrosVivos: vivo(r.paymentIntentId) ? ligadosVivos(suya?.id) : [] })
+        }
+        return { ok: true as const, r }
+      },
+      (e: any) => ({ ok: false as const, code: e?.code as string | undefined, e }),
+    )
+
+  /** El POST viejo de la talla M que ya apartó y liga su intento (como lo deja `attachIntent`). */
+  function ligarM(m: Fila, status: string) {
+    const pi = 'pi_M'
+    intentos.set(pi, { status, holdKey: `plhold:${m.id}` })
+    porLlave.set(`plhold:${m.id}`, pi)
+    Object.assign(m, { stripePaymentIntentId: pi, stripeAccountId: 'acct_A', intentParams: { amount: 50000 } })
+  }
+
+  /** La invariante al terminar: ninguna entrega con otro vivo, a lo más un intento vivo y con su ficha apartada. */
+  function nuncaDosCobros() {
+    for (const e of entregas) expect(e).toEqual({ pi: e.pi, otrosVivos: [] })
+    const candidatos = new Set([...entregas.map(e => e.pi), ...[...filas.values()].map(f => f.stripePaymentIntentId)].filter(vivo))
+    expect([...candidatos].length).toBeLessThanOrEqual(1)
+    for (const pi of candidatos) {
+      const suya = [...filas.values()].find(f => f.stripePaymentIntentId === pi)
+      expect({ pi, ficha: suya?.status }).toEqual({ pi, ficha: 'ACTIVE' })
+    }
+  }
+
+  function puerta() {
+    let abrir!: () => void
+    const p = new Promise<void>(r => (abrir = r))
+    return { p, abrir }
+  }
+  async function hasta(cond: () => boolean) {
+    for (let i = 0; i < 500 && !cond(); i++) await new Promise(r => setImmediate(r))
+    if (!cond()) throw new Error('la intercalación no llegó al punto esperado')
+  }
+
+  /** Fija la secuencia de Codex r3b #1 hasta que L₂ termina; devuelve las promesas para que cada caso decida el final. */
+  async function secuenciaR3b(estadoDeM: string, antesDeL2: () => void = () => undefined) {
+    const m = sembrar({ productId: T_M })
+    const tomas = [puerta(), puerta()]
+    let llegadas = 0
+    const consultaDeL1 = puerta()
+    let consultasM = 0
+    pausa = async (op, id) => {
+      if (op === 'take') await tomas[llegadas++].p
+      if (op === 'consultar-respuesta' && id === 'pi_M' && consultasM++ === 0) await consultaDeL1.p
+    }
+    // L₁ y L₂ revisan previas cuando M todavía no tiene intento, y se detienen antes de apartar.
+    const l1 = pagarTalla(T_L)
+    const l2 = pagarTalla(T_L)
+    await hasta(() => llegadas === 2)
+    // El POST viejo liga pi_M (la clienta ya lo empieza a confirmar).
+    ligarM(m, estadoDeM)
+    // L₁ aparta (suelta M con pi_M, crea L) y consulta pi_M: la respuesta de Stripe se queda en el camino.
+    tomas[0].abrir()
+    await hasta(() => consultasM === 1)
+    // L₂ aparta (REUSA L) y termina.
+    antesDeL2()
+    tomas[1].abrir()
+    const r2 = await l2
+    return { m, l1, r2, soltarConsultaDeL1: consultaDeL1.abrir }
+  }
+
+  it('r3b #1: pi_M cobrando → L₂ no crea ni entrega pi_L; L₁ tampoco; M vuelve a apartarse y L se suelta', async () => {
+    const { m, l1, r2, soltarConsultaDeL1 } = await secuenciaR3b('processing')
+    expect(r2).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    soltarConsultaDeL1()
+    expect(await l1).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    expect(piCreate).not.toHaveBeenCalled()
+    expect(filas.get(m.id)).toMatchObject({ status: 'ACTIVE', releasedReason: null, stripePaymentIntentId: 'pi_M' })
+    expect([...filas.values()].filter(f => f.productId === T_L).map(f => f.status)).toEqual(['RELEASED'])
+    nuncaDosCobros()
+  })
+
+  it('r3b #1, pi_M todavía cancelable → L₂ lo cancela con certeza ANTES de crear pi_L; L₁ recibe el mismo pi_L', async () => {
+    const { m, l1, r2, soltarConsultaDeL1 } = await secuenciaR3b('requires_payment_method')
+    expect(r2).toMatchObject({ ok: true })
+    expect(intentos.get('pi_M')!.status).toBe('canceled')
+    soltarConsultaDeL1()
+    const r1 = await l1
+    expect(r1).toMatchObject({ ok: true, r: { paymentIntentId: (r2 as any).r.paymentIntentId } })
+    expect(filas.get(m.id)).toMatchObject({ status: 'RELEASED', releasedReason: 'intento_cancelado' })
+    nuncaDosCobros()
+  })
+
+  it('r3b #1 con la consulta de L₁ vieja («processing») y pi_M ya rechazado: L₂ lo cancela y entrega pi_L → L₁ NO suelta L', async () => {
+    // A la clienta le rechazan la tarjeta de M (vuelve a requires_payment_method) mientras la respuesta de L₁ sigue en el camino.
+    const { m, l1, r2, soltarConsultaDeL1 } = await secuenciaR3b('processing', () => {
+      intentos.get('pi_M')!.status = 'requires_payment_method'
+    })
+    expect(r2).toMatchObject({ ok: true })
+    expect(intentos.get('pi_M')!.status).toBe('canceled')
+    soltarConsultaDeL1()
+    expect(await l1).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    // La ficha de L ya tiene el intento que L₂ entregó con certeza: soltarla dejaría ese pago sin pieza apartada.
+    const fichaL = [...filas.values()].find(f => f.stripePaymentIntentId === (r2 as any).r.paymentIntentId)!
+    expect(fichaL.status).toBe('ACTIVE')
+    expect(filas.get(m.id)).toMatchObject({ status: 'RELEASED', releasedReason: 'intento_cancelado' })
+    nuncaDosCobros()
+  })
+
+  it('después de que L₁ restauró M: otra L y la propia M reciben 409 «en curso», sin crear intento', async () => {
+    const { l1, soltarConsultaDeL1 } = await secuenciaR3b('processing')
+    soltarConsultaDeL1()
+    await l1
+    pausa = async () => {}
+    expect(await pagarTalla(T_L)).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    expect(await pagarTalla(T_M)).toMatchObject({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    expect(piCreate).not.toHaveBeenCalled()
+    nuncaDosCobros()
+  })
+
+  /** PRNG con semilla (mulberry32): la misma semilla repite la misma intercalación. */
+  function azar(semilla: number) {
+    let a = semilla >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+
+  /**
+   * Cada operación de fichas y de Stripe cede el turno 0-3 vueltas al azar: con muchas semillas se recorren las intercalaciones
+   * de los POST (y de la clienta que confirma su intento o a quien se le rechaza la tarjeta).
+   */
+  async function correr(semilla: number, inicio: () => void, tallas: string[], clienta: 'confirma' | 'rechazo' | 'nada') {
+    const r = azar(semilla)
+    pausa = async () => {
+      const k = Math.floor(r() * 4)
+      for (let i = 0; i < k; i++) await new Promise(res => setImmediate(res))
+    }
+    inicio()
+    const posts = tallas.map(t => pagarTalla(t))
+    const pestaña = (async () => {
+      for (let i = 0; i < 30; i++) {
+        await pausa('clienta')
+        const ligados = [...filas.values()].filter(f => vivo(f.stripePaymentIntentId))
+        const objetivo = ligados[Math.floor(r() * Math.max(ligados.length, 1))]
+        if (!objetivo || r() < 0.7) continue
+        const i2 = intentos.get(objetivo.stripePaymentIntentId as string)!
+        if (clienta === 'confirma' && i2.status === 'requires_payment_method') i2.status = 'processing'
+        else if (clienta === 'rechazo' && i2.status === 'processing') i2.status = 'requires_payment_method'
+      }
+    })()
+    await Promise.all([...posts, pestaña])
+    nuncaDosCobros()
+  }
+
+  const SEMILLAS = Array.from({ length: 150 }, (_, i) => i + 1)
+
+  it.each([
+    ['misma talla ×3, sin intento ligado', () => undefined, [T_L, T_L, T_L], 'nada'],
+    ['misma talla ×3, la clienta confirma lo que se le entrega', () => undefined, [T_L, T_L, T_L], 'confirma'],
+    ['tallas distintas (L, M, L) desde cero', () => undefined, [T_L, T_M, T_L], 'confirma'],
+    ['M en vuelo sin intento + L, L (r3b #1)', 'm-sin-intento', [T_M, T_L, T_L], 'confirma'],
+    ['M con intento cobrando + L, L, M', 'm-processing', [T_L, T_L, T_M], 'rechazo'],
+    ['M con intento cancelable + L, M, L', 'm-cancelable', [T_L, T_M, T_L], 'confirma'],
+  ] as const)('%s: en 150 intercalaciones nunca hay dos cobros posibles', async (_n, inicio, tallas, clienta) => {
+    for (const semilla of SEMILLAS) {
+      filas.clear()
+      intentos.clear()
+      porLlave.clear()
+      entregas = []
+      candado = Promise.resolve()
+      const sembrarInicio = () => {
+        if (typeof inicio === 'function') return
+        const m = sembrar({ productId: T_M })
+        if (inicio === 'm-processing') ligarM(m, 'processing')
+        if (inicio === 'm-cancelable') ligarM(m, 'requires_payment_method')
+      }
+      try {
+        await correr(semilla, sembrarInicio, [...tallas], clienta)
+      } catch (err) {
+        throw new Error(`semilla ${semilla}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
   })
 })
 

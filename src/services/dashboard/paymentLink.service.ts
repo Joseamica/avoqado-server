@@ -2012,7 +2012,7 @@ async function cobrarPrendaConApartado(args: {
       if (pagada) return pagada
     }
 
-    const { hold, reused, released } = await takeOrReuseHold({
+    const { hold, reused, released, pendientes } = await takeOrReuseHold({
       paymentLinkId: paymentLink.id,
       venueId: paymentLink.venueId,
       productId,
@@ -2025,18 +2025,30 @@ async function cobrarPrendaConApartado(args: {
     // crea ni devuelve intento: nunca dos cobros posibles antes de vencer.
     // Codex código r2: la ficha soltada cuyo intento sigue vivo vuelve a ACTIVE (dentro de `cerrarIntentoPrevio`). La ficha de
     // ESTE POST se suelta, salvo que sea una reusada cuyo intento ya está en su pestaña: ésa se deja como estaba.
+    // Encargo b578cd: y sólo si sigue SIN intento (CAS). Si otra solicitud que reusó esta misma ficha ya revisó todo, creó y
+    // entregó su intento, la vista de ESTA solicitud es vieja: soltarla dejaría ese pago sin pieza apartada.
     const soltarLaNueva = async (motivo: string) => {
       if (reused && hold.stripePaymentIntentId) return
-      await releaseHold(hold.id, motivo)
+      await releaseHold(hold.id, motivo, { soloSinIntento: true })
     }
-    for (const r of released) {
+    // 🔴 Encargo b578cd (Codex r3b #1): además de las que soltó ESTA llamada, las que ya estaban soltadas con un intento que
+    // nadie ha confirmado cancelado (otra solicitud del navegador las soltó y todavía las está revisando, o el barrido las
+    // venció con el intento en curso). Sin esto, la solicitud que REUSA la ficha nueva de otra veía `released` vacío y creaba y
+    // entregaba su intento mientras el de la talla vieja ya cobraba: dos cobros posibles. Invariante: ningún intento se crea
+    // ni se entrega mientras otra ficha del navegador tenga un intento ligado que no esté cancelado con certeza.
+    const porCerrar = [
+      ...released.map(r => ({ ...r, restaurarSiSigue: true })),
+      // Sólo una `cambio_de_compra` vuelve a ACTIVE si su pago sigue; las demás se marcan «intento_cobrado» si ya cobraron.
+      ...pendientes.map(p => ({ ...p, restaurarSiSigue: p.releasedReason === 'cambio_de_compra' })),
+    ]
+    for (const r of porCerrar) {
       if (!r.stripePaymentIntentId || !r.stripeAccountId) continue
       let pagada: Awaited<ReturnType<typeof cerrarIntentoPrevio>>
       try {
         pagada = await cerrarIntentoPrevio(
           stripe,
           { id: r.holdId, stripePaymentIntentId: r.stripePaymentIntentId, stripeAccountId: r.stripeAccountId },
-          { restaurarSiSigue: true },
+          { restaurarSiSigue: r.restaurarSiSigue },
         )
       } catch (err) {
         await soltarLaNueva('intento_previo_sin_cerrar')

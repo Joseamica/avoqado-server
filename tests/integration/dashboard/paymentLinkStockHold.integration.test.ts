@@ -120,6 +120,25 @@ it('dos POST del MISMO token y talla a la vez → una sola ficha', async () => {
   expect(await activas({ browserToken: 'tok-dup' })).toBe(1)
 })
 
+it('encargo b578cd: M y L a la vez con M ya ligada → quien reusa o crea ve a M (released o pendientes), nunca se pierde', async () => {
+  const [m, l] = [await talla('PM', 3), await talla('PL', 3)]
+  const tok = 'tok-pend'
+  const fm = (await tomar(m, tok)).hold
+  await attachIntent(fm.id, 'pi_pend_m')
+  // Dos solicitudes de L a la vez: la primera suelta M (released), la segunda reusa L y la ve en `pendientes`.
+  const [a, b] = await Promise.all([tomar(l, tok), tomar(l, tok)])
+  const vistas = [...a.released, ...a.pendientes, ...b.released, ...b.pendientes].map(x => x.holdId)
+  expect(vistas.filter(id => id === fm.id)).toHaveLength(2)
+  const quienReusa = a.reused ? a : b
+  expect(quienReusa.released).toEqual([])
+  expect(quienReusa.pendientes).toEqual([
+    { holdId: fm.id, stripePaymentIntentId: 'pi_pend_m', stripeAccountId: null, releasedReason: 'cambio_de_compra' },
+  ])
+  // Cerrada con certeza ya no se devuelve.
+  await prisma.paymentLinkStockHold.update({ where: { id: fm.id }, data: { releasedReason: 'intento_cancelado' } })
+  expect((await tomar(l, tok)).pendientes).toEqual([])
+})
+
 it('disponibilidad, congelar, ligar y consumir contra la base real', async () => {
   const p = await talla('XL', 1)
   const { hold } = await tomar(p, 'tok-pago')

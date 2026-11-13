@@ -32,18 +32,22 @@ const piCreate = jest.fn(async (params: { amount: number }, opciones: { idempote
   porLlave.set(opciones.idempotencyKey, pi)
   return pi
 })
+/** Encargo b578cd: detiene la RESPUESTA de una consulta (la foto ya se tomó: llega vieja si Stripe cambia mientras). */
+let mockAntesDeResponder: ((id: string) => Promise<void>) | null = null
 jest.mock('stripe', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     paymentIntents: {
       create: piCreate,
-      retrieve: jest.fn(async (id: string) => ({
-        id,
-        client_secret: `secret_${id}`,
-        status: estados.get(id) ?? 'requires_payment_method',
-        latest_charge: null,
-      })),
-      cancel: jest.fn(async (id: string) => ({ id, status: 'canceled' })),
+      retrieve: jest.fn(async (id: string) => {
+        const foto = { id, client_secret: `secret_${id}`, status: estados.get(id) ?? 'requires_payment_method', latest_charge: null }
+        if (mockAntesDeResponder) await mockAntesDeResponder(id)
+        return foto
+      }),
+      cancel: jest.fn(async (id: string) => {
+        estados.set(id, 'canceled')
+        return { id, status: 'canceled' }
+      }),
     },
   })),
 }))
@@ -120,6 +124,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   estados.clear()
+  mockAntesDeResponder = null
   if (m?.venueId) await prisma.paymentLinkStockHold.deleteMany({ where: { venueId: m.venueId } })
   await borrarMundoComisiones(m)
 })
@@ -324,5 +329,80 @@ describe('carrera M/L: la ficha de M no se suelta mientras su pago sigue', () =>
     await expect(
       createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaM, browserToken: 'tok_tercera_compradora_0456' } as any),
     ).rejects.toMatchObject({ code: 'PAYMENT_LINK_VARIANT_SOLD_OUT' })
+  })
+})
+
+/**
+ * Encargo b578cd · Codex r3b #1, contra Postgres real: POST de M en vuelo + dos POST de L del mismo navegador. L₁ y L₂ revisan
+ * previas cuando M todavía no tiene intento; M liga pi_M y la clienta lo confirma; L₁ aparta (suelta M, crea L) y su consulta de
+ * pi_M se queda en el camino; L₂ REUSA L. Antes: L₂ veía `released` vacío, creaba y entregaba pi_L → dos cobros posibles.
+ */
+describe('encargo b578cd: la solicitud que reusa la ficha nueva de otra también cierra lo que esa otra soltó', () => {
+  const navegador = 'tok_b578cd_r3b_0123456789'
+  let espia: jest.SpyInstance | null = null
+  afterEach(() => {
+    espia?.mockRestore()
+    espia = null
+  })
+
+  async function secuencia(antesDeL2: (piM: string) => void = () => undefined) {
+    const tallaM = await talla('BM', 500, 1)
+    const tallaL = await talla('BL', 520, 1)
+    const rM: any = await createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaM, browserToken: navegador } as any)
+    const fichaM = await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { stripePaymentIntentId: rM.paymentIntentId } })
+    estados.set(rM.paymentIntentId, 'processing')
+    // La revisión de previas (la consulta con OR, fuera del candado) de las dos L corrió antes de que M ligara su intento.
+    const real = prisma.paymentLinkStockHold.findMany.bind(prisma.paymentLinkStockHold)
+    espia = jest.spyOn(prisma.paymentLinkStockHold, 'findMany').mockImplementation((async (args: any) => {
+      const filas = (await real(args)) as Array<{ id: string }>
+      return args?.where?.OR ? filas.filter(f => f.id !== fichaM.id) : filas
+    }) as any)
+    let abrir!: () => void
+    const puerta = new Promise<void>(r => (abrir = r))
+    let consultas = 0
+    mockAntesDeResponder = async id => {
+      if (id === rM.paymentIntentId && consultas++ === 0) await puerta
+    }
+    const creadosAntes = piCreate.mock.calls.length
+    const pagarL = () =>
+      createStripePaymentIntentForPaymentLink(liga.shortCode, { productId: tallaL, browserToken: navegador } as any).then(
+        (r: any) => ({ ok: true as const, r }),
+        (e: any) => ({ ok: false as const, code: e?.code as string }),
+      )
+    const l1 = pagarL()
+    for (let i = 0; i < 400 && consultas === 0; i++) await new Promise(r => setTimeout(r, 5))
+    expect(consultas).toBe(1)
+    antesDeL2(rM.paymentIntentId)
+    const r2 = await pagarL()
+    abrir()
+    const r1 = await l1
+    return { r1, r2, fichaM, tallaL, piM: rM.paymentIntentId as string, creados: piCreate.mock.calls.length - creadosAntes }
+  }
+
+  it('pi_M cobrando → L₂ y L₁ reciben 409 sin crear intento; M sigue apartada y L queda libre', async () => {
+    const { r1, r2, fichaM, tallaL, creados } = await secuencia()
+    expect(r2).toEqual({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    expect(r1).toEqual({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    expect(creados).toBe(0)
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: fichaM.id } })).toMatchObject({
+      status: 'ACTIVE',
+      releasedReason: null,
+    })
+    expect(await prisma.paymentLinkStockHold.count({ where: { productId: tallaL, status: 'ACTIVE' } })).toBe(0)
+  })
+
+  it('la consulta de L₁ llega vieja («processing») y pi_M ya se rechazó: L₂ lo cancela, entrega pi_L y L₁ NO suelta L', async () => {
+    const { r1, r2, fichaM, piM } = await secuencia(pi => estados.set(pi, 'requires_payment_method'))
+    expect(r2).toMatchObject({ ok: true })
+    expect(estados.get(piM)).toBe('canceled')
+    expect(r1).toEqual({ ok: false, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+    const piL = (r2 as any).r.paymentIntentId
+    expect(await prisma.paymentLinkStockHold.findFirstOrThrow({ where: { stripePaymentIntentId: piL } })).toMatchObject({
+      status: 'ACTIVE',
+    })
+    expect(await prisma.paymentLinkStockHold.findUniqueOrThrow({ where: { id: fichaM.id } })).toMatchObject({
+      status: 'RELEASED',
+      releasedReason: 'intento_cancelado',
+    })
   })
 })

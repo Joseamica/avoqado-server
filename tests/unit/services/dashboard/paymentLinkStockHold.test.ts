@@ -35,6 +35,7 @@ function match(row: Row, where: Row = {}): boolean {
     const v = row[k]
     if (c && typeof c === 'object' && !(c instanceof Date)) {
       if ('in' in c) return c.in.includes(v)
+      if ('notIn' in c) return !c.notIn.includes(v)
       if ('gt' in c) return v > c.gt
       if ('equals' in c) return v == null
       if ('not' in c) return v !== c.not
@@ -179,7 +180,7 @@ describe('takeOrReuseHold', () => {
     talla('cm', 1)
     const a = await tomar('cm')
     const b = await tomar('cm')
-    expect(b).toEqual({ hold: a.hold, reused: true, released: [] })
+    expect(b).toEqual({ hold: a.hold, reused: true, released: [], pendientes: [] })
     expect(holds.filter(h => h.status === 'ACTIVE')).toHaveLength(1)
   })
 
@@ -209,6 +210,74 @@ describe('takeOrReuseHold', () => {
     expect(r.reused).toBe(false)
     expect(r.hold.id).not.toBe(vieja.id)
     expect(r.released.map(x => x.stripePaymentIntentId)).toEqual(['pi_viejo'])
+  })
+
+  describe('encargo b578cd: cierres pendientes del navegador (Codex r3b #1)', () => {
+    it('devuelve las soltadas del navegador con intento SIN cierre cierto; no las cerradas, sin intento, ajenas ni las de esta llamada', async () => {
+      talla('cm', 5)
+      talla('cl', 5)
+      const enRevision = hold({
+        productId: 'cm',
+        browserToken: 'yo',
+        status: 'RELEASED',
+        releasedReason: 'cambio_de_compra',
+        stripePaymentIntentId: 'pi_m',
+        stripeAccountId: 'acct_1',
+      })
+      const vencida = hold({
+        productId: 'cm',
+        browserToken: 'yo',
+        status: 'RELEASED',
+        releasedReason: 'vencida',
+        stripePaymentIntentId: 'pi_v',
+        stripeAccountId: 'acct_1',
+      })
+      hold({ productId: 'cm', browserToken: 'yo', status: 'RELEASED', releasedReason: 'intento_cancelado', stripePaymentIntentId: 'pi_c' })
+      hold({ productId: 'cm', browserToken: 'yo', status: 'RELEASED', releasedReason: 'intento_cobrado', stripePaymentIntentId: 'pi_p' })
+      hold({ productId: 'cm', browserToken: 'yo', status: 'RELEASED', releasedReason: 'cambio_de_compra' })
+      hold({ productId: 'cm', browserToken: 'otro', status: 'RELEASED', releasedReason: 'cambio_de_compra', stripePaymentIntentId: 'pi_o' })
+      const activa = hold({ productId: 'cm', browserToken: 'yo', stripePaymentIntentId: 'pi_a', stripeAccountId: 'acct_1' })
+      const r = await tomar('cl')
+      expect(r.pendientes).toEqual(
+        expect.arrayContaining([
+          { holdId: enRevision.id, stripePaymentIntentId: 'pi_m', stripeAccountId: 'acct_1', releasedReason: 'cambio_de_compra' },
+          { holdId: vencida.id, stripePaymentIntentId: 'pi_v', stripeAccountId: 'acct_1', releasedReason: 'vencida' },
+        ]),
+      )
+      expect(r.pendientes).toHaveLength(2)
+      // La que soltó ESTA llamada va en `released`, no repetida en `pendientes`.
+      expect(r.released).toEqual([{ holdId: activa.id, stripePaymentIntentId: 'pi_a', stripeAccountId: 'acct_1' }])
+      const consulta = db.paymentLinkStockHold.findMany.mock.calls.find((c: any[]) => c[0].where.status === 'RELEASED')[0]
+      expect(consulta.take).toBe(21)
+    })
+
+    it('también al REUSAR la ficha nueva de otra solicitud: ve la de M que esa otra soltó y sigue revisando', async () => {
+      talla('cl', 5)
+      const m = hold({
+        productId: 'cm',
+        browserToken: 'yo',
+        status: 'RELEASED',
+        releasedReason: 'cambio_de_compra',
+        stripePaymentIntentId: 'pi_m',
+        stripeAccountId: 'acct_1',
+      })
+      const l = hold({ productId: 'cl', browserToken: 'yo' })
+      const r = await tomar('cl')
+      expect(r).toMatchObject({ reused: true, released: [] })
+      expect(r.hold.id).toBe(l.id)
+      expect(r.pendientes.map(p => p.holdId)).toEqual([m.id])
+    })
+
+    it('más de 20 pendientes → 409 «en curso» sin apartar ni soltar nada (nunca se salta una)', async () => {
+      talla('cl', 5)
+      for (let i = 0; i < 21; i++) {
+        hold({ productId: 'cm', browserToken: 'yo', status: 'RELEASED', releasedReason: 'vencida', stripePaymentIntentId: `pi_${i}` })
+      }
+      const activa = hold({ productId: 'cm', browserToken: 'yo' })
+      await expect(tomar('cl')).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_LINK_PAYMENT_IN_PROGRESS' })
+      expect(activa.status).toBe('ACTIVE')
+      expect(holds.filter(h => h.productId === 'cl')).toHaveLength(0)
+    })
   })
 
   it('sin existencia → 409 PAYMENT_LINK_VARIANT_SOLD_OUT', async () => {
@@ -272,6 +341,15 @@ describe('congelar, ligar, soltar y consumir (CAS)', () => {
     await releaseHold(usada.id, 'vencida')
     expect(viva).toMatchObject({ status: 'RELEASED', releasedReason: 'vencida' })
     expect(usada.status).toBe('CONSUMED')
+  })
+
+  it('releaseHold con soloSinIntento no suelta una ficha que ya tiene intento (encargo b578cd)', async () => {
+    const conIntento = hold({ productId: 'cm', stripePaymentIntentId: 'pi_1' })
+    const sinIntento = hold({ productId: 'cm' })
+    await releaseHold(conIntento.id, 'intento_previo_sin_cerrar', { soloSinIntento: true })
+    await releaseHold(sinIntento.id, 'intento_previo_sin_cerrar', { soloSinIntento: true })
+    expect(conIntento.status).toBe('ACTIVE')
+    expect(sinIntento).toMatchObject({ status: 'RELEASED', releasedReason: 'intento_previo_sin_cerrar' })
   })
 
   it('consumeHoldInTx pasa ACTIVE → CONSUMED por intento y cuenta', async () => {

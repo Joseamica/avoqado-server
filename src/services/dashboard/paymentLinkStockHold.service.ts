@@ -84,6 +84,31 @@ export async function variantAvailability(args: {
   })
 }
 
+/** Motivos de una ficha soltada cuyo intento ya está resuelto con certeza en Stripe (cancelado o cobrado y marcado). */
+export const MOTIVOS_CERRADOS_CON_CERTEZA = ['intento_cancelado', 'intento_cobrado'] as const
+/** Tope de cierres pendientes que se revisan por solicitud; con más, la solicitud se detiene (409) en vez de saltarse alguno. */
+const MAX_CIERRES_PENDIENTES = 20
+
+/**
+ * Ficha YA soltada del mismo navegador con un intento ligado que todavía no se sabe cancelado (`cambio_de_compra` de otra
+ * solicitud que aún no termina de cerrarlo, `vencida` del barrido con el intento en curso, o la de un POST que perdió).
+ */
+export interface CierrePendiente {
+  holdId: string
+  stripePaymentIntentId: string
+  stripeAccountId: string | null
+  releasedReason: string | null
+}
+
+/**
+ * Aparta la talla para este navegador (o reusa su ficha vigente de la misma talla e importe) y suelta sus otras fichas activas.
+ *
+ * 🔴 Contrato de quien llama (encargo b578cd, Codex r3b #1): ANTES de crear o devolver un intento debe cerrar en Stripe, con la
+ * cuenta de cada una, el intento de cada ficha de `released` (las que soltó ESTA llamada) y de `pendientes` (las que ya estaban
+ * soltadas con un intento que nadie ha confirmado cancelado). Así ninguna solicitud entrega un intento mientras otro del mismo
+ * navegador pueda cobrarse: una solicitud que reusa la ficha que otra acaba de crear ve la ficha que esa otra soltó y que aún
+ * está revisando, en vez de un `released` vacío.
+ */
 export async function takeOrReuseHold(args: {
   paymentLinkId: string
   venueId: string
@@ -95,6 +120,7 @@ export async function takeOrReuseHold(args: {
   hold: PaymentLinkStockHold
   reused: boolean
   released: Array<{ holdId: string; stripePaymentIntentId: string | null; stripeAccountId: string | null }>
+  pendientes: CierrePendiente[]
 }> {
   const { paymentLinkId, venueId, productId, browserToken, amountCents } = args
   const now = args.now ?? new Date()
@@ -109,6 +135,30 @@ export async function takeOrReuseHold(args: {
     const reusable = own.find(
       h => h.productId === productId && h.expiresAt > now && (h.amountCents === null || h.amountCents === amountCents),
     )
+    // Encargo b578cd (Codex r3b #1): leídas con el candado del navegador, ANTES de soltar las de esta vuelta.
+    const pendientes = (
+      await tx.paymentLinkStockHold.findMany({
+        where: {
+          paymentLinkId,
+          browserToken,
+          status: 'RELEASED',
+          stripePaymentIntentId: { not: null },
+          releasedReason: { notIn: [...MOTIVOS_CERRADOS_CON_CERTEZA] },
+        },
+        select: { id: true, stripePaymentIntentId: true, stripeAccountId: true, releasedReason: true },
+        orderBy: { createdAt: 'desc' },
+        take: MAX_CIERRES_PENDIENTES + 1,
+      })
+    ).map(h => ({
+      holdId: h.id,
+      stripePaymentIntentId: h.stripePaymentIntentId as string,
+      stripeAccountId: h.stripeAccountId,
+      releasedReason: h.releasedReason,
+    }))
+    // Falla cerrado: nunca se entrega un intento sin haber revisado TODOS los del navegador.
+    if (pendientes.length > MAX_CIERRES_PENDIENTES) {
+      throw new ConflictError('Tu pago se está procesando. Espera unos segundos.', 'PAYMENT_LINK_PAYMENT_IN_PROGRESS')
+    }
     const toRelease = own.filter(h => h !== reusable).map(h => h.id)
     const released = toRelease.length
       ? (
@@ -119,7 +169,7 @@ export async function takeOrReuseHold(args: {
           })
         ).map(h => ({ holdId: h.id, stripePaymentIntentId: h.stripePaymentIntentId, stripeAccountId: h.stripeAccountId }))
       : []
-    if (reusable) return { hold: reusable, reused: true, released }
+    if (reusable) return { hold: reusable, reused: true, released, pendientes }
 
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'pl-hold:' + productId}))`
     const { known, tracked } = await trackedIds(tx, venueId, [productId])
@@ -130,7 +180,7 @@ export async function takeOrReuseHold(args: {
     const hold = await tx.paymentLinkStockHold.create({
       data: { venueId, paymentLinkId, productId, browserToken, amountCents, quantity: 1, expiresAt: new Date(now.getTime() + HOLD_TTL_MS) },
     })
-    return { hold, reused: false, released }
+    return { hold, reused: false, released, pendientes }
   })
 }
 
@@ -181,9 +231,14 @@ export async function restoreReleasedHold(holdId: string, now: Date = new Date()
   return count > 0
 }
 
-export async function releaseHold(holdId: string, reason: string): Promise<void> {
+/**
+ * Suelta una ficha activa. Con `soloSinIntento`, sólo si todavía no tiene intento ligado (CAS): la usa una solicitud que se
+ * rinde con su ficha nueva, que entretanto pudo recibir el intento de OTRA solicitud que sí revisó todo y ya lo entregó
+ * (encargo b578cd); soltarla dejaría ese pago sin la pieza apartada.
+ */
+export async function releaseHold(holdId: string, reason: string, opciones: { soloSinIntento?: boolean } = {}): Promise<void> {
   await prisma.paymentLinkStockHold.updateMany({
-    where: { id: holdId, status: 'ACTIVE' },
+    where: { id: holdId, status: 'ACTIVE', ...(opciones.soloSinIntento ? { stripePaymentIntentId: null } : {}) },
     data: { status: 'RELEASED', releasedReason: reason },
   })
 }
