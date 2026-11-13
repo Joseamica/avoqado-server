@@ -14,6 +14,41 @@ import { planGateMessage } from '../planGate'
 import { auditMcpWrite } from '../audit'
 import AppError from '@/errors/AppError'
 import { resumenDeProductos } from '@/services/delivery-channels/core/productosDelCanal'
+import {
+  idsDeEstaciones,
+  leerImpresion,
+  resolverImpresionReparto,
+  validarEstacionesDeImpresion,
+  validarFormaImpresion,
+  type EstacionElegible,
+  type ImpresionDelCanal,
+} from '@/services/delivery-channels/core/impresionDelCanal'
+import { updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+
+const MAX_CANALES = 200
+const MOTIVO_ESTACION = 'La estación elegida ya no existe o está apagada: se imprime como en el salón'
+
+/** Una consulta acotada por lote: sólo las estaciones que algún canal eligió. */
+async function cargarEstaciones(venueId: string, impresiones: ImpresionDelCanal[]): Promise<Map<string, EstacionElegible>> {
+  const ids = [...new Set(impresiones.flatMap(idsDeEstaciones))]
+  if (ids.length === 0) return new Map()
+  const filas = await prisma.printStation.findMany({
+    where: { venueId, id: { in: ids } },
+    select: { id: true, active: true, sendsComanda: true },
+    take: ids.length,
+  })
+  return new Map(filas.map(f => [f.id, f]))
+}
+
+/** Lo guardado, lo que de verdad saldrá (mismo resolvedor que el KDS/POS) y por qué difiere. */
+function vistaDeImpresion(provider: string, guardada: ImpresionDelCanal, estaciones: Map<string, EstacionElegible>) {
+  const efectiva = resolverImpresionReparto(provider, guardada, estaciones)
+  const perdida =
+    (guardada.comanda === 'UNA_ESTACION' && efectiva.estacionUnicaId === null) ||
+    (guardada.empaque === 'ESTACION' && efectiva.empaqueEstacionId === null)
+  return { guardada, efectiva, ...(perdida && { motivo: MOTIVO_ESTACION }) }
+}
 
 export function registerDeliveryChannelTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -142,6 +177,100 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
         // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.
         inyeccion,
       })
+    },
+  )
+
+  server.tool(
+    'delivery_channel_printing',
+    'Where the delivery orders of each channel print (paper only): per channel, the saved choice (comanda: SALON or UNA_ESTACION; empaque: NEGOCIO, NO or ESTACION) and the EFFECTIVE one (a deleted or turned-off station falls back to printing as in the dining room, with the reason). POS versions older than 2.25.44 always print as in the dining room. Read-only — requires delivery-channels:read and the PREMIUM plan. Pass venueId.',
+    { venueId: z.string().describe('Venue cuyos canales leer (debe estar en tu scope)') },
+    async ({ venueId }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('delivery-channels:read', venueId)
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Los canales de delivery')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      const links = await prisma.deliveryChannelLink.findMany({
+        where: { venueId: where.venueId ?? venueId },
+        select: { id: true, provider: true, status: true, config: true },
+        take: MAX_CANALES + 1, // uno de más para saber si hubo recorte
+      })
+      const truncated = links.length > MAX_CANALES
+      if (truncated) links.length = MAX_CANALES
+      const guardadas = links.map(l => leerImpresion(l.config))
+      const estaciones = await cargarEstaciones(venueId, guardadas)
+      return text({
+        venueId,
+        truncated,
+        channels: links.map((l, i) => ({
+          channelId: l.id,
+          provider: l.provider,
+          status: l.status,
+          impresion: vistaDeImpresion(l.provider, guardadas[i], estaciones),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'set_delivery_channel_printing',
+    'Change WHERE the delivery orders of ONE channel print (paper only; it does not change the kitchen display, stock or accounting). comanda: SALON (as in the dining room, default) or UNA_ESTACION (the whole order prints on one station, give estacionId). empaque (packing slip): NEGOCIO (as the venue has it), NO (none) or ESTACION (give empaqueEstacionId). Stations must be active and print comandas. POS versions older than 2.25.44 keep printing as in the dining room. Two steps: the first call only previews saved vs effective; call again with confirm:true to save. Requires delivery-channels:manage and the PREMIUM plan. linkId comes from delivery_channels. Pass venueId.',
+    {
+      venueId: z.string().describe('Venue del canal (debe estar en tu scope)'),
+      linkId: z.string().describe('Id del canal (de delivery_channels)'),
+      comanda: z.enum(['SALON', 'UNA_ESTACION']).describe('SALON = como en el salón; UNA_ESTACION = todo el pedido en una estación'),
+      estacionId: z.string().optional().describe('Estación de la comanda (obligatoria con UNA_ESTACION; ver list_print_stations)'),
+      empaque: z.enum(['NEGOCIO', 'NO', 'ESTACION']).describe('NEGOCIO = como lo tenga el negocio; NO = sin empaque; ESTACION = en una estación'),
+      empaqueEstacionId: z.string().optional().describe('Estación del empaque (obligatoria con ESTACION)'),
+      confirm: z.boolean().optional().describe('true sólo en la SEGUNDA llamada, para guardar'),
+    },
+    async ({ venueId, linkId, comanda, estacionId, empaque, empaqueEstacionId, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST PATCH gate
+      requireWriteScopeAlways(scope, 'delivery-channels:manage', 'cambia dónde se imprimen los pedidos de este canal')
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Cambiar dónde se imprime el delivery') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+
+      const link = await prisma.deliveryChannelLink.findFirst({ where: { id: linkId, venueId } })
+      if (!link) throw new AppError('Canal de delivery no encontrado', 404, true, 'NOT_FOUND')
+
+      const impresion: ImpresionDelCanal = {
+        comanda,
+        ...(comanda === 'UNA_ESTACION' && { estacionId }),
+        empaque,
+        ...(empaque === 'ESTACION' && { empaqueEstacionId }),
+      }
+      try {
+        validarFormaImpresion(impresion)
+        await validarEstacionesDeImpresion(prisma, venueId, impresion)
+      } catch (error) {
+        if (error instanceof AppError) return text({ ok: false, error: error.message })
+        throw error
+      }
+      const antes = leerImpresion(link.config)
+
+      if (confirm !== true) {
+        const estaciones = await cargarEstaciones(venueId, [antes, impresion])
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          mensaje: 'Vas a cambiar dónde se imprimen los pedidos de este canal (sólo papel). Vuelve a llamar con confirm:true para guardarlo.',
+          venueId,
+          linkId,
+          antes: vistaDeImpresion(link.provider, antes, estaciones),
+          despues: vistaDeImpresion(link.provider, impresion, estaciones),
+          aviso: 'Los POS anteriores a la versión 2.25.44 siguen imprimiendo como en el salón.',
+        })
+      }
+
+      await updateChannelLink(venueId, linkId, { config: { impresion } }, scope.staffId)
+      await auditMcpWrite(scope, {
+        action: 'DELIVERY_CHANNEL_PRINTING_SET',
+        entity: 'DeliveryChannelLink',
+        entityId: linkId,
+        venueId,
+        data: { previous: antes, impresion },
+      })
+      return text({ ok: true, venueId, linkId, impresion })
     },
   )
 
