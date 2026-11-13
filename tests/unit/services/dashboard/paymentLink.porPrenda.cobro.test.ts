@@ -838,11 +838,49 @@ describe('POST payment-intent de la liga por prenda', () => {
     expect(r).toMatchObject({ connectAccountId: 'acct_A', applicationFeeCents: congelada.checkoutSnapshot.applicationFeeCents })
   })
 
-  it('conflicto concurrente de idempotencia en Stripe → se responde el error y la ficha se conserva', async () => {
-    piCreate.mockRejectedValue(Object.assign(new Error('idempotency_key_in_use'), { type: 'StripeIdempotencyError', statusCode: 409 }))
-    await expect(pagar()).rejects.toMatchObject({ statusCode: 409 })
-    expect(release).not.toHaveBeenCalled()
-    expect(attach).not.toHaveBeenCalled()
+  describe('conflicto concurrente de idempotencia en Stripe (otra solicitud crea el mismo intento)', () => {
+    const enUso = () =>
+      Object.assign(new Error('There is currently another in-progress request using this Idempotent Key'), {
+        type: 'StripeIdempotencyError',
+        code: 'idempotency_key_in_use',
+        statusCode: 409,
+      })
+    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] }))
+    afterEach(() => jest.useRealTimers())
+
+    it('encargo 51ecc0 · Codex r3b #2: espera y repite con la MISMA llave y parámetros → recibe el intento que creó la otra', async () => {
+      piCreate
+        .mockRejectedValueOnce(enUso())
+        .mockResolvedValueOnce({ id: 'pi_nuevo', client_secret: 'secret_nuevo', status: 'requires_payment_method' })
+      const p = pagar().catch(e => e)
+      await jest.advanceTimersByTimeAsync(1500)
+      expect(await p).toMatchObject({ paymentIntentId: 'pi_nuevo' })
+      expect(piCreate).toHaveBeenCalledTimes(2)
+      expect(piCreate.mock.calls[1]).toEqual(piCreate.mock.calls[0])
+      expect(attach).toHaveBeenCalledWith('chold00000000000000000001', 'pi_nuevo')
+    })
+
+    it('sigue en uso después de repetir → se responde el error y la ficha se conserva', async () => {
+      piCreate.mockRejectedValue(enUso())
+      const p = pagar().catch(e => e)
+      await jest.advanceTimersByTimeAsync(1500)
+      expect(await p).toMatchObject({ statusCode: 409 })
+      expect(piCreate).toHaveBeenCalledTimes(2)
+      expect(release).not.toHaveBeenCalled()
+      expect(attach).not.toHaveBeenCalled()
+    })
+
+    it('regresión: misma llave con OTROS parámetros (400 de idempotencia) no se repite', async () => {
+      piCreate.mockRejectedValue(
+        Object.assign(new Error('Keys for idempotent requests can only be used with the same parameters'), {
+          type: 'StripeIdempotencyError',
+          statusCode: 400,
+        }),
+      )
+      await expect(pagar()).rejects.toMatchObject({ statusCode: 400 })
+      expect(piCreate).toHaveBeenCalledTimes(1)
+      expect(release).not.toHaveBeenCalled()
+    })
   })
 
   it('rechazo definitivo de Stripe al crear → se responde el error y la ficha sigue ACTIVA hasta vencer', async () => {

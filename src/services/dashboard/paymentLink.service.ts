@@ -1909,6 +1909,18 @@ function errorPermanenteDelIntento(err: unknown): boolean {
   return e?.code === 'resource_missing' || e?.code === 'account_invalid' || e?.type === 'StripePermissionError'
 }
 
+/** Cuánto se espera antes de repetir la creación cuando otra solicitud tiene la misma llave en vuelo. */
+const ESPERA_LLAVE_EN_USO_MS = 1500
+
+/**
+ * 409 de Stripe «hay otra solicitud en vuelo con esta llave» (`idempotency_key_in_use`). No es el 400 de parámetros distintos
+ * con la misma llave: ése no se repite.
+ */
+function llaveEnUso(err: unknown): boolean {
+  const e = err as { type?: string; code?: string; statusCode?: number } | null
+  return e?.statusCode === 409 && (e.type === 'StripeIdempotencyError' || e.code === 'idempotency_key_in_use')
+}
+
 /** El 409 cuando la ficha cambió mientras se cobraba (otra pestaña cambió de talla o venció): la página recarga la liga. */
 const APARTADO_CAMBIO = 'Tu apartado cambió. Vuelve a escoger tu talla.'
 
@@ -2071,10 +2083,22 @@ async function cobrarPrendaConApartado(args: {
     if (congelada.status !== 'ACTIVE') throw new ConflictError(APARTADO_CAMBIO, 'PAYMENT_LINK_VARIANT_UNAVAILABLE')
     const cuenta = congelada.stripeAccountId as string
     const foto = congelada.checkoutSnapshot as unknown as FotoDeCobro
-    const pi = await stripe.paymentIntents.create(congelada.intentParams as unknown as PaymentIntentCreateParams, {
-      stripeAccount: cuenta,
-      idempotencyKey: `plhold:${hold.id}`,
-    })
+    const crearIntento = () =>
+      stripe.paymentIntents.create(congelada.intentParams as unknown as PaymentIntentCreateParams, {
+        stripeAccount: cuenta,
+        idempotencyKey: `plhold:${hold.id}`,
+      })
+    let pi: PaymentIntent
+    try {
+      pi = await crearIntento()
+    } catch (err) {
+      // Encargo 51ecc0 · Codex r3b #2: otra solicitud del mismo navegador (StrictMode, dos pestañas) está creando ESTE mismo
+      // intento con la misma llave y Stripe sigue sin terminarla tras los reintentos del SDK. Los parámetros son los
+      // congelados (idénticos), así que se espera un momento y se repite: Stripe devuelve el intento que creó la otra.
+      if (!llaveEnUso(err)) throw err
+      await new Promise(resolve => setTimeout(resolve, ESPERA_LLAVE_EN_USO_MS))
+      pi = await crearIntento()
+    }
     await prisma.checkoutSession.createMany({
       data: [
         {
