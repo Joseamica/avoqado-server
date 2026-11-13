@@ -1,16 +1,20 @@
 import { registerPaymentLinkTools } from '../../../src/mcp/tools/paymentLinks'
 import type { McpScope } from '../../../src/mcp/scope'
+import { DIRECTORY_TOOLS } from '../../../src/mcp/directory/catalog'
+import { TOOL_EFFECTS } from '../../../src/mcp/catalog'
 
 const mockCreate = jest.fn()
 const mockAudit = jest.fn()
 const mockGroupFindMany = jest.fn()
 const mockGroupFindFirst = jest.fn()
 const mockLinkFind = jest.fn()
+const mockPermiso = jest.fn()
+const mockLinkCount = jest.fn().mockResolvedValue(1)
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v: string) => ({ venueId: { in: [v] } }),
-    requirePermission: jest.fn(),
+    requirePermission: (...a: unknown[]) => mockPermiso(...(a as [])),
   }),
 }))
 jest.mock('@/services/dashboard/paymentLink.service', () => ({ createPaymentLink: (...a: unknown[]) => mockCreate(...(a as [])) }))
@@ -18,7 +22,7 @@ jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    paymentLink: { count: jest.fn().mockResolvedValue(1), findMany: (...a: unknown[]) => mockLinkFind(...(a as [])) },
+    paymentLink: { count: (...a: unknown[]) => mockLinkCount(...(a as [])), findMany: (...a: unknown[]) => mockLinkFind(...(a as [])) },
     productGroup: {
       findMany: (...a: unknown[]) => mockGroupFindMany(...(a as [])),
       findFirst: (...a: unknown[]) => mockGroupFindFirst(...(a as [])),
@@ -30,6 +34,7 @@ const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Pro
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const create = (args: Record<string, unknown>) => handlers.get('create_payment_link')!(args, {})
 const list = (args: Record<string, unknown>) => handlers.get('list_payment_links')!(args, {})
+const listPrendas = (args: Record<string, unknown>) => handlers.get('list_garment_payment_links')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
@@ -48,16 +53,21 @@ describe('create_payment_link por prenda', () => {
 
   it('confirm crea con purpose ITEM + productGroupId, sin importe, y audita', async () => {
     mockGroupFindFirst.mockResolvedValueOnce({ id: 'g1', name: 'Vestido lino' })
-    mockCreate.mockResolvedValueOnce({ id: 'pl-9', shortCode: 'XY', title: 'Vestido', amountType: 'OPEN', amount: null, status: 'ACTIVE' })
+    // El servicio guarda la liga por prenda como FIXED (precio de la talla) con importe vacío.
+    mockCreate.mockResolvedValueOnce({ id: 'pl-9', shortCode: 'XY', title: 'Vestido', amountType: 'FIXED', amount: null, status: 'ACTIVE' })
     const out = parse(await create({ venueId: 'v1', title: 'Vestido', productGroupId: 'g1', confirm: true }))
-    expect(mockCreate).toHaveBeenCalledWith(
-      'v1',
-      expect.objectContaining({ purpose: 'ITEM', productGroupId: 'g1', amountType: 'OPEN' }),
-      's1',
-    )
+    expect(mockCreate).toHaveBeenCalledWith('v1', expect.objectContaining({ purpose: 'ITEM', productGroupId: 'g1' }), 's1')
     expect(mockCreate.mock.calls[0][1].amount).toBeUndefined()
     expect(out.ok).toBe(true)
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ entityId: 'pl-9', data: expect.objectContaining({ productGroupId: 'g1' }) })
+  })
+
+  it('G2: la respuesta y la auditoría dicen lo GUARDADO (FIXED), nunca «OPEN»', async () => {
+    mockGroupFindFirst.mockResolvedValueOnce({ id: 'g1', name: 'Vestido lino' })
+    mockCreate.mockResolvedValueOnce({ id: 'pl-9', shortCode: 'XY', title: 'Vestido', amountType: 'FIXED', amount: null, status: 'ACTIVE' })
+    const out = parse(await create({ venueId: 'v1', title: 'Vestido', productGroupId: 'g1', confirm: true }))
+    expect(out.paymentLink.amountType).toBe('FIXED')
+    expect(mockAudit.mock.calls[0][1].data.amountType).toBe('FIXED')
   })
 
   it('garment por nombre: una coincidencia se resuelve', async () => {
@@ -116,23 +126,71 @@ describe('create_payment_link por prenda', () => {
   })
 })
 
-describe('list_payment_links con garment', () => {
-  it('trae el nombre de la prenda (o null)', async () => {
-    const base = {
-      description: null,
-      purpose: 'ITEM',
-      amountType: 'OPEN',
-      amount: null,
-      currency: 'MXN',
-      status: 'ACTIVE',
-      expiresAt: null,
-      createdAt: new Date(),
-    }
+/**
+ * H: `list_payment_links` está en el catálogo certificado (directorio): cambiar su respuesta cambia lo que se revisó. La
+ * prenda se ve con una tool NUEVA de sólo lectura, sólo en el modo libre (`/mcp`), con las mismas guardas.
+ */
+describe('list_payment_links queda como la certificada', () => {
+  it('no trae «garment» ni consulta la familia', async () => {
     mockLinkFind.mockResolvedValueOnce([
-      { ...base, shortCode: 'A', title: 'a', productGroup: { id: 'g1', name: 'Vestido lino' } },
-      { ...base, shortCode: 'B', title: 'b', purpose: 'PAYMENT', productGroup: null },
+      {
+        shortCode: 'A',
+        title: 'a',
+        description: null,
+        purpose: 'ITEM',
+        amountType: 'FIXED',
+        amount: null,
+        currency: 'MXN',
+        status: 'ACTIVE',
+        expiresAt: null,
+        createdAt: new Date(),
+      },
     ])
     const out = parse(await list({ venueId: 'v1' }))
-    expect(out.links.map((l: { garment: string | null }) => l.garment)).toEqual(['Vestido lino', null])
+    expect(out.links[0]).not.toHaveProperty('garment')
+    expect(mockLinkFind.mock.calls[0][0].select).not.toHaveProperty('productGroup')
+  })
+})
+
+describe('list_garment_payment_links (modo libre)', () => {
+  const base = {
+    shortCode: 'A',
+    title: 'Vestido',
+    status: 'ACTIVE',
+    currency: 'MXN',
+    expiresAt: null,
+    createdAt: new Date('2026-11-12T00:00:00Z'),
+    productGroup: { id: 'g1', name: 'Vestido lino' },
+  }
+
+  it('lista sólo ligas por prenda del negocio, con el nombre de la prenda, paginada y con tope', async () => {
+    mockLinkCount.mockResolvedValueOnce(3)
+    mockLinkFind.mockResolvedValueOnce([base])
+    const out = parse(await listPrendas({ venueId: 'v1', limit: 1 }))
+    expect(mockPermiso).toHaveBeenCalledWith('payment-link:read', 'v1')
+    const args = mockLinkFind.mock.calls[0][0]
+    expect(args.where).toMatchObject({ venueId: { in: ['v1'] }, productGroupId: { not: null }, status: 'ACTIVE' })
+    expect(args.take).toBe(1)
+    expect(out).toMatchObject({ venueId: 'v1', count: 1, total: 3, hasMore: true, nextOffset: 1 })
+    expect(out.links[0]).toMatchObject({
+      shortCode: 'A',
+      title: 'Vestido',
+      garment: 'Vestido lino',
+      productGroupId: 'g1',
+      status: 'ACTIVE',
+    })
+  })
+
+  it('sin permiso de lectura no consulta', async () => {
+    mockPermiso.mockImplementationOnce(() => {
+      throw new Error('sin permiso')
+    })
+    await expect(listPrendas({ venueId: 'v1' })).rejects.toThrow('sin permiso')
+    expect(mockLinkFind).not.toHaveBeenCalled()
+  })
+
+  it('es lectura, y NO entra al catálogo certificado', () => {
+    expect(TOOL_EFFECTS.list_garment_payment_links).toBe('read')
+    expect(DIRECTORY_TOOLS.has('list_garment_payment_links')).toBe(false)
   })
 })

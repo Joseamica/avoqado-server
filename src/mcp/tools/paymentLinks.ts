@@ -69,7 +69,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_payment_links',
-    'Payment links (checkout links via pay.avoqado.io) of a venue you can access: title, purpose (generic payment / item sale / donation), fixed or open amount, currency, status (active/paused/expired/archived), short code, expiry and, for per-garment links, the garment name (the buyer picks the size). Defaults to active links. Answers "¿qué links de pago tengo? ¿cuáles siguen activos / ya expiraron?". Pass venueId.',
+    'Payment links (checkout links via pay.avoqado.io) of a venue you can access: title, purpose (generic payment / item sale / donation), fixed or open amount, currency, status (active/paused/expired/archived), short code and expiry. Defaults to active links. Answers "¿qué links de pago tengo? ¿cuáles siguen activos / ya expiraron?". Pass venueId.',
     {
       venueId: z.string().describe('Venue whose payment links to list (must be in your scope)'),
       status: z.enum(['active', 'paused', 'expired', 'archived', 'all']).optional().describe("Filter by status (default 'active')"),
@@ -95,7 +95,6 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           status: true,
           expiresAt: true,
           createdAt: true,
-          productGroup: { select: { name: true } },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         skip: offset,
@@ -115,7 +114,57 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           amount: l.amountType === 'OPEN' ? 'open' : l.amount != null ? Number(l.amount) : null,
           currency: l.currency,
           status: l.status, // ACTIVE | PAUSED | EXPIRED | ARCHIVED
-          garment: l.productGroup?.name ?? null, // liga por prenda: la clienta elige la talla al pagar
+          expiresAt: l.expiresAt?.toISOString() ?? null,
+          createdAt: l.createdAt.toISOString(),
+        })),
+      })
+    },
+  )
+
+  // Liga por prenda: tool APARTE (sólo modo libre). `list_payment_links` está en el catálogo certificado y no se toca.
+  server.tool(
+    'list_garment_payment_links',
+    'Per-garment payment links (pay.avoqado.io) of a venue you can access: the buyer picks the size when paying and pays that size price. Returns title, garment name, status (active/paused/expired/archived), short code and expiry. Defaults to active links. Answers "¿qué ligas por prenda tengo y de qué prenda es cada una?". Pass venueId.',
+    {
+      venueId: z.string().describe('Venue whose per-garment links to list (must be in your scope)'),
+      status: z.enum(['active', 'paused', 'expired', 'archived', 'all']).optional().describe("Filter by status (default 'active')"),
+      limit: z.number().int().positive().max(100).optional().describe('Max links to return (default 50, newest first)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
+    },
+    async ({ venueId, status, limit, offset = 0 }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payment-link:read', venueId) // read gate — same as list_payment_links
+      const statusFilter = !status ? { status: PaymentLinkStatus.ACTIVE } : status === 'all' ? {} : { status: STATUS_MAP[status] }
+      const filter = { ...where, ...statusFilter, productGroupId: { not: null } }
+      const total = await prisma.paymentLink.count({ where: filter })
+      const links = await prisma.paymentLink.findMany({
+        where: filter,
+        select: {
+          shortCode: true,
+          title: true,
+          currency: true,
+          status: true,
+          expiresAt: true,
+          createdAt: true,
+          productGroup: { select: { id: true, name: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        skip: offset,
+        take: limit ?? 50,
+      })
+      return text({
+        venueId,
+        count: links.length,
+        total,
+        hasMore: offset + links.length < total,
+        nextOffset: offset + links.length < total ? offset + links.length : null,
+        links: links.map(l => ({
+          shortCode: l.shortCode,
+          title: l.title,
+          garment: l.productGroup?.name ?? null,
+          productGroupId: l.productGroup?.id ?? null,
+          currency: l.currency,
+          status: l.status, // ACTIVE | PAUSED | EXPIRED | ARCHIVED
           expiresAt: l.expiresAt?.toISOString() ?? null,
           createdAt: l.createdAt.toISOString(),
         })),
@@ -258,7 +307,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           venueId,
           data: {
             title,
-            amountType: amount !== undefined ? 'FIXED' : 'OPEN',
+            amountType: link.amountType, // lo guardado: una liga por prenda queda FIXED (precio de la talla)
             amount: amount ?? null,
             discount: resumenDeDescuento(link.discount),
             ...(prenda ? { productGroupId: prenda.id } : {}),

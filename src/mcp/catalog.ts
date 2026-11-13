@@ -242,6 +242,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_my_venues: 'read',
   list_payment_effects: 'read',
   list_payment_links: 'read',
+  list_garment_payment_links: 'read',
   list_payments: 'read',
   list_platform_charges_due: 'read',
   get_pos_app_version_policies: 'read',
