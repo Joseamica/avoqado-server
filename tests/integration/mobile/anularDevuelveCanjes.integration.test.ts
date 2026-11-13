@@ -529,18 +529,22 @@ describe('Anular una venta sin cobrar le devuelve al cliente sus canjes', () => 
 // hz:87f4b879:D1, contra Postgres real: en la terminal, quien anula es la SESIÓN (`actorId`), no el vendedor elegido (`staffId`
 // del cuerpo). Aquí truena lo que el doble no ve: `LoyaltyTransaction.createdById` es FK a StaffVenue y `performedById` a Staff.
 describe('D1: anular todo en la terminal devuelve los canjes a nombre de la sesión', () => {
-  let sesionId: string, sesionMembresiaId: string, sinMembresiaId: string
+  let sesionId: string, sesionMembresiaId: string, sinMembresiaId: string, deBajaId: string
 
   beforeAll(async () => {
     sesionId = (await prisma.staff.create({ data: { email: `${venueId}@sesion.test`, firstName: 'Sesión', lastName: 'D1' } })).id
     sinMembresiaId = (await prisma.staff.create({ data: { email: `${venueId}@dueno.test`, firstName: 'Dueño', lastName: 'D1' } })).id
-    personalExtra.push(sesionId, sinMembresiaId)
+    deBajaId = (await prisma.staff.create({ data: { email: `${venueId}@baja.test`, firstName: 'Baja', lastName: 'D4' } })).id
+    personalExtra.push(sesionId, sinMembresiaId, deBajaId)
     sesionMembresiaId = (await prisma.staffVenue.create({ data: { venueId, staffId: sesionId, role: 'CASHIER' } })).id
+    await prisma.staffVenue.create({ data: { venueId, staffId: deBajaId, role: 'CASHIER', active: false } })
   })
 
   const casos = [
     ['con membresía', () => sesionId, () => sesionMembresiaId],
     ['sin membresía en el negocio (dueño de la organización)', () => sinMembresiaId, () => null],
+    // hz:87f4b879:D4: una membresía dada de baja no firma: el ajuste queda sin autor, como «sin membresía» (igual que D3/D5).
+    ['con la membresía dada de baja (dueño que antes fue empleado)', () => deBajaId, () => null],
   ] as const
 
   it.each(casos)('sesión %s: los mismos puntos vuelven; ajuste, bitácoras y OrderAction de la sesión', async (_, sesion, membresia) => {
