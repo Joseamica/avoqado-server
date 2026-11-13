@@ -30,12 +30,18 @@ jest.mock('@/communication/sockets', () => ({
   __esModule: true,
   default: { getBroadcastingService: jest.fn(() => null) },
 }))
+// D652: el aviso al dueño sale después del commit; aquí sólo se mira que se pida.
+jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
+  ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
+  avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
 }))
 
 import { applyOrderDiscount, createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { computeOrderBalance } from '@/services/shared/orderBalance'
+import { avisarVentaSinRed } from '@/services/mobile/avisoDeVentaSinRed'
 import { prismaMock } from '../../../__helpers__/setup'
 
 type Fila = Record<string, any>
@@ -73,7 +79,12 @@ function baseEnMemoria() {
   })
 
   const buscarOrden = async ({ where }: any) => {
-    if (where.venueId_externalId) return null
+    if (where.venueId_externalId) {
+      // D652: la llave de la venta (`@@unique([venueId, externalId])`), para el reintento.
+      const { venueId, externalId } = where.venueId_externalId
+      const o = [...ordenes.values()].find(x => x.venueId === venueId && x.externalId === externalId)
+      return o ? conRenglones(o) : null
+    }
     const o = ordenes.get(where.id)
     return o && (!where.venueId || o.venueId === where.venueId) ? conRenglones(o) : null
   }
@@ -97,6 +108,8 @@ function baseEnMemoria() {
   })
   // El candado de la orden (`lockExistingOrderForPayment`) es un SELECT … FOR UPDATE crudo.
   prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    // D652: el candado de la llave de la venta (`candadoDeLaLlave`, un `Prisma.Sql`); en memoria no hay concurrencia que serializar.
+    if (!Array.isArray(strings) && String((strings as any)?.sql).includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: '' }]
     if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
     const [orderId, venueId] = valores
     const o = ordenes.get(orderId)
@@ -488,5 +501,107 @@ describe('D2 · B — venta sin red de la TPV con descuento de catálogo, según
       ventaSinRedDeTpv({ ventaDeTerminal: { truncaPorVersion: true, totalCents: 1922 }, isOfflineReplay: false }),
     )
     expect(db.orden(creada.id).discountAmount).toBe(2.14)
+  })
+})
+
+// D652 (founder, 13-nov: «1, por cobrar»): la TPV 2.14.0–2.16.1 cobró $90 sin red de una cuenta de $100 con un cupón que no sabe
+// identificar. El controlador ya volvió su `orderDiscountId: ""` «sin descuento» y marcó `cuponSinIdentificar` (sólo token de terminal).
+describe('D652 — venta sin red de la TPV vieja con un cupón sin identificar', () => {
+  /** Lo que llega al servicio desde el cuerpo real de `armarPedidoParaMobile` (v2.16.1), ya leído por el controlador. */
+  const ventaConCuponSinId = (extra: Fila = {}) =>
+    venta({
+      externalId: 'llave-1',
+      items: [{ externalId: 'llave-1:0', name: 'Otro importe', unitPrice: 10000, quantity: 1, modifierIds: [] }],
+      tip: 0,
+      discount: 0,
+      orderDiscountId: null,
+      source: 'TPV',
+      orderType: 'TAKEOUT',
+      isOfflineReplay: true,
+      createdAtLocal: 1762990000000,
+      terminalSerialNumber: 'AVQD-1',
+      cuponSinIdentificar: { totalCents: 9000 },
+      ...extra,
+    })
+  const anotaciones = () =>
+    prismaMock.activityLog.create.mock.calls.map(([arg]: any) => arg.data).filter((d: any) => d.entity === 'VentaSinRed')
+  const avisos = avisarVentaSinRed as jest.MockedFunction<typeof avisarVentaSinRed>
+
+  beforeEach(() => avisos.mockClear())
+
+  it('🔴 la orden nace a $100 sin descuento y, con los $90 que cobró la terminal, queda debiendo $10', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    const orden = db.orden(creada.id)
+    expect(orden.total).toBe(100)
+    expect(orden.discountAmount).toBe(0)
+    expect(db.descuentosDe(creada.id)).toHaveLength(0) // nunca se inventa el descuento
+    const saldo = cierraCon(orden, 90, 0)
+    expect(saldo.remainingBalance.toNumber()).toBe(10)
+    expect(saldo.isFullyPaid).toBe(false)
+  })
+
+  it('🔴 la bitácora de «precio cambiado sin red» queda en la transacción, con el motivo y los $10 que faltan', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(anotaciones()).toEqual([
+      expect.objectContaining({
+        venueId: VENUE,
+        action: 'VENTA_SIN_RED_PRECIO_CAMBIADO',
+        entityId: 'llave-1',
+        data: expect.objectContaining({
+          orderId: creada.id,
+          terminalSerial: 'AVQD-1',
+          montoCents: 9000,
+          faltanCents: 1000,
+          origen: 'CUPON_SIN_IDENTIFICAR',
+          motivo: expect.stringContaining('cupón sin conexión que la terminal no pudo identificar'),
+        }),
+      }),
+    ])
+    expect(anotaciones()[0].data.motivo).toContain('revisa los $10.00 que faltan')
+  })
+
+  it('🔴 y avisa a dueño y admin después del commit, con la misma llave que usará el pago', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(avisos).toHaveBeenCalledTimes(1)
+    expect(avisos).toHaveBeenCalledWith(
+      VENUE,
+      'PRECIO_CAMBIADO',
+      expect.objectContaining({ externalId: 'llave-1', orderId: creada.id, montoCents: 9000, terminalSerial: 'AVQD-1' }),
+    )
+  })
+
+  it('🔴 el reintento con el mismo cuerpo devuelve LA misma orden: una sola venta, una sola anotación, un solo aviso', async () => {
+    baseEnMemoria()
+    const primera = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    const reintento = await createOrderWithItems(VENUE, ventaConCuponSinId())
+    expect(reintento.id).toBe(primera.id)
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(anotaciones()).toHaveLength(1)
+    expect(avisos).toHaveBeenCalledTimes(1)
+  })
+
+  it('sin saber cuánto cobró la terminal: entra igual y la bitácora no inventa la diferencia', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, ventaConCuponSinId({ cuponSinIdentificar: { totalCents: null } }))
+    expect(anotaciones()[0].data).toEqual(expect.objectContaining({ montoCents: null, faltanCents: null }))
+    expect(anotaciones()[0].data.motivo).not.toContain('faltan')
+  })
+
+  it('defensa: la marca sin el serial de una terminal (o fuera de la cola) no anota ni avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, ventaConCuponSinId({ terminalSerialNumber: null }))
+    await createOrderWithItems(VENUE, ventaConCuponSinId({ externalId: 'llave-2', isOfflineReplay: false }))
+    expect(anotaciones()).toHaveLength(0)
+    expect(avisos).not.toHaveBeenCalled()
+  })
+
+  it('regresión: la venta sin red sin la marca nace igual que hoy, sin anotación', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, ventaConCuponSinId({ cuponSinIdentificar: undefined }))
+    expect(db.orden(creada.id).total).toBe(100)
+    expect(anotaciones()).toHaveLength(0)
   })
 })

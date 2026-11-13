@@ -372,6 +372,12 @@ export interface CreateOrderInput {
    * puede subir ya actualizada a 2.16.2 (Codex r2 #2).
    */
   ventaDeTerminal?: { truncaPorVersion: boolean; totalCents: number | null }
+  /**
+   * D652 (server-owned: sólo con el token de una TERMINAL y `isOfflineReplay`): la TPV 2.14.0–2.16.1 cobró sin red con un cupón que no
+   * sabe identificar (`orderDiscountId: ""`). La venta entra a precio lleno, el cobro se registra tal cual y la cuenta queda debiendo
+   * la diferencia (founder, 13-nov: «por cobrar»). `totalCents` es lo que cobró la terminal (del cuerpo), sólo para el aviso.
+   */
+  cuponSinIdentificar?: { totalCents: number | null }
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
   /**
@@ -973,6 +979,44 @@ async function anotarRegaloSinPermisoEnTx(
 }
 
 const AVISO_DESCUENTO_SIN_PERMISO = 'DESCUENTO_SIN_PERMISO' satisfies AvisoVentaSinRed
+const AVISO_PRECIO_CAMBIADO = 'PRECIO_CAMBIADO' satisfies AvisoVentaSinRed
+
+/**
+ * D652: el rastro del cupón que la TPV vieja no identificó, en la MISMA transacción que la orden (si falla, la venta no se guarda).
+ * Es el de «precio cambiado sin red» con su propio motivo; `avisarVentaSinRed` lo encuentra por la llave y no lo repite (tampoco el
+ * aviso de «saldo pendiente» del pago, que llega con la misma llave). Nunca inventa el descuento: sólo dice cuánto falta.
+ */
+async function anotarCuponSinIdentificarEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  input: CreateOrderInput,
+  orderId: string,
+  vendedor: string | null,
+): Promise<Omit<DatosDelAviso, 'terminalSerial'>> {
+  const cobradoCents = input.cuponSinIdentificar?.totalCents ?? null
+  const orden = await tx.order.findUnique({ where: { id: orderId }, select: { total: true } })
+  const faltanCents = orden && cobradoCents !== null ? aCentavos(orden.total) - cobradoCents : null
+  const motivo =
+    'se cobró con un cupón sin conexión que la terminal no pudo identificar y la orden quedó a precio lleno' +
+    (faltanCents !== null && faltanCents > 0 ? `: revisa los $${(faltanCents / 100).toFixed(2)} que faltan` : '')
+  const externalId = normalizeExternalId(input.externalId) ?? orderId
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: vendedor,
+    venueId,
+    action: `VENTA_SIN_RED_${AVISO_PRECIO_CAMBIADO}`,
+    entity: 'VentaSinRed',
+    entityId: externalId,
+    data: {
+      terminalSerial: input.terminalSerialNumber ?? null,
+      montoCents: cobradoCents,
+      motivo,
+      orderId,
+      origen: 'CUPON_SIN_IDENTIFICAR',
+      faltanCents,
+    },
+  })
+  return { externalId, orderId, motivo, ...(cobradoCents !== null ? { montoCents: cobradoCents } : {}) }
+}
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
 export const UNICO_LLAVE_DE_LA_ORDEN: UnicoParcial = { indice: 'Order_venueId_externalId_key', columnas: ['venueId', 'externalId'] }
@@ -1499,6 +1543,8 @@ export type VentaDeMostradorEnTx =
       regaloSinPermisoPesos?: number
       /** Descuento del cliente (fase 2): lo que se registró, para su `DISCOUNT_APPLIED` después del commit. */
       descuentoDelCliente?: { montoPesos: number; fueraDeTarifa: boolean }
+      /** D652: el cupón sin identificar ya quedó en la bitácora de la transacción; esto es su aviso, después del commit. */
+      cuponSinIdentificar?: Omit<DatosDelAviso, 'terminalSerial'>
     }
 /** La venta recién creada (no la de una llave que ya existía). */
 export type VentaDeMostradorCreada = Exclude<VentaDeMostradorEnTx, { existente: OrdenCreada }>
@@ -2357,10 +2403,23 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // medias que anular ni llave de idempotencia envenenada, así que el reintento del POS la crea normal.
   let created: VentaDeMostradorEnTx
   try {
-    created = await withDeadlockRetry(tx => crearVentaDeMostradorEnTx(tx, venueId, input, prep), {
-      etiqueta: 'createOrderWithItems',
-      ...ORDER_LOCK_WAIT_BUDGET,
-    })
+    created = await withDeadlockRetry(
+      async tx => {
+        const venta = await crearVentaDeMostradorEnTx(tx, venueId, input, prep)
+        // D652: sólo la venta NUEVA de la cola de una terminal; la de una llave que ya existía no vuelve a anotar nada.
+        if ('existente' in venta || !input.cuponSinIdentificar || input.isOfflineReplay !== true || !input.terminalSerialNumber) {
+          return venta
+        }
+        return {
+          ...venta,
+          cuponSinIdentificar: await anotarCuponSinIdentificarEnTx(tx, venueId, input, venta.order.id, prep.validatedStaffId || null),
+        }
+      },
+      {
+        etiqueta: 'createOrderWithItems',
+        ...ORDER_LOCK_WAIT_BUDGET,
+      },
+    )
   } catch (error) {
     // Red de seguridad del índice único (venueId, externalId): con el candado de la llave, dos reintentos de ESTA ruta ya
     // no chocan, pero otro escritor de la misma llave sí puede (la orden de la terminal comparte el índice). Sólo ESE
@@ -2415,6 +2474,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     })
   }
 
+  // D652: antes que el de precio no reconocido (misma llave y mismo aviso: el primero es el que llega y explica el cupón).
+  if (created.cuponSinIdentificar) avisarSiEsDeLaColaDeTerminal(venueId, input, AVISO_PRECIO_CAMBIADO, created.cuponSinIdentificar)
   avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
   // hz:e0b12f00:D2: después del commit y sin esperarlo (nunca lanza). Su bitácora ya quedó en la transacción.
   if (created.regaloSinPermisoPesos != null) {
