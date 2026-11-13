@@ -256,8 +256,9 @@ export async function listKdsOrders(
 
   // 🔴 Consultas aparte y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin relación con
   // `Order` — un `include` revienta en runtime (y la orden puede estar borrada: ausencia = "no falta
-  // aceptar", no error). `Order.status` PENDING = nadie le ha dicho que sí al proveedor y el reloj de
-  // ~11.5 min ya corre. Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
+  // aceptar", no error). Falta aceptar = `faltaAceptar`: venta PENDING y SIN `providerAcceptedAt` (aceptar
+  // guarda esa marca y la venta sigue PENDING); mientras falte, el reloj de ~11.5 min corre y no se imprime.
+  // Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
   const ventas = await ventasDeComandas(prisma, venueId, orders)
 
   return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))

@@ -54,5 +54,18 @@ describe('releaseScheduledOrder · renglones de la comanda', () => {
       expect.objectContaining({ orderItemId: 'i2', productId: 'p2', categoryId: 'c2', notes: null, modifiers: null }),
     ])
     expect(prisma.product.findMany).toHaveBeenCalledTimes(1)
+    // El mock devuelve todo: sin afirmar el `select`, quitar un campo de la lectura pasaría esta prueba.
+    expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { orderId: 'o1' },
+        select: expect.objectContaining({
+          id: true,
+          externalLineId: true,
+          productId: true,
+          notes: true,
+          modifiers: { select: { name: true, quantity: true } },
+        }),
+      }),
+    )
   })
 })
