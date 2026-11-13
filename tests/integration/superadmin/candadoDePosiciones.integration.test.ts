@@ -191,7 +191,8 @@ describe('paso 1 · candado al cambiar la cuenta de una posición (configuració
     expect(r.positionChanges).toEqual([expect.objectContaining({ slot: 'PRIMARY', from: A, to: B, rate: 'KEEP', inheritingTerminals: 2 })])
     expect(await fotoDeTarifas([venueId], [orgId])).toBe(antes)
     const congeladaDespues = await tarifaCongeladaDeLaAfiliacion(venueId, B, ahora)
-    expect(congeladaDespues.pricing.venue).toEqual(congeladaAntes.pricing.venue)
+    expect(congeladaAntes.pricing?.venue).toMatchObject({ debitRate: '0.025' })
+    expect(congeladaDespues.pricing?.venue).toEqual(congeladaAntes.pricing?.venue)
     expect(congeladaDespues.slot).toBe('PRIMARY')
   })
 

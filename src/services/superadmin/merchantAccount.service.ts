@@ -1,5 +1,10 @@
 import prisma from '../../utils/prismaClient'
-import { exigirConfirmacionDePosiciones, tomarCandado, type ConfirmacionDePosiciones } from '@/services/shared/candadoDePosiciones'
+import {
+  exigirConfirmacionDePosiciones,
+  tomarCandado,
+  type CambioDePosicion,
+  type ConfirmacionDePosiciones,
+} from '@/services/shared/candadoDePosiciones'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
 import { angelPayIdentityConflict, lockAngelPayVenue } from '../../lib/angelpayIdentity'
 import logger from '../../config/logger'
