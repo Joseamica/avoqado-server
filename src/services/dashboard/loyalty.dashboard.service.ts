@@ -203,7 +203,9 @@ async function calcularPuntosDeLaVenta(venueId: string, amount: number): Promise
   const config = await getOrCreateLoyaltyConfig(venueId)
   if (!config.active || amount <= 0) return { total: 0, bono: 0, pointsPerDollar: config.pointsPerDollar }
   const bono = Number(config.pointsPerVisit) || 0
-  return { total: Math.floor(amount * config.pointsPerDollar) + bono, bono, pointsPerDollar: config.pointsPerDollar }
+  // En Decimal y el floor al final, como el bono de la promo (`puntosConPromo`): en número, 0.29 × 100 = 28.999… → 28.
+  const porGasto = new Prisma.Decimal(amount).times(config.pointsPerDollar).floor().toNumber()
+  return { total: porGasto + bono, bono, pointsPerDollar: config.pointsPerDollar }
 }
 
 /**
@@ -295,8 +297,8 @@ const seVencioLaTransaccion = (error: unknown): boolean => error instanceof Pris
  * returns the existing values without creating duplicates.
  * This prevents double-earning on payment retries.
  *
- * `options.skipStamp`: sólo los puntos, sin pedir sello. Lo pasa la lealtad de la venta nueva de un cambio de producto
- * (spec 2026-10-20 §7.7: no es una visita nueva). Sin la opción, todo como siempre.
+ * `options.skipStamp`: sólo los puntos, sin pedir sello ni aplicar promo de lealtad. Lo pasa la lealtad de la venta nueva de un
+ * cambio de producto (spec 2026-10-20 §7.7: no es una visita nueva). Sin la opción, todo como siempre.
  */
 export async function earnPoints(
   venueId: string,
@@ -383,6 +385,7 @@ export async function earnPoints(
       sello,
       deferredStampError,
       otorgadoHastaAhora,
+      sinPromo: options?.skipStamp === true,
     })
   } catch (error) {
     throw conLoOtorgado(error, otorgadoHastaAhora)
@@ -419,8 +422,10 @@ async function acreditarPuntosTrasElSello(ctx: {
   deferredStampError: unknown
   /** Se va llenando: el envoltorio de `earnPoints` lo cuelga de cualquier error que salga de aquí. */
   otorgadoHastaAhora: { sello: boolean; puntos: boolean }
+  /** La venta nueva de un cambio (`skipStamp`): no es una visita nueva, así que tampoco gana promo. */
+  sinPromo: boolean
 }): Promise<ResultadoDeEarnPoints> {
-  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora } = ctx
+  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora, sinPromo } = ctx
 
   // The payment callers already isolate loyalty failures from the approved
   // charge. We therefore persist points first, then surface a stamp failure so
@@ -526,7 +531,7 @@ async function acreditarPuntosTrasElSello(ctx: {
         select: { loyaltySaleAt: true, loyaltyEligibleAt: true },
       })
       const soldAt = venta?.loyaltySaleAt ?? venta?.loyaltyEligibleAt ?? new Date()
-      const decision = await decidirPromoDeLaVentaEnTx(tx, { venueId, customerId, orderId, soldAt, amount })
+      const decision = sinPromo ? null : await decidirPromoDeLaVentaEnTx(tx, { venueId, customerId, orderId, soldAt, amount })
       const conPromo = puntosConPromo({ total: pointsEarned, bono, pointsPerDollar }, decision)
       // Sin bono no hay promo que anotar ni límite que gastar (r2 #3): los puntos de siempre.
       const promo = decision && conPromo.bonusPoints > 0 ? { decision, ...conPromo } : null

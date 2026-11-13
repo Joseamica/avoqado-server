@@ -642,21 +642,22 @@ export async function reverseStampForOrder(
     reintentarSiSeVence(venueId, orderId, () =>
       withDeadlockRetry(revertirDentroDelCandado, { etiqueta: 'reverseStampForOrder', ...PRESUPUESTO_DEL_SELLO }),
     )
-  // R65 b: «revertida» sale en el RETORNO del cuerpo; un intento abortado (40P01 o P2028) no deja nada a medias.
-  const revertirDentroDelCandado = async (tx: TxConReintento): Promise<boolean> => {
+  // R65 b: «revertida» sale en el RETORNO del cuerpo (los sellos que de verdad quitó; null = no revirtió); un intento abortado
+  // (40P01 o P2028) no deja nada a medias.
+  const revertirDentroDelCandado = async (tx: TxConReintento): Promise<number | null> => {
     // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
     // termina antes de que aquí se lea nada.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
     // Otra reversión de esta venta pudo hacer commit mientras ésta esperaba el candado.
     const reversasDentro = await tx.stampEvent.count({ where: { venueId, orderId, type: StampEventType.REVERSAL } })
-    if (reversasDentro > 0) return false
+    if (reversasDentro > 0) return null
 
     const card = await tx.stampCard.findUnique({
       where: { id: otorgado.stampCardId },
       select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
     })
-    if (!card) return false
+    if (!card) return null
 
     // 🔴 ¿De qué cartilla salen los sellos? (D3, 21-oct, founder: «A, como Square»). UNA sola regla para todos los estados
     // (varias llenas, varias abiertas por D2, canjes de por medio): de cartillas que TENGAN sellos, en este orden:
@@ -738,16 +739,16 @@ export async function reverseStampForOrder(
       await tx.stampEvent.create({
         data: { stampCardId: card.id, venueId, orderId, type: StampEventType.REVERSAL, quantity: 0, createdById: options.staffVenueId },
       })
-      return true
+      return 0
     }
     // Se quitó parte, no todo: lo demás ya no estaba en ninguna cartilla. Igual que arriba: nunca negativos.
     if (restante > 0) logger.warn('Reversa de sello incompleta: las cartillas no tenían todos los sellos', { venueId, orderId, restante })
     await encolarAvisoDeTarjetaEnTx(tx, { venueId, customerId, motivo: 'SELLO_REVERTIDO' })
-    return true
+    return cantidad - restante
   }
-  let revertida: boolean
+  let quitados: number | null
   try {
-    revertida = await revertirConReintento()
+    quitados = await revertirConReintento()
   } catch (error: unknown) {
     // SÓLO el índice de la reversa de esta venta es «otra reversa ganó»; cualquier otro P2002 sube (como en `grantStamp`).
     if (esChoqueDelUnicoDeLaOrden(error, UNICA_REVERSA_DE_LA_ORDEN)) {
@@ -756,7 +757,7 @@ export async function reverseStampForOrder(
     }
     throw error
   }
-  if (!revertida) return { reversed: false, stampCardId: otorgado.stampCardId }
+  if (quitados === null) return { reversed: false, stampCardId: otorgado.stampCardId }
 
   // 🔴 Quitar un sello SÍ se registra; otorgarlo NO.
   //
@@ -772,7 +773,8 @@ export async function reverseStampForOrder(
     entity: 'StampCard',
     entityId: otorgado.stampCardId,
     venueId,
-    data: { orderId, quantity: cantidad, motivo: 'La venta que lo otorgó fue reembolsada' },
+    // Lo que de verdad se quitó (ola final): con cartillas sin todos los sellos puede ser menos de lo que dio la venta.
+    data: { orderId, quantity: quitados, motivo: 'La venta que lo otorgó fue reembolsada' },
   })
 
   // El sello se fue: la tarjeta tiene que reflejarlo igual que cuando sube.

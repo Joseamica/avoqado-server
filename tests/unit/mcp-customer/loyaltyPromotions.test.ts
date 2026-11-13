@@ -47,7 +47,7 @@ beforeAll(() => {
 })
 beforeEach(() => {
   jest.clearAllMocks()
-  mockCfg.mockResolvedValue({ active: true, stampsEnabled: true })
+  mockCfg.mockResolvedValue({ active: true, stampsEnabled: true, pointsPerDollar: 1, pointsPerVisit: 0 })
   // Por default el servicio acepta y devuelve los valores ya validados (con sus defaults).
   mockValidar.mockImplementation(async (_v: string, i: Record<string, unknown>) => ({
     v: {
@@ -81,6 +81,36 @@ describe('create_loyalty_promotion', () => {
     mockCfg.mockResolvedValue({ active: false, stampsEnabled: true })
     const out = parse(await call('create_loyalty_promotion', nueva))
     expect(out.preview).toBe('Del 13 al 17 de nov., cada visita da 2 sellos en vez de 1')
+  })
+
+  // Ola final: la misma regla que el panel — da puntos si el programa está prendido Y da puntos por peso o por visita.
+  it('programa prendido pero sin puntos por peso ni por visita: no promete puntos', async () => {
+    mockCfg.mockResolvedValue({ active: true, stampsEnabled: true, pointsPerDollar: 0, pointsPerVisit: 0 })
+    const out = parse(await call('create_loyalty_promotion', nueva))
+    expect(out.preview).toBe('Del 13 al 17 de nov., cada visita da 2 sellos en vez de 1')
+    expect(mockCfg).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ pointsPerDollar: true, pointsPerVisit: true }) }),
+    )
+  })
+
+  it('sólo bono por visita también cuenta como «da puntos»', async () => {
+    mockCfg.mockResolvedValue({ active: true, stampsEnabled: false, pointsPerDollar: 0, pointsPerVisit: 5 })
+    const out = parse(await call('create_loyalty_promotion', nueva))
+    expect(out.preview).toBe('Del 13 al 17 de nov., cada visita da el doble de puntos')
+  })
+
+  it('con productos: los puntos dobles son «por esos productos», como el panel', async () => {
+    const out = parse(await call('create_loyalty_promotion', { ...nueva, productIds: ['cp1', 'cp2'] }))
+    expect(out.preview).toBe(
+      'Del 13 al 17 de nov., cada visita que lleve alguno de los 2 productos elegidos da 2 sellos en vez de 1 y el doble de puntos por esos productos',
+    )
+  })
+
+  it('con categorías: los puntos dobles son «en esas categorías»', async () => {
+    const out = parse(await call('create_loyalty_promotion', { ...nueva, categoryIds: ['cc1', 'cc2'] }))
+    expect(out.preview).toBe(
+      'Del 13 al 17 de nov., cada visita que lleve algo de las 2 categorías elegidas da 2 sellos en vez de 1 y el doble de puntos en esas categorías',
+    )
   })
 
   it.each([

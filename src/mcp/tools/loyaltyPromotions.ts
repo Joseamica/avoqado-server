@@ -48,27 +48,35 @@ function vistaPrevia(
   },
   startDate: string,
   endDate: string | null,
-  cfg: { active: boolean; stampsEnabled: boolean } | null,
+  cfg: { active: boolean; stampsEnabled: boolean; pointsPerDollar: unknown; pointsPerVisit: number } | null,
 ) {
   const sellos = cfg?.stampsEnabled ?? false
-  const puntos = cfg?.active ?? false
+  // La regla del panel: da puntos si el programa está prendido Y da algo por peso o por visita.
+  const puntos = !!cfg?.active && (Number(cfg.pointsPerDollar) > 0 || cfg.pointsPerVisit > 0)
+  const np = i.productIds?.length ?? 0
+  const nc = i.categoryIds?.length ?? 0
   const partes: string[] = []
   if (i.kind === 'MULTIPLY') {
     const m = i.multiplier as number
     if (sellos) partes.push(`${m} sellos en vez de 1`)
-    if (puntos) partes.push(m === 2 ? 'el doble de puntos' : `${m} veces los puntos`)
+    // Como el panel: con productos o categorías sólo se multiplica la parte de la venta que califica.
+    const alcance = np ? ' por esos productos' : nc ? ' en esas categorías' : ''
+    if (puntos) partes.push(`${m === 2 ? 'el doble de puntos' : `${m} veces los puntos`}${alcance}`)
   } else {
     if (i.extraStamps != null && sellos) partes.push(`${i.extraStamps} ${i.extraStamps === 1 ? 'sello' : 'sellos'} de más`)
     if (i.extraPoints != null && puntos) partes.push(`${i.extraPoints} puntos de más`)
   }
+  const lleva = np
+    ? ` que lleve ${np === 1 ? 'el producto elegido' : `alguno de los ${np} productos elegidos`}`
+    : nc
+      ? ` que lleve algo de ${nc === 1 ? 'la categoría elegida' : `las ${nc} categorías elegidas`}`
+      : ''
   const que = partes.length
-    ? `cada visita da ${partes.join(' y ')}`
+    ? `cada visita${lleva} da ${partes.join(' y ')}`
     : 'la promoción quedaría sin efecto: el negocio no tiene prendidos esos beneficios'
   const extras: string[] = []
   if (i.daysOfWeek?.length) extras.push(`sólo ${i.daysOfWeek.map(d => DIAS[d]).join(', ')}`)
   if (i.timeFrom && i.timeUntil) extras.push(`de ${i.timeFrom} a ${i.timeUntil}`)
-  if (i.productIds?.length) extras.push(`en ${i.productIds.length} producto(s) elegidos`)
-  if (i.categoryIds?.length) extras.push(`en ${i.categoryIds.length} categoría(s) elegidas`)
   if (i.minSpend) extras.push(`con consumo mínimo de $${i.minSpend}`)
   if (i.limit === 'ONCE_PER_DAY') extras.push('una vez al día por cliente')
   if (i.limit === 'ONCE_PER_PROMOTION') extras.push('una vez por cliente en toda la promoción')
@@ -142,7 +150,10 @@ export function registerLoyaltyPromotionTools(server: McpServer, scope: McpScope
         } catch (err) {
           return text({ ok: false, error: (err as Error).message })
         }
-        const cfg = await prisma.loyaltyConfig.findFirst({ where, select: { active: true, stampsEnabled: true } })
+        const cfg = await prisma.loyaltyConfig.findFirst({
+          where,
+          select: { active: true, stampsEnabled: true, pointsPerDollar: true, pointsPerVisit: true },
+        })
         const preview = vistaPrevia(validado.v, input.startDate, input.endDate ?? null, cfg)
         return text({
           ok: false,
