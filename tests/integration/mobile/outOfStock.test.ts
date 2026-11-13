@@ -658,10 +658,11 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     expect(await prisma.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_ITEM_REMOVAL_RETRIED' } })).toBe(0)
   })
 
-  it('la comanda devuelta calcula needsAcceptance IGUAL que el tablero (pedido MANUAL aún PENDING)', async () => {
+  it('la comanda devuelta calcula needsAcceptance IGUAL que el tablero (pedido aceptado, aún PENDING)', async () => {
     const s = await sembrar()
     // Aceptado desde la tableta de Uber (PROVIDER_STATE) pero la venta sigue PENDING en Avoqado.
     await prisma.order.update({ where: { id: s.order.id }, data: { status: OrderStatus.PENDING } })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).providerAcceptedAt).not.toBeNull()
     resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
 
     const res = await retirar(s.kds.id, s.itemB.id)
@@ -669,7 +670,8 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     const enTablero = tablero.body.data.find((k: { id: string }) => k.id === s.kds.id)
 
     expect(res.status).toBe(200)
-    expect(res.body.data.needsAcceptance).toBe(true)
+    // Con `providerAcceptedAt` ya no «falta aceptar» aunque la venta siga PENDING (tarea 2b del Bloque 2).
+    expect(res.body.data.needsAcceptance).toBe(false)
     expect(res.body.data.needsAcceptance).toBe(enTablero.needsAcceptance)
     expect(res.body.data.needsPrint).toBe(enTablero.needsPrint)
   })
