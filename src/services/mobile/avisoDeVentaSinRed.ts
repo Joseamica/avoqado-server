@@ -17,10 +17,18 @@ import { logAction } from '@/services/dashboard/activity-log.service'
  * - `TURNO_CERRADO`: se registró sin turno porque el suyo ya se cerró (`SALE_SHIFT_CLOSED`); se concilia contra SU corte.
  * - `DESCUENTO_SIN_PERMISO` (hz:e0b12f00:D2): una venta del POS con un «Descuento de la cuenta» que deja los productos en $0, hecha sin
  *   permiso de cortesía, que llegó de la cola o de una app que no pide el PIN: se registró (rechazarla la perdería) y se avisa.
+ * - `DESCUENTO_SIN_APROBACION` (D22): una venta de la cola (POS o terminal) con un % o fijo que «Requiere aprobación» entró sin ella
+ *   (#428: lo cobrado ya ocurrió). La marca de la cola la manda el cliente, así que también avisa de quien la finge en línea.
  *
  * Sólo para la cola de una terminal: `isOfflineReplay` y un token con serial de terminal (la cola de Android no lo trae).
  */
-export type AvisoVentaSinRed = 'RECHAZADA' | 'REINTENTANDO' | 'PRECIO_CAMBIADO' | 'TURNO_CERRADO' | 'DESCUENTO_SIN_PERMISO'
+export type AvisoVentaSinRed =
+  | 'RECHAZADA'
+  | 'REINTENTANDO'
+  | 'PRECIO_CAMBIADO'
+  | 'TURNO_CERRADO'
+  | 'DESCUENTO_SIN_PERMISO'
+  | 'DESCUENTO_SIN_APROBACION'
 
 export interface DatosDelAviso {
   /** La llave de la venta (`externalId` de la orden = `idempotencyKey` del pago): con ella se deduplica. */
@@ -31,6 +39,11 @@ export interface DatosDelAviso {
   orderId?: string
   /** Quien cobró (el usuario del token), para la bitácora. */
   staffId?: string
+  /** D22: los descuentos que entraron sin aprobación, el nombre de quien subió la venta y las horas (ISO) que declaró el aparato y de llegada. */
+  descuentos?: Array<{ nombre: string; importeCents: number }>
+  quien?: string
+  horaDelAparato?: string
+  llegada?: string
 }
 
 const TANDA = 50
@@ -46,8 +59,14 @@ const MXN = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' 
 // S3: el POS (ANDROID/iOS) no tiene serial de terminal: su venta apartada también avisa, como «Un aparato».
 const deLaTerminal = (d: DatosDelAviso) => (d.terminalSerial ? `La terminal ${d.terminalSerial}` : 'Un aparato')
 const porMonto = (d: DatosDelAviso) => (typeof d.montoCents === 'number' ? ` por ${MXN.format(d.montoCents / 100)}` : '')
+/** Fecha y hora en la zona del NEGOCIO (nunca la del servidor, que corre en UTC): «13 nov, 02:31 p.m.». */
+const aLas = (iso: string, zona: string) =>
+  new Date(iso).toLocaleString('es-MX', { timeZone: zona, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
-const TEXTOS: Record<AvisoVentaSinRed, (d: DatosDelAviso) => { title: string; message: string; priority: NotificationPriority }> = {
+const TEXTOS: Record<
+  AvisoVentaSinRed,
+  (d: DatosDelAviso, zona: string) => { title: string; message: string; priority: NotificationPriority }
+> = {
   RECHAZADA: d => ({
     title: 'Una venta sin conexión no se pudo registrar',
     message: `${deLaTerminal(d)} cobró una venta${porMonto(d)} sin conexión y, al subirla, el sistema no la registró${d.motivo ? ` («${d.motivo}»)` : ''}. El dinero ya se cobró: la venta sigue guardada en la terminal como «con problema». Revísala con quien cobró y, si hace falta, regístrala a mano.`,
@@ -66,6 +85,11 @@ const TEXTOS: Record<AvisoVentaSinRed, (d: DatosDelAviso) => { title: string; me
   DESCUENTO_SIN_PERMISO: d => ({
     title: 'Una venta quedó en $0 con un descuento sin permiso de cortesía',
     message: `${deLaTerminal(d)} registró una venta con un «Descuento de la cuenta»${typeof d.montoCents === 'number' ? ` de ${MXN.format(d.montoCents / 100)}` : ''} que deja los productos en $0 (una cortesía), hecho por alguien sin permiso de cortesía. Llegó de la cola sin conexión o de una app sin actualizar, así que se registró para no perder la venta. Revísala con quien la hizo.`,
+    priority: NotificationPriority.HIGH,
+  }),
+  DESCUENTO_SIN_APROBACION: (d, zona) => ({
+    title: 'Un descuento que pide aprobación entró sin aprobación',
+    message: `${deLaTerminal(d)} subió como venta hecha sin conexión una venta con ${(d.descuentos ?? []).map(x => `«${x.nombre}» (${MXN.format(x.importeCents / 100)})`).join(', ') || 'un descuento'}, que necesita la aprobación de un gerente, y entró sin la aprobación para no perder lo cobrado.${d.quien ? ` La subió ${d.quien}.` : ''} ${d.horaDelAparato ? `Según el aparato, se hizo el ${aLas(d.horaDelAparato, zona)}` : 'El aparato no mandó la hora en que se hizo'}${d.llegada ? `; llegó el ${aLas(d.llegada, zona)}` : ''}. Revísala con quien la subió: si no se hizo sin conexión, el descuento se puso sin permiso.`,
     priority: NotificationPriority.HIGH,
   }),
   TURNO_CERRADO: d => ({
@@ -117,7 +141,7 @@ export async function enviarAvisoDeVentaSinRed(venueId: string, aviso: AvisoVent
 /** El cuerpo común: bitácora una vez, una notificación por persona que falte. Devuelve cuántas no se pudieron crear. */
 async function avisarContandoFallas(venueId: string, aviso: AvisoVentaSinRed, data: DatosDelAviso): Promise<number> {
   let fallas = 0
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
   if (!venue) return 0
   const action = `VENTA_SIN_RED_${aviso}`
   const yaAnotada = await prisma.activityLog.findFirst({
@@ -143,7 +167,7 @@ async function avisarContandoFallas(venueId: string, aviso: AvisoVentaSinRed, da
   // El envío carga correo, push y WhatsApp: se importa aquí para que los servicios de cobro no los arrastren al cargar.
   const { getNotificationPreferences, sendNotification } = await import('@/services/dashboard/notification.service')
   const llave = `${aviso}:${data.externalId}`
-  const texto = TEXTOS[aviso](data)
+  const texto = TEXTOS[aviso](data, venue.timezone || 'America/Mexico_City')
   let cursor: string | undefined
   for (;;) {
     const tanda = await prisma.staffVenue.findMany({

@@ -13,9 +13,14 @@ jest.mock('@/communication/sockets', () => ({
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
 }))
+jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
+  ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
+  avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
+}))
 
 import { Prisma } from '@prisma/client'
 import { ForbiddenError } from '@/errors/AppError'
+import { avisarVentaSinRed } from '@/services/mobile/avisoDeVentaSinRed'
 import { applyOrderDiscount, buildOrderItemsData, createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -281,6 +286,82 @@ describe('D4 · venta de la cola (isOfflineReplay) sin acreditación: entra, nun
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'DESCUENTO_SIN_APROBACION_SIN_RED' }) }),
     )
+  })
+})
+
+// D22 (Codex r6 #2): desde #428, mandar `isOfflineReplay` EN LÍNEA salta el PIN y nadie se enteraba. La venta sigue entrando (la de
+// la cola ya se cobró), pero el dueño recibe un aviso con qué descuento, cuánto, quién la subió y las horas del aparato y de llegada.
+describe('D22 · aviso al dueño cuando un descuento que pide aprobación entra de la cola sin ella', () => {
+  const avisos = () => (avisarVentaSinRed as jest.Mock).mock.calls.filter(([, aviso]) => aviso === 'DESCUENTO_SIN_APROBACION')
+  const HACE_UN_MINUTO = Date.now() - 60_000
+  const deLaCola = (extra: Fila = {}) => venta({ isOfflineReplay: true, createdAtLocal: HACE_UN_MINUTO, performedBy: 'sesion-1', ...extra })
+
+  beforeEach(() => {
+    prismaMock.staff.findUnique.mockResolvedValue({ firstName: 'Cajera', lastName: 'Uno' } as any)
+  })
+
+  it('sin acreditación: entra y avisa una vez con el descuento, el monto, quién la subió y las dos horas', async () => {
+    baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION }))
+    expect(avisos()).toEqual([
+      [
+        VENUE,
+        'DESCUENTO_SIN_APROBACION',
+        expect.objectContaining({
+          // Sin llave, la del aviso es la orden (como el aviso de D2).
+          externalId: creada.id,
+          orderId: creada.id,
+          staffId: 'sesion-1',
+          montoCents: 1000,
+          descuentos: [{ nombre: '10% gerencial', importeCents: 1000 }],
+          quien: 'Cajera Uno',
+          horaDelAparato: new Date(HACE_UN_MINUTO).toISOString(),
+        }),
+      ],
+    ])
+  })
+
+  it('sin hora del aparato (o ilegible), el aviso no inventa una: la deja fuera (Codex r1 #2)', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: 'ayer' }))
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2].horaDelAparato).toBeUndefined()
+    expect(typeof avisos()[0][2].llegada).toBe('string')
+  })
+
+  it('la hora del aparato adelantada se muestra tal cual (no se recorta a la llegada como para el precio)', async () => {
+    baseEnMemoria()
+    const ADELANTADA = Date.now() + 3_600_000
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, createdAtLocal: String(ADELANTADA) }))
+    expect(avisos()[0][2].horaDelAparato).toBe(new Date(ADELANTADA).toISOString())
+  })
+
+  it('la etiqueta del descuento de cuenta (importe libre) también avisa, con su nombre en la fila', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ discount: 1000, descuentoDeCatalogoId: APROBACION }))
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][2]).toMatchObject({ montoCents: 1000, descuentos: [{ nombre: 'Descuento de la cuenta', importeCents: 1000 }] })
+  })
+
+  it('regresión: de la cola CON el permiso (aprobada) no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: APROBACION, aprobacionDelDescuento: {} }))
+    expect(avisos()).toEqual([])
+  })
+
+  it('regresión: un % sin aprobación de la cola no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(VENUE, deLaCola({ orderDiscountId: LIBRE }))
+    expect(avisos()).toEqual([])
+  })
+
+  it('regresión: en línea con el PIN no avisa', async () => {
+    baseEnMemoria()
+    await createOrderWithItems(
+      VENUE,
+      venta({ orderDiscountId: APROBACION, performedBy: 'sesion-1', aprobacionDelDescuento: { porPin: 'sv-gerente' } }),
+    )
+    expect(avisos()).toEqual([])
   })
 })
 
