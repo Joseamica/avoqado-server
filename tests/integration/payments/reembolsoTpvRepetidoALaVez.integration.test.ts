@@ -12,7 +12,7 @@ import cuid from 'cuid'
 import prisma from '@/utils/prismaClient'
 import { recordRefund } from '@/services/tpv/refund.tpv.service'
 import { abrirTurno, limpiarVenue, sembrarCobro } from '../dashboard/sembrarCobroParaReembolso'
-import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
+import { crearNegocioDePrueba, limpiarNegocioDePrueba, pidDe } from '../giftCards/sembrarTarjetasDeRegalo'
 
 let venueId = ''
 let staffId = ''
@@ -47,11 +47,18 @@ const reembolsoTotal = (originalPaymentId: string, llave: string, referencia = '
     staffId,
   )
 
-/** Cuántas sesiones de ESTA base están detenidas por un candado ajeno. */
-const detenidas = async () => {
+/**
+ * Cuántas sesiones esperan DETRÁS del tercero, directa o indirectamente (Codex r2 #1): la segunda puede esperar a la
+ * primera en la cola del renglón, y las esperas de otras pruebas en la misma base no cuentan.
+ */
+const detenidasDetrasDe = async (pidTercero: number) => {
   const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
-    SELECT count(*)::int AS n FROM pg_stat_activity
-    WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`
+    WITH RECURSIVE cadena(pid) AS (
+      SELECT ${pidTercero}::int
+      UNION
+      SELECT a.pid FROM pg_stat_activity a JOIN cadena c ON c.pid = ANY(pg_blocking_pids(a.pid))
+    )
+    SELECT (count(*) - 1)::int AS n FROM cadena`
   return n
 }
 
@@ -62,28 +69,34 @@ const detenidas = async () => {
 async function conLosDosFormados<T>(orderId: string, envios: () => Array<Promise<T>>) {
   let soltar!: () => void
   const suelta = new Promise<void>(r => (soltar = r))
-  let tomado!: () => void
-  const yaTomado = new Promise<void>(r => (tomado = r))
+  let tomado!: (pid: number) => void
+  const yaTomado = new Promise<number>(r => (tomado = r))
   const tercero = prisma.$transaction(
     async tx => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`
-      tomado()
+      tomado(await pidDe(tx))
       await suelta
     },
     { timeout: 30_000, maxWait: 10_000 },
   )
-  await yaTomado
-  const resultados = Promise.allSettled(envios())
   try {
-    for (let i = 0; (await detenidas()) < 2; i++) {
+    // Codex r2 #2: si el tercero falla antes de sostener el candado, su error sale aquí en vez de colgar la prueba.
+    const pidTercero = await Promise.race([
+      yaTomado,
+      tercero.then(() => {
+        throw new Error('El tercero terminó sin sostener el candado de la orden')
+      }),
+    ])
+    const resultados = Promise.allSettled(envios())
+    for (let i = 0; (await detenidasDetrasDe(pidTercero)) < 2; i++) {
       if (i > 400) throw new Error('Los dos envíos no llegaron a formarse detrás del candado')
       await new Promise(r => setTimeout(r, 25))
     }
+    return resultados
   } finally {
     soltar()
-    await tercero
+    await tercero.catch(() => undefined)
   }
-  return resultados
 }
 
 const motivo = (r: PromiseSettledResult<unknown>) => (r.status === 'rejected' ? String((r.reason as Error)?.message) : '')
