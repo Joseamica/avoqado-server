@@ -79,15 +79,16 @@ beforeEach(() => {
   mockStationsFind.mockResolvedValue([{ id: 'st1', active: true, sendsComanda: true }])
 })
 
-describe('delivery_channels: impresion', () => {
+describe('delivery_channel_printing', () => {
   it('trae guardada y efectiva por canal con UNA sola consulta de estaciones', async () => {
     mockLinksFind.mockResolvedValue([
       link('l1', 'RAPPI', { comanda: 'UNA_ESTACION', estacionId: 'st1', empaque: 'NO' }),
       link('l2', 'UBER_EATS'),
     ])
-    const r = parse(await call('delivery_channels', { venueId: 'v1' }))
+    const r = parse(await call('delivery_channel_printing', { venueId: 'v1' }))
     expect(mockStationsFind).toHaveBeenCalledTimes(1)
     expect(mockStationsFind.mock.calls[0][0].take).toBeGreaterThan(0)
+    expect(r.channels[0]).toEqual(expect.objectContaining({ channelId: 'l1', provider: 'RAPPI', status: 'ACTIVE' }))
     expect(r.channels[0].impresion.guardada).toEqual({ comanda: 'UNA_ESTACION', estacionId: 'st1', empaque: 'NO' })
     expect(r.channels[0].impresion.efectiva).toEqual({
       proveedor: 'RAPPI',
@@ -102,14 +103,23 @@ describe('delivery_channels: impresion', () => {
   it('estación borrada: efectiva a null y motivo claro', async () => {
     mockStationsFind.mockResolvedValue([])
     mockLinksFind.mockResolvedValue([link('l1', 'RAPPI', { comanda: 'UNA_ESTACION', estacionId: 'gone', empaque: 'NEGOCIO' })])
-    const r = parse(await call('delivery_channels', { venueId: 'v1' }))
+    const r = parse(await call('delivery_channel_printing', { venueId: 'v1' }))
     expect(r.channels[0].impresion.efectiva.estacionUnicaId).toBeNull()
     expect(r.channels[0].impresion.motivo).toBe('La estación elegida ya no existe o está apagada: se imprime como en el salón')
   })
 
   it('sin estaciones elegidas no consulta estaciones', async () => {
     mockLinksFind.mockResolvedValue([link('l2', 'UBER_EATS')])
-    await call('delivery_channels', { venueId: 'v1' })
+    await call('delivery_channel_printing', { venueId: 'v1' })
+    expect(mockStationsFind).not.toHaveBeenCalled()
+  })
+})
+
+describe('delivery_channels (certificada) no cambia', () => {
+  it('su salida no trae la clave impresion ni consulta estaciones', async () => {
+    mockLinksFind.mockResolvedValue([link('l1', 'RAPPI', { comanda: 'UNA_ESTACION', estacionId: 'st1', empaque: 'NO' })])
+    const r = parse(await call('delivery_channels', { venueId: 'v1' }))
+    expect(r.channels[0]).not.toHaveProperty('impresion')
     expect(mockStationsFind).not.toHaveBeenCalled()
   })
 })

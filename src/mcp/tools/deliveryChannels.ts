@@ -85,8 +85,6 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       // 🔴 El horario se RESUELVE, no se lee crudo: si nadie lo configuró el canal publica
       // un estimado, y un estimado presentado como certeza es peor que no tenerlo — nadie lo
       // revisa. Por eso viaja junto con `fuente`, que dice de dónde salió.
-      const impresiones = links.map(l => leerImpresion(l.config))
-      const estaciones = await cargarEstaciones(venueId, impresiones)
       const horarios = new Map(await Promise.all(links.map(async l => [l.id, await resolveDeliveryHours(l)] as const)))
       // «¿por qué no quedó conectada mi tienda de Uber?»: los últimos intentos de conexión, con el
       // resultado por tienda. Sólo estado — el token cifrado NUNCA sale del server.
@@ -108,10 +106,8 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
       return text({
         venueId,
-        channels: links.map((l, i) => ({
+        channels: links.map(l => ({
           ...l,
-          // Dónde se imprime el delivery de este canal: lo guardado y lo que saldrá de verdad (sólo papel).
-          impresion: vistaDeImpresion(l.provider, impresiones[i], estaciones),
           lastMenuSyncAt: l.lastMenuSyncAt?.toISOString() ?? null,
           // Task 8 (plan 2026-08-20-delivery-nucleo-unico, §8.2): el vínculo puede existir
           // (el dueño ya conectó el canal) sin que el core todavía sepa traducirlo — la ÚNICA
@@ -179,6 +175,34 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
         // NO que la tasa sea 0. Reportar 0% sin datos dispararía alarma en cada negocio
         // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.
         inyeccion,
+      })
+    },
+  )
+
+  server.tool(
+    'delivery_channel_printing',
+    'Where the delivery orders of each channel print (paper only): per channel, the saved choice (comanda: SALON or UNA_ESTACION; empaque: NEGOCIO, NO or ESTACION) and the EFFECTIVE one (a deleted or turned-off station falls back to printing as in the dining room, with the reason). POS versions older than 2.25.44 always print as in the dining room. Read-only — requires delivery-channels:read and the PREMIUM plan. Pass venueId.',
+    { venueId: z.string().describe('Venue cuyos canales leer (debe estar en tu scope)') },
+    async ({ venueId }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('delivery-channels:read', venueId)
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Los canales de delivery')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      const links = await prisma.deliveryChannelLink.findMany({
+        where: { venueId: where.venueId ?? venueId },
+        select: { id: true, provider: true, status: true, config: true },
+        take: 200, // un negocio tiene un puñado de canales
+      })
+      const guardadas = links.map(l => leerImpresion(l.config))
+      const estaciones = await cargarEstaciones(venueId, guardadas)
+      return text({
+        venueId,
+        channels: links.map((l, i) => ({
+          channelId: l.id,
+          provider: l.provider,
+          status: l.status,
+          impresion: vistaDeImpresion(l.provider, guardadas[i], estaciones),
+        })),
       })
     },
   )
