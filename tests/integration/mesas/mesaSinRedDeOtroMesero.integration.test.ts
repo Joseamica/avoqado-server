@@ -169,6 +169,24 @@ describe('D71 · propiedad de mesa encendida: la mesa sin red de otro mesero nac
     expect(await prisma.order.findUniqueOrThrow({ where: { id: cuentaY } })).toMatchObject({ tableId: t, status: 'PENDING' })
     expect((await notaDe(String(ack.result!.orderId)))!.data).toMatchObject({ cuentasDeOtroMesero: [cuentaY] })
   })
+
+  it('Codex r1 #1: la mesa de Y está en «Limpieza» con su cuenta viva: la de X nace junto y el puntero sigue en Y', async () => {
+    const t = await mesa()
+    const cuentaY = (await assignTable(venueId, t, meseroY, 4)).order.id
+    await conRenglon(cuentaY)
+    await prisma.table.update({ where: { id: t }, data: { status: 'CLEANING' } }) // como `set_table_status`: conserva la cuenta
+
+    const o = open(t, Date.now() - 60_000)
+    const acks = await replay([o, add(o.payload.localOrderId), pay(o.payload.localOrderId, 24000)])
+
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED'])
+    const propia = String(acks[0].result!.orderId)
+    expect(propia).not.toBe(cuentaY)
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ status: 'CLEANING', currentOrderId: cuentaY })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: cuentaY } })).toMatchObject({ tableId: t, status: 'PENDING' })
+    expect(await huellaDe(propia)).toEqual({ renglones: 1, pagos: 1 })
+    expect((await notaDe(propia))!.data).toMatchObject({ cuentasDeOtroMesero: [cuentaY] })
+  })
 })
 
 describe('D71 · lo que sigue como hoy', () => {

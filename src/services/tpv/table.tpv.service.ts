@@ -457,8 +457,10 @@ export async function assignTable(
       },
     })
 
-    // Update table status and link to order (D51: junto a otra visita, la mesa sigue apuntando a la suya)
-    if (!juntoAOtras.length)
+    // Update table status and link to order (D51: junto a otra visita, la mesa sigue apuntando a la suya). D71 (Codex r1 #1): si el
+    // puntero es de una cuenta de otro mesero que se queda (la mesa en «Limpieza» con su cuenta viva), tampoco se toca la mesa.
+    const punteroDeOtroMesero = !!table.currentOrderId && ajenasQueSeQuedan.includes(table.currentOrderId)
+    if (!juntoAOtras.length && !punteroDeOtroMesero)
       await tx.table.update({
         where: { id: tableId },
         data: {
