@@ -4095,8 +4095,9 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
       currency: true,
       completedAt: true,
       errorMessage: true,
+      metadata: true,
       paymentLink: {
-        select: { shortCode: true, redirectUrl: true },
+        select: { shortCode: true, redirectUrl: true, venueId: true, productGroupId: true },
       },
     },
   })
@@ -4141,6 +4142,51 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
     errorMessage: session.errorMessage,
     redirectUrl: session.paymentLink?.redirectUrl,
     payment,
+    variant: await tallaDeLaSesion(session),
+  }
+}
+
+/**
+ * Encargo e61f52: la talla que se cobró en una liga por prenda, para que la página de éxito diga «Talla M · Color Negro» y
+ * no sólo el nombre de la familia. Sale de la pieza que guardó la sesión (la misma que se vuelve renglón de la orden), buscada
+ * dentro del negocio y de la familia de la liga, con sus valores en el orden de los ejes. Liga de siempre o sesión sin
+ * artículo: `null`. Nunca lanza: si la lectura falla, el estado del pago sale igual, sin talla.
+ */
+async function tallaDeLaSesion(session: {
+  sessionId: string
+  metadata: Prisma.JsonValue
+  paymentLink: { venueId: string; productGroupId: string | null } | null
+}): Promise<{ productName: string; values: Array<{ option: string; value: string }> } | null> {
+  const productGroupId = session.paymentLink?.productGroupId
+  if (!productGroupId) return null
+  const items = (session.metadata as { items?: unknown } | null)?.items
+  const pieza = Array.isArray(items) ? (items[0] as Partial<BundleItemSnapshot> | undefined) : undefined
+  if (!pieza || typeof pieza.productId !== 'string') return null
+  try {
+    const talla = await prisma.product.findFirst({
+      where: { id: pieza.productId, venueId: session.paymentLink!.venueId, productGroupId },
+      select: {
+        name: true,
+        variantValues: {
+          take: 20,
+          select: { option: { select: { name: true, position: true } }, optionValue: { select: { value: true } } },
+        },
+      },
+    })
+    // La pieza ya no existe: queda el nombre con el que se cobró (el mismo del renglón de la orden), sin ejes.
+    if (!talla) return typeof pieza.productName === 'string' && pieza.productName ? { productName: pieza.productName, values: [] } : null
+    return {
+      productName: talla.name,
+      values: [...talla.variantValues]
+        .sort((a, b) => a.option.position - b.option.position)
+        .map(v => ({ option: v.option.name, value: v.optionValue.value })),
+    }
+  } catch (err) {
+    logger.warn('No se pudo leer la talla de una liga por prenda (no fatal)', {
+      sessionId: session.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
   }
 }
 
