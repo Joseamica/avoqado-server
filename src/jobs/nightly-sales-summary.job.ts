@@ -22,6 +22,7 @@ import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
+import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -563,15 +564,54 @@ export async function getOrderSourcesBreakdown(
     ORDER BY net_sales DESC
   `
 
+  // 🔴 D46 (14-nov-2026): the headline netSales is gross − discounts − REFUNDS, but this breakdown never
+  // subtracted refunds: $10 returned from a $100 sale read $90 above and $100 in its channel. Each channel
+  // now subtracts the refunds made in the window on ITS orders, with the SAME population as the Sales
+  // Summary's refund aggregate (getSalesSummary, «3. Refunds»): REFUND payments by their own createdAt
+  // (a refund today of yesterday's sale counts today, like the headline), sale + tip portion, on an order
+  // that is neither cancelled/deleted nor a gift-card sale. Σ channels = headline netSales, to the cent.
+  // A refund whose order was sold before the window still lands in its channel, even with 0 orders today.
+  const refundsBySource = await prisma.$queryRaw<Array<{ source: string; refunds: unknown }>>`
+    SELECT
+      COALESCE(o.source::text, 'TPV') as source,
+      -- Refund rows are negative (amount and tipAmount); −SUM keeps Σ groups = |Σ all| like the summary.
+      COALESCE(-SUM(p.amount + p."tipAmount"), 0) as refunds
+    FROM "Payment" p
+    JOIN "Order" o ON o.id = p."orderId"
+    WHERE p."venueId" = ${venueId}
+      AND p.type = 'REFUND'
+      AND p."createdAt" >= ${utcTs(startDate)}
+      AND p."createdAt" <= ${utcTs(endDate)}
+      AND o.status NOT IN ('CANCELLED', 'DELETED')
+      AND ${sqlOrdenSinTarjetas('o.id')}
+    GROUP BY COALESCE(o.source::text, 'TPV')
+  `
+
   // The clamp above may have silently zeroed a damaged order. Name them.
   await warnOnClampedOrders(venueId, startDate, endDate)
 
-  return result.map(r => ({
-    source: formatOrderSource(r.source),
-    orders: Number(r.orders),
-    netSales: Number(r.net_sales),
-    avgOrder: r.orders > 0 ? Number(r.net_sales) / Number(r.orders) : 0,
-  }))
+  const bySource = new Map<string, { orders: number; netSales: number }>()
+  for (const r of result) {
+    const key = r.source ?? 'TPV'
+    const prev = bySource.get(key) ?? { orders: 0, netSales: 0 }
+    bySource.set(key, { orders: prev.orders + Number(r.orders), netSales: prev.netSales + Number(r.net_sales) })
+  }
+  for (const r of refundsBySource) {
+    const prev = bySource.get(r.source) ?? { orders: 0, netSales: 0 }
+    bySource.set(r.source, { orders: prev.orders, netSales: prev.netSales - Number(r.refunds) })
+  }
+
+  return [...bySource.entries()]
+    .map(([source, v]) => {
+      const netSales = Math.round(v.netSales * 100) / 100
+      return {
+        source: formatOrderSource(source),
+        orders: v.orders,
+        netSales,
+        avgOrder: v.orders > 0 ? netSales / v.orders : 0,
+      }
+    })
+    .sort((a, b) => b.netSales - a.netSales)
 }
 
 /**
