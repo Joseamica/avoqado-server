@@ -10,6 +10,7 @@ import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -167,6 +168,105 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
     expect((tableService.assignTable as jest.Mock).mock.calls[0]).toHaveLength(6)
   })
 
+  it('D51: con la hora de encolar y sin caja, assignTable recibe esa hora (8.º) y la caja vacía (7.º)', async () => {
+    const abiertaSinRed = Date.now() - 60_000
+    await processIntents(
+      baseParams([{ id: 'i-mesa-hora', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: abiertaSinRed }]),
+    )
+    const llamada = (tableService.assignTable as jest.Mock).mock.calls[0]
+    expect(llamada).toHaveLength(8)
+    expect(llamada[6]).toBeUndefined()
+    expect(llamada[7]).toEqual(new Date(abiertaSinRed))
+  })
+
+  it('D51: una hora adelantada se acota a ahora (se comporta como hoy)', async () => {
+    const antes = Date.now()
+    await processIntents(
+      baseParams([{ id: 'i-mesa-futuro', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: antes + 3_600_000 }]),
+    )
+    const hora = (tableService.assignTable as jest.Mock).mock.calls[0][7] as Date
+    expect(hora.getTime()).toBeGreaterThanOrEqual(antes)
+    expect(hora.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('D51: una hora de hace más de un día NO se sube a 24 h (Codex r1 #2)', async () => {
+    const haceDosDias = Date.now() - 48 * 3_600_000
+    await processIntents(
+      baseParams([{ id: 'i-mesa-vieja', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: haceDosDias }]),
+    )
+    expect((tableService.assignTable as jest.Mock).mock.calls[0][7]).toEqual(new Date(haceDosDias))
+  })
+
+  it('D51: si assignTable la deja junto a otras cuentas, la nota MESA_SIN_RED_EN_CUENTA_APARTE va DENTRO de su transacción', async () => {
+    const tx = {
+      activityLog: { create: jest.fn().mockResolvedValue({}) },
+      posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    }
+    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+      await args[5](tx, { orderId: 'cuenta-propia', isNewOrder: true, otrasCuentas: ['cuenta-B'] })
+      return { order: { id: 'cuenta-propia', orderNumber: 'A-2', version: 1 }, isNewOrder: true }
+    })
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'i-mesa-aparte',
+          type: 'OPEN_TABLE',
+          payload: { tableId: 't1', covers: 2, localOrderId: 'L-1' },
+          createdAtLocal: Date.now() - 60_000,
+        },
+      ]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'cuenta-propia', localOrderId: 'L-1', isNewOrder: true } })
+    expect(tx.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
+        venueId: VENUE,
+        staffId: STAFF,
+        entityId: 'cuenta-propia',
+        data: expect.objectContaining({ tableId: 't1', otrasCuentas: ['cuenta-B'], localOrderId: 'L-1', intentId: 'i-mesa-aparte' }),
+      }),
+    })
+    // La huella de la retoma sigue en la misma transacción.
+    expect(tx.posSyncIntent.updateMany).toHaveBeenCalledTimes(1)
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'MESA_SIN_RED_EN_CUENTA_APARTE' }))
+  })
+
+  it('D51 · Codex r2 #2: con propiedad de mesa, una cuenta AJENA que nació antes del candado rechaza igual (sin cuenta aparte ni nota)', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue(null) // la revisión de antes del candado no la vio
+    const tx = {
+      activityLog: { create: jest.fn() },
+      posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      order: { findFirst: jest.fn().mockResolvedValue({ servedBy: { firstName: 'Pedro', lastName: 'Mesa' } }) },
+    }
+    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+      await args[5](tx, { orderId: 'cuenta-propia', isNewOrder: true, otrasCuentas: ['cuenta-de-pedro'] })
+      return { order: { id: 'cuenta-propia', orderNumber: 'A-2', version: 1 }, isNewOrder: true }
+    })
+    const acks = await processIntents(
+      baseParams([{ id: 'i-mesa-pedro', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: Date.now() - 60_000 }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    expect(tx.order.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: VENUE, id: { in: ['cuenta-de-pedro'] }, servedById: { not: STAFF } } }),
+    )
+    expect(tx.activityLog.create).not.toHaveBeenCalled()
+    expect(tx.posSyncIntent.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('D51: adoptada (sin otras cuentas), no deja nota', async () => {
+    const tx = { activityLog: { create: jest.fn() }, posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) } }
+    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+      await args[5](tx, { orderId: 'cuenta-A', isNewOrder: false })
+      return { order: { id: 'cuenta-A', orderNumber: 'A-1', version: 1 }, isNewOrder: false }
+    })
+    await processIntents(
+      baseParams([{ id: 'i-mesa-adopta', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2 }, createdAtLocal: Date.now() - 60_000 }]),
+    )
+    expect(tx.activityLog.create).not.toHaveBeenCalled()
+  })
+
   it('una caja que no es texto de hasta 64 ⇒ REJECTED INVALID_PAYLOAD, sin abrir la mesa', async () => {
     const acks = await processIntents(
       baseParams([{ id: 'i-mesa-mala', type: 'OPEN_TABLE', payload: { tableId: 't1', covers: 2, cashDrawerSessionId: 42 } }]),
@@ -212,7 +312,10 @@ describe('PAY_CASH — saldo que la tablet esperaba (expectedBalanceBeforeCents)
 
   it('$0 también es un saldo esperado válido (la tablet creía que ya no debía nada)', async () => {
     await cobrar('i-cero', { expectedBalanceBeforeCents: 0 })
-    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].saldoEsperadoSinRed).toEqual({ antesCents: 0, deviceId: 'device-a' })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].saldoEsperadoSinRed).toEqual({
+      antesCents: 0,
+      deviceId: 'device-a',
+    })
   })
 
   it('sin el campo (apps viejas), payCashOrder recibe exactamente lo de hoy', async () => {

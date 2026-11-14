@@ -14,6 +14,14 @@ import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment, turnoDeLaOrdenQueN
 import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 
+/**
+ * D51: margen sobre la hora de la apertura sin red. La apertura EN LÍNEA perdida de ese mismo aparato pudo nacer un poco DESPUÉS (el
+ * servidor la creó cuando el aparato ya se había rendido a los ~10 s, o su reloj va atrasado): se sigue adoptando.
+ * ponytail: margen fijo. Techos: si otra caja cambia la mesa dentro de estos 30 s, lo que tenga se une (como hoy); un servidor que tarde
+ * más (o un reloj atrasado más) deja su apertura vacía aparte (visible, sin dinero; se cancela).
+ */
+const APERTURA_EN_LINEA_TARDIA_MS = 30 * 1000
+
 interface TableStatusResponse {
   id: string
   number: string
@@ -230,13 +238,25 @@ export async function assignTable(
    * Huella del reducer offline (plan 2026-10-13-sync-retoma-por-llave): corre DENTRO de esta transacción en sus tres
    * salidas, así que la admisión y la prueba de que ocurrió commitean juntas — o ninguna.
    */
-  dentroDeLaTx?: (tx: Prisma.TransactionClient, admitida: { orderId: string; isNewOrder: boolean }) => Promise<void>,
+  dentroDeLaTx?: (
+    tx: Prisma.TransactionClient,
+    admitida: { orderId: string; isNewOrder: boolean; otrasCuentas?: string[] },
+  ) => Promise<void>,
   /**
    * S3 «Efectivo sin red en el turno correcto»: sólo el reducer `OPEN_TABLE` del outbox lo pasa, con la caja en que el POS
    * (ANDROID/iOS) abrió la mesa sin red. Si esa caja es de un turno que ya no es el vivo, o es una caja cerrada sin turno ligado, la
    * cuenta nace SIN turno (misma regla que `createOrderWithItems`: `ventaDeLaColaEnTx` + `turnoDeLaOrdenQueNace`). Sin él, como hoy.
    */
   ventaDeLaCola?: { cashDrawerSessionId: string },
+  /**
+   * D51 (hz:8024bc1c:D51, 13-nov-2026): sólo el reducer `OPEN_TABLE`, con la hora en que el aparato abrió la mesa SIN red
+   * (`createdAtLocal`, nunca en el futuro). Una cuenta viva que nació DESPUÉS es de otra visita (otra caja canceló la de antes y abrió
+   * otra, o movió ahí otra cuenta): adoptarla metía lo pedido y cobrado sin red en la cuenta ajena. Se adopta sólo si la MESA no cambió
+   * después de esa hora (`Table.updatedAt`: abrir, mover, cancelar o cerrar la tocan) y la cuenta ya había nacido, las dos con
+   * `APERTURA_EN_LINEA_TARDIA_MS` de margen. Si no, la cuenta nace JUNTO a las vivas, sin soltarlas ni moverles el puntero, y
+   * `dentroDeLaTx` recibe `otrasCuentas` (para la nota y la propiedad de mesa, en la misma transacción). Sin ella, como hoy.
+   */
+  abiertaSinRedEn?: Date,
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -286,13 +306,20 @@ export async function assignTable(
       throw new BadRequestError('Mesa reservada para una reservacion proxima')
     }
 
+    // D51: con la hora de la apertura sin red, sólo se adopta lo que ya estaba en la mesa (sin ella, cualquiera, como hoy). Que la
+    // CUENTA sea anterior no basta: se puede mover a la mesa una cuenta vieja o reescribir su fecha (Codex r3 #1 y r4 #1); que la
+    // MESA no haya cambiado, sí (cada apertura, movimiento, cancelación o cierre escribe la fila de la mesa).
+    const adoptarHasta = abiertaSinRedEn ? new Date(abiertaSinRedEn.getTime() + APERTURA_EN_LINEA_TARDIA_MS) : undefined
+    const mesaQuieta = !adoptarHasta || table.updatedAt.getTime() <= adoptarHasta.getTime()
+    const adoptable = (o: { createdAt: Date }) => !adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime())
+
     // If table already has an active order, return it
-    if (
-      table.currentOrder &&
+    const punteroVivo =
+      !!table.currentOrder &&
       table.status === 'OCCUPIED' &&
       !['COMPLETED', 'CANCELLED', 'DELETED'].includes(table.currentOrder.status) &&
       table.currentOrder.paymentStatus !== 'PAID'
-    ) {
+    if (table.currentOrder && punteroVivo && adoptable(table.currentOrder)) {
       logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)
       await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: table.currentOrder.id })
       await dentroDeLaTx?.(tx, { orderId: table.currentOrder.id, isNewOrder: false })
@@ -305,30 +332,38 @@ export async function assignTable(
       }
     }
 
+    let vivas: typeof scope.orders = []
     if (table.status === 'OCCUPIED') {
-      const candidate = scope.orders
+      vivas = scope.orders
         .filter(o => o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status) && o.paymentStatus !== 'PAID')
-        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
-      const sibling = candidate
-        ? await tx.order.findFirst({
-            where: {
-              id: candidate.id,
-              venueId,
-              tableId: table.id,
-              status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-              paymentStatus: { not: 'PAID' },
-            },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-            include: { items: { include: { product: { select: { id: true, name: true } } } } },
-          })
-        : null
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      const candidate = vivas[0]
+      const sibling =
+        candidate && mesaQuieta
+          ? await tx.order.findFirst({
+              where: {
+                // D51: con la hora, la más antigua que se PUEDE adoptar (la misma regla que `adoptable`).
+                id: adoptarHasta ? { in: vivas.map(o => o.id) } : candidate.id,
+                venueId,
+                tableId: table.id,
+                status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+                paymentStatus: { not: 'PAID' },
+                ...(adoptarHasta ? { createdAt: { lte: adoptarHasta } } : {}),
+              },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              include: { items: { include: { product: { select: { id: true, name: true } } } } },
+            })
+          : null
       if (sibling) {
         await rechazarSiCuentaAnuladaEnTx(tx, { venueId, orderId: sibling.id })
-        await tx.table.update({ where: { id: table.id }, data: { currentOrderId: sibling.id } })
+        // El puntero sólo se repara si ya no apunta a una cuenta viva (D51: la posterior que no se adoptó lo conserva).
+        if (!punteroVivo) await tx.table.update({ where: { id: table.id }, data: { currentOrderId: sibling.id } })
         await dentroDeLaTx?.(tx, { orderId: sibling.id, isNewOrder: false })
         return { order: sibling, isNewOrder: false, table, staffVenue }
       }
     }
+    // D51: quedan cuentas vivas que no se adoptaron → la de este aparato nace junto a ellas (otra visita en la misma mesa).
+    const juntoAOtras = adoptarHasta ? vivas.map(o => o.id) : []
 
     await assertVenueSalesEnabled(venueId, tx)
 
@@ -337,15 +372,17 @@ export async function assignTable(
     // any zombie open orders left bound to it by older flows/abandoned data,
     // otherwise they would block clearTable and hijack the sibling repoint.
     // The orders themselves survive (reports); they just leave the table.
-    await tx.order.updateMany({
-      where: {
-        venueId,
-        tableId: table.id,
-        id: { in: scope.orders.filter(o => o.tableId === table.id).map(o => o.id) },
-        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-      },
-      data: { tableId: null },
-    })
+    // D51: junto a cuentas vivas de otra visita no hay zombis que soltar: se quedan en la mesa.
+    if (!juntoAOtras.length)
+      await tx.order.updateMany({
+        where: {
+          venueId,
+          tableId: table.id,
+          id: { in: scope.orders.filter(o => o.tableId === table.id).map(o => o.id) },
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+        },
+        data: { tableId: null },
+      })
 
     // Create new order
     const orderNumber = `ORD-${Date.now()}`
@@ -389,17 +426,18 @@ export async function assignTable(
       },
     })
 
-    // Update table status and link to order
-    await tx.table.update({
-      where: { id: tableId },
-      data: {
-        status: 'OCCUPIED',
-        currentOrderId: newOrder.id,
-      },
-    })
+    // Update table status and link to order (D51: junto a otra visita, la mesa sigue apuntando a la suya)
+    if (!juntoAOtras.length)
+      await tx.table.update({
+        where: { id: tableId },
+        data: {
+          status: 'OCCUPIED',
+          currentOrderId: newOrder.id,
+        },
+      })
 
     logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
-    await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true })
+    await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true, ...(juntoAOtras.length ? { otrasCuentas: juntoAOtras } : {}) })
 
     return { order: newOrder, isNewOrder: true, table, staffVenue }
   }, ORDER_LOCK_WAIT_BUDGET)
