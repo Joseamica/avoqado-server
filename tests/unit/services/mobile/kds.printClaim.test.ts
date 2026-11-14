@@ -14,6 +14,7 @@ import {
   releaseKdsPrint,
   PRINT_CLAIM_TTL_MS,
 } from '../../../../src/services/mobile/kds.mobile.service'
+import { faltaAceptar } from '../../../../src/services/mobile/kdsCapacidades'
 
 describe('reclamación de impresión del KDS', () => {
   beforeEach(() => jest.clearAllMocks())
@@ -161,6 +162,7 @@ describe('formatKdsOrderConVenta — sólo el reparto de PROVEEDOR pide imprimir
       retiros: new Map(),
       renglones: new Map(),
       readyReportedAt: null,
+      providerAcceptedAt: null,
       deliveryOpInFlight: null,
       deliveryOpInFlightAt: null,
     }) as any
@@ -171,9 +173,26 @@ describe('formatKdsOrderConVenta — sólo el reparto de PROVEEDOR pide imprimir
     expect(r.needsAcceptance).toBe(false)
   })
 
-  it('pedido de proveedor sin imprimir → needsPrint; PENDING → needsAcceptance', () => {
+  it('pedido de proveedor sin imprimir → needsPrint (ya aceptado); PENDING sin aceptar → needsAcceptance y no se imprime', () => {
+    expect(formatKdsOrderConVenta(comanda, venta(true, 'CONFIRMED'))).toMatchObject({ needsPrint: true, needsAcceptance: false })
     const r = formatKdsOrderConVenta(comanda, venta(true))
-    expect(r.needsPrint).toBe(true)
+    expect(r.needsPrint).toBe(false)
     expect(r.needsAcceptance).toBe(true)
+  })
+
+  it('🔴 aceptado (aún PENDING) → needsAcceptance false y SÍ se imprime; sin aceptar → no se imprime', () => {
+    const aceptada = { ...venta(true), providerAcceptedAt: new Date() }
+    expect(formatKdsOrderConVenta(comanda, aceptada)).toMatchObject({ needsAcceptance: false, needsPrint: true })
+    expect(formatKdsOrderConVenta(comanda, venta(true))).toMatchObject({ needsAcceptance: true, needsPrint: false })
+    expect(formatKdsOrderConVenta(comanda, venta(true, 'CONFIRMED'))).toMatchObject({ needsAcceptance: false, needsPrint: true })
+  })
+
+  it('faltaAceptar: sólo reparto de proveedor, PENDING y sin providerAcceptedAt', () => {
+    const base = { type: 'DELIVERY', status: 'PENDING', conProveedor: true, providerAcceptedAt: null }
+    expect(faltaAceptar(base)).toBe(true)
+    expect(faltaAceptar({ ...base, providerAcceptedAt: new Date() })).toBe(false)
+    expect(faltaAceptar({ ...base, status: 'CONFIRMED' })).toBe(false)
+    expect(faltaAceptar({ ...base, conProveedor: false })).toBe(false)
+    expect(faltaAceptar({ ...base, type: 'DINE_IN' })).toBe(false)
   })
 })
