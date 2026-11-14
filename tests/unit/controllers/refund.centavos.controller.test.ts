@@ -62,6 +62,36 @@ describe('controladores de refund — centavos enteros seguros', () => {
     expect(dashboardIssueRefund).not.toHaveBeenCalled()
   })
 
+  it('D1: el panel pasa su llave al servicio, que reconoce el reembolso repetido', async () => {
+    const res = response()
+
+    await dashboardController.issueRefund(
+      request({ amount: 100, reason: 'RETURNED_GOODS', idempotencyKey: 'panel-reembolso-1234' }),
+      res,
+      jest.fn(),
+    )
+
+    expect(dashboardIssueRefund).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'panel-reembolso-1234' }))
+  })
+
+  it('D1: sin llave sigue como siempre (undefined, nunca null ni texto vacío)', async () => {
+    for (const idempotencyKey of [undefined, null]) {
+      jest.clearAllMocks()
+      dashboardIssueRefund.mockResolvedValue({ refundId: 'refund-1' })
+      await dashboardController.issueRefund(request({ amount: 100, reason: 'RETURNED_GOODS', idempotencyKey }), response(), jest.fn())
+      expect(dashboardIssueRefund.mock.calls[0][0].idempotencyKey).toBeUndefined()
+    }
+  })
+
+  it('D1: una llave que no es texto es 400 antes del servicio', async () => {
+    const res = response()
+
+    await dashboardController.issueRefund(request({ amount: 100, reason: 'RETURNED_GOODS', idempotencyKey: 12345678 }), res, jest.fn())
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(dashboardIssueRefund).not.toHaveBeenCalled()
+  })
+
   it('dashboard rechaza amount fraccionario con 400 antes del servicio', async () => {
     const res = response()
 

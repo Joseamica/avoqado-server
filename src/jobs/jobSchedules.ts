@@ -16,6 +16,9 @@ export const DATABASE_JOB_SCHEDULES = {
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
   inventoryPostingSweeper: '44 */2 * * * *',
+  // Cierre perdido de Mercado Pago (tarjeta D1): cobros aprobados sin venta. Cada 5 min en el segundo :27 del minuto 3, 8, 13…,
+  // hueco libre (nadie usa :27) y fuera del minuto :00 de la estampida. Máximo 25 eventos y 25 sesiones por vuelta.
+  mercadoPagoCierrePerdido: '27 3-59/5 * * * *',
   // Lealtad post-cobro durable. Cada 5 min en :41, lejos del reconciliador de
   // caja (:02), inventario (:44) y calendarios (:26/:56). Máximo 25 órdenes.
   loyaltyReconciliation: '41 */5 * * * *',

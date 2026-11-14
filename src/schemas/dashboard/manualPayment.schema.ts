@@ -67,6 +67,14 @@ export const createManualPaymentSchema = z.object({
         .max(50, 'El nombre del proveedor externo no puede exceder 50 caracteres')
         .optional(),
       reason: z.string().max(500, 'La razón no puede exceder 500 caracteres').optional(),
+      /**
+       * D1 (12-nov): la llave del panel. El servicio (`createManualPayment`) reconoce el envío repetido y devuelve el pago ya
+       * registrado; con otros datos, 409 IDEMPOTENCY_KEY_REUSED. Sin declararla aquí, `validateRequest` la tiraba.
+       */
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{8,64}$/, 'La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos')
+        .optional(),
     })
     .superRefine((data, ctx) => {
       if (data.source === 'OTHER' && !data.externalSource) {

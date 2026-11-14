@@ -174,6 +174,28 @@ const cuerpo = (extra: Record<string, unknown> = {}) => ({
 
 const datosDelPagoCreado = () => (prismaMock as any).payment.create.mock.calls[0][0].data
 
+/** D1: aprende la llave de un reembolso TOTAL y deja el cobro sin devolver antes del candado (el gemelo aún no confirma). */
+const armarGemeloQueConfirmaTarde = async () => {
+  const llave = await armarReintentoDe({ amount: 10000, isPartialRefund: false })
+  const original = await (prismaMock as any).payment.findFirst()
+  return { llave, original }
+}
+
+/**
+ * D1: la PRIMERA búsqueda por llave (paso 1.5, antes del candado) no ve al gemelo; las siguientes (ya con el `FOR UPDATE`) sí,
+ * y el cobro bloqueado ya trae lo que el gemelo devolvió.
+ */
+const gemeloVisibleSoloBajoElCandado = (llave: string, original: any, gemelo: unknown) => {
+  let busquedasPorLlave = 0
+  ;(prismaMock as any).payment.findUnique.mockImplementation(async (args: any) => {
+    const compuesta = args?.where?.venueId_idempotencyKey
+    if (!compuesta) return original
+    busquedasPorLlave += 1
+    return busquedasPorLlave > 1 && compuesta.idempotencyKey === llave ? gemelo : null
+  })
+  ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([{ ...original, processorData: { refundedAmount: 100 } }])
+}
+
 beforeEach(() => jest.clearAllMocks())
 
 describe('el reembolso del TPV honra la llave de idempotencia', () => {
@@ -224,6 +246,48 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     )
 
     expect(r.id).toBe('pay-refund-ya-existia')
+  })
+
+  it('🔴 D1: si el gemelo guarda MIENTRAS éste espera el candado, devuelve su fila y NO un 400 de saldo', async () => {
+    // Antes del candado la llave todavía no existe (el gemelo no ha confirmado) y el pre-vuelo ve el cobro sin devolver.
+    // Ya con el `FOR UPDATE`, el gemelo confirmó: el cobro quedó devuelto completo. Sin volver a buscar la llave aquí, el
+    // guardia de saldo contestaba 400 y la TPV marcaba FAILED permanente un reembolso que SÍ quedó registrado.
+    const { llave, original } = await armarGemeloQueConfirmaTarde()
+    const existente = {
+      ...reembolsoExistente,
+      idempotencyKey: llave,
+      amount: -100,
+      processorData: { originalPaymentId: 'pay-orig', amountCents: 10000 },
+    }
+    gemeloVisibleSoloBajoElCandado(llave, original, existente)
+
+    const r = await refundService.recordRefund(
+      VENUE,
+      cuerpo({ idempotencyKey: LLAVE, amount: 10000, isPartialRefund: false }) as never,
+      'staff-1',
+    )
+
+    expect(r.id).toBe('pay-refund-ya-existia')
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    expect((prismaMock as any).shift.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D1 · Codex r1 #1: una fila con la misma llave pero OTRO monto no se devuelve; sigue el guardia de saldo', async () => {
+    // La huella une sus partes con `\u0000` y el cliente puede mandar ese carácter: dos peticiones distintas pueden dar la
+    // misma llave. Bajo el candado sólo se devuelve la fila si es IDÉNTICA; si no, el camino de antes (400 de saldo).
+    const { llave, original } = await armarGemeloQueConfirmaTarde()
+    const otroMonto = {
+      ...reembolsoExistente,
+      idempotencyKey: llave,
+      amount: -50,
+      processorData: { originalPaymentId: 'pay-orig', amountCents: 5000 },
+    }
+    gemeloVisibleSoloBajoElCandado(llave, original, otroMonto)
+
+    await expect(
+      refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 10000, isPartialRefund: false }) as never, 'staff-1'),
+    ).rejects.toThrow(/exceeds remaining refundable/)
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
   it('🔴 si dos reintentos corren a la vez, el P2002 devuelve al ganador en vez de reventar', async () => {
@@ -295,6 +359,9 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
           }),
         },
         payment: {
+          // D1: bajo el candado se vuelve a buscar la llave. En este escenario el ganador aún no confirma cuando el
+          // perdedor la busca (por eso choca después en el `create`).
+          findUnique: jest.fn().mockResolvedValue(null),
           findMany: jest.fn().mockResolvedValue([]),
           create: jest.fn().mockImplementation(async () => {
             stagedAlChocar = { ...staged, payments: [...staged.payments], audits: [...staged.audits] }

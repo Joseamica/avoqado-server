@@ -12,7 +12,10 @@
  * The 401 case is the only non-200 path. We intentionally return 200 even
  * when handleIpn returns "error", because:
  *   - The row is in MercadoPagoWebhookEvent with processingStatus='error'
- *   - Ops can replay manually via a cron or admin tool
+ *     (or 'pending' if the process died mid-way)
+ *   - `jobs/mercadopago-cierre-perdido.job.ts` retries it every 5 min, and also
+ *     reviews MP sessions with a known payment id and no sale (covers an IPN
+ *     whose row could not even be inserted)
  *   - MP retries would just re-trigger the same error
  */
 import { Request, Response } from 'express'

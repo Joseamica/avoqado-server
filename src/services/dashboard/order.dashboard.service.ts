@@ -390,6 +390,14 @@ export function mapOrderPaymentsWithRefunds<T extends MappablePayment>(
 }
 
 /**
+ * D70: la fecha y el folio que la venta tiene HOY, para saber si quien no es SUPERADMIN sólo los reenvía sin cambiarlos.
+ * `null` si la venta no es de este negocio (el PUT seguirá y contestará su 404 de siempre).
+ */
+export async function fechaYFolioActuales(venueId: string, orderId: string): Promise<{ createdAt: Date; orderNumber: string } | null> {
+  return prisma.order.findFirst({ where: { id: orderId, venueId }, select: { createdAt: true, orderNumber: true } })
+}
+
+/**
  * Obtener una orden por su ID con todos sus detalles.
  */
 export async function getOrderById(venueId: string, orderId: string) {

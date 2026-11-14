@@ -309,7 +309,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': 2,
   'src/services/delivery-channels/core/menuSnapshot.service.ts': 1,
   'src/services/delivery-channels/core/menuSync.service.ts': 2,
-  'src/services/delivery-channels/core/releaseScheduledOrder.service.ts': 1,
   'src/services/delivery-channels/providers/uber-eats/uber.client.ts': 1,
   'src/services/financial-connections/financialConnection.service.ts': 1,
   'src/services/fiscal/accountLedger.service.ts': 1,

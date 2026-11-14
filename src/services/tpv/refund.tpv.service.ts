@@ -265,6 +265,30 @@ async function buscarReembolsoPorLlave(venueId: string, idempotencyKey: string) 
   })
 }
 
+/** D1 · Codex r1 #1: ¿la fila guardada es EXACTAMENTE esta petición (monto, autorización y referencia), no sólo su llave? */
+function esElMismoReembolso(
+  fila: { authorizationNumber: string | null; referenceNumber: string | null; processorData: unknown },
+  refundData: Pick<RefundRequestData, 'amount' | 'authorizationNumber' | 'referenceNumber'>,
+): boolean {
+  const datos = (fila.processorData as Record<string, unknown> | null) ?? {}
+  return (
+    Number(datos.amountCents) === Math.round(Number(refundData.amount)) &&
+    (fila.authorizationNumber ?? '') === (refundData.authorizationNumber ?? '') &&
+    (fila.referenceNumber ?? '') === (refundData.referenceNumber ?? '')
+  )
+}
+
+/**
+ * D1 (pizarrón hz:c2bad9c3:D1): el gemelo de ESTE reembolso (misma llave, la terminal lo reenvió mientras el primero seguía en
+ * el servidor) lo guardó mientras éste esperaba el candado del cobro. Sale de la transacción —que todavía no escribió nada—
+ * con la fila del gemelo, para devolverla como cualquier reintento.
+ */
+class ReembolsoGuardadoPorSuGemelo extends Error {
+  constructor(readonly fila: NonNullable<Awaited<ReturnType<typeof buscarReembolsoPorLlave>>>) {
+    super('El mismo reembolso ya quedó registrado por su gemelo')
+  }
+}
+
 /**
  * Convierte un reembolso que ya existía en la MISMA respuesta que devuelve el camino normal
  * (STEP 8), para que la terminal no pueda distinguir un reintento de un primer envío.
@@ -650,6 +674,21 @@ export async function recordRefund(
         }
         if (locked.type === PaymentType.REFUND) {
           throw new BadRequestError('Cannot refund a refund')
+        }
+        // D1: el paso 1.5 buscó la llave ANTES del candado. Si el gemelo de este reembolso (misma llave) confirmó mientras
+        // esperábamos el `FOR UPDATE`, su fila ya se ve aquí y el saldo de abajo ya la descuenta: sin esta búsqueda, el guardia
+        // contestaba 400 «excede el monto reembolsable» y la terminal marcaba FAILED permanente —y bloqueaba el cierre de
+        // turno— un reembolso que SÍ quedó registrado. Mismo patrón que el cobro (`salirSiLaLlaveYaTienePago`). Nada se ha
+        // escrito todavía en esta transacción: salir aquí no deja nada a medias.
+        if (llaveIdempotencia) {
+          const gemelo = await tx.payment.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: llaveIdempotencia } },
+            include: { receipts: RECIBO_CANONICO },
+          })
+          // Sólo si es IDÉNTICO (Codex r1 #1): la huella une sus partes con `\u0000` y el cliente puede mandar ese carácter, así
+          // que dos peticiones distintas pueden dar la misma llave. Si no coincide, sigue el camino de antes (el guardia de abajo).
+          if (gemelo && esReembolsoDe(gemelo, refundData.originalPaymentId) && esElMismoReembolso(gemelo, refundData))
+            throw new ReembolsoGuardadoPorSuGemelo(gemelo)
         }
         // 🔴 El `SELECT` de arriba declara su tipo A MANO, así que TypeScript NO comprueba que el
         // SQL devuelva de verdad estas columnas. Recortar una en una edición futura vuelve la
@@ -1197,6 +1236,15 @@ export async function recordRefund(
   try {
     transactionResult = await ejecutarTransaccionDelReembolso()
   } catch (error) {
+    if (error instanceof ReembolsoGuardadoPorSuGemelo) {
+      logger.info('🔄 Refund gemelo — la misma llave se guardó mientras ésta esperaba el candado; se devuelve su fila', {
+        venueId,
+        idempotencyKey: llaveIdempotencia,
+        existingRefundPaymentId: error.fila.id,
+        originalPaymentId: refundData.originalPaymentId,
+      })
+      return respuestaDeReembolsoExistente(error.fila, refundData.originalPaymentId, originalPayment.orderId)
+    }
     if (error instanceof ConflictError && error.code === 'REFUND_AUTHORITY_UNAVAILABLE') {
       const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
         venueId,

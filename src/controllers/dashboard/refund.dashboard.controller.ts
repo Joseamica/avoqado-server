@@ -16,7 +16,7 @@ const MOTIVOS_DEL_PANEL = new Set<string>(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE'
 export async function issueRefund(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, paymentId } = req.params
-    const { amount, items, restockItemIds, reason, note, tipRefundCents } = req.body ?? {}
+    const { amount, items, restockItemIds, reason, note, tipRefundCents, idempotencyKey } = req.body ?? {}
 
     const hasItems = Array.isArray(items) && items.length > 0
     if (!vieneAusente(amount) && !esCantidadPositivaEnCentavos(amount)) {
@@ -38,8 +38,15 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
     if (!MOTIVOS_DEL_PANEL.has(reason)) {
       return res.status(400).json({ success: false, message: 'reason no es un motivo válido' })
     }
+    // D1 (12-nov): la llave del panel. El servicio reconoce el envío repetido (la persona toca otra vez tras un error de red, o
+    // el panel lo repite solo) y devuelve el reembolso ya hecho; con otros datos, 409 IDEMPOTENCY_KEY_REUSED. Su formato lo
+    // valida el servicio.
+    if (!vieneAusente(idempotencyKey) && typeof idempotencyKey !== 'string') {
+      return res.status(400).json({ success: false, message: 'idempotencyKey debe ser texto' })
+    }
 
     const result = await refundService.issueRefund({
+      idempotencyKey: vieneAusente(idempotencyKey) ? undefined : idempotencyKey,
       venueId,
       paymentId,
       amount: typeof amount === 'number' ? amount : undefined,

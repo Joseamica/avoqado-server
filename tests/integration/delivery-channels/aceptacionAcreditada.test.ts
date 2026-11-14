@@ -146,11 +146,13 @@ describe('aceptación acreditada, «listo» irrevocable y reserva simétrica (Ta
     expect(f.deliveryOpToken).toBeNull()
   })
 
-  it('🔴 MANUAL: un 409 del accept sigue siendo "ok" para el flujo pero NO estampa nada', async () => {
+  it('🔴 MANUAL: un 409 del accept sin aceptación comprobada NO estampa nada y NO contesta ACCEPTED', async () => {
     jest.spyOn(uberAdapter, 'acceptOrder').mockResolvedValue(r409)
+    // La lectura a Uber no prueba aceptación (caída): la cocina recibe «intenta de nuevo», no un sí que nadie imprime.
+    jest.spyOn(uberAdapter, 'fetchOrder').mockRejectedValue(new Error('sin red en la prueba'))
     const o = await nuevaOrden(OrderStatus.PENDING)
 
-    expect((await acceptDeliveryOrder(venueId, o.id)).outcome).toBe('ACCEPTED')
+    expect(await acceptDeliveryOrder(venueId, o.id)).toEqual({ outcome: 'FAILED', error: 'ACEPTACION_SIN_CONFIRMAR' })
 
     const f = await leer(o.id)
     expect(f.providerAcceptedAt).toBeNull()

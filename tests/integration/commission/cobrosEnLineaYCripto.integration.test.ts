@@ -101,6 +101,7 @@ async function ligaPagadaPorMercadoPago(staffIds: string[], monto = 200) {
       expiresAt: new Date(Date.now() + 86_400_000),
       paymentLinkId: liga.id,
       metadata: { tipAmount: 0 },
+      status: 'COMPLETED', // el cierre de MP sólo vende una sesión que MP ya aprobó (cierre perdido 12-nov)
     },
   })
   const mpPaymentId = `${Date.now()}${Math.floor(Math.random() * 1000)}`

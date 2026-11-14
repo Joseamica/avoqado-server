@@ -317,6 +317,68 @@ describe('avisarVentaSinRed', () => {
     expect(bitacora().map(b => b.action)).toEqual(['VENTA_SIN_RED_TURNO_CERRADO', 'VENTA_SIN_RED_PRECIO_CAMBIADO'])
   })
 
+  it('DESCUENTO_SIN_APROBACION (D22) dice qué descuento, cuánto, quién la subió, las horas en la zona del negocio y que entró sin aprobación', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ slug: 'cafe-centro', timezone: 'America/Mazatlan' })
+    await avisarVentaSinRed(VENUE, 'DESCUENTO_SIN_APROBACION', {
+      externalId: LLAVE,
+      orderId: 'order-9',
+      staffId: 'cajera-1',
+      montoCents: 1000,
+      descuentos: [{ nombre: '10% gerencial', importeCents: 1000 }],
+      quien: 'Cajera Uno',
+      horaDelAparato: '2026-11-13T20:31:00.000Z',
+      llegada: '2026-11-13T20:32:00.000Z',
+    })
+
+    const [aviso] = notificaciones()
+    expect(aviso).toMatchObject({
+      entityId: `DESCUENTO_SIN_APROBACION:${LLAVE}`,
+      title: 'Un descuento que pide aprobación entró sin aprobación',
+      priority: 'HIGH',
+      actionUrl: '/venues/cafe-centro/orders/order-9',
+    })
+    expect(aviso.message).toMatch(/^Un aparato subió/)
+    expect(aviso.message).toContain('«10% gerencial» ($10.00)')
+    expect(aviso.message).toContain('Cajera Uno')
+    // Mazatlán (UTC−7): 20:31 UTC = 1:31 p. m. del negocio, nunca la hora del servidor.
+    expect(aviso.message).toMatch(/Según el aparato, se hizo el 13 nov, 01:31.*llegó el 13 nov, 01:32/)
+    expect(aviso.message).toContain('sin la aprobación')
+    expect(bitacora().map(b => b.action)).toEqual(['VENTA_SIN_RED_DESCUENTO_SIN_APROBACION'])
+  })
+
+  it('DESCUENTO_SIN_APROBACION sin hora del aparato: lo dice, y da la de llegada', async () => {
+    await avisarVentaSinRed(VENUE, 'DESCUENTO_SIN_APROBACION', {
+      externalId: LLAVE,
+      terminalSerial: SERIAL,
+      montoCents: 2000,
+      descuentos: [{ nombre: '$20 gerencial', importeCents: 2000 }],
+      llegada: '2026-11-13T20:32:00.000Z',
+    })
+
+    const [aviso] = notificaciones()
+    expect(aviso.message).toMatch(new RegExp(`^La terminal ${SERIAL} subió`))
+    expect(aviso.message).toContain('El aparato no mandó la hora en que se hizo')
+    expect(aviso.message).toMatch(/llegó el 13 nov, 02:32/)
+  })
+
+  it('DESCUENTO_SIN_APROBACION: si falla la notificación de una persona, la otra sí la recibe (mejor esfuerzo, nunca lanza)', async () => {
+    ;(sendNotification as jest.Mock).mockImplementation(async (p: any) => {
+      if (p.recipientId === 'owner-1') throw new Error('base caída')
+      enviadas.push(p)
+      return p
+    })
+
+    await expect(
+      avisarVentaSinRed(VENUE, 'DESCUENTO_SIN_APROBACION', {
+        externalId: LLAVE,
+        montoCents: 1000,
+        descuentos: [{ nombre: '10% gerencial', importeCents: 1000 }],
+      }),
+    ).resolves.toBeUndefined()
+
+    expect(enviadas.map(n => n.recipientId)).toEqual(['admin-1'])
+  })
+
   it('dos subidas SIMULTÁNEAS de la misma venta ⇒ una sola notificación por persona (la terminal reintenta sin esperar al aviso)', async () => {
     const datos = { externalId: LLAVE, terminalSerial: SERIAL }
 

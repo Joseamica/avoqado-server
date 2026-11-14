@@ -13,7 +13,7 @@ jest.mock('@/services/mercado-pago/connection.service')
 const mockPrisma = prisma as unknown as {
   mercadoPagoWebhookEvent: { create: jest.Mock; updateMany: jest.Mock }
   ecommerceMerchant: { findFirst: jest.Mock }
-  checkoutSession: { findFirst: jest.Mock; update: jest.Mock }
+  checkoutSession: { findFirst: jest.Mock; updateMany: jest.Mock }
 }
 
 function buildPaymentPayload(overrides: Partial<MercadoPagoWebhookPayload> = {}): MercadoPagoWebhookPayload {
@@ -74,7 +74,7 @@ describe('handleIpn — happy path (payment approved)', () => {
       completedAt: null,
     })
 
-    mockPrisma.checkoutSession.update.mockResolvedValue({ id: 'cs_internal_1' })
+    mockPrisma.checkoutSession.updateMany.mockResolvedValue({ count: 1 })
     mockPrisma.mercadoPagoWebhookEvent.updateMany.mockResolvedValue({ count: 1 })
 
     const result = await handleIpn({
@@ -101,8 +101,8 @@ describe('handleIpn — happy path (payment approved)', () => {
     expect(paymentService.getPayment).toHaveBeenCalledWith('SELLER-token', '9999')
 
     // Verify CheckoutSession update wrote MP fields + status
-    const updateArgs = mockPrisma.checkoutSession.update.mock.calls[0][0]
-    expect(updateArgs.where).toEqual({ id: 'cs_internal_1' })
+    const updateArgs = mockPrisma.checkoutSession.updateMany.mock.calls[0][0]
+    expect(updateArgs.where).toEqual({ id: 'cs_internal_1', status: { not: 'FAILED' }, completedAt: null })
     expect(updateArgs.data.mpPaymentId).toBe('9999')
     expect(updateArgs.data.mpMerchantOrderId).toBe('7777')
     expect(updateArgs.data.status).toBe('COMPLETED')
@@ -289,7 +289,7 @@ describe('handleIpn — status mapping', () => {
       status: 'PENDING',
       completedAt: null,
     })
-    mockPrisma.checkoutSession.update.mockResolvedValue({ id: 'cs_internal_1' })
+    mockPrisma.checkoutSession.updateMany.mockResolvedValue({ count: 1 })
     mockPrisma.mercadoPagoWebhookEvent.updateMany.mockResolvedValue({ count: 1 })
   }
 
@@ -308,7 +308,7 @@ describe('handleIpn — status mapping', () => {
 
     await handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' })
 
-    const updateArgs = mockPrisma.checkoutSession.update.mock.calls[0][0]
+    const updateArgs = mockPrisma.checkoutSession.updateMany.mock.calls[0][0]
     expect(updateArgs.data.status).toBe('COMPLETED')
     expect(updateArgs.data.completedAt).toBeInstanceOf(Date)
   })
@@ -328,7 +328,7 @@ describe('handleIpn — status mapping', () => {
 
     await handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' })
 
-    const updateArgs = mockPrisma.checkoutSession.update.mock.calls[0][0]
+    const updateArgs = mockPrisma.checkoutSession.updateMany.mock.calls[0][0]
     expect(updateArgs.data.status).toBe('CANCELLED')
   })
 
@@ -347,7 +347,7 @@ describe('handleIpn — status mapping', () => {
 
     await handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' })
 
-    const updateArgs = mockPrisma.checkoutSession.update.mock.calls[0][0]
+    const updateArgs = mockPrisma.checkoutSession.updateMany.mock.calls[0][0]
     expect(updateArgs.data.status).toBe('PENDING')
   })
 
@@ -366,7 +366,7 @@ describe('handleIpn — status mapping', () => {
 
     await handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' })
 
-    const updateArgs = mockPrisma.checkoutSession.update.mock.calls[0][0]
+    const updateArgs = mockPrisma.checkoutSession.updateMany.mock.calls[0][0]
     expect(updateArgs.data.status).toBe('FAILED')
   })
 })

@@ -90,6 +90,7 @@ import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 import { paymentLinkHoldSweeperJob } from './jobs/payment-link-hold-sweeper.job'
+import { mercadoPagoCierrePerdidoJob } from './jobs/mercadopago-cierre-perdido.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
@@ -201,6 +202,7 @@ const gracefulShutdown = async (signal: string) => {
       cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
       paymentLinkHoldSweeperJob.stop()
+      mercadoPagoCierrePerdidoJob.stop()
       loyaltyReconciliationJob.stop()
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
@@ -575,6 +577,8 @@ const startApplication = async (retries = 3) => {
       inventoryPostingSweeperJob.start()
       // Liga por prenda: suelta los apartados de talla vencidos y cierra su intento en Stripe.
       paymentLinkHoldSweeperJob.start()
+      // Cobros de Mercado Pago aprobados sin venta (el aviso responde 200 aunque falle): los retoma y cierra una sola vez.
+      mercadoPagoCierrePerdidoJob.start()
       loyaltyReconciliationJob.start()
       // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
       kitchenTicketsReconciliationJob.start()

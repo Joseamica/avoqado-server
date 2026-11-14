@@ -488,6 +488,44 @@ describe('deliveryChannelLink.service', () => {
       expect(escrito.deliveryHours).toEqual(HORARIO_OK)
     })
 
+    describe('config.impresion (dónde se imprime el delivery)', () => {
+      const IMPRESION = { comanda: 'UNA_ESTACION', estacionId: 'cA', empaque: 'NO' }
+      beforeEach(() => {
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+        ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([{ id: 'cA', active: true, sendsComanda: true }])
+      })
+
+      it('PATCH con impresion conserva deliveryHours', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { deliveryHours: HORARIO_OK } }])
+        await updateChannelLink('venue1', 'link1', { config: { impresion: IMPRESION } }, 'staff1')
+        const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+        expect(escrito.deliveryHours).toEqual(HORARIO_OK)
+        expect(escrito.impresion).toEqual(IMPRESION)
+      })
+
+      it('PATCH sólo con deliveryHours conserva impresion', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { impresion: IMPRESION } }])
+        await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } }, 'staff1')
+        const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+        expect(escrito.impresion).toEqual(IMPRESION)
+        expect(escrito.deliveryHours).toEqual(HORARIO_OK)
+      })
+
+      it('estación de otro venue (no regresa del findMany) → ValidationError y no escribe', async () => {
+        ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([])
+        await expect(updateChannelLink('venue1', 'link1', { config: { impresion: IMPRESION } })).rejects.toThrow(ValidationError)
+        expect(prisma.printStation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue1', id: { in: ['cA'] } } }))
+        expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+      })
+
+      it('forma inválida → ValidationError', async () => {
+        await expect(updateChannelLink('venue1', 'link1', { config: { impresion: { comanda: 'OTRA', empaque: 'NO' } } })).rejects.toThrow(
+          ValidationError,
+        )
+      })
+    })
+
     it('config: null SÍ limpia todo (es la forma explícita de borrar, no un accidente)', async () => {
       ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'alta manual', precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
