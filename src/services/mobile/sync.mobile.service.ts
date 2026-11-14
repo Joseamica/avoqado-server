@@ -1046,13 +1046,25 @@ async function applyOpenTable(
     }
   }
 
+  // D51 (hz:8024bc1c:D51): la hora en que el aparato abrió la mesa sin red. Con ella, una cuenta que nació DESPUÉS en esa mesa no se
+  // adopta: lo de este aparato nace en su propia cuenta junto a ella. Sólo se recorta el futuro (un reloj adelantado = como hoy); el
+  // piso de 24 h de `clampSoldAt` NO, porque convertiría en «anterior» una cuenta posterior tras un día sin red (Codex r1 #2).
+  const horaLocal = intent.createdAtLocal === undefined || intent.createdAtLocal === null ? NaN : new Date(intent.createdAtLocal).getTime()
+  const abiertaSinRedEn = Number.isFinite(horaLocal) ? new Date(Math.min(horaLocal, Date.now())) : undefined
+  const caja = typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? { cashDrawerSessionId: cajaDeLaMesa } : undefined
+
   // Propiedad de mesa: abrir una mesa ocupada por otro reutilizaría su orden.
-  if (await isTableOwnershipEnforced(venueId)) {
+  // D71 (hz:8024bc1c:D71, founder 13-nov-2026: «A, cuenta propia»): con la hora de la apertura sin red ya no se rechaza (el efectivo
+  // ya cobrado quedaba en cuarentena sin cuenta): assignTable sólo adopta cuentas de este mesero y la suya nace junto a la del otro,
+  // con nota. Sin la hora (petición a mano), el rechazo de hoy.
+  const propiedadDeMesa = await isTableOwnershipEnforced(venueId)
+  const soloCuentasDe = propiedadDeMesa && !(await staffCanManageAllTables(staffId, venueId)) ? staffId : undefined
+  if (soloCuentasDe && !abiertaSinRedEn) {
     const foreign = await prisma.order.findFirst({
       where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, servedById: { not: staffId } },
       select: { servedBy: { select: { firstName: true, lastName: true } } },
     })
-    if (foreign && !(await staffCanManageAllTables(staffId, venueId))) {
+    if (foreign) {
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
       return {
         id: intent.id,
@@ -1063,27 +1075,20 @@ async function applyOpenTable(
     }
   }
 
-  // D51 (hz:8024bc1c:D51): la hora en que el aparato abrió la mesa sin red. Con ella, una cuenta que nació DESPUÉS en esa mesa no se
-  // adopta: lo de este aparato nace en su propia cuenta junto a ella. Sólo se recorta el futuro (un reloj adelantado = como hoy); el
-  // piso de 24 h de `clampSoldAt` NO, porque convertiría en «anterior» una cuenta posterior tras un día sin red (Codex r1 #2).
-  const horaLocal = intent.createdAtLocal === undefined || intent.createdAtLocal === null ? NaN : new Date(intent.createdAtLocal).getTime()
-  const abiertaSinRedEn = Number.isFinite(horaLocal) ? new Date(Math.min(horaLocal, Date.now())) : undefined
-  const caja = typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? { cashDrawerSessionId: cajaDeLaMesa } : undefined
-  // La cuenta aparte, dentro de la transacción de assignTable (bajo el candado de la mesa):
-  //  · propiedad de mesa otra vez (Codex r2 #2): una cuenta ajena que nació entre la revisión de arriba y el candado se rechaza igual;
-  //  · la nota para el gerente (Codex r1 #3): una caída después del commit no la pierde.
+  // La nota de la cuenta aparte va dentro de la transacción de assignTable (bajo el candado de la mesa; Codex r1 #3): una caída
+  // después del commit no la pierde. D71: nombra cuáles de las otras cuentas son de otro mesero (Codex r2 #2 rechazaba aquí; ya no
+  // hace falta: assignTable nunca adopta una cuenta ajena con `soloCuentasDe`).
   const huellaYNota: Parameters<typeof tableService.assignTable>[5] = async (tx, admitida) => {
-    if (admitida.otrasCuentas?.length && (await isTableOwnershipEnforced(venueId))) {
-      const ajena = await tx.order.findFirst({
-        where: { venueId, id: { in: admitida.otrasCuentas }, servedById: { not: staffId } },
-        select: { servedBy: { select: { firstName: true, lastName: true } } },
-      })
-      if (ajena && !(await staffCanManageAllTables(staffId, venueId)))
-        throw errorMesaAjena({
-          ownerName: ajena.servedBy ? `${ajena.servedBy.firstName} ${ajena.servedBy.lastName}`.trim() : 'otro mesero',
-        })
-    }
-    if (admitida.otrasCuentas?.length)
+    if (admitida.otrasCuentas?.length) {
+      const cuentasDeOtroMesero = soloCuentasDe
+        ? (
+            await tx.order.findMany({
+              where: { venueId, id: { in: admitida.otrasCuentas }, servedById: { not: staffId } },
+              select: { id: true },
+              take: admitida.otrasCuentas.length,
+            })
+          ).map(o => o.id)
+        : []
       await writeLegacyActivityAuditTx(tx, {
         staffId,
         venueId,
@@ -1096,13 +1101,26 @@ async function applyOpenTable(
           localOrderId,
           intentId: intent.id,
           abiertaSinRedEn: abiertaSinRedEn?.toISOString() ?? null,
+          ...(cuentasDeOtroMesero.length ? { cuentasDeOtroMesero } : {}),
         },
       })
+    }
     await dejarHuella?.(tx, admitida)
   }
   // Sin caja ni hora, la llamada de hoy byte a byte (sin un séptimo argumento).
   const { order, isNewOrder } = abiertaSinRedEn
-    ? await tableService.assignTable(venueId, tableId, staffId, covers, undefined, huellaYNota, caja, abiertaSinRedEn)
+    ? await tableService.assignTable(
+        venueId,
+        tableId,
+        staffId,
+        covers,
+        undefined,
+        huellaYNota,
+        caja,
+        abiertaSinRedEn,
+        // D71: sin propiedad de mesa (o con permiso de mesas ajenas), la llamada de D51 (ocho argumentos).
+        ...(soloCuentasDe ? [soloCuentasDe] : []),
+      )
     : await tableService.assignTable(
         venueId,
         tableId,

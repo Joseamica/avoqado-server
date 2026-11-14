@@ -257,6 +257,13 @@ export async function assignTable(
    * `dentroDeLaTx` recibe `otrasCuentas` (para la nota y la propiedad de mesa, en la misma transacción). Sin ella, como hoy.
    */
   abiertaSinRedEn?: Date,
+  /**
+   * D71 (hz:8024bc1c:D71, founder 13-nov-2026: «A, cuenta propia»): sólo el reducer `OPEN_TABLE`, con `abiertaSinRedEn`, cuando la
+   * «propiedad de mesa» está encendida y el mesero no puede manejar mesas ajenas. Sólo se adoptan cuentas de ESE mesero (ni siquiera
+   * una sin mesero: Codex r2 #1); una cuenta de otro mesero nunca se adopta ni se suelta de la mesa: la de este aparato nace junto a ella, a su nombre. Antes
+   * el reducer la rechazaba (TABLE_OWNED_BY_OTHER) y el efectivo ya cobrado sin red quedaba en cuarentena. Sin él, como D51.
+   */
+  soloCuentasDe?: string,
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -311,7 +318,11 @@ export async function assignTable(
     // MESA no haya cambiado, sí (cada apertura, movimiento, cancelación o cierre escribe la fila de la mesa).
     const adoptarHasta = abiertaSinRedEn ? new Date(abiertaSinRedEn.getTime() + APERTURA_EN_LINEA_TARDIA_MS) : undefined
     const mesaQuieta = !adoptarHasta || table.updatedAt.getTime() <= adoptarHasta.getTime()
-    const adoptable = (o: { createdAt: Date }) => !adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime())
+    // D71: con la propiedad de mesa, además, sólo lo de ESTE mesero. Una cuenta sin mesero tampoco (Codex r2 #1): su apertura en línea
+    // perdida nació a su nombre (`servedById: staffId`, abajo), así que una sin mesero no es suya y absorbería su venta.
+    const delMesero = (o: { servedById: string | null }) => !soloCuentasDe || o.servedById === soloCuentasDe
+    const adoptable = (o: { createdAt: Date; servedById: string | null }) =>
+      delMesero(o) && (!adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime()))
 
     // If table already has an active order, return it
     const punteroVivo =
@@ -349,6 +360,7 @@ export async function assignTable(
                 status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
                 paymentStatus: { not: 'PAID' },
                 ...(adoptarHasta ? { createdAt: { lte: adoptarHasta } } : {}),
+                ...(soloCuentasDe ? { servedById: soloCuentasDe } : {}),
               },
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
               include: { items: { include: { product: { select: { id: true, name: true } } } } },
@@ -373,12 +385,32 @@ export async function assignTable(
     // otherwise they would block clearTable and hijack the sibling repoint.
     // The orders themselves survive (reports); they just leave the table.
     // D51: junto a cuentas vivas de otra visita no hay zombis que soltar: se quedan en la mesa.
+    // D71: con la propiedad de mesa, la cuenta de otro mesero tampoco se suelta (aunque la mesa no diga OCUPADA): se queda en la mesa y
+    // la nota la nombra.
+    const pegadasALaMesa = scope.orders.filter(o => o.tableId === table.id).map(o => o.id)
+    const ajenasQueSeQuedan =
+      !juntoAOtras.length && soloCuentasDe && pegadasALaMesa.length
+        ? (
+            await tx.order.findMany({
+              where: {
+                venueId,
+                tableId: table.id,
+                id: { in: pegadasALaMesa },
+                status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+                servedById: { not: soloCuentasDe },
+              },
+              select: { id: true },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              take: pegadasALaMesa.length,
+            })
+          ).map(o => o.id)
+        : []
     if (!juntoAOtras.length)
       await tx.order.updateMany({
         where: {
           venueId,
           tableId: table.id,
-          id: { in: scope.orders.filter(o => o.tableId === table.id).map(o => o.id) },
+          id: { in: pegadasALaMesa.filter(id => !ajenasQueSeQuedan.includes(id)) },
           status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
         },
         data: { tableId: null },
@@ -426,8 +458,10 @@ export async function assignTable(
       },
     })
 
-    // Update table status and link to order (D51: junto a otra visita, la mesa sigue apuntando a la suya)
-    if (!juntoAOtras.length)
+    // Update table status and link to order (D51: junto a otra visita, la mesa sigue apuntando a la suya). D71 (Codex r1 #1): si el
+    // puntero es de una cuenta de otro mesero que se queda (la mesa en «Limpieza» con su cuenta viva), tampoco se toca la mesa.
+    const punteroDeOtroMesero = !!table.currentOrderId && ajenasQueSeQuedan.includes(table.currentOrderId)
+    if (!juntoAOtras.length && !punteroDeOtroMesero)
       await tx.table.update({
         where: { id: tableId },
         data: {
@@ -437,7 +471,8 @@ export async function assignTable(
       })
 
     logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
-    await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true, ...(juntoAOtras.length ? { otrasCuentas: juntoAOtras } : {}) })
+    const otrasCuentas = [...juntoAOtras, ...ajenasQueSeQuedan]
+    await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true, ...(otrasCuentas.length ? { otrasCuentas } : {}) })
 
     return { order: newOrder, isNewOrder: true, table, staffVenue }
   }, ORDER_LOCK_WAIT_BUDGET)
@@ -771,9 +806,14 @@ export async function reconcileTableAfterOrderRemovedInTransaction(
   const relevant = scope.tables.filter(t => t.id === removed?.tableId || t.currentOrderId === removedOrderId)
   const tables: TableRow[] = []
   for (const table of relevant) {
-    const sibling = scope.orders
-      .filter(o => o.id !== removedOrderId && o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status))
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+    const vivas = scope.orders.filter(
+      o => o.id !== removedOrderId && o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status),
+    )
+    // D71 (Codex r3 #1): si la cuenta que se va NO era la principal y la principal sigue viva en la mesa, se queda. Antes se
+    // re-apuntaba siempre a la más antigua: mover o cancelar la cuenta aparte de una mesa sin red le quitaba el lugar a la del otro.
+    const sibling =
+      vivas.find(o => o.id === table.currentOrderId) ??
+      vivas.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
     tables.push(
       await tx.table.update({
         where: { id: table.id },
