@@ -534,7 +534,9 @@ describe('sync.mobile.service processIntents', () => {
       baseParams([{ id: 'i7', type: 'ADD_ITEMS', payload: { localOrderId: 'local-C', items: [{ productId: 'p2', quantity: 1 }] } }]),
     )
     expect(prisma.posSyncIntent.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED', type: { not: 'HTTP_OP_V1' } } }),
+      expect.objectContaining({
+        where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED', type: { notIn: ['HTTP_OP_V1', 'CLEAR_TABLE'] } },
+      }),
     )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-3' } })
   })
