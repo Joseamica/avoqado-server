@@ -54,7 +54,11 @@ jest.mock('stripe', () => ({
 
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { createStripePaymentIntentForPaymentLink, finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import {
+  createStripePaymentIntentForPaymentLink,
+  finalizePaymentLinkCheckout,
+  getSessionStatus,
+} from '@/services/dashboard/paymentLink.service'
 import { PaymentLinkHoldSweeperJob } from '@/jobs/payment-link-hold-sweeper.job'
 import { borrarMundoComisiones, categoria, crearMundoComisiones, MundoComisiones } from '../commission/_mundoComisiones'
 
@@ -169,6 +173,47 @@ it.each([
     const lineas = await prisma.inventoryPostingLine.findMany({ where: { posting: { venueId: m.venueId } }, take: 10 })
     expect(lineas.map(l => l.productId)).toEqual([m1])
   }
+})
+
+it('encargo e61f52: tras cobrar, el estado de la sesión dice la talla que se vendió, con sus ejes en orden', async () => {
+  const m1 = await talla('M', 500, null)
+  await talla('L', 520, null)
+  // Ejes de la familia: Talla (posición 0) y Color (posición 1); los valores de la pieza se guardan al revés a propósito.
+  const ejeTalla = await prisma.productGroupOption.create({ data: { groupId: grupo, name: 'Talla', position: 0 } })
+  const ejeColor = await prisma.productGroupOption.create({ data: { groupId: grupo, name: 'Color', position: 1 } })
+  const valorM = await prisma.productGroupOptionValue.create({ data: { optionId: ejeTalla.id, value: 'M', position: 0 } })
+  const valorNegro = await prisma.productGroupOptionValue.create({ data: { optionId: ejeColor.id, value: 'Negro', position: 0 } })
+  await prisma.productVariantValue.create({ data: { productId: m1, optionId: ejeColor.id, optionValueId: valorNegro.id } })
+  await prisma.productVariantValue.create({ data: { productId: m1, optionId: ejeTalla.id, optionValueId: valorM.id } })
+
+  const r: any = await createStripePaymentIntentForPaymentLink(liga.shortCode, {
+    productId: m1,
+    browserToken: 'tok_integracion_e61f52_0123',
+    customerEmail: `${m.key}-ana@example.test`,
+  } as any)
+  // Antes de cobrar ya dice qué talla se está pagando.
+  expect((await getSessionStatus(liga.shortCode, r.paymentIntentId)).variant).toEqual({
+    productName: 'Blusa · M',
+    values: [
+      { option: 'Talla', value: 'M' },
+      { option: 'Color', value: 'Negro' },
+    ],
+  })
+
+  await finalizePaymentLinkCheckout({ stripeSessionId: r.paymentIntentId, paymentIntentId: r.paymentIntentId, amountPaidCents: 50000 })
+
+  const estado = await getSessionStatus(liga.shortCode, r.paymentIntentId)
+  expect(estado.status).toBe('COMPLETED')
+  expect(estado.variant).toEqual({
+    productName: 'Blusa · M',
+    values: [
+      { option: 'Talla', value: 'M' },
+      { option: 'Color', value: 'Negro' },
+    ],
+  })
+  // La misma pieza que quedó como renglón de la orden.
+  const orden = await prisma.order.findFirstOrThrow({ where: { venueId: m.venueId, source: 'PAYMENT_LINK' }, include: { items: true } })
+  expect(orden.items.map(i => i.productId)).toEqual([m1])
 })
 
 it('dos POST simultáneos del mismo navegador y talla → una ficha, un intento y una sesión', async () => {
