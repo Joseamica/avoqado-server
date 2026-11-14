@@ -16,10 +16,12 @@ import { saldoPorCobrar, type CompletedPaymentForBalance } from '../shared/order
  *
  * - Un cobro todavía en curso (PENDING/PROCESSING, p. ej. un QR de cripto vigente) sigue apartando su importe, como antes: si
  *   no, otra terminal ofrecería cobrarlo otra vez. Uno FAILED ya no aparta nada (antes sí: la terminal pedía de menos).
- * - Una cuenta de SoftRestaurant (integrada) queda EXACTAMENTE como antes: su total y su cierre son de SoftRestaurant, no de
- *   Avoqado, y el saldo común no sabe qué trae su total.
+ * - Una cuenta que NO nació en Avoqado queda EXACTAMENTE como antes. SoftRestaurant (integrada): su total y su cierre son de
+ *   SoftRestaurant y no se sabe qué trae su total. Canales de entrega (Uber, Deliverect, Rappi): la ingesta guarda en `total`
+ *   comisiones y envío del canal (`merchantFees`) que ninguna columna explica, y Rappi 2b debe además propina y tarifa que el
+ *   cobro de la terminal no sabe registrar. Para ellas el saldo común diría otra cosa que lo que la plataforma manda cobrar.
  *
- * La forma no cambia: un número en pesos, nunca negativo (la TPV lee ≤ 0 como «no falta nada»).
+ * La forma no cambia: un número en pesos (la TPV lee ≤ 0 como «no falta nada»); en una cuenta de Avoqado, nunca negativo.
  */
 export type PagoParaElRestante = CompletedPaymentForBalance & {
   status: string | null
@@ -33,15 +35,15 @@ type CuentaParaElRestante = Parameters<typeof saldoPorCobrar>[0] & {
   externalId: string | null | undefined
 }
 
-/** ¿Su dinero lo lleva otro sistema? SoftRestaurant, o cualquier cuenta del POS con id externo (el criterio de «integrada» de
- * `cierreDelCobroSaldaLaCuenta`). */
-export function esCuentaDeSoftRestaurant(orden: Pick<CuentaParaElRestante, 'originSystem' | 'source' | 'externalId'>): boolean {
-  return orden.originSystem === 'POS_SOFTRESTAURANT' || (orden.source === 'POS' && !!orden.externalId?.trim())
+/** ¿La cuenta nació fuera de Avoqado? Otro origen (SoftRestaurant, canal de entrega, Shopify), o una cuenta del POS con id
+ * externo (el criterio de «integrada» de `cierreDelCobroSaldaLaCuenta`). */
+export function esCuentaDeOtroSistema(orden: Pick<CuentaParaElRestante, 'originSystem' | 'source' | 'externalId'>): boolean {
+  return (orden.originSystem ?? 'AVOQADO') !== 'AVOQADO' || (orden.source === 'POS' && !!orden.externalId?.trim())
 }
 
 export function restanteDeLaMesa(orden: CuentaParaElRestante, pagos: readonly PagoParaElRestante[]): number {
-  if (esCuentaDeSoftRestaurant(orden)) {
-    // Exactamente la fórmula de antes (también sin el piso en 0): no cambia nada para quien no es de Avoqado.
+  if (esCuentaDeOtroSistema(orden)) {
+    // Exactamente la fórmula de antes (también sin el piso en 0): no cambia nada para una cuenta de otro sistema.
     return Number(orden.total || 0) - pagos.reduce((suma, p) => suma + Number(p.amount || 0), 0)
   }
 

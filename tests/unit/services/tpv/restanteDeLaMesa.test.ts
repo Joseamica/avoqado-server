@@ -184,8 +184,9 @@ describe('restanteDeLaMesa — D4: una fila por escritor de la cuenta', () => {
 
   // ── Cuentas que no nacieron en Avoqado ─────────────────────────────────────────────────────────────────────────────
 
-  it('T19 · Rappi 2b (repartidor propio en efectivo): la terminal pide las tres partes, igual que el POS', () => {
-    // Venta $200, propina contractual $20, tarifa de Rappi $15 por cobrar. Sin cobros: $235.
+  it('T19 · Rappi 2b (repartidor propio en efectivo): queda como antes (la terminal no sabe registrar propina ni tarifa de Rappi)', () => {
+    // Venta $200, propina contractual $20, tarifa de Rappi $15 por cobrar. Antes: total − Σ amount = 200. Se cobra en la bandeja
+    // «Pedidos en línea» del POS, que sí pide las tres partes.
     const o = cuenta({
       originSystem: 'DELIVERY_PLATFORM',
       source: 'RAPPI',
@@ -196,12 +197,11 @@ describe('restanteDeLaMesa — D4: una fila por escritor de la cuenta', () => {
       cashTipDue: new Decimal('20.00'),
       thirdPartyCashDue: new Decimal('15.00'),
     })
-    expect(restanteDeLaMesa(o, [])).toBe(235)
-    expect(delPos(o, [])).toBe(235)
+    expect(restanteDeLaMesa(o, [])).toBe(200)
   })
 
-  it('T20 · canal de entrega con comisiones en el total (Deliverect): lo mismo que el POS y que el cierre del cobro', () => {
-    // La ingesta guarda total = venta + comisiones − descuento; el cobro de la TPV cierra con la regla común (sin comisiones).
+  it('T20 · canal de entrega con comisiones/envío en el total (Uber, Deliverect): queda como antes, con lo que la plataforma manda', () => {
+    // La ingesta guarda total = venta + merchantFees − descuento; ninguna columna explica los $12. Antes: 212 − 0 = 212.
     const o = cuenta({
       originSystem: 'DELIVERY_PLATFORM',
       source: 'DELIVERECT',
@@ -210,8 +210,8 @@ describe('restanteDeLaMesa — D4: una fila por escritor de la cuenta', () => {
       subtotal: new Decimal('200.00'),
       total: new Decimal('212.00'),
     })
-    expect(restanteDeLaMesa(o, [])).toBe(delPos(o, []))
-    expect(restanteDeLaMesa(o, [])).toBe(200)
+    expect(restanteDeLaMesa(o, [])).toBe(212)
+    expect(restanteDeLaMesa(o, [pago('100.00', '0.00', { method: 'CASH' })])).toBe(112)
   })
 
   it('T21 · SoftRestaurant (integrada): EXACTAMENTE la fórmula de antes, también con propina', () => {
@@ -232,6 +232,23 @@ describe('restanteDeLaMesa — D4: una fila por escritor de la cuenta', () => {
   it('T22 · una cuenta del POS con id externo cuenta como integrada aunque su origen diga AVOQADO', () => {
     const o = cuenta({ source: 'POS', externalId: 'ext-9', total: new Decimal('60.00'), tipAmount: new Decimal('10.00') })
     expect(restanteDeLaMesa(o, [pago('25.00', '10.00')])).toBe(35)
+  })
+
+  it('T23 · venta de mostrador abierta con propina DECLARADA al crearla (total con propina, sin cobro): igual que el POS', () => {
+    // crearVentaDeMostradorEnTx guarda total = productos + propina declarada; el saldo común sólo cuenta propinas COBRADAS.
+    const o = cuenta({ status: 'PENDING', paymentStatus: 'PENDING', total: new Decimal('60.00'), tipAmount: new Decimal('10.00') })
+    expect(restanteDeLaMesa(o, [])).toBe(delPos(o, []))
+    expect(restanteDeLaMesa(o, [])).toBe(50)
+  })
+
+  it('T24 · producto serializado agregado (addSerializedItemToOrder guarda el total SIN el cargo por servicio) → lo cuenta', () => {
+    const o = cuenta({ subtotal: new Decimal('100.00'), serviceChargeAmount: new Decimal('10.00'), total: new Decimal('100.00') })
+    expect(restanteDeLaMesa(o, [])).toBe(110)
+  })
+
+  it('T25 · una cuenta sin originSystem (fila vieja) cuenta como de Avoqado, el default del esquema', () => {
+    const o = cuenta({ originSystem: null, total: new Decimal('60.00'), tipAmount: new Decimal('10.00') })
+    expect(restanteDeLaMesa(o, [pago('25.00', '10.00')])).toBe(25)
   })
 
   // ── REGRESIÓN: lo que ya funcionaba sigue igual ────────────────────────────────────────────────────────────────────
