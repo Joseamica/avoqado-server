@@ -46,6 +46,7 @@ import { descuentosDeLosClientes } from '../shared/descuentoDelCliente.service'
 import { autorizadorDelDescuentoDelCliente } from '../mobile/permission-override.mobile.service'
 import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
+import { restanteDeLaMesa } from './restanteDeLaMesa'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
@@ -368,10 +369,9 @@ export async function getOrder(
     }
   })
 
-  // Calculate amount left to pay
-  const orderTotal = Number(order.total || 0)
-  const totalPayments = order.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
-  const amount_left = orderTotal - totalPayments
+  // 🔴 D4 (hz:72be07e6:D4): antes `order.total − Σ payment.amount`, que volvía a pedir la propina en la mesa dividida. Ahora es el
+  // mismo saldo que el POS y que el cierre del cobro (`restanteDeLaMesa`). La forma no cambia: un número en pesos.
+  const amount_left = restanteDeLaMesa(order, order.payments)
 
   // Construct table name for display in Android app
   const tableName = order.table ? `Mesa ${order.table.number}` : null

@@ -471,6 +471,30 @@ export function computeOrderBalance(order: OrderAmountsForBalance, completedPaym
   }
 }
 
+/**
+ * 🔴 D4 (hz:72be07e6:D4, 14-nov): lo que falta cobrar de una cuenta. UNA respuesta para el POS (`preBillBalance`, saldo de la
+ * lista) y la terminal (`amount_left` de la mesa), y la misma aritmética con la que el cobro cierra la cuenta
+ * (`recordOrderPayment`, `payCashOrder`): un pedido de reparto en efectivo debe sus tres partes; lo demás, el saldo común.
+ *
+ * No lee la columna `Order.total` a propósito: unos escritores la guardan CON las propinas cobradas (los cobros) y otros SIN ellas
+ * (agregar o quitar productos), así que restarle los cobros pedía la propina otra vez (la mesa de $50 con $25 + $10 de propina
+ * decía «Restante $35»). El saldo común suma las propinas al total y al pagado, y se cancelan. Tabla de los escritores:
+ * `docs/audit/2026-11-13-mesa-dividida-propina/promesa.md` del workspace.
+ */
+export function saldoPorCobrar(
+  orden: OrderAmountsForBalance & {
+    paymentStatus: string | null | undefined
+    thirdPartyCashDue: DecimalLike | null
+    cashTipDue: DecimalLike | null
+  },
+  completados: readonly (CompletedPaymentForBalance & { thirdPartyCashAmount?: DecimalLike | null })[],
+): Prisma.Decimal {
+  // Una venta ya cerrada no vuelve a pedir lo del reparto (Codex código r1 #5 de Rappi 2b): si se saldó con otro medio, la tarifa
+  // la concilia el gerente.
+  const reparto = esVentaCerrada(orden.paymentStatus) ? null : saldoDeCobroDeReparto(orden, completados)
+  return reparto ? reparto.totalACobrar : computeOrderBalance(orden, completados).remainingBalance
+}
+
 /** Lo que falta cobrar de un pedido de reparto en efectivo, por partes (Rappi 2b). Todo en pesos. */
 export interface SaldoDeCobroDeReparto {
   /** Venta (productos + envío − descuento) que falta: el saldo común. */
