@@ -161,7 +161,16 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     findUniqueMock.mockResolvedValue(
       buildOrderFixture({
         table: { id: 'table-1', number: 5 },
-        payments: [{ id: 'pay-1', amount: new Decimal('50.00'), splitType: 'EQUALPARTS', createdAt: new Date() }],
+        payments: [
+          {
+            id: 'pay-1',
+            amount: new Decimal('50.00'),
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            splitType: 'EQUALPARTS',
+            createdAt: new Date(),
+          },
+        ],
       }),
     )
 
@@ -171,6 +180,48 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     expect(result.tableName).toBe('Mesa 5')
     expect(result.lastSplitType).toBe('EQUALPARTS')
     expect(result.paidItemIds).toEqual([])
+  })
+
+  it('D4: la mesa de $50 con la parte 1 de $25 + $10 de propina responde amount_left = 25 (antes 35)', async () => {
+    // Caso medido en la PAX el 12-nov (ORD-1794548257592): el cobro guardó el total CON la propina (60).
+    findUniqueMock.mockResolvedValue(
+      buildOrderFixture({
+        originSystem: 'AVOQADO',
+        source: 'TPV',
+        externalId: null,
+        status: 'CONFIRMED',
+        paymentStatus: 'PARTIAL',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        subtotal: new Decimal('50.00'),
+        discountAmount: new Decimal('0.00'),
+        serviceChargeAmount: new Decimal('0.00'),
+        taxAmount: new Decimal('0.00'),
+        tipAmount: new Decimal('10.00'),
+        total: new Decimal('60.00'),
+        thirdPartyCashDue: null,
+        cashTipDue: null,
+        orderDiscounts: [],
+        serviceCharges: [],
+        payments: [
+          {
+            id: 'pay-1',
+            amount: new Decimal('25.00'),
+            tipAmount: new Decimal('10.00'),
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            reopenedAmount: null,
+            reopenedTipAmount: null,
+            splitType: 'CUSTOMAMOUNT',
+            createdAt: new Date(),
+          },
+        ],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(typeof result.amount_left).toBe('number')
+    expect(result.amount_left).toBe(25)
   })
 
   it('still throws NotFoundError when the order does not exist', async () => {
