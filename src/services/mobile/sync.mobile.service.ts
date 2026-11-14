@@ -873,7 +873,7 @@ async function applyIntent(ctx: {
       case 'ASSIGN_ORDER':
         return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent)
       case 'CLEAR_TABLE':
-        return await applyClearTable(venueId, staffId, intent)
+        return await applyClearTable(venueId, staffId, intent, localRefMap)
       case 'SPLIT_ORDER':
         return await applySplitOrder(venueId, staffId, intent, localRefMap)
       case 'SPLIT_BY_SEAT':
@@ -1152,9 +1152,10 @@ async function resolveOrderId(venueId: string, payload: Record<string, unknown>,
   if (localRef) {
     const mapped = localRefMap.get(localRef)
     if (mapped) return mapped
-    // Replay en request separado: buscar el OPEN_TABLE ya ackeado.
+    // Replay en request separado: buscar el OPEN_TABLE ya ackeado. D75: desde ANDROID D75 un CLEAR_TABLE también lleva la cuenta
+    // local, pero su ACK no la nombra (`result` sin `orderId`): si fuera el más reciente taparía la cuenta para lo que llegue después.
     const prior = await prisma.posSyncIntent.findFirst({
-      where: { venueId, localRef, status: 'ACKED', type: { not: 'HTTP_OP_V1' } },
+      where: { venueId, localRef, status: 'ACKED', type: { notIn: ['HTTP_OP_V1', 'CLEAR_TABLE'] } },
       orderBy: { createdAt: 'desc' },
       select: { resultJson: true },
     })
@@ -1731,11 +1732,33 @@ async function applyOrderMutation(
   return { id: intent.id, status: 'ACKED', result: { orderId, version: current?.version ?? undefined } }
 }
 
-/** CLEAR_TABLE — liberar mesa; el server rechaza si tiene cuenta sin pagar. */
-async function applyClearTable(venueId: string, staffId: string, intent: SyncIntentInput): Promise<SyncIntentAck> {
+/**
+ * CLEAR_TABLE — liberar mesa; el server rechaza si tiene cuenta sin pagar.
+ *
+ * D75 (hz:8024bc1c:D75): el payload puede traer la cuenta que el aparato quiso soltar (`orderId` | `localOrderId`, opcional; iOS, la
+ * TPV y las apps viejas sólo mandan la mesa → como hoy). Si esa cuenta ya no debe y lo que debe la mesa es OTRA cuenta (la mesa
+ * abierta sin red que terminó en cuenta aparte, D51/D71), no hay nada suyo que liberar: ACK sin tocar la mesa. Antes se rechazaba
+ * por la otra cuenta (`BUSINESS_RULE` o `TABLE_OWNED_BY_OTHER`) y quedaba una «operación por revisar» que nadie puede resolver. Va
+ * antes de la propiedad de mesa y no escribe nada: no puede liberar ni re-apuntar la cuenta de otro. El ACK no nombra la cuenta: en
+ * ANDROID un `orderId` en el resultado confirma la sesión de esa cuenta (`TableSyncCoordinator`).
+ */
+async function applyClearTable(
+  venueId: string,
+  staffId: string,
+  intent: SyncIntentInput,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const tableId = typeof intent.payload.tableId === 'string' ? intent.payload.tableId : null
   if (!tableId) return invalid(intent, 'CLEAR_TABLE requiere tableId')
+
+  const suCuenta = await cuentaQueQuisoSoltar(venueId, intent.payload, localRefMap)
+  if (suCuenta && (await nadaSuyoQueLiberar(venueId, tableId, suCuenta))) {
+    logger.info(
+      `🪑 [POS SYNC] CLEAR_TABLE ${intent.id}: la cuenta ${suCuenta} ya no debe y la mesa ${tableId} sigue con otra — sin cambios`,
+    )
+    return { id: intent.id, status: 'ACKED', result: { tableId, mesaSinCambios: true } }
+  }
 
   // Propiedad de mesa: liberar la mesa de otro requiere override (misma regla
   // que el middleware con source='table').
@@ -1757,6 +1780,43 @@ async function applyClearTable(venueId: string, staffId: string, intent: SyncInt
 
   await tableService.clearTable(venueId, tableId)
   return { id: intent.id, status: 'ACKED', result: { tableId } }
+}
+
+/**
+ * D75: la cuenta que nombra el `CLEAR_TABLE`. ANDROID elige `orderId` o `localOrderId` con la sesión de ESE momento, que pudo
+ * ascender o cerrarse mientras `/clear` esperaba la red (Codex r1 #1): un id local puede llegar como `orderId`. Si no es una cuenta de
+ * la sucursal, se busca como id local (mismo camino que las demás operaciones). Sólo decide el ACK sin cambios, que no escribe nada.
+ */
+async function cuentaQueQuisoSoltar(
+  venueId: string,
+  payload: Record<string, unknown>,
+  localRefMap: Map<string, string>,
+): Promise<string | null> {
+  const id = await resolveOrderId(venueId, payload, localRefMap)
+  if (!id || typeof payload.localOrderId === 'string') return id
+  if (await prisma.order.findFirst({ where: { id, venueId }, select: { id: true } })) return id
+  return resolveOrderId(venueId, { localOrderId: id }, localRefMap)
+}
+
+/**
+ * D75: la cuenta del aparato ya no debe (cerrada, anulada o pagada) y lo que debe la mesa es OTRA cuenta.
+ * ponytail: se decide sin el candado de la mesa. Si la otra cuenta se salda o se anula justo después, la mesa la libera ese cobro o esa
+ * anulación (`releaseTableIfSettled`), no este intent; si aparece otra justo antes de liberar, sale el rechazo de hoy.
+ */
+async function nadaSuyoQueLiberar(venueId: string, tableId: string, orderId: string): Promise<boolean> {
+  const suya = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { status: true, paymentStatus: true } })
+  if (!suya || !(['COMPLETED', 'CANCELLED', 'DELETED'].includes(suya.status) || suya.paymentStatus === 'PAID')) return false
+  const otraQueDebe = await prisma.order.findFirst({
+    where: {
+      venueId,
+      tableId,
+      id: { not: orderId },
+      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      paymentStatus: { not: 'PAID' },
+    },
+    select: { id: true },
+  })
+  return otraQueDebe !== null
 }
 
 /**
