@@ -20,7 +20,7 @@ import {
   assertVenueHasCompatibleTerminal,
   PROVIDER_DEVICE_COMPATIBILITY,
 } from '../../lib/providerDeviceCompatibility'
-import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
+import { credencialesDeBlumon } from './credencialesDeBlumon'
 import { getBalanceForMerchant } from '../financial-connections/financialConnection.service'
 import { logAction, type LogActionParams } from '../dashboard/activity-log.service'
 import { ACTIVATABLE_TERMINAL_TYPES } from '../device-capabilities.service'
@@ -2126,8 +2126,7 @@ export async function refetchBlumonCredentials(
   // STEP 1: Pull fresh credentials from Blumon. If this throws (network,
   // serial-not-affiliated, auth error), we exit BEFORE any DB write — TPV keeps
   // cobrando with the existing credentials, zero impact.
-  const blumonTpvService = createBlumonTpvService(environment)
-  const fresh = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+  const fresh = await credencialesDeBlumon(environment, serialNumber, brand, model)
 
   const previousPosId = existing.blumonPosId
   const previousSerial = existing.blumonSerialNumber

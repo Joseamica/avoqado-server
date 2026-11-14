@@ -984,21 +984,21 @@ describe('PaymentLink Service', () => {
       })
 
       it('se conserva al editar: la liga ya enviada mantiene su precio', async () => {
-        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [{ modifierId: 'm-arch' }] }])
+        ;(prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [{ modifierId: 'm-arch' }] }])
         prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
 
         await expect(editar('p1', 'm-arch')).resolves.toBeDefined()
       })
 
       it('no se puede agregar un archivado que la liga no traía', async () => {
-        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [] }])
+        ;(prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p1', modifiers: [] }])
         prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
 
         await expect(editar('p1', 'm-arch')).rejects.toThrow(/no pertenecen/)
       })
 
       it('no vale haberlo traído en OTRO producto de la liga', async () => {
-        (prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p2', modifiers: [{ modifierId: 'm-arch' }] }])
+        ;(prismaMock as any).paymentLinkItem.findMany.mockResolvedValueOnce([{ productId: 'p2', modifiers: [{ modifierId: 'm-arch' }] }])
         prismaMock.product.findMany.mockResolvedValueOnce([conExtras('p1')])
 
         await expect(editar('p1', 'm-arch')).rejects.toThrow(/no pertenecen/)
@@ -1527,7 +1527,7 @@ describe('PaymentLink Service', () => {
       })
 
       const armarMp = (orderId = 'order-mp-1') => {
-        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: null })
+        prismaMock.checkoutSession.updateMany.mockResolvedValueOnce({ count: 1 } as any) // reclamo dentro de la tx: COMPLETED y sin venta
         prismaMock.order.create.mockResolvedValueOnce({
           id: orderId,
           items: [{ id: 'oi-1', productId: PRODUCT_ID, quantity: 2, weightQuantity: null, modifiers: [] }],
@@ -1543,6 +1543,11 @@ describe('PaymentLink Service', () => {
 
         await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
 
+        // Cierre perdido de MP (Codex r1 #2): sólo se vende una sesión COMPLETED y sin venta, reclamada en la tx.
+        expect(prismaMock.checkoutSession.updateMany).toHaveBeenCalledWith({
+          where: { id: 'session-db-123', status: 'COMPLETED', paymentId: null },
+          data: { updatedAt: expect.any(Date) },
+        })
         const args = prismaMock.order.create.mock.calls[0][0]
         expect(args.data.items).toBeDefined()
         expect(args.data.items.create).toHaveLength(1)
@@ -1652,7 +1657,7 @@ describe('PaymentLink Service', () => {
     }
 
     const armarMp = (orderId = 'order-mp-1') => {
-      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: null })
+      prismaMock.checkoutSession.updateMany.mockResolvedValueOnce({ count: 1 } as any) // reclamo dentro de la tx: COMPLETED y sin venta
       prismaMock.order.create.mockResolvedValueOnce({ id: orderId, items: [] })
       prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-mp-1' })
       prismaMock.checkoutSession.update.mockResolvedValueOnce({})
@@ -1742,11 +1747,9 @@ describe('PaymentLink Service', () => {
     })
 
     it('[repetirNoDuplica:finalizeMercadoPagoCheckout] MercadoPago: si al reintentar otro aviso ya confirmó, NO se acreditan puntos ni vale con la orden del intento abortado', async () => {
-      prismaMock.checkoutSession.findUnique
-        .mockResolvedValueOnce(mpSession())
-        // Dentro de la transacción: el intento 1 la ve libre y crea su orden; el intento 2 ya la ve cobrada (el IPN concurrente confirmó).
-        .mockResolvedValueOnce({ paymentId: null })
-        .mockResolvedValueOnce({ paymentId: 'payment-del-ipn' })
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+      // Dentro de la transacción: el intento 1 la reclama y crea su orden; el intento 2 ya no puede (el IPN concurrente confirmó).
+      prismaMock.checkoutSession.updateMany.mockResolvedValueOnce({ count: 1 } as any).mockResolvedValueOnce({ count: 0 } as any)
       prismaMock.customer.findFirst.mockResolvedValue({ id: CUSTOMER_ID })
       armarPersistente('order-A')
       mockCreateSalePostingInTx.mockReset()
@@ -1893,8 +1896,8 @@ describe('PaymentLink Service', () => {
     it('🔴 MercadoPago: si una llamada concurrente ya selló el pago, no se acredita nada', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
       prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
-      // Recheck DENTRO de la transacción: el otro finalizador ya creó la orden.
-      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: 'payment-ya-existente' })
+      // Reclamo DENTRO de la transacción: el otro finalizador ya creó la orden (o la sesión ya no está COMPLETED).
+      prismaMock.checkoutSession.updateMany.mockResolvedValueOnce({ count: 0 } as any)
 
       await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
 

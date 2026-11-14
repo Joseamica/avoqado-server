@@ -11,6 +11,7 @@ import { OrderStatus } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { estacionDePantallaParaReparto } from '@/services/kds/kitchenDisplayStations'
+import { toKdsModifierLabels } from '@/services/kds/kdsModifierLabels'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { contactoParaComanda } from './deliveryOrderIngestion.service'
 import { withDeliveryOrderLock } from './deliveryOrderLock'
@@ -59,8 +60,23 @@ export async function releaseScheduledOrder(externalId: string): Promise<{ outco
 
     const items = await tx.orderItem.findMany({
       where: { orderId: order.id },
-      select: { id: true, productName: true, quantity: true, externalLineId: true },
+      select: {
+        id: true,
+        productName: true,
+        quantity: true,
+        externalLineId: true,
+        productId: true,
+        notes: true,
+        modifiers: { select: { name: true, quantity: true } },
+      },
     })
+    // Misma lectura que la ingesta inmediata: UNA consulta de categorías para todos los renglones (sin N+1).
+    const idsProducto = [...new Set(items.map(i => i.productId).filter((v): v is string => Boolean(v)))]
+    const categoriaPorProducto = new Map<string, string | null>()
+    if (idsProducto.length) {
+      const filas = await tx.product.findMany({ where: { id: { in: idsProducto } }, select: { id: true, categoryId: true }, take: idsProducto.length })
+      for (const p of filas) categoriaPorProducto.set(p.id, p.categoryId)
+    }
 
     await tx.kdsOrder.create({
       data: {
@@ -78,6 +94,12 @@ export async function releaseScheduledOrder(externalId: string): Promise<{ outco
             // La misma liga que pone la ingesta: sin ella no hay renglón que retirar.
             orderItemId: i.id,
             externalLineId: i.externalLineId,
+            // Los ids que hacen RUTEABLE la comanda y reconocible «Sin comanda» (igual que la ingesta inmediata).
+            productId: i.productId,
+            categoryId: categoriaPorProducto.get(i.productId ?? '') ?? null,
+            // Nota y modificadores por el normalizador COMPARTIDO: «sin cebolla» no se pierde al liberar.
+            modifiers: i.modifiers.length ? JSON.stringify(toKdsModifierLabels(i.modifiers)) : null,
+            notes: i.notes ?? null,
           })),
         },
       },

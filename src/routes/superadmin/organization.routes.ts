@@ -111,7 +111,7 @@ const setPaymentConfigSchema = z.object({
   }),
 })
 
-const setPricingSchema = z.object({
+export const setPricingSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('ID de organización inválido'),
   }),
@@ -121,6 +121,11 @@ const setPricingSchema = z.object({
     creditRate: z.number().min(0).max(1),
     amexRate: z.number().min(0).max(1),
     internationalRate: z.number().min(0).max(1),
+    // D18: el IVA de la tarifa (null = sin definir). Antes la validación lo quitaba y la tarifa nueva nacía en null.
+    includesTax: z.boolean().nullable().optional(),
+    taxRate: z.number().min(0).max(1).optional(),
+    // D18: «si queda igual a la vigente, no escribas» (y la nueva, si hace falta, empieza ahora). Lo manda el Wizard de Pagos.
+    skipIfUnchanged: z.boolean().optional(),
     fixedFeePerTransaction: z.number().optional().nullable(),
     monthlyServiceFee: z.number().optional().nullable(),
     minimumMonthlyVolume: z.number().optional().nullable(),
