@@ -11,6 +11,7 @@ import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { calculateRecipeCostV1, describeRecipeCostErrorV1, RecipeCostCalculationError } from './recipe-cost-calculator'
 import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostGraphsForRawMaterialUpdateV1 } from './recipe-cost-graph-lock'
+import type { PostingFence } from '../inventory/postingFence'
 
 function calculateRawMaterialRecipeCostV1(
   input: Parameters<typeof calculateRecipeCostV1>[0],
@@ -1043,6 +1044,7 @@ export async function deductStockForModifiers(
   orderId: string,
   staffId?: string,
   postingLineId?: string,
+  fence?: PostingFence,
 ): Promise<void> {
   for (const orderModifier of orderModifiers) {
     const { modifier, quantity: modifierQty } = orderModifier
@@ -1069,6 +1071,7 @@ export async function deductStockForModifiers(
       reference: orderId,
       createdBy: staffId,
       postingLineId,
+      fence,
     })
 
     // Check for low stock after deduction
@@ -1147,6 +1150,7 @@ export async function deductStockForRecipe(
   staffId?: string,
   orderModifiers?: OrderModifierForInventory[],
   postingLineId?: string,
+  fence?: PostingFence,
 ) {
   const recipe = await prisma.recipe.findUnique({
     where: { productId },
@@ -1208,6 +1212,7 @@ export async function deductStockForRecipe(
               reference: orderId,
               createdBy: staffId,
               postingLineId,
+              fence,
             })
 
             trace.push({
@@ -1233,6 +1238,7 @@ export async function deductStockForRecipe(
           reference: orderId,
           createdBy: staffId,
           postingLineId,
+          fence,
         })
 
         trace.push({

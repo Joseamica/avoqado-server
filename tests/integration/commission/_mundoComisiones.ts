@@ -444,6 +444,7 @@ export async function borrarMundoComisiones(m: MundoComisiones | undefined): Pro
   await prisma.shift.deleteMany({ where: v })
   await prisma.order.deleteMany({ where: v })
   await prisma.product.deleteMany({ where: v })
+  await prisma.productGroup.deleteMany({ where: v }) // familias (liga por prenda): apuntan a una categoría
   await prisma.menuCategory.deleteMany({ where: v })
   await prisma.commissionConfig.deleteMany({ where: v })
   await prisma.venue.delete({ where: { id: m.venueId } })

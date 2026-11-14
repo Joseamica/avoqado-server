@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CUSTOM FIELD & TIPPING SCHEMAS
@@ -135,9 +136,12 @@ export const createPaymentLinkBodySchema = z
     customFields: customFieldsSchema,
     tippingConfig: tippingConfigSchema,
     discount: paymentLinkDiscountInput,
+    /** Liga por prenda: familia de productos (el cliente elige talla al pagar). Las reglas de negocio viven en el servicio. */
+    productGroupId: existingId('ID de familia inválido').nullable().optional(),
   })
   .refine(
     data => {
+      if (data.productGroupId) return true // por prenda: sin importe fijo
       if (data.amountType === 'FIXED' && (data.amount === undefined || data.amount === null)) {
         return false
       }
@@ -150,6 +154,7 @@ export const createPaymentLinkBodySchema = z
   )
   .refine(
     data => {
+      if (data.productGroupId) return true // por prenda: la familia reemplaza a los productos
       if (data.purpose === 'ITEM' && (!data.items || data.items.length === 0)) {
         return false
       }
@@ -196,6 +201,8 @@ export const updatePaymentLinkBodySchema = z.object({
   customFields: customFieldsSchema,
   tippingConfig: tippingConfigSchema,
   discount: paymentLinkDiscountInput,
+  /** Sólo para confirmar la familia de una liga por prenda; el servicio rechaza cualquier cambio de clase. */
+  productGroupId: existingId('ID de familia inválido').nullable().optional(),
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -387,10 +394,14 @@ export const listPaymentLinksSchema = z.object({
   }),
 })
 
+/** Token aleatorio de la pestaña (liga por prenda): con él la página ve como suya la talla que se le apartó. */
+const browserTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/, 'Token de navegador inválido')
+
 export const publicShortCodeSchema = z.object({
   params: z.object({
     shortCode: z.string().min(1, 'Código de liga inválido'),
   }),
+  query: z.object({ t: browserTokenSchema.optional() }),
 })
 
 export const publicCheckoutSchema = z.object({
@@ -486,5 +497,8 @@ export const publicStripePaymentIntentSchema = z.object({
     customerEmail: z.string().email('Email inválido').optional(),
     customFieldResponses: z.record(z.string()).optional(),
     expectedTotal: z.number().positive().optional(),
+    /** Liga por prenda: la talla elegida y el token de la pestaña que la aparta. */
+    productId: existingId('Talla inválida').optional(),
+    browserToken: browserTokenSchema.optional(),
   }),
 })

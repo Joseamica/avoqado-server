@@ -435,6 +435,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 12. Payment Links
   PaymentLink: 'Payment Links',
   PaymentLinkItem: 'Payment Links',
+  PaymentLinkStockHold: 'Payment Links',
   PaymentLinkItemModifier: 'Payment Links',
   PaymentLinkAttribution: 'Payment Links',
   VenuePaymentLinkSettings: 'Payment Links',
