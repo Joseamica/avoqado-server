@@ -182,7 +182,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
   server.tool(
     'delivery_channel_printing',
-    'Where the delivery orders of each channel print (paper only): per channel, the saved choice (comanda: SALON or UNA_ESTACION; empaque: NEGOCIO, NO or ESTACION) and the EFFECTIVE one (a deleted or turned-off station falls back to printing as in the dining room, with the reason). POS versions older than 2.25.44 always print as in the dining room. Read-only — requires delivery-channels:read and the PREMIUM plan. Pass venueId.',
+    'Where the delivery orders of each channel print (paper only): per channel, the saved choice (comanda: SALON or UNA_ESTACION; empaque: NEGOCIO, NO or ESTACION) and the EFFECTIVE one (a deleted or turned-off station falls back to printing as in the dining room, with the reason). POS versions older than 2.25.45 always print as in the dining room. Read-only — requires delivery-channels:read and the PREMIUM plan. Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId)
@@ -213,7 +213,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
   server.tool(
     'set_delivery_channel_printing',
-    'Change WHERE the delivery orders of ONE channel print (paper only; it does not change the kitchen display, stock or accounting). comanda: SALON (as in the dining room, default) or UNA_ESTACION (the whole order prints on one station, give estacionId). empaque (packing slip): NEGOCIO (as the venue has it), NO (none) or ESTACION (give empaqueEstacionId). Stations must be active and print comandas. POS versions older than 2.25.44 keep printing as in the dining room. Two steps: the first call only previews saved vs effective; call again with confirm:true to save. Requires delivery-channels:manage and the PREMIUM plan. linkId comes from delivery_channels. Pass venueId.',
+    'Change WHERE the delivery orders of ONE channel print (paper only; it does not change the kitchen display, stock or accounting). comanda: SALON (as in the dining room, default) or UNA_ESTACION (the whole order prints on one station, give estacionId). empaque (packing slip): NEGOCIO (as the venue has it), NO (none) or ESTACION (give empaqueEstacionId). Stations must be active and print comandas. POS versions older than 2.25.45 keep printing as in the dining room. Two steps: the first call only previews saved vs effective; call again with confirm:true to save. Requires delivery-channels:manage and the PREMIUM plan. linkId comes from delivery_channels. Pass venueId.',
     {
       venueId: z.string().describe('Venue del canal (debe estar en tu scope)'),
       linkId: z.string().describe('Id del canal (de delivery_channels)'),
@@ -258,7 +258,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           linkId,
           antes: vistaDeImpresion(link.provider, antes, estaciones),
           despues: vistaDeImpresion(link.provider, impresion, estaciones),
-          aviso: 'Los POS anteriores a la versión 2.25.44 siguen imprimiendo como en el salón.',
+          aviso: 'Los POS anteriores a la versión 2.25.45 siguen imprimiendo como en el salón.',
         })
       }
 
