@@ -1845,6 +1845,13 @@ export async function getPaymentSetupSummary(req: Request, res: Response, next: 
   }
 }
 
+// D10 (14-nov): sin configuración propia, la cuenta principal es obligatoria (llave foránea): la primera va en la Principal,
+// como en el asistente de AngelPay. Antes se intentaba crear con la principal vacía y tronaba con un error genérico.
+const primeroLaPrincipal = (tipo: 'venue' | 'organization') =>
+  new BadRequestError(
+    `${tipo === 'venue' ? 'Este negocio' : 'Esta organización'} todavía no tiene cuentas de cobro propias: la primera cuenta tiene que ir en la posición «Principal».`,
+  )
+
 /**
  * POST /api/v1/superadmin/merchant-accounts/blumon/full-setup
  * Complete wizard setup: auto-fetch → assign terminals → cost structure → payment config → pricing → settlement
@@ -1923,6 +1930,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
         target.type === 'venue'
           ? await prisma.venuePaymentConfig.findUnique({ where: { venueId: target.id }, select: { id: true } })
           : await prisma.organizationPaymentConfig.findUnique({ where: { organizationId: target.id }, select: { id: true } })
+      if (!configPropia && posicionDelCandado !== 'PRIMARY') throw primeroLaPrincipal(target.type)
       const cuenta = yaExiste?.id ?? CUENTA_NUEVA
       await exigirConfirmacionDePosiciones(prisma, {
         objetivo: objetivoDelCandado,
@@ -2035,6 +2043,8 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
         target.type === 'venue'
           ? await tx.venuePaymentConfig.findUnique({ where: { venueId: target.id } })
           : await tx.organizationPaymentConfig.findUnique({ where: { organizationId: target.id } })
+      // D10: la revisión previa ya lo pidió; aquí cubre la configuración que se borró en medio.
+      if (!existingConfig && posicionDelCandado !== 'PRIMARY') throw primeroLaPrincipal(target.type)
       positionChanges = await exigirConfirmacionDePosiciones(tx, {
         objetivo: objetivoDelCandado,
         // Sin configuración propia se crea una con sólo esta posición: las otras dejan de heredarse (Codex p12-r1 #3).
@@ -2051,15 +2061,8 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
             data: { [accountSlotField]: merchantAccountId },
           })
         }
-        // primaryAccountId is required for create — set to merchantAccountId if PRIMARY slot, otherwise need a primary
-        return tx.venuePaymentConfig.create({
-          data: {
-            venueId: target.id,
-            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
-            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
-            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
-          },
-        })
+        // Sin configuración propia sólo se llega aquí con la Principal (D10).
+        return tx.venuePaymentConfig.create({ data: { venueId: target.id, primaryAccountId: merchantAccountId } })
       }
       if (existingConfig) {
         return tx.organizationPaymentConfig.update({
@@ -2067,14 +2070,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           data: { [accountSlotField]: merchantAccountId },
         })
       }
-      return tx.organizationPaymentConfig.create({
-        data: {
-          organizationId: target.id,
-          primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
-          ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
-          ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
-        },
-      })
+      return tx.organizationPaymentConfig.create({ data: { organizationId: target.id, primaryAccountId: merchantAccountId } })
     })
 
     logger.info('[Full Setup] Step 5: Payment config saved', {
