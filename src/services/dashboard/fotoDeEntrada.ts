@@ -7,10 +7,12 @@
  *
  * Promesa y mapa de entradas: workspace `docs/audit/2026-11-15-foto-de-entrada-checador/promesa.md`.
  */
+import { randomUUID } from 'crypto'
+
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { PRIVATE_PREFIX, savePrivateFile, signPrivateFileUrl } from '../privateStorage.service'
+import { deletePrivateFile, PRIVATE_PREFIX, savePrivateFile, signPrivateFileUrl } from '../privateStorage.service'
 import { getStorageEnvPrefix } from '../storage.service'
 
 /**
@@ -56,18 +58,43 @@ function carpetaDeAsistencia(venueId: string): string {
 }
 
 /**
- * Guarda la selfie y devuelve su ruta privada. Si el almacén falla devuelve null: la entrada se registra igual (sin
- * foto, y Asistencia lo dice) — perder la checada de alguien por un tropiezo de Storage le cuesta su día de pago.
+ * Cuánto se espera al almacén. El POS se rinde a los 30 s de lectura: si la foto tardara más, la entrada se crearía
+ * después de que el empleado ya vio «Sin conexión» (Codex r2 #6). Pasado el plazo, la entrada sale sin foto.
+ */
+export const PLAZO_DE_LA_SELFIE_MS = 8_000
+
+/**
+ * Guarda la selfie y devuelve su ruta privada. Si el almacén falla o tarda más de [PLAZO_DE_LA_SELFIE_MS], devuelve null:
+ * la entrada se registra igual (sin foto, y Asistencia lo dice) — perder la checada de alguien por un tropiezo de Storage
+ * le cuesta su día de pago. Una subida que termina tarde se borra: nadie la apunta.
+ *
+ * El nombre lleva un id único: dos entradas en el mismo milisegundo tenían la misma ruta y la que perdía el candado
+ * borraba la foto de la que ganó (Codex r2 #3).
  */
 export async function guardarSelfieDeEntrada(params: { venueId: string; staffId: string; foto: Buffer }): Promise<string | null> {
+  const subida = savePrivateFile({
+    scope: `attendance/${params.venueId}/${params.staffId}`,
+    fileName: `entrada-${randomUUID()}.jpg`,
+    buffer: params.foto,
+    contentType: 'image/jpeg',
+  })
+  let reloj: NodeJS.Timeout | undefined
+  const plazo = new Promise<'plazo'>(resolve => {
+    reloj = setTimeout(() => resolve('plazo'), PLAZO_DE_LA_SELFIE_MS)
+  })
   try {
-    const { path } = await savePrivateFile({
-      scope: `attendance/${params.venueId}/${params.staffId}`,
-      fileName: 'entrada.jpg',
-      buffer: params.foto,
-      contentType: 'image/jpeg',
-    })
-    return path
+    const r = await Promise.race([subida, plazo])
+    if (r === 'plazo') {
+      logger.warn('[FOTO-ENTRADA] El almacén tardó más del plazo; la entrada se registra sin foto', {
+        venueId: params.venueId,
+        staffId: params.staffId,
+        plazoMs: PLAZO_DE_LA_SELFIE_MS,
+      })
+      // Si la subida termina después, nadie la apunta: se borra.
+      subida.then(({ path }) => deletePrivateFile(path)).catch(() => undefined)
+      return null
+    }
+    return r.path
   } catch (error) {
     logger.warn('[FOTO-ENTRADA] No se pudo guardar la selfie; la entrada se registra sin foto', {
       venueId: params.venueId,
@@ -75,6 +102,8 @@ export async function guardarSelfieDeEntrada(params: { venueId: string; staffId:
       error: error instanceof Error ? error.message : String(error),
     })
     return null
+  } finally {
+    if (reloj) clearTimeout(reloj)
   }
 }
 

@@ -10,7 +10,6 @@ import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.serv
 import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
-import { negocioPideFotoDeEntrada } from '@/services/dashboard/fotoDeEntrada'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -429,7 +428,6 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
           trackPromoterLocation: true,
           promoterLocationStartHour: true,
           promoterLocationEndHour: true,
-          requireClockInPhoto: true,
         },
       }),
       getVenuePlanInfo(terminal.venueId).catch((error): VenuePlanInfo | undefined => {
@@ -466,10 +464,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.
       requireAvoqadoServerForCardPayment: terminalTpvSettings.requireAvoqadoServerForCardPayment,
-      // Foto de entrada: la de cada terminal (Terminal.config) O la del negocio («Foto de Entrada» en Ajustes). Prendida en
-      // el negocio, todas las terminales la piden; apagada, cada terminal sigue como esté configurada (PlayTelecom intacto).
-      // requireClockOutPhoto sigue siendo sólo de la terminal.
-      requireClockInPhoto: terminalTpvSettings.requireClockInPhoto === true || venueSettings?.requireClockInPhoto === true,
+      // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config).
+      // 🔴 NO se le suma la «Foto de entrada» del negocio (VenueSettings.requireClockInPhoto, que manda en el POS): la TPV
+      // devuelve TODOS sus ajustes al guardar uno, y un valor heredado se pegaba a la terminal o la apagaba (Codex r1 #1 y
+      // r2 #1-#2, 15-nov). La terminal sigue con su propio ajuste, que se cambia en su configuración.
     }
 
     // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer
@@ -727,12 +725,6 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     } = existingConfig.settings || {}
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
     const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
-    // «Foto de Entrada» del negocio prendida: la terminal recibió `requireClockInPhoto: true` HEREDADO (getTerminalConfig
-    // lo suma) y lo devuelve aquí con todos sus ajustes. Si se guardara, quedaría pegado como suyo y seguiría pidiendo foto
-    // después de apagarla en el negocio (Codex r1 #1, 15-nov). Mientras el negocio la pida, la terminal no la cambia.
-    if (await negocioPideFotoDeEntrada(sessionVenueId)) {
-      newSettings.requireClockInPhoto = currentSettings.requireClockInPhoto
-    }
 
     // Step 4: Compute overrides (diff vs org defaults)
     const overrides = computeOverrides(newSettings, baseSettings)

@@ -1,14 +1,13 @@
 /**
- * Terminal TPV controller — «Foto de Entrada» del negocio llega a la TPV (encargo b0c1a1, 15-nov).
+ * La TPV NO hereda la «Foto de entrada» del negocio (encargo b0c1a1, 15-nov; Codex r1 #1 y r2 #1-#2).
  *
- * El interruptor del negocio (VenueSettings.requireClockInPhoto) se suma al de cada terminal (Terminal.config): prendido
- * en el negocio, toda terminal pide la selfie; apagado, cada terminal sigue como esté. Así la TPV publicada lo obedece sin
- * recompilarse y PlayTelecom (que lo prende por terminal) no cambia.
+ * VenueSettings.requireClockInPhoto manda en el POS (ANDROID, WINDOWS, iOS). La TPV devuelve TODOS sus ajustes al guardar
+ * uno, así que un valor heredado se le pegaba como propio o la apagaba; por eso sigue sólo con su ajuste por terminal.
  */
 import type { NextFunction, Request, Response } from 'express'
 
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getTerminalConfig, updateTpvSettings } from '@/controllers/tpv/terminal.tpv.controller'
+import { getTerminalConfig } from '@/controllers/tpv/terminal.tpv.controller'
 
 // Same mock set as terminal.tpv.planInfo.test.ts — isolate tpvSettings assembly.
 jest.mock('@/lib/providerDeviceCompatibility', () => ({
@@ -64,75 +63,29 @@ function makeRes(): Response & { __status: number; __body: any } {
 
 const makeReq = () => ({ params: { serialNumber } }) as unknown as Request
 
-async function fotoDeEntrada(): Promise<boolean> {
-  const res = makeRes()
-  const next = jest.fn() as NextFunction
-  await getTerminalConfig(makeReq(), res, next)
-  expect(next).not.toHaveBeenCalled()
-  expect(res.__status).toBe(200)
-  return res.__body.data.tpvSettings.requireClockInPhoto
-}
-
-describe('GET /tpv/terminals/:serialNumber/config — requireClockInPhoto', () => {
+describe('GET /tpv/terminals/:serialNumber/config — requireClockInPhoto es sólo de la terminal', () => {
   beforeEach(() => {
     prismaMock.terminal.findFirst.mockResolvedValue(paxTerminal)
     prismaMock.venueFeature.findMany.mockResolvedValue([])
     prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
   })
 
-  it('prendida en el negocio ⇒ la terminal la pide aunque su ajuste propio esté apagado', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ enableShifts: true, requireClockInPhoto: true })
-    expect(await fotoDeEntrada()).toBe(true)
-  })
-
-  it('regresión PlayTelecom: apagada en el negocio, la terminal que la tiene prendida sigue pidiéndola', async () => {
-    prismaMock.terminal.findFirst.mockResolvedValue({ ...paxTerminal, config: { settings: { requireClockInPhoto: true } } })
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ enableShifts: true, requireClockInPhoto: false })
-    expect(await fotoDeEntrada()).toBe(true)
-  })
-
-  it('regresión: apagada en los dos lados (o sin fila de ajustes) ⇒ no la pide', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ enableShifts: true, requireClockInPhoto: false })
-    expect(await fotoDeEntrada()).toBe(false)
-    prismaMock.venueSettings.findUnique.mockResolvedValue(null)
-    expect(await fotoDeEntrada()).toBe(false)
-  })
-})
-
-// Codex r1 #1: la TPV manda TODOS sus ajustes al guardar cualquiera; si el negocio la tenía prendida, el `true` que la
-// terminal recibió heredado no se puede quedar guardado como suyo (al apagarla en el negocio seguiría pidiendo foto).
-describe('PUT /tpv/terminals/:serialNumber/settings — la foto heredada del negocio no se pega a la terminal', () => {
-  const deviceTerminal = {
-    id: 'term-1',
-    config: { settings: { requireClockInPhoto: false } },
-    configOverrides: null as any,
-    venueId,
-    venue: { organizationId: null },
+  async function fotoDeEntrada(): Promise<boolean> {
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+    await getTerminalConfig(makeReq(), res, next)
+    expect(next).not.toHaveBeenCalled()
+    return res.__body.data.tpvSettings.requireClockInPhoto
   }
-  const makePutReq = (body: Record<string, any>) =>
-    ({ params: { serialNumber }, body, authContext: { userId: 'staff-1', venueId, role: 'MANAGER' } }) as unknown as Request
-  const guardado = () => (prismaMock.terminal.update.mock.calls[0][0] as any).data.config.settings
 
-  beforeEach(() => {
-    jest.clearAllMocks()
-    prismaMock.terminal.update.mockResolvedValue({})
-    prismaMock.terminal.findFirst.mockResolvedValue(deviceTerminal)
+  it('el interruptor del negocio prendido NO prende la foto en una terminal que la tiene apagada', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ enableShifts: true, requireClockInPhoto: true })
+    expect(await fotoDeEntrada()).toBe(false)
   })
 
-  it('negocio prendido: el `true` que devuelve la terminal no reemplaza su ajuste propio (apagado)', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ requireClockInPhoto: true })
-    const res = makeRes()
-    await updateTpvSettings(makePutReq({ showTipScreen: false, requireClockInPhoto: true }), res, jest.fn() as NextFunction)
-    expect(res.__status).toBe(200)
-    expect(guardado().requireClockInPhoto).toBe(false)
-    expect(guardado().showTipScreen).toBe(false)
-  })
-
-  it('regresión PlayTelecom: negocio apagado, la terminal sí puede cambiar su propia foto', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ requireClockInPhoto: false })
-    const res = makeRes()
-    await updateTpvSettings(makePutReq({ requireClockInPhoto: true }), res, jest.fn() as NextFunction)
-    expect(res.__status).toBe(200)
-    expect(guardado().requireClockInPhoto).toBe(true)
+  it('regresión PlayTelecom: la terminal que la tiene prendida la sigue pidiendo', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({ ...paxTerminal, config: { settings: { requireClockInPhoto: true } } })
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ enableShifts: true })
+    expect(await fotoDeEntrada()).toBe(true)
   })
 })

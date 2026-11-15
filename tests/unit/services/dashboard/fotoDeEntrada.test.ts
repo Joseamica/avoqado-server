@@ -4,11 +4,17 @@ jest.mock('@/services/privateStorage.service', () => ({
   PRIVATE_PREFIX: 'private',
   savePrivateFile: jest.fn(),
   signPrivateFileUrl: jest.fn(),
-  deletePrivateFile: jest.fn(),
+  deletePrivateFile: jest.fn().mockResolvedValue(undefined),
 }))
 
-import { savePrivateFile, signPrivateFileUrl } from '@/services/privateStorage.service'
-import { assertFotoNoPrivada, decodificarSelfie, fotoParaVer, guardarSelfieDeEntrada } from '@/services/dashboard/fotoDeEntrada'
+import { deletePrivateFile, savePrivateFile, signPrivateFileUrl } from '@/services/privateStorage.service'
+import {
+  assertFotoNoPrivada,
+  decodificarSelfie,
+  fotoParaVer,
+  guardarSelfieDeEntrada,
+  PLAZO_DE_LA_SELFIE_MS,
+} from '@/services/dashboard/fotoDeEntrada'
 
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200, 7)])
 
@@ -62,6 +68,31 @@ describe('guardarSelfieDeEntrada', () => {
     expect(savePrivateFile).toHaveBeenCalledWith(
       expect.objectContaining({ scope: 'attendance/v1/s1', contentType: 'image/jpeg', buffer: JPEG }),
     )
+  })
+
+  it('cada foto tiene nombre propio: dos entradas en el mismo milisegundo no comparten ruta (Codex r2 #3)', async () => {
+    ;(savePrivateFile as jest.Mock).mockResolvedValue({ path: 'x' })
+    await guardarSelfieDeEntrada({ venueId: 'v1', staffId: 's1', foto: JPEG })
+    await guardarSelfieDeEntrada({ venueId: 'v1', staffId: 's1', foto: JPEG })
+    const [a, b] = (savePrivateFile as jest.Mock).mock.calls.map(c => c[0].fileName)
+    expect(a).toMatch(/^entrada-[0-9a-f-]{36}\.jpg$/)
+    expect(a).not.toBe(b)
+  })
+
+  it('si el almacén tarda más del plazo: null a tiempo, y la subida tardía se borra (Codex r2 #6)', async () => {
+    jest.useFakeTimers()
+    try {
+      let terminar: (v: { path: string }) => void = () => undefined
+      ;(savePrivateFile as jest.Mock).mockReturnValue(new Promise(r => (terminar = r)))
+      const resultado = guardarSelfieDeEntrada({ venueId: 'v1', staffId: 's1', foto: JPEG })
+      await jest.advanceTimersByTimeAsync(PLAZO_DE_LA_SELFIE_MS)
+      await expect(resultado).resolves.toBeNull()
+      terminar({ path: 'private/dev/attendance/v1/s1/tarde.jpg' })
+      await jest.advanceTimersByTimeAsync(0)
+      expect(deletePrivateFile).toHaveBeenCalledWith('private/dev/attendance/v1/s1/tarde.jpg')
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('si el almacén falla, devuelve null (la entrada se registra igual, sin foto)', async () => {
