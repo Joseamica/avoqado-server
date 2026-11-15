@@ -6,6 +6,7 @@ import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
+import { leerModifierIds, revisarExtrasDeLaPieza, type ExtraCobrado, type ExtraDelVenue, type GrupoDeLaPieza } from './extrasDeLaPieza'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/guards'
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
@@ -22,6 +23,8 @@ export interface PromotionSelection {
   groupId: string
   optionId: string
   serviceCourse?: ServiceCourseSnapshot | null
+  /** Extras de ESA pieza (id repetido = más unidades). Ausente = como hoy, sin revisión; presente (aunque `[]`) = se revisa. */
+  modifierIds?: string[]
 }
 
 export interface ApplyPromotionParams {
@@ -206,6 +209,62 @@ async function applyPromotionInTransaction(
         selections: chosen.map(c => ({ ...c, chargedQuantity: c.quantity })),
       })
 
+  // Extras de cada pieza (modificadores del combo). SIEMPRE después de resolver los precios: si entraran al bruto, FIXED_TOTAL los
+  // volvería descuento. Sólo se consulta si alguna selección trae la llave `modifierIds`; nunca lanza (marca revisión).
+  const modifierIdsPorPieza = chosen.map((_, i) => {
+    const grupo = promotion.groups[i]
+    return leerModifierIds(selections.find(s => s.groupId === grupo.id)?.modifierIds)
+  })
+  const extrasPorPieza: Array<{ extras: ExtraCobrado[]; extrasCents: number }> = chosen.map(() => ({ extras: [], extrasCents: 0 }))
+  const problemasDeExtras: string[] = []
+  if (modifierIdsPorPieza.some(ids => ids !== undefined)) {
+    const productIds = [...new Set(chosen.filter((_, i) => modifierIdsPorPieza[i] !== undefined).map(c => c.productId))]
+    const todosLosIds = [...new Set(modifierIdsPorPieza.flatMap(ids => ids ?? []))]
+    const ligas = await tx.productModifierGroup.findMany({
+      where: { productId: { in: productIds }, group: { venueId, active: true } },
+      select: {
+        productId: true,
+        group: { select: { id: true, name: true, required: true, allowMultiple: true, minSelections: true, maxSelections: true } },
+      },
+    })
+    const modificadores = todosLosIds.length
+      ? await tx.modifier.findMany({
+          where: { id: { in: todosLosIds }, group: { venueId } },
+          select: { id: true, name: true, price: true, groupId: true },
+        })
+      : []
+    const extrasDelVenue = new Map<string, ExtraDelVenue>(
+      modificadores.map(m => [m.id, { id: m.id, name: m.name, priceCents: Math.round(Number(m.price) * 100), groupId: m.groupId }]),
+    )
+    const gruposPorProducto = new Map<string, GrupoDeLaPieza[]>()
+    for (const liga of ligas) {
+      const lista = gruposPorProducto.get(liga.productId) ?? []
+      lista.push(liga.group)
+      gruposPorProducto.set(liga.productId, lista)
+    }
+    chosen.forEach((pieza, i) => {
+      const revision = revisarExtrasDeLaPieza({
+        productName: denorm[i]?.productName ?? 'la pieza',
+        quantity: pieza.quantity,
+        modifierIds: modifierIdsPorPieza[i],
+        gruposDelProducto: gruposPorProducto.get(pieza.productId) ?? [],
+        extrasDelVenue,
+      })
+      extrasPorPieza[i] = { extras: revision.extras, extrasCents: revision.extrasCents }
+      problemasDeExtras.push(...revision.problemas)
+    })
+  }
+  const razones = [
+    ...(vigente
+      ? []
+      : [
+          archivada
+            ? 'La promoción ya estaba archivada al sincronizar la venta.'
+            : 'La promoción no estaba en vigencia al momento de la venta.',
+        ]),
+    ...problemasDeExtras,
+  ]
+
   const created = await tx.orderPromotion.create({
     data: {
       orderId,
@@ -216,42 +275,60 @@ async function applyPromotionInTransaction(
         type: promotion.type,
         pricingMode: promotion.pricingMode,
         priceCents: promotion.priceCents,
-        selections: chosen.map((selection, index) => ({ ...selection, ...selectedCourses[index] })),
+        selections: chosen.map((selection, index) => ({
+          ...selection,
+          ...selectedCourses[index],
+          ...(extrasPorPieza[index].extras.length ? { extras: extrasPorPieza[index].extras } : {}),
+        })),
       } as unknown as Prisma.InputJsonValue,
       grossCents: resolved.grossCents,
       discountCents: resolved.discountCents,
       netCents: resolved.netCents,
-      needsReview: !vigente,
-      reviewReason: vigente
-        ? null
-        : archivada
-          ? 'La promoción ya estaba archivada al sincronizar la venta.'
-          : 'La promoción no estaba en vigencia al momento de la venta.',
+      needsReview: razones.length > 0,
+      reviewReason: razones.length ? razones.join(' ') : null,
     },
   })
 
-  await tx.orderItem.createMany({
-    data: resolved.lines.map((line, i) => ({
-      orderId,
-      orderPromotionId: created.id,
-      productId: line.productId,
-      // Denormalizados (contrato Toast/Square del schema): sin esto, el
-      // recibo y el picker de reembolso muestran líneas sin nombre, y si el
-      // producto se borra la línea pierde su identidad.
-      productName: denorm[i]?.productName ?? null,
-      productSku: denorm[i]?.productSku ?? null,
-      categoryName: denorm[i]?.categoryName ?? null,
-      quantity: line.quantity,
-      unitPrice: line.unitPriceCents / 100,
-      discountAmount: line.discountCents / 100,
-      taxAmount: 0, // Las promociones NUNCA tocan el impuesto: el CFDI lo deriva del neto.
-      total: line.totalCents / 100,
-      course: selectedCourses[i].serviceCourse ? legacyCourseForSnapshot(selectedCourses[i].serviceCourse!) : null,
-      ...(selectedCourses[i].serviceCourse ? { serviceCourse: selectedCourses[i].serviceCourse as Prisma.InputJsonValue } : {}),
-      ...(options.sentToKitchenAt ? { sentToKitchenAt: options.sentToKitchenAt } : {}),
-      ...(options.componentExternalIdPrefix ? { externalId: `${options.componentExternalIdPrefix}:g:${selectedCourses[i].groupId}` } : {}),
-    })),
+  const filaDeLaLinea = (line: (typeof resolved.lines)[number], i: number) => ({
+    orderId,
+    orderPromotionId: created.id,
+    productId: line.productId,
+    // Denormalizados (contrato Toast/Square del schema): sin esto, el
+    // recibo y el picker de reembolso muestran líneas sin nombre, y si el
+    // producto se borra la línea pierde su identidad.
+    productName: denorm[i]?.productName ?? null,
+    productSku: denorm[i]?.productSku ?? null,
+    categoryName: denorm[i]?.categoryName ?? null,
+    quantity: line.quantity,
+    unitPrice: line.unitPriceCents / 100,
+    discountAmount: line.discountCents / 100,
+    taxAmount: 0, // Las promociones NUNCA tocan el impuesto: el CFDI lo deriva del neto.
+    total: line.totalCents / 100,
+    course: selectedCourses[i].serviceCourse ? legacyCourseForSnapshot(selectedCourses[i].serviceCourse!) : null,
+    ...(selectedCourses[i].serviceCourse ? { serviceCourse: selectedCourses[i].serviceCourse as Prisma.InputJsonValue } : {}),
+    ...(options.sentToKitchenAt ? { sentToKitchenAt: options.sentToKitchenAt } : {}),
+    ...(options.componentExternalIdPrefix ? { externalId: `${options.componentExternalIdPrefix}:g:${selectedCourses[i].groupId}` } : {}),
   })
+
+  // Sin extras: createMany como siempre. Con extras: un create por renglón (createMany no anida modificadores).
+  const sinExtras = resolved.lines.map((line, i) => ({ line, i })).filter(({ i }) => extrasPorPieza[i].extras.length === 0)
+  if (sinExtras.length > 0) {
+    await tx.orderItem.createMany({ data: sinExtras.map(({ line, i }) => filaDeLaLinea(line, i)) })
+  }
+  for (const [i, line] of resolved.lines.entries()) {
+    const { extras, extrasCents } = extrasPorPieza[i]
+    if (extras.length === 0) continue
+    await tx.orderItem.create({
+      data: {
+        ...filaDeLaLinea(line, i),
+        // total = lista×q − parte del combo + Σextras; discountAmount (la parte del combo) no cambia.
+        total: (line.totalCents + extrasCents) / 100,
+        modifiers: {
+          create: extras.map(e => ({ modifierId: e.modifierId, name: e.name, quantity: 1, price: e.priceCents / 100 })),
+        },
+      },
+    })
+  }
 
   // 🔴 El recálculo de totales cae o persiste JUNTO con las líneas: una
   // ronda de puras promociones sin esto ACKeaba con el total viejo.
