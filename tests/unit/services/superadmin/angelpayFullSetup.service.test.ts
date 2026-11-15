@@ -383,11 +383,19 @@ describe('fullSetupAngelPayMerchant — la tarifa del negocio no puede empezar e
     })
   })
 
-  it('«ahora» con el reloj del navegador unos segundos adelantado: pasa (tolerancia de reloj)', async () => {
-    const adelantado = new Date(Date.now() + 30 * 1000).toISOString()
+  it('«ahora» con el reloj del navegador unos segundos adelantado: pasa, y se guarda con «ahora» del servidor, no con la hora adelantada', async () => {
+    const adelantado = new Date(Date.now() + 30 * 1000)
 
-    const result = await fullSetupAngelPayMerchant(baseInput({ pricing: pricing(adelantado) } as Partial<FullSetupAngelPayInput>))
+    const result = await fullSetupAngelPayMerchant(
+      baseInput({ pricing: pricing(adelantado.toISOString()) } as Partial<FullSetupAngelPayInput>),
+    )
+    const despues = Date.now()
+
     expect(result.pricingStructureId).toBe('pricing-1')
+    const guardada: Date = mockedPricing.venuePricingStructure.create.mock.calls[0][0].data.effectiveFrom
+    // Un cobro de inmediato ya la encuentra (el lector pide effectiveFrom <= fecha del cobro).
+    expect(guardada.getTime()).toBeLessThanOrEqual(despues)
+    expect(guardada.getTime()).toBeLessThan(adelantado.getTime())
   })
 
   it('sin tarifa: el alta sigue igual (la validación no estorba)', async () => {

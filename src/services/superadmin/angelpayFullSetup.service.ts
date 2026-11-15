@@ -338,7 +338,9 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
               taxRate: input.pricing.taxRate,
               fixedFeePerTransaction: input.pricing.fixedFeePerTransaction ?? null,
               monthlyServiceFee: input.pricing.monthlyServiceFee ?? null,
-              effectiveFrom: new Date(input.pricing.effectiveFrom),
+              // Codex a02d12-r1: dentro de la tolerancia, la fecha del navegador adelantado se baja a «ahora» del servidor;
+              // guardada tal cual, los cobros de esos segundos tampoco encontraban tarifa.
+              effectiveFrom: new Date(Math.min(new Date(input.pricing.effectiveFrom).getTime(), Date.now())),
               active: true,
             },
           })
