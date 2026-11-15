@@ -13,6 +13,7 @@ import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada, decodificarSelfie, guardarSelfieDeEntrada, negocioPideFotoDeEntrada } from '../dashboard/fotoDeEntrada'
 import { deletePrivateFile } from '../privateStorage.service'
 import { conCandadoDeEntrada } from '../tpv/candadoDeEntrada'
+import { logAction } from '../dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -208,14 +209,34 @@ export async function clockIn(params: ClockInParams) {
 
   const staffId = staffVenue.staffId
 
-  // La foto se sube ANTES del candado: subirla tarda, y no se debe detener a nadie más mientras tanto. Si resulta que ya
-  // tenía entrada, se borra.
+  // Un reintento de quien ya tiene entrada no sube otra foto (Codex r4 #1). Es sólo un atajo: lo que manda es la revisión
+  // dentro del candado, más abajo.
+  if (selfie) {
+    const yaAdentro = await prisma.timeEntry.findFirst({
+      where: { staffId, venueId, status: { in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK] } },
+      select: { id: true },
+    })
+    if (yaAdentro) throw new BadRequestError('Ya tienes entrada registrada. Primero marca la salida.')
+  }
+
+  // La foto se sube ANTES del candado: subirla tarda, y no se debe detener a nadie más mientras tanto. Si la entrada no se
+  // registra, se borra.
   const rutaDeLaSelfie = selfie ? await guardarSelfieDeEntrada({ venueId, staffId, foto: selfie }) : null
 
   // Si la entrada no se registra (ya tenía una, o falla la base), la foto recién subida se borra: un dato personal sin
   // checada no se queda en la caja fuerte (Codex r3 #3).
   const borrarSelfie = () => {
-    if (rutaDeLaSelfie) void deletePrivateFile(rutaDeLaSelfie).catch(() => undefined)
+    if (!rutaDeLaSelfie) return
+    // Si el borrado falla, la ruta queda en la bitácora para limpiarla después: no se pierde en silencio (Codex r4 #1).
+    void deletePrivateFile(rutaDeLaSelfie).catch(error =>
+      logAction({
+        venueId,
+        staffId,
+        action: 'CLOCK_IN_PHOTO_ORPHANED',
+        entity: 'TimeEntry',
+        data: { path: rutaDeLaSelfie, error: error instanceof Error ? error.message : String(error) },
+      }),
+    )
   }
   const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
     // Check if already clocked in

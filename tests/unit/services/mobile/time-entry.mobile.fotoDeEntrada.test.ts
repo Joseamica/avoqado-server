@@ -7,6 +7,9 @@ jest.mock('@/services/privateStorage.service', () => ({
   deletePrivateFile: jest.fn().mockResolvedValue(undefined),
 }))
 
+const mockLogAction = jest.fn()
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
+
 import { prismaMock } from '@tests/__helpers__/setup'
 import { deletePrivateFile, savePrivateFile } from '@/services/privateStorage.service'
 import { clockIn, identifyByPin } from '@/services/mobile/time-entry.mobile.service'
@@ -60,11 +63,30 @@ describe('clockIn — la selfie del POS', () => {
     expect(savePrivateFile).not.toHaveBeenCalled()
   })
 
-  it('si ya tenía entrada (p. ej. un reintento), contesta lo de siempre y borra la foto que acaba de subir', async () => {
+  it('si ya tenía entrada (p. ej. un reintento), contesta lo de siempre SIN subir otra foto (Codex r4 #1)', async () => {
     prismaMock.timeEntry.findFirst.mockResolvedValue({ id: 'te-0', status: 'CLOCKED_IN' } as any)
+    await expect(clockIn({ venueId: 'venue-1', pin: '1234', checkInPhoto: JPEG.toString('base64') })).rejects.toThrow(/Ya tienes entrada/)
+    expect(savePrivateFile).not.toHaveBeenCalled()
+    expect(prismaMock.timeEntry.create).not.toHaveBeenCalled()
+  })
+
+  it('si la entrada aparece entre la subida y el candado, la foto recién subida se borra', async () => {
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce(null) // el atajo de antes de subir
+      .mockResolvedValue({ id: 'te-0', status: 'CLOCKED_IN' } as any) // ya dentro del candado
     await expect(clockIn({ venueId: 'venue-1', pin: '1234', checkInPhoto: JPEG.toString('base64') })).rejects.toThrow(/Ya tienes entrada/)
     expect(prismaMock.timeEntry.create).not.toHaveBeenCalled()
     expect(deletePrivateFile).toHaveBeenCalledWith(RUTA)
+  })
+
+  it('si el borrado falla, la ruta queda en la bitácora (CLOCK_IN_PHOTO_ORPHANED)', async () => {
+    ;(deletePrivateFile as jest.Mock).mockRejectedValueOnce(new Error('Storage caído'))
+    prismaMock.timeEntry.create.mockRejectedValue(new Error('base caída'))
+    await expect(clockIn({ venueId: 'venue-1', pin: '1234', checkInPhoto: JPEG.toString('base64') })).rejects.toThrow('base caída')
+    await new Promise(r => setImmediate(r))
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CLOCK_IN_PHOTO_ORPHANED', venueId: 'venue-1', data: expect.objectContaining({ path: RUTA }) }),
+    )
   })
 
   it('si el almacén falla, la entrada se registra sin foto', async () => {
