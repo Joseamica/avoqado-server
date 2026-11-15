@@ -119,12 +119,12 @@ export const lineOrderDiscountSql = (alias = 'oi'): string => aliveSql(alias, ra
  * its own discount, i.e. the giveaway is NOT also sitting on
  * `Order.discountAmount`. Keep the two in step — they answer the same question.
  *
- * A promotion line (`orderPromotionId IS NOT NULL`) is ALWAYS net of its own discount by contract (its discount lives
- * only on the line). Its `total` may also carry paid modifier extras (`list×q − share + extras`), so the
- * `total = lineBase` comparison would wrongly fail for a combo piece with extras and drop its discount.
+ * A combo piece (`orderPromotionId` set) may carry paid extras in its `total` (`list×q − share + extras`), so it is also
+ * net when `total = lineBase + modifiers`. A TPV cortesía on a combo piece (total 108, lineBase 0) stays NOT item-level:
+ * its discount is mirrored on the order header and must not be counted twice.
  */
 export const isItemLevelDiscountSql = (alias = 'oi'): string =>
-  `(${alias}."discountAmount" > 0 AND (${alias}."orderPromotionId" IS NOT NULL OR ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005))`
+  `(${alias}."discountAmount" > 0 AND (ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005 OR (${alias}."orderPromotionId" IS NOT NULL AND ABS(${alias}."total" - ${lineBaseSql(alias)} - ${lineModifiersSql(alias)}) < 0.005)))`
 
 interface LineLike {
   id?: string
@@ -197,12 +197,13 @@ export function lineOrderDiscount(item: Pick<LineLike, 'id'>, orderDiscounts?: A
  * modifiers on most rows, so including them here would misread a perfectly
  * normal discounted line as "already booked at order level".
  *
- * Exception: a promotion line (`orderPromotionId` set) is always net of its own discount, even when its `total`
- * also carries paid modifier extras (a combo piece), so it counts without the comparison.
+ * Exception: a combo piece (`orderPromotionId` set) whose `total` also carries paid modifier extras is net when
+ * `total = lineBase + modifiers`. A TPV cortesía on a combo piece is mirrored on the header, so it does NOT count.
  */
 export function isItemLevelDiscount(item: LineLike & { total: unknown }): boolean {
   const discount = Number(item.discountAmount ?? 0)
   if (discount <= 0) return false
-  if (item.orderPromotionId) return true
-  return Math.abs(Number(item.total ?? 0) - lineBase(item)) < 0.005
+  const diff = Number(item.total ?? 0) - lineBase(item)
+  if (Math.abs(diff) < 0.005) return true
+  return !!item.orderPromotionId && Math.abs(diff - lineModifiers(item)) < 0.005
 }

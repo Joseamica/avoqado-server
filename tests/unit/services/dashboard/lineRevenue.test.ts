@@ -177,9 +177,15 @@ describe('isItemLevelDiscount — only count a giveaway once', () => {
     expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50, orderPromotionId: 'p1' })).toBe(false)
   })
 
-  it('SQL twin: a promotion line skips the total comparison', () => {
+  it('does NOT count a combo piece with a TPV cortesía (mirrored on the header)', () => {
+    expect(
+      isItemLevelDiscount({ quantity: 1, unitPrice: 120, discountAmount: 120, total: 108, orderPromotionId: 'p1', modifiers: [] }),
+    ).toBe(false)
+  })
+
+  it('SQL twin: a promotion line also matches total = lineBase + modifiers', () => {
     const sql = isItemLevelDiscountSql('oi')
-    expect(sql).toContain('oi."orderPromotionId" IS NOT NULL OR ABS(')
+    expect(sql).toContain('oi."orderPromotionId" IS NOT NULL AND ABS(')
   })
 })
 
