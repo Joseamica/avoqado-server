@@ -451,6 +451,39 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   return updatedCategory
 }
 
+/** Cuántos nombres de producto enseña el rechazo de «Eliminar categoría»; el total va aparte. */
+const EJEMPLOS_EN_EL_RECHAZO = 5
+
+/** «No se puede eliminar «Postres»: todavía tiene 7 productos (2 pausados): A, B y 5 más. …» */
+export function rechazoConProductos(categoria: string, total: number, pausados: number, ejemplos: string[]): string {
+  const uno = total === 1
+  const cuantos = `${total} ${uno ? 'producto' : 'productos'}`
+  const nota =
+    pausados === 0
+      ? ''
+      : pausados === total
+        ? uno
+          ? ' (pausado)'
+          : ' (todos pausados)'
+        : ` (${pausados} ${pausados === 1 ? 'pausado' : 'pausados'})`
+  const resto = total - ejemplos.length
+  const lista = ejemplos.length > 0 ? `: ${ejemplos.join(', ')}${resto > 0 ? ` y ${resto} más` : ''}` : ''
+  const avisoPausados = pausados > 0 ? ' Los pausados también cuentan.' : ''
+  const accion = uno ? 'Muévelo a otra categoría o elimínalo' : 'Muévelos a otra categoría o elimínalos'
+  return `No se puede eliminar «${categoria}»: todavía tiene ${cuantos}${nota}${lista}.${avisoPausados} ${accion} y vuelve a intentarlo.`
+}
+
+/** «No se puede eliminar «Postres»: tiene 2 subcategorías: Pays, Helados. …» */
+export function rechazoConSubcategorias(categoria: string, subcategorias: string[]): string {
+  const uno = subcategorias.length === 1
+  const cuantas = uno ? '1 subcategoría' : `${subcategorias.length} subcategorías`
+  return `No se puede eliminar «${categoria}»: tiene ${cuantas}: ${subcategorias.join(', ')}. ${uno ? 'Elimínala' : 'Elimínalas'} primero y vuelve a intentarlo.`
+}
+
+function rechazoPorSubcategorias(categoria: string, subcategorias: string[]): BadRequestError {
+  return new BadRequestError(rechazoConSubcategorias(categoria, subcategorias), 'CATEGORY_HAS_SUBCATEGORIES', { subcategorias })
+}
+
 export async function deleteMenuCategory(venueId: string, categoryId: string): Promise<MenuCategory> {
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
@@ -463,12 +496,35 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
 
   // Plan 5 (D6, Ruling P5-R7): los productos ARCHIVADOS no cuentan — el dueño ya no los ve. Pero `Product.categoryId` es
   // RESTRICT: una categoría que sólo conserva archivados no se puede borrar de verdad; se APAGA, como en «Reemplazar menú».
+  // Encargo 08cc59 (15-nov): el rechazo dice POR QUÉ, en español (el panel lo enseña tal cual o lo arma con `code`/`details`):
+  // cuántos productos quedan, cuántos pausados —los pausados cuentan y el dueño no los ve en el menú— y cuáles.
   const productCount = await prisma.product.count({ where: { categoryId, deletedAt: null } })
   if (productCount > 0) {
-    throw new BadRequestError('Cannot delete category: it still contains products. Please move or delete them first.')
+    const [pausados, ejemplos] = await Promise.all([
+      prisma.product.count({ where: { categoryId, deletedAt: null, active: false } }),
+      prisma.product.findMany({
+        where: { categoryId, deletedAt: null },
+        select: { name: true },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: EJEMPLOS_EN_EL_RECHAZO,
+      }),
+    ])
+    const nombres = ejemplos.map(p => p.name)
+    throw new BadRequestError(rechazoConProductos(category.name, productCount, pausados, nombres), 'CATEGORY_HAS_PRODUCTS', {
+      productos: productCount,
+      pausados,
+      ejemplos: nombres,
+    })
   }
-  if (category.children && category.children.length > 0) {
-    throw new BadRequestError('Cannot delete category: it still has sub-categories. Please delete them first.')
+  // Cualquier subcategoría bloquea, como antes (una hija de OTRO negocio también, sin enseñar su nombre: el `parentId` se
+  // conecta por id). Codex r1-r2 (08cc59): dejar pasar las apagadas y vacías abría carreras con quien reactiva una hija,
+  // restaura un producto o reordena; se descartó. El caso «subcategoría ya eliminada que sigue apagada» queda anotado.
+  const hijos = category.children ?? []
+  if (hijos.length > 0) {
+    throw rechazoPorSubcategorias(
+      category.name,
+      hijos.map(h => (h.venueId === venueId ? h.name : 'una subcategoría de otro negocio')),
+    )
   }
   // Variantes (decisión 3a): `ProductGroup.categoryId` también es RESTRICT — una familia (aun archivada o deshecha) que la
   // referencia la conserva apagada, igual que un archivado.
