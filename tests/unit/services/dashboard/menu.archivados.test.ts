@@ -90,16 +90,20 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
    * `product.count` responde por su `where`, no por el orden de las llamadas: `jest.clearAllMocks()` no vacía las colas de
    * `mockResolvedValueOnce`, y una cola sobrante arrastraba a las pruebas siguientes. Un `where` distinto de los dos truena.
    */
-  const contar = (vigentes: number, todos: number) =>
+  const CUENTA_PAUSADOS = { where: { categoryId: 'c1', deletedAt: null, active: false } }
+  const contar = (vigentes: number, todos: number, pausados = 0) =>
     prismaMock.product.count.mockImplementation(async (arg: unknown) => {
       if (isDeepStrictEqual(arg, CUENTA_VIGENTES)) return vigentes
       if (isDeepStrictEqual(arg, CUENTA_TODOS)) return todos
+      if (isDeepStrictEqual(arg, CUENTA_PAUSADOS)) return pausados
       throw new Error(`product.count con un where inesperado: ${JSON.stringify(arg)}`)
     })
 
   beforeEach(() => {
     prismaMock.product.count.mockReset()
     prismaMock.menuCategory.findUnique.mockResolvedValue(categoria as never)
+    prismaMock.product.findMany.mockResolvedValue([] as never)
+    prismaMock.menuCategory.findMany.mockResolvedValue([] as never)
   })
 
   it('sólo archivados: se APAGA (no se borra, conserva su imagen) y responde con la categoría', async () => {
@@ -134,5 +138,105 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
     expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
     expect(prismaMock.menuCategoryAssignment.deleteMany).not.toHaveBeenCalled()
+  })
+
+  // Encargo 08cc59 (15-nov): el rechazo salía en inglés y el panel lo cerraba sin decir nada. Ahora dice POR QUÉ, en español,
+  // con cuántos productos quedan, cuántos están pausados (los pausados también cuentan) y cuáles, más un código para el panel.
+  describe('el rechazo dice por qué, en español', () => {
+    it('con productos: cuántos, cuántos pausados y cuáles (5 como ejemplo, sin tope de la base abierto)', async () => {
+      contar(7, 7, 2)
+      prismaMock.product.findMany.mockResolvedValue(['Brownie', 'Flan', 'Gelatina', 'Pay', 'Pastel'].map(name => ({ name })) as never)
+
+      const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
+
+      expect(error).toMatchObject({
+        statusCode: 400,
+        code: 'CATEGORY_HAS_PRODUCTS',
+        details: { productos: 7, pausados: 2, ejemplos: ['Brownie', 'Flan', 'Gelatina', 'Pay', 'Pastel'] },
+      })
+      expect(error.message).toBe(
+        'No se puede eliminar «Postres»: todavía tiene 7 productos (2 pausados): Brownie, Flan, Gelatina, Pay, Pastel y 2 más. ' +
+          'Los pausados también cuentan. Muévelos a otra categoría o elimínalos y vuelve a intentarlo.',
+      )
+      expect(prismaMock.product.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { categoryId: 'c1', deletedAt: null }, select: { name: true }, take: 5 }),
+      )
+    })
+
+    it('un solo producto, pausado: lo nombra y dice que está pausado', async () => {
+      contar(1, 1, 1)
+      prismaMock.product.findMany.mockResolvedValue([{ name: 'Flan' }] as never)
+
+      const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
+
+      expect(error.message).toBe(
+        'No se puede eliminar «Postres»: todavía tiene 1 producto (pausado): Flan. ' +
+          'Los pausados también cuentan. Muévelo a otra categoría o elimínalo y vuelve a intentarlo.',
+      )
+      expect(error.details).toEqual({ productos: 1, pausados: 1, ejemplos: ['Flan'] })
+    })
+
+    it('subcategoría ACTIVA o con productos: 400 que la nombra', async () => {
+      contar(0, 0)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({
+        ...categoria,
+        children: [
+          { id: 'h1', name: 'Pays', active: true },
+          { id: 'h2', name: 'Helados', active: false },
+          { id: 'h3', name: 'Vieja', active: false },
+        ],
+      } as never)
+      // `Helados` está apagada pero aún tiene productos vigentes; `Vieja` está apagada y vacía (no bloquea).
+      prismaMock.product.findMany.mockResolvedValue([{ categoryId: 'h2' }] as never)
+      prismaMock.menuCategory.findMany.mockResolvedValue([] as never)
+
+      const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
+
+      expect(error).toMatchObject({ statusCode: 400, code: 'CATEGORY_HAS_SUBCATEGORIES', details: { subcategorias: ['Pays', 'Helados'] } })
+      expect(error.message).toBe(
+        'No se puede eliminar «Postres»: tiene 2 subcategorías activas o con productos: Pays, Helados. Elimínalas primero y vuelve a intentarlo.',
+      )
+      expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
+      expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
+    })
+
+    it('una subcategoría apagada que todavía tiene subcategorías debajo también bloquea', async () => {
+      contar(0, 0)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({ ...categoria, children: [{ id: 'h1', name: 'Pays', active: false }] } as never)
+      prismaMock.product.findMany.mockResolvedValue([] as never)
+      prismaMock.menuCategory.findMany.mockResolvedValue([{ parentId: 'h1' }] as never)
+
+      await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({
+        code: 'CATEGORY_HAS_SUBCATEGORIES',
+        details: { subcategorias: ['Pays'] },
+      })
+    })
+
+    it('sólo subcategorías apagadas y vacías (lo que deja «eliminar» con archivados): ya no bloquea para siempre, se APAGA', async () => {
+      contar(0, 0)
+      prismaMock.productGroup.count.mockResolvedValue(0 as never)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({
+        ...categoria,
+        children: [{ id: 'h1', name: 'Vieja', active: false }],
+      } as never)
+      prismaMock.product.findMany.mockResolvedValue([] as never)
+      prismaMock.menuCategory.findMany.mockResolvedValue([] as never)
+      prismaMock.menuCategory.update.mockResolvedValue({ ...categoria, active: false } as never)
+
+      await expect(menuService.deleteMenuCategory(V, 'c1')).resolves.toMatchObject({ id: 'c1', active: false })
+
+      // No se borra de verdad: la llave del padre es SET NULL y la subcategoría «eliminada» saldría suelta en la lista.
+      expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
+      expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { active: false } })
+      expect(prismaMock.menuCategoryAssignment.deleteMany).toHaveBeenCalledWith({ where: { categoryId: 'c1' } })
+      expect(deleteFileFromStorage).not.toHaveBeenCalled()
+      // Las dos lecturas de los hijos van con tope y dentro del negocio.
+      expect(prismaMock.product.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { categoryId: { in: ['h1'] }, deletedAt: null }, take: 1 }),
+      )
+      expect(prismaMock.menuCategory.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: V, parentId: { in: ['h1'] } }, take: 1 }),
+      )
+    })
   })
 })

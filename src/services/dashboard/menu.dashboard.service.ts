@@ -451,6 +451,35 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   return updatedCategory
 }
 
+/** Cuántos nombres de producto enseña el rechazo de «Eliminar categoría»; el total va aparte. */
+const EJEMPLOS_EN_EL_RECHAZO = 5
+
+/** «No se puede eliminar «Postres»: todavía tiene 7 productos (2 pausados): A, B y 5 más. …» */
+export function rechazoConProductos(categoria: string, total: number, pausados: number, ejemplos: string[]): string {
+  const uno = total === 1
+  const cuantos = `${total} ${uno ? 'producto' : 'productos'}`
+  const nota =
+    pausados === 0
+      ? ''
+      : pausados === total
+        ? uno
+          ? ' (pausado)'
+          : ' (todos pausados)'
+        : ` (${pausados} ${pausados === 1 ? 'pausado' : 'pausados'})`
+  const resto = total - ejemplos.length
+  const lista = ejemplos.length > 0 ? `: ${ejemplos.join(', ')}${resto > 0 ? ` y ${resto} más` : ''}` : ''
+  const avisoPausados = pausados > 0 ? ' Los pausados también cuentan.' : ''
+  const accion = uno ? 'Muévelo a otra categoría o elimínalo' : 'Muévelos a otra categoría o elimínalos'
+  return `No se puede eliminar «${categoria}»: todavía tiene ${cuantos}${nota}${lista}.${avisoPausados} ${accion} y vuelve a intentarlo.`
+}
+
+/** «No se puede eliminar «Postres»: tiene 2 subcategorías activas o con productos: Pays, Helados. …» */
+export function rechazoConSubcategorias(categoria: string, subcategorias: string[]): string {
+  const uno = subcategorias.length === 1
+  const cuantas = uno ? '1 subcategoría activa o con productos' : `${subcategorias.length} subcategorías activas o con productos`
+  return `No se puede eliminar «${categoria}»: tiene ${cuantas}: ${subcategorias.join(', ')}. ${uno ? 'Elimínala' : 'Elimínalas'} primero y vuelve a intentarlo.`
+}
+
 export async function deleteMenuCategory(venueId: string, categoryId: string): Promise<MenuCategory> {
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
@@ -463,17 +492,63 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
 
   // Plan 5 (D6, Ruling P5-R7): los productos ARCHIVADOS no cuentan — el dueño ya no los ve. Pero `Product.categoryId` es
   // RESTRICT: una categoría que sólo conserva archivados no se puede borrar de verdad; se APAGA, como en «Reemplazar menú».
+  // Encargo 08cc59 (15-nov): el rechazo dice POR QUÉ, en español (el panel lo enseña tal cual o lo arma con `code`/`details`):
+  // cuántos productos quedan, cuántos pausados —los pausados cuentan y el dueño no los ve en el menú— y cuáles.
   const productCount = await prisma.product.count({ where: { categoryId, deletedAt: null } })
   if (productCount > 0) {
-    throw new BadRequestError('Cannot delete category: it still contains products. Please move or delete them first.')
+    const [pausados, ejemplos] = await Promise.all([
+      prisma.product.count({ where: { categoryId, deletedAt: null, active: false } }),
+      prisma.product.findMany({
+        where: { categoryId, deletedAt: null },
+        select: { name: true },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: EJEMPLOS_EN_EL_RECHAZO,
+      }),
+    ])
+    const nombres = ejemplos.map(p => p.name)
+    throw new BadRequestError(rechazoConProductos(category.name, productCount, pausados, nombres), 'CATEGORY_HAS_PRODUCTS', {
+      productos: productCount,
+      pausados,
+      ejemplos: nombres,
+    })
   }
-  if (category.children && category.children.length > 0) {
-    throw new BadRequestError('Cannot delete category: it still has sub-categories. Please delete them first.')
+  // Una subcategoría APAGADA y VACÍA es lo que deja «eliminar» una subcategoría que conservaba archivados: el dueño ya la
+  // eliminó y no tiene cómo volver a hacerlo (sigue existiendo, apagada). Antes bloqueaba al padre para siempre. Ahora sólo
+  // bloquean las que siguen vivas (activas, con productos vigentes o con subcategorías debajo); si las demás no bloquean, el
+  // padre se APAGA en vez de borrarse: la llave `parentId` es SET NULL y borrarlo soltaría a esas subcategorías en la lista.
+  const hijos = category.children ?? []
+  let conHijosResiduales = false
+  if (hijos.length > 0) {
+    const ids = hijos.map(h => h.id)
+    const [hijosConProductos, hijosConHijos] = await Promise.all([
+      prisma.product.findMany({
+        where: { categoryId: { in: ids }, deletedAt: null },
+        select: { categoryId: true },
+        distinct: ['categoryId'],
+        take: ids.length,
+      }),
+      prisma.menuCategory.findMany({
+        where: { venueId, parentId: { in: ids } },
+        select: { parentId: true },
+        distinct: ['parentId'],
+        take: ids.length,
+      }),
+    ])
+    const ocupados = new Set<string | null>([...hijosConProductos.map(p => p.categoryId), ...hijosConHijos.map(h => h.parentId)])
+    const queBloquean = hijos.filter(h => h.active || ocupados.has(h.id)).map(h => h.name)
+    if (queBloquean.length > 0) {
+      throw new BadRequestError(rechazoConSubcategorias(category.name, queBloquean), 'CATEGORY_HAS_SUBCATEGORIES', {
+        subcategorias: queBloquean,
+      })
+    }
+    conHijosResiduales = true
   }
   // Variantes (decisión 3a): `ProductGroup.categoryId` también es RESTRICT — una familia (aun archivada o deshecha) que la
   // referencia la conserva apagada, igual que un archivado.
   const conArchivados =
-    (await prisma.product.count({ where: { categoryId } })) > 0 || (await prisma.productGroup.count({ where: { categoryId } })) > 0
+    conHijosResiduales ||
+    (await prisma.product.count({ where: { categoryId } })) > 0 ||
+    (await prisma.productGroup.count({ where: { categoryId } })) > 0
 
   // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta).
   // Sólo un archivo de la carpeta de ESTE negocio: la URL la escribe quien edita y puede ser de otro (Codex r10 de demos).
