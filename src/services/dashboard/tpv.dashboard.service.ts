@@ -2,7 +2,13 @@ import logger from '@/config/logger'
 import { DeviceFormFactor, FulfillmentMode, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
-import { countUpdatedTerminals, lockTerminalRow, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
+import {
+  bloquearOrdenesAntesDeBorrarTerminal,
+  countUpdatedTerminals,
+  lockTerminalRow,
+  scopedTerminalWhere,
+  writeScopedTerminal,
+} from '../shared/terminalScopedWrites'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
@@ -246,7 +252,9 @@ export async function getTpvById(
   tpvId: string,
 ): Promise<
   DeviceManagementDto<
-    Terminal & { fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null }
+    Terminal & {
+      fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null
+    }
   > &
     ExtrasDeLaFicha
 > {
@@ -556,7 +564,12 @@ export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
   // 4. Eliminar la terminal, acotada al venue con el que se leyó: si se mudó a otro negocio entre la lectura y el
   //    borrado, el negocio anterior ya no puede borrarla (auditoría de Codex, 4ª ronda, 2026-09-17).
   await writeScopedTerminal(
-    () => prisma.terminal.delete({ where: scopedTerminalWhere(tpvId, { venueId }) }),
+    // b771c2: las órdenes antes que la terminal (ver `bloquearOrdenesAntesDeBorrarTerminal`).
+    () =>
+      prisma.$transaction(async tx => {
+        await bloquearOrdenesAntesDeBorrarTerminal(tx, { terminalId: tpvId })
+        return tx.terminal.delete({ where: scopedTerminalWhere(tpvId, { venueId }) })
+      }),
     `Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`,
   )
 

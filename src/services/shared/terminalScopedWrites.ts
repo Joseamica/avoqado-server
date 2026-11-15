@@ -48,6 +48,28 @@ export async function lockTerminalRow(tx: Prisma.TransactionClient, terminalId: 
 }
 
 /**
+ * 🔴 Borrar una terminal borra EN CASCADA sus órdenes (`TpvCommandQueue`, FK `ON DELETE CASCADE`). El orden de candados de
+ * la terminal es orden → configuración → terminal (cancelar y descartar una mudanza, el permiso de ejecución del protocolo
+ * 2; b771c2, 15-nov-2026). Un borrado que tomara la terminal y después, por la cascada, sus órdenes se trancaría con un
+ * descarte que ya tiene las órdenes y espera la terminal (Codex r1 de b771c2). Por eso quien borra terminales bloquea antes
+ * sus órdenes, todas y por id, dentro de la misma transacción del borrado.
+ */
+export async function bloquearOrdenesAntesDeBorrarTerminal(
+  tx: Prisma.TransactionClient,
+  where: { terminalId: string } | { venueId: string },
+): Promise<void> {
+  if ('terminalId' in where) {
+    await tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE "terminalId" = ${where.terminalId} ORDER BY id FOR UPDATE`
+  } else {
+    await tx.$queryRaw`
+      SELECT q.id FROM "TpvCommandQueue" q
+      WHERE q."terminalId" IN (SELECT t.id FROM "Terminal" t WHERE t."venueId" = ${where.venueId})
+      ORDER BY q.id FOR UPDATE OF q
+    `
+  }
+}
+
+/**
  * Ejecuta una escritura acotada (`update` o `delete` con `scopedTerminalWhere`). Si la base no encuentra la terminal
  * en ese negocio (P2025), eso es «esta terminal ya no es tuya»: un 404, no un error del servidor.
  */

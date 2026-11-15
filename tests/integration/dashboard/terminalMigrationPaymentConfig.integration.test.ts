@@ -18,6 +18,7 @@ import { Prisma, TpvCommandStatus } from '@prisma/client'
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { migrateCancel, migrateDiscard } from '@/services/dashboard/terminal-migration.service'
+import { deleteTerminal } from '@/services/dashboard/terminals.superadmin.service'
 import prisma from '@/utils/prismaClient'
 
 import { esperarBloqueado, retener } from '../customer-display/barrera'
@@ -275,5 +276,20 @@ describe('descartar una mudanza y la configuración que creó (Postgres real)', 
     await alta.transaccion
     await expect(descarte).resolves.toMatchObject({ discarded: 1, restoredVenueId: venueA })
     expect(await laConfig()).toEqual({ primaryAccountId: mOtra })
+  })
+
+  it('10. 🔴 Codex r1: eliminar la terminal ya no se tranca con un descarte que ya tiene sus órdenes', async () => {
+    const M = await ordenParaDescartar()
+    // Descartar: las órdenes primero …
+    const descarte = await retener(tx => tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE id = ${M} FOR UPDATE`)
+    const borrado = deleteTerminal(terminalId)
+    expect(await esperarBloqueado(descarte.pid, borrado)).toBe('bloqueada')
+    // … luego la terminal. Si el borrado tomara la terminal antes que las órdenes que borra en cascada: `deadlock detected`.
+    descarte.soltar(async tx => {
+      await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`
+    })
+    await descarte.transaccion
+    await expect(borrado).resolves.toEqual({ success: true })
+    expect(await prisma.terminal.findUnique({ where: { id: terminalId }, select: { id: true } })).toBeNull()
   })
 })

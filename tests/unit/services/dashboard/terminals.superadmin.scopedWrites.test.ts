@@ -17,8 +17,11 @@ import { generateActivationCode as generateActivationCodeUtil } from '@/services
 import { deleteTerminal, generateActivationCodeForTerminal, updateTerminal } from '@/services/dashboard/terminals.superadmin.service'
 
 jest.mock('@/utils/prismaClient', () => {
+  // b771c2: borrar va en una transacción que bloquea antes las órdenes de la terminal; `delete` es el mismo mock dentro y fuera.
+  const borrar = jest.fn()
   const tx = {
-    terminal: { update: jest.fn() },
+    terminal: { update: jest.fn(), delete: borrar },
+    $queryRaw: jest.fn().mockResolvedValue([]),
   }
   return {
     __esModule: true,
@@ -26,7 +29,7 @@ jest.mock('@/utils/prismaClient', () => {
       terminal: {
         findUnique: jest.fn(),
         update: jest.fn(),
-        delete: jest.fn(),
+        delete: borrar,
       },
       merchantAccount: {
         findMany: jest.fn(),
@@ -57,7 +60,7 @@ const mockedPrisma = prisma as unknown as {
   terminal: { findUnique: jest.Mock; update: jest.Mock; delete: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
   $transaction: jest.Mock
-  __tx: { terminal: { update: jest.Mock } }
+  __tx: { terminal: { update: jest.Mock; delete: jest.Mock }; $queryRaw: jest.Mock }
 }
 
 const orgScope = { organizationId: 'org-1' }
@@ -146,6 +149,18 @@ describe('deleteTerminal con el ámbito de la organización', () => {
     await deleteTerminal('term-1')
 
     expect(mockedPrisma.terminal.delete).toHaveBeenCalledWith({ where: { id: 'term-1' } })
+  })
+
+  it('b771c2: bloquea las órdenes de la terminal ANTES de borrarla (orden → terminal), en la misma transacción', async () => {
+    await deleteTerminal('term-1')
+
+    const candado = mockedPrisma.__tx.$queryRaw
+    expect(candado).toHaveBeenCalledTimes(1)
+    const [sql, terminalId] = candado.mock.calls[0]
+    expect(sql.join('?')).toContain('"TpvCommandQueue"')
+    expect(sql.join('?')).toContain('ORDER BY id FOR UPDATE')
+    expect(terminalId).toBe('term-1')
+    expect(candado.mock.invocationCallOrder[0]).toBeLessThan(mockedPrisma.terminal.delete.mock.invocationCallOrder[0])
   })
 })
 

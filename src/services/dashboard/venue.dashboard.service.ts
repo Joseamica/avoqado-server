@@ -60,6 +60,7 @@ import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
+import { bloquearOrdenesAntesDeBorrarTerminal } from '../shared/terminalScopedWrites'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -650,7 +651,8 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       })
       logger.info(`  ✓ Deleted ${deletedVenueSettings.count} VenueSettings`)
 
-      // 14. Delete Terminals
+      // 14. Delete Terminals — b771c2: sus órdenes antes que ellas (ver `bloquearOrdenesAntesDeBorrarTerminal`).
+      await bloquearOrdenesAntesDeBorrarTerminal(tx, { venueId })
       const deletedTerminals = await tx.terminal.deleteMany({
         where: { venueId },
       })

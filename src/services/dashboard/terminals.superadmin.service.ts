@@ -17,7 +17,12 @@ import { logAction } from './activity-log.service'
 import { normalizeTerminalSerialNumber, terminalIdentityKey } from '../../utils/terminalSerial'
 import { predicadoDeBloqueo } from '../terminal-payment.service'
 import { getVenuesEstrictos } from '../terminal-payment-strictness'
-import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
+import {
+  type TerminalWriteScope,
+  bloquearOrdenesAntesDeBorrarTerminal,
+  scopedTerminalWhere,
+  writeScopedTerminal,
+} from '../shared/terminalScopedWrites'
 import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
@@ -913,7 +918,15 @@ export async function deleteTerminal(terminalId: string, actor?: TerminalActor, 
   }
 
   // Acotado a la organización cuando llama su dashboard: si la terminal pasó a otra en medio, 404 (ver `updateTerminal`).
-  await writeScopedTerminal(() => prisma.terminal.delete({ where: scopedTerminalWhere(terminalId, scope) }), 'Terminal not found')
+  // b771c2: las órdenes antes que la terminal (ver `bloquearOrdenesAntesDeBorrarTerminal`).
+  await writeScopedTerminal(
+    () =>
+      prisma.$transaction(async tx => {
+        await bloquearOrdenesAntesDeBorrarTerminal(tx, { terminalId })
+        return tx.terminal.delete({ where: scopedTerminalWhere(terminalId, scope) })
+      }),
+    'Terminal not found',
+  )
 
   logger.info(`Terminal ${terminalId} deleted successfully`)
 
