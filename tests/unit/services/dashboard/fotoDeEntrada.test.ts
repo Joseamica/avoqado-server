@@ -28,8 +28,10 @@ describe('decodificarSelfie', () => {
     expect(() => decodificarSelfie('hola')).toThrow(/foto/i)
   })
 
-  it('rechaza una foto de más de 2 MB y lo que no es texto', () => {
-    const grande = Buffer.concat([JPEG, Buffer.alloc(2 * 1024 * 1024)])
+  it('rechaza una foto de más de 600 KB (no cabría en el cuerpo de 1 MB) y lo que no es texto', () => {
+    const grande = Buffer.concat([JPEG, Buffer.alloc(600 * 1024)])
+    // Lo que sí cabe: 600 KB en base64 + el resto del cuerpo queda bajo 1 MB.
+    expect(Math.ceil((600 * 1024 * 4) / 3) + 200).toBeLessThan(1024 * 1024)
     expect(() => decodificarSelfie(grande.toString('base64'))).toThrow(/grande/i)
     expect(() => decodificarSelfie({ a: 1 } as unknown as string)).toThrow(/foto/i)
   })

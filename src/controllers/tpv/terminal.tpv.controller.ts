@@ -10,6 +10,7 @@ import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.serv
 import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
+import { negocioPideFotoDeEntrada } from '@/services/dashboard/fotoDeEntrada'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -726,6 +727,12 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     } = existingConfig.settings || {}
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
     const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
+    // «Foto de Entrada» del negocio prendida: la terminal recibió `requireClockInPhoto: true` HEREDADO (getTerminalConfig
+    // lo suma) y lo devuelve aquí con todos sus ajustes. Si se guardara, quedaría pegado como suyo y seguiría pidiendo foto
+    // después de apagarla en el negocio (Codex r1 #1, 15-nov). Mientras el negocio la pida, la terminal no la cambia.
+    if (await negocioPideFotoDeEntrada(sessionVenueId)) {
+      newSettings.requireClockInPhoto = currentSettings.requireClockInPhoto
+    }
 
     // Step 4: Compute overrides (diff vs org defaults)
     const overrides = computeOverrides(newSettings, baseSettings)

@@ -13,8 +13,12 @@ import prisma from '../../utils/prismaClient'
 import { PRIVATE_PREFIX, savePrivateFile, signPrivateFileUrl } from '../privateStorage.service'
 import { getStorageEnvPrefix } from '../storage.service'
 
-/** Tope de la foto ya decodificada. La app manda ~100 KB (720 px, JPEG 80); 2 MB deja aire sin abrir la puerta. */
-export const MAX_SELFIE_BYTES = 2 * 1024 * 1024
+/**
+ * Tope de la foto ya decodificada. La app manda ~100 KB (720 px, JPEG 80). En base64 pesa 4/3: 600 KB ≈ 800 KB de JSON,
+ * dentro del límite de cuerpo del servidor (`BODY_JSON_LIMIT`, 1 MB por default). Con 2 MB el cuerpo se rechazaba con
+ * 413 antes de llegar aquí (Codex r1 #3).
+ */
+export const MAX_SELFIE_BYTES = 600 * 1024
 const MINUTOS_DE_FIRMA = 10
 
 /** ¿El negocio prendió «Foto de Entrada»? Sin fila de ajustes = apagado (es el default de la columna). */

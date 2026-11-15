@@ -98,3 +98,20 @@ describe('clockIn — la selfie del POS', () => {
     expect((prismaMock.timeEntry.create.mock.calls[0][0] as any).data.checkInPhotoUrl).toBe('https://firebasestorage.googleapis.com/a.jpg')
   })
 })
+
+describe('clockIn — un solo «¿ya tiene entrada? → crearla» a la vez por persona (Codex r1 #4)', () => {
+  it('toma el candado de la persona ANTES de revisar y crear, dentro de la misma transacción', async () => {
+    const orden: string[] = []
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async () => (orden.push('candado'), [{}]))
+    prismaMock.timeEntry.findFirst.mockImplementation((async () => (orden.push('revisa'), null)) as any)
+    prismaMock.timeEntry.create.mockImplementation((async (a: any) => (orden.push('crea'), { id: 'te-1', ...a.data })) as any)
+
+    await clockIn({ venueId: 'venue-1', pin: '1234' })
+
+    expect(orden).toEqual(['candado', 'revisa', 'crea'])
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
+    expect(sql[0].join('?')).toContain('pg_advisory_xact_lock')
+    expect(sql[1]).toBe('time-entry-clock-in:venue-1:staff-1')
+  })
+})
