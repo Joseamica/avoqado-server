@@ -225,3 +225,72 @@ describe('D4: % o fijo con «Requiere aprobación» pide tpv-orders:discount', (
     })
   })
 })
+
+// Encargo 1afe04 (founder «A», 15-nov): el «Ajuste de precio» (`items[].adjustedUnitPrice`, D12) pide lo mismo que un descuento con
+// aprobación. Bajar un precio a mano ya no lo hace cualquiera con el POS.
+describe('Ajuste de precio pide tpv-orders:discount', () => {
+  const conAjuste = (extra: Record<string, unknown> = {}) =>
+    request({ items: [{ productId: 'p1', quantity: 1, adjustedUnitPrice: 8000 }], ...extra })
+
+  it('un renglón con ajuste: pide el permiso SIN consultar descuentos y acredita el request', async () => {
+    const req = conAjuste()
+    const { next } = await run(req)
+    expect(findDiscount).not.toHaveBeenCalled()
+    expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
+    expect(next).toHaveBeenCalledWith()
+    expect(aprobacionDelDescuento(req)).toEqual({})
+  })
+
+  it('con el PIN del encargado: queda como aprobador', async () => {
+    mockPinConsumido = 'sv-encargado'
+    const req = conAjuste()
+    await run(req)
+    expect(aprobacionDelDescuento(req)).toEqual({ porPin: 'sv-encargado' })
+  })
+
+  it('sin el permiso: 403 overridable, no sigue', async () => {
+    mockPermissionResult = 'denied'
+    const req = conAjuste()
+    const { res, next } = await run(req)
+    expect(res.statusCode).toBe(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ overridable: true }))
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('el ajuste de un renglón de cortesía no cuenta (el servicio lo ignora): no pide nada', async () => {
+    const req = request({ items: [{ productId: 'p1', isCortesia: true, cortesiaReason: 'x', adjustedUnitPrice: 8000 }] })
+    const { next } = await run(req)
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  it.each([[0], [-5], [null], ['8000'], [Number.NaN]])('un ajuste inválido (%p) no cuenta: no pide nada', async valor => {
+    const { next } = await run(request({ items: [{ productId: 'p1', adjustedUnitPrice: valor }] }))
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  it('la venta ya existe con esa llave: no pide nada', async () => {
+    findOrder.mockResolvedValue({ id: 'order-1' })
+    mockPermissionResult = 'denied'
+    const { next } = await run(conAjuste({ externalId: 'venta-1' }))
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  it('venta de la cola sin el permiso: entra (no 403), sin acreditar', async () => {
+    mockPermissionResult = 'denied'
+    const req = conAjuste({ isOfflineReplay: true })
+    const { res, next } = await run(req)
+    expect(res.status).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+    expect(aprobacionDelDescuento(req)).toBeUndefined()
+  })
+
+  it('venta de la cola con el permiso propio: queda aprobada', async () => {
+    permisoPropio.mockResolvedValue(true)
+    const req = conAjuste({ isOfflineReplay: true })
+    await run(req)
+    expect(aprobacionDelDescuento(req)).toEqual({})
+  })
+})

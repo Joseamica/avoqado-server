@@ -234,6 +234,15 @@ export function aprobacionDelDescuento(req: Request): { porPin?: string } | unde
 const idValido = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 64
 
 /**
+ * Encargo 1afe04 (founder «A», 15-nov, como Toast): el «Ajuste de precio» (D12, `items[].adjustedUnitPrice`) baja el precio a mano;
+ * lo aplica quien tiene `tpv-orders:discount` o un encargado con su PIN, igual que un descuento con «Requiere aprobación». Cuenta
+ * lo mismo que `buildOrderItemsData` podría honrar: un entero ≥ 1 centavo en un renglón que no es cortesía. Si al final el servicio
+ * no lo honra (no baja el precio que decidió), el PIN se pidió de más: nunca de menos (ahí el servicio falla cerrado).
+ */
+export const traeAjusteDePrecio = (items: any[]): boolean =>
+  items.some(item => item?.isCortesia !== true && Number.isSafeInteger(item?.adjustedUnitPrice) && (item.adjustedUnitPrice as number) >= 1)
+
+/**
  * D4 (founder «B», 12-nov): un % o fijo de catálogo con «Requiere aprobación» lo aplica quien tiene `tpv-orders:discount` (de
  * fábrica gerente, administrador y dueño); a quien no, se lo autoriza un superior con su PIN, sin cambiar de sesión. Va por
  * `checkPermission`: consume `X-Permission-Override` o contesta el 403 canónico (con `overridable` si el negocio tiene el PIN).
@@ -257,16 +266,20 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
       ),
     ]
     const cupon = traeCuponEnLinea(body) ? (body.couponCode as string).trim().toUpperCase() : null
-    if (!venueId || (ids.length === 0 && !cupon)) return next()
-    const pideAprobacion = await prisma.discount.findFirst({
-      where: {
-        venueId,
-        requiresApproval: true,
-        type: { not: DiscountType.COMP },
-        OR: [...(ids.length > 0 ? [{ id: { in: ids } }] : []), ...(cupon ? [{ couponCodes: { some: { code: cupon } } }] : [])],
-      },
-      select: { id: true },
-    })
+    const ajuste = traeAjusteDePrecio(items)
+    if (!venueId || (ids.length === 0 && !cupon && !ajuste)) return next()
+    // Encargo 1afe04: un «Ajuste de precio» pide aprobación siempre (sin consultar el catálogo); los demás, según su descuento.
+    const pideAprobacion =
+      ajuste ||
+      (await prisma.discount.findFirst({
+        where: {
+          venueId,
+          requiresApproval: true,
+          type: { not: DiscountType.COMP },
+          OR: [...(ids.length > 0 ? [{ id: { in: ids } }] : []), ...(cupon ? [{ couponCodes: { some: { code: cupon } } }] : [])],
+        },
+        select: { id: true },
+      })) !== null
     if (!pideAprobacion) return next()
     const externalId = typeof body.externalId === 'string' ? body.externalId.trim() : ''
     if (externalId && (await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: { id: true } }))) {
