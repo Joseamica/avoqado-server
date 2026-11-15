@@ -28,6 +28,14 @@ beforeEach(() => {
 })
 
 describe('listPromotionsForPos', () => {
+  it('anuncia que entiende extras en combos', async () => {
+    prismaMock.promotion.findMany.mockResolvedValue([])
+
+    const result = await listPromotionsForPos('venue-1', new Date('2026-08-13T01:00:00Z'))
+
+    expect(result.componentModifiers).toBe(true)
+  })
+
   it('una promoción vigente ahora sale en activas', async () => {
     // 2026-08-12 19:00 CST = 2026-08-13 01:00 UTC.
     prismaMock.promotion.findMany.mockResolvedValue([promo({ timeFrom: '18:00', timeUntil: '20:00' })])
