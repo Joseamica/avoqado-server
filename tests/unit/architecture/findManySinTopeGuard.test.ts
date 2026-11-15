@@ -379,7 +379,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/transaction.mobile.service.ts': 1,
   'src/services/modules/module.service.ts': 9,
   'src/services/notifications/emailUnsubscribe.service.ts': 1,
-  'src/services/onboarding/demoCleanup.service.ts': 6,
+  'src/services/onboarding/demoCleanup.service.ts': 5,
   'src/services/onboarding/demoSeed.service.ts': 1,
   'src/services/onboarding/venueCreation.service.ts': 1,
   'src/services/organization-dashboard/orgMessages.service.ts': 1,

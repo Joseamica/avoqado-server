@@ -57,6 +57,10 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { tomarCandado as tomarCandadoDePosiciones } from '@/services/shared/candadoDePosiciones'
+
+/** fe2b91 (Codex r1 #3): una tarifa que usa un canal de comercio en línea no se borra (perdería su tarifa en silencio). */
+const TARIFA_SIN_CANAL_EN_LINEA = { ecommerceMerchants: { none: {} } } satisfies Prisma.VenuePricingStructureWhereInput
 
 /** Cómo se reconoce una cuenta de cobro demo (las que siembra `demoSeed`). */
 const CUENTA_DEMO_WHERE: Prisma.MerchantAccountWhereInput[] = [
@@ -134,6 +138,10 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // ⭐ (C6 concern 1): con una sola tarjeta vendida no se borra nada (ver la cabecera). Dentro de la transacción, antes de borrar.
       // r1 (R2): primero la fila del negocio en FOR UPDATE (choca con el KEY SHARE que toma la llave foránea de un sobre que se está
       // vendiendo, como `deleteVenue`); la consulta de tarjetas va en OTRA sentencia y ve la venta que esperamos.
+      // fe2b91 (Codex r1 #1): el MISMO candado que los que cambian la cuenta de una posición (tarifa al comercio, paso 1), ANTES
+      // de leer la configuración de pagos y en el orden de un traslado (candado de posiciones → fila del negocio): un superadmin
+      // que pone una cuenta real en una posición demo mientras se convierte espera a que acabemos y luego ve la pantalla vieja (409).
+      await tomarCandadoDePosiciones(tx, { venueId })
       await tx.$queryRaw`SELECT 1 FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
       if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } })) {
         result.skippedReason = 'GIFT_CARDS'
@@ -205,9 +213,10 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // (encargo fe2b91, hz:87f4b879:D7). Antes, con UNA cuenta demo se borraba la configuración entera y todas sus tarifas, y el
       // negocio que ya había dado de alta su cuenta real en otra posición se quedaba sin cuenta de cobro ni tarifa.
       // - Todas las posiciones demo (como las siembra `demoSeed`): se borra la configuración y todas sus tarifas, como siempre.
-      // - Mezcla: se vacía la secundaria o terciaria demo y se borra SÓLO la tarifa de esa posición. La principal no puede quedar
-      //   vacía (la columna es obligatoria): si la demo está en la principal, se deja como está y se avisa; no se mueve una cuenta
-      //   real de posición ni se inventa una tarifa.
+      // - Mezcla: se vacía cada secundaria o terciaria demo y se borra SÓLO la tarifa de esa posición. La principal no puede
+      //   quedar vacía (la columna es obligatoria): si la demo está en la principal, esa posición se deja como está y se avisa; no
+      //   se mueve una cuenta real de posición ni se inventa una tarifa.
+      // - Nunca se borra una tarifa que usa un canal en línea, ni una cuenta demo que siga en alguna configuración.
       const venuePaymentConfig = await tx.venuePaymentConfig.findUnique({
         where: { venueId },
         select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
@@ -233,7 +242,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       if (venuePaymentConfig && posicionesDemo.length > 0) {
         if (posicionesDemo.length === posiciones.length) {
           await tx.venuePaymentConfig.delete({ where: { venueId } })
-          await tx.venuePricingStructure.deleteMany({ where: { venueId } })
+          await tx.venuePricingStructure.deleteMany({ where: { venueId, ...TARIFA_SIN_CANAL_EN_LINEA } })
           result.pagosDemo = { limpiadas: posicionesDemo, demoQueSeQueda: null, configuracionBorrada: true }
           logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (every position was demo)`)
         } else {
@@ -246,7 +255,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
                 ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
               },
             })
-            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
+            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas }, ...TARIFA_SIN_CANAL_EN_LINEA } })
           }
           const demoQueSeQueda = posicionesDemo.includes('PRIMARY') ? ('PRIMARY' as const) : null
           result.pagosDemo = { limpiadas, demoQueSeQueda, configuracionBorrada: false }
@@ -272,8 +281,21 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
           select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
         })
 
+        // fe2b91 (Codex r1 #2): también las de una ORGANIZACIÓN; su llave es RESTRICT y el borrado tumbaría toda la limpieza.
+        const stillReferencedByOrg = await tx.organizationPaymentConfig.findMany({
+          where: {
+            OR: [
+              { primaryAccountId: { in: demoAccountIds } },
+              { secondaryAccountId: { in: demoAccountIds } },
+              { tertiaryAccountId: { in: demoAccountIds } },
+            ],
+          },
+          select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+          take: 100,
+        })
+
         const stillReferencedIds = new Set<string>()
-        for (const config of stillReferenced) {
+        for (const config of [...stillReferenced, ...stillReferencedByOrg]) {
           if (config.primaryAccountId) stillReferencedIds.add(config.primaryAccountId)
           if (config.secondaryAccountId) stillReferencedIds.add(config.secondaryAccountId)
           if (config.tertiaryAccountId) stillReferencedIds.add(config.tertiaryAccountId)

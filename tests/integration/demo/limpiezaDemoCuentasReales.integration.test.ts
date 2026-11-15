@@ -33,6 +33,8 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await prisma.ecommerceMerchant.deleteMany({ where: { venueId: { in: negocios } } })
+  await prisma.organizationPaymentConfig.deleteMany({ where: { organization: { name: { startsWith: llave } } } })
   for (const venueId of negocios) {
     await prisma.venuePricingStructure.deleteMany({ where: { venueId } })
     await prisma.venuePaymentConfig.deleteMany({ where: { venueId } })
@@ -45,6 +47,10 @@ afterAll(async () => {
 })
 
 async function negocioTrial(sufijo: string): Promise<string> {
+  return (await negocioTrialConOrg(sufijo)).venueId
+}
+
+async function negocioTrialConOrg(sufijo: string): Promise<{ venueId: string; orgId: string }> {
   const org = await prisma.organization.create({
     data: { name: `${llave}-${sufijo}`, email: `${llave}-${sufijo}@example.test`, phone: '5500000000' },
   })
@@ -52,7 +58,7 @@ async function negocioTrial(sufijo: string): Promise<string> {
     data: { organizationId: org.id, name: `Prueba ${sufijo}`, slug: `${llave}-${sufijo}`, status: 'TRIAL' },
   })
   negocios.push(venue.id)
-  return venue.id
+  return { venueId: venue.id, orgId: org.id }
 }
 
 /** Una cuenta como las que siembra `demoSeed` (externalMerchantId con «demo») o una real del negocio. */
@@ -81,7 +87,7 @@ async function cuenta(tipo: 'demo' | 'real', sufijo: string): Promise<string> {
 }
 
 async function tarifa(venueId: string, accountType: AccountType) {
-  await prisma.venuePricingStructure.create({
+  return prisma.venuePricingStructure.create({
     data: {
       venueId,
       accountType,
@@ -174,6 +180,74 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
         data: expect.objectContaining({ limpiadas: [], demoQueSeQueda: 'PRIMARY' }),
       }),
     )
+  })
+
+  it('[demo, demo, real]: la principal demo se queda, la secundaria demo se vacía con su tarifa y la real no se toca', async () => {
+    const venueId = await negocioTrial('demo-demo-real')
+    const demo1 = await cuenta('demo', 'f1')
+    const demo2 = await cuenta('demo', 'f2')
+    const real = await cuenta('real', 'f3')
+    await prisma.venuePaymentConfig.create({
+      data: { venueId, primaryAccountId: demo1, secondaryAccountId: demo2, tertiaryAccountId: real },
+    })
+    await tarifa(venueId, 'PRIMARY')
+    await tarifa(venueId, 'SECONDARY')
+    await tarifa(venueId, 'TERTIARY')
+
+    await cleanDemoData(venueId, null)
+
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toMatchObject({
+      primaryAccountId: demo1,
+      secondaryAccountId: null,
+      tertiaryAccountId: real,
+    })
+    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY', 'TERTIARY'])
+    expect(await prisma.merchantAccount.findUnique({ where: { id: demo2 } })).toBeNull()
+    expect(await prisma.merchantAccount.findUnique({ where: { id: demo1 } })).not.toBeNull()
+  })
+
+  it('Codex r1 #3: la tarifa de una posición demo que usa un canal en línea NO se borra', async () => {
+    const venueId = await negocioTrial('canal')
+    const real = await cuenta('real', 'g1')
+    const demo = await cuenta('demo', 'g2')
+    await prisma.venuePaymentConfig.create({ data: { venueId, primaryAccountId: real, secondaryAccountId: demo } })
+    await tarifa(venueId, 'PRIMARY')
+    const secundaria = await tarifa(venueId, 'SECONDARY')
+    const canal = await prisma.ecommerceMerchant.create({
+      data: {
+        venueId,
+        businessName: 'Tienda en línea de prueba',
+        contactEmail: `${llave}-canal@example.test`,
+        publicKey: `pk_test_${llave}`,
+        secretKeyHash: `hash-${llave}`,
+        providerId,
+        providerCredentials: {},
+        pricingStructureId: secundaria.id,
+      },
+    })
+
+    await cleanDemoData(venueId, null)
+
+    expect((await prisma.venuePaymentConfig.findUnique({ where: { venueId } }))!.secondaryAccountId).toBeNull()
+    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY', 'SECONDARY'])
+    expect((await prisma.ecommerceMerchant.findUnique({ where: { id: canal.id } }))!.pricingStructureId).toBe(secundaria.id)
+  })
+
+  it('Codex r1 #2: una cuenta demo que también usa la organización no se borra y la limpieza NO se cae', async () => {
+    const { venueId, orgId } = await negocioTrialConOrg('org-usa-demo')
+    const demo1 = await cuenta('demo', 'h1')
+    const demo2 = await cuenta('demo', 'h2')
+    await prisma.venuePaymentConfig.create({ data: { venueId, primaryAccountId: demo1, secondaryAccountId: demo2 } })
+    await prisma.organizationPaymentConfig.create({ data: { organizationId: orgId, primaryAccountId: demo2 } })
+    await tarifa(venueId, 'PRIMARY')
+
+    const r = await cleanDemoData(venueId, null)
+
+    // La limpieza terminó (antes: RESTRICT de la organización tumbaba toda la transacción).
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toBeNull()
+    expect(await prisma.merchantAccount.findUnique({ where: { id: demo1 } })).toBeNull()
+    expect(await prisma.merchantAccount.findUnique({ where: { id: demo2 } })).not.toBeNull()
+    expect(r.deletedMerchantAccounts).toBe(1)
   })
 
   it('regresión · TODAS demo (como las siembra el demo): se borra la configuración, todas sus tarifas y las cuentas demo', async () => {
