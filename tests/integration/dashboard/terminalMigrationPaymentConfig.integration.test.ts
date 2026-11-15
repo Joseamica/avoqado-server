@@ -309,4 +309,36 @@ describe('descartar una mudanza y la configuración que creó (Postgres real)', 
     await descarte.transaccion
     await expect(borrado).resolves.toEqual({ count: 1 })
   })
+
+  it('12. 🔴 Codex r3: si una mudanza le encola una orden a la terminal a media eliminación, eliminar responde 409 y no la toca', async () => {
+    // Una mudanza tiene la terminal (la toma antes de encolar su borrado) …
+    const mudanza = await retener(tx => tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`)
+    const borrado = deleteTerminal(terminalId)
+    expect(await esperarBloqueado(mudanza.pid, borrado)).toBe('bloqueada') // ya bloqueó las órdenes que había; espera la terminal
+    // … y encola la orden nueva. Si el borrado la tomara por la cascada DESPUÉS de la terminal, se trancaría con quien
+    // cancelara esa mudanza (tiene la orden y espera la terminal).
+    let nueva = ''
+    mudanza.soltar(async tx => {
+      nueva = (
+        await tx.tpvCommandQueue.create({
+          data: {
+            terminalId,
+            venueId: venueB,
+            commandType: 'FACTORY_RESET',
+            priority: 'CRITICAL',
+            requestedBy: 'system',
+            status: 'QUEUED',
+          },
+          select: { id: true },
+        })
+      ).id
+    })
+    await mudanza.transaccion
+    await expect(borrado).rejects.toMatchObject({ statusCode: 409, code: 'ORDENES_DE_LA_TERMINAL_CAMBIARON' })
+    expect(await prisma.terminal.findUnique({ where: { id: terminalId }, select: { id: true } })).not.toBeNull()
+    expect(await prisma.tpvCommandQueue.findUnique({ where: { id: nueva }, select: { id: true } })).not.toBeNull()
+    // Sin la orden nueva, el mismo borrado pasa.
+    await prisma.tpvCommandQueue.delete({ where: { id: nueva } })
+    await expect(deleteTerminal(terminalId)).resolves.toEqual({ success: true })
+  })
 })

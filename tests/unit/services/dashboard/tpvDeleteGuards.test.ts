@@ -10,6 +10,8 @@ function terminal(overrides: Record<string, any> = {}) {
 }
 
 beforeEach(() => {
+  // b771c2: borrar una terminal bloquea antes sus órdenes y la terminal (`bloquearOrdenesAntesDeBorrarTerminal`); sin órdenes.
+  prismaMock.$queryRaw.mockResolvedValue([])
   jest.clearAllMocks()
   prismaMock.terminal.findFirst.mockReset()
   prismaMock.terminal.delete.mockReset()

@@ -154,13 +154,28 @@ describe('deleteTerminal con el ámbito de la organización', () => {
   it('b771c2: bloquea las órdenes de la terminal ANTES de borrarla (orden → terminal), en la misma transacción', async () => {
     await deleteTerminal('term-1')
 
+    // órdenes (FOR UPDATE) → terminal (FOR UPDATE) → relectura de órdenes → borrado.
     const candado = mockedPrisma.__tx.$queryRaw
-    expect(candado).toHaveBeenCalledTimes(1)
-    const [sql] = candado.mock.calls[0] as [Prisma.Sql]
-    expect(sql.sql).toContain('"TpvCommandQueue"')
-    expect(sql.sql).toContain('ORDER BY id FOR UPDATE')
-    expect(sql.values).toEqual(['term-1'])
-    expect(candado.mock.invocationCallOrder[0]).toBeLessThan(mockedPrisma.terminal.delete.mock.invocationCallOrder[0])
+    expect(candado).toHaveBeenCalledTimes(3)
+    const sqls = candado.mock.calls.map(([sql]) => (sql as Prisma.Sql).sql)
+    expect(sqls[0]).toContain('"TpvCommandQueue"')
+    expect(sqls[0]).toContain('FOR UPDATE OF q')
+    expect(sqls[1]).toContain('FOR UPDATE OF t')
+    expect(sqls[2]).toContain('"TpvCommandQueue"')
+    expect(sqls[2]).not.toContain('FOR UPDATE')
+    expect((candado.mock.calls[0][0] as Prisma.Sql).values).toEqual(['term-1'])
+    expect(candado.mock.invocationCallOrder[2]).toBeLessThan(mockedPrisma.terminal.delete.mock.invocationCallOrder[0])
+  })
+
+  it('b771c2 (Codex r3): una orden nueva entre el candado de las órdenes y el de la terminal ⇒ 409 y no se borra', async () => {
+    mockedPrisma.__tx.$queryRaw
+      .mockResolvedValueOnce([{ id: 'cmd-viejo' }])
+      .mockResolvedValueOnce([{ id: 'term-1' }])
+      .mockResolvedValueOnce([{ id: 'cmd-viejo' }, { id: 'cmd-nuevo' }])
+
+    await expect(deleteTerminal('term-1')).rejects.toMatchObject({ statusCode: 409, code: 'ORDENES_DE_LA_TERMINAL_CAMBIARON' })
+    expect(mockedPrisma.terminal.delete).not.toHaveBeenCalled()
+    expect(auditActions()).not.toContain('TERMINAL_DELETED')
   })
 })
 

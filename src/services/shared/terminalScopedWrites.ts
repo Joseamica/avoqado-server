@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 
-import { NotFoundError } from '../../errors/AppError'
+import { ConflictError, NotFoundError } from '../../errors/AppError'
 
 /**
  * A qué negocio pertenece la terminal que se va a escribir.
@@ -47,26 +47,47 @@ export async function lockTerminalRow(tx: Prisma.TransactionClient, terminalId: 
   return filas[0] ?? null
 }
 
+/** Las órdenes de la terminal cambiaron mientras se preparaba su borrado: se reintenta (409). */
+export const ORDENES_DE_LA_TERMINAL_CAMBIARON = 'ORDENES_DE_LA_TERMINAL_CAMBIARON'
+
 /**
  * 🔴 Borrar una terminal borra EN CASCADA sus órdenes (`TpvCommandQueue`, FK `ON DELETE CASCADE`). El orden de candados de
  * la terminal es orden → configuración → terminal (cancelar y descartar una mudanza, el permiso de ejecución del protocolo
  * 2; b771c2, 15-nov-2026). Un borrado que tomara la terminal y después, por la cascada, sus órdenes se trancaría con un
- * descarte que ya tiene las órdenes y espera la terminal (Codex r1 de b771c2). Por eso quien borra terminales bloquea antes
- * sus órdenes, todas y por id, dentro de la misma transacción del borrado.
+ * descarte que ya tiene las órdenes y espera la terminal (Codex r1 de b771c2). Por eso quien borra terminales llama esto,
+ * dentro de la misma transacción y JUSTO antes del borrado:
+ *   1. bloquea sus órdenes, todas y por id;
+ *   2. bloquea las terminales, por id (desde aquí nadie les puede insertar una orden: el INSERT necesita su FK);
+ *   3. relee sus órdenes. Si apareció una entre 1 y 2 (una mudanza que encoló su borrado, Codex r3 de b771c2), la cascada
+ *      la tomaría DESPUÉS de la terminal y se trancaría con quien ya la tiene (cancelar esa mudanza). En vez de eso, 409
+ *      `ORDENES_DE_LA_TERMINAL_CAMBIARON`: la transacción se deshace, suelta todo y la persona vuelve a intentarlo.
  */
 export async function bloquearOrdenesAntesDeBorrarTerminal(
   tx: Prisma.TransactionClient,
   where: { terminalId: string } | { venueId: string },
 ): Promise<void> {
-  const consulta =
+  const terminales =
     'terminalId' in where
-      ? Prisma.sql`SELECT id FROM "TpvCommandQueue" WHERE "terminalId" = ${where.terminalId} ORDER BY id FOR UPDATE`
-      : Prisma.sql`
-          SELECT q.id FROM "TpvCommandQueue" q
-          WHERE q."terminalId" IN (SELECT t.id FROM "Terminal" t WHERE t."venueId" = ${where.venueId})
-          ORDER BY q.id FOR UPDATE OF q
-        `
-  await tx.$queryRaw(consulta)
+      ? Prisma.sql`SELECT t.id FROM "Terminal" t WHERE t.id = ${where.terminalId}`
+      : Prisma.sql`SELECT t.id FROM "Terminal" t WHERE t."venueId" = ${where.venueId}`
+  const ordenes = () =>
+    tx.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT q.id FROM "TpvCommandQueue" q WHERE q."terminalId" IN (${terminales}) ORDER BY q.id FOR UPDATE OF q`,
+    )
+  const bloqueadas = new Set((await ordenes()).map(fila => fila.id))
+  await tx.$queryRaw(Prisma.sql`${terminales} ORDER BY t.id FOR UPDATE OF t`)
+  // Con las terminales tomadas ya no entra ninguna orden: el INSERT de una orden toma FOR KEY SHARE de su terminal y choca
+  // con este FOR UPDATE (uno a medio confirmar nos hace esperar a que confirme). Las que entraron antes las ve esta lectura
+  // simple (READ COMMITTED, foto nueva por sentencia); no se bloquean aquí, porque eso sería terminal → orden otra vez.
+  const ahora = await tx.$queryRaw<Array<{ id: string }>>(
+    Prisma.sql`SELECT q.id FROM "TpvCommandQueue" q WHERE q."terminalId" IN (${terminales}) ORDER BY q.id`,
+  )
+  if (ahora.some(fila => !bloqueadas.has(fila.id))) {
+    throw new ConflictError(
+      'La terminal recibió una orden nueva mientras se borraba. Actualiza y vuelve a intentarlo.',
+      ORDENES_DE_LA_TERMINAL_CAMBIARON,
+    )
+  }
 }
 
 /**

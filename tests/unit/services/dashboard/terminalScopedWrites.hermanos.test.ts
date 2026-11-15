@@ -54,6 +54,8 @@ describe('activateTerminal — registrar la serie escribe dentro del negocio', (
 
 describe('deleteTpv — borrar una terminal borra dentro del negocio', () => {
   beforeEach(() => {
+    // b771c2: borrar una terminal bloquea antes sus órdenes y la terminal (`bloquearOrdenesAntesDeBorrarTerminal`); sin órdenes.
+    prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.terminal.findFirst.mockResolvedValue({
       id: terminalId,
       venueId,
