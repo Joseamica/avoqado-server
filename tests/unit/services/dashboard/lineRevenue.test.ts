@@ -1,6 +1,7 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
   isItemLevelDiscount,
+  isItemLevelDiscountSql,
   lineBase,
   lineGross,
   lineGrossSql,
@@ -159,6 +160,26 @@ describe('isItemLevelDiscount — only count a giveaway once', () => {
 
   it('ignores a line with no discount at all', () => {
     expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50 })).toBe(false)
+  })
+
+  it('counts a combo piece with paid extras (total = list - share + extras)', () => {
+    const pieza = { quantity: 1, unitPrice: 120, discountAmount: 12, total: 123, modifiers: [{ price: 15 }] }
+    expect(isItemLevelDiscount({ ...pieza, orderPromotionId: 'p1' })).toBe(true)
+  })
+
+  it('does NOT count the same numbers on a normal line (no promotion)', () => {
+    const linea = { quantity: 1, unitPrice: 120, discountAmount: 12, total: 123, modifiers: [{ price: 15 }] }
+    expect(isItemLevelDiscount(linea)).toBe(false)
+    expect(isItemLevelDiscount({ ...linea, orderPromotionId: null })).toBe(false)
+  })
+
+  it('ignores a promotion line with no discount', () => {
+    expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50, orderPromotionId: 'p1' })).toBe(false)
+  })
+
+  it('SQL twin: a promotion line skips the total comparison', () => {
+    const sql = isItemLevelDiscountSql('oi')
+    expect(sql).toContain('oi."orderPromotionId" IS NOT NULL OR ABS(')
   })
 })
 

@@ -118,15 +118,20 @@ export const lineOrderDiscountSql = (alias = 'oi'): string => aliveSql(alias, ra
  * SQL twin of `isItemLevelDiscount`: true when the line total is already net of
  * its own discount, i.e. the giveaway is NOT also sitting on
  * `Order.discountAmount`. Keep the two in step — they answer the same question.
+ *
+ * A promotion line (`orderPromotionId IS NOT NULL`) is ALWAYS net of its own discount by contract (its discount lives
+ * only on the line). Its `total` may also carry paid modifier extras (`list×q − share + extras`), so the
+ * `total = lineBase` comparison would wrongly fail for a combo piece with extras and drop its discount.
  */
 export const isItemLevelDiscountSql = (alias = 'oi'): string =>
-  `(${alias}."discountAmount" > 0 AND ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005)`
+  `(${alias}."discountAmount" > 0 AND (${alias}."orderPromotionId" IS NOT NULL OR ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005))`
 
 interface LineLike {
   id?: string
   quantity: number
   unitPrice: unknown
   discountAmount?: unknown
+  orderPromotionId?: string | null
   weightQuantity?: unknown
   modifiers?: Array<{ price: unknown; quantity?: number }> | null
 }
@@ -191,9 +196,13 @@ export function lineOrderDiscount(item: Pick<LineLike, 'id'>, orderDiscounts?: A
  * Compares against `lineBase`, NOT `lineRevenue`: `OrderItem.total` excludes the
  * modifiers on most rows, so including them here would misread a perfectly
  * normal discounted line as "already booked at order level".
+ *
+ * Exception: a promotion line (`orderPromotionId` set) is always net of its own discount, even when its `total`
+ * also carries paid modifier extras (a combo piece), so it counts without the comparison.
  */
 export function isItemLevelDiscount(item: LineLike & { total: unknown }): boolean {
   const discount = Number(item.discountAmount ?? 0)
   if (discount <= 0) return false
+  if (item.orderPromotionId) return true
   return Math.abs(Number(item.total ?? 0) - lineBase(item)) < 0.005
 }
