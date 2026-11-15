@@ -206,14 +206,19 @@ describe('G4: deshacer una migración exige que siga vigente (Postgres real)', (
 
   it('2. descarte: la orden venció mientras esperaba el candado ⇒ 409 (la terminal sigue donde la dejó la migración)', async () => {
     const M1 = await ordenDeDescarte()
+    // b771c2: la orden vence por el RELOJ mientras el descarte espera. Antes la barrera la reescribía con la terminal tomada
+    // (terminal → orden); ningún escritor real lo hace, y desde que descartar va orden → configuración → terminal, como
+    // cancelar, esa barrera se trancaría con él.
+    const expiresAt = new Date(Date.now() + 2_000)
+    await prisma.tpvCommandQueue.update({ where: { id: M1 }, data: { expiresAt } })
     const { pid, soltar, transaccion } = await retenerTerminal(terminalId)
     const descarte = migrateDiscard(terminalId, {})
     expect(await esperarBloqueado(pid, descarte)).toBe('bloqueada')
+    expect(await ordenBloqueada(M1)).toBe(true) // ya tiene la orden: orden → terminal
+    await new Promise(r => setTimeout(r, Math.max(0, expiresAt.getTime() + 200 - Date.now())))
 
     // La terminal queda en B: la revisión del negocio (a) pasa; sólo la vigencia de la orden (b) la detiene.
-    soltar(async tx => {
-      await tx.tpvCommandQueue.update({ where: { id: M1 }, data: { expiresAt: new Date(Date.now() - 1_000) } })
-    })
+    soltar()
     await transaccion
 
     await expect(descarte).rejects.toMatchObject(NO_VIGENTE)

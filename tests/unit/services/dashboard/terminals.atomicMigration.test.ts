@@ -245,3 +245,27 @@ describe('el gancho de la pantalla del cliente en el traslado', () => {
     expect(mockInvalidar).not.toHaveBeenCalled()
   })
 })
+
+it('b771c2: si la mudanza crea la config del destino, la orden anota su id y su updatedAt', async () => {
+  const updatedAt = new Date('2026-11-15T10:00:00.000Z')
+  db.venuePaymentConfig.create.mockResolvedValue({ id: 'vpc-1', updatedAt })
+  await updateTerminal('t1', { venueId: 'new', assignedMerchantIds: ['m-new'] }, { staffId: 'admin' }, undefined, {
+    expectedVenueId: 'old',
+    paymentConfig: { primaryAccountId: 'm-new' } as any,
+  })
+  expect(db.venuePaymentConfig.create).toHaveBeenCalledWith({ data: { primaryAccountId: 'm-new', venueId: 'new' } })
+  expect(queue).toHaveBeenCalledWith(
+    expect.objectContaining({
+      payload: {
+        migration: {
+          fromVenueId: 'old',
+          previousMerchantIds: ['m-old'],
+          toVenueId: 'new',
+          createdVenuePaymentConfigId: 'vpc-1',
+          createdVenuePaymentConfigUpdatedAt: '2026-11-15T10:00:00.000Z',
+        },
+      },
+    }),
+    db,
+  )
+})

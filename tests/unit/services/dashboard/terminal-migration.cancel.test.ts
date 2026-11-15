@@ -6,6 +6,26 @@ import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '
 
 // migrateCancel reverts the terminal DIRECTLY via prisma (bypassing updateTerminal
 // so the "blindar" auto-wipe does NOT re-queue a FACTORY_RESET on the revert).
+
+/**
+ * b771c2: deshacer una mudanza bloquea también sus órdenes y la config que creó, ANTES de la terminal (orden → configuración
+ * → terminal). Esas consultas van a sus propios mocks (`bloquearOrdenes`, `bloquearConfig`); `$queryRaw` sigue siendo el
+ * candado de la terminal, como en el resto de estas pruebas.
+ */
+function mockConCandados(db: any) {
+  return {
+    ...db,
+    $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join('?')
+      if (sql.includes('"VenuePaymentConfig"')) return db.bloquearConfig(sql, ...values)
+      if (sql.includes('"TpvCommandQueue"')) return db.bloquearOrdenes(sql, ...values)
+      return db.$queryRaw(strings, ...values)
+    },
+  }
+}
+/** La config tal como la dejó la mudanza: nadie la editó. */
+const mockConfigIntacta = () => [{ createdAt: new Date(0), updatedAt: new Date(0) }]
+
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -16,6 +36,8 @@ jest.mock('@/utils/prismaClient', () => ({
     terminal: { update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn() },
     venuePaymentConfig: { deleteMany: jest.fn() },
+    bloquearConfig: jest.fn(async () => mockConfigIntacta()),
+    bloquearOrdenes: jest.fn().mockResolvedValue([]),
   },
 }))
 jest.mock('@/services/tpv/command-queue.service', () => ({
@@ -35,13 +57,16 @@ const m = prisma as unknown as {
   terminal: { update: jest.Mock; findUnique: jest.Mock }
   venue: { findFirst: jest.Mock }
   venuePaymentConfig: { deleteMany: jest.Mock }
+  bloquearConfig: jest.Mock
+  bloquearOrdenes: jest.Mock
 }
+const txConCandados = mockConCandados(m)
 const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
 
 describe('migrateCancel', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    m.$transaction.mockImplementation(async callback => callback(m))
+    m.$transaction.mockImplementation(async callback => callback(txConCandados))
     m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
     mockedCancelCommand.mockResolvedValue(undefined)
   })
@@ -72,7 +97,7 @@ describe('migrateCancel', () => {
       }),
     )
     // queued wipe cancelled so it never reaches the device
-    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.stringContaining('cancelada'), m)
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.stringContaining('cancelada'), txConCandados)
     // terminal reverted directly (bypassing updateTerminal → blindar does NOT re-wipe)
     expect(m.terminal.update).toHaveBeenCalledWith({
       where: { id: 'term-1' },
@@ -146,7 +171,7 @@ describe('migrateCancel', () => {
 
     const r = await migrateCancel('term-1', { staffId: 'admin-1' })
 
-    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String), m)
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String), txConCandados)
     // nothing to revert: the terminal stays exactly where it is
     expect(m.terminal.update).not.toHaveBeenCalled()
     expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-current' })
@@ -158,7 +183,7 @@ describe('migrateCancel — config de pagos creada por la migración', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    m.$transaction.mockImplementation(async callback => callback(m))
+    m.$transaction.mockImplementation(async callback => callback(txConCandados))
     m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
     mockedCancelCommand.mockResolvedValue(undefined)
   })
@@ -204,12 +229,12 @@ describe('migrateCancel — config de pagos creada por la migración', () => {
 
 // The wipe cancellation and venue restoration must commit together.
 it('P1 cancelling a migration restores the venue inside the same transaction as the queue change', async () => {
-  m.$transaction.mockImplementation(async callback => callback(m))
+  m.$transaction.mockImplementation(async callback => callback(txConCandados))
   m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-tx', payload: { migration: { fromVenueId: 'old', toVenueId: 'venue-new' } } })
   m.terminal.update.mockRejectedValueOnce(new Error('restore failed'))
   await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow('restore failed')
   expect(m.$transaction).toHaveBeenCalledTimes(1)
-  expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-tx', 'admin-1', expect.any(String), m)
+  expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-tx', 'admin-1', expect.any(String), txConCandados)
 })
 
 // 🔴 G4 (auditoría de Codex del plan, 14-oct; ronda 2): cancelar deshace la migración sólo si sigue siendo la vigente.
@@ -234,7 +259,7 @@ describe('migrateCancel — G4: la reversión sigue vigente', () => {
     // Sólo se finge el reloj: las promesas y los temporizadores siguen siendo los reales.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
     jest.setSystemTime(T0)
-    m.$transaction.mockImplementation(async callback => callback(m))
+    m.$transaction.mockImplementation(async callback => callback(txConCandados))
     m.$queryRaw.mockResolvedValue([{ id: 'term-1', venueId: 'venue-new' }])
     m.tpvCommandQueue.findUnique.mockResolvedValue({ expiresAt: null })
     m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
@@ -454,5 +479,84 @@ describe('migrateCancel — el gancho de la pantalla del cliente', () => {
     await cancelacion
 
     expect(mockGancho).not.toHaveBeenCalled()
+  })
+})
+
+describe('b771c2: la config que creó la mudanza sólo se borra si sigue como la dejó', () => {
+  const actor = { staffId: 'admin-1' }
+  const creadaEn = new Date('2026-11-15T10:00:00.000Z')
+  const orden = (migration: Record<string, unknown>) => ({
+    id: 'cmd-1',
+    status: 'QUEUED',
+    payload: { migration: { fromVenueId: 'venue-old', toVenueId: 'venue-new', previousMerchantIds: ['ma-1'], ...migration } },
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.$transaction.mockImplementation(async callback => callback(txConCandados))
+    m.$queryRaw.mockResolvedValue([{ id: 'term-1', venueId: 'venue-new' }])
+    m.tpvCommandQueue.findUnique.mockResolvedValue({ expiresAt: null })
+    m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
+    mockedCancelCommand.mockResolvedValue(undefined)
+  })
+
+  it('orden → configuración → terminal: la config se bloquea después del CAS y antes de la terminal', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue(orden({ createdVenuePaymentConfigId: 'vpc-1' }))
+    await migrateCancel('term-1', actor)
+    const cas = mockedCancelCommand.mock.invocationCallOrder[0]
+    const config = m.bloquearConfig.mock.invocationCallOrder[0]
+    const terminal = m.$queryRaw.mock.invocationCallOrder[0]
+    expect(cas).toBeLessThan(config)
+    expect(config).toBeLessThan(terminal)
+    expect(String(m.bloquearConfig.mock.calls[0][0])).toContain('FOR UPDATE')
+  })
+
+  it('con la marca y sin cambios ⇒ se borra', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([{ createdAt: creadaEn, updatedAt: creadaEn }])
+    m.tpvCommandQueue.findFirst.mockResolvedValue(
+      orden({ createdVenuePaymentConfigId: 'vpc-1', createdVenuePaymentConfigUpdatedAt: creadaEn.toISOString() }),
+    )
+    await migrateCancel('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).toHaveBeenCalledWith({ where: { id: 'vpc-1' } })
+  })
+
+  it('🔴 editada después de la mudanza ⇒ se conserva, se anota y la terminal sí regresa', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([{ createdAt: creadaEn, updatedAt: new Date(creadaEn.getTime() + 60_000) }])
+    m.tpvCommandQueue.findFirst.mockResolvedValue(
+      orden({ createdVenuePaymentConfigId: 'vpc-1', createdVenuePaymentConfigUpdatedAt: creadaEn.toISOString() }),
+    )
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+    await expect(migrateCancel('term-1', actor)).resolves.toEqual({ cancelled: true, restoredVenueId: 'venue-old' })
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+    expect(m.terminal.update).toHaveBeenCalledWith({
+      where: { id: 'term-1' },
+      data: { venueId: 'venue-old', assignedMerchantIds: ['ma-1'] },
+    })
+    const acciones = (logAction as jest.Mock).mock.calls.map(([p]) => p.action)
+    expect(acciones).toContain('VENUE_PAYMENT_CONFIG_KEPT')
+    expect(acciones).not.toContain('VENUE_PAYMENT_CONFIG_DELETED')
+  })
+
+  it('orden vieja sin marca: editada (updatedAt ≠ createdAt) ⇒ se conserva', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([{ createdAt: creadaEn, updatedAt: new Date(creadaEn.getTime() + 1) }])
+    m.tpvCommandQueue.findFirst.mockResolvedValue(orden({ createdVenuePaymentConfigId: 'vpc-1' }))
+    await migrateCancel('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('marca ilegible ⇒ se conserva (ante la duda no se borra)', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([{ createdAt: creadaEn, updatedAt: creadaEn }])
+    m.tpvCommandQueue.findFirst.mockResolvedValue(
+      orden({ createdVenuePaymentConfigId: 'vpc-1', createdVenuePaymentConfigUpdatedAt: 'no-es-fecha' }),
+    )
+    await migrateCancel('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('la config ya no existe ⇒ nada que borrar ni anotar', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([])
+    m.tpvCommandQueue.findFirst.mockResolvedValue(orden({ createdVenuePaymentConfigId: 'vpc-1' }))
+    await expect(migrateCancel('term-1', actor)).resolves.toMatchObject({ cancelled: true })
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
   })
 })

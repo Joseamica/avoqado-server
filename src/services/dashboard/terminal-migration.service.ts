@@ -254,7 +254,67 @@ interface WipeMigrationPayload {
   toVenueId?: string
   previousMerchantIds?: string[]
   createdVenuePaymentConfigId?: string
+  /** `updatedAt` de la config cuando la mudanza la creó (ISO). Falta en las órdenes anteriores al 15-nov-2026. */
+  createdVenuePaymentConfigUpdatedAt?: string
 }
+
+/** Qué hacer con la configuración de pagos que la mudanza creó en el destino al deshacerla. */
+type DestinoDeLaConfig = { id: string; borrar: boolean } | null
+
+/**
+ * 🔴 b771c2 (Codex p12 r1 #2 y r4 A1/A2, 12-nov-2026). Deshacer una mudanza borraba por id la configuración que creó, aunque
+ * otra persona la hubiera editado después (cuentas o posiciones nuevas): las demás terminales del destino perdían esas
+ * cuentas. Ahora sólo se borra si sigue como la dejó la mudanza: su `updatedAt` es el que la mudanza anotó (en una orden
+ * vieja, sin esa marca, `updatedAt == createdAt`: nunca se editó). Si cambió, se conserva. Todo escritor de la config pasa
+ * por Prisma (`@updatedAt`); no hay `UPDATE` crudo (grep del 15-nov).
+ *
+ * La fila se toma `FOR UPDATE` ANTES de la terminal: orden → configuración → terminal. Es el orden del alta AngelPay y de
+ * los demás escritores de posiciones (`tomarCandado` toma la configuración y después actualizan terminales); antes, deshacer
+ * tomaba la terminal y luego la configuración, y los dos se trancaban (`deadlock detected`). Con el candado puesto, la
+ * comparación y el borrado ya no pueden separarse de una edición concurrente.
+ */
+async function bloquearConfigDeLaMudanza(
+  tx: Prisma.TransactionClient,
+  migracion: Pick<WipeMigrationPayload, 'createdVenuePaymentConfigId' | 'createdVenuePaymentConfigUpdatedAt'>,
+): Promise<DestinoDeLaConfig> {
+  const id = migracion.createdVenuePaymentConfigId
+  if (!id) return null
+  const [fila] = await tx.$queryRaw<Array<{ createdAt: Date; updatedAt: Date }>>`
+    SELECT "createdAt", "updatedAt" FROM "VenuePaymentConfig" WHERE id = ${id} FOR UPDATE
+  `
+  if (!fila) return null // ya no existe: nada que borrar ni que conservar
+  const marca = migracion.createdVenuePaymentConfigUpdatedAt
+  // Una marca ilegible da NaN y conserva: ante la duda, no se borra la configuración de pagos de nadie.
+  const comoLaCreo = marca ? new Date(marca).getTime() : fila.createdAt.getTime()
+  return { id, borrar: fila.updatedAt.getTime() === comoLaCreo }
+}
+
+/** Borra la config bloqueada por `bloquearConfigDeLaMudanza`, sólo si sigue como la dejó la mudanza. */
+async function deshacerConfigDeLaMudanza(tx: Prisma.TransactionClient, config: DestinoDeLaConfig): Promise<void> {
+  if (config?.borrar) await tx.venuePaymentConfig.deleteMany({ where: { id: config.id } })
+}
+
+/** El asiento de una config que deshacer la mudanza dejó viva porque alguien la cambió. */
+async function anotarConfigConservada(
+  config: DestinoDeLaConfig,
+  toVenueId: string | undefined,
+  actor: TerminalActor,
+  data: Record<string, unknown>,
+): Promise<void> {
+  if (!config || config.borrar) return
+  logger.warn(`Config de pagos ${config.id} conservada al deshacer una mudanza: alguien la editó después`, { toVenueId, ...data })
+  await logAction({
+    staffId: actor.staffId ?? null,
+    venueId: toVenueId ?? null,
+    action: 'VENUE_PAYMENT_CONFIG_KEPT',
+    entity: 'VenuePaymentConfig',
+    entityId: config.id,
+    data: { reason: 'Se editó después de la mudanza; deshacerla ya no la borra', ...data } as Prisma.InputJsonValue,
+    ipAddress: actor.ipAddress,
+    userAgent: actor.userAgent,
+  })
+}
+
 function migrationPayloadOf(row: PendingWipeRow): WipeMigrationPayload | null {
   const m = (row.payload as { migration?: WipeMigrationPayload } | null)?.migration
   return m && typeof m.fromVenueId === 'string' ? m : null
@@ -574,7 +634,7 @@ export interface MigrateCancelResult {
 }
 
 export async function migrateCancel(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateCancelResult> {
-  const { command, migration, restoredVenueId } = await prisma.$transaction(async tx => {
+  const { command, migration, restoredVenueId, config } = await prisma.$transaction(async tx => {
     const command = await tx.tpvCommandQueue.findFirst({
       where: {
         terminalId,
@@ -593,7 +653,7 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
       )
     const migration = (
       command.payload as {
-        migration?: { fromVenueId?: string; toVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
+        migration?: WipeMigrationPayload
       } | null
     )?.migration
     if (scopedOrgId && migration?.fromVenueId) {
@@ -609,6 +669,8 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
       tx,
     )
     if (migration?.fromVenueId) {
+      // b771c2: la config que creó la mudanza se bloquea AQUÍ, entre la orden y la terminal (orden → configuración → terminal).
+      const config = await bloquearConfigDeLaMudanza(tx, migration)
       // G4 (Codex r2): con los DOS candados tomados —la orden por el CAS de arriba y la terminal aquí; cola → terminal, el
       // orden de siempre— la orden y la terminal ya no cambian. Un reloj NUEVO decide si la orden había vencido: si venció,
       // otra migración pudo tomar la terminal (también B→A, que (a) no ve). `cancelCommand` hace `await findUnique` antes de
@@ -638,24 +700,22 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
           assignedMerchantIds: migration.previousMerchantIds ?? [],
         },
       })
-      if (migration.createdVenuePaymentConfigId) {
-        await tx.venuePaymentConfig.deleteMany({ where: { id: migration.createdVenuePaymentConfigId } })
-      }
-      return { command, migration, restoredVenueId: migration.fromVenueId }
+      await deshacerConfigDeLaMudanza(tx, config)
+      return { command, migration, restoredVenueId: migration.fromVenueId, config }
     }
     const terminal = await tx.terminal.findUnique({ where: { id: terminalId }, select: { venueId: true } })
     if (!terminal) throw new NotFoundError('Terminal not found')
-    return { command, migration, restoredVenueId: terminal.venueId }
+    return { command, migration, restoredVenueId: terminal.venueId, config: null as DestinoDeLaConfig }
   })
   // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
   invalidateCustomerDisplayCache(terminalId)
-  if (migration?.createdVenuePaymentConfigId) {
+  if (config?.borrar) {
     await logAction({
       staffId: actor.staffId ?? null,
       venueId: restoredVenueId,
       action: 'VENUE_PAYMENT_CONFIG_DELETED',
       entity: 'VenuePaymentConfig',
-      entityId: migration.createdVenuePaymentConfigId,
+      entityId: config.id,
       data: { reason: 'Migración de terminal cancelada', commandId: command.id, terminalId },
       ipAddress: actor.ipAddress,
       userAgent: actor.userAgent,
@@ -667,10 +727,16 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
     action: migration?.fromVenueId ? 'TERMINAL_MIGRATION_CANCELLED' : 'TERMINAL_PENDING_WIPE_CANCELLED',
     entity: 'Terminal',
     entityId: terminalId,
-    data: { commandId: command.id, restoredVenueId, restoredMerchantIds: migration?.previousMerchantIds ?? [] },
+    data: {
+      commandId: command.id,
+      restoredVenueId,
+      restoredMerchantIds: migration?.previousMerchantIds ?? [],
+      ...(config && !config.borrar && { keptVenuePaymentConfigId: config.id }),
+    },
     ipAddress: actor.ipAddress,
     userAgent: actor.userAgent,
   })
+  await anotarConfigConservada(config, migration?.toVenueId, actor, { commandId: command.id, terminalId, via: 'cancel' })
   logger.info(`Pending wipe cancelled for terminal ${terminalId}`, { commandId: command.id, restoredVenueId })
   return { cancelled: true, restoredVenueId }
 }
@@ -736,7 +802,13 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
     .map(migrationPayloadOf)
     .find(Boolean)
 
-  const { discardedIds, now } = await prisma.$transaction(async tx => {
+  const { discardedIds, now, config } = await prisma.$transaction(async tx => {
+    // b771c2 (Codex p12 r4 A2): orden → configuración → terminal, el mismo orden que cancelar (CAS de la orden y luego la
+    // terminal) y que el permiso de ejecución. Antes se tomaba la terminal primero y cancelar y descartar a la vez se trancaban.
+    // Las órdenes se bloquean por id, en orden fijo; su estado y vigencia se revisan más abajo, en el CAS de cada una.
+    const idsPendientes = pending.map(row => row.id)
+    await tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE id = ANY(${idsPendientes}::text[]) ORDER BY id FOR UPDATE`
+    const config = revert?.fromVenueId ? await bloquearConfigDeLaMudanza(tx, revert) : null
     // Serialize against authenticated app-boot registration. A plain re-read still leaves a race
     // between the read and the writes; this row lock keeps the proof stable until commit.
     const [fresh] = await tx.$queryRaw<Array<{ commandSessionId: string | null; venueId: string }>>`
@@ -809,12 +881,10 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
         where: { id: terminalId },
         data: { venueId: revert.fromVenueId, assignedMerchantIds: revert.previousMerchantIds ?? [] },
       })
-      if (revert.createdVenuePaymentConfigId) {
-        await tx.venuePaymentConfig.deleteMany({ where: { id: revert.createdVenuePaymentConfigId } })
-      }
+      await deshacerConfigDeLaMudanza(tx, config)
     }
 
-    return { discardedIds, now }
+    return { discardedIds, now, config }
   })
   // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
   invalidateCustomerDisplayCache(terminalId)
@@ -834,11 +904,13 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
       lastActivationStatusCheckAt: terminal.lastActivationStatusCheckAt,
       revertedFromVenueId: revert?.fromVenueId ? terminal.venueId : undefined,
       restoredVenueId,
-      deletedVenuePaymentConfigId: revert?.createdVenuePaymentConfigId,
+      deletedVenuePaymentConfigId: config?.borrar ? config.id : undefined,
+      keptVenuePaymentConfigId: config && !config.borrar ? config.id : undefined,
     },
     ipAddress: actor.ipAddress,
     userAgent: actor.userAgent,
   })
+  await anotarConfigConservada(config, revert?.toVenueId, actor, { commandIds: discardedIds, terminalId, via: 'discard' })
   logger.warn(`Pending wipe(s) discarded for terminal ${terminalId} by ${actor.staffId ?? 'system'}`, {
     commandIds: discardedIds,
     restoredVenueId,

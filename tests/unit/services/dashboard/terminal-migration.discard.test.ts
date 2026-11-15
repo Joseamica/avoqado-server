@@ -15,6 +15,25 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
+/**
+ * b771c2: deshacer una mudanza bloquea también sus órdenes y la config que creó, ANTES de la terminal (orden → configuración
+ * → terminal). Esas consultas van a sus propios mocks (`bloquearOrdenes`, `bloquearConfig`); `$queryRaw` sigue siendo el
+ * candado de la terminal, como en el resto de estas pruebas.
+ */
+function mockConCandados(db: any) {
+  return {
+    ...db,
+    $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join('?')
+      if (sql.includes('"VenuePaymentConfig"')) return db.bloquearConfig(sql, ...values)
+      if (sql.includes('"TpvCommandQueue"')) return db.bloquearOrdenes(sql, ...values)
+      return db.$queryRaw(strings, ...values)
+    },
+  }
+}
+/** La config tal como la dejó la mudanza: nadie la editó. */
+const mockConfigIntacta = () => [{ createdAt: new Date(0), updatedAt: new Date(0) }]
+
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     terminal: { findUnique: jest.fn(), update: jest.fn() },
@@ -24,8 +43,10 @@ jest.mock('@/utils/prismaClient', () => {
   }
   // Interactive transaction: the callback receives the same mocked client, so the
   // assertions below see every write the transaction performs.
-  client.$transaction = jest.fn((fn: any) => fn(client))
+  client.$transaction = jest.fn((fn: any) => fn(mockConCandados(client)))
   client.$queryRaw = jest.fn()
+  client.bloquearConfig = jest.fn(async () => mockConfigIntacta())
+  client.bloquearOrdenes = jest.fn().mockResolvedValue([])
   return { __esModule: true, default: client }
 })
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
@@ -41,6 +62,8 @@ const m = prisma as unknown as {
   venuePaymentConfig: { deleteMany: jest.Mock }
   $transaction: jest.Mock
   $queryRaw: jest.Mock
+  bloquearConfig: jest.Mock
+  bloquearOrdenes: jest.Mock
 }
 const mockedLogAction = logAction as jest.Mock
 
@@ -82,7 +105,7 @@ describe('migrateDiscard', () => {
     // G4: el candado lee también el negocio de la terminal. `venue-a` es el destino de `migrationWipe`: en v1 la terminal
     // ya se mudó, así que ahí la dejó esa migración.
     m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }])
-    m.$transaction.mockImplementation((fn: any) => fn(prisma))
+    m.$transaction.mockImplementation((fn: any) => fn(mockConCandados(prisma)))
   })
 
   it('the threshold is 24 hours (founder decision, not a tunable)', () => {
@@ -367,6 +390,7 @@ describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
   const mockGancho = borrarDisenoAlCambiarDeNegocio as jest.Mock
   const mockInvalidar = invalidateCustomerDisplayCache as jest.Mock
   let tx: any
+  let terminalDelTx: jest.Mock
   let confirmar!: () => void
   let fallarCommit!: (e: unknown) => void
   const flush = () => new Promise(r => setImmediate(r))
@@ -377,7 +401,8 @@ describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
     m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
     m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
     // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw` (el candado de la terminal).
-    tx = { ...m, $queryRaw: jest.fn().mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }]) }
+    terminalDelTx = jest.fn().mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }])
+    tx = mockConCandados({ ...m, $queryRaw: terminalDelTx })
     m.$transaction.mockImplementation(
       (fn: any) =>
         new Promise((resolve, reject) => {
@@ -403,7 +428,7 @@ describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
     })
     expect(mockGancho.mock.calls[0][0]).toBe(tx)
     expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
+    expect(terminalDelTx.mock.invocationCallOrder[0]).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
     expect(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockGancho.mock.invocationCallOrder[0])
     expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(m.terminal.update.mock.invocationCallOrder[0])
     expect(mockInvalidar).toHaveBeenCalledTimes(0)
@@ -433,5 +458,52 @@ describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
     await descarte
 
     expect(mockGancho).not.toHaveBeenCalled()
+  })
+})
+
+describe('b771c2: orden de candados y config editada al descartar', () => {
+  const creadaEn = new Date('2026-11-15T10:00:00.000Z')
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.$transaction.mockImplementation((fn: any) => fn(mockConCandados(m)))
+    m.terminal.findUnique.mockResolvedValue(terminal())
+    m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
+    m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }])
+  })
+
+  it('órdenes → configuración → terminal, y todo antes de cualquier escritura', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    await migrateDiscard('term-1', actor)
+    const ordenes = m.bloquearOrdenes.mock.invocationCallOrder[0]
+    const config = m.bloquearConfig.mock.invocationCallOrder[0]
+    const terminalLock = m.$queryRaw.mock.invocationCallOrder[0]
+    expect(ordenes).toBeLessThan(config)
+    expect(config).toBeLessThan(terminalLock)
+    expect(terminalLock).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
+    const [sql, ids] = m.bloquearOrdenes.mock.calls[0]
+    expect(sql).toContain('ORDER BY id FOR UPDATE')
+    expect(ids).toEqual(['cmd-1'])
+  })
+
+  it('🔴 editada después de la mudanza ⇒ se conserva, se anota y la terminal sí regresa', async () => {
+    m.bloquearConfig.mockResolvedValueOnce([{ createdAt: creadaEn, updatedAt: new Date(creadaEn.getTime() + 60_000) }])
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1, restoredVenueId: 'venue-origen' })
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+    expect(m.terminal.update).toHaveBeenCalledWith({
+      where: { id: 'term-1' },
+      data: { venueId: 'venue-origen', assignedMerchantIds: ['ma-1'] },
+    })
+    const acciones = mockedLogAction.mock.calls.map(([p]) => p.action)
+    expect(acciones).toContain('VENUE_PAYMENT_CONFIG_KEPT')
+    const descartado = mockedLogAction.mock.calls.find(([p]) => p.action === 'TERMINAL_PENDING_WIPE_DISCARDED')![0]
+    expect(descartado.data).toMatchObject({ keptVenuePaymentConfigId: 'vpc-nueva', deletedVenuePaymentConfigId: undefined })
+  })
+
+  it('sin cambios ⇒ se borra, como antes', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    await migrateDiscard('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).toHaveBeenCalledWith({ where: { id: 'vpc-nueva' } })
   })
 })

@@ -747,7 +747,12 @@ export async function updateTerminal(
                   fromVenueId,
                   previousMerchantIds: terminal.assignedMerchantIds ?? [],
                   toVenueId: data.venueId!,
-                  ...(createdConfig && { createdVenuePaymentConfigId: createdConfig.id }),
+                  // b771c2: la hora de la config recién creada. Deshacer la mudanza la borra sólo si sigue así
+                  // (nadie la editó después); si cambió, la conserva (`terminal-migration.service`).
+                  ...(createdConfig && {
+                    createdVenuePaymentConfigId: createdConfig.id,
+                    createdVenuePaymentConfigUpdatedAt: createdConfig.updatedAt.toISOString(),
+                  }),
                 },
               },
             },
