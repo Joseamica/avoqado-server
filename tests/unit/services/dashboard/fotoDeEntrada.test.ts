@@ -7,6 +7,9 @@ jest.mock('@/services/privateStorage.service', () => ({
   deletePrivateFile: jest.fn().mockResolvedValue(undefined),
 }))
 
+const mockLogAction = jest.fn()
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
+
 import { deletePrivateFile, savePrivateFile, signPrivateFileUrl } from '@/services/privateStorage.service'
 import {
   assertFotoNoPrivada,
@@ -90,6 +93,29 @@ describe('guardarSelfieDeEntrada', () => {
       terminar({ path: 'private/dev/attendance/v1/s1/tarde.jpg' })
       await jest.advanceTimersByTimeAsync(0)
       expect(deletePrivateFile).toHaveBeenCalledWith('private/dev/attendance/v1/s1/tarde.jpg')
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('si la subida tardía tampoco se puede borrar, su ruta queda en la bitácora (Codex r5 #1)', async () => {
+    jest.useFakeTimers()
+    try {
+      let terminar: (v: { path: string }) => void = () => undefined
+      ;(savePrivateFile as jest.Mock).mockReturnValue(new Promise(r => (terminar = r)))
+      ;(deletePrivateFile as jest.Mock).mockRejectedValueOnce(new Error('Storage caído'))
+      const resultado = guardarSelfieDeEntrada({ venueId: 'v1', staffId: 's1', foto: JPEG })
+      await jest.advanceTimersByTimeAsync(PLAZO_DE_LA_SELFIE_MS)
+      await expect(resultado).resolves.toBeNull()
+      terminar({ path: 'private/dev/attendance/v1/s1/tarde.jpg' })
+      await jest.advanceTimersByTimeAsync(0)
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CLOCK_IN_PHOTO_ORPHANED',
+          venueId: 'v1',
+          data: expect.objectContaining({ path: 'private/dev/attendance/v1/s1/tarde.jpg' }),
+        }),
+      )
     } finally {
       jest.useRealTimers()
     }

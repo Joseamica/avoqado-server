@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { logAction } from './activity-log.service'
 import { deletePrivateFile, PRIVATE_PREFIX, savePrivateFile, signPrivateFileUrl } from '../privateStorage.service'
 import { getStorageEnvPrefix } from '../storage.service'
 
@@ -91,7 +92,20 @@ export async function guardarSelfieDeEntrada(params: { venueId: string; staffId:
         plazoMs: PLAZO_DE_LA_SELFIE_MS,
       })
       // Si la subida termina después, nadie la apunta: se borra.
-      subida.then(({ path }) => deletePrivateFile(path)).catch(() => undefined)
+      subida
+        .then(({ path }) =>
+          deletePrivateFile(path).catch(error =>
+            // Si tampoco se puede borrar, la ruta queda en la bitácora para limpiarla (Codex r5 #1).
+            logAction({
+              venueId: params.venueId,
+              staffId: params.staffId,
+              action: 'CLOCK_IN_PHOTO_ORPHANED',
+              entity: 'TimeEntry',
+              data: { path, error: error instanceof Error ? error.message : String(error) },
+            }),
+          ),
+        )
+        .catch(() => undefined) // la subida tardía falló: no quedó archivo
       return null
     }
     return r.path
