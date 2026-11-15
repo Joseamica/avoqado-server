@@ -237,7 +237,15 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
               organizationId: true, // For deriving orgId in token generation
               // El login era PEOR que auth/status: omitía settings por completo, así que hasta
               // el primer refresco el sidebar no sabía ni de turnos ni de asistencia (Codex, hallazgo 1).
-              settings: { select: { enableShifts: true, hiddenSidebarItems: true, attendanceEnabled: true, attendanceGraceMinutes: true } },
+              settings: {
+                select: {
+                  enableShifts: true,
+                  hiddenSidebarItems: true,
+                  attendanceEnabled: true,
+                  attendanceGraceMinutes: true,
+                  requireClockInPhoto: true,
+                },
+              },
             },
           },
           permissionSet: true,

@@ -259,6 +259,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                     attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
                     rotatingShiftsEnabled: true,
                     attendanceGraceMinutes: true,
+                    requireClockInPhoto: true, // «Foto de entrada»: Asistencia marca «Sin foto» cuando la pide
                   },
                 },
               },
@@ -313,6 +314,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
                 rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
+                requireClockInPhoto: true, // «Foto de entrada»: Asistencia marca «Sin foto» cuando la pide
               },
             },
           },
@@ -541,6 +543,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
               rotatingShiftsEnabled: true,
               attendanceGraceMinutes: true,
+              requireClockInPhoto: true, // «Foto de entrada»: Asistencia marca «Sin foto» cuando la pide
             },
           },
         },
@@ -662,6 +665,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
                 rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
+                requireClockInPhoto: true, // «Foto de entrada»: Asistencia marca «Sin foto» cuando la pide
               },
             },
           },
