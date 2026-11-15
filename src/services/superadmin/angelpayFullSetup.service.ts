@@ -33,6 +33,10 @@ const SLOT_COLUMN = {
   TERTIARY: 'tertiaryAccountId',
 } as const
 
+/** «Ahora» del navegador con su reloj un poco adelantado no es una fecha futura. */
+const TOLERANCIA_DE_RELOJ_MS = 5 * 60 * 1000
+export const TARIFA_CON_FECHA_FUTURA = 'PRICING_EFFECTIVE_FROM_IN_FUTURE'
+
 // Settlement configs are created per card type. OTHER is intentionally skipped.
 const SETTLEMENT_CARD_TYPES = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL'] as const
 
@@ -70,6 +74,15 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
   // PRIMARY is a required column — it can never be left empty.
   if (input.slot.moveStrategy === 'vacate' && input.slot.fromSlot === 'PRIMARY') {
     throw new ValidationError('No se puede vaciar el slot PRIMARY')
+  }
+  // Encargo a02d12 (Codex p12-r1 #9): el paso 6 apaga HOY las tarifas vigentes de la posición. Con una tarifa nueva que empieza
+  // en el futuro, la posición se quedaba sin tarifa del negocio hasta ese día (el cobro la busca por `effectiveFrom <= fecha`).
+  // Programar una tarifa futura es de la pantalla de tarifas del negocio, que CIERRA la anterior en vez de apagarla.
+  if (input.pricing && new Date(input.pricing.effectiveFrom).getTime() > Date.now() + TOLERANCIA_DE_RELOJ_MS) {
+    throw new BadRequestError(
+      'La tarifa del negocio no puede empezar en el futuro en el alta: elige hoy, o programa el cambio después desde las tarifas del negocio',
+      TARIFA_CON_FECHA_FUTURA,
+    )
   }
 
   const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })

@@ -322,3 +322,77 @@ describe('fullSetupAngelPayMerchant — una afiliación ocupa UN solo slot', () 
     })
   })
 })
+
+/**
+ * Encargo a02d12 (tarjeta hz:87f4b879:D8, Codex p12-r1 #9): el alta apaga HOY las tarifas vigentes de la posición y crea la
+ * nueva con su `effectiveFrom`. Con una fecha futura, la posición se quedaba sin tarifa del negocio hasta ese día (el cobro
+ * resuelve por `effectiveFrom <= fecha del cobro`). El alta ahora rechaza esa fecha ANTES de escribir; programar una tarifa
+ * futura sigue en la pantalla de tarifas del negocio, que cierra la anterior en vez de apagarla.
+ */
+describe('fullSetupAngelPayMerchant — la tarifa del negocio no puede empezar en el futuro', () => {
+  const pricing = (effectiveFrom: string) => ({
+    debitRate: 0.02,
+    creditRate: 0.025,
+    amexRate: 0.03,
+    internationalRate: 0.035,
+    includesTax: true,
+    taxRate: 0.16,
+    effectiveFrom,
+  })
+  const mockedPricing = prisma as unknown as { venuePricingStructure: { updateMany: jest.Mock; create: jest.Mock } }
+
+  beforeEach(() => {
+    mockedPricing.venuePricingStructure.updateMany.mockResolvedValue({ count: 1 })
+    mockedPricing.venuePricingStructure.create.mockResolvedValue({ id: 'pricing-1' })
+  })
+
+  it('mañana: 400 con el motivo en español, sin abrir la transacción ni apagar la tarifa vigente', async () => {
+    const manana = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+
+    await expect(
+      fullSetupAngelPayMerchant(baseInput({ pricing: pricing(manana) } as Partial<FullSetupAngelPayInput>)),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/no puede empezar en el futuro/) })
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled()
+    expect(mockedPricing.venuePricingStructure.updateMany).not.toHaveBeenCalled()
+    expect(mockedPricing.venuePricingStructure.create).not.toHaveBeenCalled()
+  })
+
+  it('también al reemplazar una posición (ahí la tarifa es obligatoria): se rechaza igual', async () => {
+    const enUnaHora = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+
+    await expect(
+      fullSetupAngelPayMerchant(
+        baseInput({
+          slot: { accountType: 'PRIMARY', mode: 'replace', replacedAccountId: 'merchant-viejo' },
+          pricing: pricing(enUnaHora),
+        } as Partial<FullSetupAngelPayInput>),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('hoy (la medianoche del día elegido, como la manda el asistente): pasa y crea la tarifa con esa fecha', async () => {
+    const hoy = new Date()
+    hoy.setHours(0, 0, 0, 0)
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ pricing: pricing(hoy.toISOString()) } as Partial<FullSetupAngelPayInput>))
+
+    expect(result.pricingStructureId).toBe('pricing-1')
+    expect(mockedPricing.venuePricingStructure.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ effectiveFrom: hoy, active: true, accountType: 'PRIMARY' }),
+    })
+  })
+
+  it('«ahora» con el reloj del navegador unos segundos adelantado: pasa (tolerancia de reloj)', async () => {
+    const adelantado = new Date(Date.now() + 30 * 1000).toISOString()
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ pricing: pricing(adelantado) } as Partial<FullSetupAngelPayInput>))
+    expect(result.pricingStructureId).toBe('pricing-1')
+  })
+
+  it('sin tarifa: el alta sigue igual (la validación no estorba)', async () => {
+    const result = await fullSetupAngelPayMerchant(baseInput())
+    expect(result.pricingStructureId).toBeUndefined()
+    expect(mockedPricing.venuePricingStructure.updateMany).not.toHaveBeenCalled()
+  })
+})
