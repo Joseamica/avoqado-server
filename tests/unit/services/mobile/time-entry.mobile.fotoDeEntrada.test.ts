@@ -115,3 +115,16 @@ describe('clockIn — un solo «¿ya tiene entrada? → crearla» a la vez por p
     expect(sql[1]).toBe('time-entry-clock-in:venue-1:staff-1')
   })
 })
+
+describe('clockIn — la foto no se queda huérfana si la entrada falla (Codex r3 #3)', () => {
+  it('si falla la base después de subir la foto, la foto se borra y el error sigue', async () => {
+    prismaMock.timeEntry.create.mockRejectedValue(new Error('base caída'))
+    await expect(clockIn({ venueId: 'venue-1', pin: '1234', checkInPhoto: JPEG.toString('base64') })).rejects.toThrow('base caída')
+    expect(deletePrivateFile).toHaveBeenCalledWith(RUTA)
+  })
+
+  it('regresión: si la entrada se registra, la foto NO se borra', async () => {
+    await clockIn({ venueId: 'venue-1', pin: '1234', checkInPhoto: JPEG.toString('base64') })
+    expect(deletePrivateFile).not.toHaveBeenCalled()
+  })
+})

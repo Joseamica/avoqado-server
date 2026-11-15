@@ -212,6 +212,11 @@ export async function clockIn(params: ClockInParams) {
   // tenía entrada, se borra.
   const rutaDeLaSelfie = selfie ? await guardarSelfieDeEntrada({ venueId, staffId, foto: selfie }) : null
 
+  // Si la entrada no se registra (ya tenía una, o falla la base), la foto recién subida se borra: un dato personal sin
+  // checada no se queda en la caja fuerte (Codex r3 #3).
+  const borrarSelfie = () => {
+    if (rutaDeLaSelfie) void deletePrivateFile(rutaDeLaSelfie).catch(() => undefined)
+  }
   const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
     // Check if already clocked in
     const existingEntry = await tx.timeEntry.findFirst({
@@ -225,10 +230,6 @@ export async function clockIn(params: ClockInParams) {
     })
 
     if (existingEntry) {
-      if (rutaDeLaSelfie) {
-        // La foto de un intento que no registró nada no se queda huérfana en la caja fuerte.
-        void deletePrivateFile(rutaDeLaSelfie).catch(() => undefined)
-      }
       throw new BadRequestError('Ya tienes entrada registrada. Primero marca la salida.')
     }
 
@@ -255,6 +256,9 @@ export async function clockIn(params: ClockInParams) {
         },
       },
     })
+  }).catch(error => {
+    borrarSelfie()
+    throw error
   })
 
   logger.info(

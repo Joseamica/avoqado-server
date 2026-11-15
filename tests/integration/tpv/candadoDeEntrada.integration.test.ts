@@ -41,9 +41,14 @@ beforeAll(async () => {
   ).id
 })
 
-beforeEach(() => prisma.timeEntry.deleteMany({ where: { staffId } }))
+beforeEach(async () => {
+  // Sin staffId (falló la preparación), `{ staffId: undefined }` borraría TODAS las checadas (Codex r3 #4).
+  if (!staffId) throw new Error('La preparación no creó a la persona de prueba')
+  await prisma.timeEntry.deleteMany({ where: { staffId } })
+})
 
 afterAll(async () => {
+  if (!orgId || !venueId || !staffId) return // la preparación falló: no hay nada propio que limpiar
   await prisma.timeEntry.deleteMany({ where: { staffId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
   await prisma.staffOrganization.deleteMany({ where: { organizationId: orgId } })
