@@ -14,6 +14,8 @@ import { getOrderSourcesBreakdown } from '@/jobs/nightly-sales-summary.job'
  */
 
 const SOURCES_ROW = { source: 'TPV', orders: 3, net_sales: 500 }
+/** D46: the second query is the refunds per channel; none here. */
+const NO_REFUNDS: unknown[] = []
 
 /** The real damaged order: Avoqado Wellness / ORD-1779465117373. */
 const DAMAGED = {
@@ -32,7 +34,7 @@ beforeEach(() => {
 
 describe('nightly summary — the clamp is never silent', () => {
   it('warns with venue, order and BOTH amounts when an order gets clamped', async () => {
-    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce([DAMAGED])
+    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce(NO_REFUNDS).mockResolvedValueOnce([DAMAGED])
 
     await getOrderSourcesBreakdown('venue-1', new Date('2025-03-11T06:00:00Z'), new Date('2025-03-12T05:59:59Z'))
 
@@ -55,7 +57,7 @@ describe('nightly summary — the clamp is never silent', () => {
   })
 
   it('stays quiet when nothing was clamped', async () => {
-    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce([])
+    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce(NO_REFUNDS).mockResolvedValueOnce([])
 
     await getOrderSourcesBreakdown('venue-1', new Date('2025-03-11T06:00:00Z'), new Date('2025-03-12T05:59:59Z'))
 
@@ -64,7 +66,7 @@ describe('nightly summary — the clamp is never silent', () => {
 
   it('reports a COUNT instead of 20+ lines when the damage is widespread', async () => {
     const many = Array.from({ length: 21 }, (_, i) => ({ ...DAMAGED, id: `order-${i}` }))
-    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce(many)
+    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce(NO_REFUNDS).mockResolvedValueOnce(many)
 
     await getOrderSourcesBreakdown('venue-1', new Date('2025-03-11T06:00:00Z'), new Date('2025-03-12T05:59:59Z'))
 
@@ -74,7 +76,7 @@ describe('nightly summary — the clamp is never silent', () => {
   })
 
   it('a failure in the diagnostic NEVER breaks the email', async () => {
-    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockRejectedValueOnce(new Error('boom'))
+    prismaMock.$queryRaw.mockResolvedValueOnce([SOURCES_ROW]).mockResolvedValueOnce(NO_REFUNDS).mockRejectedValueOnce(new Error('boom'))
 
     const rows = await getOrderSourcesBreakdown('venue-1', new Date('2025-03-11T06:00:00Z'), new Date('2025-03-12T05:59:59Z'))
 
@@ -82,5 +84,28 @@ describe('nightly summary — the clamp is never silent', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].netSales).toBe(500)
     expect((logger.warn as jest.Mock).mock.calls.some(([m]) => String(m).includes('No se pudo revisar'))).toBe(true)
+  })
+})
+
+describe('D46 — «Origen del pedido» resta los reembolsos de cada canal', () => {
+  it('resta lo devuelto en su canal y muestra el canal que sólo devolvió (0 pedidos)', async () => {
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([
+        { source: 'TPV', orders: 2, net_sales: 300 },
+        { source: 'QR', orders: 1, net_sales: 50 },
+      ])
+      .mockResolvedValueOnce([
+        { source: 'TPV', refunds: '10.00' },
+        { source: 'WEB', refunds: '30.00' },
+      ])
+      .mockResolvedValueOnce([])
+
+    const rows = await getOrderSourcesBreakdown('venue-1', new Date('2025-03-11T06:00:00Z'), new Date('2025-03-12T05:59:59Z'))
+
+    expect(rows).toEqual([
+      { source: 'Punto de venta', orders: 2, netSales: 290, avgOrder: 145 },
+      { source: 'Avoqado QR', orders: 1, netSales: 50, avgOrder: 50 },
+      { source: 'WEB', orders: 0, netSales: -30, avgOrder: 0 },
+    ])
   })
 })
