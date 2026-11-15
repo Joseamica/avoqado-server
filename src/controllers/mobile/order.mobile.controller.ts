@@ -22,6 +22,7 @@ import {
   conCortesiaSiRegala,
   tieneCortesiaAutorizada,
   tieneDescuentoConPermisoPropio,
+  traeAjusteDePrecio,
 } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { membresiaDeQuienLlama } from '@/services/tpv/discount.tpv.service'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
@@ -399,6 +400,9 @@ export async function autoridadDeLaVenta(
   if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
   return {
     ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
+    // Encargo 1afe04 (Codex r1 #1): el «Ajuste de precio» guarda la SESIÓN que lo aplicó y, con su permiso, como quien lo aprobó;
+    // sin otro descuento nadie más pasaba `performedBy` (la fila se quedaba con el vendedor elegido y sin aprobador).
+    ...(!needsCompAuthority && traeAjusteDePrecio(venta.items) ? { performedBy: req.authContext?.userId } : {}),
     // Descuento del cliente (fase 2): `discounts:apply` propio, sólo si lo comprobó el guard de ESTE request (`/orders` y pay-new-order).
     ...(venta.descuentoDelCliente ? { descuentoConPermisoPropio: tieneDescuentoConPermisoPropio(req) } : {}),
     // D4: la aprobación de un % o fijo con «Requiere aprobación», sólo si la comprobó el guard de ESTE request (PIN o permiso propio).

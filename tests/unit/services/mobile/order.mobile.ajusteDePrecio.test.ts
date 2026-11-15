@@ -21,6 +21,8 @@ jest.mock('@/services/shared/repartoDescuentoTx', () => ({
 }))
 
 import { Decimal } from '@prisma/client/runtime/library'
+import type { Request } from 'express'
+import { autoridadDeLaVenta } from '@/controllers/mobile/order.mobile.controller'
 import { buildOrderItemsData, createOrderWithItems, type CreateOrderInput } from '@/services/mobile/order.mobile.service'
 import { filaDeAjustesDePrecio } from '@/services/shared/discount.service'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -505,5 +507,19 @@ describe('«Ajuste de precio» pide aprobación (encargo 1afe04, founder «A», 
   it('regresión: una venta sin ajuste no pide nada', async () => {
     await crear({ items: [{ productId: 'prod-1', quantity: 1 }], aprobacionDelDescuento: undefined })
     expect(Number(datosDeLaOrden().total)).toBe(100)
+  })
+})
+
+describe('autoridadDeLaVenta con «Ajuste de precio» (Codex r1 #1)', () => {
+  const req = { params: { venueId: 'venue-1' }, authContext: { userId: 'sesion-1' }, body: {}, headers: {} } as unknown as Request
+
+  it('una venta con sólo un ajuste lleva la SESIÓN (quien lo aplicó), nunca el vendedor elegido', async () => {
+    const venta = { staffId: 'vendedor-1', items: [{ productId: 'prod-1', quantity: 1, adjustedUnitPrice: 8000 }] } as CreateOrderInput
+    expect(await autoridadDeLaVenta(req, venta)).toMatchObject({ performedBy: 'sesion-1' })
+  })
+
+  it('regresión: sin ajuste ni descuentos no agrega performedBy', async () => {
+    const venta = { staffId: 'vendedor-1', items: [{ productId: 'prod-1', quantity: 1 }] } as CreateOrderInput
+    expect(await autoridadDeLaVenta(req, venta)).not.toHaveProperty('performedBy')
   })
 })

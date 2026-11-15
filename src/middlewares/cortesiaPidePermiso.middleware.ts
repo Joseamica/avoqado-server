@@ -236,11 +236,37 @@ const idValido = (id: unknown): id is string => typeof id === 'string' && id.len
 /**
  * Encargo 1afe04 (founder «A», 15-nov, como Toast): el «Ajuste de precio» (D12, `items[].adjustedUnitPrice`) baja el precio a mano;
  * lo aplica quien tiene `tpv-orders:discount` o un encargado con su PIN, igual que un descuento con «Requiere aprobación». Cuenta
- * lo mismo que `buildOrderItemsData` podría honrar: un entero ≥ 1 centavo en un renglón que no es cortesía. Si al final el servicio
- * no lo honra (no baja el precio que decidió), el PIN se pidió de más: nunca de menos (ahí el servicio falla cerrado).
+ * lo mismo que `buildOrderItemsData` podría honrar: un entero ≥ 1 centavo en un renglón que no es cortesía.
  */
-export const traeAjusteDePrecio = (items: any[]): boolean =>
-  items.some(item => item?.isCortesia !== true && Number.isSafeInteger(item?.adjustedUnitPrice) && (item.adjustedUnitPrice as number) >= 1)
+const ajustesDelCuerpo = (items: any[]): Array<{ productId: unknown; centavos: number }> =>
+  items
+    .filter(item => item?.isCortesia !== true && Number.isSafeInteger(item?.adjustedUnitPrice) && (item.adjustedUnitPrice as number) >= 1)
+    .map(item => ({ productId: item.productId, centavos: item.adjustedUnitPrice as number }))
+
+export const traeAjusteDePrecio = (items: any[]): boolean => ajustesDelCuerpo(items).length > 0
+
+/**
+ * Codex r1 #4: ¿algún ajuste BAJA el precio de catálogo de su producto? Si no lo baja, el servicio lo ignora y no hay nada que
+ * aprobar (un carrito viejo con un ajuste a $90 sobre un producto que ya bajó a $80). El servicio lo honra sólo bajo el precio que
+ * decide (`precio` ≤ catálogo), así que «baja el catálogo» lo cubre siempre: el PIN se puede pedir de más en el caso raro del precio
+ * que vio el cliente, nunca de menos (ahí el servicio falla cerrado). Un producto que no aparece cuenta como «lo baja».
+ */
+async function algunAjusteBajaElPrecio(venueId: string, items: any[]): Promise<boolean> {
+  const ajustes = ajustesDelCuerpo(items)
+  if (ajustes.length === 0) return false
+  const ids = [...new Set(ajustes.map(a => a.productId).filter(idValido))]
+  if (ids.length < new Set(ajustes.map(a => a.productId)).size) return true
+  const productos = await prisma.product.findMany({
+    where: { venueId, id: { in: ids } },
+    select: { id: true, price: true },
+    take: ids.length,
+  })
+  const centavos = new Map(productos.map(p => [p.id, Math.round(Number(p.price) * 100)]))
+  return ajustes.some(a => {
+    const precio = centavos.get(a.productId as string)
+    return precio === undefined || a.centavos < precio
+  })
+}
 
 /**
  * D4 (founder «B», 12-nov): un % o fijo de catálogo con «Requiere aprobación» lo aplica quien tiene `tpv-orders:discount` (de
@@ -266,11 +292,10 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
       ),
     ]
     const cupon = traeCuponEnLinea(body) ? (body.couponCode as string).trim().toUpperCase() : null
-    const ajuste = traeAjusteDePrecio(items)
-    if (!venueId || (ids.length === 0 && !cupon && !ajuste)) return next()
-    // Encargo 1afe04: un «Ajuste de precio» pide aprobación siempre (sin consultar el catálogo); los demás, según su descuento.
+    if (!venueId || (ids.length === 0 && !cupon && !traeAjusteDePrecio(items))) return next()
+    // Encargo 1afe04: un «Ajuste de precio» que baja el precio pide aprobación; los demás, según su descuento.
     const pideAprobacion =
-      ajuste ||
+      (await algunAjusteBajaElPrecio(venueId, items)) ||
       (await prisma.discount.findFirst({
         where: {
           venueId,

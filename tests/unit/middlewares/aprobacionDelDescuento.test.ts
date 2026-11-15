@@ -22,11 +22,12 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 jest.mock('@/middlewares/permissionFlag.middleware', () => ({ tienePermisoEnVenue: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { discount: { findFirst: jest.fn() }, order: { findUnique: jest.fn() } },
+  default: { discount: { findFirst: jest.fn() }, order: { findUnique: jest.fn() }, product: { findMany: jest.fn() } },
 }))
 
 const findDiscount = prisma.discount.findFirst as jest.Mock
 const findOrder = prisma.order.findUnique as jest.Mock
+const findProducts = prisma.product.findMany as jest.Mock
 const permisoPropio = tienePermisoEnVenue as jest.Mock
 
 function request(body: Record<string, unknown>, params: Record<string, string> = {}): Request {
@@ -52,6 +53,7 @@ beforeEach(() => {
   findDiscount.mockResolvedValue(null)
   findOrder.mockResolvedValue(null)
   permisoPropio.mockResolvedValue(false)
+  findProducts.mockResolvedValue([{ id: 'p1', price: 100 }])
 })
 
 describe('D4: % o fijo con «Requiere aprobación» pide tpv-orders:discount', () => {
@@ -232,9 +234,10 @@ describe('Ajuste de precio pide tpv-orders:discount', () => {
   const conAjuste = (extra: Record<string, unknown> = {}) =>
     request({ items: [{ productId: 'p1', quantity: 1, adjustedUnitPrice: 8000 }], ...extra })
 
-  it('un renglón con ajuste: pide el permiso SIN consultar descuentos y acredita el request', async () => {
+  it('un renglón con ajuste que baja el precio: pide el permiso SIN consultar descuentos y acredita el request', async () => {
     const req = conAjuste()
     const { next } = await run(req)
+    expect(findProducts).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1', id: { in: ['p1'] } }, take: 1 }))
     expect(findDiscount).not.toHaveBeenCalled()
     expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
     expect(next).toHaveBeenCalledWith()
@@ -292,5 +295,31 @@ describe('Ajuste de precio pide tpv-orders:discount', () => {
     const req = conAjuste({ isOfflineReplay: true })
     await run(req)
     expect(aprobacionDelDescuento(req)).toEqual({})
+  })
+
+  it('Codex r1 #4: un ajuste que NO baja el precio de catálogo (el producto ya bajó) no pide nada: el servicio lo ignora', async () => {
+    findProducts.mockResolvedValue([{ id: 'p1', price: 75 }])
+    const { next } = await run(conAjuste())
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  it('un ajuste igual al precio no pide nada', async () => {
+    const { next } = await run(request({ items: [{ productId: 'p1', quantity: 1, adjustedUnitPrice: 10000 }] }))
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  it('un producto que no aparece cuenta como «lo baja» (nunca de menos)', async () => {
+    findProducts.mockResolvedValue([])
+    await run(conAjuste())
+    expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
+  })
+
+  it('un ajuste que no baja junto a un descuento que pide aprobación: decide el descuento', async () => {
+    findProducts.mockResolvedValue([{ id: 'p1', price: 50 }])
+    findDiscount.mockResolvedValue({ id: 'disc-gerente' })
+    await run(request({ items: [{ productId: 'p1', quantity: 1, adjustedUnitPrice: 8000, discountId: 'disc-gerente' }] }))
+    expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
   })
 })
