@@ -58,15 +58,15 @@ export async function bloquearOrdenesAntesDeBorrarTerminal(
   tx: Prisma.TransactionClient,
   where: { terminalId: string } | { venueId: string },
 ): Promise<void> {
-  if ('terminalId' in where) {
-    await tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE "terminalId" = ${where.terminalId} ORDER BY id FOR UPDATE`
-  } else {
-    await tx.$queryRaw`
-      SELECT q.id FROM "TpvCommandQueue" q
-      WHERE q."terminalId" IN (SELECT t.id FROM "Terminal" t WHERE t."venueId" = ${where.venueId})
-      ORDER BY q.id FOR UPDATE OF q
-    `
-  }
+  const consulta =
+    'terminalId' in where
+      ? Prisma.sql`SELECT id FROM "TpvCommandQueue" WHERE "terminalId" = ${where.terminalId} ORDER BY id FOR UPDATE`
+      : Prisma.sql`
+          SELECT q.id FROM "TpvCommandQueue" q
+          WHERE q."terminalId" IN (SELECT t.id FROM "Terminal" t WHERE t."venueId" = ${where.venueId})
+          ORDER BY q.id FOR UPDATE OF q
+        `
+  await tx.$queryRaw(consulta)
 }
 
 /**

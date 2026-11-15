@@ -265,8 +265,15 @@ async function main() {
       })
 
       console.log('   🗑️  Eliminando Terminals...')
-      await prisma.terminal.deleteMany({
-        where: { venueId: { in: venueIdList } },
+      // b771c2: sus órdenes antes que las terminales (el borrado las borra en cascada; mismo orden que cancelar o descartar
+      // una mudanza, ver `bloquearOrdenesAntesDeBorrarTerminal` en src/services/shared/terminalScopedWrites.ts).
+      await prisma.$transaction(async tx => {
+        await tx.$queryRaw`
+          SELECT q.id FROM "TpvCommandQueue" q
+          WHERE q."terminalId" IN (SELECT t.id FROM "Terminal" t WHERE t."venueId" = ANY(${venueIdList}::text[]))
+          ORDER BY q.id FOR UPDATE OF q
+        `
+        await tx.terminal.deleteMany({ where: { venueId: { in: venueIdList } } })
       })
     }
 

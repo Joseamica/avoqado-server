@@ -156,10 +156,10 @@ describe('deleteTerminal con el ámbito de la organización', () => {
 
     const candado = mockedPrisma.__tx.$queryRaw
     expect(candado).toHaveBeenCalledTimes(1)
-    const [sql, terminalId] = candado.mock.calls[0]
-    expect(sql.join('?')).toContain('"TpvCommandQueue"')
-    expect(sql.join('?')).toContain('ORDER BY id FOR UPDATE')
-    expect(terminalId).toBe('term-1')
+    const [sql] = candado.mock.calls[0] as [Prisma.Sql]
+    expect(sql.sql).toContain('"TpvCommandQueue"')
+    expect(sql.sql).toContain('ORDER BY id FOR UPDATE')
+    expect(sql.values).toEqual(['term-1'])
     expect(candado.mock.invocationCallOrder[0]).toBeLessThan(mockedPrisma.terminal.delete.mock.invocationCallOrder[0])
   })
 })

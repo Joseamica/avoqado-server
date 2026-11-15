@@ -19,6 +19,7 @@ import { Prisma, TpvCommandStatus } from '@prisma/client'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { migrateCancel, migrateDiscard } from '@/services/dashboard/terminal-migration.service'
 import { deleteTerminal } from '@/services/dashboard/terminals.superadmin.service'
+import { bloquearOrdenesAntesDeBorrarTerminal } from '@/services/shared/terminalScopedWrites'
 import prisma from '@/utils/prismaClient'
 
 import { esperarBloqueado, retener } from '../customer-display/barrera'
@@ -291,5 +292,21 @@ describe('descartar una mudanza y la configuración que creó (Postgres real)', 
     await descarte.transaccion
     await expect(borrado).resolves.toEqual({ success: true })
     expect(await prisma.terminal.findUnique({ where: { id: terminalId }, select: { id: true } })).toBeNull()
+  })
+
+  it('11. 🔴 Codex r2: borrar las terminales de un negocio entero (limpieza de demos, borrar negocio) tampoco se tranca', async () => {
+    const M = await ordenParaDescartar()
+    const descarte = await retener(tx => tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE id = ${M} FOR UPDATE`)
+    // Lo mismo que hacen `deleteVenueDataTx` y `deleteVenue`: órdenes del negocio y luego sus terminales.
+    const borrado = prisma.$transaction(async tx => {
+      await bloquearOrdenesAntesDeBorrarTerminal(tx, { venueId: venueB })
+      return tx.terminal.deleteMany({ where: { venueId: venueB } })
+    })
+    expect(await esperarBloqueado(descarte.pid, borrado)).toBe('bloqueada')
+    descarte.soltar(async tx => {
+      await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`
+    })
+    await descarte.transaccion
+    await expect(borrado).resolves.toEqual({ count: 1 })
   })
 })

@@ -43,7 +43,12 @@ const EXTERNAL_MID = 'blumon_2841548418'
 async function teardown() {
   const t = await prod.terminal.findFirst({ where: { serialNumber: APP_SERIAL }, select: { id: true } })
   if (t) {
-    await prod.terminal.delete({ where: { id: t.id } })
+    // b771c2: sus órdenes antes que la terminal (el borrado las borra en cascada; mismo orden que cancelar o descartar una
+    // mudanza, ver `bloquearOrdenesAntesDeBorrarTerminal` en src/services/shared/terminalScopedWrites.ts).
+    await prod.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM "TpvCommandQueue" WHERE "terminalId" = ${t.id} ORDER BY id FOR UPDATE`
+      await tx.terminal.delete({ where: { id: t.id } })
+    })
     console.log(`🗑️  Deleted prod terminal ${APP_SERIAL}`)
   }
   const m = await prod.merchantAccount.findFirst({ where: { externalMerchantId: EXTERNAL_MID }, select: { id: true } })

@@ -17,6 +17,7 @@ import { deleteOrRetainStaffWithH1ProvenanceTx, isH1ProvenanceConstraint } from 
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { demoConPagoAlPersonalError, historiaDeSede, LIVE_DEMO_CON_PAGO_AL_PERSONAL } from '@/services/dashboard/staffPay/participacion'
 import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from '@/utils/esperaDeCandados'
+import { bloquearOrdenesAntesDeBorrarTerminal } from '@/services/shared/terminalScopedWrites'
 
 const INACTIVITY_THRESHOLD_HOURS = 5
 
@@ -549,6 +550,8 @@ export async function deleteVenueDataTx(tx: TxConReintento, venueId: string): Pr
   await borrar(tx.productOption.deleteMany({ where: { venueId } }))
   await borrar(tx.inventoryTransfer.deleteMany({ where: { venueId } }))
   await borrar(tx.posCommand.deleteMany({ where: { venueId } }))
+  // b771c2 (Codex r2): las órdenes de sus terminales antes que ellas (ver `bloquearOrdenesAntesDeBorrarTerminal`).
+  await bloquearOrdenesAntesDeBorrarTerminal(tx, { venueId })
   await borrar(tx.terminal.deleteMany({ where: { venueId } }))
 
   // 12. Finally, delete the venue
