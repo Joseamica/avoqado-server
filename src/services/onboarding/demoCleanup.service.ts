@@ -59,9 +59,6 @@ import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tomarCandado as tomarCandadoDePosiciones } from '@/services/shared/candadoDePosiciones'
 
-/** fe2b91 (Codex r1 #3): una tarifa que usa un canal de comercio en línea no se borra (perdería su tarifa en silencio). */
-const TARIFA_SIN_CANAL_EN_LINEA = { ecommerceMerchants: { none: {} } } satisfies Prisma.VenuePricingStructureWhereInput
-
 /** Cómo se reconoce una cuenta de cobro demo (las que siembra `demoSeed`). */
 const CUENTA_DEMO_WHERE: Prisma.MerchantAccountWhereInput[] = [
   { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
@@ -216,7 +213,9 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // - Mezcla: se vacía cada secundaria o terciaria demo y se borra SÓLO la tarifa de esa posición. La principal no puede
       //   quedar vacía (la columna es obligatoria): si la demo está en la principal, esa posición se deja como está y se avisa; no
       //   se mueve una cuenta real de posición ni se inventa una tarifa.
-      // - Nunca se borra una tarifa que usa un canal en línea, ni una cuenta demo que siga en alguna configuración.
+      // - Una cuenta demo sólo se borra si ya ninguna configuración (de negocio u organización) la usa.
+      // - Codex r2 #1: una tarifa demo se borra aunque la use un canal en línea (como antes). Conservarla haría que el negocio
+      //   cobrara esa tarifa sobre la cuenta real que hereda de su organización; el canal pierde el enlace (FK SET NULL).
       const venuePaymentConfig = await tx.venuePaymentConfig.findUnique({
         where: { venueId },
         select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
@@ -242,7 +241,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       if (venuePaymentConfig && posicionesDemo.length > 0) {
         if (posicionesDemo.length === posiciones.length) {
           await tx.venuePaymentConfig.delete({ where: { venueId } })
-          await tx.venuePricingStructure.deleteMany({ where: { venueId, ...TARIFA_SIN_CANAL_EN_LINEA } })
+          await tx.venuePricingStructure.deleteMany({ where: { venueId } })
           result.pagosDemo = { limpiadas: posicionesDemo, demoQueSeQueda: null, configuracionBorrada: true }
           logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (every position was demo)`)
         } else {
@@ -255,7 +254,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
                 ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
               },
             })
-            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas }, ...TARIFA_SIN_CANAL_EN_LINEA } })
+            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
           }
           const demoQueSeQueda = posicionesDemo.includes('PRIMARY') ? ('PRIMARY' as const) : null
           result.pagosDemo = { limpiadas, demoQueSeQueda, configuracionBorrada: false }
@@ -269,39 +268,24 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       }
 
       if (demoAccountIds.length > 0) {
-        // Una cuenta demo que sigue en una posición (la principal de arriba, u otro negocio) no se borra.
-        const stillReferenced = await tx.venuePaymentConfig.findMany({
-          where: {
-            OR: [
-              { primaryAccountId: { in: demoAccountIds } },
-              { secondaryAccountId: { in: demoAccountIds } },
-              { tertiaryAccountId: { in: demoAccountIds } },
-            ],
-          },
-          select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
-        })
-
-        // fe2b91 (Codex r1 #2): también las de una ORGANIZACIÓN; su llave es RESTRICT y el borrado tumbaría toda la limpieza.
-        const stillReferencedByOrg = await tx.organizationPaymentConfig.findMany({
-          where: {
-            OR: [
-              { primaryAccountId: { in: demoAccountIds } },
-              { secondaryAccountId: { in: demoAccountIds } },
-              { tertiaryAccountId: { in: demoAccountIds } },
-            ],
-          },
-          select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
-          take: 100,
-        })
-
-        const stillReferencedIds = new Set<string>()
-        for (const config of [...stillReferenced, ...stillReferencedByOrg]) {
-          if (config.primaryAccountId) stillReferencedIds.add(config.primaryAccountId)
-          if (config.secondaryAccountId) stillReferencedIds.add(config.secondaryAccountId)
-          if (config.tertiaryAccountId) stillReferencedIds.add(config.tertiaryAccountId)
-        }
-
-        const safeToDeleteIds = demoAccountIds.filter(id => !stillReferencedIds.has(id))
+        // Una cuenta demo que sigue en una posición (la principal de arriba, otro negocio u otra ORGANIZACIÓN) no se borra: la
+        // llave de la organización es RESTRICT y tumbaría toda la limpieza (fe2b91, Codex r1 #2 y r2 #2). Se pregunta por cada
+        // cuenta, sin tope: son las ≤3 de este negocio.
+        const safeToDeleteIds = (
+          await tx.merchantAccount.findMany({
+            where: {
+              id: { in: demoAccountIds },
+              venueConfigsPrimary: { none: {} },
+              venueConfigsSecondary: { none: {} },
+              venueConfigsTertiary: { none: {} },
+              orgConfigsPrimary: { none: {} },
+              orgConfigsSecondary: { none: {} },
+              orgConfigsTertiary: { none: {} },
+            },
+            select: { id: true },
+            take: demoAccountIds.length, // una fila por cuenta: el tope no corta nada
+          })
+        ).map(m => m.id)
 
         if (safeToDeleteIds.length > 0) {
           await tx.providerCostStructure.deleteMany({

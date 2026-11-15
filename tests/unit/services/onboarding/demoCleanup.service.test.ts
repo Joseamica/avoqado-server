@@ -198,14 +198,18 @@ describe('cleanDemoData (trial→real conversion)', () => {
         ...config,
       })
     }
-    const sonDemo = (...ids: string[]) =>
+    // `enUso`: cuentas demo que alguna configuración (negocio u organización) sigue usando después de la limpieza.
+    const sonDemo = (ids: string[], enUso: string[] = []) =>
       (prismaMock.merchantAccount.findMany as jest.Mock).mockImplementation(async ({ where }: any) =>
-        (where.id.in as string[]).filter(id => ids.includes(id)).map(id => ({ id })),
+        (where.id.in as string[])
+          .filter(id => ids.includes(id))
+          .filter(id => (where.venueConfigsPrimary ? !enUso.includes(id) : true))
+          .map(id => ({ id })),
       )
 
     it('🔴 principal real + secundaria demo: NO borra la configuración; vacía sólo la secundaria y borra sólo su tarifa', async () => {
       conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
-      sonDemo('demo-1')
+      sonDemo(['demo-1'])
 
       await cleanDemoData(VENUE_ID)
 
@@ -215,13 +219,13 @@ describe('cleanDemoData (trial→real conversion)', () => {
         data: { secondaryAccountId: null },
       })
       expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
-        where: { venueId: VENUE_ID, accountType: { in: ['SECONDARY'] }, ecommerceMerchants: { none: {} } },
+        where: { venueId: VENUE_ID, accountType: { in: ['SECONDARY'] } },
       })
     })
 
     it('🔴 principal demo + secundaria real: no borra ni vacía nada de pagos (la principal no puede quedar vacía)', async () => {
       conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'real-1' })
-      sonDemo('demo-1')
+      sonDemo(['demo-1'])
 
       await cleanDemoData(VENUE_ID)
 
@@ -232,19 +236,19 @@ describe('cleanDemoData (trial→real conversion)', () => {
 
     it('regresión · todas demo: borra la configuración y todas sus tarifas, como siempre', async () => {
       conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2' })
-      sonDemo('demo-1', 'demo-2')
+      sonDemo(['demo-1', 'demo-2'])
 
       await cleanDemoData(VENUE_ID)
 
       expect(prismaMock.venuePaymentConfig.delete).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
       expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
-        where: { venueId: VENUE_ID, ecommerceMerchants: { none: {} } },
+        where: { venueId: VENUE_ID },
       })
     })
 
     it('[demo, demo, real]: la principal demo se queda; la secundaria demo se vacía con su tarifa', async () => {
       conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2', tertiaryAccountId: 'real-1' })
-      sonDemo('demo-1', 'demo-2')
+      sonDemo(['demo-1', 'demo-2'])
 
       await cleanDemoData(VENUE_ID)
 
@@ -257,7 +261,7 @@ describe('cleanDemoData (trial→real conversion)', () => {
 
     it('Codex r1 #1: toma el candado de posiciones ANTES de leer la configuración de pagos', async () => {
       conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
-      sonDemo('demo-1')
+      sonDemo(['demo-1'])
       const orden: string[] = []
       ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray) => {
         if (strings.join('?').includes('posiciones-de-cobro') || strings.join('?').includes('pg_advisory_xact_lock')) orden.push('candado')
@@ -274,21 +278,28 @@ describe('cleanDemoData (trial→real conversion)', () => {
       expect(orden).toContain('leer')
     })
 
-    it('Codex r1 #2: una cuenta demo que usa una organización no se borra (su llave tumbaría toda la limpieza)', async () => {
+    it('Codex r1/r2 #2: una cuenta demo que usa una organización no se borra (su llave tumbaría toda la limpieza)', async () => {
       conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2' })
-      sonDemo('demo-1', 'demo-2')
-      ;(prismaMock.organizationPaymentConfig.findMany as jest.Mock).mockResolvedValue([
-        { primaryAccountId: 'demo-2', secondaryAccountId: null, tertiaryAccountId: null },
-      ])
+      sonDemo(['demo-1', 'demo-2'], ['demo-2'])
 
       await cleanDemoData(VENUE_ID)
 
       expect(prismaMock.merchantAccount.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['demo-1'] } } })
+      // Se pregunta por cada cuenta, también por las organizaciones, sin tope.
+      expect(prismaMock.merchantAccount.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            orgConfigsPrimary: { none: {} },
+            orgConfigsSecondary: { none: {} },
+            orgConfigsTertiary: { none: {} },
+          }),
+        }),
+      )
     })
 
     it('regresión · todas reales: no toca la configuración ni las tarifas', async () => {
       conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'real-2' })
-      sonDemo()
+      sonDemo([])
 
       await cleanDemoData(VENUE_ID)
 

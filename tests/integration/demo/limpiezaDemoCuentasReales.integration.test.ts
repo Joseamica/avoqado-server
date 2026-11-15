@@ -206,7 +206,7 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
     expect(await prisma.merchantAccount.findUnique({ where: { id: demo1 } })).not.toBeNull()
   })
 
-  it('Codex r1 #3: la tarifa de una posición demo que usa un canal en línea NO se borra', async () => {
+  it('Codex r2 #1: la tarifa de una posición demo se borra aunque la use un canal en línea (el canal pierde el enlace, como antes)', async () => {
     const venueId = await negocioTrial('canal')
     const real = await cuenta('real', 'g1')
     const demo = await cuenta('demo', 'g2')
@@ -229,11 +229,11 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
     await cleanDemoData(venueId, null)
 
     expect((await prisma.venuePaymentConfig.findUnique({ where: { venueId } }))!.secondaryAccountId).toBeNull()
-    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY', 'SECONDARY'])
-    expect((await prisma.ecommerceMerchant.findUnique({ where: { id: canal.id } }))!.pricingStructureId).toBe(secundaria.id)
+    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY'])
+    expect((await prisma.ecommerceMerchant.findUnique({ where: { id: canal.id } }))!.pricingStructureId).toBeNull()
   })
 
-  it('Codex r1 #2: una cuenta demo que también usa la organización no se borra y la limpieza NO se cae', async () => {
+  it('Codex r1/r2 #2: una cuenta demo que también usa la organización no se borra y la limpieza NO se cae', async () => {
     const { venueId, orgId } = await negocioTrialConOrg('org-usa-demo')
     const demo1 = await cuenta('demo', 'h1')
     const demo2 = await cuenta('demo', 'h2')
