@@ -287,6 +287,72 @@ describe('createOrderWithItems — líneas de promoción', () => {
     )
   })
 
+  // ── 🔴 Extras por pieza del combo (modificadores en combo) ──
+  // `applyPromotionToOrder` va simulado: su aritmética (extras encima del combo, marca de revisión, sin 400) se prueba en
+  // promotion.service. Aquí se prueba la mitad de ESTE endpoint: que `modifierIds` llegue intacto al motor y que, sobre el
+  // subtotal que el motor deja (combo $180 + queso $15 = $195), el descuento de cuenta y la propina den lo correcto.
+  describe('combo $180 (lista $200) + queso $15 en una pieza', () => {
+    const refConExtra = {
+      promotionRef: {
+        promotionId: 'promo-1',
+        promotionInstanceId: 'uuid-1',
+        selections: [{ groupId: 'g1', optionId: 'o1', modifierIds: ['mod-queso'] }],
+      },
+    }
+
+    beforeEach(() => {
+      prismaMock.order.findFirst.mockResolvedValue({
+        subtotal: new Decimal(195),
+        serviceChargeAmount: new Decimal(0),
+        paidAmount: new Decimal(0),
+      })
+      prismaMock.order.create.mockResolvedValue(orderRow([], 0))
+    })
+
+    it('los modifierIds de la pieza llegan intactos al motor de promociones', async () => {
+      await createOrderWithItems('venue-1', { staffId: 'staff-1', items: [refConExtra] } as any)
+
+      expect(apply).toHaveBeenCalledWith(
+        expect.objectContaining({ selections: [{ groupId: 'g1', optionId: 'o1', modifierIds: ['mod-queso'] }] }),
+        prismaMock,
+      )
+    })
+
+    it('sin descuento ni propina: subtotal y total = 195', async () => {
+      await createOrderWithItems('venue-1', { staffId: 'staff-1', items: [refConExtra] } as any)
+
+      expect(prismaMock.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ discountAmount: new Decimal(0), total: new Decimal(195), remainingBalance: new Decimal(195) }),
+        }),
+      )
+    })
+
+    it('descuento de cuenta del cajero 1950 centavos (10 % de $195): el extra recibe el descuento igual que el combo → 175.50', async () => {
+      await createOrderWithItems('venue-1', { staffId: 'staff-1', items: [refConExtra], discount: 1950 } as any)
+
+      expect(prismaMock.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            discountAmount: new Decimal(19.5),
+            total: new Decimal(175.5),
+            remainingBalance: new Decimal(175.5),
+          }),
+        }),
+      )
+    })
+
+    it('descuento 1950 + propina 2000 → 195.50', async () => {
+      await createOrderWithItems('venue-1', { staffId: 'staff-1', items: [refConExtra], discount: 1950, tip: 2000 } as any)
+
+      expect(prismaMock.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ total: new Decimal(195.5), remainingBalance: new Decimal(195.5) }),
+        }),
+      )
+    })
+  })
+
   // ── 🔴 La llave de idempotencia no puede quedar envenenada ──
 
   it('🔴 si la promoción falla, la venta ENTERA se revierte con su transacción: nada que anular ni llave que soltar', async () => {

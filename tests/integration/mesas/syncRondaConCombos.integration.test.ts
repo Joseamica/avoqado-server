@@ -364,4 +364,35 @@ describe('ronda de combos sin red: entera o nada', () => {
     expect(await prisma.orderItem.count({ where: { orderId, externalId: l } })).toBe(1)
     expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(290) // combo $90 + 2 × $100
   })
+
+  // Modificadores en combo: la ronda de mesa cobra el extra de una pieza encima del combo y el mismo intent no lo duplica.
+  it('(9) combo con extra (queso $15) por ADD_ITEMS: renglón con su modificador, total = combo + extra, y reproducir el intent no duplica', async () => {
+    const { orderId, localOrderId } = await cuentaDeMesa()
+    const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Extras-${fixture}`, active: true } })
+    const queso = await prisma.modifier.create({ data: { groupId: grupo.id, name: 'Queso extra', price: 15 } })
+    await prisma.productModifierGroup.create({ data: { productId, groupId: grupo.id } })
+    const comboConExtra = (instanceId: string) => ({
+      promotionRef: {
+        promotionId,
+        promotionInstanceId: instanceId,
+        selections: selections.map((sel, i) => (i === 0 ? { ...sel, modifierIds: [queso.id] } : sel)),
+      },
+    })
+    const a = randomUUID()
+    const r = ronda(localOrderId, [comboConExtra(a)])
+
+    const [ack] = await processIntents(params([r]))
+    expect(ack).toMatchObject({ id: r.id, status: 'ACKED' })
+    const [replay] = await processIntents(params([r])) // el mismo intent otra vez (huella igual)
+    expect(replay).toMatchObject({ id: r.id, status: 'ACKED' })
+
+    expect(await combosDeLaRonda(orderId, [a])).toBe(1)
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(Number(cuenta.total)).toBe(105) // combo $90 + queso $15
+    const filas = await prisma.orderItemModifier.findMany({ where: { orderItem: { orderId } } })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ modifierId: queso.id, name: 'Queso extra', quantity: 1 })
+    expect(Number(filas[0].price)).toBe(15)
+    expect(await prisma.orderItem.count({ where: { orderId, orderPromotion: { instanceId: a } } })).toBe(2)
+  })
 })

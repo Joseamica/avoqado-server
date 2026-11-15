@@ -293,3 +293,20 @@ describe('shift top products — revenue is net of the line discount', () => {
     expect(shift.orders[0].items[0].price).toBe(89)
   })
 })
+
+describe('lineGross / lineRevenue — extras de un combo (hamburguesa $120 + papas $80 de lista, combo $180, queso $15)', () => {
+  // Lo que el motor deja: cada pieza con su parte del combo en `unitPrice`/`discountAmount` y el extra como modificador.
+  // Hamburguesa: lista 120, combo la deja en 108 (descuento 12) + queso 15. Papas: lista 80, combo 72 (descuento 8).
+  const lineas = [
+    { quantity: 1, unitPrice: 120, discountAmount: 12, modifiers: [{ price: 15, quantity: 1 }] },
+    { quantity: 1, unitPrice: 80, discountAmount: 8, modifiers: [] },
+  ]
+
+  it('Σ lineGross = 215 (lista $200 + extra $15)', () => {
+    expect(lineas.reduce((a, l) => a + lineGross(l), 0)).toBe(215)
+  })
+
+  it('Σ lineRevenue = 195 (combo $180 + extra $15)', () => {
+    expect(lineas.reduce((a, l) => a + lineRevenue(l), 0)).toBe(195)
+  })
+})
