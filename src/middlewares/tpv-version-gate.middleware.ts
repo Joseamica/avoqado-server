@@ -173,6 +173,15 @@ export async function tpvVersionGate(req: Request, res: Response, next: NextFunc
       return next()
     }
 
+    // La Nexgo (AngelPay) se actualiza por el TMS de AngelPay, nunca por nuestro APK: check-update, get-version y el latido
+    // ya la saltan. Una obligatoria (de la PAX) con código mayor que el suyo le rechazaba cada operación con 426: su app
+    // ignora el aviso, pero la petición ya se perdió (Codex, apps viejas 11-nov, r4 hallazgo 2). Se reconoce por
+    // `X-TPV-Processor: NEXGO` (lo mandan todas desde el 1-oct) o por su nombre de versión (`-nexgo`, `-nexgo-prod`).
+    const processor = (req.headers['x-tpv-processor'] as string | undefined)?.trim().toUpperCase()
+    if (processor === 'NEXGO' || /-nexgo(-|$)/i.test(versionName)) {
+      return next()
+    }
+
     // El ambiente sale del nombre de versión
     const isSandbox = versionName.toLowerCase().includes('sandbox')
     const environment: AppEnvironment = isSandbox ? 'SANDBOX' : 'PRODUCTION'
