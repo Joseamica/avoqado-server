@@ -389,6 +389,19 @@ describe('extras de las piezas', () => {
     expect(prismaMock.orderItem.createMany).not.toHaveBeenCalled()
   })
 
+  it('las consultas llevan tope y llegar al tope de grupos marca revisión', async () => {
+    const liga = { productId: 'hamburguesa', group: grupoTermino }
+    prismaMock.productModifierGroup.findMany.mockResolvedValue(Array.from({ length: 50 }, () => liga))
+
+    await applyPromotionToOrder(conExtras())
+
+    expect(prismaMock.productModifierGroup.findMany.mock.calls[0][0].take).toBe(50)
+    expect(prismaMock.modifier.findMany.mock.calls[0][0].take).toBe(1)
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op.needsReview).toBe(true)
+    expect(op.reviewReason).toContain('No se revisaron todos los grupos de modificadores')
+  })
+
   it('modificador de otro venue se omite: la consulta filtra por venueId', async () => {
     prismaMock.modifier.findMany.mockResolvedValue([])
 

@@ -19,6 +19,9 @@ import {
   type ServiceCourseSnapshot,
 } from '@/services/service-courses/serviceCourseContract'
 
+/** Tope de grupos de modificadores que se leen por producto al revisar los extras de una pieza (una pieza real trae un puñado). */
+const MAX_GRUPOS_DE_MODIFICADORES_POR_PRODUCTO = 50
+
 export interface PromotionSelection {
   groupId: string
   optionId: string
@@ -220,7 +223,9 @@ async function applyPromotionInTransaction(
   if (modifierIdsPorPieza.some(ids => ids !== undefined)) {
     const productIds = [...new Set(chosen.filter((_, i) => modifierIdsPorPieza[i] !== undefined).map(c => c.productId))]
     const todosLosIds = [...new Set(modifierIdsPorPieza.flatMap(ids => ids ?? []))]
+    const topeDeLigas = productIds.length * MAX_GRUPOS_DE_MODIFICADORES_POR_PRODUCTO
     const ligas = await tx.productModifierGroup.findMany({
+      take: topeDeLigas,
       where: { productId: { in: productIds }, group: { venueId, active: true } },
       select: {
         productId: true,
@@ -229,10 +234,15 @@ async function applyPromotionInTransaction(
     })
     const modificadores = todosLosIds.length
       ? await tx.modifier.findMany({
+          take: todosLosIds.length, // ids ya deduplicados: tope exacto
           where: { id: { in: todosLosIds }, group: { venueId } },
           select: { id: true, name: true, price: true, groupId: true },
         })
       : []
+    // Si la consulta llega al tope no se descarta en silencio: la revisión de grupos pudo quedar incompleta.
+    if (ligas.length >= topeDeLigas) {
+      problemasDeExtras.push('No se revisaron todos los grupos de modificadores de las piezas del combo.')
+    }
     const extrasDelVenue = new Map<string, ExtraDelVenue>(
       modificadores.map(m => [m.id, { id: m.id, name: m.name, priceCents: Math.round(Number(m.price) * 100), groupId: m.groupId }]),
     )
