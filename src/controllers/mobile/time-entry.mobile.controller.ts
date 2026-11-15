@@ -53,7 +53,7 @@ export const identifyByPin = async (req: Request, res: Response, next: NextFunct
 export const clockIn = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = req.body
+    const { pin, jobRole, checkInPhotoUrl, checkInPhoto, latitude, longitude, accuracy, note } = req.body
 
     if (!isPinText(pin)) {
       return res.status(400).json({
@@ -67,6 +67,7 @@ export const clockIn = async (req: Request, res: Response, next: NextFunction) =
       pin,
       jobRole,
       checkInPhotoUrl,
+      checkInPhoto, // selfie del POS (base64, JPEG): la guarda el servidor en la caja fuerte privada
       latitude,
       longitude,
       accuracy,

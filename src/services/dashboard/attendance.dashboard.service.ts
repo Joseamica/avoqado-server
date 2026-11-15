@@ -29,6 +29,7 @@ import { type ExpectedDay, resolveExpectedDay, type WeeklyWorkSchedule, type Wor
 import type { TimeEntryStatus } from '@prisma/client'
 import { checaAsistencia } from './rh/checaAsistencia'
 import { fechaComoDbDate } from './staffPay/periodos'
+import { fotoParaVer } from './fotoDeEntrada'
 
 export interface VenueTimeEntriesQuery {
   staffId?: string
@@ -44,12 +45,19 @@ export async function getVenueTimeEntries(venueId: string, query: VenueTimeEntri
   // El motor TPV hace `new Date(startDate)` — medianoche UTC, no del negocio. Se le pasan
   // instantes ya resueltos en la zona del venue para que el día final entre completo.
   const { from, to } = await venueDateRange(venueId, query.startDate, query.endDate)
-  return getTimeEntries({
+  const page = await getTimeEntries({
     venueId,
     ...query,
     startDate: from?.toISOString(),
     endDate: to?.toISOString(),
   })
+  // Foto de entrada lista para pintarse (campo NUEVO; `checkInPhotoUrl` se queda como estaba): la selfie privada del POS
+  // sale firmada 10 min y sólo si es de ESTE negocio; la URL pública de la TPV, tal cual. Firmar es local (sin red) y la
+  // página ya viene acotada por `limit`.
+  const timeEntries = await Promise.all(
+    page.timeEntries.map(async entry => ({ ...entry, checkInPhotoViewUrl: await fotoParaVer(venueId, entry.checkInPhotoUrl) })),
+  )
+  return { ...page, timeEntries }
 }
 
 /** Quién está dentro en este momento. Ya viene acotado al venue. */

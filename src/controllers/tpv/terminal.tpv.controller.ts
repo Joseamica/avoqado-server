@@ -428,6 +428,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
           trackPromoterLocation: true,
           promoterLocationStartHour: true,
           promoterLocationEndHour: true,
+          requireClockInPhoto: true,
         },
       }),
       getVenuePlanInfo(terminal.venueId).catch((error): VenuePlanInfo | undefined => {
@@ -464,7 +465,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.
       requireAvoqadoServerForCardPayment: terminalTpvSettings.requireAvoqadoServerForCardPayment,
-      // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
+      // Foto de entrada: la de cada terminal (Terminal.config) O la del negocio («Foto de Entrada» en Ajustes). Prendida en
+      // el negocio, todas las terminales la piden; apagada, cada terminal sigue como esté configurada (PlayTelecom intacto).
+      // requireClockOutPhoto sigue siendo sólo de la terminal.
+      requireClockInPhoto: terminalTpvSettings.requireClockInPhoto === true || venueSettings?.requireClockInPhoto === true,
     }
 
     // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer

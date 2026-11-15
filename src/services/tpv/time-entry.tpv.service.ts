@@ -1,5 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
+import { assertFotoNoPrivada } from '../dashboard/fotoDeEntrada'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -181,6 +182,8 @@ export async function clockIn(params: ClockInParams) {
 
   // Interruptor de asistencia: apagado = 403 con mensaje que la app ya sabe mostrar.
   await assertAttendanceEnabled(venueId)
+  // La TPV manda la URL pública de Firebase; una ruta del almacén privado sólo la escribe el servidor (Asistencia la firma).
+  assertFotoNoPrivada(checkInPhotoUrl)
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
