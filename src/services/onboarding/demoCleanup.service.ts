@@ -30,10 +30,11 @@
  * - RawMaterial
  * - RawMaterialMovement / StockBatch (only those belonging to demo raw materials)
  *
- * What gets DELETED (payment config - ONLY if demo accounts):
- * - VenuePaymentConfig (only if linked to demo merchant accounts)
- * - VenuePricingStructure (only if VenuePaymentConfig was demo)
- * - ProviderCostStructure (only for demo merchant accounts)
+ * What gets DELETED (payment config - ONLY the demo positions, encargo fe2b91):
+ * - Every position demo → the whole VenuePaymentConfig and every VenuePricingStructure
+ * - Mixed → only the SECONDARY/TERTIARY position holding a demo account, and only that position's VenuePricingStructure.
+ *   A demo PRIMARY next to a real account stays (the column is required) and an ActivityLog says so.
+ * - ProviderCostStructure + MerchantAccount (only demo accounts no position references anymore)
  *
  * What gets KEPT:
  * - All data created by the user (isDemo: false)
@@ -51,10 +52,18 @@
  * los respalda. Se regresa con `skippedReason: 'GIFT_CARDS'`, un aviso en el log y en ActivityLog; la conversión sigue.
  */
 
+import { AccountType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+
+/** Cómo se reconoce una cuenta de cobro demo (las que siembra `demoSeed`). */
+const CUENTA_DEMO_WHERE: Prisma.MerchantAccountWhereInput[] = [
+  { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
+  { displayName: { contains: 'Demo', mode: 'insensitive' } },
+  { blumonSerialNumber: { startsWith: 'DEMO' } },
+]
 
 interface CleanupResult {
   // Transactional data (all deleted)
@@ -79,6 +88,8 @@ interface CleanupResult {
   deletedCustomerGroups: number
   deletedLoyaltyConfig: number
   deletedRawMaterials: number
+  /** Encargo fe2b91: qué posiciones de cobro se limpiaron. Sin el campo, el negocio no tenía cuentas demo. */
+  pagosDemo?: { limpiadas: AccountType[]; demoQueSeQueda: 'PRIMARY' | null; configuracionBorrada: boolean }
   /** ⭐ (C6 concern 1): por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo. Sin el campo, se limpió. */
   skippedReason?: 'GIFT_CARDS'
 }
@@ -190,98 +201,96 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       result.deletedBatches = deletedBatches.count
       logger.info(`  ✓ Deleted ${deletedBatches.count} demo stock batches`)
 
-      // 7. Delete demo MerchantAccounts for THIS venue only
+      // 7. Cuentas de cobro demo de ESTE negocio. 🔴 Se limpia sólo la POSICIÓN con cuenta demo, con la tarifa de esa posición
+      // (encargo fe2b91, hz:87f4b879:D7). Antes, con UNA cuenta demo se borraba la configuración entera y todas sus tarifas, y el
+      // negocio que ya había dado de alta su cuenta real en otra posición se quedaba sin cuenta de cobro ni tarifa.
+      // - Todas las posiciones demo (como las siembra `demoSeed`): se borra la configuración y todas sus tarifas, como siempre.
+      // - Mezcla: se vacía la secundaria o terciaria demo y se borra SÓLO la tarifa de esa posición. La principal no puede quedar
+      //   vacía (la columna es obligatoria): si la demo está en la principal, se deja como está y se avisa; no se mueve una cuenta
+      //   real de posición ni se inventa una tarifa.
       const venuePaymentConfig = await tx.venuePaymentConfig.findUnique({
         where: { venueId },
         select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
       })
 
-      const venueAccountIds: string[] = []
-      if (venuePaymentConfig?.primaryAccountId) venueAccountIds.push(venuePaymentConfig.primaryAccountId)
-      if (venuePaymentConfig?.secondaryAccountId) venueAccountIds.push(venuePaymentConfig.secondaryAccountId)
-      if (venuePaymentConfig?.tertiaryAccountId) venueAccountIds.push(venuePaymentConfig.tertiaryAccountId)
+      const posiciones: Array<{ tipo: AccountType; id: string }> = []
+      if (venuePaymentConfig?.primaryAccountId) posiciones.push({ tipo: 'PRIMARY', id: venuePaymentConfig.primaryAccountId })
+      if (venuePaymentConfig?.secondaryAccountId) posiciones.push({ tipo: 'SECONDARY', id: venuePaymentConfig.secondaryAccountId })
+      if (venuePaymentConfig?.tertiaryAccountId) posiciones.push({ tipo: 'TERTIARY', id: venuePaymentConfig.tertiaryAccountId })
+      const venueAccountIds = posiciones.map(p => p.id)
 
-      // Check if any of the venue's merchant accounts are demo accounts
-      let hasDemoMerchantAccounts = false
-      if (venueAccountIds.length > 0) {
-        const demoAccountCheck = await tx.merchantAccount.findMany({
-          where: {
-            id: { in: venueAccountIds },
-            OR: [
-              { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
-              { displayName: { contains: 'Demo', mode: 'insensitive' } },
-              { blumonSerialNumber: { startsWith: 'DEMO' } },
-            ],
-          },
-          select: { id: true },
-        })
-        hasDemoMerchantAccounts = demoAccountCheck.length > 0
-      }
+      const demoAccountIds =
+        venueAccountIds.length > 0
+          ? (
+              await tx.merchantAccount.findMany({
+                where: { id: { in: venueAccountIds }, OR: CUENTA_DEMO_WHERE },
+                select: { id: true },
+              })
+            ).map(m => m.id)
+          : []
+      const posicionesDemo = posiciones.filter(p => demoAccountIds.includes(p.id)).map(p => p.tipo)
 
-      // Delete VenuePaymentConfig ONLY if it points to demo accounts
-      // Preserve real config that was set up post-KYC
-      if (venuePaymentConfig && hasDemoMerchantAccounts) {
-        await tx.venuePaymentConfig.delete({
-          where: { venueId },
-        })
-
-        // Delete VenuePricingStructure ONLY if the config was demo
-        // This preserves pricing structures created for real accounts post-KYC
-        await tx.venuePricingStructure.deleteMany({
-          where: { venueId },
-        })
-        logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures`)
+      if (venuePaymentConfig && posicionesDemo.length > 0) {
+        if (posicionesDemo.length === posiciones.length) {
+          await tx.venuePaymentConfig.delete({ where: { venueId } })
+          await tx.venuePricingStructure.deleteMany({ where: { venueId } })
+          result.pagosDemo = { limpiadas: posicionesDemo, demoQueSeQueda: null, configuracionBorrada: true }
+          logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (every position was demo)`)
+        } else {
+          const limpiadas = posicionesDemo.filter(t => t !== 'PRIMARY')
+          if (limpiadas.length > 0) {
+            await tx.venuePaymentConfig.update({
+              where: { venueId },
+              data: {
+                ...(limpiadas.includes('SECONDARY') ? { secondaryAccountId: null } : {}),
+                ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
+              },
+            })
+            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
+          }
+          const demoQueSeQueda = posicionesDemo.includes('PRIMARY') ? ('PRIMARY' as const) : null
+          result.pagosDemo = { limpiadas, demoQueSeQueda, configuracionBorrada: false }
+          logger.info(`  ⚡ Preserved real merchant positions; cleaned demo positions: ${limpiadas.join(', ') || 'none'}`)
+          if (demoQueSeQueda) {
+            logger.warn(`  ⚠️ The PRIMARY position still holds a demo merchant account while another position is real`, { venueId })
+          }
+        }
       } else if (venuePaymentConfig) {
         logger.info(`  ⚡ Preserved real VenuePaymentConfig and VenuePricingStructures (non-demo accounts)`)
       }
 
-      if (venueAccountIds.length > 0 && hasDemoMerchantAccounts) {
-        const demoAccountsForVenue = await tx.merchantAccount.findMany({
+      if (demoAccountIds.length > 0) {
+        // Una cuenta demo que sigue en una posición (la principal de arriba, u otro negocio) no se borra.
+        const stillReferenced = await tx.venuePaymentConfig.findMany({
           where: {
-            id: { in: venueAccountIds },
             OR: [
-              { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
-              { displayName: { contains: 'Demo', mode: 'insensitive' } },
-              { blumonSerialNumber: { startsWith: 'DEMO' } },
+              { primaryAccountId: { in: demoAccountIds } },
+              { secondaryAccountId: { in: demoAccountIds } },
+              { tertiaryAccountId: { in: demoAccountIds } },
             ],
           },
-          select: { id: true },
+          select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
         })
 
-        if (demoAccountsForVenue.length > 0) {
-          const demoAccountIds = demoAccountsForVenue.map(m => m.id)
+        const stillReferencedIds = new Set<string>()
+        for (const config of stillReferenced) {
+          if (config.primaryAccountId) stillReferencedIds.add(config.primaryAccountId)
+          if (config.secondaryAccountId) stillReferencedIds.add(config.secondaryAccountId)
+          if (config.tertiaryAccountId) stillReferencedIds.add(config.tertiaryAccountId)
+        }
 
-          const stillReferenced = await tx.venuePaymentConfig.findMany({
-            where: {
-              OR: [
-                { primaryAccountId: { in: demoAccountIds } },
-                { secondaryAccountId: { in: demoAccountIds } },
-                { tertiaryAccountId: { in: demoAccountIds } },
-              ],
-            },
-            select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+        const safeToDeleteIds = demoAccountIds.filter(id => !stillReferencedIds.has(id))
+
+        if (safeToDeleteIds.length > 0) {
+          await tx.providerCostStructure.deleteMany({
+            where: { merchantAccountId: { in: safeToDeleteIds } },
           })
 
-          const stillReferencedIds = new Set<string>()
-          for (const config of stillReferenced) {
-            if (config.primaryAccountId) stillReferencedIds.add(config.primaryAccountId)
-            if (config.secondaryAccountId) stillReferencedIds.add(config.secondaryAccountId)
-            if (config.tertiaryAccountId) stillReferencedIds.add(config.tertiaryAccountId)
-          }
-
-          const safeToDeleteIds = demoAccountIds.filter(id => !stillReferencedIds.has(id))
-
-          if (safeToDeleteIds.length > 0) {
-            await tx.providerCostStructure.deleteMany({
-              where: { merchantAccountId: { in: safeToDeleteIds } },
-            })
-
-            const deletedMerchantAccounts = await tx.merchantAccount.deleteMany({
-              where: { id: { in: safeToDeleteIds } },
-            })
-            result.deletedMerchantAccounts = deletedMerchantAccounts.count
-            logger.info(`  ✓ Deleted ${deletedMerchantAccounts.count} demo merchant accounts`)
-          }
+          const deletedMerchantAccounts = await tx.merchantAccount.deleteMany({
+            where: { id: { in: safeToDeleteIds } },
+          })
+          result.deletedMerchantAccounts = deletedMerchantAccounts.count
+          logger.info(`  ✓ Deleted ${deletedMerchantAccounts.count} demo merchant accounts`)
         }
       }
 
@@ -507,6 +516,17 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       data: { reason: result.skippedReason },
     })
     return result
+  }
+
+  if (result.pagosDemo) {
+    await logAction({
+      staffId: staffId ?? null,
+      venueId,
+      action: 'DEMO_PAYMENT_POSITIONS_CLEANED',
+      entity: 'VenuePaymentConfig',
+      entityId: venueId,
+      data: { ...result.pagosDemo, cuentasDemoBorradas: result.deletedMerchantAccounts },
+    })
   }
 
   logger.info(`🎉 Demo data cleanup complete for venue ${venueId}`)
