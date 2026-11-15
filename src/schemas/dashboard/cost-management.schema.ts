@@ -177,48 +177,60 @@ export const exportProfitDataQuerySchema = z.object({
  * Enhanced venue creation schema with payment processing and pricing
  */
 export const enhancedCreateVenueSchema = z.object({
-  body: z.object({
-    // Basic venue information
-    name: z.string().min(1, 'El nombre del negocio es obligatorio'),
-    type: z.string().min(1, 'El tipo de negocio es obligatorio'),
-    logo: z.string().url('El logo debe ser una dirección web válida').optional().nullable(),
-    address: z.string().min(1, 'La dirección es obligatoria'),
-    city: z.string().min(1, 'La ciudad es obligatoria'),
-    state: z.string().min(1, 'El estado es obligatorio'),
-    country: z.string().default('MX'),
-    zipCode: z.string().min(1, 'El código postal es obligatorio'),
-    phone: z.string().min(1, 'El teléfono es obligatorio'),
-    email: z.string().email('Escribe un correo electrónico válido'),
-    website: z.string().url().optional(),
+  body: z
+    .object({
+      // Basic venue information
+      name: z.string().min(1, 'El nombre del negocio es obligatorio'),
+      type: z.string().min(1, 'El tipo de negocio es obligatorio'),
+      logo: z.string().url('El logo debe ser una dirección web válida').optional().nullable(),
+      address: z.string().min(1, 'La dirección es obligatoria'),
+      city: z.string().min(1, 'La ciudad es obligatoria'),
+      state: z.string().min(1, 'El estado es obligatorio'),
+      country: z.string().default('MX'),
+      zipCode: z.string().min(1, 'El código postal es obligatorio'),
+      phone: z.string().min(1, 'El teléfono es obligatorio'),
+      email: z.string().email('Escribe un correo electrónico válido'),
+      website: z.string().url().optional(),
 
-    // Payment configuration
-    enablePaymentProcessing: z.boolean().default(true),
-    primaryAccountId: z.string().optional(),
-    secondaryAccountId: z.string().optional(),
-    tertiaryAccountId: z.string().optional(),
-    routingRules: z.any().optional(), // JSON object for routing rules
+      // Payment configuration
+      enablePaymentProcessing: z.boolean().default(true),
+      primaryAccountId: z.string().optional(),
+      secondaryAccountId: z.string().optional(),
+      tertiaryAccountId: z.string().optional(),
+      routingRules: z.any().optional(), // JSON object for routing rules
 
-    // Pricing configuration
-    setupPricingStructure: z.boolean().default(true),
-    pricingTier: z.enum(['STANDARD', 'PREMIUM', 'ENTERPRISE', 'CUSTOM']).default('STANDARD'),
-    debitRate: z.number().min(0).max(1).optional(),
-    creditRate: z.number().min(0).max(1).optional(),
-    amexRate: z.number().min(0).max(1).optional(),
-    internationalRate: z.number().min(0).max(1).optional(),
-    includesTax: z.boolean().nullable().optional(),
-    taxRate: z.number().min(0).max(1).optional(),
-    fixedFeePerTransaction: z.number().min(0).optional(),
-    monthlyServiceFee: z.number().min(0).optional(),
-    minimumMonthlyVolume: z.number().min(0).optional(),
+      // Pricing configuration
+      setupPricingStructure: z.boolean().default(true),
+      pricingTier: z.enum(['STANDARD', 'PREMIUM', 'ENTERPRISE', 'CUSTOM']).default('STANDARD'),
+      debitRate: z.number().min(0).max(1).optional(),
+      creditRate: z.number().min(0).max(1).optional(),
+      amexRate: z.number().min(0).max(1).optional(),
+      internationalRate: z.number().min(0).max(1).optional(),
+      includesTax: z.boolean().nullable().optional(),
+      taxRate: z.number().min(0).max(1).optional(),
+      fixedFeePerTransaction: z.number().min(0).optional(),
+      monthlyServiceFee: z.number().min(0).optional(),
+      minimumMonthlyVolume: z.number().min(0).optional(),
 
-    // Business configuration
-    currency: z.string().default('MXN'),
-    timezone: zTimezone,
-    businessType: z.string().default('RESTAURANT'),
+      // Business configuration
+      currency: z.string().default('MXN'),
+      timezone: zTimezone,
+      businessType: z.string().default('RESTAURANT'),
 
-    // User context
-    userId: z.string().optional(),
-  }),
+      // User context
+      userId: z.string().optional(),
+    })
+    // D25 (15-nov): los cobros vienen prendidos por default, y la configuración de pagos exige una cuenta principal (llave
+    // foránea a la cuenta de cobro). Sin ella, el alta ENTERA tronaba en la base con un error genérico. Mismo patrón que D10.
+    .superRefine((body, ctx) => {
+      if (body.enablePaymentProcessing && !body.primaryAccountId?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['primaryAccountId'],
+          message: 'Para activar los cobros elige la cuenta principal, o desactiva los cobros para crear el negocio sin ellos.',
+        })
+      }
+    }),
 })
 
 // ===== TYPE EXPORTS =====
