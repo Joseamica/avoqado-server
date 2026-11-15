@@ -99,7 +99,15 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       throw new Error(`product.count con un where inesperado: ${JSON.stringify(arg)}`)
     })
 
+  /** La transacción del apagado con hijas: corre el callback con el mismo mock; la 2.ª lectura con candado son las hijas. */
+  const transaccionCon = (hijasConCandado: unknown[]) => {
+    prismaMock.$transaction.mockImplementation((async (cb: (tx: typeof prismaMock) => unknown) => cb(prismaMock)) as never)
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'c1' }] as never).mockResolvedValueOnce(hijasConCandado as never)
+  }
+
   beforeEach(() => {
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$transaction.mockReset()
     prismaMock.product.count.mockReset()
     prismaMock.menuCategory.findUnique.mockResolvedValue(categoria as never)
     prismaMock.product.findMany.mockResolvedValue([] as never)
@@ -181,9 +189,9 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       prismaMock.menuCategory.findUnique.mockResolvedValue({
         ...categoria,
         children: [
-          { id: 'h1', name: 'Pays', active: true },
-          { id: 'h2', name: 'Helados', active: false },
-          { id: 'h3', name: 'Vieja', active: false },
+          { id: 'h1', name: 'Pays', active: true, venueId: V },
+          { id: 'h2', name: 'Helados', active: false, venueId: V },
+          { id: 'h3', name: 'Vieja', active: false, venueId: V },
         ],
       } as never)
       // `Helados` está apagada pero aún tiene productos vigentes; `Vieja` está apagada y vacía (no bloquea).
@@ -202,7 +210,10 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
 
     it('una subcategoría apagada que todavía tiene subcategorías debajo también bloquea', async () => {
       contar(0, 0)
-      prismaMock.menuCategory.findUnique.mockResolvedValue({ ...categoria, children: [{ id: 'h1', name: 'Pays', active: false }] } as never)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({
+        ...categoria,
+        children: [{ id: 'h1', name: 'Pays', active: false, venueId: V }],
+      } as never)
       prismaMock.product.findMany.mockResolvedValue([] as never)
       prismaMock.menuCategory.findMany.mockResolvedValue([{ parentId: 'h1' }] as never)
 
@@ -217,13 +228,17 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       prismaMock.productGroup.count.mockResolvedValue(0 as never)
       prismaMock.menuCategory.findUnique.mockResolvedValue({
         ...categoria,
-        children: [{ id: 'h1', name: 'Vieja', active: false }],
+        children: [{ id: 'h1', name: 'Vieja', active: false, venueId: V }],
       } as never)
       prismaMock.product.findMany.mockResolvedValue([] as never)
       prismaMock.menuCategory.findMany.mockResolvedValue([] as never)
       prismaMock.menuCategory.update.mockResolvedValue({ ...categoria, active: false } as never)
+      transaccionCon([{ id: 'h1', name: 'Vieja', active: false, venueId: V }])
 
       await expect(menuService.deleteMenuCategory(V, 'c1')).resolves.toMatchObject({ id: 'c1', active: false })
+      // Se apaga DENTRO de una transacción que tomó al padre y a sus hijas con candado.
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
 
       // No se borra de verdad: la llave del padre es SET NULL y la subcategoría «eliminada» saldría suelta en la lista.
       expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
@@ -235,8 +250,43 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
         expect.objectContaining({ where: { categoryId: { in: ['h1'] }, deletedAt: null }, take: 1 }),
       )
       expect(prismaMock.menuCategory.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { venueId: V, parentId: { in: ['h1'] } }, take: 1 }),
+        expect.objectContaining({ where: { parentId: { in: ['h1'] } }, take: 1 }),
       )
+    })
+
+    it('Codex r1 · carrera: si la hija se reactiva entre la lectura y el apagado, la revisión con candado lo rechaza', async () => {
+      contar(0, 0)
+      prismaMock.productGroup.count.mockResolvedValue(0 as never)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({
+        ...categoria,
+        children: [{ id: 'h1', name: 'Vieja', active: false, venueId: V }],
+      } as never)
+      prismaMock.product.findMany.mockResolvedValue([] as never)
+      prismaMock.menuCategory.findMany.mockResolvedValue([] as never)
+      // Dentro del candado, la hija ya está ACTIVA (otra persona la reactivó).
+      transaccionCon([{ id: 'h1', name: 'Vieja', active: true, venueId: V }])
+
+      await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'CATEGORY_HAS_SUBCATEGORIES',
+        details: { subcategorias: ['Vieja'] },
+      })
+      expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
+      expect(prismaMock.menuCategoryAssignment.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
+    })
+
+    it('una hija de OTRO negocio bloquea, pero su nombre no se enseña', async () => {
+      contar(0, 0)
+      prismaMock.menuCategory.findUnique.mockResolvedValue({
+        ...categoria,
+        children: [{ id: 'x1', name: 'Secreta de otro', active: false, venueId: 'otro-venue' }],
+      } as never)
+
+      const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
+
+      expect(error).toMatchObject({ code: 'CATEGORY_HAS_SUBCATEGORIES', details: { subcategorias: ['una subcategoría de otro negocio'] } })
+      expect(error.message).not.toContain('Secreta de otro')
     })
   })
 })

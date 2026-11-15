@@ -480,6 +480,44 @@ export function rechazoConSubcategorias(categoria: string, subcategorias: string
   return `No se puede eliminar «${categoria}»: tiene ${cuantas}: ${subcategorias.join(', ')}. ${uno ? 'Elimínala' : 'Elimínalas'} primero y vuelve a intentarlo.`
 }
 
+type HijaDeCategoria = { id: string; name: string; active: boolean; venueId: string }
+
+/**
+ * Las subcategorías que SÍ impiden borrar al padre: activas, con productos vigentes o con subcategorías debajo. Una apagada y
+ * vacía no (es lo que deja «eliminar» una que conservaba archivados). Una hija de OTRO negocio (el `parentId` se conecta por
+ * id) bloquea igual, pero su nombre no se enseña.
+ */
+async function subcategoriasQueBloquean(
+  db: Pick<Prisma.TransactionClient, 'product' | 'menuCategory'>,
+  venueId: string,
+  hijos: HijaDeCategoria[],
+): Promise<string[]> {
+  if (hijos.length === 0) return []
+  const ids = hijos.map(h => h.id)
+  const [hijosConProductos, hijosConHijos] = await Promise.all([
+    db.product.findMany({
+      where: { categoryId: { in: ids }, deletedAt: null },
+      select: { categoryId: true },
+      distinct: ['categoryId'],
+      take: ids.length,
+    }),
+    db.menuCategory.findMany({
+      where: { parentId: { in: ids } },
+      select: { parentId: true },
+      distinct: ['parentId'],
+      take: ids.length,
+    }),
+  ])
+  const ocupados = new Set<string | null>([...hijosConProductos.map(p => p.categoryId), ...hijosConHijos.map(h => h.parentId)])
+  return hijos
+    .filter(h => h.venueId !== venueId || h.active || ocupados.has(h.id))
+    .map(h => (h.venueId === venueId ? h.name : 'una subcategoría de otro negocio'))
+}
+
+function rechazoPorSubcategorias(categoria: string, subcategorias: string[]): BadRequestError {
+  return new BadRequestError(rechazoConSubcategorias(categoria, subcategorias), 'CATEGORY_HAS_SUBCATEGORIES', { subcategorias })
+}
+
 export async function deleteMenuCategory(venueId: string, categoryId: string): Promise<MenuCategory> {
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
@@ -519,28 +557,8 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
   const hijos = category.children ?? []
   let conHijosResiduales = false
   if (hijos.length > 0) {
-    const ids = hijos.map(h => h.id)
-    const [hijosConProductos, hijosConHijos] = await Promise.all([
-      prisma.product.findMany({
-        where: { categoryId: { in: ids }, deletedAt: null },
-        select: { categoryId: true },
-        distinct: ['categoryId'],
-        take: ids.length,
-      }),
-      prisma.menuCategory.findMany({
-        where: { venueId, parentId: { in: ids } },
-        select: { parentId: true },
-        distinct: ['parentId'],
-        take: ids.length,
-      }),
-    ])
-    const ocupados = new Set<string | null>([...hijosConProductos.map(p => p.categoryId), ...hijosConHijos.map(h => h.parentId)])
-    const queBloquean = hijos.filter(h => h.active || ocupados.has(h.id)).map(h => h.name)
-    if (queBloquean.length > 0) {
-      throw new BadRequestError(rechazoConSubcategorias(category.name, queBloquean), 'CATEGORY_HAS_SUBCATEGORIES', {
-        subcategorias: queBloquean,
-      })
-    }
+    const queBloquean = await subcategoriasQueBloquean(prisma, venueId, hijos)
+    if (queBloquean.length > 0) throw rechazoPorSubcategorias(category.name, queBloquean)
     conHijosResiduales = true
   }
   // Variantes (decisión 3a): `ProductGroup.categoryId` también es RESTRICT — una familia (aun archivada o deshecha) que la
@@ -562,7 +580,20 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
   }
 
   let deletedCategory: MenuCategory
-  if (conArchivados) {
+  if (conHijosResiduales) {
+    // Codex r1 (08cc59): lo de arriba se leyó sin candado; si alguien reactiva una subcategoría (o le mete un producto o una
+    // subcategoría) mientras tanto, se apagaría el padre con una hija viva. Aquí se toman el padre y sus hijas `FOR UPDATE`
+    // —un producto o una hija nueva esperan a la llave foránea, una reactivación espera a la fila— y se vuelve a revisar.
+    deletedCategory = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM "MenuCategory" WHERE id = ${categoryId} AND "venueId" = ${venueId} FOR UPDATE`
+      const hijasAhora = await tx.$queryRaw<HijaDeCategoria[]>`
+        SELECT id, name, active, "venueId" FROM "MenuCategory" WHERE "parentId" = ${categoryId} ORDER BY id FOR UPDATE`
+      const queBloquean = await subcategoriasQueBloquean(tx, venueId, hijasAhora)
+      if (queBloquean.length > 0) throw rechazoPorSubcategorias(category.name, queBloquean)
+      await tx.menuCategoryAssignment.deleteMany({ where: { categoryId } })
+      return tx.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
+    })
+  } else if (conArchivados) {
     // F5-1: apagada y FUERA de los menús (getMenus no filtra `active`); las dos restauraciones de la importación la vuelven a
     // asignar con `upsert`.
     await prisma.menuCategoryAssignment.deleteMany({ where: { categoryId } })
