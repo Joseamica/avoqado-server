@@ -223,15 +223,16 @@ describe('cleanDemoData (trial→real conversion)', () => {
       })
     })
 
-    it('🔴 principal demo + secundaria real: no borra ni vacía nada de pagos (la principal no puede quedar vacía)', async () => {
+    it('principal demo + secundaria real (Codex r3): como antes borra la configuración, pero NUNCA la cuenta real', async () => {
       conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'real-1' })
       sonDemo(['demo-1'])
 
-      await cleanDemoData(VENUE_ID)
+      const r = await cleanDemoData(VENUE_ID)
 
-      expect(prismaMock.venuePaymentConfig.delete).not.toHaveBeenCalled()
+      expect(prismaMock.venuePaymentConfig.delete).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
       expect(prismaMock.venuePaymentConfig.update).not.toHaveBeenCalled()
-      expect(prismaMock.venuePricingStructure.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.merchantAccount.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['demo-1'] } } })
+      expect(r.pagosDemo?.cuentasRealesDesligadas).toEqual([{ posicion: 'SECONDARY', id: 'real-1' }])
     })
 
     it('regresión · todas demo: borra la configuración y todas sus tarifas, como siempre', async () => {
@@ -246,8 +247,8 @@ describe('cleanDemoData (trial→real conversion)', () => {
       })
     })
 
-    it('[demo, demo, real]: la principal demo se queda; la secundaria demo se vacía con su tarifa', async () => {
-      conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2', tertiaryAccountId: 'real-1' })
+    it('[real, demo, demo]: vacía las dos demo en una sola escritura y borra sólo sus tarifas', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1', tertiaryAccountId: 'demo-2' })
       sonDemo(['demo-1', 'demo-2'])
 
       await cleanDemoData(VENUE_ID)
@@ -255,7 +256,10 @@ describe('cleanDemoData (trial→real conversion)', () => {
       expect(prismaMock.venuePaymentConfig.delete).not.toHaveBeenCalled()
       expect(prismaMock.venuePaymentConfig.update).toHaveBeenCalledWith({
         where: { venueId: VENUE_ID },
-        data: { secondaryAccountId: null },
+        data: { secondaryAccountId: null, tertiaryAccountId: null },
+      })
+      expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID, accountType: { in: ['SECONDARY', 'TERTIARY'] } },
       })
     })
 

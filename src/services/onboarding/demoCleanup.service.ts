@@ -31,9 +31,9 @@
  * - RawMaterialMovement / StockBatch (only those belonging to demo raw materials)
  *
  * What gets DELETED (payment config - ONLY the demo positions, encargo fe2b91):
- * - Every position demo → the whole VenuePaymentConfig and every VenuePricingStructure
- * - Mixed → only the SECONDARY/TERTIARY position holding a demo account, and only that position's VenuePricingStructure.
- *   A demo PRIMARY next to a real account stays (the column is required) and an ActivityLog says so.
+ * - PRIMARY real → only the SECONDARY/TERTIARY position holding a demo account, and only that position's pricing.
+ * - PRIMARY demo → the whole VenuePaymentConfig and every VenuePricingStructure (as always); real accounts in other
+ *   positions are kept as accounts (never deleted) and the ActivityLog lists them as unlinked.
  * - ProviderCostStructure + MerchantAccount (only demo accounts no position references anymore)
  *
  * What gets KEPT:
@@ -90,7 +90,12 @@ interface CleanupResult {
   deletedLoyaltyConfig: number
   deletedRawMaterials: number
   /** Encargo fe2b91: qué posiciones de cobro se limpiaron. Sin el campo, el negocio no tenía cuentas demo. */
-  pagosDemo?: { limpiadas: AccountType[]; demoQueSeQueda: 'PRIMARY' | null; configuracionBorrada: boolean }
+  pagosDemo?: {
+    limpiadas: AccountType[]
+    configuracionBorrada: boolean
+    /** Principal demo junto a cuentas reales: éstas se conservan como cuentas pero quedan sin posición (para volver a ligarlas). */
+    cuentasRealesDesligadas: Array<{ posicion: AccountType; id: string }>
+  }
   /** ⭐ (C6 concern 1): por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo. Sin el campo, se limpió. */
   skippedReason?: 'GIFT_CARDS'
 }
@@ -206,13 +211,13 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       result.deletedBatches = deletedBatches.count
       logger.info(`  ✓ Deleted ${deletedBatches.count} demo stock batches`)
 
-      // 7. Cuentas de cobro demo de ESTE negocio. 🔴 Se limpia sólo la POSICIÓN con cuenta demo, con la tarifa de esa posición
-      // (encargo fe2b91, hz:87f4b879:D7). Antes, con UNA cuenta demo se borraba la configuración entera y todas sus tarifas, y el
-      // negocio que ya había dado de alta su cuenta real en otra posición se quedaba sin cuenta de cobro ni tarifa.
-      // - Todas las posiciones demo (como las siembra `demoSeed`): se borra la configuración y todas sus tarifas, como siempre.
-      // - Mezcla: se vacía cada secundaria o terciaria demo y se borra SÓLO la tarifa de esa posición. La principal no puede
-      //   quedar vacía (la columna es obligatoria): si la demo está en la principal, esa posición se deja como está y se avisa; no
-      //   se mueve una cuenta real de posición ni se inventa una tarifa.
+      // 7. Cuentas de cobro demo de ESTE negocio (encargo fe2b91, hz:87f4b879:D7). Antes, con UNA cuenta demo se borraba la
+      // configuración entera y todas sus tarifas, y el negocio que ya había dado de alta su cuenta real como principal se quedaba
+      // sin cuenta de cobro ni tarifa. Ahora:
+      // - Principal REAL: se vacía sólo la secundaria/terciaria demo y se borra SÓLO la tarifa de esa posición.
+      // - Principal DEMO (todas demo o junto a una real): como siempre, se borra la configuración y sus tarifas (la principal no
+      //   puede quedar vacía y conservarla demo rompe la herencia de la organización). Las cuentas reales se conservan como
+      //   cuentas y la bitácora dice cuáles quedaron sueltas. No se mueve una cuenta de posición ni se inventa una tarifa.
       // - Una cuenta demo sólo se borra si ya ninguna configuración (de negocio u organización) la usa.
       // - Codex r2 #1: una tarifa demo se borra aunque la use un canal en línea (como antes). Conservarla haría que el negocio
       //   cobrara esa tarifa sobre la cuenta real que hereda de su organización; el canal pierde el enlace (FK SET NULL).
@@ -239,29 +244,35 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       const posicionesDemo = posiciones.filter(p => demoAccountIds.includes(p.id)).map(p => p.tipo)
 
       if (venuePaymentConfig && posicionesDemo.length > 0) {
-        if (posicionesDemo.length === posiciones.length) {
+        if (posicionesDemo.includes('PRIMARY')) {
+          // Principal demo (todas demo, o junto a una real): como siempre, se borra la configuración y todas sus tarifas, y el
+          // negocio vuelve a heredar las cuentas de su organización. Codex r3 #1 y #2: conservarla con la principal demo dejaba a
+          // una PAX que hereda sin su cuenta real de la organización y tumbaba la aprobación de KYC con procesador. Lo que sí
+          // cambia: la cuenta REAL no se borra (sólo se borran demos) y la bitácora dice cuál quedó suelta y en qué posición.
+          const cuentasRealesDesligadas = posiciones.filter(p => !demoAccountIds.includes(p.id)).map(p => ({ posicion: p.tipo, id: p.id }))
           await tx.venuePaymentConfig.delete({ where: { venueId } })
           await tx.venuePricingStructure.deleteMany({ where: { venueId } })
-          result.pagosDemo = { limpiadas: posicionesDemo, demoQueSeQueda: null, configuracionBorrada: true }
-          logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (every position was demo)`)
-        } else {
-          const limpiadas = posicionesDemo.filter(t => t !== 'PRIMARY')
-          if (limpiadas.length > 0) {
-            await tx.venuePaymentConfig.update({
-              where: { venueId },
-              data: {
-                ...(limpiadas.includes('SECONDARY') ? { secondaryAccountId: null } : {}),
-                ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
-              },
+          result.pagosDemo = { limpiadas: posiciones.map(p => p.tipo), configuracionBorrada: true, cuentasRealesDesligadas }
+          logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (PRIMARY was demo)`)
+          if (cuentasRealesDesligadas.length > 0) {
+            logger.warn(`  ⚠️ PRIMARY was demo: real merchant accounts were unlinked (kept, not deleted)`, {
+              venueId,
+              cuentasRealesDesligadas,
             })
-            await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
           }
-          const demoQueSeQueda = posicionesDemo.includes('PRIMARY') ? ('PRIMARY' as const) : null
-          result.pagosDemo = { limpiadas, demoQueSeQueda, configuracionBorrada: false }
-          logger.info(`  ⚡ Preserved real merchant positions; cleaned demo positions: ${limpiadas.join(', ') || 'none'}`)
-          if (demoQueSeQueda) {
-            logger.warn(`  ⚠️ The PRIMARY position still holds a demo merchant account while another position is real`, { venueId })
-          }
+        } else {
+          // Principal REAL: se vacía cada secundaria/terciaria demo y se borra SÓLO la tarifa de esa posición.
+          const limpiadas = posicionesDemo
+          await tx.venuePaymentConfig.update({
+            where: { venueId },
+            data: {
+              ...(limpiadas.includes('SECONDARY') ? { secondaryAccountId: null } : {}),
+              ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
+            },
+          })
+          await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
+          result.pagosDemo = { limpiadas, configuracionBorrada: false, cuentasRealesDesligadas: [] }
+          logger.info(`  ⚡ Preserved real merchant positions; cleaned demo positions: ${limpiadas.join(', ')}`)
         }
       } else if (venuePaymentConfig) {
         logger.info(`  ⚡ Preserved real VenuePaymentConfig and VenuePricingStructures (non-demo accounts)`)

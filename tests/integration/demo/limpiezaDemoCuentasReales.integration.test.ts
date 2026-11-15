@@ -5,9 +5,9 @@
  * todas sus tarifas, aunque otra posición ya tuviera la cuenta real del negocio (la que dio de alta antes de convertirse). El
  * negocio se quedaba sin cuenta de cobro ni tarifa.
  *
- * Ahora: se limpia sólo la posición con cuenta demo (y la tarifa de ESA posición). La principal no puede quedar vacía: si la demo
- * está en la principal y hay una real en otra posición, se deja como está y se avisa (bitácora), sin inventar tarifas.
- * Si TODAS las posiciones son demo, se borra todo como siempre.
+ * Ahora, con la principal REAL se limpia sólo la posición con cuenta demo (y la tarifa de ESA posición). Con la principal DEMO
+ * se borra la configuración como siempre (el negocio vuelve a heredar de su organización), pero las cuentas reales se conservan
+ * y la bitácora dice cuáles quedaron sueltas. Una cuenta demo que siga en otra configuración no se borra.
  *
  * Contra base real. Correr (base desechable): npx jest --selectProjects=integration --runInBand --ci \
  *   --runTestsByPath tests/integration/demo/limpiezaDemoCuentasReales.integration.test.ts
@@ -16,6 +16,7 @@ import { randomUUID } from 'crypto'
 import { AccountType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
+import { assignProcessorAndApproveKyc } from '@/services/superadmin/kycReview.service'
 // `integration-setup.ts` mockea la bitácora (fire-and-forget): se comprueba la llamada, no la fila.
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -131,7 +132,7 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
       expect.objectContaining({
         action: 'DEMO_PAYMENT_POSITIONS_CLEANED',
         venueId,
-        data: expect.objectContaining({ limpiadas: ['SECONDARY'], demoQueSeQueda: null }),
+        data: expect.objectContaining({ limpiadas: ['SECONDARY'], configuracionBorrada: false, cuentasRealesDesligadas: [] }),
       }),
     )
   })
@@ -156,7 +157,7 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
     expect(await prisma.merchantAccount.findUnique({ where: { id: demo } })).toBeNull()
   })
 
-  it('🔴 principal demo + secundaria REAL: no se borra nada de pagos (la principal no puede quedar vacía) y se avisa', async () => {
+  it('principal demo + secundaria REAL (Codex r3): como antes se borra la configuración, pero la cuenta real y su costo se conservan', async () => {
     const venueId = await negocioTrial('demo-real')
     const demo = await cuenta('demo', 'c1')
     const real = await cuenta('real', 'c2')
@@ -166,29 +167,29 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
 
     const r = await cleanDemoData(venueId, null)
 
-    const config = await prisma.venuePaymentConfig.findUnique({ where: { venueId } })
-    expect(config).toMatchObject({ primaryAccountId: demo, secondaryAccountId: real })
-    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY', 'SECONDARY'])
+    // Sin configuración propia: el negocio vuelve a heredar las cuentas de su organización (como antes).
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toBeNull()
+    expect(await tiposDeTarifa(venueId)).toEqual([])
     expect(await prisma.merchantAccount.findUnique({ where: { id: real } })).not.toBeNull()
-    // La demo sigue en uso por la principal: no se borra.
-    expect(await prisma.merchantAccount.findUnique({ where: { id: demo } })).not.toBeNull()
-    expect(r.deletedMerchantAccounts).toBe(0)
+    expect(await prisma.providerCostStructure.count({ where: { merchantAccountId: real } })).toBe(1)
+    expect(await prisma.merchantAccount.findUnique({ where: { id: demo } })).toBeNull()
+    expect(r.deletedMerchantAccounts).toBe(1)
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'DEMO_PAYMENT_POSITIONS_CLEANED',
         venueId,
-        data: expect.objectContaining({ limpiadas: [], demoQueSeQueda: 'PRIMARY' }),
+        data: expect.objectContaining({ configuracionBorrada: true, cuentasRealesDesligadas: [{ posicion: 'SECONDARY', id: real }] }),
       }),
     )
   })
 
-  it('[demo, demo, real]: la principal demo se queda, la secundaria demo se vacía con su tarifa y la real no se toca', async () => {
-    const venueId = await negocioTrial('demo-demo-real')
-    const demo1 = await cuenta('demo', 'f1')
-    const demo2 = await cuenta('demo', 'f2')
-    const real = await cuenta('real', 'f3')
+  it('[real, demo, demo]: se vacían las dos demo con sus tarifas; la principal real y su tarifa se quedan', async () => {
+    const venueId = await negocioTrial('real-demo-demo')
+    const real = await cuenta('real', 'f1')
+    const demo1 = await cuenta('demo', 'f2')
+    const demo2 = await cuenta('demo', 'f3')
     await prisma.venuePaymentConfig.create({
-      data: { venueId, primaryAccountId: demo1, secondaryAccountId: demo2, tertiaryAccountId: real },
+      data: { venueId, primaryAccountId: real, secondaryAccountId: demo1, tertiaryAccountId: demo2 },
     })
     await tarifa(venueId, 'PRIMARY')
     await tarifa(venueId, 'SECONDARY')
@@ -197,13 +198,12 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
     await cleanDemoData(venueId, null)
 
     expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toMatchObject({
-      primaryAccountId: demo1,
+      primaryAccountId: real,
       secondaryAccountId: null,
-      tertiaryAccountId: real,
+      tertiaryAccountId: null,
     })
-    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY', 'TERTIARY'])
-    expect(await prisma.merchantAccount.findUnique({ where: { id: demo2 } })).toBeNull()
-    expect(await prisma.merchantAccount.findUnique({ where: { id: demo1 } })).not.toBeNull()
+    expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY'])
+    expect(await prisma.merchantAccount.count({ where: { id: { in: [demo1, demo2] } } })).toBe(0)
   })
 
   it('Codex r2 #1: la tarifa de una posición demo se borra aunque la use un canal en línea (el canal pierde el enlace, como antes)', async () => {
@@ -277,5 +277,34 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
     expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toMatchObject({ primaryAccountId: real })
     expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY'])
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DEMO_PAYMENT_POSITIONS_CLEANED' }))
+  })
+
+  it('Codex r3 #2: tras conservar la principal real, la aprobación de KYC con procesador dice qué hacer (antes: error de base sin texto)', async () => {
+    const venueId = await negocioTrial('kyc')
+    const real = await cuenta('real', 'k1')
+    const demo = await cuenta('demo', 'k2')
+    await prisma.venuePaymentConfig.create({ data: { venueId, primaryAccountId: real, secondaryAccountId: demo } })
+    await cleanDemoData(venueId, null)
+    const cuentasAntes = await prisma.merchantAccount.count({ where: { providerId } })
+
+    await expect(
+      assignProcessorAndApproveKyc(venueId, 'superadmin-kyc', {
+        providerId,
+        externalMerchantId: `kyc-${llave}`,
+        displayName: 'KYC',
+        credentials: {},
+        clabeNumber: '012345678901234567',
+        bankName: 'Banco',
+        accountHolder: 'Titular',
+        providerCosts: { debitRate: 0.01, creditRate: 0.01, amexRate: 0.01, internationalRate: 0.01, fixedCostPerTransaction: 0 },
+        venuePricing: { debitRate: 0.02, creditRate: 0.02, amexRate: 0.02, internationalRate: 0.02, fixedFeePerTransaction: 0 },
+      }),
+    ).rejects.toThrow('Este negocio ya tiene su propia cuenta de cobro')
+
+    // Nada se creó: ni cuenta, ni tarifa nueva, y la configuración sigue con la cuenta real.
+    expect(await prisma.merchantAccount.count({ where: { providerId } })).toBe(cuentasAntes)
+    expect(await tiposDeTarifa(venueId)).toEqual([])
+    expect(await prisma.venuePaymentConfig.findUnique({ where: { venueId } })).toMatchObject({ primaryAccountId: real })
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).kycStatus).not.toBe('VERIFIED')
   })
 })
