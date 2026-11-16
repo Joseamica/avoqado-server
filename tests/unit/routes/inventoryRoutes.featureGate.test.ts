@@ -75,6 +75,7 @@ const VENUE_ID = 'venue_inv_1'
 
 function createApp() {
   const app = express()
+  app.use(express.json())
   // Stand-in for authenticateTokenMiddleware (dashboard.routes.ts mounts it before inventoryRoutes).
   app.use((req: any, _res, next) => {
     req.authContext = { userId: 'user_1', venueId: VENUE_ID, orgId: 'org_1', role: 'OWNER' }
@@ -206,5 +207,87 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'getSettings' })
+  })
+})
+
+// «Nuevo producto» y «Crear servicio» del DASHBOARD guardan siempre por /wizard/complete. Dar de alta un producto SIN
+// inventario es de todos los planes: sólo el alta CON inventario pasa por el candado de INVENTORY_TRACKING (D8, 16-nov).
+describe('alta de producto por el asistente (/wizard/complete) — el candado sólo si lleva inventario', () => {
+  const WIZARD_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/wizard/complete`
+  const producto = { name: 'Pan dulce', price: 25, categoryId: 'cat_1' }
+  const sinInventario = { product: producto, inventory: { useInventory: false } }
+  const porPiezas = {
+    product: producto,
+    inventory: { useInventory: true, inventoryMethod: 'QUANTITY' },
+    simpleStock: { initialStock: 10, reorderPoint: 2, costPerUnit: 5 },
+  }
+  const conReceta = {
+    product: producto,
+    inventory: { useInventory: true, inventoryMethod: 'RECIPE' },
+    recipe: { portionYield: 1, ingredients: [] },
+  }
+
+  // NEW FEATURE TESTS
+  it('negocio Gratis, producto sin inventario → 200 (llega al controlador)', async () => {
+    const res = await request(server).post(WIZARD_URL).send(sinInventario)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ handler: 'createProductWithInventory' })
+  })
+
+  it('negocio Pro, producto sin inventario → 200', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server).post(WIZARD_URL).send(sinInventario)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('«lleva inventario» sin método es, como en el servicio, un producto sin inventario → 200', async () => {
+    const res = await request(server)
+      .post(WIZARD_URL)
+      .send({ product: producto, inventory: { useInventory: true } })
+
+    expect(res.status).toBe(200)
+  })
+
+  it('negocio Gratis, producto con inventario por piezas → 403 INVENTORY_TRACKING (sin cambio)', async () => {
+    const res = await request(server).post(WIZARD_URL).send(porPiezas)
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+  })
+
+  it('negocio Pro, producto con receta → 403 INVENTORY_TRACKING (sin cambio)', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server).post(WIZARD_URL).send(conReceta)
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+  })
+
+  // REGRESSION TESTS
+  it('negocio Premium, producto con receta → 200', async () => {
+    vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
+
+    const res = await request(server).post(WIZARD_URL).send(conReceta)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('negocio exento (grandfathered), producto con inventario → 200', async () => {
+    venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
+
+    const res = await request(server).post(WIZARD_URL).send(porPiezas)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('los demás pasos del asistente siguen detrás del candado (step1 en Gratis → 403)', async () => {
+    const res = await request(server).post(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/wizard/step1`).send(producto)
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
   })
 })

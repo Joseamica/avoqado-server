@@ -5,6 +5,7 @@ import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
 import { ensureQuantityInventoryRow, isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from './quantityInventoryRow'
+import { productoLlevaInventario } from './productoLlevaInventario'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import type { CatalogActor } from '../../types/master-catalog'
@@ -223,7 +224,7 @@ export async function configureInventoryStep2(venueId: string, productId: string
     throw new AppError('Producto no encontrado', 404)
   }
 
-  if (!data.useInventory || !data.inventoryMethod) {
+  if (!productoLlevaInventario(data)) {
     // User doesn't want inventory tracking
     await prisma.product.update({
       where: { id: productId },
