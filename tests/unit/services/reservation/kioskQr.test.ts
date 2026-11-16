@@ -267,10 +267,9 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
 
       expect(out).toEqual({ outcome: 'CHECKED_IN', reservationId: 'res-inv' })
-      expect(prismaMock.reservation.findMany.mock.calls[1][0].where).toMatchObject({
-        venueId: VENUE,
-        customerId: null,
-        OR: [{ guestPhone: { endsWith: '5512345678' } }],
+      expect(prismaMock.reservation.findMany.mock.calls[1][0]).toMatchObject({
+        where: { venueId: VENUE, customerId: null, guestPhone: { not: null } },
+        take: 200,
       })
       const cmd = (checkInReservation as jest.Mock).mock.calls[0][1]
       expect(cmd).toMatchObject({ reservationId: 'res-inv', method: 'PHONE', source: 'KIOSK' })
@@ -301,6 +300,27 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
         code: 'CHECK_IN_NOT_FOUND',
       })
       expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    it('P1 r9 #1: el teléfono guardado con espacios («55 1234 5678») es el mismo ⇒ la encuentra', async () => {
+      sinPropias({ ...INVITADA, guestPhone: '55 1234 5678' })
+      const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(out).toEqual({ outcome: 'CHECKED_IN', reservationId: 'res-inv' })
+    })
+
+    it('P1 r9 #1: dos invitadas con el mismo teléfono en formatos distintos siguen siendo dos ⇒ no marca a ninguna', async () => {
+      sinPropias(INVITADA, { ...INVITADA, id: 'res-hija', guestPhone: '55 1234 5678' })
+      await expect(consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })).rejects.toMatchObject({
+        code: 'CHECK_IN_NOT_FOUND',
+      })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    it('si la ventana trae tantas invitadas como el tope, no se puede saber que es la única ⇒ no marca', async () => {
+      sinPropias(INVITADA, ...Array.from({ length: 199 }, (_, i) => ({ ...INVITADA, id: `otra-${i}`, guestPhone: '5599990000' })))
+      await expect(consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })).rejects.toMatchObject({
+        code: 'CHECK_IN_NOT_FOUND',
+      })
     })
 
     it('P1 r8 #3: si el personal cambió el contacto con el que entró, la de invitada también queda «a mano por»', async () => {

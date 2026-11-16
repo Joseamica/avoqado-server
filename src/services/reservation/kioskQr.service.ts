@@ -32,7 +32,7 @@ import {
 } from './checkIn.service'
 import { CHECK_IN_CHALLENGE_EXPIRED, CHECK_IN_NOT_FOUND, consumeDurableAttempt } from './kioskCheckIn.service'
 import { undoNoShow } from './undoNoShow.service'
-import { phoneLast10, phonesMatch } from '@/utils/phone'
+import { phonesMatch } from '@/utils/phone'
 import { afterNoShowCorrection } from './noShowNotices.service'
 
 /** Cuánto vale un QR después de pintarse: lo que tarda una alumna nueva en entrar con su código de WhatsApp. */
@@ -41,6 +41,8 @@ export const KIOSK_QR_MAX_AGE_SECONDS = 10 * 60
 export const KIOSK_QR_MAX_SKEW_SECONDS = 2 * 60
 /** Cada cuánto cambia el QR en la pantalla (lo usa el aparato; aquí sólo se documenta). */
 export const KIOSK_QR_ROTATE_SECONDS = 30
+/** Reservas de invitada (sin ficha) que se leen de la ventana de llegada para buscar la de un teléfono probado. */
+const TOPE_DE_INVITADAS = 200
 
 function pepper(): string {
   return process.env.OTP_PEPPER ?? ''
@@ -185,20 +187,21 @@ export async function consumeKioskQr(args: {
   // Hallado en la D3 (16-nov): el panel da de alta a una asistente sólo con nombre y teléfono, SIN ficha de clienta, y esa
   // alumna veía «No encontramos una reservación tuya». SÓLO si no tiene ninguna reserva con su ficha en la ventana (ni una ya
   // registrada: Codex r8 #2) se busca la de invitada cuyo teléfono es el que PROBÓ con código:
-  //  - la cola de 10 dígitos sólo prefiltra; la identidad es `phonesMatch`, con lada (r8 #1: un +1 551… no es un +52 55…);
-  //  - si ese teléfono lo comparten varias invitadas (mamá e hija), no se adivina: no se marca ninguna.
+  //  - la identidad es `phonesMatch`, con lada (r8 #1: un +1 551… no es un +52 55…), y se compara en memoria: el panel guarda
+  //    el teléfono como lo teclearon («55 1234 5678»), y un filtro de texto en la consulta escondía esas filas (r9 #1);
+  //  - si ese teléfono lo comparten varias invitadas (mamá e hija), no se adivina: no se marca ninguna. Tampoco si la
+  //    ventana trae más invitadas que el tope (no se podría saber que es la única).
   if (enVentana.length === 0) {
     const probados = args.sesion.contactos.filter(c => c.tipo === 'PHONE').map(c => c.valor)
-    const colas = [...new Set(probados.map(phoneLast10).filter((c): c is string => !!c))]
-    if (colas.length > 0) {
+    if (probados.length > 0) {
       const invitadas = await prisma.reservation.findMany({
-        where: { venueId: args.venueId, customerId: null, OR: colas.map(cola => ({ guestPhone: { endsWith: cola } })), ...ventana },
+        where: { venueId: args.venueId, customerId: null, guestPhone: { not: null }, ...ventana },
         orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-        take: 20,
+        take: TOPE_DE_INVITADAS,
         select: { id: true, status: true, startsAt: true, customerId: true, guestPhone: true },
       })
       const suyas = invitadas.filter(r => enLaVentana(r) && probados.some(t => phonesMatch(r.guestPhone, t)))
-      if (suyas.length === 1) enVentana = suyas
+      if (suyas.length === 1 && invitadas.length < TOPE_DE_INVITADAS) enVentana = suyas
     }
   }
   // Primero la que falta marcar; si todas ya están, «ya estabas».
