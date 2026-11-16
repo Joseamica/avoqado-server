@@ -1892,8 +1892,16 @@ async function yaSeAvisoEsteMovimiento(venueId: string, reservationId: string, s
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { data: true },
   })
-  const d = (ultimo?.data ?? null) as { startsAt?: string; endsAt?: string; notificationSentVia?: string | null } | null
-  if (!d?.notificationSentVia || !d.startsAt || !d.endsAt) return false
+  const d = (ultimo?.data ?? null) as {
+    startsAt?: string
+    endsAt?: string
+    notificationSentVia?: string | null
+    notificationSkipped?: string | null
+  } | null
+  // Un reenvío que ya se saltó el aviso hereda la evidencia del aviso original: sin esto el 3.er reenvío
+  // idéntico (1 avisa, 2 se salta, 3 leía «no avisó») volvía a mandarlo.
+  const yaAvisado = Boolean(d?.notificationSentVia) || d?.notificationSkipped === 'ALREADY_NOTIFIED'
+  if (!d || !yaAvisado || !d.startsAt || !d.endsAt) return false
   return new Date(d.startsAt).getTime() === startsAt.getTime() && new Date(d.endsAt).getTime() === endsAt.getTime()
 }
 

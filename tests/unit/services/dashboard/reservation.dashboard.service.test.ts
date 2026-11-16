@@ -3314,6 +3314,16 @@ describe('Reservation Dashboard Service', () => {
       )
     })
 
+    it('el 3.er reenvío idéntico tampoco avisa (el 2.º, que se saltó el aviso, conserva la evidencia)', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: null, notificationSkipped: 'ALREADY_NOTIFIED' })
+
+      await reagendarA21()
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+    })
+
     it('mismo inicio pero OTRO fin sí avisa (es un cambio real)', async () => {
       prepararReagendar(yaMovidaA21)
       avisoPrevio({ notificationSentVia: 'whatsapp' })
