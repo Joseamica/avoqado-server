@@ -24,6 +24,7 @@ const TOUCHED_MODELS = [
   'venuePricingStructure',
   'providerCostStructure',
   'merchantAccount',
+  'organizationPaymentConfig',
   'customer',
   'recipeLine',
   'recipe',
@@ -51,6 +52,8 @@ describe('cleanDemoData (trial→real conversion)', () => {
       mock.findMany?.mockResolvedValue([])
       mock.findUnique?.mockResolvedValue(null)
     }
+    // El candado de posiciones (fe2b91) lee la organización del negocio antes de formarse.
+    ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
   })
 
   // ==========================================
@@ -185,6 +188,131 @@ describe('cleanDemoData (trial→real conversion)', () => {
     )
     expect(sinAcotar).toEqual([])
   })
+  // Encargo fe2b91 (hz:87f4b879:D7): una cuenta demo en UNA posición ya no borra la configuración entera ni las tarifas de las
+  // posiciones con cuenta real. La prueba contra base real está en tests/integration/demo/limpiezaDemoCuentasReales.
+  describe('cuentas de cobro: sólo se limpia la posición con cuenta demo', () => {
+    const conConfig = (config: { primaryAccountId: string; secondaryAccountId?: string | null; tertiaryAccountId?: string | null }) => {
+      ;(prismaMock.venuePaymentConfig.findUnique as jest.Mock).mockResolvedValue({
+        secondaryAccountId: null,
+        tertiaryAccountId: null,
+        ...config,
+      })
+    }
+    // `enUso`: cuentas demo que alguna configuración (negocio u organización) sigue usando después de la limpieza.
+    const sonDemo = (ids: string[], enUso: string[] = []) =>
+      (prismaMock.merchantAccount.findMany as jest.Mock).mockImplementation(async ({ where }: any) =>
+        (where.id.in as string[])
+          .filter(id => ids.includes(id))
+          .filter(id => (where.venueConfigsPrimary ? !enUso.includes(id) : true))
+          .map(id => ({ id })),
+      )
+
+    it('🔴 principal real + secundaria demo: NO borra la configuración; vacía sólo la secundaria y borra sólo su tarifa', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
+      sonDemo(['demo-1'])
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.venuePaymentConfig.delete).not.toHaveBeenCalled()
+      expect(prismaMock.venuePaymentConfig.update).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID },
+        data: { secondaryAccountId: null },
+      })
+      expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID, accountType: { in: ['SECONDARY'] } },
+      })
+    })
+
+    it('principal demo + secundaria real (Codex r3): como antes borra la configuración, pero NUNCA la cuenta real', async () => {
+      conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'real-1' })
+      sonDemo(['demo-1'])
+
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.venuePaymentConfig.delete).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
+      expect(prismaMock.venuePaymentConfig.update).not.toHaveBeenCalled()
+      expect(prismaMock.merchantAccount.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['demo-1'] } } })
+      expect(r.pagosDemo?.cuentasRealesDesligadas).toEqual([{ posicion: 'SECONDARY', id: 'real-1' }])
+    })
+
+    it('regresión · todas demo: borra la configuración y todas sus tarifas, como siempre', async () => {
+      conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2' })
+      sonDemo(['demo-1', 'demo-2'])
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.venuePaymentConfig.delete).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
+      expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID },
+      })
+    })
+
+    it('[real, demo, demo]: vacía las dos demo en una sola escritura y borra sólo sus tarifas', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1', tertiaryAccountId: 'demo-2' })
+      sonDemo(['demo-1', 'demo-2'])
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.venuePaymentConfig.delete).not.toHaveBeenCalled()
+      expect(prismaMock.venuePaymentConfig.update).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID },
+        data: { secondaryAccountId: null, tertiaryAccountId: null },
+      })
+      expect(prismaMock.venuePricingStructure.deleteMany).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID, accountType: { in: ['SECONDARY', 'TERTIARY'] } },
+      })
+    })
+
+    it('Codex r1 #1: toma el candado de posiciones ANTES de leer la configuración de pagos', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
+      sonDemo(['demo-1'])
+      const orden: string[] = []
+      ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray) => {
+        if (strings.join('?').includes('posiciones-de-cobro') || strings.join('?').includes('pg_advisory_xact_lock')) orden.push('candado')
+        return []
+      })
+      ;(prismaMock.venuePaymentConfig.findUnique as jest.Mock).mockImplementation(async () => {
+        orden.push('leer')
+        return { primaryAccountId: 'real-1', secondaryAccountId: 'demo-1', tertiaryAccountId: null }
+      })
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(orden[0]).toBe('candado')
+      expect(orden).toContain('leer')
+    })
+
+    it('Codex r1/r2 #2: una cuenta demo que usa una organización no se borra (su llave tumbaría toda la limpieza)', async () => {
+      conConfig({ primaryAccountId: 'demo-1', secondaryAccountId: 'demo-2' })
+      sonDemo(['demo-1', 'demo-2'], ['demo-2'])
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.merchantAccount.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['demo-1'] } } })
+      // Se pregunta por cada cuenta, también por las organizaciones, sin tope.
+      expect(prismaMock.merchantAccount.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            orgConfigsPrimary: { none: {} },
+            orgConfigsSecondary: { none: {} },
+            orgConfigsTertiary: { none: {} },
+          }),
+        }),
+      )
+    })
+
+    it('regresión · todas reales: no toca la configuración ni las tarifas', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'real-2' })
+      sonDemo([])
+
+      await cleanDemoData(VENUE_ID)
+
+      expect(prismaMock.venuePaymentConfig.delete).not.toHaveBeenCalled()
+      expect(prismaMock.venuePaymentConfig.update).not.toHaveBeenCalled()
+      expect(prismaMock.venuePricingStructure.deleteMany).not.toHaveBeenCalled()
+    })
+  })
+
   // S5b (red por traba, R65 b): el resultado nace dentro de cada intento y sale en el retorno.
   describe('tras un 40P01 sólo cuenta el intento ganador', () => {
     const abortarElPrimerIntento = () => {

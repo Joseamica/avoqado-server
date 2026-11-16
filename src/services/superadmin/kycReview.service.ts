@@ -415,6 +415,13 @@ export async function assignProcessorAndApproveKyc(
   const result = await prisma.$transaction(async tx => {
     // Candado de posiciones PRIMERO (Codex p12-r3 #3): antes de insertar la tarifa, que apunta al negocio.
     await tomarCandado(tx, { venueId })
+    // fe2b91 (Codex r3 #2): al convertir el demo, una principal REAL ya no se borra; aquí se crearía una segunda configuración
+    // (venueId es único) y la base tumbaría la aprobación con un error sin texto. Se dice qué hacer.
+    if (await tx.venuePaymentConfig.findUnique({ where: { venueId }, select: { id: true } })) {
+      throw new BadRequestError(
+        'Este negocio ya tiene su propia cuenta de cobro. Apruébalo sin asignar procesador o cambia la cuenta en «Cuentas de cobro».',
+      )
+    }
     // 1. Create MerchantAccount with CLABE
     const merchantAccount = await tx.merchantAccount.create({
       data: {
