@@ -127,6 +127,20 @@ export function textoDeLlegadas(llegadas: Prisma.JsonValue | null | undefined): 
   return partes.length ? partes.join(', ') : null
 }
 
+/**
+ * D8 (16-nov): el TOTAL de una persona (recibo, PDF y Excel). Son llegadas REGISTRADAS; si alguna clase tuvo «Corregir conteo», lo
+ * dice («· 1 clase con pago corregido a mano»), porque el pago de esas clases usa el número corregido. null si no tiene clases de
+ * «sólo quien llegó». Pura.
+ */
+export function textoDeLlegadasDelTotal(l: Prisma.JsonValue | null | undefined): string | null {
+  if (!l || typeof l !== 'object' || Array.isArray(l)) return null
+  const lista = textoDeLlegadas({ ...l, corregidoA: null })
+  const corregidas = typeof l.corregidas === 'number' ? l.corregidas : 0
+  if (!lista && !corregidas) return null
+  const cola = corregidas ? ` · ${corregidas} ${corregidas === 1 ? 'clase' : 'clases'} con pago corregido a mano` : ''
+  return `Llegadas registradas: ${lista ?? 'ninguna'}${cola}`
+}
+
 /** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
 export function filasDelRecibo(r: {
   renglones: RenglonRecibo[]
@@ -143,7 +157,7 @@ export function filasDelRecibo(r: {
       fecha: '',
       hora: null,
       sede: '',
-      concepto: r.llegadasEnTotal ? `${total} · Llegadas: ${r.llegadasEnTotal}` : total,
+      concepto: r.llegadasEnTotal ? `${total} · ${r.llegadasEnTotal}` : total,
       lugares: null,
       monto: r.total,
     },

@@ -127,20 +127,20 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     })
     const ana = filas.find(f => f.staffId === m.ana)!
     // Sólo las clases OK: la del grupo por confirmar no entra al resumen.
-    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
+    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1, corregidas: 1 })
   })
 
   it('Codex r3 #6: el reporte del periodo dice, por coach, cómo llegaron sus lugares', async () => {
     const { reportePeriodo } = await import('@/services/dashboard/staffPay/reporte.service')
     const r = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-11-15', offset: 0, limit: 50 })
     const ana = r.personas.items.find(i => i.staffId === m.ana) as any
-    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
+    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1, corregidas: 1 })
   })
 
   it('Codex r4 #5: el recibo de la coach trae el total de llegadas por método y cada clase su desglose', async () => {
     const { reciboDePersona } = await import('@/services/dashboard/staffPay/recibos.service')
     const r = await reciboDePersona({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-11-15', limit: 100 })
-    expect(r.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
+    expect(r.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1, corregidas: 1 })
     expect(r.renglones.some(x => /con celular/.test(x.concepto))).toBe(true)
   })
 })

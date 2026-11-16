@@ -26,7 +26,10 @@ export interface LlegadasPorMetodo {
 }
 
 /** Totales de llegadas de una persona en el periodo (Codex r2 #7), sólo de sus clases en «sólo quien llegó». */
-export type LlegadasDePersona = Omit<LlegadasPorMetodo, 'aMano' | 'desdeLaLista' | 'corregidoA'>
+export type LlegadasDePersona = Omit<LlegadasPorMetodo, 'aMano' | 'desdeLaLista' | 'corregidoA'> & {
+  /** D8 (16-nov): cuántas de esas clases tuvieron «Corregir conteo» (su pago usa el número corregido). Opcional: fotos de antes. */
+  corregidas?: number
+}
 type Db = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 /** Tope de horas de las dos reglas de clase: el CHECK de `ServicePayTableVersion` (spec fase 3 §7.3). */
@@ -424,7 +427,8 @@ export async function resumenPorPersona(db: Db, f: FiltroValoracion): Promise<Re
              'staff', COALESCE(SUM((llegadas->>'staff')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
              'list', COALESCE(SUM((llegadas->>'list')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
              'pass', COALESCE(SUM((llegadas->>'pass')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
-             'sinMetodo', COALESCE(SUM((llegadas->>'sinMetodo')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0)
+             'sinMetodo', COALESCE(SUM((llegadas->>'sinMetodo')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'corregidas', COUNT(*) FILTER (WHERE "countMode" = 'ATTENDED' AND llegadas->>'corregidoA' IS NOT NULL)
            ) END AS llegadas
     FROM valoradas
     WHERE estado = 'OK' AND "staffId" IS NOT NULL

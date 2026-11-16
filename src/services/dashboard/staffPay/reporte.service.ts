@@ -99,20 +99,22 @@ const llegadasDeClase = (vv: Prisma.Sql) => Prisma.sql`
   CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'staff')::int ELSE 0 END AS lleg_staff,
   CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'list')::int ELSE 0 END AS lleg_list,
   CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'pass')::int ELSE 0 END AS lleg_pass,
-  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'sinMetodo')::int ELSE 0 END AS lleg_sin`
-const SIN_LLEGADAS = Prisma.sql`0 AS lleg_atendidas, 0 AS lleg_qr, 0 AS lleg_phone, 0 AS lleg_staff, 0 AS lleg_list, 0 AS lleg_pass, 0 AS lleg_sin`
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'sinMetodo')::int ELSE 0 END AS lleg_sin,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' AND ${vv}.llegadas->>'corregidoA' IS NOT NULL THEN 1 ELSE 0 END AS lleg_corr`
+const SIN_LLEGADAS = Prisma.sql`0 AS lleg_atendidas, 0 AS lleg_qr, 0 AS lleg_phone, 0 AS lleg_staff, 0 AS lleg_list, 0 AS lleg_pass, 0 AS lleg_sin, 0 AS lleg_corr`
 /** Las sumas por persona (abierto: de la fuente `u`; cerrado: de la foto `descriptor.llegadas` de cada clase). */
 const SUMA_LLEGADAS_ABIERTO = Prisma.sql`
   SUM(u.lleg_atendidas)::int AS lleg_atendidas, SUM(u.lleg_qr)::int AS lleg_qr, SUM(u.lleg_phone)::int AS lleg_phone,
   SUM(u.lleg_staff)::int AS lleg_staff, SUM(u.lleg_list)::int AS lleg_list, SUM(u.lleg_pass)::int AS lleg_pass,
-  SUM(u.lleg_sin)::int AS lleg_sin`
+  SUM(u.lleg_sin)::int AS lleg_sin, SUM(u.lleg_corr)::int AS lleg_corr`
 const llegadaCerrada = (k: string) =>
   // La llave va como texto fijo (de una lista cerrada): como parámetro, `->>` no sabría si es texto o índice.
   Prisma.sql`COALESCE(SUM((e.descriptor->'llegadas'->>${Prisma.raw(`'${k}'`)})::int) FILTER (WHERE e.concept = 'SERVICE' AND e.descriptor ? 'llegadas'), 0)::int`
 const SUMA_LLEGADAS_CERRADO = Prisma.sql`
   (COUNT(*) FILTER (WHERE e.concept = 'SERVICE' AND e.descriptor ? 'llegadas'))::int AS lleg_atendidas,
   ${llegadaCerrada('qr')} AS lleg_qr, ${llegadaCerrada('phone')} AS lleg_phone, ${llegadaCerrada('staff')} AS lleg_staff,
-  ${llegadaCerrada('list')} AS lleg_list, ${llegadaCerrada('pass')} AS lleg_pass, ${llegadaCerrada('sinMetodo')} AS lleg_sin`
+  ${llegadaCerrada('list')} AS lleg_list, ${llegadaCerrada('pass')} AS lleg_pass, ${llegadaCerrada('sinMetodo')} AS lleg_sin,
+  (COUNT(*) FILTER (WHERE e.concept = 'SERVICE' AND e.descriptor->'llegadas'->>'corregidoA' IS NOT NULL))::int AS lleg_corr`
 
 interface SumaLlegadas {
   lleg_atendidas: number
@@ -122,6 +124,7 @@ interface SumaLlegadas {
   lleg_list: number
   lleg_pass: number
   lleg_sin: number
+  lleg_corr: number
 }
 /** null si la persona no tiene ninguna clase en «sólo quien llegó» (no hay desglose que enseñar). */
 const llegadasDePersona = (f: Partial<SumaLlegadas>) =>
@@ -133,6 +136,7 @@ const llegadasDePersona = (f: Partial<SumaLlegadas>) =>
         list: f.lleg_list ?? 0,
         pass: f.lleg_pass ?? 0,
         sinMetodo: f.lleg_sin ?? 0,
+        corregidas: f.lleg_corr ?? 0,
       }
     : null
 
