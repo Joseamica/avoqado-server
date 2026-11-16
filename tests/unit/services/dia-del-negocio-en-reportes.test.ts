@@ -143,6 +143,27 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
     expect(estado['2026-11-15']).toBe('LATE')
   })
 
+  it('detalle: si el reloj cruza la medianoche a media petición, el calendario sigue siendo de los 30 días de la consulta (Codex r2)', async () => {
+    fijarReloj('2026-11-16T05:59:59.000Z') // domingo 15-nov, 23:59:59 CDMX
+    zonaDelNegocio(CDMX)
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      role: 'CASHIER',
+      staff: { id: 's1', firstName: 'Ana', lastName: 'P', email: null, phone: null, photoUrl: null, createdAt: new Date() },
+    })
+    prismaMock.order.findMany.mockResolvedValue([])
+    prismaMock.performanceGoal.findUnique.mockResolvedValue(null)
+    prismaMock.timeEntry.findFirst.mockResolvedValue(null)
+    prismaMock.timeEntry.findMany.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-11-16T06:00:01.000Z')) // ya es lunes 16 en CDMX
+      return []
+    })
+
+    const d = await promotersService.getPromoterDetail('v1', 's1')
+
+    const fechas = d!.attendance.days.map(x => x.date)
+    expect([fechas[0], fechas[29], new Set(fechas).size]).toEqual(['2026-10-17', '2026-11-15', 30])
+  })
+
   it('gerente de tiendas: el avance estimado del mes usa el día del mes del negocio', async () => {
     fijarReloj(NOCHE)
     prismaMock.staff.findFirst.mockResolvedValue({ id: 'm1', firstName: 'Mara', lastName: 'G', email: null, phone: null })
