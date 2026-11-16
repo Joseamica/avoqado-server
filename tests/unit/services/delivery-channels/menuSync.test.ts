@@ -1321,6 +1321,7 @@ describe('disponibilidad con productos del canal por id (`config.productoIds`)',
     expect(mockedProducts.mock.calls[2][0]).toEqual({
       where: { venueId: 'venue1', sku: { in: ['LATTE', 'CORONA'] } },
       select: { id: true, sku: true },
+      take: 2,
     })
   })
 

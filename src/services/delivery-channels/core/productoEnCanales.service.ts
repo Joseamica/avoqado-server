@@ -24,7 +24,7 @@ import { normalizarSeleccion, sumarRevisados } from './seleccionDelCanal.service
 const LISTA_VACIA = 'Un canal necesita al menos un producto; pausa el canal si no quieres vender ahí'
 
 /** Lee la lista guardada; si está dañada, un error en español que nombra el canal (nunca se lee como «todo el catálogo»). */
-function leerLista<T>(leer: () => T, provider: DeliveryProvider): T {
+function listaLegible<T>(leer: () => T, provider: DeliveryProvider): T {
   try {
     return leer()
   } catch (e) {
@@ -77,8 +77,8 @@ export async function ponerProductoEnCanales(
       resultado.push({ linkId: fila.id, dentro })
       const config = configComoObjeto(fila.config)
 
-      let lista = leerLista(() => idsDelCanal(config), fila.provider)
-      const viejos = lista === null ? leerLista(() => productosDelCanal(config), fila.provider) : null
+      let lista = listaLegible(() => idsDelCanal(config), fila.provider)
+      const viejos = lista === null ? listaLegible(() => productosDelCanal(config), fila.provider) : null
       if (viejos) {
         const codigos = [...viejos]
         const deAlguien = await tx.product.findMany({

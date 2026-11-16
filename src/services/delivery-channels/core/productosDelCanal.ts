@@ -43,7 +43,7 @@ function comoObjeto(v: unknown): Record<string, unknown> | null {
 }
 
 /** La lista guardada en `config[llave]`, o `null` si no hay. Truena si no sirve. */
-function leerLista(config: unknown, llave: keyof typeof LISTAS): string[] | null {
+function listaGuardada(config: unknown, llave: keyof typeof LISTAS): string[] | null {
   const lista = comoObjeto(config)?.[llave]
   if (lista === undefined || lista === null) return null
   const problema = problemaDeLaLista(lista, llave)
@@ -53,13 +53,13 @@ function leerLista(config: unknown, llave: keyof typeof LISTAS): string[] | null
 
 /** Los SKU que publica el canal, o `null` = todo el catálogo. Truena si la lista guardada no sirve. */
 export function productosDelCanal(config: unknown): Set<string> | null {
-  const lista = leerLista(config, 'productos')
+  const lista = listaGuardada(config, 'productos')
   return lista && new Set(lista)
 }
 
 /** Los productos (ids) que publica el canal, o `null` = no hay lista por id. Truena si la lista guardada no sirve. */
 export function idsDelCanal(config: unknown): string[] | null {
-  return leerLista(config, 'productoIds')
+  return listaGuardada(config, 'productoIds')
 }
 
 /** Sólo los productos que `queda` deja, sin pasillos vacíos. No muta el original. */

@@ -687,6 +687,7 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
           await prisma.product.findMany({
             where: { venueId: link.venueId, sku: { in: candidatos } },
             select: { id: true, sku: true },
+            take: candidatos.length, // el SKU es único por negocio
           })
         )
           .filter(enElMenu)
