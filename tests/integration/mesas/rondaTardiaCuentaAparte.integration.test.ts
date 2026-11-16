@@ -117,7 +117,11 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(aparte).not.toBe(cobrada)
     expect(await fotoDe(cobrada)).toEqual(antes)
     expect(await fotoDe(aparte)).toMatchObject({ tableId: t, paymentStatus: 'PENDING', total: 20, renglones: 1, pagos: 0 })
-    expect(await prisma.order.findUniqueOrThrow({ where: { id: aparte } })).toMatchObject({ servedById: mesera })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: aparte } })).toMatchObject({
+      servedById: mesera,
+      rondaTardiaDeId: cobrada,
+      rondaTardiaAparato: aparatoMesera,
+    })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ status: 'OCCUPIED', currentOrderId: aparte })
     const [nota] = await notasDe(cobrada)
     expect(nota).toMatchObject({ entity: 'Order', entityId: aparte, staffId: mesera })
@@ -182,17 +186,9 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
 
   it('una cuenta aparte vacía que dejó un proceso muerto se reusa: no nace otra', async () => {
     const { t, cobrada } = await mesaCobradaPorLaCaja()
+    // La transacción que la creó commiteó; la de la ronda nunca llegó (sin huella): la retoma vuelve a correr el reducer.
     const huerfana = (await assignTable(venueId, t, mesera, 2)).order.id
-    await prisma.activityLog.create({
-      data: {
-        venueId,
-        staffId: mesera,
-        action: 'RONDA_TARDIA_EN_CUENTA_APARTE',
-        entity: 'Order',
-        entityId: huerfana,
-        data: { tableId: t, cuentaOriginal: cobrada, deviceId: aparatoMesera, intentId: 'muerto' },
-      },
-    })
+    await prisma.order.update({ where: { id: huerfana }, data: { rondaTardiaDeId: cobrada, rondaTardiaAparato: aparatoMesera } })
 
     const [ack] = await replay([ronda(cobrada)])
 
@@ -224,7 +220,15 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     const r = ronda(cobrada)
     const hija = (
       await prisma.order.create({
-        data: { venueId, tableId: t, orderNumber: `HIJA-${randomUUID().slice(0, 6)}`, servedById: caja, total: 20, subtotal: 20, taxAmount: 0 },
+        data: {
+          venueId,
+          tableId: t,
+          orderNumber: `HIJA-${randomUUID().slice(0, 6)}`,
+          servedById: caja,
+          total: 20,
+          subtotal: 20,
+          taxAmount: 0,
+        },
       })
     ).id
     await prisma.orderItem.create({
@@ -259,20 +263,40 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await fotoDe(aparte)).toMatchObject({ paymentStatus: 'PAID', pagos: 2 })
   })
 
-  it('Codex r0 #4: la cuenta aparte se la pasaron a otro mesero: la siguiente ronda de la mesera abre otra a su nombre', async () => {
+  it('Codex r0 #4: con propiedad de mesa, si a la cuenta aparte se la pasaron a otro mesero, la ronda de la mesera ya no entra ahí', async () => {
     const { cobrada } = await mesaCobradaPorLaCaja()
     const [primero] = await replay([ronda(cobrada)])
     const deCaja = String((primero.result as any).cuentaAparte?.orderId)
     await prisma.order.update({ where: { id: deCaja }, data: { servedById: caja } })
+    await prisma.venueSettings.update({ where: { venueId }, data: { enforceTableOwnership: true } })
+    try {
+      const [segundo] = await replay([ronda(cobrada, coca)])
+      // La misma regla que una ronda de todos los días a la cuenta de otro mesero.
+      expect(segundo).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(await fotoDe(deCaja)).toMatchObject({ renglones: 1, total: 20 })
+    } finally {
+      await prisma.venueSettings.update({ where: { venueId }, data: { enforceTableOwnership: false } })
+    }
+  })
+
+  it('la cuenta aparte ya se cobró y llega OTRA ronda tardía del mismo aparato: nace otra, colgada de la anterior', async () => {
+    const { cobrada } = await mesaCobradaPorLaCaja()
+    const [primero] = await replay([ronda(cobrada)])
+    const primera = String((primero.result as any).cuentaAparte?.orderId)
+    await payCashOrder(venueId, primera, { amount: 2000, tip: 0, staffId: caja, idempotencyKey: `caja-${primera}` })
 
     const [segundo] = await replay([ronda(cobrada, coca)])
 
     expect(segundo.status).toBe('ACKED')
-    const nueva = String((segundo.result as any).cuentaAparte?.orderId)
-    expect(nueva).not.toBe(deCaja)
-    expect(await fotoDe(deCaja)).toMatchObject({ renglones: 1, total: 20 })
-    expect(await prisma.order.findUniqueOrThrow({ where: { id: nueva } })).toMatchObject({ servedById: mesera })
-    expect(await notasDe(cobrada)).toHaveLength(2)
+    const segunda = String((segundo.result as any).cuentaAparte?.orderId)
+    expect(segunda).not.toBe(primera)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: segunda } })).toMatchObject({
+      rondaTardiaDeId: primera,
+      rondaTardiaAparato: aparatoMesera,
+      paymentStatus: 'PENDING',
+    })
+    expect(await fotoDe(segunda)).toMatchObject({ total: 25, renglones: 1 })
+    expect(await fotoDe(primera)).toMatchObject({ paymentStatus: 'PAID', renglones: 1, pagos: 1 })
   })
 
   it('Codex r0 #7: con otra visita en la mesa, el «Liberar mesa» de una app vieja (sólo la mesa) tras saldar la aparte no queda por revisar', async () => {
