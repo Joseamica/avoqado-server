@@ -15,7 +15,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
-import { Prisma } from '@prisma/client'
+import { Prisma, type ReservationStatus } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -32,6 +32,7 @@ import {
 } from './checkIn.service'
 import { CHECK_IN_CHALLENGE_EXPIRED, CHECK_IN_NOT_FOUND, consumeDurableAttempt } from './kioskCheckIn.service'
 import { undoNoShow } from './undoNoShow.service'
+import { phoneLast10, phonesMatch } from '@/utils/phone'
 import { afterNoShowCorrection } from './noShowNotices.service'
 
 /** Cuánto vale un QR después de pintarse: lo que tarda una alumna nueva en entrar con su código de WhatsApp. */
@@ -168,33 +169,38 @@ export async function consumeKioskQr(args: {
     ON CONFLICT ("opId") DO NOTHING`
 
   const grace = (await getReservationSettings(args.venueId)).scheduling.noShowGraceMin
-  // Hallado en la D3 (16-nov): el panel da de alta a una asistente sólo con nombre y teléfono, SIN ficha de clienta. Esa
-  // reserva también es de esta alumna si el teléfono que PROBÓ con código es el de la reserva: la misma cola de 10 dígitos
-  // con la que el kiosco busca un teléfono tecleado. Sólo teléfonos probados; el correo no entra.
-  const colas = [
-    ...new Set(
-      args.sesion.contactos
-        .filter(c => c.tipo === 'PHONE')
-        .map(c => c.valor.replace(/\D/g, ''))
-        .filter(d => d.length >= 10)
-        .map(d => d.slice(-10)),
-    ),
-  ]
+  const ventana = {
+    status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] as ReservationStatus[] },
+    startsAt: { gt: new Date(at.getTime() - grace * 60_000), lte: new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000) },
+  }
+  const enLaVentana = (r: { startsAt: Date }) => evaluateKioskWindow({ startsAt: r.startsAt, now: at, noShowGraceMin: grace })
   const candidates = await prisma.reservation.findMany({
-    where: {
-      venueId: args.venueId,
-      OR: [{ customerId: args.customerId }, ...colas.map(cola => ({ customerId: null, guestPhone: { endsWith: cola } }))],
-      status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] },
-      startsAt: { gt: new Date(at.getTime() - grace * 60_000), lte: new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000) },
-    },
+    where: { venueId: args.venueId, customerId: args.customerId, ...ventana },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
     take: 20,
     select: { id: true, status: true, startsAt: true, customerId: true },
   })
-  // La reserva con su ficha va antes que la de invitada (el orden por hora se conserva dentro de cada grupo).
-  const enVentana = candidates
-    .filter(r => evaluateKioskWindow({ startsAt: r.startsAt, now: at, noShowGraceMin: grace }))
-    .sort((a, b) => Number(a.customerId === null) - Number(b.customerId === null))
+  let enVentana = candidates.filter(enLaVentana)
+
+  // Hallado en la D3 (16-nov): el panel da de alta a una asistente sólo con nombre y teléfono, SIN ficha de clienta, y esa
+  // alumna veía «No encontramos una reservación tuya». SÓLO si no tiene ninguna reserva con su ficha en la ventana (ni una ya
+  // registrada: Codex r8 #2) se busca la de invitada cuyo teléfono es el que PROBÓ con código:
+  //  - la cola de 10 dígitos sólo prefiltra; la identidad es `phonesMatch`, con lada (r8 #1: un +1 551… no es un +52 55…);
+  //  - si ese teléfono lo comparten varias invitadas (mamá e hija), no se adivina: no se marca ninguna.
+  if (enVentana.length === 0) {
+    const probados = args.sesion.contactos.filter(c => c.tipo === 'PHONE').map(c => c.valor)
+    const colas = [...new Set(probados.map(phoneLast10).filter((c): c is string => !!c))]
+    if (colas.length > 0) {
+      const invitadas = await prisma.reservation.findMany({
+        where: { venueId: args.venueId, customerId: null, OR: colas.map(cola => ({ guestPhone: { endsWith: cola } })), ...ventana },
+        orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+        take: 20,
+        select: { id: true, status: true, startsAt: true, customerId: true, guestPhone: true },
+      })
+      const suyas = invitadas.filter(r => enLaVentana(r) && probados.some(t => phonesMatch(r.guestPhone, t)))
+      if (suyas.length === 1) enVentana = suyas
+    }
+  }
   // Primero la que falta marcar; si todas ya están, «ya estabas».
   const target = enVentana.find(r => r.status === 'PENDING' || r.status === 'CONFIRMED') ?? enVentana.find(r => r.status === 'NO_SHOW')
   if (!target) {
@@ -211,7 +217,9 @@ export async function consumeKioskQr(args: {
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
   // 🔴 La de invitada queda «con teléfono», nunca «con celular»: ese número lo escribió el personal en la reserva (no lo
   // probó la ficha), así que vale lo mismo que teclearlo en el kiosco. Quien pueda editar reservas no gana un «con celular».
-  const metodo = target.customerId === null ? { method: 'PHONE' as const } : await metodoDeLaSesion(args)
+  // Si el personal cambió hace poco el contacto con el que entró, sigue siendo «a mano por» (r1 #1), también aquí (r8 #3).
+  const deLaSesion = await metodoDeLaSesion(args)
+  const metodo = target.customerId === null && deLaSesion.method === 'QR' ? { method: 'PHONE' as const } : deLaSesion
 
   const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
     const n = await insertarRecibo(tx, target.id)
