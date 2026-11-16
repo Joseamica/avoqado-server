@@ -89,6 +89,26 @@ export const disconnectChannelSchema = z.object({
   query: z.object({}).passthrough().optional(),
 })
 
+/** PUT /venues/:venueId/products/:productId/channels — pone (`true`) o quita (`false`) UN producto en 1 a 20 canales (D1). */
+export const productoEnCanalesSchema = z.object({
+  body: z
+    .object({
+      canales: z
+        .record(z.boolean({ message: 'Cada canal va con verdadero (vender ahí) o falso (no vender ahí)' }), {
+          message: 'Envía los canales como { id del canal: verdadero o falso }',
+        })
+        .refine(c => Object.keys(c).length >= 1 && Object.keys(c).length <= 20, { message: 'Envía de 1 a 20 canales' }),
+    })
+    .strict(),
+  params: z
+    .object({
+      venueId: z.string().min(1, 'El venue es requerido'),
+      productId: z.string().min(1, 'El producto es requerido'),
+    })
+    .passthrough(),
+  query: z.object({}).passthrough().optional(),
+})
+
 /** POST /venues/:venueId/activation-request — el dueño solicita activar delivery (self-serve). */
 export const createActivationRequestSchema = z.object({
   body: z
