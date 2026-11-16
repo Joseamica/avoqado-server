@@ -802,6 +802,8 @@ describe('deliveryChannelLink.service', () => {
       it('marcarRevisados suma a productosRevisados (sin los de la lista); el resto de config queda', async () => {
         await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'p1'] })
         expect(escrito()).toEqual({ ...ACTUAL, productosRevisados: ['p9', 'p3'] })
+        // La bitácora guarda cuántos, no los ids (pueden ser 10,000).
+        expect((logAction as jest.Mock).mock.calls[0][0].data).toEqual({ marcarRevisados: 2 })
       })
 
       it('`config.productosRevisados` mandado por el panel se ignora', async () => {

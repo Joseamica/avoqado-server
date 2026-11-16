@@ -469,7 +469,8 @@ export async function updateChannelLink(
     action: 'DELIVERY_CHANNEL_UPDATED',
     entity: 'DeliveryChannelLink',
     entityId: linkId,
-    data: data as Prisma.InputJsonValue,
+    // `marcarRevisados` puede traer hasta 10,000 ids: en la bitácora sólo cuántos.
+    data: (data.marcarRevisados !== undefined ? { ...data, marcarRevisados: data.marcarRevisados.length } : data) as Prisma.InputJsonValue,
   })
 
   return link as unknown as DeliveryChannelLinkSafe
