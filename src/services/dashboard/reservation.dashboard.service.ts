@@ -50,6 +50,7 @@ import {
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
+import { fechaHoraDelNegocio } from '@/utils/fechaHoraDelNegocio'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -1853,8 +1854,55 @@ export type RescheduleNotification = {
 }
 
 export interface RescheduleReservationInput extends RescheduleNotification {
-  startsAt: Date
-  endsAt: Date
+  /**
+   * Instante con zona (`…Z`, `-06:00`) o hora SIN zona del negocio (`2026-11-12T15:00`, lo que manda un
+   * `<input type="datetime-local">`). La hora sin zona se lee en la zona del venue, nunca en la del proceso.
+   */
+  startsAt: Date | string
+  endsAt: Date | string
+}
+
+/**
+ * «push» no existe para el cliente final (no hay app con avisos push hacia él), pero es la opción que
+ * ANDROID, iOS y el DASHBOARD traían marcada: quien la deja quiere que el cliente se entere. Se
+ * entrega por el mejor canal que tenga: WhatsApp si hay teléfono, si no (o si WhatsApp falla) correo.
+ * Un canal elegido a mano (whatsapp/email) se respeta tal cual, sin caer a otro.
+ */
+type CanalDeAviso = 'whatsapp' | 'email'
+
+function canalesAIntentar(
+  channel: RescheduleNotification['notificationChannel'],
+  phone?: string | null,
+  email?: string | null,
+): CanalDeAviso[] {
+  if (channel === 'whatsapp') return ['whatsapp']
+  if (channel === 'email') return ['email']
+  if (channel === 'push') {
+    const canales: CanalDeAviso[] = []
+    if (phone) canales.push('whatsapp')
+    if (email) canales.push('email')
+    return canales
+  }
+  return []
+}
+
+async function yaSeAvisoEsteMovimiento(venueId: string, reservationId: string, startsAt: Date, endsAt: Date): Promise<boolean> {
+  const ultimo = await prisma.activityLog.findFirst({
+    where: { venueId, entity: 'Reservation', entityId: reservationId, action: 'RESERVATION_RESCHEDULED' },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { data: true },
+  })
+  const d = (ultimo?.data ?? null) as {
+    startsAt?: string
+    endsAt?: string
+    notificationSentVia?: string | null
+    notificationSkipped?: string | null
+  } | null
+  // Un reenvío que ya se saltó el aviso hereda la evidencia del aviso original: sin esto el 3.er reenvío
+  // idéntico (1 avisa, 2 se salta, 3 leía «no avisó») volvía a mandarlo.
+  const yaAvisado = Boolean(d?.notificationSentVia) || d?.notificationSkipped === 'ALREADY_NOTIFIED'
+  if (!d || !yaAvisado || !d.startsAt || !d.endsAt) return false
+  return new Date(d.startsAt).getTime() === startsAt.getTime() && new Date(d.endsAt).getTime() === endsAt.getTime()
 }
 
 export async function rescheduleReservation(
@@ -1864,9 +1912,6 @@ export async function rescheduleReservation(
   context: ReservationWriteContext,
   rescheduledBy: string,
 ) {
-  const { startsAt: newStartsAt, endsAt: newEndsAt } = data
-  const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
-
   // Capture pre-update snapshot so we can show "old → new" in notifications and
   // pull venue/customer fields without a second round-trip after the update.
   const original = await prisma.reservation.findFirst({
@@ -1879,6 +1924,15 @@ export async function rescheduleReservation(
   })
   if (!original) throw new NotFoundError('Reservacion no encontrada')
   const originalStartsAt = original.startsAt
+  const tz = original.venue?.timezone || 'America/Mexico_City'
+
+  const newStartsAt = fechaHoraDelNegocio(data.startsAt, tz)
+  const newEndsAt = fechaHoraDelNegocio(data.endsAt, tz)
+  if (Number.isNaN(newStartsAt.getTime()) || Number.isNaN(newEndsAt.getTime())) {
+    throw new BadRequestError('La fecha u hora nueva no es válida')
+  }
+  if (newEndsAt <= newStartsAt) throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
+  const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
 
   const rescheduled = await updateReservation(
     venueId,
@@ -1890,21 +1944,45 @@ export async function rescheduleReservation(
   )
 
   const channel = data.notificationChannel
-  if (channel && channel !== 'none' && channel !== 'push') {
+  let notificationSentVia: CanalDeAviso | null = null
+  // Reenvío de la cola sin red de ANDROID/iOS (repite el mismo cuerpo si se perdió la respuesta): si la cita
+  // ya empieza a esa hora y el último reagendar de ESTE mismo movimiento (mismo inicio y fin pedidos) ya le
+  // avisó al cliente, no se vuelve a avisar. Si aquel aviso no salió, si fue «Sin notificación» o si cambia
+  // el fin, sí se avisa. Dos peticiones simultáneas al mismo horario aún pueden avisar dos veces (raro).
+  let notificationSkipped: 'ALREADY_NOTIFIED' | null = null
+  if (channel && channel !== 'none' && originalStartsAt.getTime() === newStartsAt.getTime()) {
+    if (await yaSeAvisoEsteMovimiento(venueId, reservationId, newStartsAt, newEndsAt)) {
+      notificationSkipped = 'ALREADY_NOTIFIED'
+      logger.info(`[RESERVATION] Reschedule of ${rescheduled.confirmationCode} already notified for this time — not sent again`)
+    }
+  }
+  if (channel && channel !== 'none' && !notificationSkipped) {
     const customerName =
       [original.customer?.firstName, original.customer?.lastName].filter(Boolean).join(' ').trim() || rescheduled.guestName || 'cliente'
     const phone = original.customer?.phone || rescheduled.guestPhone
     const email = original.customer?.email || rescheduled.guestEmail
     const venueName = original.venue?.name || 'Avoqado'
-    const tz = original.venue?.timezone || 'America/Mexico_City'
 
     const formatDate = (d: Date) =>
       new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz }).format(d)
     const formatTime = (d: Date) =>
       new Intl.DateTimeFormat('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz }).format(d)
 
-    if (channel === 'whatsapp') {
-      if (phone) {
+    if (channel === 'sms') {
+      logger.warn(`[RESERVATION] SMS reschedule requested for ${rescheduled.confirmationCode} but SMS infra is not configured — skipped`)
+    }
+
+    const canales = canalesAIntentar(channel, phone, email)
+    if (channel === 'push' && canales.length === 0) {
+      logger.warn(`[RESERVATION] Reschedule notice for ${rescheduled.confirmationCode}: customer has no phone or email — skipped`)
+    }
+
+    for (const canal of canales) {
+      if (canal === 'whatsapp') {
+        if (!phone) {
+          logger.warn(`[RESERVATION] WhatsApp reschedule requested for ${rescheduled.confirmationCode} but customer has no phone — skipped`)
+          continue
+        }
         try {
           await sendReservationRescheduleWhatsApp(phone, {
             customerName,
@@ -1913,17 +1991,19 @@ export async function rescheduleReservation(
             time: formatTime(newStartsAt),
             message: data.customMessage,
           })
+          notificationSentVia = 'whatsapp'
           logger.info(`✅ [RESERVATION] WhatsApp reschedule sent for ${rescheduled.confirmationCode} → ${phone}`)
+          break
         } catch (err) {
           logger.error(`❌ [RESERVATION] WhatsApp reschedule failed for ${rescheduled.confirmationCode}: ${(err as Error).message}`)
         }
       } else {
-        logger.warn(`[RESERVATION] WhatsApp reschedule requested for ${rescheduled.confirmationCode} but customer has no phone — skipped`)
-      }
-    } else if (channel === 'email') {
-      if (email) {
+        if (!email) {
+          logger.warn(`[RESERVATION] Email reschedule requested for ${rescheduled.confirmationCode} but customer has no email — skipped`)
+          continue
+        }
         try {
-          await emailService.sendReservationRescheduledEmail(email, {
+          const enviado = await emailService.sendReservationRescheduledEmail(email, {
             customerName,
             venueName,
             serviceName: original.product?.name,
@@ -1932,15 +2012,18 @@ export async function rescheduleReservation(
             confirmationCode: rescheduled.confirmationCode,
             customMessage: data.customMessage,
           })
+          // El remitente devuelve `false` si Resend lo rechaza: no se anota como avisado.
+          if (!enviado) {
+            logger.error(`❌ [RESERVATION] Email reschedule rejected for ${rescheduled.confirmationCode}`)
+            continue
+          }
+          notificationSentVia = 'email'
           logger.info(`✅ [RESERVATION] Email reschedule sent for ${rescheduled.confirmationCode} → ${email}`)
+          break
         } catch (err) {
           logger.error(`❌ [RESERVATION] Email reschedule failed for ${rescheduled.confirmationCode}: ${(err as Error).message}`)
         }
-      } else {
-        logger.warn(`[RESERVATION] Email reschedule requested for ${rescheduled.confirmationCode} but customer has no email — skipped`)
       }
-    } else if (channel === 'sms') {
-      logger.warn(`[RESERVATION] SMS reschedule requested for ${rescheduled.confirmationCode} but SMS infra is not configured — skipped`)
     }
   }
 
@@ -1955,6 +2038,8 @@ export async function rescheduleReservation(
       endsAt: newEndsAt,
       confirmationCode: rescheduled.confirmationCode,
       notificationChannel: channel ?? null,
+      notificationSentVia,
+      notificationSkipped,
       customMessage: data.customMessage ?? null,
     },
   })

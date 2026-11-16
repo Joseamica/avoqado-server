@@ -113,8 +113,8 @@ describe('reservation availability controller boundaries', () => {
       'venue-1',
       'reservation-1',
       {
-        startsAt: new Date('2026-08-22T15:00:00.000Z'),
-        endsAt: new Date('2026-08-22T16:00:00.000Z'),
+        startsAt: '2026-08-22T15:00:00.000Z',
+        endsAt: '2026-08-22T16:00:00.000Z',
         notificationChannel: 'email',
         customMessage: 'Nos vemos pronto',
       },
@@ -192,8 +192,8 @@ describe('reservation availability controller boundaries', () => {
       'venue-1',
       'reservation-1',
       {
-        startsAt: new Date('2026-08-22T15:00:00.000Z'),
-        endsAt: new Date('2026-08-22T16:00:00.000Z'),
+        startsAt: '2026-08-22T15:00:00.000Z',
+        endsAt: '2026-08-22T16:00:00.000Z',
         notificationChannel: undefined,
         customMessage: undefined,
       },
