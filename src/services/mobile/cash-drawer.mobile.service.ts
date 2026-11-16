@@ -276,6 +276,8 @@ interface PayInOutParams {
    * una edad creíble la hora es `llegada − edadMs` (`horaDelMovimientoDeLaCola`): el reloj de pared del aparato no participa.
    */
   edadMs?: unknown
+  /** Cuándo ENTRÓ la petición (el controlador la toma antes de cualquier consulta). Sin ella, ahora. */
+  llegada?: Date
 }
 
 /**
@@ -348,7 +350,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       ? horaDelMovimientoDeLaCola(
           { createdAt: params.createdAt, edadMs: params.edadMs },
           { openedAt: session.openedAt, closedAt: session.closedAt ?? null },
-          new Date(),
+          params.llegada ?? new Date(),
         )
       : undefined
   const row = {
