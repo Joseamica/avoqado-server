@@ -156,6 +156,17 @@ export async function consumeKioskQr(args: {
   }
   const at = new Date(Math.min(args.ts * 1000, args.now.getTime()))
 
+  // 🔴 Codex r5 #2 y r6 #1: el MISMO QR presentado otra vez por la MISMA alumna (respuesta perdida, doble escaneo) contesta con
+  // la reserva de la PRIMERA vez: no elige otra ni re-marca una llegada que alguien deshizo. Recibo como la cola del
+  // teléfono: llave = hash(llave del QR, hora, alumna). Se consulta ANTES de elegir reserva.
+  const opId = `qr:${createHash('sha256').update(`${args.keyId}|${args.ts}|${args.customerId}`).digest('hex').slice(0, 56)}`
+  const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId }, select: { reservationId: true, venueId: true } })
+  if (previa && previa.venueId === args.venueId) return { outcome: 'ALREADY_CHECKED_IN', reservationId: previa.reservationId }
+  const insertarRecibo = (tx: Prisma.TransactionClient | typeof prisma, reservationId: string) => tx.$executeRaw`
+    INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
+    VALUES (${opId}, ${args.venueId}, ${reservationId})
+    ON CONFLICT ("opId") DO NOTHING`
+
   const grace = (await getReservationSettings(args.venueId)).scheduling.noShowGraceMin
   const candidates = await prisma.reservation.findMany({
     where: {
@@ -173,23 +184,20 @@ export async function consumeKioskQr(args: {
   const target = enVentana.find(r => r.status === 'PENDING' || r.status === 'CONFIRMED') ?? enVentana.find(r => r.status === 'NO_SHOW')
   if (!target) {
     const ya = enVentana.find(r => r.status === 'CHECKED_IN')
-    if (ya) return { outcome: 'ALREADY_CHECKED_IN', reservationId: ya.id }
+    if (ya) {
+      // «Ya estabas» también deja su recibo (r6 #1): si alguien deshace después, repetir ESTE QR no la vuelve a marcar.
+      await insertarRecibo(prisma, ya.id)
+      const r = await prisma.kioskCheckInOp.findUnique({ where: { opId }, select: { reservationId: true } })
+      return { outcome: 'ALREADY_CHECKED_IN', reservationId: r?.reservationId ?? ya.id }
+    }
     throw new NotFoundError('No encontramos una reservación tuya lista para check-in', CHECK_IN_NOT_FOUND)
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
   const metodo = await metodoDeLaSesion(args)
 
-  // 🔴 Codex r5 #2: el MISMO QR presentado otra vez por la MISMA alumna (respuesta perdida, doble escaneo) no puede marcar
-  // otra reserva. Lleva un recibo, como la cola del teléfono: llave = hash(llave del QR, hora, alumna).
-  const opId = `qr:${createHash('sha256').update(`${args.keyId}|${args.ts}|${args.customerId}`).digest('hex').slice(0, 56)}`
-  const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId }, select: { reservationId: true, venueId: true } })
-  if (previa && previa.venueId === args.venueId) return { outcome: 'ALREADY_CHECKED_IN', reservationId: previa.reservationId }
   const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
-    const n = await tx.$executeRaw`
-      INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
-      VALUES (${opId}, ${args.venueId}, ${target.id})
-      ON CONFLICT ("opId") DO NOTHING`
+    const n = await insertarRecibo(tx, target.id)
     if (n === 0) throw new QrYaPresentado()
     return fn()
   }

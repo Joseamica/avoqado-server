@@ -80,6 +80,18 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       expect(String(valores[0])).toMatch(/^qr:[a-f0-9]{56}$/)
       expect(valores.slice(1)).toEqual([VENUE, 'res-1'])
     })
+    it('🔴 Codex r6 #1: «ya estabas» también deja su recibo, ANTES de elegir reserva se consulta', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([{ id: 'res-1', status: 'CHECKED_IN', startsAt: CLASE }] as any)
+      prismaMock.kioskCheckInOp.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ reservationId: 'res-1' } as any)
+      const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(out).toEqual({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-1' })
+      const [pedazos, ...valores] = (prismaMock.$executeRaw as jest.Mock).mock.calls[0] as [string[], ...unknown[]]
+      expect(pedazos.join('?')).toMatch(/INSERT INTO "KioskCheckInOp"/)
+      expect(valores.slice(1)).toEqual([VENUE, 'res-1'])
+      expect(prismaMock.kioskCheckInOp.findUnique.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.reservation.findMany.mock.invocationCallOrder[0],
+      )
+    })
     it('otra alumna con el mismo QR tiene su propio recibo (la fila de 8 sigue funcionando)', async () => {
       await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'alumna-a', now: NOW })
       await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'alumna-b', now: NOW })
