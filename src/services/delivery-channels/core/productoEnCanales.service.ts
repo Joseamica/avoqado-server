@@ -120,7 +120,7 @@ export async function ponerProductoEnCanales(
       const revisados = sumarRevisados(config.productosRevisados, dentro ? [] : [productId], final)
       if (!cambiaLista && JSON.stringify(revisados) === JSON.stringify(config.productosRevisados ?? [])) continue
 
-      const nuevo = cambiaLista ? await normalizarSeleccion(tx, venueId, config, { productoIds: final }) : config
+      const nuevo = cambiaLista ? await normalizarSeleccion(tx, venueId, config, { productoIds: final }, config) : config
       await tx.deliveryChannelLink.updateMany({
         where: { id: fila.id, venueId },
         data: { config: { ...nuevo, productosRevisados: revisados } as Prisma.InputJsonValue },

@@ -110,11 +110,12 @@ export function aplicarSeleccion(snapshot: MenuSnapshot, config: unknown): { sna
   const porExtra = comoObjeto(comoObjeto(guardados)?.porExtra)
   if (!porProducto && !porExtra) return { snapshot: sinId, precios: guardados as PreciosDeCanal | undefined }
 
+  // La copia guardada no decide. Límite conocido (Codex impl r3 #5): si alguien vuelve a un SERVIDOR anterior, cambia ahí un precio
+  // por código y luego se restaura éste, se publica el precio por id que quedó guardado, no el que se cambió en la versión vieja.
   const { porProducto: _p, porExtra: _e, overrides: _copia, ...resto } = guardados as Record<string, unknown>
   // Los valores se copian tal cual: el mapeador de cada proveedor ya ignora un precio que no es número finito ≥ 0.
-  // Un producto cuyo código es literalmente el `MOD-<id>` de un extra comparte esa llave en el menú del proveedor (ya era así
-  // antes de D1, fuera de alcance): ahí gana el precio del extra.
   const publicados = delCanal.categories.flatMap(c => c.products)
+  const deProducto = new Set(publicados.map(p => p.plu))
   const extras = new Set(publicados.flatMap(p => p.modifierGroups.flatMap(g => g.modifiers.map(m => m.plu))))
   const overrides: Record<string, number> = {}
   for (const p of publicados) {
@@ -122,7 +123,12 @@ export function aplicarSeleccion(snapshot: MenuSnapshot, config: unknown): { sna
       overrides[p.plu] = porProducto[p.productId] as number
     }
   }
-  for (const [id, precio] of Object.entries(porExtra ?? {})) if (extras.has(`MOD-${id}`)) overrides[`MOD-${id}`] = precio as number
+  // Un producto publicado cuyo código es literalmente el `MOD-<id>` de un extra comparte esa llave en el menú del proveedor (ya
+  // era así antes de D1, fuera de alcance): ahí gana el producto y el precio del extra no se escribe (Codex impl r3 #1).
+  for (const [id, precio] of Object.entries(porExtra ?? {})) {
+    const codigo = `MOD-${id}`
+    if (extras.has(codigo) && !deProducto.has(codigo)) overrides[codigo] = precio as number
+  }
   return { snapshot: sinId, precios: { ...resto, overrides } as PreciosDeCanal }
 }
 

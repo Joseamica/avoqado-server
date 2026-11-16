@@ -166,6 +166,7 @@ export async function createChannelLink(
         venueId,
         config as Record<string, unknown>,
         data.config as Record<string, unknown>,
+        null, // canal nuevo: no hay nada guardado
       )) as Prisma.InputJsonValue
     }
   }
@@ -416,6 +417,7 @@ export async function updateChannelLink(
           venueId,
           nuevo as Record<string, unknown>,
           data.config as Record<string, unknown>,
+          actual.config, // la fila bloqueada, antes de mezclar (Codex impl r3 #3)
         )) as Prisma.InputJsonValue
       }
       // 🔴 D1, compara-y-cambia: si alguien cambió la selección desde que la pantalla la leyó, 409. Salvo que lo pedido YA sea lo

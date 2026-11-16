@@ -232,6 +232,15 @@ describe('aplicarSeleccion — filtra y arma los precios sobre la MISMA copia de
     expect(precios).toEqual({ overrides: { 'MOD-m1': 6 } })
   })
 
+  it('🔴 Codex impl r3 #1: un producto PUBLICADO con el código `MOD-m1` gana esa llave; el precio del extra no la pisa', () => {
+    const menu = copia('MOD-m1', 'LATTE', 'TE')
+    menu.categories[1].products[0].modifierGroups = [leche('MOD-m1')]
+    const config = (porProducto: Record<string, number>) => ({ productoIds: ['p1', 'p3'], precios: { porProducto, porExtra: { m1: 8 } } })
+    expect(aplicarSeleccion(menu, config({ p1: 79 })).precios).toEqual({ overrides: { 'MOD-m1': 79 } })
+    // Sin precio fijo del producto, la llave queda libre: los dos salen a su precio de mostrador.
+    expect(aplicarSeleccion(menu, config({})).precios).toEqual({ overrides: {} })
+  })
+
   it('🔴 Codex impl r2 #1: un producto FUERA de la selección con el código `MOD-m1` no le quita al extra su precio', () => {
     // p2 (fuera de la lista) tomó el código `MOD-m1`; el extra m1 cuelga de p3 (publicado): base $10, en el canal $8.
     const menu = copia('Z', 'MOD-m1', 'TE')

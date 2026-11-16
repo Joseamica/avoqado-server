@@ -45,25 +45,31 @@ function mapaEnviado(v: unknown, llave: 'porProducto' | 'porExtra'): Record<stri
  * devuelve igual y sin consultar. Lo que llega en `entrante` y no es de este negocio truena con `ValidationError`.
  *
  * Precios:
- *  · `porProducto` / `porExtra` enviados mandan; la `overrides` enviada junto a ellos no decide nada ni truena (es la copia que
- *    devuelve la propia API; Codex impl r2 #3).
+ *  · `porProducto` / `porExtra` enviados mandan; la `overrides` enviada junto a ellos se ignora POR COMPLETO: no decide, no
+ *    truena (es la copia que devuelve la propia API; Codex impl r2 #3) y no completa el mapa que falte (Codex impl r3 #3).
  *  · `overrides` enviado SIN ellos (la API de antes de D1) reemplaza todos los precios: cada código de producto va a
  *    `porProducto`, cada `MOD-<id>` de un extra del negocio a `porExtra`, y lo demás truena nombrándolo (`{}` borra todo).
- *  · Un canal con lista o con precios por id al que le falta un mapa lo saca UNA vez de la copia por código (Codex plan r3 #2;
- *    también el canal que el D1 anterior convirtió sin `porExtra`). Lo que no es de nadie se descarta.
+ *  · Un canal con lista o con precios por id al que le falta un mapa lo saca UNA vez de la copia por código GUARDADA, la de
+ *    `guardado` (la fila leída bajo candado, antes de mezclar; Codex plan r3 #2). Lo que no es de nadie se descarta.
  */
 export async function normalizarSeleccion(
   db: Prisma.TransactionClient,
   venueId: string,
   mezclado: Record<string, unknown>,
   entrante: Record<string, unknown>,
+  guardado: unknown,
 ): Promise<Record<string, unknown>> {
   const enviados = comoObjeto(entrante.precios)
   const precios = comoObjeto(mezclado.precios)
-  // La copia por código: la guardada, o la que llegó en este guardado.
-  const copia = comoObjeto(precios?.overrides) ?? {}
   const mandaMapas = enviados?.porProducto !== undefined || enviados?.porExtra !== undefined
   const reemplaza = !mandaMapas && enviados?.overrides !== undefined
+  // La copia por código de la que se sacan precios: la ENVIADA sólo cuando reemplaza; si no, la GUARDADA antes de este guardado
+  // (y ninguna si este guardado borró `precios`).
+  const copia = reemplaza
+    ? (comoObjeto(precios?.overrides) ?? {})
+    : precios
+      ? (comoObjeto(comoObjeto(comoObjeto(guardado)?.precios)?.overrides) ?? {})
+      : {}
 
   // La lista: `undefined` = no se tocó.
   let productoIds: string[] | null | undefined
@@ -178,11 +184,11 @@ export async function normalizarSeleccion(
     resultado.productos = productoIds && productoIds.flatMap(id => (codigoDe.has(id) ? [codigoDe.get(id)!] : []))
   }
   if (porProducto !== undefined || porExtra !== undefined) {
-    // La copia por código, sólo desde los ids: el código vigente de cada producto y el `MOD-<id>` de cada extra (con un producto
-    // que se llame literalmente igual, gana el extra, como al publicar).
+    // La copia por código, sólo desde los ids: el `MOD-<id>` de cada extra y el código vigente de cada producto (con un producto
+    // que se llame literalmente igual, gana el producto, como al publicar).
     const copiaNueva: Record<string, unknown> = {}
-    for (const [id, precio] of Object.entries(porProducto ?? {})) if (codigoDe.has(id)) copiaNueva[codigoDe.get(id)!] = precio
     for (const [id, precio] of Object.entries(porExtra ?? {})) copiaNueva[`MOD-${id}`] = precio
+    for (const [id, precio] of Object.entries(porProducto ?? {})) if (codigoDe.has(id)) copiaNueva[codigoDe.get(id)!] = precio
     // `porExtra` se guarda si trae algo, si ya estaba o si la copia lleva un `MOD-…` (de un producto que se llama así): sin él,
     // otro guardado sacaría de la copia ese precio de producto como si fuera del extra (Codex impl r2 #2).
     const guardaExtra =
