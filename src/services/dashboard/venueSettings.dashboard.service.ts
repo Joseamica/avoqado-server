@@ -139,8 +139,11 @@ export async function updateVenueSettings(
   }
 
   // Encargo f998c8: «Pedir motivo en los descuentos» + la lista del negocio. Se valida contra lo guardado (no se prende con la lista
-  // vacía; prendido no se quita el último motivo) y la lista se guarda limpia (recortada, sin vacíos ni repetidos).
-  if ('discountReasonRequired' in updates || 'discountReasons' in updates) {
+  // vacía; prendido no se quita el último motivo) y la lista se guarda limpia (recortada, sin vacíos ni repetidos). Codex r2 #1: se
+  // vuelve a validar con la fila BLOQUEADA en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
+  // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
+  const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
+  if (tocaMotivos) {
     const guardado = await prisma.venueSettings.findUnique({
       where: { venueId },
       select: { discountReasonRequired: true, discountReasons: true },
@@ -238,6 +241,7 @@ export async function updateVenueSettings(
         where: { venueId },
         select: { id: true, cashReconciliationEnabled: true },
       })
+      if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
 
       const settings = await tx.venueSettings.upsert({
         where: { venueId },
@@ -268,11 +272,16 @@ export async function updateVenueSettings(
   const previous = (await prisma.venueSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
 
   // Upsert settings (create if not exists, update if exists)
-  const settings = await prisma.venueSettings.upsert({
-    where: { venueId },
-    create: createData,
-    update: updates,
-  })
+  const settings = tocaMotivos
+    ? await prisma.$transaction(async tx => {
+        await revalidarMotivosConCandado(tx, venueId, updates)
+        return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
+      })
+    : await prisma.venueSettings.upsert({
+        where: { venueId },
+        create: createData,
+        update: updates,
+      })
 
   const updatedFields = Object.keys(updates)
   logger.info(`Updated VenueSettings for venue: ${venueId}`, { updatedFields })
@@ -293,6 +302,27 @@ export async function updateVenueSettings(
   })
 
   return settings
+}
+
+/**
+ * Encargo f998c8 (Codex r2 #1): bloquea la fila del negocio (`FOR UPDATE`) y vuelve a validar el cambio YA normalizado contra lo que
+ * hay ahora. Sin fila no hay qué bloquear, y tampoco hay lista que vaciar: la combinación peligrosa (prendido sin motivos) necesita
+ * una fila con motivos. Lanza el mismo 400 en español que la primera validación.
+ */
+async function revalidarMotivosConCandado(tx: Prisma.TransactionClient, venueId: string, updates: Prisma.VenueSettingsUpdateInput) {
+  await tx.$queryRaw`SELECT 1 FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+  const ahora = await tx.venueSettings.findUnique({
+    where: { venueId },
+    select: { discountReasonRequired: true, discountReasons: true },
+  })
+  const resultado = validarAjusteDeMotivos(
+    {
+      ...(typeof updates.discountReasonRequired === 'boolean' ? { required: updates.discountReasonRequired } : {}),
+      ...(Array.isArray(updates.discountReasons) ? { reasons: updates.discountReasons as unknown[] } : {}),
+    },
+    { required: ahora?.discountReasonRequired ?? false, reasons: ahora?.discountReasons ?? [] },
+  )
+  if (!resultado.ok) throw new BadRequestError(resultado.mensaje)
 }
 
 // TPV Settings functions removed (2025-11-29)

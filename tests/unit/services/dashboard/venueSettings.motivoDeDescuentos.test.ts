@@ -10,6 +10,8 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     venueSettings: { findUnique: jest.fn(), upsert: jest.fn(), create: jest.fn() },
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
   },
 }))
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
@@ -51,6 +53,8 @@ describe('motivo de descuentos: PUT', () => {
     jest.clearAllMocks()
     fila = null
     db.venue.findUnique.mockResolvedValue({ id: 'venue-1' })
+    db.$transaction.mockImplementation(async (cb: any) => cb(db))
+    db.$queryRaw.mockResolvedValue([])
     db.venueSettings.findUnique.mockImplementation(async () => fila)
     db.venueSettings.upsert.mockImplementation(async ({ create, update }: any) => {
       fila = fila ? { ...fila, ...update } : { id: 'settings-1', discountReasonRequired: false, discountReasons: [], ...create }
@@ -85,6 +89,21 @@ describe('motivo de descuentos: PUT', () => {
 
   it('un repetido es 400 en español', async () => {
     await expect(updateVenueSettings('venue-1', { discountReasons: ['Error', 'error'] } as any, 'staff-1')).rejects.toThrow(/repetido/)
+  })
+
+  it('Codex r2 #1: valida otra vez con la fila BLOQUEADA en la transacción que escribe (dos administradores a la vez)', async () => {
+    // Primera lectura: switch apagado con un motivo (quitarlo pasa). Dentro de la transacción, otro administrador ya lo prendió.
+    let lecturas = 0
+    db.venueSettings.findUnique.mockImplementation(async () => {
+      lecturas += 1
+      return lecturas === 1
+        ? { id: 's', discountReasonRequired: false, discountReasons: ['A'] }
+        : { id: 's', discountReasonRequired: true, discountReasons: ['A'] }
+    })
+    await expect(updateVenueSettings('venue-1', { discountReasons: [] } as any, 'staff-1')).rejects.toThrow(/apaga/)
+    expect(db.$queryRaw).toHaveBeenCalled()
+    expect(String(db.$queryRaw.mock.calls[0][0].join('?'))).toMatch(/FOR UPDATE/)
+    expect(db.venueSettings.upsert).not.toHaveBeenCalled()
   })
 
   it('regresión: un PUT sin estas llaves no las toca ni las lee', async () => {
