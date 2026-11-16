@@ -10,7 +10,9 @@
 import { storeCreditDeClientes, type StoreCreditDeCliente } from '../storeCredit/customerStoreCreditBalance'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
-import { venueStartOfMonth, zonaValida } from '@/utils/datetime'
+import { fromZonedTime } from 'date-fns-tz'
+import { zonaValida } from '@/utils/datetime'
+import { venueMonthKey } from '@/utils/venueDateKeys'
 import { getVenueTimezone } from './commission/commission-utils'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -795,7 +797,8 @@ export async function deleteCustomer(venueId: string, customerId: string) {
  */
 export async function getCustomerStats(venueId: string): Promise<CustomerStatsResponse> {
   // D19: el día 1 a la medianoche del NEGOCIO; `new Date(año, mes, 1)` daba la del proceso (UTC en producción).
-  const firstDayOfMonth = venueStartOfMonth(zonaValida(await getVenueTimezone(venueId)))
+  const timezone = zonaValida(await getVenueTimezone(venueId))
+  const firstDayOfMonth = fromZonedTime(`${venueMonthKey(new Date(), timezone)}-01T00:00:00.000`, timezone)
 
   const [totalCustomers, activeCustomers, newCustomersThisMonth, vipCustomers, avgStats, topSpenders] = await prisma.$transaction([
     // Total customers

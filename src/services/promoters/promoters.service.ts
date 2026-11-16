@@ -7,9 +7,19 @@ import prisma from '../../utils/prismaClient'
 import { CashDepositStatus } from '@prisma/client'
 import { logAction } from '../dashboard/activity-log.service'
 import { getVenueTimezone } from '../dashboard/commission/commission-utils'
-import { formatInTimeZone } from 'date-fns-tz'
-import { venueStartOfDay, venueStartOfDayOffset, zonaValida } from '../../utils/datetime'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
+import { zonaValida } from '../../utils/datetime'
 import { venueCivilDate, venueDayKey } from '../../utils/venueDateKeys'
+
+/**
+ * D19: the venue's calendar day `offset` days from today (0 = today), as `YYYY-MM-DD`, and its midnight. Calendar math on
+ * the civil date (no hours), so neither the process zone (UTC in production) nor its DST can move it.
+ */
+function venueDayKeyFromToday(timezone: string, offset: number): string {
+  const { year, month, day } = venueCivilDate(new Date(), timezone)
+  return new Date(Date.UTC(year, month - 1, day + offset)).toISOString().slice(0, 10)
+}
+const venueMidnight = (timezone: string, offset = 0) => fromZonedTime(`${venueDayKeyFromToday(timezone, offset)}T00:00:00.000`, timezone)
 
 // Types for the service responses
 export interface PromoterSummary {
@@ -85,7 +95,7 @@ class PromotersService {
     // D19: «hoy» empieza en la medianoche del NEGOCIO. `setHours(0, 0, 0, 0)` daba la del proceso (UTC en producción):
     // en CDMX sumaba la tarde-noche de ayer y a las 18:00 se reiniciaba.
     const timezone = zonaValida(await getVenueTimezone(venueId))
-    const todayStart = venueStartOfDay(timezone)
+    const todayStart = venueMidnight(timezone)
 
     // Get all promoters (staff with CASHIER/WAITER role) for this venue
     const staffVenues = await prisma.staffVenue.findMany({
@@ -225,7 +235,7 @@ class PromotersService {
   async getPromoterDetail(venueId: string, promoterId: string): Promise<PromoterDetail | null> {
     // D19: hoy, el calendario y el retardo se cuentan en la zona del negocio (ver getPromotersList).
     const timezone = zonaValida(await getVenueTimezone(venueId))
-    const todayStart = venueStartOfDay(timezone)
+    const todayStart = venueMidnight(timezone)
 
     // Get promoter info
     const staffVenue = await prisma.staffVenue.findFirst({
@@ -299,7 +309,7 @@ class PromotersService {
     })
 
     // Get last 30 days attendance from TimeEntry (today and the 29 days before, in the venue's zone)
-    const thirtyDaysAgo = venueStartOfDayOffset(timezone, -29)
+    const thirtyDaysAgo = venueMidnight(timezone, -29)
 
     const timeEntries = await prisma.timeEntry.findMany({
       where: {
@@ -312,10 +322,8 @@ class PromotersService {
 
     // Build attendance calendar
     const attendanceDays: Array<{ date: string; status: 'PRESENT' | 'ABSENT' | 'LATE' | 'HALF_DAY' }> = []
-    const today = venueCivilDate(new Date(), timezone)
     for (let i = 29; i >= 0; i--) {
-      // Calendar math on the venue's civil date (no hours), so the process zone never moves the day.
-      const dateStr = new Date(Date.UTC(today.year, today.month - 1, today.day - i)).toISOString().slice(0, 10)
+      const dateStr = venueDayKeyFromToday(timezone, -i)
 
       // Find time entry for this day
       const entry = timeEntries.find(r => venueDayKey(r.clockInTime, timezone) === dateStr)

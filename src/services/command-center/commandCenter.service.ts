@@ -4,7 +4,14 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
-import { venueStartOfDay, venueEndOfDay, venueStartOfMonth, venueStartOfDayOffset, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import {
+  venueStartOfDay,
+  venueEndOfDay,
+  venueStartOfMonth,
+  venueStartOfDayOffset,
+  DEFAULT_TIMEZONE,
+  parseDbDateRange,
+} from '../../utils/datetime'
 import { toZonedTime } from 'date-fns-tz'
 import { utcTs } from '../../utils/sqlDates'
 
@@ -558,8 +565,9 @@ class CommandCenterService {
 
     // Determine date range using venue timezone
     if (startDate && endDate) {
-      currentPeriodStart = venueStartOfDay(timezone, new Date(startDate))
-      currentPeriodEnd = venueEndOfDay(timezone, new Date(endDate))
+      // D19: the DASHBOARD sends bare `YYYY-MM-DD` venue days. `new Date('2026-11-15')` is UTC midnight (18:00 of the 14th
+      // in Mexico City), so the chart showed the day before. parseDbDateRange reads a bare day in the venue's zone.
+      ;({ from: currentPeriodStart, to: currentPeriodEnd } = parseDbDateRange(startDate, endDate, timezone))
     } else {
       currentPeriodEnd = venueEndOfDay(timezone)
       currentPeriodStart = venueStartOfDayOffset(timezone, -(days - 1))

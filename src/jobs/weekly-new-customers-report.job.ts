@@ -19,13 +19,14 @@
 
 import { CronJob } from 'cron'
 import { PlanTier, VenueStatus } from '@prisma/client'
-import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { env } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
+import { venueCivilDate } from '../utils/venueDateKeys'
 
 const TIMEZONE = 'America/Mexico_City'
 const PAID_TIERS: PlanTier[] = [PlanTier.PRO, PlanTier.PREMIUM, PlanTier.ENTERPRISE]
@@ -153,25 +154,22 @@ export class WeeklyNewCustomersReportJob {
 /**
  * Monday 00:00:00 through Sunday 23:59:59.999 (Mexico City) of the week before `at`'s week, as real instants.
  *
- * The calendar math runs on Mexico City wall-clock fields held in a process-local Date (`toZonedTime`); D19: without
- * `fromZonedTime` at the end the process zone (UTC in production) read those fields as its own, and the week ran from
- * Sunday 18:00 to Sunday 17:59 in Mexico City.
+ * D19: the old code did `setHours`/`setDate` on Mexico City wall-clock fields and never converted back, so the process
+ * zone (UTC in production) ran the week from Sunday 18:00 to Sunday 17:59 in Mexico City. The math is now on the civil
+ * date (UTC calendar, no hours), so no process zone can move it.
  */
 function getLastCompleteWeek(at: Date): { weekStart: Date; weekEnd: Date } {
-  const zoned = toZonedTime(at, TIMEZONE)
-  const dayOfWeek = zoned.getDay() // 0=Sun..6=Sat
-  const daysSinceMonday = (dayOfWeek + 6) % 7 // Mon=0..Sun=6
-
-  const thisMonday = new Date(zoned)
-  thisMonday.setHours(0, 0, 0, 0)
-  thisMonday.setDate(thisMonday.getDate() - daysSinceMonday)
-
-  const weekStart = new Date(thisMonday)
-  weekStart.setDate(weekStart.getDate() - 7)
+  const { year, month, day } = venueCivilDate(at, TIMEZONE)
+  const daysSinceMonday = (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7 // Mon=0..Sun=6
+  const mondayMidnight = (weeksBack: number) =>
+    fromZonedTime(
+      `${new Date(Date.UTC(year, month - 1, day - daysSinceMonday - 7 * weeksBack)).toISOString().slice(0, 10)}T00:00:00.000`,
+      TIMEZONE,
+    )
 
   return {
-    weekStart: fromZonedTime(weekStart, TIMEZONE),
-    weekEnd: new Date(fromZonedTime(thisMonday, TIMEZONE).getTime() - 1), // prior Sunday 23:59:59.999
+    weekStart: mondayMidnight(1),
+    weekEnd: new Date(mondayMidnight(0).getTime() - 1), // prior Sunday 23:59:59.999
   }
 }
 

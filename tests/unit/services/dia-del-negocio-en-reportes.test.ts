@@ -7,10 +7,11 @@
  * empezaba a las 18:00 del último día del mes anterior. Cada prueba fija el reloj a una hora de la noche en México, cuando
  * el día de UTC ya cambió y el del negocio no.
  *
- * Debe dar lo mismo con el proceso en cualquier zona. La zona se fija ANTES de que arranque Jest, así que se corre dos veces:
+ * Debe dar lo mismo con el proceso en cualquier zona, también en una cuya medianoche no existe el día del cambio de horario
+ * (America/Havana el 8-mar-2026, Codex r1). La zona se fija ANTES de que arranque Jest, así que se corre en varias:
  *
- *   TZ=UTC npx jest --selectProjects unit tests/unit/services/dia-del-negocio-en-reportes.test.ts
- *   TZ=America/Mexico_City npx jest --selectProjects unit tests/unit/services/dia-del-negocio-en-reportes.test.ts
+ *   TZ=UTC npx jest --selectProjects=unit --runTestsByPath tests/unit/services/dia-del-negocio-en-reportes.test.ts
+ *   TZ=America/Mexico_City …   TZ=America/Tijuana …   TZ=America/Havana …
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import { weeklyNewCustomersReportJob } from '@/jobs/weekly-new-customers-report.job'
@@ -18,6 +19,7 @@ import { promotersService } from '@/services/promoters/promoters.service'
 import { getReferralSummary } from '@/services/referrals/referralReads.service'
 import { getCustomerStats } from '@/services/dashboard/customer.dashboard.service'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
+import { commandCenterService } from '@/services/command-center/commandCenter.service'
 import tpvRouter from '@/routes/tpv.routes'
 
 const CDMX = 'America/Mexico_City'
@@ -68,6 +70,12 @@ describe('correo semanal de clientes nuevos (weekly-new-customers-report)', () =
     expect(iso(lte)).toBe('2026-11-16T05:59:59.999Z') // domingo 15, 23:59:59.999 CDMX
     expect([iso(r.weekStart), iso(r.weekEnd)]).toEqual([iso(gte), iso(lte)])
   })
+
+  it('consultado el domingo 8-mar (en Havana esa medianoche no existe): semana del 23-feb al 1-mar', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([])
+    const r = await weeklyNewCustomersReportJob.runNow({ previewOnly: true, at: new Date('2026-03-08T18:00:00Z') })
+    expect([iso(r.weekStart), iso(r.weekEnd)]).toEqual(['2026-02-23T06:00:00.000Z', '2026-03-02T05:59:59.999Z'])
+  })
 })
 
 describe('promotores (PlayTelecom): «hoy» del negocio', () => {
@@ -88,6 +96,18 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     expect(iso(prismaMock.timeEntry.findMany.mock.calls[0][0].where.clockInTime.gte)).toBe(medianoche)
     expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe(medianoche)
+  })
+
+  it('lista: el día del cambio de horario del proceso no mueve la medianoche del negocio (8-mar, Havana)', async () => {
+    fijarReloj('2026-03-08T12:00:00Z') // 06:00 CDMX
+    zonaDelNegocio(CDMX)
+    prismaMock.staffVenue.findMany.mockResolvedValue([])
+    prismaMock.timeEntry.findMany.mockResolvedValue([])
+    prismaMock.order.findMany.mockResolvedValue([])
+
+    await promotersService.getPromotersList('v1')
+
+    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe('2026-03-08T06:00:00.000Z')
   })
 
   it('detalle: ventas y checada de hoy, y el calendario de 30 días con días y retardos del negocio', async () => {
@@ -136,6 +156,23 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     // $7,000 en 7 días → $1,000 diarios × día 15 = $15,000 de la meta de $50,000 = 30 % (el 16 de UTC daba 32 %).
     expect(r!.stores[0].goalProgress).toBe(30)
+  })
+})
+
+describe('centro de mando (PlayTelecom): tendencia de ventas con días elegidos en el DASHBOARD', () => {
+  it('«AAAA-MM-DD» es el día del negocio, y el periodo anterior es el día de antes', async () => {
+    zonaDelNegocio(CDMX)
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.order.aggregate.mockResolvedValue({ _sum: { total: null }, _count: 0 })
+    prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: null } })
+
+    const r = await commandCenterService.getStockVsSales('v1', { startDate: '2026-11-15', endDate: '2026-11-15' })
+
+    // Antes: `new Date('2026-11-15')` es la medianoche UTC (14-nov 18:00 CDMX) y la gráfica mostraba el 14.
+    const anterior = prismaMock.order.aggregate.mock.calls[0][0].where.createdAt
+    expect([iso(anterior.gte), iso(anterior.lte)]).toEqual(['2026-11-14T06:00:00.000Z', '2026-11-15T05:59:59.999Z'])
+    expect(r.trend).toHaveLength(1)
+    expect(r.trend[0].date).toBe(new Date('2026-11-15T18:00:00Z').toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }))
   })
 })
 
