@@ -283,11 +283,23 @@ it.each([
     '/venues/:venueSlug/customer/checkin/:challengeId',
     [
       'kioskCheckInCors',
-      'writeLimit',
+      'checkInLimit',
       'resolveVenueBySlug',
       'authenticateCustomer',
       'activarReservasSiFalta',
       'kioskCheckInController.consumeChallenge',
+    ],
+  ],
+  [
+    'post',
+    '/venues/:venueSlug/customer/checkin-qr',
+    [
+      'kioskCheckInCors',
+      'checkInLimit',
+      'resolveVenueBySlug',
+      'authenticateCustomer',
+      'activarReservasSiFalta',
+      'kioskCheckInController.consumeQr',
     ],
   ],
   [

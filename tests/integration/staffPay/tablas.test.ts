@@ -99,7 +99,7 @@ describe('tablas — feature nueva', () => {
 })
 
 describe('tablas — regresión', () => {
-  it('rechaza ATTENDED en la fase 1 (spec §5.5)', async () => {
+  it('asistencia verificada (16-nov): ya acepta «sólo quien llegó» (ATTENDED)', async () => {
     const [t] = await listarTablas(venue, '2026-09-10')
     await expect(
       publicarVersion({
@@ -111,10 +111,10 @@ describe('tablas — regresión', () => {
         maxCount: 2,
         cells: celdas(2, () => 1),
         actorId: staff,
-        soloSimular: false,
+        soloSimular: true,
         ahora: AHORA,
       }),
-    ).rejects.toThrow('todavía no está disponible')
+    ).resolves.toBeDefined()
   })
   it('rechaza celdas fuera de 0..maxCount, repetidas, o de un nivel de otra organización', async () => {
     const [t] = await listarTablas(venue, '2026-09-10')

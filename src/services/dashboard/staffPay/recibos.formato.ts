@@ -46,6 +46,8 @@ export interface FilaRecibo {
   /** Final-fix G6: una venta que el esquema subió a su mínimo o bajó a su tope (`DescriptorVenta.limite`); null en lo demás. */
   limite: 'MINIMO' | 'TOPE' | null
   motivo: string | null
+  /** Asistencia verificada: en «sólo quien llegó», cómo llegaron (de la foto al cerrar o en vivo); null en lo demás. */
+  llegadas: Prisma.JsonValue | null
   /** Propinas de un día juntas (pantalla y PDF): `cobros` dice cuántas. */
   agrupada: boolean
   cobros: number
@@ -87,15 +89,53 @@ export function conceptoDe(r: FilaRecibo): string {
   }
   const clase = r.clase ?? 'Clase'
   // `regla` sólo la llenan los brazos de clases, con la forma de `ReglaDeClase` (D3a).
-  if (r.tipo === 'CLASE') return r.regla ? `${clase} · ${textoDeRegla(r.regla as ReglaDeClase)}` : clase
+  if (r.tipo === 'CLASE') {
+    const partes = [clase, r.regla ? textoDeRegla(r.regla as ReglaDeClase) : null, textoDeLlegadas(r.llegadas)]
+    return partes.filter(Boolean).join(' · ')
+  }
   // Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
   // La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
   const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
   return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
 }
 
+/**
+ * Asistencia verificada (16-nov-2026): «6 con celular, 1 con teléfono, 1 a mano por Ana P.». Sólo lo que hubo; null si la
+ * clase no trae desglose (modo «quien reservó» o una foto de antes). Pura.
+ */
+export function textoDeLlegadas(llegadas: Prisma.JsonValue | null | undefined): string | null {
+  if (!llegadas || typeof llegadas !== 'object' || Array.isArray(llegadas)) return null
+  const l = llegadas as Record<string, unknown>
+  const n = (k: string) => (typeof l[k] === 'number' ? (l[k] as number) : 0)
+  const nombres = (k: string) => (Array.isArray(l[k]) ? (l[k] as unknown[]).filter((x): x is string => typeof x === 'string') : [])
+  const aMano = nombres('aMano')
+  const lista = nombres('desdeLaLista')
+  const partes = [
+    n('qr') ? `${n('qr')} con celular` : null,
+    n('phone') ? `${n('phone')} con teléfono` : null,
+    n('staff') ? `${n('staff')} a mano${aMano.length ? ` por ${aMano.join(', ')}` : ''}` : null,
+    n('list') ? `${n('list')} desde la lista${lista.length ? ` (sesión de ${lista.join(', ')})` : ''}` : null,
+    n('pass') ? `${n('pass')} con pase` : null,
+    n('sinMetodo') ? `${n('sinMetodo')} sin método` : null,
+  ].filter(Boolean)
+  // Codex r2 #6: con «Corregir conteo», el pago usa ese número; las llegadas registradas se rotulan como tales.
+  const corregido = typeof l.corregidoA === 'number' ? (l.corregidoA as number) : null
+  if (corregido !== null) {
+    const registradas = partes.length ? `llegadas registradas: ${partes.join(', ')}` : 'sin llegadas registradas'
+    return `${registradas} · pago corregido a mano a ${corregido} ${corregido === 1 ? 'lugar' : 'lugares'}`
+  }
+  return partes.length ? partes.join(', ') : null
+}
+
 /** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
-export function filasDelRecibo(r: { renglones: RenglonRecibo[]; total: string; parcial: boolean }): RenglonRecibo[] {
+export function filasDelRecibo(r: {
+  renglones: RenglonRecibo[]
+  total: string
+  parcial: boolean
+  /** Asistencia verificada (Codex r5 #3): el Excel no tiene línea de resumen; el total de llegadas va en la fila del total. */
+  llegadasEnTotal?: string | null
+}): RenglonRecibo[] {
+  const total = r.parcial ? 'Total (vista parcial)' : 'Total'
   return [
     ...r.renglones,
     {
@@ -103,7 +143,7 @@ export function filasDelRecibo(r: { renglones: RenglonRecibo[]; total: string; p
       fecha: '',
       hora: null,
       sede: '',
-      concepto: r.parcial ? 'Total (vista parcial)' : 'Total',
+      concepto: r.llegadasEnTotal ? `${total} · Llegadas: ${r.llegadasEnTotal}` : total,
       lugares: null,
       monto: r.total,
     },

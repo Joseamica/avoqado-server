@@ -33,6 +33,7 @@ const c = (id: string, monto: number | null, extra: Partial<ClaseValorada> = {})
   bonoSuplencia: null,
   canceladaTarde: false,
   regla: null,
+  llegadas: { qr: 0, phone: 0, staff: 0, list: 0, pass: 0, sinMetodo: 0, aMano: [], desdeLaLista: [], corregidoA: null },
   ...extra,
 })
 const cab = { organizationId: 'o1', start: '2026-08-01', end: '2026-08-31', venueIds: ['v2', 'v1'] }

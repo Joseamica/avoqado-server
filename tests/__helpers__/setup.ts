@@ -419,6 +419,8 @@ const prismaMock: any = {
   reservationNoShowCorrection: createMockModel(),
   kioskCheckInChallenge: createMockModel(),
   kioskCheckInAttempt: createMockModel(),
+  kioskQrKey: createMockModel(),
+  kioskCheckInOp: createMockModel(),
   kioskOutreachOutbox: createMockModel(),
   classSession: createMockModel(),
   staffSchedule: createMockModel(),
