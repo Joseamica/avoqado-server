@@ -87,9 +87,10 @@ export function filtrarMenuDelCanal(snapshot: MenuSnapshot, productos: Set<strin
  * El menú y los precios que viajan al proveedor, sacados de UNA sola copia del catálogo (Codex plan r3 #1: traducir los ids a
  * códigos en otra lectura dejaba una ventana para publicar otro producto con el código reusado). PURA.
  *  · Con `productoIds`: los productos de la copia cuyo id está en la lista. Sin ella: la lista vieja por código, como hoy.
- *  · Precios: con `precios.porProducto`, `overrides` = el precio de cada producto publicado bajo el código que trae ESTA copia,
- *    más los precios guardados de los extras de ESTA copia (su `MOD-<id>` es estable); lo demás de la `overrides` guardada se ignora.
- *    Sin `porProducto`, los precios guardados viajan tal cual. `markupPercent` pasa igual.
+ *  · Precios: con `precios.porProducto` o `precios.porExtra` (por id), `overrides` se arma SÓLO con ids y ESTA copia: el precio de
+ *    cada producto publicado bajo el código que trae, y el de cada extra publicado bajo su `MOD-<id>` (estable). La `overrides`
+ *    guardada (la copia por código) se ignora entera (Codex impl r2: compartir ese mapa entre productos y extras ponía precios en
+ *    el artículo equivocado). Sin ninguno de los dos (canal viejo), los precios guardados viajan tal cual. `markupPercent` pasa igual.
  *  · La copia que devuelve no lleva `productId`: el payload y su huella no cambian para nadie.
  */
 export function aplicarSeleccion(snapshot: MenuSnapshot, config: unknown): { snapshot: MenuSnapshot; precios: PreciosDeCanal | undefined } {
@@ -106,24 +107,22 @@ export function aplicarSeleccion(snapshot: MenuSnapshot, config: unknown): { sna
 
   const guardados = comoObjeto(config)?.precios
   const porProducto = comoObjeto(comoObjeto(guardados)?.porProducto)
-  if (!porProducto) return { snapshot: sinId, precios: guardados as PreciosDeCanal | undefined }
+  const porExtra = comoObjeto(comoObjeto(guardados)?.porExtra)
+  if (!porProducto && !porExtra) return { snapshot: sinId, precios: guardados as PreciosDeCanal | undefined }
 
-  const { porProducto: _porProducto, overrides: guardadas, ...resto } = guardados as Record<string, unknown>
-  // 🔴 Codex impl r1 #2: el prefijo `MOD-` no prueba que sea un extra (un producto puede llamarse `MOD-raro`, y otro tomar ese
-  // código después). De la `overrides` guardada sólo viajan los extras de ESTA copia que no son el código de un producto.
-  const productos = snapshot.categories.flatMap(c => c.products)
-  const deProducto = new Set(productos.map(p => p.plu))
-  const extras = new Set(productos.flatMap(p => p.modifierGroups.flatMap(g => g.modifiers.map(m => m.plu))))
+  const { porProducto: _p, porExtra: _e, overrides: _copia, ...resto } = guardados as Record<string, unknown>
   // Los valores se copian tal cual: el mapeador de cada proveedor ya ignora un precio que no es número finito ≥ 0.
+  // Un producto cuyo código es literalmente el `MOD-<id>` de un extra comparte esa llave en el menú del proveedor (ya era así
+  // antes de D1, fuera de alcance): ahí gana el precio del extra.
+  const publicados = delCanal.categories.flatMap(c => c.products)
+  const extras = new Set(publicados.flatMap(p => p.modifierGroups.flatMap(g => g.modifiers.map(m => m.plu))))
   const overrides: Record<string, number> = {}
-  for (const [codigo, precio] of Object.entries(comoObjeto(guardadas) ?? {})) {
-    if (extras.has(codigo) && !deProducto.has(codigo)) overrides[codigo] = precio as number
-  }
-  for (const p of delCanal.categories.flatMap(c => c.products)) {
-    if (p.productId !== undefined && Object.prototype.hasOwnProperty.call(porProducto, p.productId)) {
+  for (const p of publicados) {
+    if (porProducto && p.productId !== undefined && Object.prototype.hasOwnProperty.call(porProducto, p.productId)) {
       overrides[p.plu] = porProducto[p.productId] as number
     }
   }
+  for (const [id, precio] of Object.entries(porExtra ?? {})) if (extras.has(`MOD-${id}`)) overrides[`MOD-${id}`] = precio as number
   return { snapshot: sinId, precios: { ...resto, overrides } as PreciosDeCanal }
 }
 

@@ -1,11 +1,13 @@
 /**
- * La selección del canal al ESCRIBIR (D1, 16-nov-2026): qué productos publica y a qué precio, guardado por PRODUCTO (id).
+ * La selección del canal al ESCRIBIR (D1, 16-nov-2026): qué productos publica y a qué precio, guardado por id.
  *
  * El código de un producto cambia por muchos caminos (Shopify, variantes, importaciones) y uno nuevo puede tomar un código
- * viejo; el id no cambia nunca. Por eso todo lo que escribe la selección guarda `productoIds` y `precios.porProducto`, y
- * rehace la copia por código (`productos`, `precios.overrides`) con los códigos vigentes: la API vieja la sigue leyendo y una
- * vuelta atrás de versión publica lo último guardado, no todo el catálogo. Los precios de extras (`MOD-<id>`, código estable) se
- * quedan en `overrides`, pero sólo si `<id>` es un extra del negocio: el prefijo no lo prueba (Codex impl r1 #2).
+ * viejo; el id no cambia nunca. Por eso todo lo que escribe la selección guarda `productoIds`, `precios.porProducto` (por id de
+ * producto) y `precios.porExtra` (por id de extra), y rehace la copia por código (`productos`, `precios.overrides`) con los
+ * códigos vigentes: la API vieja la sigue leyendo y una vuelta atrás de versión publica lo último guardado, no todo el catálogo.
+ *
+ * 🔴 Codex impl r2: los precios de extras ya NO viven en la copia por código. Compartir ese mapa con los productos ponía un precio
+ * en el artículo equivocado cada vez que un código pasaba de un producto a un extra (o al revés).
  *
  * 🔴 Corre sobre la config YA MEZCLADA (Codex plan r3 #2): así convertir la lista vieja arrastra también sus precios guardados.
  */
@@ -24,9 +26,31 @@ const comoObjeto = (v: unknown): Record<string, unknown> | null =>
 
 const esPrecio = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0
 
+/** El id del extra si `codigo` tiene la forma `MOD-<id>` (el código que el menú le da a un extra); si no, `null`. */
+const idDeExtra = (codigo: string): string | null => (codigo.startsWith('MOD-') && codigo.length > 4 ? codigo.slice(4) : null)
+
+/** El mapa enviado `{ id: precio }`, validado. */
+function mapaEnviado(v: unknown, llave: 'porProducto' | 'porExtra'): Record<string, unknown> {
+  const que = llave === 'porProducto' ? 'producto' : 'extra'
+  const mapa = comoObjeto(v)
+  if (!mapa) throw new ValidationError(`\`precios.${llave}\` debe ser un objeto { id de ${que}: precio }`)
+  for (const [id, precio] of Object.entries(mapa)) {
+    if (!esPrecio(precio)) throw new ValidationError(`El precio fijo del ${que} "${id}" debe ser un número mayor o igual a 0`)
+  }
+  return mapa
+}
+
 /**
  * `mezclado` con la lista y los precios guardados por id y su copia por código al día. Sin lista ni precios en juego, la
  * devuelve igual y sin consultar. Lo que llega en `entrante` y no es de este negocio truena con `ValidationError`.
+ *
+ * Precios:
+ *  · `porProducto` / `porExtra` enviados mandan; la `overrides` enviada junto a ellos no decide nada ni truena (es la copia que
+ *    devuelve la propia API; Codex impl r2 #3).
+ *  · `overrides` enviado SIN ellos (la API de antes de D1) reemplaza todos los precios: cada código de producto va a
+ *    `porProducto`, cada `MOD-<id>` de un extra del negocio a `porExtra`, y lo demás truena nombrándolo (`{}` borra todo).
+ *  · Un canal con lista o con precios por id al que le falta un mapa lo saca UNA vez de la copia por código (Codex plan r3 #2;
+ *    también el canal que el D1 anterior convirtió sin `porExtra`). Lo que no es de nadie se descarta.
  */
 export async function normalizarSeleccion(
   db: Prisma.TransactionClient,
@@ -36,10 +60,10 @@ export async function normalizarSeleccion(
 ): Promise<Record<string, unknown>> {
   const enviados = comoObjeto(entrante.precios)
   const precios = comoObjeto(mezclado.precios)
-  const overrides = comoObjeto(precios?.overrides) ?? {}
-  // `porProducto` enviado manda para productos; un `overrides` enviado sin él REEMPLAZA los precios (Codex plan r4 #1).
-  const mandaPorProducto = enviados?.porProducto !== undefined
-  const reemplaza = !mandaPorProducto && enviados?.overrides !== undefined
+  // La copia por código: la guardada, o la que llegó en este guardado.
+  const copia = comoObjeto(precios?.overrides) ?? {}
+  const mandaMapas = enviados?.porProducto !== undefined || enviados?.porExtra !== undefined
+  const reemplaza = !mandaMapas && enviados?.overrides !== undefined
 
   // La lista: `undefined` = no se tocó.
   let productoIds: string[] | null | undefined
@@ -57,30 +81,28 @@ export async function normalizarSeleccion(
   if (guardados) productoIds = mezclado.productoIds as string[]
   const conLista = Array.isArray(productoIds) || codigos.length > 0
 
-  // Precios por código guardados en un canal con lista por id: se pasan a `porProducto` (Codex plan r3 #2).
-  const convertirGuardados =
-    !mandaPorProducto && !reemplaza && precios?.porProducto === undefined && conLista && Object.keys(overrides).length > 0
+  // Los mapas que ya trae lo mezclado (enviados, o guardados que la mezcla conservó). Con `reemplaza` no cuenta ninguno.
+  const ppDado = reemplaza ? undefined : precios?.porProducto
+  const peDado = reemplaza ? undefined : precios?.porExtra
+  const conMapas = conLista || ppDado !== undefined || peDado !== undefined
+  const sacaProductos = reemplaza || (conMapas && ppDado === undefined && Object.keys(copia).length > 0)
+  const sacaExtras = reemplaza || (conMapas && peDado === undefined && Object.keys(copia).some(c => idDeExtra(c) !== null))
   const tocaLista = entrante.productoIds !== undefined || entrante.productos !== undefined
-  if (!tocaLista && !mandaPorProducto && !reemplaza && !convertirGuardados) return mezclado
+  if (!tocaLista && !mandaMapas && !sacaProductos && !sacaExtras) return mezclado
 
-  if (mandaPorProducto) {
-    const p = comoObjeto(enviados?.porProducto)
-    if (!p) throw new ValidationError('`precios.porProducto` debe ser un objeto { id de producto: precio }')
-    for (const [id, precio] of Object.entries(p)) {
-      if (!esPrecio(precio)) throw new ValidationError(`El precio fijo del producto "${id}" debe ser un número mayor o igual a 0`)
-    }
-  }
-  // Tope de lo enviado: la consulta de abajo busca cada llave (`IN` acotado).
-  for (const mapa of [enviados?.porProducto, enviados?.overrides]) {
+  const ppEnviado = enviados?.porProducto !== undefined ? mapaEnviado(enviados.porProducto, 'porProducto') : undefined
+  const peEnviado = enviados?.porExtra !== undefined ? mapaEnviado(enviados.porExtra, 'porExtra') : undefined
+  // Tope de lo enviado: las consultas de abajo buscan cada llave (`IN` acotado).
+  for (const mapa of [enviados?.porProducto, enviados?.porExtra, enviados?.overrides]) {
     if (Object.keys(comoObjeto(mapa) ?? {}).length > MAX_PRECIOS) {
       throw new ValidationError(`El canal admite hasta ${MAX_PRECIOS.toLocaleString('es-MX')} precios fijos`)
     }
   }
-  const porProductoBase = mandaPorProducto ? comoObjeto(enviados?.porProducto)! : reemplaza ? {} : (comoObjeto(precios?.porProducto) ?? {})
+  const sacaDeLaCopia = sacaProductos || sacaExtras
 
   // UNA consulta, del negocio y con tope: los ids en juego y los códigos en juego (archivados incluidos).
-  const ids = [...new Set([...(Array.isArray(productoIds) ? productoIds : []), ...Object.keys(porProductoBase)])]
-  const codigosEnJuego = [...new Set([...codigos, ...Object.keys(overrides)])]
+  const ids = [...new Set([...(Array.isArray(productoIds) ? productoIds : []), ...Object.keys(comoObjeto(ppDado) ?? {})])]
+  const codigosEnJuego = [...new Set([...codigos, ...(sacaDeLaCopia ? Object.keys(copia) : [])])]
   const filas: Array<{ id: string; sku: string }> =
     ids.length + codigosEnJuego.length === 0
       ? []
@@ -101,55 +123,79 @@ export async function normalizarSeleccion(
     if (ajenos.length) throw new ValidationError(`Estos productos no son de tu negocio: ${ajenos.join(', ')}`)
     productoIds = [...new Set(productoIds)]
   }
-  if (mandaPorProducto) {
-    const ajenos = Object.keys(porProductoBase).filter(id => !codigoDe.has(id))
+  if (ppEnviado) {
+    const ajenos = Object.keys(ppEnviado).filter(id => !codigoDe.has(id))
     if (ajenos.length) throw new ValidationError(`Estos precios fijos no son de productos de tu negocio: ${ajenos.join(', ')}`)
   }
 
-  // Precios por producto: los enviados, los convertidos de `overrides` o los guardados.
-  let porProducto: Record<string, unknown> | undefined
-  if (mandaPorProducto || (!reemplaza && precios?.porProducto !== undefined)) {
-    porProducto = porProductoBase
-  } else if (reemplaza || convertirGuardados) {
-    porProducto = {}
-    for (const [codigo, precio] of Object.entries(overrides)) {
-      const id = idDe.get(codigo) // un código de producto gana, aunque empiece con `MOD-`
-      if (id) porProducto[id] = precio
+  // Los extras en juego: los enviados y los `MOD-<id>` de la copia que no son el código de un producto (un código de producto
+  // gana, aunque empiece con `MOD-`). UNA consulta, del negocio, por id y con tope.
+  const deLaCopia =
+    reemplaza || sacaExtras
+      ? Object.keys(copia)
+          .filter(c => !idDe.has(c))
+          .flatMap(c => idDeExtra(c) ?? [])
+      : []
+  const candidatos = [...new Set([...Object.keys(peEnviado ?? {}), ...deLaCopia])]
+  const extras = new Set(
+    candidatos.length === 0
+      ? []
+      : (
+          await db.modifier.findMany({
+            where: { id: { in: candidatos }, group: { venueId } },
+            select: { id: true },
+            take: candidatos.length,
+          })
+        ).map(m => m.id),
+  )
+  if (peEnviado) {
+    const ajenos = Object.keys(peEnviado).filter(id => !extras.has(id))
+    if (ajenos.length) throw new ValidationError(`Estos precios fijos no son de extras de tu negocio: ${ajenos.join(', ')}`)
+  }
+
+  // Lo que sale de la copia por código. Los valores se copian tal cual: el mapeador ya ignora un precio que no sirve.
+  const deCopia: { porProducto: Record<string, unknown>; porExtra: Record<string, unknown> } = { porProducto: {}, porExtra: {} }
+  if (sacaDeLaCopia) {
+    const sinDueno: string[] = []
+    for (const [codigo, precio] of Object.entries(copia)) {
+      const id = idDe.get(codigo)
+      const extra = idDeExtra(codigo)
+      if (id) deCopia.porProducto[id] = precio
+      else if (extra !== null && extras.has(extra)) deCopia.porExtra[extra] = precio
+      else sinDueno.push(codigo)
+    }
+    // Enviado se nombra; guardado no es de nadie y se descarta.
+    if (reemplaza && sinDueno.length) {
+      throw new ValidationError(`Estos precios fijos no son de ningún producto ni extra de tu negocio: ${sinDueno.join(', ')}`)
     }
   }
+  const porProducto = ppDado !== undefined ? (comoObjeto(ppDado) ?? {}) : sacaProductos ? deCopia.porProducto : undefined
+  const porExtra = peDado !== undefined ? (comoObjeto(peDado) ?? {}) : sacaExtras ? deCopia.porExtra : undefined
 
   const resultado: Record<string, unknown> = { ...mezclado }
   if (productoIds !== undefined) {
     resultado.productoIds = productoIds
     resultado.productos = productoIds && productoIds.flatMap(id => (codigoDe.has(id) ? [codigoDe.get(id)!] : []))
   }
-  if (porProducto !== undefined) {
-    // 🔴 Codex impl r1 #2: un `MOD-<id>` que no es código de producto es precio de extra sólo si `<id>` es un extra de ESTE negocio
-    // (UNA consulta, por id y con tope). Lo demás no es de nadie: enviado se nombra; guardado se descarta.
-    const posibles = [
-      ...new Set(Object.keys(overrides).flatMap(c => (c.startsWith('MOD-') && !idDe.has(c) && c.length > 4 ? [c.slice(4)] : []))),
-    ]
-    const extras = new Set(
-      posibles.length === 0
-        ? []
-        : (
-            await db.modifier.findMany({
-              where: { id: { in: posibles }, group: { venueId } },
-              select: { id: true },
-              take: posibles.length,
-            })
-          ).map(m => `MOD-${m.id}`),
-    )
-    const sinDueno = Object.keys(comoObjeto(enviados?.overrides) ?? {}).filter(c => !idDe.has(c) && !extras.has(c))
-    if (sinDueno.length) {
-      throw new ValidationError(`Estos precios fijos no son de ningún producto ni extra de tu negocio: ${sinDueno.join(', ')}`)
+  if (porProducto !== undefined || porExtra !== undefined) {
+    // La copia por código, sólo desde los ids: el código vigente de cada producto y el `MOD-<id>` de cada extra (con un producto
+    // que se llame literalmente igual, gana el extra, como al publicar).
+    const copiaNueva: Record<string, unknown> = {}
+    for (const [id, precio] of Object.entries(porProducto ?? {})) if (codigoDe.has(id)) copiaNueva[codigoDe.get(id)!] = precio
+    for (const [id, precio] of Object.entries(porExtra ?? {})) copiaNueva[`MOD-${id}`] = precio
+    // `porExtra` se guarda si trae algo, si ya estaba o si la copia lleva un `MOD-…` (de un producto que se llama así): sin él,
+    // otro guardado sacaría de la copia ese precio de producto como si fuera del extra (Codex impl r2 #2).
+    const guardaExtra =
+      Object.keys(porExtra ?? {}).length > 0 || peDado !== undefined || Object.keys(copiaNueva).some(c => idDeExtra(c) !== null)
+    // `porProducto` va siempre con `porExtra` y en un canal con lista (aunque vacío): así lo guardado no se vuelve a convertir.
+    const guardaProducto = guardaExtra || Array.isArray(productoIds) || Object.keys(porProducto ?? {}).length > 0
+    const { porProducto: _pp, porExtra: _pe, ...resto }: Record<string, unknown> = precios ?? {}
+    resultado.precios = {
+      ...resto,
+      ...(guardaProducto && { porProducto: porProducto ?? {} }),
+      ...(guardaExtra && { porExtra: porExtra ?? {} }),
+      overrides: copiaNueva,
     }
-    const copia: Record<string, unknown> = Object.fromEntries(Object.entries(overrides).filter(([codigo]) => extras.has(codigo)))
-    for (const [id, precio] of Object.entries(porProducto)) if (codigoDe.has(id)) copia[codigoDe.get(id)!] = precio
-    const { porProducto: _viejo, ...resto }: Record<string, unknown> = precios ?? {}
-    // Un canal con lista por id siempre lleva `porProducto` (aunque vacío): así lo guardado no se vuelve a convertir.
-    const conPorProducto = Object.keys(porProducto).length > 0 || Array.isArray(productoIds)
-    resultado.precios = { ...resto, ...(conPorProducto && { porProducto }), overrides: copia }
   }
   return resultado
 }

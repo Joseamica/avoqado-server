@@ -809,6 +809,47 @@ describe('deliveryChannelLink.service', () => {
         expect(escrito().precios).toEqual({ porProducto: { pA: 90 }, overrides: { A: 90 } })
       })
 
+      it('🔴 Codex impl r2 #3: reenviar los precios que devolvió la API (copia vieja `A`) se acepta y rehace la copia', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+          { config: { productoIds: ['p1'], productos: ['A'], precios: { porProducto: { p1: 79 }, overrides: { A: 79 } } } },
+        ])
+        // p1 cambió de código: ahora es Z.
+        ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'p1', sku: 'Z' }])
+        await updateChannelLink('venue1', 'link1', {
+          config: { precios: { markupPercent: 10, porProducto: { p1: 79 }, overrides: { A: 79 } } },
+        })
+        expect(escrito().precios).toEqual({ markupPercent: 10, porProducto: { p1: 79 }, overrides: { Z: 79 } })
+      })
+
+      it('`precios` sin `porExtra` conserva los precios de extras guardados (el margen y el `porProducto` del DASHBOARD)', async () => {
+        const precios = { ...ACTUAL.precios, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } }
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { ...ACTUAL, precios } }])
+        await updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 25 } } })
+        await updateChannelLink('venue1', 'link1', { config: { precios: { porProducto: { p1: 65 } } } })
+        const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config.precios)
+        expect(escritos[0]).toEqual({
+          markupPercent: 25,
+          porProducto: { p1: 60 },
+          porExtra: { m1: 7 },
+          overrides: { LATTE: 60, 'MOD-m1': 7 },
+        })
+        expect(escritos[1]).toEqual({ porProducto: { p1: 65 }, porExtra: { m1: 7 }, overrides: { LATTE: 65, 'MOD-m1': 7 } })
+      })
+
+      it('🔴 un canal convertido por el D1 anterior (`MOD-m1: 7` en la copia, sin porExtra) lo pasa a porExtra al guardar', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+          { config: { ...ACTUAL, precios: { porProducto: { p1: 60 }, overrides: { LATTE: 60, 'MOD-m1': 7 } } } },
+        ])
+        ;(prisma.modifier.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'm1' }])
+        await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } })
+        expect(escrito().precios).toEqual({ porProducto: { p1: 60 }, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } })
+        expect(prisma.modifier.findMany).toHaveBeenCalledWith({
+          where: { id: { in: ['m1'] }, group: { venueId: 'venue1' } },
+          select: { id: true },
+          take: 1,
+        })
+      })
+
       it('marcarRevisados suma a productosRevisados (sin los de la lista); el resto de config queda', async () => {
         await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'p1'] })
         expect(escrito()).toEqual({ ...ACTUAL, productosRevisados: ['p9', 'p3'] })

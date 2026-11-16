@@ -123,7 +123,7 @@ describe('normalizarSeleccion — precios por producto', () => {
     const mezclado = { productos: ['A'], precios: { overrides: { A: 79, 'MOD-m1': 5 } } }
     const r = await normalizarSeleccion(db, 'v1', mezclado, { productos: ['A'] })
     expect(r.productoIds).toEqual(['pA'])
-    expect(r.precios).toEqual({ porProducto: { pA: 79 }, overrides: { A: 79, 'MOD-m1': 5 } })
+    expect(r.precios).toEqual({ porProducto: { pA: 79 }, porExtra: { m1: 5 }, overrides: { A: 79, 'MOD-m1': 5 } })
     expect(r.productos).toEqual(['A'])
 
     // Después pA cambia a Z: se publica Z a 79 y el extra a 5.
@@ -156,10 +156,10 @@ describe('normalizarSeleccion — precios por producto', () => {
     expect(aplicarSeleccion(menuCon(['pA', 'A']), vacio).precios).toEqual({ markupPercent: 20, overrides: {} })
   })
 
-  it('🔴 Codex r3 #3: un precio de extra (MOD-…) se acepta como hoy y se queda en overrides', async () => {
+  it('🔴 Codex r3 #3: un precio de extra (MOD-…) se acepta como hoy y se guarda por id del extra (porExtra)', async () => {
     const { db } = baseDe()
     const r = await normalizarSeleccion(db, 'v1', { precios: { overrides: { 'MOD-m1': 7 } } }, { precios: { overrides: { 'MOD-m1': 7 } } })
-    expect(r.precios).toEqual({ overrides: { 'MOD-m1': 7 } })
+    expect(r.precios).toEqual({ porProducto: {}, porExtra: { m1: 7 }, overrides: { 'MOD-m1': 7 } })
   })
 
   it('🔴 Codex r3 #3: un precio ENVIADO para un código que no es producto ni extra ⇒ ValidationError que lo nombra', async () => {
@@ -179,7 +179,7 @@ describe('normalizarSeleccion — precios por producto', () => {
     ).rejects.toThrow(ValidationError)
   })
 
-  it('`porProducto` enviado manda para productos; las MOD-… salen del overrides guardado si no viene otro', async () => {
+  it('`porProducto` enviado manda para productos; el `MOD-…` de un extra real de la copia guardada pasa a porExtra', async () => {
     const { db } = baseDe()
     const r = await normalizarSeleccion(
       db,
@@ -187,7 +187,7 @@ describe('normalizarSeleccion — precios por producto', () => {
       { productoIds: ['p1'], productos: ['LATTE'], precios: { porProducto: { p1: 65 }, overrides: { LATTE: 60, 'MOD-m1': 5 } } },
       { precios: { porProducto: { p1: 65 } } },
     )
-    expect(r.precios).toEqual({ porProducto: { p1: 65 }, overrides: { LATTE: 65, 'MOD-m1': 5 } })
+    expect(r.precios).toEqual({ porProducto: { p1: 65 }, porExtra: { m1: 5 }, overrides: { LATTE: 65, 'MOD-m1': 5 } })
   })
 
   it('un precio GUARDADO de un código que ya no es de nadie se descarta al convertir (no truena)', async () => {
@@ -204,7 +204,8 @@ describe('normalizarSeleccion — precios por producto', () => {
       { productos: ['MOD-raro'], precios: { overrides: { 'MOD-raro': 9 } } },
       { productos: ['MOD-raro'] },
     )
-    expect(r.precios).toEqual({ porProducto: { pM: 9 }, overrides: { 'MOD-raro': 9 } })
+    // `porExtra: {}`: la copia lleva un `MOD-…` de producto; así otro guardado no lo vuelve a leer como extra.
+    expect(r.precios).toEqual({ porProducto: { pM: 9 }, porExtra: {}, overrides: { 'MOD-raro': 9 } })
   })
 })
 
@@ -222,7 +223,7 @@ describe('normalizarSeleccion — un `MOD-…` es precio de extra sólo si el ex
       { productos: ['MOD-raro', 'B'] },
     )
     expect(r.productoIds).toEqual(['p1', 'p2'])
-    expect(r.precios).toEqual({ porProducto: { p1: 79 }, overrides: { 'MOD-raro': 79 } })
+    expect(r.precios).toEqual({ porProducto: { p1: 79 }, porExtra: {}, overrides: { 'MOD-raro': 79 } })
 
     // p1 pasa a Z y p2 toma `MOD-raro` (desde la ficha o Shopify): la copia por código guardada todavía dice `MOD-raro: 79`.
     const { snapshot, precios } = aplicarSeleccion(menuCon(['p1', 'Z'], ['p2', 'MOD-raro']), r)
@@ -254,7 +255,7 @@ describe('normalizarSeleccion — un `MOD-…` es precio de extra sólo si el ex
       { productos: ['A'], precios: { overrides: { A: 79, 'MOD-m1': 5, 'MOD-raro': 9 } } },
       { productos: ['A'] },
     )
-    expect(r.precios).toEqual({ porProducto: { pA: 79 }, overrides: { A: 79, 'MOD-m1': 5 } })
+    expect(r.precios).toEqual({ porProducto: { pA: 79 }, porExtra: { m1: 5 }, overrides: { A: 79, 'MOD-m1': 5 } })
     // UNA consulta de extras: del negocio, por id y con tope.
     expect(findModifiers).toHaveBeenCalledTimes(1)
     expect(findModifiers.mock.calls[0][0]).toEqual({
@@ -264,7 +265,7 @@ describe('normalizarSeleccion — un `MOD-…` es precio de extra sólo si el ex
     })
   })
 
-  it('un `MOD-…` ENVIADO cuyo extra no es del negocio ⇒ ValidationError que lo nombra (con o sin `porProducto`)', async () => {
+  it('un `MOD-…` ENVIADO sin porProducto/porExtra cuyo extra no es del negocio ⇒ ValidationError que lo nombra', async () => {
     const { db } = baseDe()
     const solo = normalizarSeleccion(
       db,
@@ -274,16 +275,144 @@ describe('normalizarSeleccion — un `MOD-…` es precio de extra sólo si el ex
     )
     await expect(solo).rejects.toThrow(ValidationError)
     await expect(solo).rejects.toThrow(/MOD-ajeno/)
+  })
 
-    const enviados = { porProducto: { p1: 60 }, overrides: { 'MOD-m1': 5, 'MOD-ajeno': 3 } }
-    const conPorProducto = normalizarSeleccion(db, 'v1', { productoIds: ['p1'], precios: enviados }, { precios: enviados })
-    await expect(conPorProducto).rejects.toThrow(/MOD-ajeno/)
+  it('con `porProducto` enviado, la `overrides` enviada no truena (es la copia de la API) y `MOD-ajeno` no queda en ningún lado', async () => {
+    const { db } = baseDe()
+    const enviados = { porProducto: { p1: 60 }, overrides: { 'MOD-m1': 5, 'MOD-ajeno': 3, NADIE: 1 } }
+    const r = await normalizarSeleccion(db, 'v1', { productoIds: ['p1'], precios: enviados }, { precios: enviados })
+    expect(r.precios).toEqual({ porProducto: { p1: 60 }, porExtra: { m1: 5 }, overrides: { LATTE: 60, 'MOD-m1': 5 } })
   })
 
   it('sin llaves `MOD-` que no sean de producto, no consulta los extras', async () => {
     const { db, findModifiers } = baseDe()
     await normalizarSeleccion(db, 'v1', { productos: ['A'], precios: { overrides: { A: 79 } } }, { productos: ['A'] })
     expect(findModifiers).not.toHaveBeenCalled()
+  })
+})
+
+describe('normalizarSeleccion — precios de extras por id (`porExtra`, Codex impl r2)', () => {
+  it('🔴 Codex impl r2 #2: el producto `MOD-m1` a $79 se convierte, pasa a Z y m1 cuelga de otro ⇒ Z a 79 y el extra a su base', async () => {
+    const r = await normalizarSeleccion(
+      baseDe([
+        { id: 'pM', sku: 'MOD-m1' },
+        { id: 'p2', sku: 'CAP' },
+      ]).db,
+      'v1',
+      { productos: ['MOD-m1', 'CAP'], precios: { overrides: { 'MOD-m1': 79 } } },
+      { productos: ['MOD-m1', 'CAP'] },
+    )
+    // `MOD-m1` es el código de un producto: su precio es del producto, no del extra m1.
+    expect(r.precios).toEqual({ porProducto: { pM: 79 }, porExtra: {}, overrides: { 'MOD-m1': 79 } })
+
+    // pM pasa a Z y el extra m1 (base $5) se asocia a CAP.
+    const menu = menuCon(['pM', 'Z'], ['p2', 'CAP', ['MOD-m1']])
+    const publicar = (config: Record<string, unknown>) => {
+      const { snapshot, precios } = aplicarSeleccion(menu, config)
+      return construirMenuRappi(snapshot, 'store1', { precios }).payload.items.map(i => [
+        i.sku,
+        i.price,
+        (i.children ?? []).map(h => [h.sku, h.price]),
+      ])
+    }
+    const esperado = [
+      ['Z', 79, []],
+      ['CAP', 50, [['MOD-m1', 5]]],
+    ]
+    expect(publicar(r)).toEqual(esperado)
+
+    // Los guardados siguientes no leen la copia vieja `MOD-m1: 79` como precio del extra.
+    const ahora = baseDe([
+      { id: 'pM', sku: 'Z' },
+      { id: 'p2', sku: 'CAP' },
+    ]).db
+    const horario = await normalizarSeleccion(ahora, 'v1', { ...r, deliveryHours: null }, { deliveryHours: null })
+    expect(publicar(horario)).toEqual(esperado)
+    const panel = await normalizarSeleccion(
+      ahora,
+      'v1',
+      { ...r, precios: { ...(r.precios as object), porProducto: { pM: 79 } } },
+      { precios: { porProducto: { pM: 79 } } },
+    )
+    expect(panel.precios).toEqual({ porProducto: { pM: 79 }, porExtra: {}, overrides: { Z: 79 } })
+    expect(publicar(panel)).toEqual(esperado)
+  })
+
+  it('🔴 un producto que TOMA después el código `MOD-m1` deja `porExtra: {}` guardado: al renombrarse, su precio no pasa al extra', async () => {
+    // Canal ya convertido (pM era `A`); pM pasa a llamarse `MOD-m1` y el DASHBOARD guarda su precio.
+    const guardado = { productoIds: ['pM'], productos: ['A'], precios: { porProducto: { pM: 79 }, overrides: { A: 79 } } }
+    const r = await normalizarSeleccion(baseDe([{ id: 'pM', sku: 'MOD-m1' }]).db, 'v1', guardado, { precios: { porProducto: { pM: 79 } } })
+    expect(r.precios).toEqual({ porProducto: { pM: 79 }, porExtra: {}, overrides: { 'MOD-m1': 79 } })
+
+    // pM pasa a Z; el siguiente guardado no lee la copia `MOD-m1: 79` como precio del extra m1.
+    const despues = await normalizarSeleccion(
+      baseDe([{ id: 'pM', sku: 'Z' }]).db,
+      'v1',
+      { ...r, deliveryHours: null },
+      { deliveryHours: null },
+    )
+    expect((despues.precios as { porExtra?: unknown }).porExtra).toEqual({})
+  })
+
+  it('🔴 API vieja: `overrides` sin porProducto/porExtra reemplaza todos los precios, separados en producto y extra', async () => {
+    const { db } = baseDe()
+    const enviado = { precios: { overrides: { LATTE: 60, 'MOD-m1': 7 } } }
+    const r = await normalizarSeleccion(db, 'v1', enviado, enviado)
+    expect(r.precios).toEqual({ porProducto: { p1: 60 }, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } })
+
+    await expect(
+      normalizarSeleccion(db, 'v1', { precios: { overrides: { NADIE: 1 } } }, { precios: { overrides: { NADIE: 1 } } }),
+    ).rejects.toThrow(/NADIE/)
+
+    // `{}` borra los dos (lo mezclado conserva los mapas guardados: el `overrides` enviado manda igual).
+    const guardado = {
+      productoIds: ['p1'],
+      productos: ['LATTE'],
+      precios: { porProducto: { p1: 60 }, porExtra: { m1: 7 }, overrides: {} },
+    }
+    const vacio = await normalizarSeleccion(db, 'v1', guardado, { precios: { overrides: {} } })
+    expect(vacio.precios).toEqual({ porProducto: {}, overrides: {} })
+    expect(aplicarSeleccion(menuCon(['p1', 'LATTE', ['MOD-m1']]), vacio).precios).toEqual({ overrides: {} })
+  })
+
+  it('🔴 un canal convertido por el D1 anterior (porProducto + `MOD-m1: 7` en la copia, sin porExtra) lo pasa a porExtra en cualquier guardado', async () => {
+    const guardado = {
+      productoIds: ['p1'],
+      productos: ['LATTE'],
+      precios: { porProducto: { p1: 60 }, overrides: { LATTE: 60, 'MOD-m1': 7 } },
+    }
+    const esperado = { porProducto: { p1: 60 }, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } }
+
+    const horario = await normalizarSeleccion(baseDe().db, 'v1', { ...guardado, deliveryHours: null }, { deliveryHours: null })
+    expect(horario.precios).toEqual(esperado)
+    const margen = await normalizarSeleccion(
+      baseDe().db,
+      'v1',
+      { ...guardado, precios: { ...guardado.precios, markupPercent: 10 } },
+      { precios: { markupPercent: 10 } },
+    )
+    expect(margen.precios).toEqual({ ...esperado, markupPercent: 10 })
+
+    // Y el extra se sigue publicando a 7.
+    expect(aplicarSeleccion(menuCon(['p1', 'LATTE', ['MOD-m1']]), horario).precios).toEqual({ overrides: { LATTE: 60, 'MOD-m1': 7 } })
+  })
+
+  it('`porExtra` enviado manda sobre la copia; sólo extras del negocio y precios ≥ 0', async () => {
+    const { db, findModifiers } = baseDe()
+    const enviados = { porExtra: { m1: 8 }, overrides: { 'MOD-m1': 99 } }
+    const r = await normalizarSeleccion(db, 'v1', { productoIds: ['p1'], precios: enviados }, { precios: enviados })
+    expect(r.precios).toEqual({ porProducto: {}, porExtra: { m1: 8 }, overrides: { 'MOD-m1': 8 } })
+    expect(findModifiers.mock.calls[0][0]).toEqual({
+      where: { id: { in: ['m1'] }, group: { venueId: 'v1' } },
+      select: { id: true },
+      take: 1,
+    })
+
+    const con = (porExtra: unknown) => normalizarSeleccion(db, 'v1', { precios: { porExtra } }, { precios: { porExtra } })
+    await expect(con({ mAjeno: 3 })).rejects.toThrow(/mAjeno/)
+    await expect(con({ m1: -1 })).rejects.toThrow(ValidationError)
+    await expect(con({ m1: Infinity })).rejects.toThrow(ValidationError)
+    await expect(con(['m1'])).rejects.toThrow(ValidationError)
   })
 })
 

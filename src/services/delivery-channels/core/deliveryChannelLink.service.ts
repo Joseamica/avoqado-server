@@ -328,11 +328,14 @@ function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null):
   )
   // 🔴 Codex r1 #3: el DASHBOARD guarda el margen como `precios: {}` o `{ markupPercent }` y no conoce los precios por SKU.
   // Un `precios` SIN la llave `overrides` conserva los que había; quitarlos es mandar `overrides` explícito (`{}` = ninguno).
-  // D1: igual `porProducto` (los precios por id). Un `overrides` enviado sin `porProducto` los reemplaza en `normalizarSeleccion`.
-  const preciosBase = base.precios as { overrides?: unknown; porProducto?: unknown } | undefined
+  // D1: igual `porProducto` y `porExtra` (los precios por id de producto y de extra). Un `overrides` enviado sin ninguno de los
+  // dos los reemplaza en `normalizarSeleccion`.
+  const preciosBase = base.precios as { overrides?: unknown; porProducto?: unknown; porExtra?: unknown } | undefined
   const preciosPedido = pedido.precios
   if (preciosPedido && typeof preciosPedido === 'object' && !Array.isArray(preciosPedido)) {
-    const conservados = (['overrides', 'porProducto'] as const).filter(l => !(l in preciosPedido) && preciosBase?.[l] !== undefined)
+    const conservados = (['overrides', 'porProducto', 'porExtra'] as const).filter(
+      l => !(l in preciosPedido) && preciosBase?.[l] !== undefined,
+    )
     if (conservados.length) pedido.precios = { ...preciosPedido, ...Object.fromEntries(conservados.map(l => [l, preciosBase![l]])) }
   }
   return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue

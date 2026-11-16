@@ -94,7 +94,7 @@ describe('ponerProductoEnCanales — marcar (true)', () => {
     expect(escrito()).toEqual({
       productoIds: ['p1', 'p2'],
       productos: ['LATTE', 'CAP'],
-      precios: { porProducto: { p1: 60 }, overrides: { LATTE: 60, 'MOD-m1': 5 } },
+      precios: { porProducto: { p1: 60 }, porExtra: { m1: 5 }, overrides: { LATTE: 60, 'MOD-m1': 5 } },
       productosRevisados: [],
     })
     // El código que no es de nadie se queda fuera sin error, y la bitácora lo nombra.

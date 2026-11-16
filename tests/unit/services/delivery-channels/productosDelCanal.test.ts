@@ -19,6 +19,7 @@ import {
 } from '@/services/delivery-channels/core/productosDelCanal'
 import { ValidationError } from '@/errors/AppError'
 import type { MenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
+import { construirMenuRappi } from '@/services/delivery-channels/providers/rappi/rappi.menuMapper'
 
 const producto = (plu: string) => ({ plu, name: plu, description: null, price: 50, imageUrl: null, modifierGroups: [] })
 
@@ -102,6 +103,17 @@ const copia = (p1: string, p2: string, p3: string): MenuSnapshot => ({
     { name: 'BARRA DE CAFE', products: [conId('p1', p1), conId('p2', p2)] },
     { name: 'TES', products: [conId('p3', p3)] },
   ],
+})
+
+/** Un grupo de extras con un solo extra (su código en el menú es `MOD-<id>`). */
+const leche = (plu: string) => ({
+  id: 'g1',
+  name: 'Leche',
+  required: false,
+  allowMultiple: false,
+  minSelections: 0,
+  maxSelections: 1,
+  modifiers: [{ plu, name: 'Avena', price: 10 }],
 })
 
 const plus = (m: MenuSnapshot) => m.categories.flatMap(c => c.products.map(p => p.plu))
@@ -192,24 +204,45 @@ describe('aplicarSeleccion — filtra y arma los precios sobre la MISMA copia de
     expect(() => aplicarSeleccion(copia('LATTE', 'CAP', 'TE'), { productos: [] })).toThrow(/productos/)
   })
 
-  it('🔴 precios por producto: el código sale de ESTA copia; la llave vieja de producto se ignora y la del extra se conserva', () => {
+  it('🔴 precios por id: el código del producto y el del extra salen de ESTA copia; la `overrides` guardada se ignora entera', () => {
     const menu = copia('Z', 'LATTE', 'TE')
-    menu.categories[1].products[0].modifierGroups = [
-      {
-        id: 'g1',
-        name: 'Leche',
-        required: false,
-        allowMultiple: false,
-        minSelections: 0,
-        maxSelections: 1,
-        modifiers: [{ plu: 'MOD-m1', name: 'Avena', price: 10 }],
-      },
-    ]
+    menu.categories[1].products[0].modifierGroups = [leche('MOD-m1')]
     const { precios } = aplicarSeleccion(menu, {
       productoIds: ['p1', 'p3'],
-      precios: { markupPercent: 30, porProducto: { p1: 79 }, overrides: { LATTE: 50, 'MOD-m1': 5 } },
+      // m9 no es extra de ningún producto publicado: no viaja.
+      precios: { markupPercent: 30, porProducto: { p1: 79 }, porExtra: { m1: 5, m9: 4 }, overrides: { LATTE: 50, 'MOD-m1': 99 } },
     })
     expect(precios).toEqual({ markupPercent: 30, overrides: { Z: 79, 'MOD-m1': 5 } })
+  })
+
+  it('🔴 con porProducto y sin porExtra, un `MOD-…` de la copia guardada ya no viaja (aunque sea extra de esta copia)', () => {
+    const menu = copia('Z', 'LATTE', 'TE')
+    menu.categories[1].products[0].modifierGroups = [leche('MOD-m1')]
+    const { precios } = aplicarSeleccion(menu, {
+      productoIds: ['p1', 'p3'],
+      precios: { porProducto: { p1: 79 }, overrides: { 'MOD-m1': 5 } },
+    })
+    expect(precios).toEqual({ overrides: { Z: 79 } })
+  })
+
+  it('con sólo porExtra también manda el id: los precios de producto de la copia guardada no viajan', () => {
+    const menu = copia('Z', 'LATTE', 'TE')
+    menu.categories[1].products[0].modifierGroups = [leche('MOD-m1')]
+    const { precios } = aplicarSeleccion(menu, { productoIds: ['p1', 'p3'], precios: { porExtra: { m1: 6 }, overrides: { Z: 1 } } })
+    expect(precios).toEqual({ overrides: { 'MOD-m1': 6 } })
+  })
+
+  it('🔴 Codex impl r2 #1: un producto FUERA de la selección con el código `MOD-m1` no le quita al extra su precio', () => {
+    // p2 (fuera de la lista) tomó el código `MOD-m1`; el extra m1 cuelga de p3 (publicado): base $10, en el canal $8.
+    const menu = copia('Z', 'MOD-m1', 'TE')
+    menu.categories[1].products[0].modifierGroups = [leche('MOD-m1')]
+    const { snapshot, precios } = aplicarSeleccion(menu, {
+      productoIds: ['p1', 'p3'],
+      precios: { porProducto: { p1: 79 }, porExtra: { m1: 8 } },
+    })
+    expect(precios).toEqual({ overrides: { Z: 79, 'MOD-m1': 8 } })
+    const { payload } = construirMenuRappi(snapshot, 'store1', { precios })
+    expect(payload.items.find(i => i.sku === 'TE')?.children?.map(h => [h.sku, h.price])).toEqual([['MOD-m1', 8]])
   })
 
   it('🔴 Codex impl r1 #2: con porProducto, un `MOD-…` guardado sólo viaja si es un extra de ESTA copia y no el código de un producto', () => {
