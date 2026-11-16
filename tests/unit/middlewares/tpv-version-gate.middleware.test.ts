@@ -127,4 +127,40 @@ describe('tpvVersionGate', () => {
     expect(res.status).toHaveBeenCalledWith(426)
     for (const [arg] of findFirst.mock.calls) expect(arg.where.targetType).toBe('ALL')
   })
+  // Codex, apps viejas (11-nov, r4 hallazgo 2; encargo 93372f): la Nexgo se actualiza por el TMS de AngelPay, nunca por
+  // nuestro APK. check-update, get-version y el latido ya la saltan; la puerta no, y una obligatoria de la PAX con código
+  // mayor que el de la Nexgo (2.13.2 = 122) le rechazaba con 426 cada operación: su app ignora el aviso, pero la petición
+  // ya se perdió. La Nexgo se reconoce por `X-TPV-Processor: NEXGO` (desde el 1-oct, en todas las vivas) o por su nombre
+  // de versión (`-nexgo`, `-nexgo-prod`).
+  it('una Nexgo con código menor a la obligatoria de la PAX pasa (se actualiza por el TMS)', async () => {
+    const { res, next } = await correr({
+      'x-app-version-code': '50',
+      'x-app-version-name': '2.13.2-nexgo-prod',
+      'x-tpv-processor': 'NEXGO',
+    })
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('una Nexgo sin el encabezado del procesador también pasa por su nombre de versión', async () => {
+    const { res, next } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '2.13.0-nexgo-prod' })
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('una Nexgo de pruebas (sufijo «-nexgo») también pasa', async () => {
+    const { res, next } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '2.13.2-nexgo', 'x-tpv-processor': 'NEXGO' })
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('una PAX vieja que dice «PAX» sigue recibiendo 426', async () => {
+    const { res, next } = await correr({ 'x-app-version-code': '50', 'x-app-version-name': '2.13.2', 'x-tpv-processor': 'PAX' })
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(426)
+  })
 })
