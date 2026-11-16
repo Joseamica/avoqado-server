@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
@@ -23,6 +23,7 @@ import {
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
+import { productoLlevaInventario } from '../../services/dashboard/productoLlevaInventario'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
@@ -108,13 +109,40 @@ import {
 const router = Router({ mergeParams: true })
 
 // ===========================================
+// ALTA DE PRODUCTO POR EL ASISTENTE — antes del candado general, a propósito (D8, 16-nov-2026)
+// ===========================================
+// «Nuevo producto» y «Crear servicio» del DASHBOARD guardan SIEMPRE por aquí, también sin inventario. Con el candado
+// general delante, un negocio nuevo en Gratis o Pro (no exento ni demo) no podía dar de alta ni un producto: 403.
+// Dar de alta un producto SIN inventario es de todos los planes; el alta CON inventario sigue pidiendo
+// INVENTORY_TRACKING, con la misma regla con que el servicio decide si lo configura (`productoLlevaInventario`).
+// El cuerpo se valida ANTES de decidir, para que el candado lea lo mismo que va a leer el servicio.
+const candadoSiLlevaInventario: RequestHandler = (req, res, next) =>
+  productoLlevaInventario(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/wizard/complete:
+ *   post:
+ *     tags: [Inventory - Product Wizard]
+ *     summary: "All-in-one: Create product with inventory"
+ */
+router.post(
+  '/wizard/complete',
+  checkPermission('inventory:update'),
+  validateRequest(CreateProductWithInventorySchema),
+  candadoSiLlevaInventario,
+  productWizardController.createProductWithInventory,
+)
+
+// ===========================================
 // PLAN GATE — whole inventory namespace
 // ===========================================
 // INVENTORY_TRACKING is a PREMIUM-only differentiator (PREMIUM_ONLY_CODES ↔ plan-catalog.ts).
 // Grandfathered/demo venues, explicit VenueFeature grants and superadmins all pass inside
 // checkFeatureAccess. The auto-reorder routes below ADDITIONALLY gate on AUTO_REORDER (their
 // own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
-// the MCP's planGateMessage — this closes the server side of that same paywall.
+// the MCP's planGateMessage — this closes the server side of that same paywall. The only route
+// registered above it is the product wizard's «complete» (its own conditional gate).
 router.use(checkFeatureAccess('INVENTORY_TRACKING'))
 
 // ===========================================
@@ -1375,20 +1403,6 @@ router.get(
   checkPermission('inventory:read'),
   validateRequest(GetWizardProgressSchema),
   productWizardController.getWizardProgress,
-)
-
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/products/wizard/complete:
- *   post:
- *     tags: [Inventory - Product Wizard]
- *     summary: "All-in-one: Create product with inventory"
- */
-router.post(
-  '/wizard/complete',
-  checkPermission('inventory:update'),
-  validateRequest(CreateProductWithInventorySchema),
-  productWizardController.createProductWithInventory,
 )
 
 // ===========================================
