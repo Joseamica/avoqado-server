@@ -198,6 +198,12 @@ const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisi
 // decía «Sin conexión». Las llegadas exigen sesión de clienta y las firmas malas ya se cuentan aparte (10 y se bloquea),
 // así que aquí sólo va un techo por IP, el mismo de `/contact`.
 const checkInLimit = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// Entrar con código (founder, 16-nov, «A: subir a 30»): alumnas SIN sesión llegan juntas por el WiFi del estudio, o sea por
+// UNA IP. Pedir el código iba en `writeLimit` (5 por minuto por IP) y verificarlo + crear la ficha en `authLimit` (10, compartido
+// con Google): la sexta del minuto se frenaba. Topes propios por IP: 30 códigos por minuto, y 60 para verificar y crear la ficha
+// (dos pasos por persona). Lo demás no cambia: por teléfono, un código cada 30 s y su tope por hora; por reto, sus intentos.
+const otpRequestLimit = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+const otpAccessLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 // El actualizador del POS: cada aparato pregunta al abrir y al volver la red; 120 por minuto por visitante.
 const posAppVersionLimit = rateLimit({
@@ -519,20 +525,20 @@ router.post(
 
 router.post(
   '/venues/:venueSlug/auth/otp/request',
-  writeLimit,
+  otpRequestLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpRequestSchema })),
   otpAuthController.requestOtp,
 )
 router.post(
   '/venues/:venueSlug/auth/otp/verify',
-  authLimit,
+  otpAccessLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
   otpAuthController.verifyOtp,
 )
 // S7 (P2-1): «no, soy nueva» con la prueba del contacto, y Google de respaldo. El slug manda (el controller resuelve el venue).
 router.post(
   '/venues/:venueSlug/auth/session/nueva-ficha',
-  authLimit,
+  otpAccessLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: sessionNuevaFichaSchema })),
   otpAuthController.crearFichaNueva,
 )
