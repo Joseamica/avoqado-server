@@ -67,8 +67,9 @@ export async function issueKioskQrKey(args: {
   deviceKey: string
   staffId: string | null
   now: Date
-}): Promise<{ keyId: string; secret: string; rotateSeconds: number }> {
+}): Promise<{ keyId: string; secret: string; rotateSeconds: number; checkInUrl: string }> {
   const deviceKey = args.deviceKey.slice(0, 128)
+  const venue = await prisma.venue.findUniqueOrThrow({ where: { id: args.venueId }, select: { slug: true } })
   const created = await prisma.$transaction(async tx => {
     await tx.kioskQrKey.updateMany({
       where: { venueId: args.venueId, deviceKey, revokedAt: null },
@@ -94,7 +95,15 @@ export async function issueKioskQrKey(args: {
     return key
   })
   // El secreto sale UNA vez, a quien lo pidió (hex: el aparato lo guarda en su almacén cifrado).
-  return { keyId: created.id, secret: kioskQrSecret(created.id).toString('hex'), rotateSeconds: KIOSK_QR_ROTATE_SECONDS }
+  // La página del celular (WIDGET). El aparato le pega el fragmento `#v=2&k=…&t=…&s=…`: nada de eso viaja al servidor
+  // de la página ni queda en su historial. La misma base que el QR de los paquetes (`BOOKING_SITE_URL`).
+  const base = (process.env.BOOKING_SITE_URL ?? 'https://book.avoqado.io').replace(/\/+$/, '')
+  return {
+    keyId: created.id,
+    secret: kioskQrSecret(created.id).toString('hex'),
+    rotateSeconds: KIOSK_QR_ROTATE_SECONDS,
+    checkInUrl: `${base}/${encodeURIComponent(venue.slug)}/checkin/q`,
+  }
 }
 
 export interface KioskQrCheckInResult {
