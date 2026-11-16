@@ -481,6 +481,44 @@ describe('normalizarSeleccion — precios de extras por id (`porExtra`, Codex im
   })
 })
 
+describe('normalizarSeleccion — un canal viejo por código pasa lista y precios a ids JUNTOS', () => {
+  const guardado = { productos: ['LATTE', 'A', 'VIEJO'], precios: { overrides: { LATTE: 60 } } }
+
+  it('🔴 la API vieja pasa los precios a ids ⇒ la lista guardada también (el código de nadie se cae sin error)', async () => {
+    const enviado = { precios: { overrides: { LATTE: 65 } } }
+    const r = await normalizarSeleccion(baseDe().db, 'v1', { ...guardado, ...enviado }, enviado, guardado)
+    expect(r.productoIds).toEqual(['p1', 'pA'])
+    expect(r.productos).toEqual(['LATTE', 'A'])
+    expect(r.precios).toEqual({ porProducto: { p1: 65 }, overrides: { LATTE: 65 } })
+
+    // Después p1 pasa a Z: sigue publicándose, a su precio.
+    const { snapshot, precios } = aplicarSeleccion(menuCon(['p1', 'Z'], ['pA', 'A']), r)
+    expect(snapshot.categories[0].products.map(p => p.plu)).toEqual(['Z', 'A'])
+    expect(precios?.overrides).toEqual({ Z: 65 })
+  })
+
+  it('`porProducto` sin lista (un cliente nuevo de la API) también pasa la lista a ids', async () => {
+    const r = await normalizarSeleccion(
+      baseDe().db,
+      'v1',
+      { ...guardado, precios: { porProducto: { p1: 70 }, overrides: { LATTE: 60 } } },
+      { precios: { porProducto: { p1: 70 } } },
+      guardado,
+    )
+    expect(r.productoIds).toEqual(['p1', 'pA'])
+    expect(r.precios).toEqual({ porProducto: { p1: 70 }, overrides: { LATTE: 70 } })
+  })
+
+  it('sin precios por id que guardar (sólo el horario, o `overrides: {}`) el canal sigue por código, lista y precios', async () => {
+    const { db, findMany } = baseDe()
+    const horario = await normalizarSeleccion(db, 'v1', { ...guardado, deliveryHours: null }, { deliveryHours: null }, guardado)
+    expect(horario).toEqual({ ...guardado, deliveryHours: null })
+    const vacio = await normalizarSeleccion(db, 'v1', { ...guardado, precios: { overrides: {} } }, { precios: { overrides: {} } }, guardado)
+    expect(vacio).toEqual({ productos: ['LATTE', 'A', 'VIEJO'], precios: { overrides: {} } })
+    expect(findMany).not.toHaveBeenCalled()
+  })
+})
+
 describe('sumarRevisados', () => {
   it('unión sin repetidos y sin los que están en la lista', () => {
     expect(sumarRevisados(['a', 'b'], ['b', 'c', 'd', 'c'], ['d'])).toEqual(['a', 'b', 'c'])

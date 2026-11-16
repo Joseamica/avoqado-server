@@ -6,8 +6,9 @@
  *
  * El invariante: un precio cae sólo en el artículo para el que se eligió; una copia por código nunca decide. Dos excepciones,
  * escritas en el título de su fila:
- *  · «por código, antes de D1»: un canal viejo que nadie ha vuelto a guardar sigue publicando por código (se convierte en su
- *    primer guardado; antes no hay manera de saber a qué producto se refería un código que cambió de dueño).
+ *  · «por código, antes de D1»: un canal viejo que nadie ha vuelto a guardar sigue publicando por código (lista y precios pasan
+ *    juntos a ids en su primer guardado con precios; antes no hay manera de saber a qué producto se refería un código que cambió
+ *    de dueño).
  *  · «llave compartida»: un producto cuyo código es literalmente el `MOD-<id>` de un extra comparte esa llave en el menú del
  *    proveedor (ya era así antes de D1): gana el precio del producto.
  */
@@ -93,7 +94,8 @@ function pedido(p: Pedido, estado: Estado): Record<string, unknown> | null {
 function esperado(estado: Estado, p: Pedido, evento: Evento) {
   const codigos: Record<Id, string> = CODIGOS[evento]
   const porCodigo = estado === 'legado' && (p === 'ninguno' || p === 'horario')
-  const listaPorId = estado === 'porId' || p === 'panel'
+  // Un guardado que pasa los precios a ids pasa también la lista: sólo el canal viejo sin guardar sigue por código.
+  const listaPorId = !porCodigo
   const publicados = (['p1', 'p2'] as const).filter(id => listaPorId || ['A', 'B'].includes(codigos[id]))
   const eleccion = ELECCION[p]
   const precioDe = (id: Id) => (porCodigo ? (codigos[id] === 'A' ? 79 : BASE[id]) : (eleccion[id] ?? BASE[id]))
@@ -151,9 +153,9 @@ function base(guardado: unknown) {
   ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ id: 'link1' })
 }
 
-async function publicar(estado: Estado, p: Pedido, evento: Evento) {
-  let config: unknown = structuredClone(ESTADOS[estado])
-  const cuerpo = pedido(p, estado)
+/** Guarda `cuerpo` sobre `guardado` (si hay) y publica con los códigos de después de `evento`. */
+async function publicar(guardado: unknown, cuerpo: Record<string, unknown> | null, evento: Evento) {
+  let config: unknown = structuredClone(guardado)
   if (cuerpo) {
     base(config)
     await updateChannelLink('venue1', 'link1', { config: cuerpo as never })
@@ -162,8 +164,11 @@ async function publicar(estado: Estado, p: Pedido, evento: Evento) {
   const { snapshot, precios } = aplicarSeleccion(menu(CODIGOS[evento]), config)
   const { payload } = construirMenuRappi(snapshot, 'store1', { precios })
   return {
-    productos: Object.fromEntries(payload.items.map(i => [i.sku, i.price])),
-    extras: Object.fromEntries(payload.items.flatMap(i => i.children ?? []).map(h => [h.sku, h.price])),
+    config,
+    publicado: {
+      productos: Object.fromEntries(payload.items.map(i => [i.sku, i.price])),
+      extras: Object.fromEntries(payload.items.flatMap(i => i.children ?? []).map(h => [h.sku, h.price])),
+    },
   }
 }
 
@@ -182,7 +187,26 @@ const FILAS = (Object.keys(ESTADOS) as Estado[]).flatMap(estado =>
 
 describe('precios del canal: tabla estado × guardado × evento (el precio cae sólo en su artículo)', () => {
   it.each(FILAS.map(f => [f.titulo, f] as const))('%s', async (_titulo, f) => {
-    const real = await publicar(f.estado, f.p, f.evento)
-    expect(real).toEqual({ productos: f.e.productos, extras: f.e.extras })
+    const { publicado } = await publicar(ESTADOS[f.estado], pedido(f.p, f.estado), f.evento)
+    expect(publicado).toEqual({ productos: f.e.productos, extras: f.e.extras })
+  })
+})
+
+describe('canal viejo con un código muerto en su lista: al pasar sus precios a ids, la lista también (sin el código muerto)', () => {
+  const CON_VIEJO = { productos: ['A', 'B', 'VIEJO'], precios: { overrides: { A: 79, 'MOD-m1': 8 } } }
+
+  it.each([
+    ['apiVieja · renombra ⇒ Z=85 B=40 ↳MOD-m1=9 ↳MOD-m2=3', 'apiVieja', 'renombra', { Z: 85, B: 40 }, { 'MOD-m1': 9, 'MOD-m2': 3 }],
+    [
+      'copiaConOtroExtra · otroTomaElCodigo ⇒ Z=85 A=40 ↳MOD-m1=8 ↳MOD-m2=3',
+      'copiaConOtroExtra',
+      'otroTomaElCodigo',
+      { Z: 85, A: 40 },
+      { 'MOD-m1': 8, 'MOD-m2': 3 },
+    ],
+  ] as const)('legadoConViejo · %s', async (_titulo, p, evento, productos, extras) => {
+    const { config, publicado } = await publicar(CON_VIEJO, pedido(p, 'legado'), evento)
+    expect(config).toEqual(expect.objectContaining({ productoIds: ['p1', 'p2'], productos: ['A', 'B'] }))
+    expect(publicado).toEqual({ productos, extras })
   })
 })

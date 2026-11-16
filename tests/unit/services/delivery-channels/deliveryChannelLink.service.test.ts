@@ -850,11 +850,30 @@ describe('deliveryChannelLink.service', () => {
         })
       })
 
+      /** Los productos de `venue1` que contesta la base, filtrando por los ids pedidos. */
+      const productosDelNegocio = (...ids: string[]) =>
+        (prisma.product.findMany as jest.Mock).mockImplementation(async ({ where }: any) =>
+          where.venueId === 'venue1' ? ids.filter(id => where.id?.in?.includes(id)).map(id => ({ id })) : [],
+        )
+
       it('marcarRevisados suma a productosRevisados (sin los de la lista); el resto de config queda', async () => {
+        productosDelNegocio('p1', 'p3')
         await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'p1'] })
         expect(escrito()).toEqual({ ...ACTUAL, productosRevisados: ['p9', 'p3'] })
         // La bitácora guarda cuántos, no los ids (pueden ser 10,000).
         expect((logAction as jest.Mock).mock.calls[0][0].data).toEqual({ marcarRevisados: 2 })
+      })
+
+      it('🔴 marcarRevisados sólo guarda ids de productos de ESTE negocio; los demás se descartan sin error', async () => {
+        productosDelNegocio('p1', 'p3')
+        await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'pOtroNegocio', 'inventado'] })
+        expect(escrito().productosRevisados).toEqual(['p9', 'p3'])
+        // UNA consulta, del negocio, por id y con tope, dentro de la transacción.
+        expect(prisma.product.findMany).toHaveBeenCalledWith({
+          where: { venueId: 'venue1', id: { in: ['p3', 'pOtroNegocio', 'inventado'] } },
+          select: { id: true },
+          take: 3,
+        })
       })
 
       it('`config.productosRevisados` mandado por el panel se ignora', async () => {

@@ -429,9 +429,19 @@ export async function updateChannelLink(
         }
       }
       if (data.marcarRevisados !== undefined) {
+        // Sólo productos de ESTE negocio (archivados incluidos); lo demás se descarta sin error. UNA consulta, por id y con tope.
+        const pedidos = [...new Set(data.marcarRevisados)]
+        const delNegocio = new Set(
+          pedidos.length === 0
+            ? []
+            : (await tx.product.findMany({ where: { venueId, id: { in: pedidos } }, select: { id: true }, take: pedidos.length })).map(
+                p => p.id,
+              ),
+        )
+        const revisados = data.marcarRevisados.filter(id => delNegocio.has(id))
         const c = nuevo === Prisma.JsonNull ? {} : configComoObjeto(nuevo)
         const lista = Array.isArray(c.productoIds) ? (c.productoIds as string[]) : null
-        nuevo = { ...c, productosRevisados: sumarRevisados(c.productosRevisados, data.marcarRevisados, lista) } as Prisma.InputJsonValue
+        nuevo = { ...c, productosRevisados: sumarRevisados(c.productosRevisados, revisados, lista) } as Prisma.InputJsonValue
       }
       if (data.config !== undefined || data.marcarRevisados !== undefined) config = nuevo
     }

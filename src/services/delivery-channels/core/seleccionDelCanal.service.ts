@@ -51,6 +51,7 @@ function mapaEnviado(v: unknown, llave: 'porProducto' | 'porExtra'): Record<stri
  *    `porProducto`, cada `MOD-<id>` de un extra del negocio a `porExtra`, y lo demás truena nombrándolo (`{}` borra todo).
  *  · Un canal con lista o con precios por id al que le falta un mapa lo saca UNA vez de la copia por código GUARDADA, la de
  *    `guardado` (la fila leída bajo candado, antes de mezclar; Codex plan r3 #2). Lo que no es de nadie se descarta.
+ *  · Si los precios de un canal viejo por código quedan por id, su lista `productos` pasa también a `productoIds`.
  */
 export async function normalizarSeleccion(
   db: Prisma.TransactionClient,
@@ -86,6 +87,11 @@ export async function normalizarSeleccion(
   const guardados = productoIds === undefined && codigos.length === 0 && Array.isArray(mezclado.productoIds)
   if (guardados) productoIds = mezclado.productoIds as string[]
   const conLista = Array.isArray(productoIds) || codigos.length > 0
+  // La lista vieja por código que trae lo guardado (sin `productoIds`): pasa a ids junto con sus precios (abajo).
+  const listaVieja =
+    productoIds === undefined && codigos.length === 0 && Array.isArray(mezclado.productos)
+      ? (mezclado.productos as unknown[]).filter((c): c is string => typeof c === 'string')
+      : []
 
   // Los mapas que ya trae lo mezclado (enviados, o guardados que la mezcla conservó). Con `reemplaza` no cuenta ninguno.
   const ppDado = reemplaza ? undefined : precios?.porProducto
@@ -108,7 +114,9 @@ export async function normalizarSeleccion(
 
   // UNA consulta, del negocio y con tope: los ids en juego y los códigos en juego (archivados incluidos).
   const ids = [...new Set([...(Array.isArray(productoIds) ? productoIds : []), ...Object.keys(comoObjeto(ppDado) ?? {})])]
-  const codigosEnJuego = [...new Set([...codigos, ...(sacaDeLaCopia ? Object.keys(copia) : [])])]
+  // Los códigos de la lista vieja sólo si este guardado puede dejar precios por id (si no, el canal sigue por código entero).
+  const codigosViejos = ppDado !== undefined || peDado !== undefined || Object.keys(copia).length > 0 ? listaVieja : []
+  const codigosEnJuego = [...new Set([...codigos, ...codigosViejos, ...(sacaDeLaCopia ? Object.keys(copia) : [])])]
   const filas: Array<{ id: string; sku: string }> =
     ids.length + codigosEnJuego.length === 0
       ? []
@@ -179,10 +187,6 @@ export async function normalizarSeleccion(
   const porExtra = peDado !== undefined ? (comoObjeto(peDado) ?? {}) : sacaExtras ? deCopia.porExtra : undefined
 
   const resultado: Record<string, unknown> = { ...mezclado }
-  if (productoIds !== undefined) {
-    resultado.productoIds = productoIds
-    resultado.productos = productoIds && productoIds.flatMap(id => (codigoDe.has(id) ? [codigoDe.get(id)!] : []))
-  }
   if (porProducto !== undefined || porExtra !== undefined) {
     // La copia por código, sólo desde los ids: el `MOD-<id>` de cada extra y el código vigente de cada producto (con un producto
     // que se llame literalmente igual, gana el producto, como al publicar).
@@ -193,6 +197,12 @@ export async function normalizarSeleccion(
     // otro guardado sacaría de la copia ese precio de producto como si fuera del extra (Codex impl r2 #2).
     const guardaExtra =
       Object.keys(porExtra ?? {}).length > 0 || peDado !== undefined || Object.keys(copiaNueva).some(c => idDeExtra(c) !== null)
+    // Un canal viejo por código cuyos precios quedan por id pasa también su lista a ids (los códigos de nadie se caen sin error):
+    // lista y precios nunca quedan en dos identidades. Si ningún código es de nadie, la lista se queda igual (tampoco publica nada).
+    if (productoIds === undefined && (guardaExtra || Object.keys(porProducto ?? {}).length > 0)) {
+      const vivos = [...new Set(codigosViejos.flatMap(c => (idDe.has(c) ? [idDe.get(c)!] : [])))]
+      if (vivos.length > 0) productoIds = vivos
+    }
     // `porProducto` va siempre con `porExtra` y en un canal con lista (aunque vacío): así lo guardado no se vuelve a convertir.
     const guardaProducto = guardaExtra || Array.isArray(productoIds) || Object.keys(porProducto ?? {}).length > 0
     const { porProducto: _pp, porExtra: _pe, ...resto }: Record<string, unknown> = precios ?? {}
@@ -202,6 +212,10 @@ export async function normalizarSeleccion(
       ...(guardaExtra && { porExtra: porExtra ?? {} }),
       overrides: copiaNueva,
     }
+  }
+  if (productoIds !== undefined) {
+    resultado.productoIds = productoIds
+    resultado.productos = productoIds && productoIds.flatMap(id => (codigoDe.has(id) ? [codigoDe.get(id)!] : []))
   }
   return resultado
 }
