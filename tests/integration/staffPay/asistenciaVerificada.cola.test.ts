@@ -44,6 +44,9 @@ beforeAll(async () => {
   m = await crearMundo('asistencia-cola')
 })
 afterAll(async () => {
+  if (!m) return
+  // Las llegadas dejan su ActivityLog (con FK a la organización): se borra antes que el mundo.
+  await prisma.activityLog.deleteMany({ where: { organizationId: m.orgId } })
   await borrarMundo(m)
 })
 
