@@ -109,6 +109,8 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
       note,
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
+      // Encargo 921513: la hora del aparato (ISO o epoch ms); el servicio la acota a la vida de la caja.
+      createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -180,6 +182,8 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
       authorizedByStaffVenueId: autorizo,
+      // Encargo 921513: la hora del aparato (ISO o epoch ms); el servicio la acota a la vida de la caja.
+      createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event, authorizedBy })
