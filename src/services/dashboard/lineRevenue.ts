@@ -111,6 +111,14 @@ const rawOrderDiscountSql = (alias: string): string =>
      WHERE od."orderId" = ${alias}."orderId"
        AND COALESCE((od."reparto"->>'espejo')::boolean, false) = false), 0)`
 
+/**
+ * What the line earned as CHARGED, even if the delivery provider removed it later. Only for sharing an order's net out by
+ * line (the nightly email's categories, D21): the order's subtotal keeps a removed line and its refund takes it back out,
+ * so its share must stay on its own category instead of landing on its neighbours.
+ */
+export const lineRevenueAsChargedSql = (alias = 'oi'): string =>
+  `(${rawGrossSql(alias)} - ${alias}."discountAmount" - ${rawOrderDiscountSql(alias)})`
+
 /** Descuentos de cuenta repartidos a ESTE renglón, en pesos (0 si el renglón se quitó). Va en la columna `discounts`. */
 export const lineOrderDiscountSql = (alias = 'oi'): string => aliveSql(alias, rawOrderDiscountSql(alias))
 

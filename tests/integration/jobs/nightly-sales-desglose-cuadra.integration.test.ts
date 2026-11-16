@@ -83,6 +83,34 @@ beforeAll(async () => {
     await prisma.order.update({ where: { id: fuera.order.id }, data: { status } })
   }
 
+  // Codex r1 #1: promoción de Rappi asumida por el negocio — la ingesta la guarda SÓLO en Order.discountAmount (sin
+  // reparto por renglón): $174 de producto, $28 de promoción, neto $146. Antes las categorías decían $174.
+  const rappi = await sembrarCobro({
+    venueId,
+    staffId,
+    saleCents: 14600,
+    items: [{ productId: cafe.id, productName: 'Café', quantity: 1, totalCents: 17400 }],
+  })
+  await prisma.order.update({ where: { id: rappi.order.id }, data: { subtotal: 174, discountAmount: 28, total: 146 } })
+
+  // Codex r1 #2: dos pesadas de 0.333 kg a $199.99/kg — el cobro redondea CADA renglón (66.60 × 2 = 133.20) y el renglón
+  // sin redondear vale 66.59667: antes salía un «importe libre» de $0.01 que no existe.
+  const pesada = await sembrarCobro({ venueId, staffId, saleCents: 13320 })
+  for (let i = 0; i < 2; i++) {
+    await prisma.orderItem.create({
+      data: {
+        orderId: pesada.order.id,
+        productId: cafe.id,
+        productName: 'Café',
+        quantity: 1,
+        unitPrice: 199.99,
+        weightQuantity: 0.333,
+        taxAmount: 0,
+        total: 66.6,
+      } as any,
+    })
+  }
+
   hasta = new Date(Date.now() + 2 * 60 * 60 * 1000)
 })
 
@@ -103,20 +131,21 @@ afterAll(async () => {
 describe('D21 · el desglose por categoría del correo nocturno suma las ventas netas', () => {
   it('las categorías cuentan las mismas cuentas que las ventas netas (sin PENDING ni DELETED)', async () => {
     const categorias = await getCategoryBreakdown(venueId, desde, hasta)
+    // Café: 100 + 146 (la promoción de la cuenta repartida a su renglón) + 133.20 (lo que se cobró por las pesadas).
     expect(categorias).toEqual([
-      { name: 'Bebidas', itemsSold: 1, netSales: 100 },
+      { name: 'Bebidas', itemsSold: 4, netSales: 379.2 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
     ])
   })
 
   it('🔴 el desglose del correo suma las ventas netas del Resumen, al centavo, con su renglón de importe libre', async () => {
     const r = await getSalesSummary(venueId, { startDate: desde.toISOString(), endDate: hasta.toISOString(), timezone: TZ })
-    // 100 + 50 + 26.99 vendidos − 10 devueltos.
-    expect(r.summary.netSales).toBeCloseTo(166.99, 2)
+    // 100 + 50 + 26.99 + 146 + 133.20 vendidos − 10 devueltos.
+    expect(r.summary.netSales).toBeCloseTo(446.19, 2)
 
     const filas = reconcileCategoryBreakdown(await getCategoryBreakdown(venueId, desde, hasta), r.summary.netSales ?? 0, r.summary.refunds)
     expect(filas).toEqual([
-      { name: 'Bebidas', itemsSold: 1, netSales: 100 },
+      { name: 'Bebidas', itemsSold: 4, netSales: 379.2 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
       { name: 'Devoluciones', itemsSold: null, netSales: -10 },
       { name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: 26.99 },

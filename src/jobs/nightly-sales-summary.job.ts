@@ -21,7 +21,7 @@ import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard
 import emailService from '../services/email.service'
 import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
-import { lineRevenueSql } from '../services/dashboard/lineRevenue'
+import { lineRevenueAsChargedSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
@@ -498,10 +498,10 @@ const CATEGORY_ROWS = 10
  *
  * The rows: the top 10 categories, the rest folded into «Otras categorías» (the old LIMIT 10 dropped them), the day's
  * refunds as a negative row (the headline subtracts them; they have no category), and what is left of the headline after
- * all that as «Ventas sin producto». That remainder is, measured, sales with no lines (and Mindform's legacy QR payments,
- * which the headline adds and carry no lines here either; in a demo venue with the IVA charged ON TOP, also that IVA, which
- * the lines never include). A remainder below zero means lines worth MORE than their order
- * (damaged rows, 2 in av-db-25): no negative row is invented, it is logged.
+ * all that as «Ventas sin producto». The categories already carry each order's whole net (see `getCategoryBreakdown`), so
+ * the remainder is, measured, the orders with no lines (and Mindform's legacy QR payments, which the headline adds and carry
+ * no lines here either). A remainder below zero can only come from a sale that changed between the email's queries
+ * (Codex r1 #3, the same race the headline's own queries have): no negative row is invented, it is logged.
  */
 export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: number, refunds: number, venueId?: string): CategoryRow[] {
   const cents = (n: number) => Math.round(n * 100)
@@ -518,7 +518,7 @@ export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: 
   const remainder = cents(netSales) - rows.reduce((s, r) => s + cents(r.netSales), 0)
   if (remainder > 0) rows.push({ name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: remainder / 100 })
   else if (remainder < 0) {
-    logger.warn('⚠️ Desglose por categoría mayor que las ventas netas: renglones que valen más que su cuenta (data dañada)', {
+    logger.warn('⚠️ Desglose por categoría mayor que las ventas netas: una venta cambió mientras se armaba el correo', {
       venueId,
       netSales,
       excessCents: -remainder,
@@ -530,41 +530,73 @@ export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: 
 /**
  * Get sales breakdown by category — every category, net desc (`reconcileCategoryBreakdown` folds the tail). Bounded by
  * the venue's own categories (one row each).
+ *
+ * D21 (Codex r1 #1, #2): each ORDER's net — the same one the headline sums, subtotal − LEAST(discount, subtotal) + the IVA
+ * charged on top — is shared out to its categories in proportion to what each line earned (`lineRevenueAsChargedSql`). The lines
+ * alone do not add up to the order when the discount lives only on the order (a Rappi/Uber promotion the venue pays, an
+ * account discount from before the per-line split) or when a weighed line was rounded when charged (2 × 0.333 kg at
+ * $199.99 charged $133.20, the lines say $133.19). Square shares order discounts the same way. Cents are rounded so the
+ * categories add up exactly to the orders' net (largest remainder). An order whose lines are worth 0 cannot be shared out:
+ * it is left out, like an order with no lines.
+ *
+ * A line the delivery provider removed sold no ITEMS, but it keeps its weight: the order's subtotal still has it and its
+ * refund takes it back out in «Devoluciones», like the headline. Without it, its value would land on the other lines.
  */
+const lineUnitsCountSql = `(CASE WHEN oi."removedAt" IS NULL THEN oi.quantity ELSE 0 END)`
+
 export async function getCategoryBreakdown(
   venueId: string,
   startDate: Date,
   endDate: Date,
 ): Promise<Array<{ name: string; itemsSold: number; netSales: number }>> {
-  const result = await prisma.$queryRaw<Array<{ name: string; items_sold: number; net_sales: number }>>`
+  const result = await prisma.$queryRaw<Array<{ name: string; items_sold: unknown; net_sales: unknown }>>`
+    WITH lines AS (
+      SELECT
+        oi."orderId" AS order_id,
+        COALESCE(c.name, 'Sin categorizar') AS name,
+        ${Prisma.raw(lineUnitsCountSql)} AS quantity,
+        ${Prisma.raw(lineRevenueAsChargedSql())} AS revenue,
+        o.subtotal - LEAST(o."discountAmount", o.subtotal) + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))} AS order_net
+      FROM "OrderItem" oi
+      JOIN "Order" o ON oi."orderId" = o.id
+      LEFT JOIN "Product" p ON oi."productId" = p.id
+      LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
+      WHERE o."venueId" = ${venueId}
+        AND o."createdAt" >= ${utcTs(startDate)}
+        AND o."createdAt" <= ${utcTs(endDate)}
+        -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
+        -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
+        AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+        AND o."paymentStatus" NOT IN ('REFUNDED')
+        AND ${sqlOrdenSinTarjetas('o.id')}
+    ),
+    shared AS (
+      SELECT name, quantity, revenue, order_net, SUM(revenue) OVER (PARTITION BY order_id) AS order_revenue FROM lines
+    )
     SELECT
-      COALESCE(c.name, 'Sin categorizar') as name,
-      COALESCE(SUM(oi.quantity), 0) as items_sold,
-      -- This column, its SQL alias and the TS return type all say NET, but it
-      -- used to sum unitPrice * quantity — the LIST price — so a category with
-      -- a combo was overstated in the owner's nightly email.
-      COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as net_sales
-    FROM "OrderItem" oi
-    JOIN "Order" o ON oi."orderId" = o.id
-    LEFT JOIN "Product" p ON oi."productId" = p.id
-    LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
-    WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
-      -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
-      -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
-      AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
-      AND ${sqlOrdenSinTarjetas('o.id')}
-      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
-    GROUP BY c.name
+      name,
+      COALESCE(SUM(quantity), 0) AS items_sold,
+      COALESCE(SUM(CASE WHEN order_revenue <> 0 THEN order_net * revenue / order_revenue ELSE 0 END), 0) AS net_sales
+    FROM shared
+    GROUP BY name
     ORDER BY net_sales DESC
   `
 
-  return result.map(r => ({
+  // Largest remainder: round each category down to the cent, then hand the missing cents to the biggest fractions, so
+  // Σ categories = the orders' net to the cent (rounding each one on its own could leave a cent over or short).
+  const exact = result.map(r => Number(r.net_sales) * 100)
+  const floors = exact.map(Math.floor)
+  let missing = Math.round(exact.reduce((s, v) => s + v, 0)) - floors.reduce((s, v) => s + v, 0)
+  for (const i of exact.map((_, i) => i).sort((a, b) => exact[b] - floors[b] - (exact[a] - floors[a]))) {
+    if (missing <= 0) break
+    floors[i] += 1
+    missing -= 1
+  }
+
+  return result.map((r, i) => ({
     name: r.name,
     itemsSold: Number(r.items_sold),
-    netSales: Number(r.net_sales),
+    netSales: floors[i] / 100,
   }))
 }
 

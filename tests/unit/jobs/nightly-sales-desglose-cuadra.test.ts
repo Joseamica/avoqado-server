@@ -107,7 +107,7 @@ describe('D21 · el desglose por categoría suma las ventas netas del correo', (
     expect(filas).toEqual([{ name: 'Carnes', itemsSold: 1, netSales: 104.4 }])
   })
 
-  it('si las categorías suman MÁS que las ventas netas (dato dañado) no inventa un renglón negativo', async () => {
+  it('si las categorías suman MÁS que las ventas netas (una venta cambió entre consultas) no inventa un renglón negativo', async () => {
     const filas = await desgloseCon([['Bebidas', 2, 727.5]], 553)
     expect(filas).toEqual([{ name: 'Bebidas', itemsSold: 2, netSales: 727.5 }])
   })
