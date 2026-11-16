@@ -164,6 +164,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerFeatureTools(server, scope)
   registerHybridBillingTools(server, scope)
   registerDeliveryChannelTools(server, scope)
+  registerDeliveryChannelProductTools(server, scope)
   registerOnlineOrderingTools(server, scope)
   registerDeliveryActivationTools(server, scope)
   registerDeliveryCourierTools(server, scope)
