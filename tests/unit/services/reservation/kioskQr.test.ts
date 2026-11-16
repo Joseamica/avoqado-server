@@ -258,8 +258,10 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
    */
   describe('reserva que recepción dio de alta sin ficha (sólo nombre y teléfono)', () => {
     const INVITADA = { id: 'res-inv', status: 'CONFIRMED', startsAt: CLASE, customerId: null, guestPhone: '5512345678' }
+    // Sin reservas con su ficha; la consulta de invitadas (la primera `$queryRaw`) trae las de su número.
     const sinPropias = (...invitadas: object[]) => {
-      prismaMock.reservation.findMany.mockResolvedValueOnce([] as any).mockResolvedValueOnce(invitadas as any)
+      prismaMock.reservation.findMany.mockResolvedValue([] as any)
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce(invitadas)
     }
 
     it('sin reserva propia en la ventana: se busca la de invitada por el teléfono PROBADO y queda «con teléfono»', async () => {
@@ -267,10 +269,9 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
 
       expect(out).toEqual({ outcome: 'CHECKED_IN', reservationId: 'res-inv' })
-      expect(prismaMock.reservation.findMany.mock.calls[1][0]).toMatchObject({
-        where: { venueId: VENUE, customerId: null, guestPhone: { not: null } },
-        take: 200,
-      })
+      // La consulta va por el negocio y por los últimos 10 dígitos del teléfono PROBADO (nunca por otro dato del cliente).
+      const valores = (prismaMock.$queryRaw as jest.Mock).mock.calls[0].slice(1)
+      expect(valores).toEqual(expect.arrayContaining([VENUE, ['5512345678']]))
       const cmd = (checkInReservation as jest.Mock).mock.calls[0][1]
       expect(cmd).toMatchObject({ reservationId: 'res-inv', method: 'PHONE', source: 'KIOSK' })
       expect(cmd.byStaffId).toBeUndefined()
@@ -290,7 +291,7 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       ] as any)
       const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
       expect(out).toEqual({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-propia' })
-      expect(prismaMock.reservation.findMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
       expect(checkInReservation).not.toHaveBeenCalled()
     })
 
@@ -316,8 +317,8 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       expect(checkInReservation).not.toHaveBeenCalled()
     })
 
-    it('si la ventana trae tantas invitadas como el tope, no se puede saber que es la única ⇒ no marca', async () => {
-      sinPropias(INVITADA, ...Array.from({ length: 199 }, (_, i) => ({ ...INVITADA, id: `otra-${i}`, guestPhone: '5599990000' })))
+    it('P1 r10 #1: si el MISMO número llena el tope de la lectura, no se puede saber que es la única ⇒ no marca', async () => {
+      sinPropias(INVITADA, ...Array.from({ length: 19 }, (_, i) => ({ ...INVITADA, id: `otra-${i}`, guestPhone: '+15512345678' })))
       await expect(consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })).rejects.toMatchObject({
         code: 'CHECK_IN_NOT_FOUND',
       })
@@ -325,7 +326,7 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
 
     it('P1 r8 #3: si el personal cambió el contacto con el que entró, la de invitada también queda «a mano por»', async () => {
       sinPropias(INVITADA)
-      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ staffId: 'staff-9' }])
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([{ staffId: 'staff-9' }])
       await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
       expect((checkInReservation as jest.Mock).mock.calls[0][1]).toMatchObject({
         reservationId: 'res-inv',
@@ -343,7 +344,7 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       await expect(consumeKioskQr({ venueId: VENUE, sesion, ...qr(), customerId: 'cust-1', now: NOW })).rejects.toMatchObject({
         code: 'CHECK_IN_NOT_FOUND',
       })
-      expect(prismaMock.reservation.findMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
   })
 })
