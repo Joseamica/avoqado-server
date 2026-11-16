@@ -16,7 +16,23 @@ import { enUnaFoto } from './foto'
 import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
 import { alcanceEnLaFoto, LecturaPreparada, prepararLectura, zonasEnLaFoto } from './lectura'
 import { rangosConParticipacion } from './rangos'
-import { columnasDelRecibo, conceptoDe, FilaRecibo, filasDelRecibo, RenglonRecibo, slug, totalesPorTipoDelRecibo } from './recibos.formato'
+import {
+  columnasDelRecibo,
+  conceptoDe,
+  FilaRecibo,
+  filasDelRecibo,
+  RenglonRecibo,
+  slug,
+  textoDeLlegadas,
+  totalesPorTipoDelRecibo,
+} from './recibos.formato'
+import type { LlegadasDePersona } from './valoracion'
+
+/** El total de llegadas del recibo, en una línea del resumen del PDF y el Excel (sólo si hay clases de «sólo quien llegó»). */
+const lineaDeLlegadas = (l: LlegadasDePersona | null): string[] => {
+  const texto = l ? textoDeLlegadas(l as unknown as Prisma.JsonValue) : null
+  return texto ? [`Llegadas: ${texto}`] : []
+}
 
 export type { FilaRecibo, RenglonRecibo } from './recibos.formato'
 export { columnasDelRecibo, filasDelRecibo, totalesPorTipoDelRecibo } from './recibos.formato'
@@ -43,6 +59,11 @@ export interface Recibo {
   parcial: boolean
   /** Del recibo ENTERO, por tipo (SUM en la base); sólo los tipos que tienen renglones (spec fase 3 §11). */
   totalesPorTipo: Partial<Record<RenglonRecibo['tipo'], string>>
+  /**
+   * Asistencia verificada (Codex r3 #6, r4 #5): del recibo ENTERO, cuántos lugares llegaron con celular, con teléfono, a mano,
+   * desde la lista y con pase, en sus clases de «sólo quien llegó». null si no tiene ninguna. Opcional para un cliente previo.
+   */
+  llegadas: LlegadasDePersona | null
   /** B12 (r6.2, r5.1): devoluciones de esta persona que se descontarán solas en OTRO cierre; null en uno cerrado o pág. 2+. */
   pendientes: DevolucionesPendientes | null
 }
@@ -300,7 +321,8 @@ async function fuenteDelRecibo(
              e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
              e.descriptor->'regla' AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
              (e.descriptor->>'base')::numeric AS base, (e.descriptor->>'tasa')::numeric AS tasa, e.descriptor->>'limite' AS limite,
-             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
+             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo,
+             e.descriptor->'llegadas' AS llegadas
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
         ${fila.status === 'CLOSED' ? Prisma.empty : Prisma.sql`AND e.concept IN ('RECONCILE', 'MANUAL')`}`)
@@ -316,7 +338,8 @@ async function fuenteDelRecibo(
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
                vv.conteo AS lugares, vv.monto, vv.regla AS regla, NULL::text AS orden, NULL::text AS esquema,
-               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, NULL::text AS motivo
+               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, NULL::text AS motivo,
+               CASE WHEN vv."countMode" = 'ATTENDED' THEN vv.llegadas END AS llegadas
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
     }
@@ -336,7 +359,7 @@ async function fuenteDelRecibo(
           SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,
                  v."venueId", v."fechaLocal" AS fecha, v.hora, NULL::text AS clase, v.sede AS "sedeFoto", NULL::text AS reason,
                  NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.tasa,
-                 v.limite, v.motivo
+                 v.limite, v.motivo, NULL::jsonb AS llegadas
           FROM (${ventas}) v`)
       }
     }
@@ -384,6 +407,7 @@ export const COLUMNAS_FUENTE_RECIBO = [
   'tasa',
   'limite',
   'motivo',
+  'llegadas',
   'agrupada',
   'cobros',
 ] as const
@@ -404,7 +428,7 @@ function armarFuente(crudo: Prisma.Sql[], agruparPropinas: boolean): Prisma.Sql 
     UNION ALL
     SELECT 'PROPINA', MIN(c.instante), 'T:' || c."venueId" || ':' || c.fecha || ':' || c.motivo, c."venueId", c.fecha,
            NULL::text, NULL::text, MAX(c."sedeFoto"), NULL::text, NULL::text, NULL::int, SUM(c.monto),
-           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, NULL::text, c.motivo, true, COUNT(*)::int
+           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, NULL::text, c.motivo, NULL::jsonb, true, COUNT(*)::int
     FROM crudo c
     WHERE c.tipo = 'PROPINA'
     GROUP BY c."venueId", c.fecha, c.motivo`
@@ -437,8 +461,13 @@ function leerCursor(s: string, f: Pick<FuenteRecibo, 'periodo' | 'llave'>): { in
 async function totalDelRecibo(
   db: Db,
   f: FuenteRecibo,
-): Promise<{ total: Prisma.Decimal; cantidad: number; porTipo: Partial<Record<RenglonRecibo['tipo'], string>> }> {
-  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0, porTipo: {} }
+): Promise<{
+  total: Prisma.Decimal
+  cantidad: number
+  porTipo: Partial<Record<RenglonRecibo['tipo'], string>>
+  llegadas: LlegadasDePersona | null
+}> {
+  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0, porTipo: {}, llegadas: null }
   const filas = await db.$queryRaw<Array<{ tipo: RenglonRecibo['tipo']; total: Prisma.Decimal | null; cantidad: number }>>`
     SELECT r.tipo, SUM(r.monto) AS total, COUNT(*)::int AS cantidad FROM (${f.sql}) r GROUP BY r.tipo`
   let total = new Prisma.Decimal(0)
@@ -450,7 +479,20 @@ async function totalDelRecibo(
     cantidad += x.cantidad
     porTipo[x.tipo] = t.toFixed(2)
   }
-  return { total, cantidad, porTipo }
+  // Las llegadas de las clases con desglose (sólo «sólo quien llegó» lo trae), sumadas en la base sobre la MISMA fuente.
+  const [l] = await db.$queryRaw<Array<{ clases: number } & Record<'qr' | 'phone' | 'staff' | 'list' | 'pass' | 'sinMetodo', number>>>`
+    SELECT COUNT(*)::int AS clases,
+           COALESCE(SUM((r.llegadas->>'qr')::int), 0)::int AS qr,
+           COALESCE(SUM((r.llegadas->>'phone')::int), 0)::int AS phone,
+           COALESCE(SUM((r.llegadas->>'staff')::int), 0)::int AS staff,
+           COALESCE(SUM((r.llegadas->>'list')::int), 0)::int AS list,
+           COALESCE(SUM((r.llegadas->>'pass')::int), 0)::int AS pass,
+           COALESCE(SUM((r.llegadas->>'sinMetodo')::int), 0)::int AS "sinMetodo"
+    FROM (${f.sql}) r
+    WHERE r.tipo = 'CLASE' AND r.llegadas IS NOT NULL`
+  const llegadas =
+    l && l.clases > 0 ? { qr: l.qr, phone: l.phone, staff: l.staff, list: l.list, pass: l.pass, sinMetodo: l.sinMetodo } : null
+  return { total, cantidad, porTipo, llegadas }
 }
 
 function sqlPaginaDelRecibo(fuente: Prisma.Sql, c: { instante: Date; id: string } | null, limite: number): Prisma.Sql {
@@ -500,7 +542,7 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
   await input.trasPreparar?.()
   return enUnaFoto(async tx => {
     const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: true })
-    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
+    const { total, cantidad, porTipo, llegadas } = await totalDelRecibo(tx, f)
     const pagina = await paginaDelRecibo(tx, f, input.cursor, acotar(input.limit))
     // B12: en la MISMA foto; sólo el recibo abierto (lo de su periodo ya es renglón) y, B13, sólo su primera página.
     const pendientes =
@@ -522,6 +564,7 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
       pagadoEn: f.pagadoEn,
       parcial: f.parcial,
       totalesPorTipo: porTipo,
+      llegadas,
       pendientes,
     }
   })
@@ -548,10 +591,10 @@ export async function exportarRecibo(input: {
   const prep = await prepararRecibo(input) // cliente global ANTES de la instantánea (Codex R4-Nuevo 1)
   // Fuente, total y TODAS las páginas en UNA instantánea de sólo lectura (Codex R3-Nuevo 1); el archivo se genera
   // DESPUÉS de cerrar la transacción (codificar no retiene la conexión).
-  const { f, total, porTipo, renglones } = await enUnaFoto(async tx => {
+  const { f, total, porTipo, renglones, llegadas } = await enUnaFoto(async tx => {
     // El Excel lleva cada cobro por separado; la pantalla y el PDF, las propinas de un día juntas (B-D6).
     const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: input.format === 'pdf' })
-    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
+    const { total, cantidad, porTipo, llegadas } = await totalDelRecibo(tx, f)
     // El tope del ARCHIVO (export.helpers: 1,000 en PDF, 10,000 en Excel) se revisa con la cuenta de la base ANTES de
     // leer los renglones: arriba del tope se explica, nunca se trunca (D6).
     if (cantidad + 1 > tope) {
@@ -569,16 +612,22 @@ export async function exportarRecibo(input: {
       cursor = p.siguiente
       await input.entreLotes?.()
     }
-    return { f, total, porTipo, renglones }
+    return { f, total, porTipo, renglones, llegadas }
   })
   const columnas = columnasDelRecibo(input.format)
   const encoded = await encodeExport(input.format, {
     allColumns: columnas,
     requestedColumnIds: columnas.map(c => c.id),
-    rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
+    rows: filasDelRecibo({
+      renglones,
+      total: total.toFixed(2),
+      parcial: f.parcial,
+      // El PDF lo dice en su línea de resumen; el Excel, en la fila del total (no tiene resumen).
+      llegadasEnTotal: input.format === 'xlsx' && llegadas ? textoDeLlegadas(llegadas as unknown as Prisma.JsonValue) : null,
+    }),
     title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
     sheetName: `Recibo de ${f.persona}`,
-    resumen: totalesPorTipoDelRecibo(porTipo),
+    resumen: [...totalesPorTipoDelRecibo(porTipo), ...lineaDeLlegadas(llegadas)],
   })
   return { encoded, nombre: `recibo-${slug(f.persona)}-${f.periodo.start}` }
 }

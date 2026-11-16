@@ -15,7 +15,7 @@
  * Antes (reservation.dashboard.service.ts checkInReservation): sólo CONFIRMED→CHECKED_IN,
  * no idempotente, la orden se creaba en otra tx y el error se tragaba sin rastro.
  */
-import { Prisma, ReservationStatus } from '@prisma/client'
+import { Prisma, ReservationCheckInMethod, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
@@ -84,7 +84,7 @@ export function decideCheckIn(status: ReservationStatus | string): 'TRANSITION' 
   return 'NOT_CHECKINABLE'
 }
 
-type StatusLogEntry = { status: string; at: string; by: string | null; source?: string; reason?: string }
+type StatusLogEntry = { status: string; at: string; by: string | null; source?: string; reason?: string; method?: string; opId?: string }
 
 export function actorLabel(actor: CheckInActor): string {
   return actor.type === 'HUMAN' ? actor.staffId : `service:${actor.servicePrincipalId}`
@@ -121,6 +121,30 @@ export interface CheckInCommand {
   actor: CheckInActor
   source: CheckInSource
   now: Date
+  /** Cómo se demostró la llegada. Sin él se deriva del `source` (`checkInMethodFor`). */
+  method?: ReservationCheckInMethod
+  /** Quién la marcó cuando el actor es el servicio del kiosco (lista de una app vieja: la sesión del aparato). */
+  byStaffId?: string | null
+  /** Id de la operación de una cola sin red: queda en el statusLog para que un reintento no la vuelva a aplicar. */
+  opId?: string
+}
+
+/**
+ * Asistencia verificada (16-nov-2026): cómo se demostró una llegada y quién la marcó. Lo usan los DOS escritores de
+ * `CHECKED_IN` (`checkInReservation` y `undoNoShow`). Sin método explícito: panel, POS y MCP son «a mano» (STAFF),
+ * el conector de pases es PASS y el kiosco sin más dato es la lista por nombre (KIOSK_LIST, apps viejas).
+ * Sólo «a mano» y la lista guardan quién: el QR y el teléfono los demostró la propia clienta.
+ */
+export function checkInMethodFor(input: {
+  source: CheckInSource | 'MCP'
+  actor: CheckInActor
+  method?: ReservationCheckInMethod
+  byStaffId?: string | null
+}): { checkInMethod: ReservationCheckInMethod; checkedInByStaffId: string | null } {
+  const checkInMethod: ReservationCheckInMethod =
+    input.method ?? (input.source === 'KIOSK' ? 'KIOSK_LIST' : input.source === 'PASS' ? 'PASS' : 'STAFF')
+  const quien = input.actor.type === 'HUMAN' ? input.actor.staffId : (input.byStaffId ?? null)
+  return { checkInMethod, checkedInByStaffId: checkInMethod === 'STAFF' || checkInMethod === 'KIOSK_LIST' ? quien : null }
 }
 
 export interface CheckInResult<R = any> {
@@ -139,9 +163,18 @@ export interface CheckInResult<R = any> {
  *   KIOSK fuera de ventana → 422 CHECK_IN_OUTSIDE_WINDOW (antes de escribir)
  */
 export async function checkInReservation(tx: Prisma.TransactionClient, cmd: CheckInCommand): Promise<CheckInResult> {
+  // 🔴 Codex r5 #1: el candado de la fila PRIMERO. Leer, decidir y reescribir el statusLog es un leer-modificar-escribir: sin
+  // candado, un QR y un «deshacer» que pasaran entre la lectura y el CAS dejaban volver a marcar la llegada deshecha y
+  // borraban esos movimientos de la historia. El mismo orden que `undoNoShow` (candado de la reserva primero).
+  await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${cmd.reservationId} AND "venueId" = ${cmd.venueId} FOR UPDATE`
   const current = await tx.reservation.findFirst({ where: { id: cmd.reservationId, venueId: cmd.venueId } })
   if (!current) throw new NotFoundError('Reservacion no encontrada')
 
+  // Cinturón: la llave idempotente de verdad es el recibo `KioskCheckInOp` (kioskCheckIn.service); esto sólo evita volver a
+  // aplicar una operación cuya marca sigue en la historia.
+  if (cmd.opId && Array.isArray(current.statusLog) && (current.statusLog as StatusLogEntry[]).some(e => e?.opId === cmd.opId)) {
+    return finish(tx, cmd, 'ALREADY_CHECKED_IN')
+  }
   const decision = decideCheckIn(current.status)
   if (decision === 'NOT_CHECKINABLE') {
     throw new ConflictError(`La reservacion esta en estado ${current.status} y ya no admite check-in`, RESERVATION_NOT_CHECKINABLE)
@@ -166,17 +199,31 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
     }
   }
 
+  const metodo = checkInMethodFor(cmd)
   const entries = Array.isArray(current.statusLog) ? (current.statusLog as StatusLogEntry[]) : []
   const statusLog: StatusLogEntry[] = [
     ...entries,
-    { status: 'CHECKED_IN', at: cmd.now.toISOString(), by: actorLabel(cmd.actor), source: cmd.source },
+    {
+      status: 'CHECKED_IN',
+      at: cmd.now.toISOString(),
+      by: actorLabel(cmd.actor),
+      source: cmd.source,
+      method: metodo.checkInMethod,
+      ...(cmd.opId ? { opId: cmd.opId } : {}),
+    },
   ]
 
   // CAS: sólo gana quien encuentre la fila todavía en PENDING/CONFIRMED. Carrera con otro
   // check-in o con el job de no-show ⇒ exactamente un ganador; el perdedor relee y decide.
   const cas = await tx.reservation.updateMany({
     where: { id: cmd.reservationId, venueId: cmd.venueId, status: { in: CHECKINABLE } },
-    data: { status: 'CHECKED_IN', checkedInAt: cmd.now, statusLog: statusLog as unknown as Prisma.InputJsonValue },
+    data: {
+      status: 'CHECKED_IN',
+      checkedInAt: cmd.now,
+      statusLog: statusLog as unknown as Prisma.InputJsonValue,
+      checkInMethod: metodo.checkInMethod,
+      checkedInByStaffId: metodo.checkedInByStaffId,
+    },
   })
   if (cas.count === 0) {
     const reread = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, select: { status: true } })
@@ -193,7 +240,13 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
       action: 'RESERVATION_CHECKED_IN',
       entity: 'Reservation',
       entityId: cmd.reservationId,
-      data: { status: 'CHECKED_IN', confirmationCode: current.confirmationCode, source: cmd.source },
+      data: {
+        status: 'CHECKED_IN',
+        confirmationCode: current.confirmationCode,
+        source: cmd.source,
+        method: metodo.checkInMethod,
+        ...(metodo.checkedInByStaffId ? { checkedInByStaffId: metodo.checkedInByStaffId } : {}),
+      },
     },
   })
 
@@ -401,7 +454,13 @@ export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckIn
   // se confirmó entre el chequeo de arriba y aquí).
   const cas = await tx.reservation.updateMany({
     where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN', noShowCorrection: { is: null } },
-    data: { status: target, checkedInAt: null, statusLog: statusLog as unknown as Prisma.InputJsonValue },
+    data: {
+      status: target,
+      checkedInAt: null,
+      checkInMethod: null,
+      checkedInByStaffId: null,
+      statusLog: statusLog as unknown as Prisma.InputJsonValue,
+    },
   })
   if (cas.count === 0) {
     const reread = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, select: { status: true } })

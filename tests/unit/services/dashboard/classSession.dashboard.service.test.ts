@@ -1373,6 +1373,24 @@ describe('ClassSession Dashboard Service', () => {
       expect(result.reservation.classSessionId).toBe(SESSION_ID)
     })
 
+    it('asistencia verificada: agregarla ya llegada la marca «a mano» por quien la agrega; sin llegada no hay método', async () => {
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CHECKED_IN', classSessionId: SESSION_ID }))
+      await addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, checkInImmediately: true } as any, STAFF_ID).catch(() => undefined)
+      expect(prismaMock.reservation.create.mock.calls[0][0].data).toMatchObject({
+        status: 'CHECKED_IN',
+        checkInMethod: 'STAFF',
+        checkedInByStaffId: STAFF_ID,
+      })
+
+      jest.clearAllMocks()
+      prismaMock.$transaction = jest.fn((callback: any) => callback(prismaMock))
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CONFIRMED', classSessionId: SESSION_ID }))
+      await addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)
+      expect(prismaMock.reservation.create.mock.calls[0][0].data.checkInMethod).toBeUndefined()
+    })
+
     it('should default partySize to 1 when not specified', async () => {
       mockSessionAndEnrolled(sessionRow, 0)
       prismaMock.reservation.create.mockResolvedValue(makeReservation({ partySize: 1 }))

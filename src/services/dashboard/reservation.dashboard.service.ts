@@ -780,6 +780,9 @@ export const RESERVATION_INCLUDE = {
     },
   },
   createdBy: { select: { id: true, firstName: true, lastName: true } },
+  // Asistencia verificada (16-nov-2026): quién marcó la llegada a mano (o desde la lista de una app vieja). Campo nuevo y
+  // opcional: las apps que no lo conocen lo ignoran.
+  checkedInBy: { select: { id: true, firstName: true, lastName: true } },
   // Picked modifiers — surfaced so the dashboard reservation detail / TPV
   // shows the full breakdown and the cashier charges the correct total.
   modifiers: {
