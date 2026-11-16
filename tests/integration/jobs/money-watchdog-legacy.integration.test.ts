@@ -27,7 +27,7 @@ const tables = {
   Product: 'id text, "venueId" text, "trackInventory" boolean, "inventoryMethod" text',
   Recipe: '"productId" text',
   OrderItemModifier: '"orderItemId" text, "modifierId" text',
-  Modifier: 'id text, "rawMaterialId" text, "quantityPerUnit" numeric',
+  Modifier: 'id text, "rawMaterialId" text, "quantityPerUnit" numeric, "linkedProductId" text',
   InventoryPosting: '"orderId" text, "venueId" text, "effectKind" text',
   Inventory: 'id text, "venueId" text',
   InventoryMovement: `"inventoryId" text, reference text, type text, quantity numeric,
