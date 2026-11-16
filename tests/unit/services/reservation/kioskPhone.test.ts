@@ -57,6 +57,8 @@ beforeEach(() => {
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   prismaMock.kioskCheckInAttempt.upsert.mockResolvedValue({ count: 1 } as any)
   prismaMock.reservation.findFirst.mockResolvedValue(reserva() as any)
+  prismaMock.kioskCheckInOp.findUnique.mockResolvedValue(null)
+  ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
   ;(checkInReservation as jest.Mock).mockResolvedValue({ outcome: 'CHECKED_IN', reservation: {}, services: [] })
 })
 
@@ -95,19 +97,37 @@ describe('Teléfono tecleado en el kiosco', () => {
     expect(undoNoShow).not.toHaveBeenCalled()
   })
 
-  it('🔴 Codex r1 #5: la gerente deshizo la llegada y la cola reintenta la misma fila ⇒ «ya registrada», sin volver a marcar', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(
-      reserva({
-        status: 'CONFIRMED',
-        statusLog: [
-          { status: 'CHECKED_IN', opId: 'fila-1', method: 'PHONE' },
-          { status: 'CONFIRMED', by: 'gerente' },
-        ],
-      }) as any,
-    )
+  it('🔴 Codex r4: la operación ya tiene recibo ⇒ «ya registrada» con la reserva de la PRIMERA vez, sin buscar ni escribir', async () => {
+    prismaMock.kioskCheckInOp.findUnique.mockResolvedValue({ venueId: V, reservationId: 'res-primera' } as any)
+    prismaMock.reservation.findFirst.mockResolvedValue(reserva({ id: 'res-primera', status: 'CONFIRMED' }) as any)
     const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-1' })
+    expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-primera' })
+    // Se lee la reserva SÓLO para pintar, por su id: no se vuelve a resolver por teléfono y hora (podía caer en otra clase).
+    expect((prismaMock.reservation.findFirst.mock.calls[0][0] as any).where).toEqual({ id: 'res-primera', venueId: V })
+    expect(checkInReservation).not.toHaveBeenCalled()
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('el recibo se escribe en la MISMA transacción que la llegada, antes de ella', async () => {
+    await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-2' })
+    const [pedazos, ...valores] = (prismaMock.$executeRaw as jest.Mock).mock.calls[0] as [string[], ...unknown[]]
+    expect(pedazos.join('?')).toMatch(/INSERT INTO "KioskCheckInOp"[\s\S]*ON CONFLICT \("opId"\) DO NOTHING/)
+    expect(valores).toEqual(['fila-2', V, 'res-1'])
+    expect(checkInReservation).toHaveBeenCalled()
+  })
+
+  it('otra petición con el mismo opId ganó el recibo ⇒ ésta no marca nada y contesta lo mismo', async () => {
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(0)
+    prismaMock.kioskCheckInOp.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ reservationId: 'res-1' } as any)
+    const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-3' })
     expect(out.outcome).toBe('ALREADY_CHECKED_IN')
     expect(checkInReservation).not.toHaveBeenCalled()
+  })
+
+  it('en vivo (sin opId) no hay recibo', async () => {
+    await checkInByIdentifier(base)
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    expect(prismaMock.kioskCheckInOp.findUnique).not.toHaveBeenCalled()
   })
 
   it('una hora futura (más de 1 min) ⇒ 422', async () => {
@@ -125,14 +145,12 @@ describe('Teléfono tecleado en el kiosco', () => {
     expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
   })
 
-  it('🔴 Codex r2 #3: desde la cola, «ya estaba registrada» también deja su opId (un reintento tras deshacer no re-marca)', async () => {
+  it('🔴 Codex r2 #3: desde la cola, «ya estaba registrada» también deja su recibo (un reintento tras deshacer no re-marca)', async () => {
     prismaMock.reservation.findFirst.mockResolvedValue(reserva({ status: 'CHECKED_IN' }) as any)
-    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
     const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-9' })
     expect(out.outcome).toBe('ALREADY_CHECKED_IN')
-    const [pedazos, ...valores] = (prismaMock.$executeRaw as jest.Mock).mock.calls[0] as [string[], ...unknown[]]
-    expect(pedazos.join('?')).toMatch(/"status" = 'CHECKED_IN'/)
-    expect(String(valores[0])).toContain('"opId":"fila-9"')
+    const valores = (prismaMock.$executeRaw as jest.Mock).mock.calls[0].slice(1)
+    expect(valores).toEqual(['fila-9', V, 'res-1'])
     expect(checkInReservation).not.toHaveBeenCalled()
   })
 
@@ -150,10 +168,10 @@ describe('Teléfono tecleado en el kiosco', () => {
     expect(undoNoShow).toHaveBeenCalled()
   })
 
-  it('Codex r2 #5: la cola tiene 30 intentos por minuto para su teléfono; lo tecleado en vivo, 5', async () => {
-    await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-3' })
+  it('Codex r2 #5 y r4 #4: la cola no gasta el tope por teléfono (5/min); lo tecleado en vivo, sí', async () => {
+    await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-4' })
     await checkInByIdentifier(base)
     const ups = prismaMock.kioskCheckInAttempt.upsert.mock.calls.map(c => (c[0] as any).where.venueId_scope_windowStart.scope)
-    expect(ups.filter((x: string) => x.startsWith('identifier:'))).toHaveLength(2)
+    expect(ups.filter((x: string) => x.startsWith('identifier:'))).toHaveLength(1)
   })
 })

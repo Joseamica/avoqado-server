@@ -20,3 +20,15 @@ CREATE TABLE "KioskQrKey" (
 CREATE INDEX "KioskQrKey_venueId_deviceKey_idx" ON "KioskQrKey"("venueId", "deviceKey");
 ALTER TABLE "KioskQrKey" ADD CONSTRAINT "KioskQrKey_venueId_fkey"
   FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- Recibo idempotente de cada llegada de la cola sin red del kiosco (opId).
+CREATE TABLE "KioskCheckInOp" (
+    "opId" VARCHAR(64) NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "reservationId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "KioskCheckInOp_pkey" PRIMARY KEY ("opId")
+);
+CREATE INDEX "KioskCheckInOp_venueId_createdAt_idx" ON "KioskCheckInOp"("venueId", "createdAt");
+ALTER TABLE "KioskCheckInOp" ADD CONSTRAINT "KioskCheckInOp_venueId_fkey"
+  FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;

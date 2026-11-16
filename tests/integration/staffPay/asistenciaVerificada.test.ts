@@ -136,4 +136,11 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     const ana = r.personas.items.find(i => i.staffId === m.ana) as any
     expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
   })
+
+  it('Codex r4 #5: el recibo de la coach trae el total de llegadas por método y cada clase su desglose', async () => {
+    const { reciboDePersona } = await import('@/services/dashboard/staffPay/recibos.service')
+    const r = await reciboDePersona({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-11-15', limit: 100 })
+    expect(r.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
+    expect(r.renglones.some(x => /con celular/.test(x.concepto))).toBe(true)
+  })
 })

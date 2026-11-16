@@ -556,6 +556,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Reservation: 'Reservations & Booking',
   KioskCheckInChallenge: 'Reservations & Booking',
   KioskQrKey: 'Reservations & Booking',
+  KioskCheckInOp: 'Reservations & Booking',
   KioskCheckInAttempt: 'Reservations & Booking',
   KioskOutreachOutbox: 'Reservations & Booking',
   ReservationSettings: 'Reservations & Booking',
