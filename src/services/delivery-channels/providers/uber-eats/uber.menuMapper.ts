@@ -33,7 +33,7 @@ const aCentavos = (pesos: number): number => Math.round(pesos * 100)
  * dos veces (a pesos y luego a centavos) desplaza el precio y el comercio cobra distinto de
  * lo que configuró.
  */
-function precioPublicado(sku: string, precioMostrador: number, p?: PreciosDeCanal): number {
+export function precioPublicado(sku: string, precioMostrador: number, p?: PreciosDeCanal): number {
   const fijo = p?.overrides?.[sku]
   if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return aCentavos(fijo)
   const pct = p?.markupPercent

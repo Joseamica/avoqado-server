@@ -49,6 +49,7 @@ import {
   pauseChannelSchema,
   disconnectChannelSchema,
   createActivationRequestSchema,
+  productoEnCanalesSchema,
 } from '../schemas/delivery-channels.schema'
 
 const router = Router({ mergeParams: true })
@@ -215,6 +216,20 @@ router.post(
   withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.disconnectChannel,
+)
+
+/**
+ * D1 (16-nov-2026): pone o quita UN producto en varios canales, con la fila de cada canal bloqueada. La llaman la casilla
+ * «Vender en: ☑ Rappi ☐ Uber Eats» del producto y el MCP. Mismas guardas y mismo orden que el PATCH del canal. Idempotente.
+ */
+router.put(
+  '/venues/:venueId/products/:productId/channels',
+  authenticateTokenMiddleware,
+  validateRequest(productoEnCanalesSchema),
+  checkPermission('delivery-channels:manage'),
+  withDeliveryPremiumMessage,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  ctrl.setProductChannels,
 )
 
 router.post(
