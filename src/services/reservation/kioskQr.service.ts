@@ -168,18 +168,33 @@ export async function consumeKioskQr(args: {
     ON CONFLICT ("opId") DO NOTHING`
 
   const grace = (await getReservationSettings(args.venueId)).scheduling.noShowGraceMin
+  // Hallado en la D3 (16-nov): el panel da de alta a una asistente sólo con nombre y teléfono, SIN ficha de clienta. Esa
+  // reserva también es de esta alumna si el teléfono que PROBÓ con código es el de la reserva: la misma cola de 10 dígitos
+  // con la que el kiosco busca un teléfono tecleado. Sólo teléfonos probados; el correo no entra.
+  const colas = [
+    ...new Set(
+      args.sesion.contactos
+        .filter(c => c.tipo === 'PHONE')
+        .map(c => c.valor.replace(/\D/g, ''))
+        .filter(d => d.length >= 10)
+        .map(d => d.slice(-10)),
+    ),
+  ]
   const candidates = await prisma.reservation.findMany({
     where: {
       venueId: args.venueId,
-      customerId: args.customerId,
+      OR: [{ customerId: args.customerId }, ...colas.map(cola => ({ customerId: null, guestPhone: { endsWith: cola } }))],
       status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] },
       startsAt: { gt: new Date(at.getTime() - grace * 60_000), lte: new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000) },
     },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
     take: 20,
-    select: { id: true, status: true, startsAt: true },
+    select: { id: true, status: true, startsAt: true, customerId: true },
   })
-  const enVentana = candidates.filter(r => evaluateKioskWindow({ startsAt: r.startsAt, now: at, noShowGraceMin: grace }))
+  // La reserva con su ficha va antes que la de invitada (el orden por hora se conserva dentro de cada grupo).
+  const enVentana = candidates
+    .filter(r => evaluateKioskWindow({ startsAt: r.startsAt, now: at, noShowGraceMin: grace }))
+    .sort((a, b) => Number(a.customerId === null) - Number(b.customerId === null))
   // Primero la que falta marcar; si todas ya están, «ya estabas».
   const target = enVentana.find(r => r.status === 'PENDING' || r.status === 'CONFIRMED') ?? enVentana.find(r => r.status === 'NO_SHOW')
   if (!target) {
@@ -194,7 +209,9 @@ export async function consumeKioskQr(args: {
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
-  const metodo = await metodoDeLaSesion(args)
+  // 🔴 La de invitada queda «con teléfono», nunca «con celular»: ese número lo escribió el personal en la reserva (no lo
+  // probó la ficha), así que vale lo mismo que teclearlo en el kiosco. Quien pueda editar reservas no gana un «con celular».
+  const metodo = target.customerId === null ? { method: 'PHONE' as const } : await metodoDeLaSesion(args)
 
   const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
     const n = await insertarRecibo(tx, target.id)

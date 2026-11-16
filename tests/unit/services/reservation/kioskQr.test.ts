@@ -161,7 +161,9 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       expect(cmd).toMatchObject({ reservationId: 'res-1', venueId: VENUE, source: 'KIOSK', method: 'QR' })
       expect(cmd.now.getTime()).toBe(ts * 1000)
       // Sólo SUS reservas: la sesión decide quién llegó.
-      expect(prismaMock.reservation.findMany.mock.calls[0][0].where).toMatchObject({ venueId: VENUE, customerId: 'cust-1' })
+      const where = prismaMock.reservation.findMany.mock.calls[0][0].where
+      expect(where).toMatchObject({ venueId: VENUE })
+      expect(where.OR).toContainEqual({ customerId: 'cust-1' })
     })
 
     it('🔴 la «coach» con SU sesión (sin reserva en esa clase) no marca a nadie', async () => {
@@ -248,6 +250,47 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
       ;(undoNoShow as jest.Mock).mockResolvedValue({ outcome: 'UNDONE', correction: { id: 'corr-2' } })
       const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
       expect(out.corrected).toBe(true)
+    })
+  })
+
+  /**
+   * Hallado en la D3 el 16-nov: el panel da de alta a una asistente sólo con nombre y teléfono (reserva SIN ficha de
+   * clienta). Esa alumna entraba con el código de ESE teléfono, escaneaba y veía «No encontramos una reservación tuya».
+   */
+  describe('reserva que recepción dio de alta sin ficha (sólo nombre y teléfono)', () => {
+    it('se busca también por el teléfono que la alumna PROBÓ (misma cola de 10 dígitos que el kiosco)', async () => {
+      await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(prismaMock.reservation.findMany.mock.calls[0][0].where.OR).toEqual([
+        { customerId: 'cust-1' },
+        { customerId: null, guestPhone: { endsWith: '5512345678' } },
+      ])
+    })
+
+    it('queda «con teléfono», no «con celular»: ese número lo escribió el personal, no lo probó la ficha', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([{ id: 'res-inv', status: 'CONFIRMED', startsAt: CLASE, customerId: null }] as any)
+      const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(out).toEqual({ outcome: 'CHECKED_IN', reservationId: 'res-inv' })
+      const cmd = (checkInReservation as jest.Mock).mock.calls[0][1]
+      expect(cmd).toMatchObject({ reservationId: 'res-inv', method: 'PHONE', source: 'KIOSK' })
+      expect(cmd.byStaffId).toBeUndefined()
+    })
+
+    it('si también tiene una reserva con su ficha en la misma ventana, se marca ÉSA (y «con celular»)', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        { id: 'res-inv', status: 'CONFIRMED', startsAt: CLASE, customerId: null },
+        { id: 'res-propia', status: 'CONFIRMED', startsAt: CLASE, customerId: 'cust-1' },
+      ] as any)
+      await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect((checkInReservation as jest.Mock).mock.calls[0][1]).toMatchObject({ reservationId: 'res-propia', method: 'QR' })
+    })
+
+    it('una sesión que sólo probó un correo no busca reservas de invitada', async () => {
+      const sesion = {
+        tipo: 'SESION',
+        contactos: [{ tipo: 'EMAIL' as const, valor: 'ana@prueba.mx', metodo: 'EMAIL_CODE' as const, probadoEn: 1 }],
+      }
+      await consumeKioskQr({ venueId: VENUE, sesion, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(prismaMock.reservation.findMany.mock.calls[0][0].where.OR).toEqual([{ customerId: 'cust-1' }])
     })
   })
 })

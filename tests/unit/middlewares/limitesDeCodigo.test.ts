@@ -81,6 +81,28 @@ describe('los limitadores del código viven en un solo módulo', () => {
     expect(rutas).toMatch(/const writeLimit = rateLimit\(\{ windowMs: 60_000, max: 5, keyGenerator: porVisitante,/)
   })
 
+  // Asistencia verificada (hallado en la D3, 16-nov): toda la clase llega por el WiFi del estudio, o sea por UNA IP. Con
+  // `writeLimit` (5/min por IP, compartido con pedir el código) la sexta alumna del minuto recibía 429 y veía «Sin conexión».
+  it('las llegadas del kiosco (QR y reto) no usan el writeLimit de 5 por IP: llevan su techo propio', () => {
+    const rutas = fuente('routes/public.routes.ts')
+    expect(rutas).toMatch(/const checkInLimit = rateLimit\(\{ windowMs: 60_000, max: 120, keyGenerator: porVisitante,/)
+    for (const ruta of ["'/venues/:venueSlug/customer/checkin-qr'", "'/venues/:venueSlug/customer/checkin/:challengeId'"]) {
+      const bloque = rutas.slice(rutas.indexOf(`router.post(\n  ${ruta}`))
+      expect(bloque.slice(0, bloque.indexOf(')\n'))).toMatch(
+        /kioskCheckInCors,\s*checkInLimit,\s*resolveVenueBySlug,\s*authenticateCustomer,/,
+      )
+    }
+  })
+
+  it('una clase de 12 que llega en el mismo minuto por la misma IP pasa completa con el techo de llegadas', async () => {
+    const techo = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: req => ipDelCliente(req) || 'desconocida' })
+    const app = appCon(techo)
+    for (let i = 0; i < 12; i++) {
+      const res = await request(app).post('/contact').set('X-Forwarded-For', IP_DEL_PROXY).send({})
+      expect(res.status).toBe(200)
+    }
+  })
+
   it('exporta los limitadores como middlewares', () => {
     for (const limite of [
       limiteContactoPorCorreo,

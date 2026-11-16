@@ -193,6 +193,11 @@ const porVisitante = (req: Parameters<typeof ipDelCliente>[0]) => ipDelCliente(r
 const readLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// Asistencia verificada (hallado en la D3, 16-nov): toda la clase llega por el WiFi del estudio, o sea por UNA IP. Con
+// `writeLimit` (5 por minuto por IP, compartido con pedir el código) la sexta alumna del minuto recibía 429 y su celular
+// decía «Sin conexión». Las llegadas exigen sesión de clienta y las firmas malas ya se cuentan aparte (10 y se bloquea),
+// así que aquí sólo va un techo por IP, el mismo de `/contact`.
+const checkInLimit = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 // El actualizador del POS: cada aparato pregunta al abrir y al volver la red; 120 por minuto por visitante.
 const posAppVersionLimit = rateLimit({
@@ -407,7 +412,7 @@ router.post(
 router.post(
   '/venues/:venueSlug/customer/checkin/:challengeId',
   kioskCheckInCors,
-  writeLimit,
+  checkInLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   activarReservasSiFalta,
@@ -420,7 +425,7 @@ router.options('/venues/:venueSlug/customer/checkin-qr', kioskCheckInCors)
 router.post(
   '/venues/:venueSlug/customer/checkin-qr',
   kioskCheckInCors,
-  writeLimit,
+  checkInLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   activarReservasSiFalta,
