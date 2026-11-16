@@ -272,8 +272,8 @@ interface PayInOutParams {
    */
   createdAt?: string | number | null
   /**
-   * Encargo 921513 (Codex r2): cuánto esperó el movimiento en la cola, en ms, medido con el reloj del aparato (`ahora − createdAt`).
-   * Con una edad creíble la hora es `llegada − edadMs` (`horaDelMovimientoDeLaCola`): el desfase del reloj se cancela solo.
+   * Encargo 921513 (Codex r2 y r3): cuánto esperó el movimiento en la cola, en ms, medido con el reloj MONOTÓNICO del aparato. Con
+   * una edad creíble la hora es `llegada − edadMs` (`horaDelMovimientoDeLaCola`): el reloj de pared del aparato no participa.
    */
   edadMs?: unknown
 }
