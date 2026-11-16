@@ -791,6 +791,45 @@ export async function buildReservationSpecs(
     },
   })
 
+  // «Una sola foto» (Codex r4 #1): lo que se aparta sale de la MISMA foto que se guarda en el vale (`modifiersSnapshot[].inventario`),
+  // no de una segunda lectura del extra: si el dueño lo cambia entre las dos, apartar B y consumir A descontaría los dos.
+  const fotos = snapshots.flatMap(line => (line.modifiersSnapshot ?? []).map(m => m.inventario).filter((f): f is InventarioDelExtra => !!f))
+  const rawIds = [...new Set(fotos.map(f => f.rawMaterialId).filter((id): id is string => !!id))]
+  const linkedIds = [...new Set(fotos.map(f => f.linkedProductId).filter((id): id is string => !!id))]
+  const [rawsDeFoto, ligadosDeFoto] = await Promise.all([
+    rawIds.length
+      ? prisma.rawMaterial.findMany({
+          where: { id: { in: rawIds }, venueId },
+          select: { id: true, name: true, unit: true },
+          take: rawIds.length,
+        })
+      : [],
+    linkedIds.length
+      ? prisma.product.findMany({
+          where: { id: { in: linkedIds }, venueId },
+          select: LINKED_PRODUCT_INVENTORY_SELECT,
+          take: linkedIds.length,
+        })
+      : [],
+  ])
+  const rawById = new Map(rawsDeFoto.map(r => [r.id, r]))
+  const ligadoById = new Map(ligadosDeFoto.map(p => [p.id, p]))
+  const extrasDeLaLinea = (lineIndex: number) =>
+    modifiers
+      .filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))
+      .map(modifier => {
+        const foto = snapshots[lineIndex]?.modifiersSnapshot?.find(m => m.modifierId === modifier.id)?.inventario
+        if (!foto) return modifier
+        return {
+          ...modifier,
+          rawMaterial: foto.rawMaterialId ? (rawById.get(foto.rawMaterialId) ?? null) : null,
+          quantityPerUnit: foto.quantityPerUnit != null ? new Prisma.Decimal(foto.quantityPerUnit) : null,
+          unit: foto.unit as typeof modifier.unit,
+          inventoryMode: (foto.inventoryMode ?? modifier.inventoryMode) as typeof modifier.inventoryMode,
+          linkedProduct: foto.linkedProductId ? (ligadoById.get(foto.linkedProductId) ?? null) : null,
+        }
+      })
+
   const specs: ReservationSpec[] = []
   snapshots.forEach((snapshot, lineIndex) => {
     const product = products.find(candidate => candidate.id === snapshot.productId)
@@ -800,7 +839,7 @@ export async function buildReservationSpecs(
     // Los extras se apartan aunque el platillo principal no lleve inventario, igual que en el cobro (Codex r2 #3, encargo 27771e): antes
     // un principal sin inventario saltaba también sus extras, y al cobrar se consumían sin haberse apartado. Además, así la reserva es
     // la foto EXACTA de lo que el extra descontaba al emitir (`esExtraApartable`, usado al consumir).
-    for (const modifier of modifiers.filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))) {
+    for (const modifier of extrasDeLaLinea(lineIndex)) {
       // Extra ligado a un platillo: 1 porción por pieza del renglón (en una línea pesada la cantidad es 1: es por renglón).
       for (const target of linkedProductTargets(venueId, modifier.linkedProduct, new Prisma.Decimal(snapshot.quantity))) {
         specs.push({ lineIndex, ...target })
@@ -837,8 +876,8 @@ export async function buildReservationSpecs(
         throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No existe receta para "${product.name}".`)
       }
       const selectedSubstitutionGroups = new Set(
-        modifiers
-          .filter(modifier => (inputs[lineIndex].modifierIds ?? []).includes(modifier.id) && modifier.inventoryMode === 'SUBSTITUTION')
+        extrasDeLaLinea(lineIndex)
+          .filter(modifier => modifier.inventoryMode === 'SUBSTITUTION')
           .map(modifier => modifier.groupId),
       )
       for (const recipeLine of product.recipe.lines) {

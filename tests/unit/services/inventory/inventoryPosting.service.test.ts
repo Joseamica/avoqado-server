@@ -817,3 +817,72 @@ describe('🍟 ordenDescuentaInventarioSql (vigilante de dinero) espeja al extra
     expect(ordenDescuentaInventarioSql('o')).toMatch(/m\."linkedProductId" IS NOT NULL/)
   })
 })
+
+describe('🍟 Codex r4 #2 (encargo 27771e): un vale por área cerrado por OTRO canal descuenta la foto del vale', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(null as any)
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-1', status: 'PENDING' } as any)
+    prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    getInventoryMethodsMock.mockImplementation(async (ids: string[]) => new Map(ids.map(id => [id, null])))
+  })
+
+  const vivo = (linkedProductId: string | null, rawMaterialId: string | null = null) => ({
+    quantity: 1,
+    modifier: {
+      id: 'mod-papas',
+      name: 'Papas',
+      groupId: 'g1',
+      rawMaterialId,
+      quantityPerUnit: rawMaterialId ? '10' : null,
+      unit: rawMaterialId ? 'MILLILITER' : null,
+      inventoryMode: 'ADDITION',
+      linkedProductId,
+    },
+  })
+
+  it('al emitir estaba ligado a Papas; hoy es el insumo Aceite ⇒ el vale de la venta congela Papas, no Aceite', async () => {
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([
+      {
+        id: 'line-1',
+        orderItem: { id: 'oi-1' },
+        modifiersSnapshot: [
+          {
+            modifierId: 'mod-papas',
+            inventario: { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: 'ADDITION', linkedProductId: 'p-papas' },
+          },
+        ],
+      },
+    ] as any)
+
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: [
+        {
+          id: 'oi-1',
+          productId: 'p-burger',
+          quantity: 1,
+          weightQuantity: null,
+          areaTicketLineId: 'line-1',
+          modifiers: [vivo(null, 'rm-aceite')],
+        },
+      ] as any,
+    })
+
+    const data = (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
+    expect(data.payloadSnapshot.items[0].modifiers[0].modifier).toMatchObject({ linkedProductId: 'p-papas', rawMaterialId: null })
+    expect(data.lines.create).toHaveLength(1)
+  })
+
+  it('regresión: un renglón SIN vale congela el extra de ahora, como siempre', async () => {
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: [{ id: 'oi-1', productId: 'p-burger', quantity: 1, weightQuantity: null, modifiers: [vivo('p-aros')] }] as any,
+    })
+    const data = (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
+    expect(data.payloadSnapshot.items[0].modifiers[0].modifier.linkedProductId).toBe('p-aros')
+    expect(prismaMock.areaTicketLine.findMany).not.toHaveBeenCalled()
+  })
+})

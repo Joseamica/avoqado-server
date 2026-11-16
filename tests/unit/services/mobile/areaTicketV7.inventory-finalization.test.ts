@@ -1794,6 +1794,64 @@ describe('🍟 Vales por área: la reserva es la foto de los extras al emitir (C
 describe('🍟 La foto de inventario de los extras en el vale (encargo 27771e, Codex r3)', () => {
   const { buildReservationSpecs } = jest.requireActual('@/services/mobile/areaTicketV7.mobile.service')
 
+  it('Codex r4 #1: lo que se aparta sale de la FOTO del vale (platillo A), no de una segunda lectura del extra (hoy B)', async () => {
+    prismaMock.product.findMany.mockImplementation((async (args: any) => {
+      if (args?.where?.id?.in?.includes('p-papas'))
+        return [
+          {
+            id: 'p-papas',
+            name: 'Papas',
+            venueId,
+            trackInventory: true,
+            inventoryMethod: 'QUANTITY',
+            soldByWeight: false,
+            inventory: { id: 'inventory-papas' },
+            recipe: null,
+          },
+        ]
+      return [{ id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null }]
+    }) as any)
+    prismaMock.rawMaterial.findMany.mockResolvedValue([])
+    prismaMock.modifier.findMany.mockResolvedValue([
+      {
+        id: 'mod-papas',
+        groupId: 'g1',
+        inventoryMode: 'ADDITION',
+        rawMaterial: null,
+        quantityPerUnit: null,
+        unit: null,
+        linkedProduct: {
+          id: 'p-aros',
+          name: 'Aros',
+          venueId,
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          soldByWeight: false,
+          inventory: { id: 'inventory-aros' },
+          recipe: null,
+        },
+      },
+    ])
+    const specs = await buildReservationSpecs(
+      venueId,
+      [{ clientLineId: 'l1', modifierIds: ['mod-papas'] }],
+      [
+        {
+          productId: 'p-burger',
+          quantity: '1',
+          weightKg: null,
+          modifiersSnapshot: [
+            {
+              modifierId: 'mod-papas',
+              inventario: { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: 'ADDITION', linkedProductId: 'p-papas' },
+            },
+          ],
+        },
+      ],
+    )
+    expect(specs.map((s: any) => s.inventoryId)).toEqual(['inventory-papas'])
+  })
+
   it('Codex r3 #4: con el principal SIN inventario, una SUSTITUCIÓN no se aparta (no sustituye nada), una ADICIÓN sí', async () => {
     prismaMock.product.findMany.mockResolvedValue([
       { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
