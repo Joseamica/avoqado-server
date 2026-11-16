@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as creditPackPublicService from '../../services/dashboard/creditPack.public.service'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 
 // ==========================================
@@ -98,6 +98,9 @@ export async function createCheckout(req: Request, res: Response, next: NextFunc
     // Fase 0.B: con sesión (authenticateCustomerOptional ya validó el token contra el slug),
     // la compra se liga al customer del token; el email del body no manda.
     const sessionCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? null
+    // D655: la invitada se identifica por su teléfono (como siempre). Con sesión, la compra va por su id y el
+    // teléfono sobra: quien entró con Google no tiene, y la tienda manda `phone: ''`.
+    if (!sessionCustomerId && !phone) throw new BadRequestError('El teléfono es requerido')
 
     const result = await creditPackPublicService.createCheckoutSession(venue.id, packId, email, phone, successUrl, cancelUrl, {
       customerId: sessionCustomerId,

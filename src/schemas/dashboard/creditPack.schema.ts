@@ -135,7 +135,9 @@ export const publicCheckoutSchema = z.object({
   body: rejectBodyCustomerId(
     z.object({
       email: z.string().email('Email inválido').optional(),
-      phone: z.string().min(1, 'El teléfono es requerido'),
+      // D655: opcional. Con sesión la compra va por el id de la clienta (quien entró con Google no tiene teléfono);
+      // sin sesión, el controlador (`createCheckout`) lo sigue exigiendo.
+      phone: z.string().trim().optional(),
       successUrl: z.string().url('URL de éxito inválida'),
       cancelUrl: z.string().url('URL de cancelación inválida'),
     }),
