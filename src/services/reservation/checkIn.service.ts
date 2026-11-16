@@ -163,6 +163,10 @@ export interface CheckInResult<R = any> {
  *   KIOSK fuera de ventana → 422 CHECK_IN_OUTSIDE_WINDOW (antes de escribir)
  */
 export async function checkInReservation(tx: Prisma.TransactionClient, cmd: CheckInCommand): Promise<CheckInResult> {
+  // 🔴 Codex r5 #1: el candado de la fila PRIMERO. Leer, decidir y reescribir el statusLog es un leer-modificar-escribir: sin
+  // candado, un QR y un «deshacer» que pasaran entre la lectura y el CAS dejaban volver a marcar la llegada deshecha y
+  // borraban esos movimientos de la historia. El mismo orden que `undoNoShow` (candado de la reserva primero).
+  await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${cmd.reservationId} AND "venueId" = ${cmd.venueId} FOR UPDATE`
   const current = await tx.reservation.findFirst({ where: { id: cmd.reservationId, venueId: cmd.venueId } })
   if (!current) throw new NotFoundError('Reservacion no encontrada')
 

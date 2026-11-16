@@ -14,7 +14,8 @@
  * a una alumna ausente que coopera. Eso sólo lo cerraría la ubicación, y el founder la dejó fuera (promesa, «No entra»).
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
+import { Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -178,14 +179,35 @@ export async function consumeKioskQr(args: {
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
   const metodo = await metodoDeLaSesion(args)
+
+  // 🔴 Codex r5 #2: el MISMO QR presentado otra vez por la MISMA alumna (respuesta perdida, doble escaneo) no puede marcar
+  // otra reserva. Lleva un recibo, como la cola del teléfono: llave = hash(llave del QR, hora, alumna).
+  const opId = `qr:${createHash('sha256').update(`${args.keyId}|${args.ts}|${args.customerId}`).digest('hex').slice(0, 56)}`
+  const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId }, select: { reservationId: true, venueId: true } })
+  if (previa && previa.venueId === args.venueId) return { outcome: 'ALREADY_CHECKED_IN', reservationId: previa.reservationId }
+  const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
+    const n = await tx.$executeRaw`
+      INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
+      VALUES (${opId}, ${args.venueId}, ${target.id})
+      ON CONFLICT ("opId") DO NOTHING`
+    if (n === 0) throw new QrYaPresentado()
+    return fn()
+  }
+  const yaPresentado = async () => {
+    const r = await prisma.kioskCheckInOp.findUnique({ where: { opId }, select: { reservationId: true } })
+    return { outcome: 'ALREADY_CHECKED_IN' as const, reservationId: r?.reservationId ?? target.id }
+  }
   if (target.status !== 'NO_SHOW') {
     try {
       const out = await prisma.$transaction(tx =>
-        checkInReservation(tx, { reservationId: target.id, venueId: args.venueId, actor, source: 'KIOSK', now: at, ...metodo }),
+        conRecibo(tx, () =>
+          checkInReservation(tx, { reservationId: target.id, venueId: args.venueId, actor, source: 'KIOSK', now: at, ...metodo }),
+        ),
       )
       logger.info('✅ [KIOSK QR] Llegada con celular', { venueId: args.venueId, reservationId: target.id, keyId: args.keyId })
       return { outcome: out.outcome, reservationId: target.id }
     } catch (err) {
+      if (err instanceof QrYaPresentado) return yaPresentado()
       // El «No asistió» automático le ganó entre la lectura y el check-in: se corrige abajo.
       if (!(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
     }
@@ -193,13 +215,32 @@ export async function consumeKioskQr(args: {
 
   // Llegó (el QR firmado lo prueba, con su hora) pero el «No asistió» automático ya había corrido. Como la cola del
   // kiosco (D4): se corrige con la hora del QR y el gerente se entera.
-  const undone = await prisma.$transaction(tx =>
-    undoNoShow(tx, { reservationId: target.id, venueId: args.venueId, actor, source: 'KIOSK', now: args.now, arrivedAt: at, ...metodo }),
-  )
+  let undone
+  try {
+    undone = await prisma.$transaction(tx =>
+      conRecibo(tx, () =>
+        undoNoShow(tx, {
+          reservationId: target.id,
+          venueId: args.venueId,
+          actor,
+          source: 'KIOSK',
+          now: args.now,
+          arrivedAt: at,
+          ...metodo,
+        }),
+      ),
+    )
+  } catch (err) {
+    if (err instanceof QrYaPresentado) return yaPresentado()
+    throw err
+  }
   if (undone.outcome === 'UNDONE') void afterNoShowCorrection(undone.correction.id)
   logger.info('✅ [KIOSK QR] Llegada con celular que corrigió un «No asistió»', { venueId: args.venueId, reservationId: target.id })
   return { outcome: 'CHECKED_IN', reservationId: target.id, corrected: true }
 }
+
+/** Otra presentación del MISMO QR por la MISMA alumna ya dejó su recibo. */
+class QrYaPresentado extends Error {}
 
 async function verify(args: { venueId: string; keyId: string; ts: number; sig: string }): Promise<boolean> {
   if (!/^c[a-z0-9]{20,30}$/.test(args.keyId) || !Number.isSafeInteger(args.ts) || args.ts <= 0) return false

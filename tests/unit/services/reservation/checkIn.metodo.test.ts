@@ -34,6 +34,8 @@ function mkTx(row: Partial<any> = {}) {
     ...row,
   }
   return {
+    // Codex r5 #1: el candado de la fila al empezar.
+    $queryRaw: jest.fn(async () => []),
     reservation: {
       findFirst: jest.fn(async () => reservation),
       updateMany: jest.fn(async () => ({ count: 1 })),
@@ -100,6 +102,16 @@ describe('checkInReservation guarda el método en la reserva, el statusLog y el 
     const out = await checkInReservation(tx, { reservationId: 'res-1', venueId: 'v1', actor: HUMAN, source: 'DASHBOARD', now: NOW })
     expect(out.outcome).toBe('ALREADY_CHECKED_IN')
     expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex r5 #1: el candado de la fila va ANTES de leer', () => {
+  it('toma FOR UPDATE de la reserva antes de leerla y decidir', async () => {
+    const tx = mkTx()
+    await checkInReservation(tx, { reservationId: 'res-1', venueId: 'v1', actor: HUMAN, source: 'DASHBOARD', now: NOW })
+    const [pedazos] = tx.$queryRaw.mock.calls[0] as [string[]]
+    expect(pedazos.join('?')).toMatch(/FOR UPDATE/)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.reservation.findFirst.mock.invocationCallOrder[0])
   })
 })
 

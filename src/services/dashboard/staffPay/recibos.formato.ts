@@ -128,7 +128,14 @@ export function textoDeLlegadas(llegadas: Prisma.JsonValue | null | undefined): 
 }
 
 /** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
-export function filasDelRecibo(r: { renglones: RenglonRecibo[]; total: string; parcial: boolean }): RenglonRecibo[] {
+export function filasDelRecibo(r: {
+  renglones: RenglonRecibo[]
+  total: string
+  parcial: boolean
+  /** Asistencia verificada (Codex r5 #3): el Excel no tiene línea de resumen; el total de llegadas va en la fila del total. */
+  llegadasEnTotal?: string | null
+}): RenglonRecibo[] {
+  const total = r.parcial ? 'Total (vista parcial)' : 'Total'
   return [
     ...r.renglones,
     {
@@ -136,7 +143,7 @@ export function filasDelRecibo(r: { renglones: RenglonRecibo[]; total: string; p
       fecha: '',
       hora: null,
       sede: '',
-      concepto: r.parcial ? 'Total (vista parcial)' : 'Total',
+      concepto: r.llegadasEnTotal ? `${total} · Llegadas: ${r.llegadasEnTotal}` : total,
       lugares: null,
       monto: r.total,
     },

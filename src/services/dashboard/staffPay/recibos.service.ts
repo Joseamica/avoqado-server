@@ -618,7 +618,13 @@ export async function exportarRecibo(input: {
   const encoded = await encodeExport(input.format, {
     allColumns: columnas,
     requestedColumnIds: columnas.map(c => c.id),
-    rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
+    rows: filasDelRecibo({
+      renglones,
+      total: total.toFixed(2),
+      parcial: f.parcial,
+      // El PDF lo dice en su línea de resumen; el Excel, en la fila del total (no tiene resumen).
+      llegadasEnTotal: input.format === 'xlsx' && llegadas ? textoDeLlegadas(llegadas as unknown as Prisma.JsonValue) : null,
+    }),
     title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
     sheetName: `Recibo de ${f.persona}`,
     resumen: [...totalesPorTipoDelRecibo(porTipo), ...lineaDeLlegadas(llegadas)],

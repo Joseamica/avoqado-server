@@ -59,8 +59,33 @@ describe('Asistencia verificada · QR firmado por el kiosco', () => {
     prismaMock.kioskQrKey.findFirst.mockResolvedValue({ id: KEY } as any)
     prismaMock.kioskCheckInAttempt.upsert.mockResolvedValue({ count: 1 } as any)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
+    prismaMock.kioskCheckInOp.findUnique.mockResolvedValue(null)
     prismaMock.reservation.findMany.mockResolvedValue([{ id: 'res-1', status: 'CONFIRMED', startsAt: CLASE }] as any)
     ;(checkInReservation as jest.Mock).mockResolvedValue({ outcome: 'CHECKED_IN', reservation: {}, services: [] })
+  })
+
+  describe('Codex r5 #2: el MISMO QR presentado otra vez por la MISMA alumna', () => {
+    it('contesta con la reserva de la primera vez y no marca otra clase', async () => {
+      prismaMock.kioskCheckInOp.findUnique.mockResolvedValue({ reservationId: 'res-1', venueId: VENUE } as any)
+      prismaMock.reservation.findMany.mockResolvedValue([{ id: 'res-2', status: 'CONFIRMED', startsAt: CLASE }] as any)
+      const out = await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      expect(out).toEqual({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-1' })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+    it('la primera vez deja su recibo en la misma transacción que la llegada', async () => {
+      await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'cust-1', now: NOW })
+      const [pedazos, ...valores] = (prismaMock.$executeRaw as jest.Mock).mock.calls[0] as [string[], ...unknown[]]
+      expect(pedazos.join('?')).toMatch(/INSERT INTO "KioskCheckInOp"/)
+      expect(String(valores[0])).toMatch(/^qr:[a-f0-9]{56}$/)
+      expect(valores.slice(1)).toEqual([VENUE, 'res-1'])
+    })
+    it('otra alumna con el mismo QR tiene su propio recibo (la fila de 8 sigue funcionando)', async () => {
+      await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'alumna-a', now: NOW })
+      await consumeKioskQr({ venueId: VENUE, sesion: SES, ...qr(), customerId: 'alumna-b', now: NOW })
+      const ops = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(c => String(c[1]))
+      expect(new Set(ops).size).toBe(2)
+    })
   })
 
   describe('emitir la llave', () => {
