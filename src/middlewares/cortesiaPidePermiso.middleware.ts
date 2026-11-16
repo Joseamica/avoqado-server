@@ -288,7 +288,14 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
     const items: any[] = Array.isArray(body.items) ? body.items : []
     const ids = [
       ...new Set(
-        [body.discountId, body.orderDiscountId, body.descuentoDeCatalogoId, ...items.map(item => item?.discountId)].filter(idValido),
+        [
+          body.discountId,
+          body.orderDiscountId,
+          body.descuentoDeCatalogoId,
+          // Encargo 1afe04 (Codex r2 #1): el descuento del cliente de un carrito guardado antes de prender «Requiere aprobación».
+          body.descuentoDelCliente?.discountId,
+          ...items.map(item => item?.discountId),
+        ].filter(idValido),
       ),
     ]
     const cupon = traeCuponEnLinea(body) ? (body.couponCode as string).trim().toUpperCase() : null

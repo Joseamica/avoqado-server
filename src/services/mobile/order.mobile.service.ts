@@ -1925,9 +1925,12 @@ export async function crearVentaDeMostradorEnTx(
   }
   // D4: el de cuenta que pide aprobación — de catálogo, del cupón o la etiqueta del importe libre (sin catálogo ni cupón; su dinero
   // sigue siendo `discount`) —, con la acreditación de la ruta. Bajo esta transacción: lo que valga es lo de ahora.
+  // Encargo 1afe04 (Codex r2 #1): también el descuento del CLIENTE (su `discountId`). Un carrito guardado días antes de que el dueño
+  // prendiera «Requiere aprobación» lo traería sin pedir nada; desde ahí el descuento del cliente ya no se ofrece solo.
+  const idDeLaEtiqueta = input.descuentoDeCatalogoId ?? input.descuentoDelCliente?.discountId
   const etiquetaDeCuenta =
-    !orderDiscount && input.descuentoDeCatalogoId && (input.discount ?? 0) > 0
-      ? await tx.discount.findFirst({ where: { id: input.descuentoDeCatalogoId, venueId }, select: { requiresApproval: true, type: true } })
+    !orderDiscount && idDeLaEtiqueta && (input.discount ?? 0) > 0
+      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true } })
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
   // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.

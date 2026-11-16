@@ -323,3 +323,20 @@ describe('Ajuste de precio pide tpv-orders:discount', () => {
     expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
   })
 })
+
+describe('el descuento del cliente que ahora pide aprobación (encargo 1afe04, Codex r2 #1)', () => {
+  it('su discountId entra en la misma consulta: si pide aprobación, pide tpv-orders:discount', async () => {
+    findDiscount.mockResolvedValue({ id: 'disc-cliente' })
+    await run(
+      request({ discount: 1000, descuentoDelCliente: { discountId: 'disc-cliente', montoCents: 1000 }, items: [{ productId: 'p1' }] }),
+    )
+    expect(findDiscount.mock.calls[0][0].where.OR).toEqual([{ id: { in: ['disc-cliente'] } }])
+    expect(checkPermission).toHaveBeenCalledWith('tpv-orders:discount')
+  })
+
+  it('regresión: el del cliente sin aprobación no pide nada', async () => {
+    const { next } = await run(request({ discount: 1000, descuentoDelCliente: { discountId: 'disc-cliente', montoCents: 1000 } }))
+    expect(checkPermission).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith()
+  })
+})
