@@ -193,6 +193,17 @@ const porVisitante = (req: Parameters<typeof ipDelCliente>[0]) => ipDelCliente(r
 const readLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// Asistencia verificada (hallado en la D3, 16-nov): toda la clase llega por el WiFi del estudio, o sea por UNA IP. Con
+// `writeLimit` (5 por minuto por IP, compartido con pedir el código) la sexta alumna del minuto recibía 429 y su celular
+// decía «Sin conexión». Las llegadas exigen sesión de clienta y las firmas malas ya se cuentan aparte (10 y se bloquea),
+// así que aquí sólo va un techo por IP, el mismo de `/contact`.
+const checkInLimit = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// Entrar con código (founder, 16-nov, «A: subir a 30»): alumnas SIN sesión llegan juntas por el WiFi del estudio, o sea por
+// UNA IP. Pedir el código iba en `writeLimit` (5 por minuto por IP) y verificarlo + crear la ficha en `authLimit` (10, compartido
+// con Google): la sexta del minuto se frenaba. Topes propios por IP: 30 códigos por minuto, y 60 para verificar y crear la ficha
+// (dos pasos por persona). «Cambiar mi número» gasta del mismo cupo de 30 (y conserva su 5 de `writeLimit`). Lo demás no cambia: por teléfono, un código cada 30 s y su tope por hora; por reto, sus intentos.
+const otpRequestLimit = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+const otpAccessLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 // El actualizador del POS: cada aparato pregunta al abrir y al volver la red; 120 por minuto por visitante.
 const posAppVersionLimit = rateLimit({
@@ -407,11 +418,24 @@ router.post(
 router.post(
   '/venues/:venueSlug/customer/checkin/:challengeId',
   kioskCheckInCors,
-  writeLimit,
+  checkInLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   activarReservasSiFalta,
   kioskCheckInController.consumeChallenge,
+)
+
+// Asistencia verificada (16-nov): el QR que firma el propio kiosco (rota cada 30 s, sirve a toda la fila y sin internet
+// en el local). Mismas guardas que el reto: CORS acotado al widget y sesión de cliente obligatoria.
+router.options('/venues/:venueSlug/customer/checkin-qr', kioskCheckInCors)
+router.post(
+  '/venues/:venueSlug/customer/checkin-qr',
+  kioskCheckInCors,
+  checkInLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  activarReservasSiFalta,
+  kioskCheckInController.consumeQr,
 )
 
 // ---- Customer Portal (authenticated) ----
@@ -442,9 +466,11 @@ router.patch(
 )
 
 // S8 (P2-1): cambiar de número. Nunca editando el campo (`customer/profile` lo sigue prohibiendo): se prueba el nuevo con su código.
+// También manda un código por WhatsApp: gasta del MISMO cupo que entrar con código, para que el total por IP siga en 30.
 router.post(
   '/venues/:venueSlug/customer/phone/request',
   writeLimit,
+  otpRequestLimit,
   resolveVenueBySlug,
   authenticateCustomerParaCambioDeNumero,
   validateRequest(customerPhoneChangeRequestSchema),
@@ -501,20 +527,20 @@ router.post(
 
 router.post(
   '/venues/:venueSlug/auth/otp/request',
-  writeLimit,
+  otpRequestLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpRequestSchema })),
   otpAuthController.requestOtp,
 )
 router.post(
   '/venues/:venueSlug/auth/otp/verify',
-  authLimit,
+  otpAccessLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
   otpAuthController.verifyOtp,
 )
 // S7 (P2-1): «no, soy nueva» con la prueba del contacto, y Google de respaldo. El slug manda (el controller resuelve el venue).
 router.post(
   '/venues/:venueSlug/auth/session/nueva-ficha',
-  authLimit,
+  otpAccessLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: sessionNuevaFichaSchema })),
   otpAuthController.crearFichaNueva,
 )

@@ -129,7 +129,14 @@ export async function clase(
   o: {
     staffId: string | null
     inicioIso: string
-    reservas?: Array<{ status: string; partySize?: number; confirmed?: boolean }>
+    reservas?: Array<{
+      status: string
+      partySize?: number
+      confirmed?: boolean
+      /** Asistencia verificada: cómo se demostró la llegada y quién la marcó (a mano / lista). */
+      checkInMethod?: 'QR' | 'PHONE' | 'STAFF' | 'KIOSK_LIST' | 'PASS'
+      checkedInByStaffId?: string
+    }>
     venueId?: string
     productId?: string
     status?: 'CANCELLED'
@@ -173,6 +180,8 @@ export async function clase(
         blockedEndsAt: endsAt,
         partySize: r.partySize ?? 1,
         confirmedAt: r.confirmed === false ? null : new Date(startsAt.getTime() - 86400000),
+        checkInMethod: r.checkInMethod ?? null,
+        checkedInByStaffId: r.checkedInByStaffId ?? null,
       })),
     })
   }

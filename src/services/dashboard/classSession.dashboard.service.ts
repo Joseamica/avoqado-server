@@ -821,6 +821,8 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         createdById: staffId,
         confirmedAt: new Date(),
         checkedInAt: data.checkInImmediately ? new Date() : null,
+        // Asistencia verificada (16-nov): quien la agrega ya llegada la marca «a mano» (cuenta para «sólo quien llegó»).
+        ...(data.checkInImmediately ? { checkInMethod: 'STAFF' as const, checkedInByStaffId: staffId ?? null } : {}),
       },
       include: {
         customer: { select: { id: true, firstName: true, lastName: true } },

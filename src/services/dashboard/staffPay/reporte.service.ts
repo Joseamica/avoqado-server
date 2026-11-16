@@ -88,11 +88,59 @@ const contexto = async (input: EntradaReporte) => contextoEn(prisma, await prepa
  * y propinas que hoy entrarían al cierre (las MISMAS reglas que el cierre, B3), con `UNION ALL`. Cada rama trae
  * `comisiones` y `propinas` aparte (0 donde no aplica). Devuelve null si no hay ninguna sede legible.
  */
+/**
+ * Asistencia verificada (Codex r2 #7 y r3 #6): las llegadas por método de cada clase en «sólo quien llegó», como columnas
+ * que la página suma por persona. `lleg_atendidas` = 1 si la clase cuenta así (para saber si la persona tiene alguna).
+ */
+const llegadasDeClase = (vv: Prisma.Sql) => Prisma.sql`
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN 1 ELSE 0 END AS lleg_atendidas,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'qr')::int ELSE 0 END AS lleg_qr,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'phone')::int ELSE 0 END AS lleg_phone,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'staff')::int ELSE 0 END AS lleg_staff,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'list')::int ELSE 0 END AS lleg_list,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'pass')::int ELSE 0 END AS lleg_pass,
+  CASE WHEN ${vv}."countMode" = 'ATTENDED' THEN (${vv}.llegadas->>'sinMetodo')::int ELSE 0 END AS lleg_sin`
+const SIN_LLEGADAS = Prisma.sql`0 AS lleg_atendidas, 0 AS lleg_qr, 0 AS lleg_phone, 0 AS lleg_staff, 0 AS lleg_list, 0 AS lleg_pass, 0 AS lleg_sin`
+/** Las sumas por persona (abierto: de la fuente `u`; cerrado: de la foto `descriptor.llegadas` de cada clase). */
+const SUMA_LLEGADAS_ABIERTO = Prisma.sql`
+  SUM(u.lleg_atendidas)::int AS lleg_atendidas, SUM(u.lleg_qr)::int AS lleg_qr, SUM(u.lleg_phone)::int AS lleg_phone,
+  SUM(u.lleg_staff)::int AS lleg_staff, SUM(u.lleg_list)::int AS lleg_list, SUM(u.lleg_pass)::int AS lleg_pass,
+  SUM(u.lleg_sin)::int AS lleg_sin`
+const llegadaCerrada = (k: string) =>
+  // La llave va como texto fijo (de una lista cerrada): como parámetro, `->>` no sabría si es texto o índice.
+  Prisma.sql`COALESCE(SUM((e.descriptor->'llegadas'->>${Prisma.raw(`'${k}'`)})::int) FILTER (WHERE e.concept = 'SERVICE' AND e.descriptor ? 'llegadas'), 0)::int`
+const SUMA_LLEGADAS_CERRADO = Prisma.sql`
+  (COUNT(*) FILTER (WHERE e.concept = 'SERVICE' AND e.descriptor ? 'llegadas'))::int AS lleg_atendidas,
+  ${llegadaCerrada('qr')} AS lleg_qr, ${llegadaCerrada('phone')} AS lleg_phone, ${llegadaCerrada('staff')} AS lleg_staff,
+  ${llegadaCerrada('list')} AS lleg_list, ${llegadaCerrada('pass')} AS lleg_pass, ${llegadaCerrada('sinMetodo')} AS lleg_sin`
+
+interface SumaLlegadas {
+  lleg_atendidas: number
+  lleg_qr: number
+  lleg_phone: number
+  lleg_staff: number
+  lleg_list: number
+  lleg_pass: number
+  lleg_sin: number
+}
+/** null si la persona no tiene ninguna clase en «sólo quien llegó» (no hay desglose que enseñar). */
+const llegadasDePersona = (f: Partial<SumaLlegadas>) =>
+  f.lleg_atendidas
+    ? {
+        qr: f.lleg_qr ?? 0,
+        phone: f.lleg_phone ?? 0,
+        staff: f.lleg_staff ?? 0,
+        list: f.lleg_list ?? 0,
+        pass: f.lleg_pass ?? 0,
+        sinMetodo: f.lleg_sin ?? 0,
+      }
+    : null
+
 async function fuentePorPersona(db: Db, c: Contexto): Promise<Prisma.Sql | null> {
   const partes = c.filtros.map(
     f => Prisma.sql`
       SELECT vv."staffId", vv."staffName", vv."venueId", 1 AS clases, vv.conteo AS lugares, vv.monto, 0::numeric AS ajuste,
-             0::numeric AS comisiones, 0::numeric AS propinas
+             0::numeric AS comisiones, 0::numeric AS propinas, ${llegadasDeClase(Prisma.sql`vv`)}
       FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
       WHERE vv.estado = 'OK' AND vv."staffId" IS NOT NULL`,
   )
@@ -100,7 +148,7 @@ async function fuentePorPersona(db: Db, c: Contexto): Promise<Prisma.Sql | null>
     partes.push(Prisma.sql`
       SELECT e."staffId", COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), ''), e.descriptor->>'persona') AS "staffName",
              e."venueId", 0 AS clases, 0 AS lugares, e.amount AS monto, e.amount AS ajuste, 0::numeric AS comisiones,
-             0::numeric AS propinas
+             0::numeric AS propinas, ${SIN_LLEGADAS}
       FROM "ServiceEarning" e
       LEFT JOIN "Staff" s ON s.id = e."staffId"
       WHERE e."periodId" = ${c.fila.id} AND e.concept IN ('RECONCILE', 'MANUAL') AND e."venueId" IN (${Prisma.join(c.venueIds)})`)
@@ -120,7 +168,7 @@ async function fuentePorPersona(db: Db, c: Contexto): Promise<Prisma.Sql | null>
     partes.push(Prisma.sql`
       SELECT v."staffId", v.persona AS "staffName", v."venueId", 0 AS clases, 0 AS lugares, v.monto, 0::numeric AS ajuste,
              CASE WHEN v.fuente = 'COMMISSION' THEN v.monto ELSE 0 END AS comisiones,
-             CASE WHEN v.fuente = 'TIP' THEN v.monto ELSE 0 END AS propinas
+             CASE WHEN v.fuente = 'TIP' THEN v.monto ELSE 0 END AS propinas, ${SIN_LLEGADAS}
       FROM (${ventas}) v`)
   }
   return partes.length ? Prisma.join(partes, ' UNION ALL ') : null
@@ -144,7 +192,8 @@ const sqlPaginaAbierto = (c: Contexto, fuente: Prisma.Sql, offset: number, limit
            -- Las sedes donde hubo dinero (clases, ventas o ajustes), la misma regla que el cerrado.
            ARRAY_AGG(DISTINCT u."venueId") AS "venueIds",
            SUM(u.clases)::int AS clases, COALESCE(SUM(u.lugares), 0)::int AS "sumaLugares",
-           SUM(u.ajuste) AS ajustes, SUM(u.comisiones) AS comisiones, SUM(u.propinas) AS propinas, SUM(u.monto) AS total
+           SUM(u.ajuste) AS ajustes, SUM(u.comisiones) AS comisiones, SUM(u.propinas) AS propinas, SUM(u.monto) AS total,
+           ${SUMA_LLEGADAS_ABIERTO}
     FROM (${fuente}) u
     GROUP BY u."staffId"
     ORDER BY "staffName" ASC NULLS LAST, u."staffId" ASC
@@ -185,7 +234,7 @@ const sqlPaginaCerrado = (c: Contexto, offset: number, limit: number) => Prisma.
            SUM(e.amount) FILTER (WHERE e.concept <> 'SERVICE' AND e."sourceType" IS DISTINCT FROM 'COMMISSION') AS ajustes,
            SUM(e.amount) FILTER (WHERE e."sourceType" = 'COMMISSION') AS comisiones,
            SUM(e.amount) FILTER (WHERE e."sourceType" = 'TIP') AS propinas,
-           SUM(e.amount) AS total, MAX(st."paidAt") AS "paidAt"
+           SUM(e.amount) AS total, MAX(st."paidAt") AS "paidAt", ${SUMA_LLEGADAS_CERRADO}
     FROM "ServiceEarning" e
     LEFT JOIN "Staff" s ON s.id = e."staffId"
     LEFT JOIN "StaffPayStatement" st ON st."periodId" = e."periodId" AND st."staffId" = e."staffId"
@@ -258,18 +307,20 @@ async function reporteAbierto(db: Db, c: Contexto, offset: number, limit: number
   // periodo sólo para las personas de ESTA página.
   const pagina = fuente
     ? await db.$queryRaw<
-        Array<{
-          staffId: string
-          staffName: string | null
-          payLevelName: string | null
-          venueIds: string[] | null
-          clases: number
-          sumaLugares: number
-          ajustes: Prisma.Decimal | null
-          comisiones: Prisma.Decimal | null
-          propinas: Prisma.Decimal | null
-          total: Prisma.Decimal
-        }>
+        Array<
+          {
+            staffId: string
+            staffName: string | null
+            payLevelName: string | null
+            venueIds: string[] | null
+            clases: number
+            sumaLugares: number
+            ajustes: Prisma.Decimal | null
+            comisiones: Prisma.Decimal | null
+            propinas: Prisma.Decimal | null
+            total: Prisma.Decimal
+          } & SumaLlegadas
+        >
       >(sqlPaginaAbierto(c, fuente, offset, limit))
     : []
   const items = pagina.map(p => ({
@@ -284,6 +335,8 @@ async function reporteAbierto(db: Db, c: Contexto, offset: number, limit: number
     propinas: pesosDe(p.propinas),
     total: new Prisma.Decimal(p.total).toFixed(2),
     pagadoEn: null as string | null,
+    // Asistencia verificada: cómo llegaron sus lugares en «sólo quien llegó» (null si no tiene clases así).
+    llegadas: llegadasDePersona(p),
   }))
   return {
     periodo: { ...c.periodo, periodicidad: c.periodicidad, id: c.fila?.id ?? null, estado: 'OPEN' as const },
@@ -326,19 +379,21 @@ async function reporteCerrado(db: Db, c: Contexto, offset: number, limit: number
     }>
   >(sqlTarjetasCerrado(c))
   const filas = await db.$queryRaw<
-    Array<{
-      staffId: string
-      staffName: string | null
-      payLevelName: string | null
-      venueIds: string[]
-      clases: number
-      sumaLugares: number
-      ajustes: Prisma.Decimal | null
-      comisiones: Prisma.Decimal | null
-      propinas: Prisma.Decimal | null
-      total: Prisma.Decimal
-      paidAt: Date | null
-    }>
+    Array<
+      {
+        staffId: string
+        staffName: string | null
+        payLevelName: string | null
+        venueIds: string[]
+        clases: number
+        sumaLugares: number
+        ajustes: Prisma.Decimal | null
+        comisiones: Prisma.Decimal | null
+        propinas: Prisma.Decimal | null
+        total: Prisma.Decimal
+        paidAt: Date | null
+      } & SumaLlegadas
+    >
   >(sqlPaginaCerrado(c, offset, limit))
   return {
     ...vacio,
@@ -366,6 +421,7 @@ async function reporteCerrado(db: Db, c: Contexto, offset: number, limit: number
         propinas: pesosDe(f.propinas),
         total: new Prisma.Decimal(f.total).toFixed(2),
         pagadoEn: f.paidAt?.toISOString() ?? null,
+        llegadas: llegadasDePersona(f),
       })),
       total: t.personas,
       offset,

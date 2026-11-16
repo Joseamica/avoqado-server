@@ -703,7 +703,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'reservation_detail',
-    'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the ALL services booked (multi-service appointments return the full `services` list with per-service duration + price, not just the lead one) plus any picked add-on `modifiers`, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
+    'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the ALL services booked (multi-service appointments return the full `services` list with per-service duration + price, not just the lead one) plus any picked add-on `modifiers`, deposit (amount, status, paid-at), check-in / no-show timestamps, how the arrival was proven (checkInMethod: QR = with her own phone, PHONE = typed her phone at the kiosk, STAFF = marked by hand with checkedInBy, KIOSK_LIST, PASS), special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
     {
       venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
       confirmationCode: z.string().min(1).describe('The reservation confirmation code'),
@@ -728,6 +728,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           depositStatus: true,
           depositPaidAt: true,
           checkedInAt: true,
+          checkInMethod: true,
+          checkedInBy: { select: { firstName: true, lastName: true } },
           noShowAt: true,
           createdAt: true,
           table: { select: { number: true } },
@@ -774,6 +776,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
               ? { amount: Number(r.depositAmount), status: r.depositStatus, paidAt: r.depositPaidAt?.toISOString() ?? null }
               : null,
           checkedInAt: r.checkedInAt?.toISOString() ?? null,
+          // Asistencia verificada (16-nov): cómo se demostró la llegada. QR = con su celular · PHONE = tecleó su teléfono en el
+          // kiosco · STAFF = a mano (checkedInBy) · KIOSK_LIST = lista de una app vieja · PASS = pase · null = antes de esa fecha.
+          checkInMethod: r.checkInMethod ?? null,
+          checkedInBy: r.checkedInBy ? [r.checkedInBy.firstName, r.checkedInBy.lastName].filter(Boolean).join(' ') : null,
           noShowAt: r.noShowAt?.toISOString() ?? null,
           specialRequests: r.specialRequests,
           internalNotes: r.internalNotes,

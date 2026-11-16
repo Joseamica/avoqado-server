@@ -35,6 +35,7 @@ import {
 import { spotLabel } from './coachClass.service'
 import { undoNoShow } from './undoNoShow.service'
 import { afterNoShowCorrection, notifyNoShowNeedsReview } from './noShowNotices.service'
+import { exigirSesionProbada, metodoDeLaSesion, type SesionDeLlegada } from './sesionDeLlegada'
 
 export const CHECK_IN_NOT_FOUND = 'CHECK_IN_NOT_FOUND' as const
 export const CHECK_IN_ALREADY_CLAIMED = 'CHECK_IN_ALREADY_CLAIMED' as const
@@ -197,6 +198,8 @@ export interface ConsumeChallengeResult {
     title: string
     startsAt: Date
     staffLabel: string | null
+    /** «Tapete 4». Opcional: sólo la respuesta del teléfono lo trae. */
+    spotLabel?: string | null
   }
 }
 
@@ -205,9 +208,12 @@ export async function consumeKioskCheckInChallenge(args: {
   challengeId: string
   secret: string
   customerId: string
+  /** Asistencia verificada (Codex r2 #1): la misma regla que el QR firmado: sólo una sesión que probó su contacto. */
+  sesion: SesionDeLlegada
   now: Date
   ip?: string
 }): Promise<ConsumeChallengeResult> {
+  exigirSesionProbada(args.sesion)
   const nonceHash = hashSecret(args.secret)
 
   const ch = await prisma.kioskCheckInChallenge.findFirst({
@@ -264,6 +270,7 @@ export async function consumeKioskCheckInChallenge(args: {
     throw new NotFoundError('No encontramos una reservación tuya lista para check-in', CHECK_IN_NOT_FOUND)
   }
 
+  const metodo = await metodoDeLaSesion({ venueId: args.venueId, customerId: args.customerId, sesion: args.sesion, now: args.now })
   const result = await prisma.$transaction(async tx => {
     // CAS sobre el reto: sólo un consumidor gana, aunque dos teléfonos lo abran a la vez.
     const claimed = await tx.kioskCheckInChallenge.updateMany({
@@ -284,6 +291,7 @@ export async function consumeKioskCheckInChallenge(args: {
       actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' },
       source: 'KIOSK',
       now: args.now,
+      ...metodo,
     })
   })
 
@@ -338,7 +346,28 @@ export async function checkInByIdentifier(args: {
   identifier: string
   now: Date
   ip?: string
+  /**
+   * Asistencia verificada (D-D): la hora en que se tecleó, cuando el aparato lo guardó sin red y lo manda después. Es la
+   * hora del SERVIDOR estimada por el aparato (último `Date` que contestó + su reloj monótono). Sin ella: ahora.
+   */
+  occurredAt?: Date
+  /**
+   * Id de la llegada en la cola del aparato (Codex r1 #5). Si la reserva ya la tiene en su historia, se contesta «ya
+   * registrada» sin escribir, aunque alguien la haya deshecho después: un reintento nunca pisa una corrección posterior.
+   */
+  opId?: string
 }): Promise<ConsumeChallengeResult> {
+  // La hora de la llegada: la tecleada sin red, o ahora. Nunca futura, nunca de hace más de 72 h (como la lista, D4).
+  const at = args.occurredAt ?? args.now
+  if (at.getTime() > args.now.getTime() + 60_000) {
+    throw new ValidationError('La hora de esta llegada está en el futuro', CHECK_IN_OUTSIDE_WINDOW)
+  }
+  if (args.now.getTime() - at.getTime() > KIOSK_MAX_OFFLINE_MS) {
+    throw new ValidationError(
+      'Esta llegada se guardó hace más de 3 días y ya no se puede registrar sola. Regístrala en Reservaciones.',
+      CHECK_IN_TOO_OLD,
+    )
+  }
   const raw = args.identifier.trim()
   const code = raw.toUpperCase().slice(0, 32)
   // Un identificador de puros dígitos es un teléfono. Se comparan los ÚLTIMOS 10 para
@@ -354,7 +383,19 @@ export async function checkInByIdentifier(args: {
   ].filter(Boolean) as string[]
 
   for (const scope of scopes) {
+    // La cola sin red (con `opId`) reintenta sola tras un 5xx: el tope por teléfono (5/min, contra quien barre números) no
+    // aplica a ella; sí los de la terminal, la cara y la IP (30/min). Codex r2 #5 y r4 #4.
+    if (args.opId && scope.startsWith('identifier:')) continue
     await assertDurableRateLimit({ venueId: args.venueId, scope, now: args.now, max: scope.startsWith('identifier:') ? 5 : 30 })
+  }
+
+  // 🔴 Codex r4 (rediseño de la familia «la cola se aplica dos veces»): la operación de la cola tiene su RECIBO propio
+  // (`KioskCheckInOp`, llave = `opId`). Si ya existe, se contesta con la reserva que le tocó la primera vez: no se vuelve a
+  // buscar (podría caer en otra clase) ni a escribir (pisaría una corrección posterior). Se escribe en la MISMA transacción
+  // que la llegada; si otra petición con el mismo `opId` ganó, ésta se deshace y contesta lo mismo.
+  if (args.opId) {
+    const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { venueId: true, reservationId: true } })
+    if (previa && previa.venueId === args.venueId) return yaRegistrada(args.venueId, previa.reservationId)
   }
 
   // Ventana primero, en la CONSULTA: por teléfono puede haber varias reservas a lo largo
@@ -362,13 +403,16 @@ export async function checkInByIdentifier(args: {
   // teclear un teléfono contestara cosas sobre citas de otro día.
   const settingsForWindow = await getReservationSettings(args.venueId)
   const graceMin = settingsForWindow.scheduling.noShowGraceMin
-  const windowFrom = new Date(args.now.getTime() - graceMin * 60_000)
-  const windowTo = new Date(args.now.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000)
+  const windowFrom = new Date(at.getTime() - graceMin * 60_000)
+  const windowTo = new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000)
 
   const reservation = await prisma.reservation.findFirst({
     where: {
       venueId: args.venueId,
       startsAt: { gte: windowFrom, lte: windowTo },
+      // Sólo las que pueden contestar algo: una cancelada no tapa a la buena del mismo teléfono. «No asistió» sólo cuenta
+      // si la llegada viene de la cola sin red (su hora real cae antes de que corriera el «No asistió»).
+      status: { in: args.occurredAt ? ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] : ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
       ...(phoneTail
         ? {
             OR: [{ guestPhone: { endsWith: phoneTail } }, { customer: { phone: { endsWith: phoneTail } } }],
@@ -376,51 +420,140 @@ export async function checkInByIdentifier(args: {
         : { confirmationCode: code }),
     },
     orderBy: { startsAt: 'asc' },
-    select: {
-      id: true,
-      status: true,
-      startsAt: true,
-      guestName: true,
-      customer: { select: { firstName: true, lastName: true } },
-      classSession: { select: { assignedStaff: { select: { firstName: true } } } },
-      product: { select: { name: true } },
-    },
+    select: DISPLAY_SELECT,
   })
 
   // Respuesta genérica: no revela si el código existe.
   const notFound = () => new NotFoundError('No encontramos esa reservación lista para check-in', CHECK_IN_NOT_FOUND)
   if (!reservation) throw notFound()
+  const display = displayDe(reservation)
 
-  const display = {
-    displayName: reservation.customer
-      ? shortName(reservation.customer.firstName, reservation.customer.lastName)
-      : shortNameFromFull(reservation.guestName),
-    title: reservation.product?.name ?? 'Tu clase',
-    startsAt: reservation.startsAt,
-    staffLabel: reservation.classSession?.assignedStaff?.firstName ? `con ${reservation.classSession.assignedStaff.firstName}` : null,
+  // Con `opId`: el recibo va primero, en la transacción de la llegada. Sin `opId` (en vivo): nada.
+  const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
+    if (args.opId) {
+      const n = await tx.$executeRaw`
+        INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
+        VALUES (${args.opId}, ${args.venueId}, ${reservation.id})
+        ON CONFLICT ("opId") DO NOTHING`
+      if (n === 0) throw new OpYaRegistrada()
+    }
+    return fn()
+  }
+  const yaPorOtra = async (err: unknown) => {
+    if (!(err instanceof OpYaRegistrada) || !args.opId) throw err
+    const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { reservationId: true } })
+    return yaRegistrada(args.venueId, previa?.reservationId ?? reservation.id)
   }
 
   if (reservation.status === 'CHECKED_IN') {
+    // Ya estaba (por QR, a mano u otra fila): con `opId`, queda su recibo para que un reintento nunca la vuelva a marcar.
+    if (args.opId) {
+      try {
+        await prisma.$transaction(tx => conRecibo(tx, async () => undefined))
+      } catch (err) {
+        return yaPorOtra(err)
+      }
+    }
     return { outcome: 'ALREADY_CHECKED_IN', reservationId: reservation.id, display }
   }
-  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) throw notFound()
 
-  if (!evaluateKioskWindow({ startsAt: reservation.startsAt, now: args.now, noShowGraceMin: graceMin })) {
+  if (!evaluateKioskWindow({ startsAt: reservation.startsAt, now: at, noShowGraceMin: graceMin })) {
     throw notFound()
   }
 
-  const result = await prisma.$transaction(tx =>
-    checkInReservation(tx, {
-      reservationId: reservation.id,
+  const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
+  const corregirNoAsistio = async (): Promise<ConsumeChallengeResult> => {
+    // Tecleó su teléfono sin red y el «No asistió» automático corrió antes de que subiera. Como la lista (D4): se corrige
+    // con la hora en que lo tecleó y el gerente se entera (la hora la midió el aparato).
+    let undone
+    try {
+      undone = await prisma.$transaction(tx =>
+        conRecibo(tx, () =>
+          undoNoShow(tx, {
+            reservationId: reservation.id,
+            venueId: args.venueId,
+            actor,
+            source: 'KIOSK',
+            now: args.now,
+            arrivedAt: at,
+            method: 'PHONE',
+            opId: args.opId,
+          }),
+        ),
+      )
+    } catch (err) {
+      return yaPorOtra(err)
+    }
+    if (undone.outcome === 'UNDONE') void afterNoShowCorrection(undone.correction.id)
+    logger.info('✅ [KIOSK CHECK-IN] Teléfono sin red que corrigió un «No asistió»', {
       venueId: args.venueId,
-      actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' },
-      source: 'KIOSK',
-      now: args.now,
-    }),
-  )
+      reservationId: reservation.id,
+    })
+    return { outcome: 'CHECKED_IN', reservationId: reservation.id, display }
+  }
+  if (reservation.status === 'NO_SHOW') return corregirNoAsistio()
+  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) throw notFound()
+
+  let result
+  try {
+    result = await prisma.$transaction(tx =>
+      conRecibo(tx, () =>
+        checkInReservation(tx, {
+          reservationId: reservation.id,
+          venueId: args.venueId,
+          actor,
+          source: 'KIOSK',
+          now: at,
+          method: 'PHONE',
+          opId: args.opId,
+        }),
+      ),
+    )
+  } catch (err) {
+    if (err instanceof OpYaRegistrada) return yaPorOtra(err)
+    // Codex r2 #4: el «No asistió» automático ganó entre la lectura y el check-in. Desde la cola (hora real) se corrige
+    // (la transacción se deshizo entera, recibo incluido); en vivo, el 409 de siempre.
+    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
+    const ahora = await prisma.reservation.findFirst({ where: { id: reservation.id, venueId: args.venueId }, select: { status: true } })
+    if (ahora?.status !== 'NO_SHOW') throw err
+    return corregirNoAsistio()
+  }
 
   logger.info('✅ [KIOSK CHECK-IN] Check-in por identificador', { venueId: args.venueId, reservationId: reservation.id })
   return { outcome: result.outcome, reservationId: reservation.id, display }
+}
+
+/** Otra petición con el mismo `opId` ya dejó su recibo: ésta no escribe nada. */
+class OpYaRegistrada extends Error {}
+
+const DISPLAY_SELECT = {
+  id: true,
+  status: true,
+  startsAt: true,
+  guestName: true,
+  spotIds: true,
+  customer: { select: { firstName: true, lastName: true } },
+  classSession: { select: { assignedStaff: { select: { firstName: true } }, product: { select: { layoutConfig: true } } } },
+  product: { select: { name: true, layoutConfig: true } },
+} satisfies Prisma.ReservationSelect
+
+type ReservaConDisplay = Prisma.ReservationGetPayload<{ select: typeof DISPLAY_SELECT }>
+
+function displayDe(r: ReservaConDisplay): NonNullable<ConsumeChallengeResult['display']> {
+  return {
+    displayName: r.customer ? shortName(r.customer.firstName, r.customer.lastName) : shortNameFromFull(r.guestName),
+    title: r.product?.name ?? 'Tu clase',
+    startsAt: r.startsAt,
+    staffLabel: r.classSession?.assignedStaff?.firstName ? `con ${r.classSession.assignedStaff.firstName}` : null,
+    // Codex r1 #8: la lista ya no trae nombres ni lugares; el lugar viaja aquí, después de demostrar quién es.
+    spotLabel: spotLabel(r.spotIds, r.classSession?.product?.layoutConfig ?? r.product?.layoutConfig),
+  }
+}
+
+/** La respuesta de una operación de la cola que ya tenía recibo: la reserva de la PRIMERA vez, sin escribir nada. */
+async function yaRegistrada(venueId: string, reservationId: string): Promise<ConsumeChallengeResult> {
+  const r = await prisma.reservation.findFirst({ where: { id: reservationId, venueId }, select: DISPLAY_SELECT })
+  return { outcome: 'ALREADY_CHECKED_IN', reservationId, ...(r ? { display: displayDe(r) } : {}) }
 }
 
 export type KioskCheckInChallengeRow = Prisma.KioskCheckInChallengeGetPayload<{}>
@@ -444,7 +577,16 @@ export interface KioskRoster {
   classTitle: string
   startsAt: Date
   staffFirstName: string | null
+  /**
+   * 🔴 Siempre vacío desde la asistencia verificada (16-nov-2026, decisión del founder del 15-nov: fijo para todos).
+   * Tocar un nombre dejaba a cualquiera marcar la llegada de otra (Mindform paga a sus coaches por lugar ocupado). El
+   * campo se queda para no romper a las apps viejas: pintan la lista vacía y el respaldo del teléfono.
+   */
   people: KioskRosterPerson[]
+  /** Lugares de la clase que ya llegaron (suma de `partySize`). «3 de 8 ya llegaron», sin nombres. */
+  arrivedCount: number
+  /** Lugares reservados en la clase (llegaron o no). */
+  expectedCount: number
   /** Cierre de la ventana (startsAt + tolerancia), con la hora del SERVIDOR. */
   closesAt: Date
   /** `closesAt − now` del servidor: el aparato cuenta desde aquí con su reloj monótono, nunca con su hora de pared. */
@@ -471,9 +613,7 @@ export async function getKioskRoster(args: { venueId: string; now: Date }): Prom
       status: true,
       startsAt: true,
       classSessionId: true,
-      spotIds: true,
-      guestName: true,
-      customer: { select: { firstName: true, lastName: true } },
+      partySize: true,
       product: { select: { name: true, layoutConfig: true } },
       assignedStaff: { select: { firstName: true } },
       classSession: { select: { product: { select: { name: true, layoutConfig: true } }, assignedStaff: { select: { firstName: true } } } },
@@ -487,19 +627,15 @@ export async function getKioskRoster(args: { venueId: string; now: Date }): Prom
   const first = open[0]
   const key = first.classSessionId ?? first.id
   const closesAt = new Date(first.startsAt.getTime() + grace * 60_000)
+  const deLaClase = open.filter(r => (r.classSessionId ?? r.id) === key)
 
   return {
     classTitle: first.classSession?.product?.name ?? first.product?.name ?? 'Tu cita',
     startsAt: first.startsAt,
     staffFirstName: first.classSession?.assignedStaff?.firstName ?? first.assignedStaff?.firstName ?? null,
-    people: open
-      .filter(r => (r.classSessionId ?? r.id) === key)
-      .map(r => ({
-        reservationId: r.id,
-        displayName: r.customer ? shortName(r.customer.firstName, r.customer.lastName) : shortNameFromFull(r.guestName),
-        checkedIn: r.status === 'CHECKED_IN',
-        spotLabel: spotLabel(r.spotIds, r.classSession?.product?.layoutConfig ?? r.product?.layoutConfig),
-      })),
+    people: [],
+    arrivedCount: deLaClase.filter(r => r.status === 'CHECKED_IN').reduce((n, r) => n + (r.partySize ?? 1), 0),
+    expectedCount: deLaClase.reduce((n, r) => n + (r.partySize ?? 1), 0),
     closesAt,
     closesInMs: closesAt.getTime() - t, // > 0: el filtro de la ventana ya lo garantiza
   }
@@ -551,6 +687,8 @@ export async function kioskCheckInReservation(args: {
   reservationId: string
   now: Date
   tapped?: { closesAt: Date; msBeforeClose: number }
+  /** La sesión del aparato que tocó (asistencia verificada: la lista queda marcada «lista, app vieja» con quién). */
+  byStaffId?: string | null
 }): Promise<KioskCheckInResult> {
   const at = args.tapped ? new Date(args.tapped.closesAt.getTime() - args.tapped.msBeforeClose) : args.now
 
@@ -583,6 +721,8 @@ export async function kioskCheckInReservation(args: {
       actor,
       source: 'KIOSK',
       now: at,
+      method: 'KIOSK_LIST',
+      byStaffId: args.byStaffId ?? null,
     })
     // D4 · respuesta perdida: cada éxito sobre una llegada corregida (sin resolver) devuelve su corrección, así el
     // aparato rehace el aviso con el mismo id.
@@ -626,6 +766,8 @@ export async function kioskCheckInReservation(args: {
             source: 'KIOSK',
             now: args.now,
             arrivedAt: at,
+            method: 'KIOSK_LIST',
+            byStaffId: args.byStaffId ?? null,
           }),
         )
         // La hora la midió el aparato: toda corrección del kiosco se avisa (decisión 7). Sin esperar.

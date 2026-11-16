@@ -16,15 +16,15 @@ datasource db {
 // ==========================================
 
 model Organization {
-  documentRequests DocumentRequest[]
+  documentRequests         DocumentRequest[]
   historicalLinkingNumbers HistoricalLinkingNumber[]
-  id    String       @id @default(cuid())
-  name  String
-  slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
-  email String
-  phone String
-  taxId String?
-  type  BusinessType @default(OTHER)
+  id                       String                    @id @default(cuid())
+  name                     String
+  slug                     String?                   @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
+  email                    String
+  phone                    String
+  taxId                    String?
+  type                     BusinessType              @default(OTHER)
 
   // Billing configuration
   billingEmail   String?
@@ -192,19 +192,19 @@ model Zone {
 }
 
 model Venue {
-  exportRuns ExportRun[]
+  exportRuns             ExportRun[]
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
   onlineOrderCharges     OnlineOrderCharge[]
-  documentRequestLinks DocumentRequestVenueLink[]
-  capabilityGrants CapabilityGrant[]
-  hybridPurchases HybridPurchase[]
-  hybridContracts HybridContract[]
-  hybridPaymentPeriods HybridPaymentPeriod[]
-  paymentEffects PaymentEffect[]
-  id             String          @id @default(cuid())
-  organizationId String
-  organization   Organization    @relation(fields: [organizationId], references: [id])
+  documentRequestLinks   DocumentRequestVenueLink[]
+  capabilityGrants       CapabilityGrant[]
+  hybridPurchases        HybridPurchase[]
+  hybridContracts        HybridContract[]
+  hybridPaymentPeriods   HybridPaymentPeriod[]
+  paymentEffects         PaymentEffect[]
+  id                     String                     @id @default(cuid())
+  organizationId         String
+  organization           Organization               @relation(fields: [organizationId], references: [id])
 
   // Zone assignment (optional geographic grouping)
   zoneId String?
@@ -601,7 +601,7 @@ model Venue {
   // ==========================================
   // PAYMENT LINKS
   // ==========================================
-  paymentLinks PaymentLink[]
+  paymentLinks          PaymentLink[]
   paymentLinkStockHolds PaymentLinkStockHold[]
 
   // ==========================================
@@ -709,6 +709,8 @@ model Venue {
   // Promociones del POS (tier PRO, código PROMOTIONS)
   promotions             Promotion[]
   kioskCheckInChallenges KioskCheckInChallenge[]
+  kioskQrKeys            KioskQrKey[]
+  kioskCheckInOps        KioskCheckInOp[]
   kioskCheckInAttempts   KioskCheckInAttempt[]
   kioskOutreachOutbox    KioskOutreachOutbox[]
 
@@ -1073,9 +1075,9 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
-  exportRunsRequested ExportRun[] @relation("ExportRunRequestedBy")
+  exportRunsRequested  ExportRun[]                @relation("ExportRunRequestedBy")
   documentRequestLinks DocumentRequestVenueLink[]
-  id String @id @default(cuid())
+  id                   String                     @id @default(cuid())
   // organizationId removed: use StaffOrganization junction table for multi-org membership
 
   // Authentication
@@ -1215,6 +1217,7 @@ model Staff {
   // Reservations
   reservationsAssigned     Reservation[]             @relation("ReservationStaff")
   reservationsCreated      Reservation[]             @relation("ReservationCreatedBy")
+  reservationsCheckedIn    Reservation[]             @relation("ReservationCheckedInBy")
   classSessionsAssigned    ClassSession[]            @relation("ClassSessionStaff")
   classSessionsCreated     ClassSession[]            @relation("ClassSessionCreatedBy")
   slotHolds                SlotHold[]
@@ -1896,9 +1899,9 @@ model TerminalMenu {
 model Product {
   /// Pedidos en línea: el platillo sólo se muestra en la tienda pública si el restaurante lo marcó.
   availableOnline Boolean @default(false)
-  id      String @id @default(cuid())
-  venueId String
-  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  id              String  @id @default(cuid())
+  venueId         String
+  venue           Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Basic info
   sku         String
@@ -1928,10 +1931,10 @@ model Product {
   // Tratamiento de IVA: la VERDAD fiscal del producto. taxRate/objetoImp se derivan de él (apps viejas los leen).
   // Lo mantienen coherente los tres triggers "Product_ivaTratamiento_ins" / "_1_explicito" / "_2_tupla".
   // Ver src/services/fiscal/ivaTratamiento.ts.
-  ivaTratamiento IvaTratamiento @default(IVA_16)
+  ivaTratamiento          IvaTratamiento @default(IVA_16)
   // Plan 4b · regla C: se enciende en la MISMA transacción que escribe un ajuste de delivery (REFUND PROVIDER_ADJUSTMENT) sobre
   // una orden con este producto, y nunca se apaga. Encendida, el trigger no deja cambiar ivaTratamiento (se crea otro producto).
-  ajusteDeliveryAlgunaVez Boolean @default(false)
+  ajusteDeliveryAlgunaVez Boolean        @default(false)
 
   // Print routing (PRINT_STATIONS): product-level station override (wins over category default).
   printStationId String?
@@ -2065,16 +2068,16 @@ model Product {
   lastSyncAt   DateTime?
 
   // Relations
-  inventory        Inventory?
-  shopifyVariantLink ShopifyVariantLink?
-  shopifyReviewItems ShopifyReviewItem[]
-  orderItems       OrderItem[]
-  areaTicketLines  AreaTicketLine[]
-  paymentLinkItems PaymentLinkItem[]
+  inventory             Inventory?
+  shopifyVariantLink    ShopifyVariantLink?
+  shopifyReviewItems    ShopifyReviewItem[]
+  orderItems            OrderItem[]
+  areaTicketLines       AreaTicketLine[]
+  paymentLinkItems      PaymentLinkItem[]
   paymentLinkStockHolds PaymentLinkStockHold[]
-  modifierGroups   ProductModifierGroup[]
-  recipe           Recipe? // ✅ NEW: Recipe composition
-  pricingPolicy    PricingPolicy? // ✅ NEW: Pricing strategy
+  modifierGroups        ProductModifierGroup[]
+  recipe                Recipe? // ✅ NEW: Recipe composition
+  pricingPolicy         PricingPolicy? // ✅ NEW: Pricing strategy
 
   // Commission System
   commissionMilestones CommissionMilestone[]
@@ -2138,14 +2141,14 @@ model Product {
   @@unique([venueId, gtin])
   @@unique([venueId, externalId])
   @@unique([id, venueId])
+  // Also serves lookups by productGroupId alone (leading column): no separate index.
+  @@unique([productGroupId, variantKey])
   @@index([venueId])
   @@index([categoryId])
   @@index([active])
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
-  // Also serves lookups by productGroupId alone (leading column): no separate index.
-  @@unique([productGroupId, variantKey])
 }
 
 /// Historial de `Product.price`: cada precio con su intervalo `[validFrom, validTo)` en UTC; `validTo` nulo = vigente
@@ -2340,6 +2343,9 @@ model InventoryMovement {
   // así un folio con movimientos vivos no se puede borrar.
   wasteReportId String?
   wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: NoAction)
+  // + índice PARCIAL "InventoryMovement_inventoryId_createdAt_waste_legacy_idx" ON (inventoryId, createdAt)
+  //   WHERE type = 'LOSS' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
+  //   (migración 20260921200100). Prisma no expresa índices parciales: vive sólo en la migración.
 
   @@index([inventoryId])
   @@index([type])
@@ -2347,9 +2353,6 @@ model InventoryMovement {
   @@index([purchaseOrderItemId])
   @@index([postingLineId])
   @@index([wasteReportId])
-  // + índice PARCIAL "InventoryMovement_inventoryId_createdAt_waste_legacy_idx" ON (inventoryId, createdAt)
-  //   WHERE type = 'LOSS' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
-  //   (migración 20260921200100). Prisma no expresa índices parciales: vive sólo en la migración.
 }
 
 // ==========================================
@@ -2881,13 +2884,13 @@ model PurchaseOrderInvoice {
   totalCents     Int
 
   /// Moneda y desglose para entradas nuevas desde XML. Null = XML antiguo sin moneda verificada.
-  currency              String?
+  currency             String?
   /// Tipo explícito del XML (I/E/P/T/N). Null = documento anterior sin tipo verificado.
-  cfdiType              String?
-  iepsCents             Int       @default(0)
-  inventoryPreparedAt   DateTime?
-  inventoryReceivedAt   DateTime?
-  inventoryIncludeIeps  Boolean?
+  cfdiType             String?
+  iepsCents            Int       @default(0)
+  inventoryPreparedAt  DateTime?
+  inventoryReceivedAt  DateTime?
+  inventoryIncludeIeps Boolean?
 
   xmlUrl String?
 
@@ -3088,6 +3091,9 @@ model RawMaterialMovement {
   // Folio de merma que originó este movimiento (espejo de InventoryMovement: NoAction, diferido al COMMIT en la base).
   wasteReportId String?
   wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: NoAction)
+  // + índice PARCIAL "RawMaterialMovement_venueId_createdAt_waste_legacy_idx" ON (venueId, createdAt)
+  //   WHERE type = 'SPOILAGE' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
+  //   (migración 20260921200000). Prisma no expresa índices parciales: vive sólo en la migración.
 
   @@index([rawMaterialId])
   @@index([venueId])
@@ -3096,9 +3102,6 @@ model RawMaterialMovement {
   @@index([batchId])
   @@index([createdAt])
   @@index([wasteReportId])
-  // + índice PARCIAL "RawMaterialMovement_venueId_createdAt_waste_legacy_idx" ON (venueId, createdAt)
-  //   WHERE type = 'SPOILAGE' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
-  //   (migración 20260921200000). Prisma no expresa índices parciales: vive sólo en la migración.
 }
 
 // Low stock alerts for raw materials
@@ -3177,17 +3180,17 @@ model StockCountItem {
   rawMaterialId String?
   rawMaterial   RawMaterial? @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
 
-  expected  Decimal   @db.Decimal(12, 3) // System stock at count time
-  counted   Decimal   @default(0) @db.Decimal(12, 3) // Physically counted
+  expected          Decimal   @db.Decimal(12, 3) // System stock at count time
+  counted           Decimal   @default(0) @db.Decimal(12, 3) // Physically counted
   // Set when the cashier actually records a count for this line. Confirm
   // applies ONLY lines with countedAt — an untouched line (counted=0 by
   // default) must never zero out real stock.
-  countedAt DateTime?
+  countedAt         DateTime?
   // Sello DURABLE de aplicación, escrito EN LA MISMA transacción que el ajuste
   // de la línea. Un re-claim del conteo (APPLYING huérfano) salta las líneas
   // con appliedAt: re-aplicar una línea ya aplicada re-SETearía el stock al
   // valor contado y borraría las ventas ocurridas después del crash.
-  appliedAt DateTime?
+  appliedAt         DateTime?
   // Conector Shopify (§12.1): la línea NO se aplicó porque el producto tenía un envío en camino a Shopify; no se
   // sabe si un cambio de apartadas vino de un pedido o de un despacho. Se recuenta después.
   shopifyHeldAt     DateTime?
@@ -3606,7 +3609,7 @@ model TpvShiftOperation {
   requestHash         String
   shiftId             String?
   cashDrawerSessionId String?
-  state               TpvShiftOperationState  @default(PENDING)
+  state               TpvShiftOperationState @default(PENDING)
   resultJson          Json?
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
@@ -4121,9 +4124,9 @@ model Order {
   venue          Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
 
   // Order info
-  orderNumber String
-  type        OrderType   @default(DINE_IN)
-  source      OrderSource @default(TPV)
+  orderNumber      String
+  type             OrderType        @default(DINE_IN)
+  source           OrderSource      @default(TPV)
   // ¿El precio cobrado ya traía el IVA? Lo declara cada escritor al crear (prueba de arquitectura
   // orderContratoDePrecioWriters). Ventas anteriores: DESCONOCIDO (sin backfill). Lo lee la facturación (plan 3).
   contratoDePrecio ContratoDePrecio @default(DESCONOCIDO)
@@ -4175,8 +4178,8 @@ model Order {
   total               Decimal @db.Decimal(12, 2)
 
   // Partial payment tracking (for split payments)
-  paidAmount       Decimal @default(0) @db.Decimal(12, 2)
-  remainingBalance Decimal @default(0) @db.Decimal(12, 2)
+  paidAmount        Decimal  @default(0) @db.Decimal(12, 2)
+  remainingBalance  Decimal  @default(0) @db.Decimal(12, 2)
   /// Rappi 2b: dinero que el negocio cobra en efectivo POR CUENTA de la plataforma (tarifa de servicio de Rappi en
   /// marketplace/cash). No es venta, propina, CFDI, comisión ni lealtad. Lo escribe SÓLO la ingesta; null en todo lo demás.
   thirdPartyCashDue Decimal? @db.Decimal(12, 2)
@@ -4338,9 +4341,9 @@ model Order {
 
   // --- KDS de Uber: contacto del cliente, retiro de renglón, aceptación del proveedor ---
   /// PIN corto del contacto enmascarado de Uber (nunca el número real).
-  customerPhonePin String?
+  customerPhonePin         String?
   /// Vínculo del canal que originó este pedido, si vino de un agregador de delivery.
-  deliveryChannelLinkId String?
+  deliveryChannelLinkId    String?
   providerAcceptedAt       DateTime?
   /// 'HTTP_2XX' | 'PROVIDER_STATE' — cómo se supo que el proveedor aceptó.
   providerAcceptedEvidence String?
@@ -4482,7 +4485,7 @@ model OrderItem {
   // "Preparar de inmediato" (also every non-restaurant flow — additive, no
   // other client is required to send or read it). Restaurant-mode POS groups
   // kitchen comandas and the check display by this label.
-  course String?
+  course        String?
   // Historical identity/name/kind, captured before transport. Immediate remains course=null.
   serviceCourse Json?
 
@@ -4534,8 +4537,8 @@ model OrderItem {
   fulfillmentLines OrderFulfillmentLine[]
 
   /// Origen v7 inmutable. Único evita importar dos veces la misma línea de vale.
-  areaTicketLineId String?         @unique
-  areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
+  areaTicketLineId         String?         @unique
+  areaTicketLine           AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
   /// Procedencia de un renglón de vale cuya venta se CANCELÓ y cuyo vale se volvió a cobrar en otra cuenta (21-oct-2026, tablero
   /// hz:11d84b54:D1). El renglón se queda en su cuenta cancelada (producto, IVA, peso, asignaciones), pero suelta `areaTicketLineId`
   /// (único) para que la cuenta nueva lo tome. Sigue siendo un renglón DE VALE para clasificar la cuenta, y nunca se descuenta ni se
@@ -4735,16 +4738,16 @@ enum ActionType {
 // ==========================================
 
 model Payment {
-  exchangeCreditAsCredit ExchangeCreditLink? @relation("ExchangeCreditAsCredit")
+  exchangeCreditAsCredit  ExchangeCreditLink?  @relation("ExchangeCreditAsCredit")
   exchangeCreditsAsOrigin ExchangeCreditLink[] @relation("ExchangeCreditAsOrigin")
-  paymentEffects PaymentEffect[]
-  id             String          @id @default(cuid())
-  venueId        String
-  venue          Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  orderId        String
-  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  shiftId        String?
-  shift          Shift?          @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  paymentEffects          PaymentEffect[]
+  id                      String               @id @default(cuid())
+  venueId                 String
+  venue                   Venue                @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  orderId                 String
+  order                   Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  shiftId                 String?
+  shift                   Shift?               @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
   processedById String?
   processedBy   Staff?  @relation(fields: [processedById], references: [id], onDelete: SetNull)
@@ -4765,8 +4768,8 @@ model Payment {
   routingEvaluation Json?
 
   // Amounts
-  amount    Decimal @db.Decimal(12, 2)
-  tipAmount Decimal @default(0) @db.Decimal(10, 2)
+  amount               Decimal  @db.Decimal(12, 2)
+  tipAmount            Decimal  @default(0) @db.Decimal(10, 2)
   /// Rappi 2b: parte de este cobro en efectivo que el negocio recibió por cuenta de un tercero (tarifa de Rappi). Fuera de
   /// `amount`/`tipAmount`, o sea fuera de venta, propina, CFDI, comisión y lealtad; entra al cajón como PAY_IN
   /// `srv-third-party:<id>`. Se escribe en la MISMA transacción que el cobro. Null en todo lo demás.
@@ -5126,7 +5129,7 @@ model SaleVerification {
   portedNumberSource  SaleVerificationNumberSource?
   portedNumberSetAt   DateTime?
   // { destino: { captureDeviceId: maxSeq } } — descarta capturas viejas de una terminal
-  appliedCaptureSeqs Json @default("{}")
+  appliedCaptureSeqs  Json                          @default("{}")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -5271,21 +5274,21 @@ model VenueFeature {
 
 /// Independent access origins. Revoking one never deletes the venue's other origins.
 model CapabilityGrant {
-  id          String   @id @default(cuid())
-  venueId     String
-  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  featureCode String
+  id              String               @id @default(cuid())
+  venueId         String
+  venue           Venue                @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  featureCode     String
   /// Stable paid-period origin, not a Stripe subscription copied onto N VenueFeature rows.
-  sourceId    String
-  contractId String?
-  contract HybridContract? @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  sourceId        String
+  contractId      String?
+  contract        HybridContract?      @relation(fields: [contractId], references: [id], onDelete: Restrict)
   paymentPeriodId String?
-  paymentPeriod HybridPaymentPeriod? @relation(fields: [paymentPeriodId], references: [id], onDelete: Restrict)
-  startsAt    DateTime
-  endsAt      DateTime
-  revokedAt   DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  paymentPeriod   HybridPaymentPeriod? @relation(fields: [paymentPeriodId], references: [id], onDelete: Restrict)
+  startsAt        DateTime
+  endsAt          DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
 
   @@unique([venueId, sourceId, featureCode])
   @@index([venueId, featureCode, revokedAt, endsAt])
@@ -5296,36 +5299,36 @@ model CapabilityGrant {
 
 /// Configuration shared by all supported hybrid onboarding flows. Publishing freezes a version.
 model HybridCampaign {
-  id             String @id @default(cuid())
-  code           String @unique
-  slug           String @unique
-  name           String
-  draftDefinition Json
-  revision       Int @default(1)
-  status         LaunchCampaignStatus @default(DRAFT)
-  startsAt       DateTime
+  id                      String                   @id @default(cuid())
+  code                    String                   @unique
+  slug                    String                   @unique
+  name                    String
+  draftDefinition         Json
+  revision                Int                      @default(1)
+  status                  LaunchCampaignStatus     @default(DRAFT)
+  startsAt                DateTime
   // SQL CHECK HybridCampaign_purpose_shape: PROMOTION requires endsAt + capacity and no listProductKey;
   // LIST has neither, requires listProductKey and never belongs to a promotion group.
-  endsAt         DateTime?
-  capacity       Int?
-  reservedCount  Int @default(0)
-  redeemedCount  Int @default(0)
-  audience       String
-  eligibleOrganizationIds String[] @default([])
-  listed         Boolean @default(false)
-  purpose              HybridCampaignPurpose @default(PROMOTION)
+  endsAt                  DateTime?
+  capacity                Int?
+  reservedCount           Int                      @default(0)
+  redeemedCount           Int                      @default(0)
+  audience                String
+  eligibleOrganizationIds String[]                 @default([])
+  listed                  Boolean                  @default(false)
+  purpose                 HybridCampaignPurpose    @default(PROMOTION)
   // SQL partial UNIQUE (listProductKey) WHERE purpose = 'LIST': one list price per product.
-  listProductKey       String?
-  promotionGroupId     String?
-  promotionGroup       HybridPromotionGroup? @relation(fields: [promotionGroupId], references: [id], onDelete: Restrict)
+  listProductKey          String?
+  promotionGroupId        String?
+  promotionGroup          HybridPromotionGroup?    @relation(fields: [promotionGroupId], references: [id], onDelete: Restrict)
   // Explicit "currently sold" publication; readers use this pointer, never the highest version.
-  currentPublicationId String?
-  pendingPublicationId String?
-  createdById    String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  publications   HybridOfferPublication[]
-  redemptions    HybridRedemption[]
+  currentPublicationId    String?
+  pendingPublicationId    String?
+  createdById             String
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  publications            HybridOfferPublication[]
+  redemptions             HybridRedemption[]
 
   @@index([status, listed, startsAt, endsAt])
   @@index([createdAt, id])
@@ -5359,129 +5362,128 @@ model HybridPromotionGroup {
 
 /// Immutable commercial terms; provider references may be attached after publication.
 model HybridOfferPublication {
-  id              String @id @default(cuid())
-  campaignId      String
-  campaign        HybridCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
-  version         Int
-  name            String
-  definition      Json
-  definitionHash  String
+  id                   String           @id @default(cuid())
+  campaignId           String
+  campaign             HybridCampaign   @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  version              Int
+  name                 String
+  definition           Json
+  definitionHash       String
   includedFeatureCodes String[]
-  stripeProductId String? @unique
-  stripePriceId   String? @unique
-  stripeRenewalPriceId String? @unique
-  contracts HybridContract[]
-  createdById     String
-  createdAt       DateTime @default(now())
+  stripeProductId      String?          @unique
+  stripePriceId        String?          @unique
+  stripeRenewalPriceId String?          @unique
+  contracts            HybridContract[]
+  createdById          String
+  createdAt            DateTime         @default(now())
 
   @@unique([campaignId, version])
 }
 
 /// A quote becomes the durable purchase intent on acceptance. The quote never changes.
 model HybridPurchase {
-  id String @id @default(cuid())
-  venueId String
-  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  quotedById String
-  quote Json
-  quoteHash String
-  quoteExpiresAt DateTime
-  clientKey String?
-  status String @default("QUOTED")
-  acceptedAt DateTime?
-  paymentExpiresAt DateTime?
-  stripeCustomerId String?
-  stripeSubscriptionId String? @unique
-  initialInvoiceId String? @unique
-  lastIssue String?
-  nextAttemptAt DateTime @default(now())
-  attemptCount Int @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  contracts HybridContract[]
-  operations HybridBillingOperation[]
-  redemptions HybridRedemption[]
-  credits HybridCreditAllocation[]
+  id                   String                   @id @default(cuid())
+  venueId              String
+  venue                Venue                    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  quotedById           String
+  quote                Json
+  quoteHash            String
+  quoteExpiresAt       DateTime
+  clientKey            String?
+  status               String                   @default("QUOTED")
+  acceptedAt           DateTime?
+  paymentExpiresAt     DateTime?
+  stripeCustomerId     String?
+  stripeSubscriptionId String?                  @unique
+  initialInvoiceId     String?                  @unique
+  lastIssue            String?
+  nextAttemptAt        DateTime                 @default(now())
+  attemptCount         Int                      @default(0)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  contracts            HybridContract[]
+  operations           HybridBillingOperation[]
+  redemptions          HybridRedemption[]
+  credits              HybridCreditAllocation[]
+  // SQL partial UNIQUE (venueId) permits only one nonterminal accepted intent.
 
   @@unique([venueId, clientKey])
   @@index([venueId, createdAt, id])
   @@index([status, nextAttemptAt, id])
   @@index([stripeCustomerId, status])
-  // SQL partial UNIQUE (venueId) permits only one nonterminal accepted intent.
 }
 
 /// One commercial unit (plan, fixed features or chosen bundle); one provider item can grant N capabilities.
 model HybridContract {
-  id String @id @default(cuid())
-  venueId String
-  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  purchaseId String
-  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  publicationId String
-  publication HybridOfferPublication @relation(fields: [publicationId], references: [id], onDelete: Restrict)
+  id                   String                 @id @default(cuid())
+  venueId              String
+  venue                Venue                  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  purchaseId           String
+  purchase             HybridPurchase         @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  publicationId        String
+  publication          HybridOfferPublication @relation(fields: [publicationId], references: [id], onDelete: Restrict)
   stripeSubscriptionId String
-  stripeItemId String @unique
-  featureCodes String[]
-  planTier String?
-  startsAt DateTime
-  paidThrough DateTime?
-  endedAt DateTime?
-  cancelAt DateTime?
-  pendingFeatureCodes Json?
-  pendingEffectiveAt DateTime?
-  revision Int @default(1)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  stripeItemId         String                 @unique
+  featureCodes         String[]
+  planTier             String?
+  startsAt             DateTime
+  paidThrough          DateTime?
+  endedAt              DateTime?
+  cancelAt             DateTime?
+  pendingFeatureCodes  Json?
+  pendingEffectiveAt   DateTime?
+  revision             Int                    @default(1)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
 
   selections HybridContractSelection[]
+  grants     CapabilityGrant[]
 
   @@unique([purchaseId, publicationId])
   @@index([venueId, endedAt, createdAt, id])
   @@index([stripeSubscriptionId])
-  grants CapabilityGrant[]
-
 }
 
 /// Persisted BEFORE each provider mutation; immutable request + stable key outlive Stripe's idempotency retention.
 model HybridContractSelection {
-  id String @id @default(cuid())
-  contractId String
-  contract HybridContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
-  effectiveAt DateTime
+  id           String         @id @default(cuid())
+  contractId   String
+  contract     HybridContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  effectiveAt  DateTime
   featureCodes String[]
-  createdAt DateTime @default(now())
+  createdAt    DateTime       @default(now())
 
   @@unique([contractId, effectiveAt])
 }
 
 model HybridBillingOperation {
-  id String @id @default(cuid())
-  purchaseId String
-  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  step String
-  request Json
+  id          String         @id @default(cuid())
+  purchaseId  String
+  purchase    HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  step        String
+  request     Json
   requestHash String
-  status String @default("PENDING")
-  providerId String?
-  resultHash String?
-  lastIssue String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  status      String         @default("PENDING")
+  providerId  String?
+  resultHash  String?
+  lastIssue   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
 
   @@unique([purchaseId, step])
 }
 
 /// A place belongs to an organization, even when several venues/tabs try to reserve it.
 model HybridRedemption {
-  id String @id @default(cuid())
-  campaignId String
-  campaign HybridCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  id             String         @id @default(cuid())
+  campaignId     String
+  campaign       HybridCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
   organizationId String
-  purchaseId String
-  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  status String @default("RESERVED")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  purchaseId     String
+  purchase       HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  status         String         @default("RESERVED")
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   @@unique([campaignId, organizationId])
   @@index([campaignId, createdAt, id])
@@ -5490,36 +5492,35 @@ model HybridRedemption {
 
 /// Funding actually confirmed by Stripe, including transferred prepaid value; no grants from subscription status alone.
 model HybridPaymentPeriod {
-  id String @id @default(cuid())
-  venueId String
-  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  id                   String            @id @default(cuid())
+  venueId              String
+  venue                Venue             @relation(fields: [venueId], references: [id], onDelete: Restrict)
   stripeSubscriptionId String
-  stripeInvoiceId String @unique
-  startsAt DateTime
-  endsAt DateTime
-  fundedAmount Decimal @db.Decimal(12, 2)
-  refundedAmount Decimal @default(0) @db.Decimal(12, 2)
-  disputed Boolean @default(false)
-  composition Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  stripeInvoiceId      String            @unique
+  startsAt             DateTime
+  endsAt               DateTime
+  fundedAmount         Decimal           @db.Decimal(12, 2)
+  refundedAmount       Decimal           @default(0) @db.Decimal(12, 2)
+  disputed             Boolean           @default(false)
+  composition          Json
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  grants               CapabilityGrant[]
 
   @@index([venueId, stripeSubscriptionId, endsAt])
-  grants CapabilityGrant[]
-
 }
 
 /// A transfer of previously funded unused value, never an invented coupon or a per-capability fraction of a bundle.
 model HybridCreditAllocation {
-  id String @id @default(cuid())
-  purchaseId String
-  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  sourceInvoiceId String
+  id                   String         @id @default(cuid())
+  purchaseId           String
+  purchase             HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  sourceInvoiceId      String
   sourceSubscriptionId String
-  amount Decimal @db.Decimal(12, 2)
-  status String @default("RESERVED")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  amount               Decimal        @db.Decimal(12, 2)
+  status               String         @default("RESERVED")
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
 
   @@unique([purchaseId, sourceInvoiceId])
   @@index([sourceInvoiceId, status])
@@ -5724,9 +5725,9 @@ model Terminal {
   model String? // Hardware model (e.g., "A910S", "D220", "VX520")
 
   // Opaque device credential: command delivery/ACK only, independent of staff sessions.
-  commandTokenHash String?
+  commandTokenHash       String?
   commandProtocolVersion Int?
-  commandSessionId String?
+  commandSessionId       String?
 
   // Status
   status        TerminalStatus @default(INACTIVE)
@@ -5948,7 +5949,6 @@ model Terminal {
   @@index([scaleProfileId])
   @@index([customerDisplayRequestExpiresAt])
   @@index([type, createdAt, id]) // TPV fleet pagination
-
 }
 
 /// El diseño de la pantalla del cliente de UNA terminal. El venue sale SIEMPRE de la terminal:
@@ -6725,10 +6725,10 @@ model EcommerceMerchant {
   createdById String? // Staff ID who onboarded this merchant
 
   // Relations
-  checkoutSessions CheckoutSession[]
-  paymentLinks     PaymentLink[]
-  payments         Payment[]
-  reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
+  checkoutSessions   CheckoutSession[]
+  paymentLinks       PaymentLink[]
+  payments           Payment[]
+  reservations       Reservation[]       @relation("ReservationEcommerceMerchant")
   onlineOrderCharges OnlineOrderCharge[]
 
   // Facturación CFDI 4.0
@@ -6858,9 +6858,9 @@ model CheckoutSession {
 
   // Customer info (optional)
   attributedCustomerId String? // Internal attribution snapshot; payer contacts stay separate
-  customerEmail String?
-  customerPhone String?
-  customerName  String?
+  customerEmail        String?
+  customerPhone        String?
+  customerName         String?
 
   // External reference (merchant's order ID)
   externalOrderId String? // "order_12345" from client's system
@@ -6916,6 +6916,9 @@ model CheckoutSession {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Barrido del cierre perdido de MP: índice PARCIAL "CheckoutSession_mp_sin_venta_createdAt_idx" ON ("createdAt")
+  // WHERE "paymentId" IS NULL AND "mpPaymentId" IS NOT NULL — Prisma 6 no declara índices parciales; vive sólo en la
+  // migración 20261112230010 (mismo patrón que PosSyncIntent_cancelEffects_pending_idx).
 
   @@index([ecommerceMerchantId])
   @@index([sessionId])
@@ -6929,9 +6932,6 @@ model CheckoutSession {
   // indexes from `@unique` above; only mpMerchantOrderId needs its own (the
   // webhook IPN looks sessions up by merchant_order during status polling).
   @@index([mpMerchantOrderId])
-  // Barrido del cierre perdido de MP: índice PARCIAL "CheckoutSession_mp_sin_venta_createdAt_idx" ON ("createdAt")
-  // WHERE "paymentId" IS NULL AND "mpPaymentId" IS NOT NULL — Prisma 6 no declara índices parciales; vive sólo en la
-  // migración 20261112230010 (mismo patrón que PosSyncIntent_cancelEffects_pending_idx).
 }
 
 /// Mapping between a venue and the merchant accounts it should use.
@@ -7198,13 +7198,13 @@ model DeliveryChannelLink {
   ownerAuthorizedClientId    String?
   ownerAuthorizedByIntentId  String?
   /// El intent que está en proceso de activar (o reactivar) este vínculo ahora mismo.
-  activatingIntentId String?
+  activatingIntentId         String?
   /// Quién tiene el lease de activación sobre este vínculo — igual patrón que
   /// `KdsOrder.printClaimedBy`: el primero que reclama gana, la reclamación caduca.
-  activationOwner    String?
+  activationOwner            String?
   /// Se incrementa cada vez que se revoca/reautoriza la conexión, para que un
   /// intent viejo no pueda reactivar por encima de una revocación posterior.
-  revocationVersion  Int     @default(0)
+  revocationVersion          Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -7219,29 +7219,29 @@ model DeliveryChannelLink {
 /// pedirle al proveedor que quite el renglón, y se resuelve con su veredicto y (si aplica)
 /// el reembolso compensatorio ya asentado.
 model DeliveryLineAction {
-  id              String           @id @default(cuid())
-  venueId         String
-  orderId         String
-  orderItemId     String
-  provider        DeliveryProvider
-  externalOrderId String
-  storeId         String
-  lineId          String
+  id                 String           @id @default(cuid())
+  venueId            String
+  orderId            String
+  orderItemId        String
+  provider           DeliveryProvider
+  externalOrderId    String
+  storeId            String
+  lineId             String
   /// 'REMOVE_ITEM' — único valor hoy; texto libre para no migrar si aparece otro.
-  action String
+  action             String
   /// 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'UNCERTAIN'
-  status String
+  status             String
   /// 'PENDING' | 'ACCREDITED' | 'REFUNDED' | 'NO_DELTA' | 'FISCAL_PENDING' — a qué llegó
   /// el reembolso compensatorio de este retiro, si lo hubo.
-  settlement String @default("PENDING")
+  settlement         String           @default("PENDING")
   /// 'STAFF' | 'PROVIDER' — quién originó el retiro.
   origin             String
   requestedByStaffId String?
   retriedByStaffId   String?
-  attempts           Int      @default(1)
-  lastAttemptAt      DateTime @default(now())
+  attempts           Int              @default(1)
+  lastAttemptAt      DateTime         @default(now())
   providerStatus     Int?
-  providerBody       String?  @db.Text
+  providerBody       String?          @db.Text
   refundPaymentId    String?
 
   createdAt  DateTime  @default(now())
@@ -7258,29 +7258,29 @@ model DeliveryLineAction {
 /// queda activado. Vida corta y con lease de activación (mismo patrón que
 /// `KdsOrder.printClaimedBy`): el primero que reclama activar gana, con caducidad.
 model DeliveryConnectIntent {
-  id       String           @id @default(cuid())
-  venueId  String
-  staffId  String
-  provider DeliveryProvider
+  id                   String              @id @default(cuid())
+  venueId              String
+  staffId              String
+  provider             DeliveryProvider
   /// Ambiente de la app de Uber usado para este intento (sandbox/production).
-  environment         String
-  clientId            String
-  orderAcceptanceMode OrderAcceptanceMode @default(AUTO)
+  environment          String
+  clientId             String
+  orderAcceptanceMode  OrderAcceptanceMode @default(AUTO)
   /// 'CREATED' | 'EXCHANGED' | 'ACTIVATING' | 'CONSUMED' | 'FAILED' | 'EXPIRED'
-  state              String   @default("CREATED")
-  activationAttempt  Int      @default(0)
+  state                String              @default("CREATED")
+  activationAttempt    Int                 @default(0)
   /// Quién tiene el lease de activación sobre ESTE intent ahora mismo.
   activationOwner      String?
   activationLeaseUntil DateTime?
   expiresAt            DateTime
 
-  storesJson    Json?
-  selectionJson Json?
-  resultsJson   Json?
+  storesJson            Json?
+  selectionJson         Json?
+  resultsJson           Json?
   /// Token de intercambio con Uber, cifrado en reposo. Nunca se expone tal cual a un
   /// cliente — sólo el servidor lo usa para completar la activación.
   merchantTokenEnvelope String? @db.Text
-  failureReason          String?
+  failureReason         String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -8069,9 +8069,9 @@ model ActivityLog {
 
 model Customer {
   paymentLinks PaymentLink[]
-  id    String  @id @default(cuid())
-  email String? // Unique per venue, not globally (allows same email in different venues)
-  phone String? // Unique per venue, not globally
+  id           String        @id @default(cuid())
+  email        String? // Unique per venue, not globally (allows same email in different venues)
+  phone        String? // Unique per venue, not globally
 
   firstName String?
   lastName  String?
@@ -8629,7 +8629,7 @@ model LoyaltyTransaction {
   /// EARN: los pesos sobre los que se calcularon `points` (sin propina ni crédito de cambio). Un reembolso quita en proporción a ESTO. Null = filas de antes.
   baseAmount       Decimal? @db.Decimal(12, 2)
   /// ADJUST que nace de un reembolso: el `Payment` REFUND que lo causó (sin FK: referencia blanda). Único: una sola reversa por reembolso.
-  refundPaymentId  String? @unique
+  refundPaymentId  String?  @unique
 
   /// EARN: la promoción de lealtad que dio el bono de esta venta. Null = sin promo.
   promotionId String?
@@ -9199,16 +9199,16 @@ model LoyaltyPromotion {
   /// Terminada a mano. Desde aquí ya no aplica.
   endedAt  DateTime?
 
-  daysOfWeek  Int[]                 @default([]) // 0-6 (domingo-sábado), vacío = todos, como Discount
-  timeFrom    String? // "09:00"
-  timeUntil   String? // "17:00"
-  productIds  String[]              @default([])
-  categoryIds String[]              @default([])
+  daysOfWeek         Int[]                 @default([]) // 0-6 (domingo-sábado), vacío = todos, como Discount
+  timeFrom           String? // "09:00"
+  timeUntil          String? // "17:00"
+  productIds         String[]              @default([])
+  categoryIds        String[]              @default([])
   /// Foto de los productos que estaban en `categoryIds` al crear la promo o al editar sus categorías (tope 5,000). Una venta sin
   /// red de un producto que después cambió de categoría sigue calificando (Codex código r1 #2).
-  categoryProductIds String[]       @default([])
-  minSpend    Decimal?              @db.Decimal(12, 2)
-  limit       LoyaltyPromotionLimit @default(NONE)
+  categoryProductIds String[]              @default([])
+  minSpend           Decimal?              @db.Decimal(12, 2)
+  limit              LoyaltyPromotionLimit @default(NONE)
 
   createdById String?
   createdBy   StaffVenue? @relation("LoyaltyPromotionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
@@ -11640,7 +11640,6 @@ model TpvCommandQueue {
   @@index([correlationId])
   @@index([bulkOperationId])
   @@index([terminalId, venueId, createdAt, id]) // Command history pagination
-
 }
 
 // ==========================================
@@ -14943,6 +14942,15 @@ enum ReservationStatus {
   NO_SHOW // Guest didn't arrive within grace period
 }
 
+/// Cómo se demostró una llegada (asistencia verificada, 16-nov-2026).
+enum ReservationCheckInMethod {
+  QR // con celular: la sesión de la clienta consumió un QR del kiosco
+  PHONE // con teléfono o código tecleado en el kiosco
+  STAFF // a mano: panel, POS, MCP o «Sí llegó» de una persona
+  KIOSK_LIST // toque por nombre en la lista del kiosco (apps viejas)
+  PASS // conector de pases (TotalPass, Wellhub)
+}
+
 enum ReservationChannel {
   DASHBOARD // Created by staff
   WEB // Customer self-service (booking page/widget)
@@ -15067,11 +15075,16 @@ model Reservation {
   createdBy   Staff?  @relation("ReservationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   // Status timestamps (audit trail for MVP — proper ReservationHistory in Phase 2)
-  confirmedAt DateTime?
-  checkedInAt DateTime?
-  completedAt DateTime?
-  cancelledAt DateTime?
-  noShowAt    DateTime?
+  confirmedAt        DateTime?
+  checkedInAt        DateTime?
+  /// Cómo se demostró la llegada (asistencia verificada, 16-nov-2026). null = antes de esa fecha o sin llegada.
+  checkInMethod      ReservationCheckInMethod?
+  /// Quién la marcó cuando fue a mano (STAFF) o desde la lista de una app vieja (KIOSK_LIST: la sesión del aparato).
+  checkedInByStaffId String?
+  checkedInBy        Staff?                    @relation("ReservationCheckedInBy", fields: [checkedInByStaffId], references: [id], onDelete: SetNull)
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  noShowAt           DateTime?
 
   // Cancellation details
   cancelledBy        String? // Staff ID, "CUSTOMER", or "SYSTEM"
@@ -16372,9 +16385,9 @@ model PaymentLink {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([venueId, createdById, creationKey])
   @@index([productGroupId])
   @@index([venueId, customerId, createdAt, id])
-  @@unique([venueId, createdById, creationKey])
   @@index([venueId])
   @@index([shortCode])
   @@index([status])
@@ -17023,7 +17036,7 @@ model KdsOrderItem {
   /// Quantity buckets HELD/PENDING/PREPARING/READY/DELIVERED/CANCELLED, per station.
   /// null is legacy, never interpreted as delivered.
   preparation         Json?
-  preparationRevision Int @default(0)
+  preparationRevision Int     @default(0)
 
   /// KDS de Uber: liga floja al OrderItem real (igual que productId/categoryId abajo,
   /// sin `@relation` — una comanda es una foto del momento), id de renglón del
@@ -17186,8 +17199,8 @@ model PrintStation {
   products      Product[]
   orderItems    OrderItem[]
   productGroups ProductGroup[]
-  printJobs  PrintJob[]
-  kdsOrders  KdsOrder[]
+  printJobs     PrintJob[]
+  kdsOrders     KdsOrder[]
 
   /// Áreas de entrega que imprimen su vale en esta estación (AREA_TICKETS).
   fulfillmentAreas FulfillmentArea[]
@@ -18189,13 +18202,13 @@ model FiscalEmisor {
   csdLastCheckedAt    DateTime?
 
   // Comprobante defaults
-  serie                   String?
-  defaultUsoCfdi          String            @default("G03")
-  globalPeriodicity       GlobalPeriodicity @default(MENSUAL)
+  serie                           String?
+  defaultUsoCfdi                  String            @default("G03")
+  globalPeriodicity               GlobalPeriodicity @default(MENSUAL)
   // OPT-IN (default false): whether CASH sales may be invoiced at all (customer self-invoice QR / Flow A
   // AND the month-end factura global / Flow C). Many venues do NOT declare cash income, so invoicing it
   // would force declaring sales they never meant to. Off by default; a venue turns it on explicitly.
-  invoiceCashSales        Boolean           @default(false)
+  invoiceCashSales                Boolean           @default(false)
   // OPT-IN (default false; founder 7-oct-2026, IVA C1): whether the month/period FACTURA GLOBAL may take sales paid ONLY
   // outside the terminal (no payment with a merchant: cash, transfer, vouchers, custom tender types). Only applies with ONE
   // RFC in the venue (with several, nobody knows whose they are). Off => those sales are excluded with motive SIN_TERMINAL;
@@ -18205,10 +18218,10 @@ model FiscalEmisor {
   // ISR / reportes contables). Separate from invoicing: the gerencial "¿cuánto gané?" ALWAYS shows the
   // full total; this flag only governs whether cash reaches the fiscal books. Off by default → cash is
   // not declared unless the venue opts in.
-  includeCashInAccounting Boolean           @default(false)
+  includeCashInAccounting         Boolean           @default(false)
   // Tasa del Impuesto Sobre Nómina (ISN), estatal — la paga el PATRÓN sobre las percepciones. Varía por
   // estado (~1%–4%); 0 = no configurada (no se calcula). Fracción: 0.03 = 3%. La captura el venue/contador.
-  isnRate                 Decimal           @default(0) @db.Decimal(5, 4)
+  isnRate                         Decimal           @default(0) @db.Decimal(5, 4)
 
   merchantConfigs MerchantFiscalConfig[]
   cfdis           Cfdi[]
@@ -18331,7 +18344,7 @@ model Cfdi {
   cancelStatus         CfdiCancelStatus?
   cancelRequestedAt    DateTime?
   cancelledAt          DateTime?
-  cancelIntento        Int       @default(0) // C2: número del intento de cancelación vigente; cada desenlace se aplica sólo a SU intento
+  cancelIntento        Int               @default(0) // C2: número del intento de cancelación vigente; cada desenlace se aplica sólo a SU intento
   cancelEnviadaAt      DateTime? // C2: token del ÚNICO envío de este intento (cuándo se tomó); NULL = anotado y todavía no enviado
   cancelAcusadaAt      DateTime? // C2: cuándo el PAC acusó este intento (lo vio en trámite); distingue «en trámite» de «en duda»
 
@@ -19464,23 +19477,23 @@ model PlatformChargeDigest {
 /// `localRef` guarda el UUID local (p.ej. de OPEN_TABLE) para que intents
 /// posteriores del mismo dispositivo resuelvan su orderId de servidor.
 model PosSyncIntent {
-  id             String   @id @default(cuid())
-  venueId        String
-  deviceId       String   @db.VarChar(64)
-  staffId        String?
+  id                String   @id @default(cuid())
+  venueId           String
+  deviceId          String   @db.VarChar(64)
+  staffId           String?
   /// Secuencia monotónica por dispositivo; el fence evita reutilizarla.
-  seq            Int?
-  type           String   @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
-  idempotencyKey String   @db.VarChar(64)
+  seq               Int?
+  type              String   @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
+  idempotencyKey    String   @db.VarChar(64)
   /// UUID local generado en el dispositivo (identidad offline) — resoluble a ids de server.
-  localRef       String?  @db.VarChar(64)
-  status         String   @db.VarChar(12) // PROCESSING | ACKED | REJECTED
-  errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
+  localRef          String?  @db.VarChar(64)
+  status            String   @db.VarChar(12) // PROCESSING | ACKED | REJECTED
+  errorCode         String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
-  resultJson     Json?
+  resultJson        Json?
   /// Obligación interna post-commit de CANCEL HTTP; SQL NULL = sin efectos pendientes. No viaja al cliente.
   cancelEffectsJson Json?
-  createdAt      DateTime @default(now())
+  createdAt         DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])
   @@unique([venueId, deviceId, seq])
@@ -19663,6 +19676,41 @@ model KioskCheckInChallenge {
 
   @@index([venueId, status, expiresAt])
   @@index([terminalId, stationKey, status])
+}
+
+/// Recibo de una llegada de la COLA sin red del kiosco (teléfono tecleado, asistencia verificada, 16-nov-2026).
+///
+/// La llave idempotente de la operación (`opId`, el id de su fila en el aparato). Se escribe en la MISMA transacción que la
+/// llegada; si ya existe, el reintento contesta «ya registrada» con la reserva que le tocó la primera vez, sin volver a
+/// resolverla ni a escribir. Codex r4: guardarla en el `statusLog` se perdía cuando otro escritor reemplazaba la bitácora, y
+/// volver a buscar la reserva podía marcar otra clase.
+model KioskCheckInOp {
+  opId          String   @id @db.VarChar(64)
+  venueId       String
+  venue         Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  reservationId String
+  createdAt     DateTime @default(now())
+
+  @@index([venueId, createdAt])
+}
+
+/// Llave del QR firmado por el aparato (asistencia verificada, 16-nov-2026).
+///
+/// El kiosco pinta cada 30 s un QR con `HMAC(secreto, "v2|venueId|keyId|ts")`, sin pedirle nada al servidor (así sale
+/// sin internet y le sirve a toda la fila). El secreto NO se guarda: es `HMAC(OTP_PEPPER, "kiosk-qr|" + id)` y se le
+/// entrega al aparato una sola vez. Revocar = `revokedAt`.
+model KioskQrKey {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Identidad estable del aparato que la pidió (la de su cola sin red). Una llave nueva revoca las anteriores del mismo.
+  deviceKey       String    @db.VarChar(128)
+  issuedByStaffId String?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([venueId, deviceKey])
 }
 
 enum KioskCheckInChallengeStatus {
@@ -20121,10 +20169,10 @@ model ExchangeCreditLink {
   exchangeId            String
   exchange              Exchange @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
   originPaymentId       String
-  originPayment         Payment @relation("ExchangeCreditAsOrigin", fields: [originPaymentId], references: [id], onDelete: Restrict)
+  originPayment         Payment  @relation("ExchangeCreditAsOrigin", fields: [originPaymentId], references: [id], onDelete: Restrict)
   creditRefundPaymentId String   @unique
   creditPaymentId       String   @unique
-  creditPayment         Payment @relation("ExchangeCreditAsCredit", fields: [creditPaymentId], references: [id], onDelete: Restrict)
+  creditPayment         Payment  @relation("ExchangeCreditAsCredit", fields: [creditPaymentId], references: [id], onDelete: Restrict)
   amount                Decimal  @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
 
@@ -20572,8 +20620,8 @@ enum ShopifyStoreStatus {
 
 /// Fase de cada sucursal. PAUSED guarda en `pausedFrom` la fase a la que vuelve.
 enum ShopifyLinkStatus {
-  CONNECTING   // importando catálogo; el stock NO se toca; el guardia ya encola todo
-  REVIEWING    // vista previa lista; con applyRequestedAt se inicializan las parejas por tandas
+  CONNECTING // importando catálogo; el stock NO se toca; el guardia ya encola todo
+  REVIEWING // vista previa lista; con applyRequestedAt se inicializan las parejas por tandas
   ACTIVE
   PAUSED
   DISCONNECTED
@@ -20621,16 +20669,16 @@ enum ShopifyReviewChoice {
 }
 
 enum ShopifyReviewReason {
-  DIFERENCIA   // el cuadre no pudo explicar Avoqado ≠ espejo + pendientes
-  ATORADO      // hay envíos en DEAD_LETTER
-  INCIERTO     // un envío ambiguo venció su ventana: no sabemos si llegó
-  REACTIVADA   // pareja nueva o reactivada sobre un producto que ya tenía stock distinto
+  DIFERENCIA // el cuadre no pudo explicar Avoqado ≠ espejo + pendientes
+  ATORADO // hay envíos en DEAD_LETTER
+  INCIERTO // un envío ambiguo venció su ventana: no sabemos si llegó
+  REACTIVADA // pareja nueva o reactivada sobre un producto que ya tenía stock distinto
 }
 
 enum ShopifySuspendReason {
-  SIN_INVENTARIO      // el producto se quedó sin fila "Inventory" (p. ej. pasó a receta)
-  NIVEL_INEXISTENTE   // la variante no tiene nivel activo en la ubicación
-  NO_RASTREADO        // inventoryItem.tracked = false en Shopify
+  SIN_INVENTARIO // el producto se quedó sin fila "Inventory" (p. ej. pasó a receta)
+  NIVEL_INEXISTENTE // la variante no tiene nivel activo en la ubicación
+  NO_RASTREADO // inventoryItem.tracked = false en Shopify
 }
 
 enum ShopifyIssueReason {
@@ -20683,45 +20731,45 @@ model ShopifyStore {
 
 /// Una sucursal de Avoqado ↔ una ubicación de Shopify. Una fila por sucursal.
 model ShopifyLocationLink {
-  id                 String               @id @default(cuid())
-  storeId            String
-  store              ShopifyStore         @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  venueId            String               @unique
-  venue              Venue                @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  shopifyLocationId  String
-  locationName       String
-  status             ShopifyLinkStatus    @default(CONNECTING)
-  pausedFrom         ShopifyLinkStatus?
+  id                   String               @id @default(cuid())
+  storeId              String
+  store                ShopifyStore         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  venueId              String               @unique
+  venue                Venue                @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  shopifyLocationId    String
+  locationName         String
+  status               ShopifyLinkStatus    @default(CONNECTING)
+  pausedFrom           ShopifyLinkStatus?
   /// Sube al conectar a otra tienda/ubicación o tras desconectar. Cada fila del buzón guarda la suya.
-  generation         Int                  @default(1)
-  importCursor       String?
-  importAttempts     Int                  @default(0)
-  importError        String?
-  importedAt         DateTime?
-  applyRequestedAt   DateTime?
-  applyRequestedById String?
-  webhooksAt         DateTime?
-  needsReconcile     Boolean              @default(false)
-  reconcileCursor    String?
-  lastReconciledAt   DateTime?
+  generation           Int                  @default(1)
+  importCursor         String?
+  importAttempts       Int                  @default(0)
+  importError          String?
+  importedAt           DateTime?
+  applyRequestedAt     DateTime?
+  applyRequestedById   String?
+  webhooksAt           DateTime?
+  needsReconcile       Boolean              @default(false)
+  reconcileCursor      String?
+  lastReconciledAt     DateTime?
   /// Sube con cada pedido de cuadre; el cierre de una vuelta hace CAS con la versión que la empezó (§10.9).
-  reconcileVersion   Int                  @default(0)
-  reconcileDoneVersion Int                @default(0)
+  reconcileVersion     Int                  @default(0)
+  reconcileDoneVersion Int                  @default(0)
   /// Barrido de catálogo (recupera webhooks perdidos, §10.10).
-  catalogSweepId     Int                  @default(0)
-  catalogSweepCursor String?
+  catalogSweepId       Int                  @default(0)
+  catalogSweepCursor   String?
   /// Reencolar eventos DEFERRED pendiente; se marca en la MISMA tx de la transición y el worker lo drena (§10.5).
-  requeuePending     Boolean              @default(false)
+  requeuePending       Boolean              @default(false)
   /// Lease del trabajo por sucursal (§10.1): reemplaza al candado global del worker.
-  workToken          String?
-  workLeaseUntil     DateTime?
-  lastWorkedAt       DateTime?
+  workToken            String?
+  workLeaseUntil       DateTime?
+  lastWorkedAt         DateTime?
   /// Espera tras una unidad fallida, para no empezar siempre por la misma sucursal (§10.2).
-  nextWorkAt         DateTime?
-  connectedById      String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  variantLinks       ShopifyVariantLink[]
+  nextWorkAt           DateTime?
+  connectedById        String?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  variantLinks         ShopifyVariantLink[]
 
   @@unique([storeId, shopifyLocationId])
   @@index([status])
@@ -20731,45 +20779,45 @@ model ShopifyLocationLink {
 /// Invariante operativo (§9.3): Inventory.currentStock = mirrorAvailable + Σ delta de filas vivas (PENDING, IN_PROGRESS,
 /// FAILED) + Σ delta de DEAD_LETTER sin resolver + offset de la revisión OPEN, del producto en la generación vigente.
 model ShopifyVariantLink {
-  id                String                @id @default(cuid())
-  locationLinkId    String
-  locationLink      ShopifyLocationLink   @relation(fields: [locationLinkId], references: [id], onDelete: Cascade)
-  venueId           String
-  productId         String                @unique
-  product           Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
-  shopifyProductId  String
-  shopifyVariantId  String
-  inventoryItemId   String
-  originalSku       String?
+  id                        String                @id @default(cuid())
+  locationLinkId            String
+  locationLink              ShopifyLocationLink   @relation(fields: [locationLinkId], references: [id], onDelete: Cascade)
+  venueId                   String
+  productId                 String                @unique
+  product                   Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shopifyProductId          String
+  shopifyVariantId          String
+  inventoryItemId           String
+  originalSku               String?
   /// Lo que Shopify tenía al importar; sólo alimenta la vista previa («así quedará tu stock»).
-  importedAvailable Int?
-  importedAt        DateTime?
+  importedAvailable         Int?
+  importedAt                DateTime?
   /// null = pareja creada pero su stock todavía no se inicializa.
-  initializedAt     DateTime?
+  initializedAt             DateTime?
   /// true si el catálogo CREÓ el producto de Avoqado para esta variante (no lo emparejó con uno que ya existía).
   /// Sólo con true se permite TOMAR_SHOPIFY estando ACTIVE (§9.6).
-  createdProduct    Boolean               @default(false)
-  suspendedReason   ShopifySuspendReason?
-  suspendedAt       DateTime?
-  mirrorAvailable   Int                   @default(0)
-  mirrorCommitted   Int                   @default(0)
-  mirrorAt          DateTime              @default(now())
-  committedAt       DateTime?
+  createdProduct            Boolean               @default(false)
+  suspendedReason           ShopifySuspendReason?
+  suspendedAt               DateTime?
+  mirrorAvailable           Int                   @default(0)
+  mirrorCommitted           Int                   @default(0)
+  mirrorAt                  DateTime              @default(now())
+  committedAt               DateTime?
   /// D1 (spec 2026-10-10): la elección del dueño al conectar («Usar el de Avoqado» / «Usar el de Shopify») y los números que
   /// vio. Vale sólo en la generación y con la credencial con que se eligió, y mientras Avoqado y lo de Shopify al importar
   /// sigan en esos números; si no, se vuelve a pedir. Nunca se borra: la generación y los números la invalidan.
   connectChoice             ShopifyReviewChoice?
   connectChoiceGeneration   Int?
   connectChoiceTokenVersion Int?
-  connectSeenAvoqadoQty     Decimal?             @db.Decimal(12, 3)
+  connectSeenAvoqadoQty     Decimal?              @db.Decimal(12, 3)
   connectSeenShopifyQty     Int?
   connectChoiceById         String?
   /// Último barrido de catálogo que vio esta variante; las bajas se deciden sólo al terminar un barrido completo.
-  lastSeenSweepId   Int?
+  lastSeenSweepId           Int?
   /// Lo que Shopify dice del catálogo de esta variante: { title, options: [{ name, value }], productImage, variantImage }.
-  shopifyCatalog    Json?
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
+  shopifyCatalog            Json?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
 
   @@unique([locationLinkId, inventoryItemId])
   @@unique([locationLinkId, shopifyVariantId])
@@ -20781,27 +20829,27 @@ model ShopifyVariantLink {
 /// Buzón Avoqado → Shopify. Lo llenan SÓLO el guardia, la resolución «usar Avoqado» y «Usar el de Avoqado» al conectar (D1).
 /// El destino queda congelado en (locationLinkId, generation).
 model ShopifyStockOutbox {
-  id             String              @id @default(cuid())
-  venueId        String
-  locationLinkId String
-  generation     Int
-  productId      String
-  delta          Decimal             @db.Decimal(12, 3)
-  status         ShopifyOutboxStatus @default(PENDING)
+  id                  String              @id @default(cuid())
+  venueId             String
+  locationLinkId      String
+  generation          Int
+  productId           String
+  delta               Decimal             @db.Decimal(12, 3)
+  status              ShopifyOutboxStatus @default(PENDING)
   /// Algún intento terminó sin saber si Shopify lo aplicó (timeout, red, 5xx, respuesta ilegible). Pegajoso: sólo lo
   /// limpia una respuesta definitiva (éxito o userErrors).
-  ambiguous      Boolean             @default(false)
+  ambiguous           Boolean             @default(false)
   /// Congelados en el PRIMER intento: todo reintento con la misma llave manda exactamente los mismos parámetros (§9.2).
   sentInventoryItemId String?
   sentLocationId      String?
-  attempts       Int                 @default(0)
-  scheduledAt    DateTime            @default(now())
-  firstAttemptAt DateTime?
-  claimToken     String?
-  leaseUntil     DateTime?
-  lastError      String?             @db.Text
-  createdAt      DateTime            @default(now())
-  processedAt    DateTime?
+  attempts            Int                 @default(0)
+  scheduledAt         DateTime            @default(now())
+  firstAttemptAt      DateTime?
+  claimToken          String?
+  leaseUntil          DateTime?
+  lastError           String?             @db.Text
+  createdAt           DateTime            @default(now())
+  processedAt         DateTime?
 
   @@index([status, scheduledAt])
   @@index([productId, status])
@@ -21117,9 +21165,9 @@ model OnlineOrderCharge {
   /// cambie sus credenciales después.
   merchantSnapshot Json
   /// Intento de sesión de pago (se incrementa si se abre una nueva sesión para el mismo cargo).
-  checkoutAttempt  Int     @default(1)
+  checkoutAttempt  Int       @default(1)
   lastError        String?
-  attempts         Int     @default(0)
+  attempts         Int       @default(0)
   /// El conciliador lo vio por primera vez en duda (`CAPTURING`/`RELEASING`): de aquí se cuentan los 15 min de la alerta
   /// (`updatedAt` no sirve: cada pasada y cada reintento lo tocan).
   inDoubtSince     DateTime?
@@ -21219,42 +21267,43 @@ model OnlineOrderCardRefundReversal {
 
 /// Platform onboarding invitations; deliberately independent of a venue.
 model DocumentRequest {
-  organizationId String?
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  submissions DocumentRequestSubmission[]
-  venueLinks DocumentRequestVenueLink[]
+  organizationId         String?
+  organization           Organization?               @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissions            DocumentRequestSubmission[]
+  venueLinks             DocumentRequestVenueLink[]
+  id                     String                      @id @default(cuid())
+  provider               String
+  entityType             String
+  businessName           String
+  tokenHash              String
+  tokenVersion           Int                         @default(1)
+  status                 String                      @default("OPEN")
+  expiresAt              DateTime
+  contactName            String?
+  email                  String?
+  phone                  String?
+  identificationType     String?
+  privacyAcceptedAt      DateTime?
+  submittedAt            DateTime?
+  submissionVersion      Int                         @default(0)
+  notificationSnapshot   Json?
+  onboardingNotification String                      @default("NONE")
+  danielNotification     String                      @default("NONE")
+  notificationAttempts   Int                         @default(0)
+  notificationNextAt     DateTime?
+  notificationLease      String?
+  notificationLeaseUntil DateTime?
+  uploadLease            String?
+  uploadLeaseUntil       DateTime?
+  uploadAttempts         Int                         @default(0)
+  totalBytes             Int                         @default(0)
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  files                  DocumentRequestFile[]
+  deliveries             DocumentRequestDelivery[]
+
   @@unique([id, organizationId])
   @@index([organizationId])
-  id String @id @default(cuid())
-  provider String
-  entityType String
-  businessName String
-  tokenHash String
-  tokenVersion Int @default(1)
-  status String @default("OPEN")
-  expiresAt DateTime
-  contactName String?
-  email String?
-  phone String?
-  identificationType String?
-  privacyAcceptedAt DateTime?
-  submittedAt DateTime?
-  submissionVersion Int @default(0)
-  notificationSnapshot Json?
-  onboardingNotification String @default("NONE")
-  danielNotification String @default("NONE")
-  notificationAttempts Int @default(0)
-  notificationNextAt DateTime?
-  notificationLease String?
-  notificationLeaseUntil DateTime?
-  uploadLease String?
-  uploadLeaseUntil DateTime?
-  uploadAttempts Int @default(0)
-  totalBytes Int @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  files DocumentRequestFile[]
-  deliveries DocumentRequestDelivery[]
   @@index([status, createdAt])
   @@index([notificationNextAt])
   @@index([expiresAt])
@@ -21262,20 +21311,21 @@ model DocumentRequest {
 
 model DocumentRequestFile {
   submissionFiles DocumentRequestSubmissionFile[]
-  id String @id @default(cuid())
-  requestId String
-  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
-  uploadId String
-  key String
-  fileName String
-  mimeType String
-  sizeBytes Int
-  contentHash String
-  storagePath String
-  status String @default("PENDING")
-  tokenVersion Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String                          @id @default(cuid())
+  requestId       String
+  request         DocumentRequest                 @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  uploadId        String
+  key             String
+  fileName        String
+  mimeType        String
+  sizeBytes       Int
+  contentHash     String
+  storagePath     String
+  status          String                          @default("PENDING")
+  tokenVersion    Int
+  createdAt       DateTime                        @default(now())
+  updatedAt       DateTime                        @updatedAt
+
   @@unique([requestId, uploadId])
   @@index([requestId, status])
   @@index([status, updatedAt])
@@ -21283,61 +21333,65 @@ model DocumentRequestFile {
 
 /// Immutable notification outbox per submission and recipient; invitation changes never cancel mail.
 model DocumentRequestDelivery {
-  id String @id @default(cuid())
-  requestId String
-  request DocumentRequest @relation(fields:[requestId],references:[id],onDelete:Restrict)
+  id                String          @id @default(cuid())
+  requestId         String
+  request           DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
   submissionVersion Int
-  recipient String
-  status String @default("PENDING")
-  snapshot Json
-  attempts Int @default(0)
-  firstAttemptAt DateTime?
-  nextAttemptAt DateTime? @default(now())
-  leaseToken String?
-  leaseUntil DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  @@unique([requestId,submissionVersion,recipient])
-  @@index([status,nextAttemptAt])
+  recipient         String
+  status            String          @default("PENDING")
+  snapshot          Json
+  attempts          Int             @default(0)
+  firstAttemptAt    DateTime?
+  nextAttemptAt     DateTime?       @default(now())
+  leaseToken        String?
+  leaseUntil        DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([requestId, submissionVersion, recipient])
+  @@index([status, nextAttemptAt])
 }
 
 /// Immutable record of one completed delivery. Never reconstructed from a later draft.
 model DocumentRequestSubmission {
-  id String @id @default(cuid())
-  requestId String
-  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id                String                          @id @default(cuid())
+  requestId         String
+  request           DocumentRequest                 @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   submissionVersion Int
-  snapshot Json
-  submittedAt DateTime
-  createdAt DateTime @default(now())
-  files DocumentRequestSubmissionFile[]
-  venueLinks DocumentRequestVenueLink[]
+  snapshot          Json
+  submittedAt       DateTime
+  createdAt         DateTime                        @default(now())
+  files             DocumentRequestSubmissionFile[]
+  venueLinks        DocumentRequestVenueLink[]
+
   @@unique([requestId, submissionVersion])
 }
 
 model DocumentRequestSubmissionFile {
   submissionId String
-  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  documentId String
-  document DocumentRequestFile @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submission   DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentId   String
+  document     DocumentRequestFile       @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   @@id([submissionId, documentId])
   @@index([documentId])
 }
 
 model DocumentRequestVenueLink {
-  id String @id @default(cuid())
-  requestId String
-  organizationId String
-  request DocumentRequest @relation(fields: [requestId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
-  submissionId String
-  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  venueId String
-  venue Venue @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
-  actorId String
-  actor Staff @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  linkedAt DateTime @default(now())
-  onboardingHash String? @unique
+  id               String                    @id @default(cuid())
+  requestId        String
+  organizationId   String
+  request          DocumentRequest           @relation(fields: [requestId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  submissionId     String
+  submission       DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  venueId          String
+  venue            Venue                     @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  actorId          String
+  actor            Staff                     @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  linkedAt         DateTime                  @default(now())
+  onboardingHash   String?                   @unique
   onboardingResult Json?
+
   @@unique([venueId, submissionId])
   @@index([venueId, linkedAt, id])
   @@index([requestId, linkedAt, id])
@@ -21480,13 +21534,6 @@ model CrmAccount {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  @@unique([source, externalKey])
-  @@index([ownerStaffId, stageId])
-  @@index([nextActivityAt])
-  @@index([source, organizationId])
-  @@index([wonAt]) // reportes: ganados del rango
-  @@index([lostAt]) // reportes: perdidos del rango
   // 🔴 ÍNDICE PARCIAL MANTENIDO A MANO — Prisma no tiene `where:` en `@@index`, así que no se ve aquí y vive sólo en el SQL
   // de la migración `20261031024450_crm_propio` (ruling 51):
   //
@@ -21494,6 +21541,13 @@ model CrmAccount {
   //     WHERE "firstMoneyAt" IS NULL AND "organizationId" IS NOT NULL;
   //
   // Lo lee el barrido del primer dinero (`fillFirstMoney`) cada 5 minutos, con esas dos condiciones escritas como literales.
+
+  @@unique([source, externalKey])
+  @@index([ownerStaffId, stageId])
+  @@index([nextActivityAt])
+  @@index([source, organizationId])
+  @@index([wonAt]) // reportes: ganados del rango
+  @@index([lostAt]) // reportes: perdidos del rango
 }
 
 /// Una persona de un negocio del CRM. El teléfono y el correo AVISAN de duplicados pero no son únicos: el mismo

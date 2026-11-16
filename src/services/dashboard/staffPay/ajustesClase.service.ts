@@ -9,7 +9,7 @@ import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
 import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
-import { ReglaDeClase, valorarClases } from './valoracion'
+import { LlegadasPorMetodo, ReglaDeClase, valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
   payCountOverride: number | null
@@ -43,6 +43,8 @@ export interface PagoDeClase {
   payLevelName: string | null
   /** La regla de clase que movió el pago (spec fase 3 §6.6): «Suplencia avisada 3 h antes: +$100»; null si ninguna. */
   regla: ReglaDeClase | null
+  /** Asistencia verificada (16-nov): cómo llegaron (con celular, con teléfono, a mano por quién); null si no se valoró. */
+  llegadas: LlegadasPorMetodo | null
   ajuste: AjusteDeClase | null
   anclada: boolean
   /**
@@ -226,6 +228,7 @@ export async function pagoDeClase(
     staffName: null,
     payLevelName: null,
     regla: null,
+    llegadas: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
     llegoTarde: false,
@@ -266,6 +269,7 @@ export async function pagoDeClase(
       staffName: fuera.staffName,
       payLevelName: fuera.payLevelName,
       regla: fuera.regla,
+      llegadas: fuera.llegadas,
       montoSiEntrara: fuera.monto !== null ? new Prisma.Decimal(fuera.monto).toFixed(2) : null,
       sede: { nombre: cs.venue.name, fecha: fuera.fechaLocal },
     }
@@ -288,6 +292,7 @@ export async function pagoDeClase(
     staffName: v.staffName,
     payLevelName: v.payLevelName,
     regla: v.regla,
+    llegadas: v.llegadas,
   }
 }
 
