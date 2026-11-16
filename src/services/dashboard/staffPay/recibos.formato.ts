@@ -116,6 +116,12 @@ export function textoDeLlegadas(llegadas: Prisma.JsonValue | null | undefined): 
     n('pass') ? `${n('pass')} con pase` : null,
     n('sinMetodo') ? `${n('sinMetodo')} sin método` : null,
   ].filter(Boolean)
+  // Codex r2 #6: con «Corregir conteo», el pago usa ese número; las llegadas registradas se rotulan como tales.
+  const corregido = typeof l.corregidoA === 'number' ? (l.corregidoA as number) : null
+  if (corregido !== null) {
+    const registradas = partes.length ? `llegadas registradas: ${partes.join(', ')}` : 'sin llegadas registradas'
+    return `${registradas} · pago corregido a mano a ${corregido} ${corregido === 1 ? 'lugar' : 'lugares'}`
+  }
   return partes.length ? partes.join(', ') : null
 }
 

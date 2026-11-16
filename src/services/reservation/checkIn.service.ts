@@ -166,6 +166,11 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
   const current = await tx.reservation.findFirst({ where: { id: cmd.reservationId, venueId: cmd.venueId } })
   if (!current) throw new NotFoundError('Reservacion no encontrada')
 
+  // Codex r2 #3: una operación de una cola que ya pasó por aquí nunca se vuelve a aplicar, aunque alguien haya deshecho la
+  // llegada después. Dentro de la transacción del caller, con la fila recién leída.
+  if (cmd.opId && Array.isArray(current.statusLog) && (current.statusLog as StatusLogEntry[]).some(e => e?.opId === cmd.opId)) {
+    return finish(tx, cmd, 'ALREADY_CHECKED_IN')
+  }
   const decision = decideCheckIn(current.status)
   if (decision === 'NOT_CHECKINABLE') {
     throw new ConflictError(`La reservacion esta en estado ${current.status} y ya no admite check-in`, RESERVATION_NOT_CHECKINABLE)

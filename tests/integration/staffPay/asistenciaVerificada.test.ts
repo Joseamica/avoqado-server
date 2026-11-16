@@ -67,7 +67,7 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     expect(v.countMode).toBe('ATTENDED')
     expect(v.conteo).toBe(5)
     expect(new Prisma.Decimal(v.monto!).toNumber()).toBe(500)
-    expect(v.llegadas).toEqual({ qr: 2, phone: 1, staff: 1, list: 0, pass: 0, sinMetodo: 1, aMano: ['Owner QA'] })
+    expect(v.llegadas).toEqual({ qr: 2, phone: 1, staff: 1, list: 0, pass: 0, sinMetodo: 1, aMano: ['Owner QA'], corregidoA: null })
   })
 
   it('🔴 un grupo de 3 que llegó queda «por confirmar» y no se paga solo (fase 0b)', async () => {
@@ -98,5 +98,21 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     expect(v.conteo).toBe(1)
     expect(new Prisma.Decimal(v.monto!).toNumber()).toBe(100)
     expect(v.llegadas.phone).toBe(3)
+    expect(v.llegadas.corregidoA).toBe(1)
+  })
+
+  it('Codex r2 #7: el resumen por persona suma cómo llegaron en sus clases de «sólo quien llegó»', async () => {
+    const { resumenPorPersona } = await import('@/services/dashboard/staffPay/valoracion')
+    const filas = await resumenPorPersona(prisma, {
+      venueId: m.venueId,
+      organizationId: m.orgId,
+      tz: TZ,
+      desde: DESDE,
+      hasta: HASTA,
+      ahora: AHORA,
+    })
+    const ana = filas.find(f => f.staffId === m.ana)!
+    // Sólo las clases OK: la del grupo por confirmar no entra al resumen.
+    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 0, pass: 0, sinMetodo: 1 })
   })
 })

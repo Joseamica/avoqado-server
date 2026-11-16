@@ -223,6 +223,7 @@ export async function consumeChallenge(req: Request, res: Response, next: NextFu
       challengeId: req.params.challengeId,
       secret,
       customerId: auth.customerId,
+      sesion: { tipo: (auth as any).tipo, contactos: (auth as any).contactos ?? [] },
       now: new Date(),
       ip: req.ip,
     })

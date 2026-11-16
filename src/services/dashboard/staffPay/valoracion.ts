@@ -19,7 +19,12 @@ export interface LlegadasPorMetodo {
   sinMetodo: number
   /** Quiénes marcaron a mano o desde la lista de una app vieja, para decir «a mano por Ana P.». */
   aMano: string[]
+  /** «Corregir conteo» de la clase (Codex r2 #6): el pago usa este número; el desglose sigue diciendo lo registrado. */
+  corregidoA: number | null
 }
+
+/** Totales de llegadas de una persona en el periodo (Codex r2 #7), sólo de sus clases en «sólo quien llegó». */
+export type LlegadasDePersona = Omit<LlegadasPorMetodo, 'aMano' | 'corregidoA'>
 type Db = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 /** Tope de horas de las dos reglas de clase: el CHECK de `ServicePayTableVersion` (spec fase 3 §7.3). */
@@ -115,6 +120,8 @@ export interface ResumenSede {
   clases: number
   total: Prisma.Decimal
   sumaLugares: number
+  /** Asistencia verificada: cómo llegaron, sumado de sus clases en «sólo quien llegó»; null si no tiene ninguna. */
+  llegadas: LlegadasDePersona | null
 }
 
 /**
@@ -355,7 +362,8 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                         'bono', cc.cover_monto::text)
              END AS regla,
              jsonb_build_object('qr', cc.lleg_qr, 'phone', cc.lleg_phone, 'staff', cc.lleg_staff, 'list', cc.lleg_list,
-                                'pass', cc.lleg_pass, 'sinMetodo', cc.lleg_sin_metodo, 'aMano', to_jsonb(cc.lleg_a_mano)) AS llegadas
+                                'pass', cc.lleg_pass, 'sinMetodo', cc.lleg_sin_metodo, 'aMano', to_jsonb(cc.lleg_a_mano),
+                                'corregidoA', cc."payCountOverride") AS llegadas
       FROM con_conteo cc
       JOIN "Product" p ON p.id = cc."productId"
       LEFT JOIN "Staff" s ON s.id = cc."assignedStaffId"
@@ -389,11 +397,26 @@ export const llegoAlTopePersonas = (filas: number): boolean => filas >= TOPE_PER
 
 export async function resumenPorPersona(db: Db, f: FiltroValoracion): Promise<ResumenSede[]> {
   const rows = await db.$queryRaw<
-    Array<{ staffId: string; staffName: string | null; clases: number; total: Prisma.Decimal | null; sumaLugares: number }>
+    Array<{
+      staffId: string
+      staffName: string | null
+      clases: number
+      total: Prisma.Decimal | null
+      sumaLugares: number
+      llegadas: LlegadasDePersona | null
+    }>
   >`
     ${valoracionCte(f)}
     SELECT "staffId", MAX("staffName") AS "staffName",
-           COUNT(*)::int AS clases, SUM(monto) AS total, COALESCE(SUM(conteo), 0)::int AS "sumaLugares"
+           COUNT(*)::int AS clases, SUM(monto) AS total, COALESCE(SUM(conteo), 0)::int AS "sumaLugares",
+           CASE WHEN bool_or("countMode" = 'ATTENDED') THEN jsonb_build_object(
+             'qr', COALESCE(SUM((llegadas->>'qr')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'phone', COALESCE(SUM((llegadas->>'phone')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'staff', COALESCE(SUM((llegadas->>'staff')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'list', COALESCE(SUM((llegadas->>'list')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'pass', COALESCE(SUM((llegadas->>'pass')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0),
+             'sinMetodo', COALESCE(SUM((llegadas->>'sinMetodo')::int) FILTER (WHERE "countMode" = 'ATTENDED'), 0)
+           ) END AS llegadas
     FROM valoradas
     WHERE estado = 'OK' AND "staffId" IS NOT NULL
     GROUP BY "staffId"

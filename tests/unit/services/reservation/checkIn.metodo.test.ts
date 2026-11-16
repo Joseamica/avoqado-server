@@ -111,3 +111,20 @@ describe('undoCheckIn limpia el método', () => {
     expect(call[0].data).toMatchObject({ checkInMethod: null, checkedInByStaffId: null, checkedInAt: null })
   })
 })
+
+describe('opId de una cola: nunca se vuelve a aplicar (Codex r2 #3)', () => {
+  it('si la historia ya trae ese opId, contesta «ya estaba» sin escribir aunque hoy esté deshecha', async () => {
+    const tx = mkTx({ status: 'CONFIRMED', statusLog: [{ status: 'CHECKED_IN', opId: 'fila-1' }, { status: 'CONFIRMED' }] })
+    const out = await checkInReservation(tx, {
+      reservationId: 'res-1',
+      venueId: 'v1',
+      actor: KIOSK,
+      source: 'KIOSK',
+      now: NOW,
+      method: 'PHONE',
+      opId: 'fila-1',
+    })
+    expect(out.outcome).toBe('ALREADY_CHECKED_IN')
+    expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+  })
+})

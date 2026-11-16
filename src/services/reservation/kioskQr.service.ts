@@ -18,8 +18,8 @@ import { createHmac, randomBytes, timingSafeEqual } from 'crypto'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { ConflictError, GoneError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
-import type { ContactoProbado } from '@/jwt.service'
+import { ConflictError, GoneError, NotFoundError, TooManyRequestsError } from '@/errors/AppError'
+import { exigirSesionProbada, metodoDeLaSesion, type SesionDeLlegada } from './sesionDeLlegada'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import {
   activityActorFields,
@@ -37,10 +37,6 @@ import { afterNoShowCorrection } from './noShowNotices.service'
 export const KIOSK_QR_MAX_AGE_SECONDS = 10 * 60
 /** Reloj del aparato adelantado respecto al del servidor que se tolera. */
 export const KIOSK_QR_MAX_SKEW_SECONDS = 2 * 60
-/** Si una persona del personal cambió el contacto con el que la alumna entró en estos días, la llegada es «a mano por» ella. */
-export const KIOSK_QR_CONTACT_CHANGE_DAYS = 30
-export const CHECK_IN_NEEDS_CODE = 'CHECK_IN_NEEDS_CODE' as const
-
 /** Cada cuánto cambia el QR en la pantalla (lo usa el aparato; aquí sólo se documenta). */
 export const KIOSK_QR_ROTATE_SECONDS = 30
 
@@ -129,17 +125,13 @@ export async function consumeKioskQr(args: {
   sig: string
   customerId: string
   /** La sesión con la que llegó (`customerAuth`): sólo una entrada con código o Google prueba que es SU celular. */
-  sesion: { tipo: string; contactos: ContactoProbado[] }
+  sesion: SesionDeLlegada
   now: Date
   ip?: string
 }): Promise<KioskQrCheckInResult> {
   const notFound = () => new NotFoundError('No encontramos ese check-in', CHECK_IN_NOT_FOUND)
 
-  // 🔴 Codex r1 #1: una contraseña vieja (el alta con contraseña dejaba ponérsela a la ficha de otra) o el token de «tus
-  // reservas de hoy» prueban la ficha, no el celular. Sólo cuenta una sesión que probó un contacto con código o Google.
-  if (args.sesion.tipo !== 'SESION' || args.sesion.contactos.length === 0) {
-    throw new UnauthorizedError('Entra con el código que te mandamos para registrar tu llegada.', CHECK_IN_NEEDS_CODE)
-  }
+  exigirSesionProbada(args.sesion)
 
   const genuino = await verify(args)
   if (!genuino) {
@@ -148,7 +140,10 @@ export async function consumeKioskQr(args: {
       const intento = await consumeDurableAttempt({ venueId: args.venueId, scope: `qr-ip:${args.ip}`, now: args.now, max: 10 }).catch(
         () => null,
       )
-      if (intento?.blocked) logger.warn('⛔ [KIOSK QR] Demasiadas firmas malas', { venueId: args.venueId, ip: args.ip })
+      if (intento?.blocked) {
+        logger.warn('⛔ [KIOSK QR] Demasiadas firmas malas', { venueId: args.venueId, ip: args.ip })
+        throw new TooManyRequestsError('Demasiados intentos. Espera un minuto y vuelve a escanear.')
+      }
     }
     throw notFound()
   }
@@ -182,8 +177,7 @@ export async function consumeKioskQr(args: {
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
-  const quien = await contactoCambiadoPorPersonal(args)
-  const metodo = quien ? ({ method: 'STAFF', byStaffId: quien } as const) : ({ method: 'QR' } as const)
+  const metodo = await metodoDeLaSesion(args)
   if (target.status !== 'NO_SHOW') {
     try {
       const out = await prisma.$transaction(tx =>
@@ -205,41 +199,6 @@ export async function consumeKioskQr(args: {
   if (undone.outcome === 'UNDONE') void afterNoShowCorrection(undone.correction.id)
   logger.info('✅ [KIOSK QR] Llegada con celular que corrigió un «No asistió»', { venueId: args.venueId, reservationId: target.id })
   return { outcome: 'CHECKED_IN', reservationId: target.id, corrected: true }
-}
-
-/**
- * 🔴 Codex r1 #1: quien puede editar clientes (`customers:update`) podría poner SU correo o teléfono en la ficha de la
- * alumna, recibir ahí el código y entrar como ella. La llegada no se niega (la alumna real también pudo pedir que le
- * corrigieran el número), pero no se presenta como «con celular»: queda «a mano por» quien cambió el contacto.
- * Se mira sólo el tipo de contacto con el que entró. Acotado: 20 renglones de 30 días de esa ficha.
- */
-async function contactoCambiadoPorPersonal(args: {
-  venueId: string
-  customerId: string
-  sesion: { contactos: ContactoProbado[] }
-  now: Date
-}): Promise<string | null> {
-  const tipos = new Set(args.sesion.contactos.map(c => (c.tipo === 'PHONE' ? 'phone' : 'email')))
-  const cambios = await prisma.activityLog.findMany({
-    where: {
-      venueId: args.venueId,
-      entity: 'Customer',
-      entityId: args.customerId,
-      action: 'CUSTOMER_UPDATED',
-      staffId: { not: null },
-      createdAt: { gte: new Date(args.now.getTime() - KIOSK_QR_CONTACT_CHANGE_DAYS * 24 * 60 * 60_000) },
-    },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: 20,
-    select: { staffId: true, data: true },
-  })
-  for (const c of cambios) {
-    const fields = (c.data as { fields?: unknown } | null)?.fields
-    // Sin lista de campos (renglón viejo) se toma como posible cambio de contacto: mejor «a mano» que un «con celular» falso.
-    const tocaContacto = !Array.isArray(fields) || fields.some(f => typeof f === 'string' && tipos.has(f))
-    if (tocaContacto && c.staffId) return c.staffId
-  }
-  return null
 }
 
 async function verify(args: { venueId: string; keyId: string; ts: number; sig: string }): Promise<boolean> {

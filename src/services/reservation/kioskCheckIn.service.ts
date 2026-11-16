@@ -35,6 +35,7 @@ import {
 import { spotLabel } from './coachClass.service'
 import { undoNoShow } from './undoNoShow.service'
 import { afterNoShowCorrection, notifyNoShowNeedsReview } from './noShowNotices.service'
+import { exigirSesionProbada, metodoDeLaSesion, type SesionDeLlegada } from './sesionDeLlegada'
 
 export const CHECK_IN_NOT_FOUND = 'CHECK_IN_NOT_FOUND' as const
 export const CHECK_IN_ALREADY_CLAIMED = 'CHECK_IN_ALREADY_CLAIMED' as const
@@ -207,9 +208,12 @@ export async function consumeKioskCheckInChallenge(args: {
   challengeId: string
   secret: string
   customerId: string
+  /** Asistencia verificada (Codex r2 #1): la misma regla que el QR firmado: sólo una sesión que probó su contacto. */
+  sesion: SesionDeLlegada
   now: Date
   ip?: string
 }): Promise<ConsumeChallengeResult> {
+  exigirSesionProbada(args.sesion)
   const nonceHash = hashSecret(args.secret)
 
   const ch = await prisma.kioskCheckInChallenge.findFirst({
@@ -266,6 +270,7 @@ export async function consumeKioskCheckInChallenge(args: {
     throw new NotFoundError('No encontramos una reservación tuya lista para check-in', CHECK_IN_NOT_FOUND)
   }
 
+  const metodo = await metodoDeLaSesion({ venueId: args.venueId, customerId: args.customerId, sesion: args.sesion, now: args.now })
   const result = await prisma.$transaction(async tx => {
     // CAS sobre el reto: sólo un consumidor gana, aunque dos teléfonos lo abran a la vez.
     const claimed = await tx.kioskCheckInChallenge.updateMany({
@@ -286,7 +291,7 @@ export async function consumeKioskCheckInChallenge(args: {
       actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' },
       source: 'KIOSK',
       now: args.now,
-      method: 'QR',
+      ...metodo,
     })
   })
 
@@ -378,7 +383,10 @@ export async function checkInByIdentifier(args: {
   ].filter(Boolean) as string[]
 
   for (const scope of scopes) {
-    await assertDurableRateLimit({ venueId: args.venueId, scope, now: args.now, max: scope.startsWith('identifier:') ? 5 : 30 })
+    // La cola sin red (con `opId`) reintenta sola tras un 5xx: con 5 por minuto la sexta vuelta salía 429 sin haber
+    // registrado nada (Codex r2 #5). Lo tecleado en vivo sigue en 5.
+    const max = scope.startsWith('identifier:') && !args.opId ? 5 : 30
+    await assertDurableRateLimit({ venueId: args.venueId, scope, now: args.now, max })
   }
 
   // Ventana primero, en la CONSULTA: por teléfono puede haber varias reservas a lo largo
@@ -437,14 +445,18 @@ export async function checkInByIdentifier(args: {
   }
 
   if (reservation.status === 'CHECKED_IN') {
+    // Codex r2 #3: «ya estaba» TAMBIÉN deja su `opId` en la historia (sin cambiar el estado): si la respuesta se pierde y
+    // alguien deshace la llegada, el reintento de esta fila no la vuelve a marcar. En una sola sentencia, sólo si sigue llegada.
+    if (args.opId) await anotarOpIdRepetida(reservation.id, args.venueId, args.opId, args.now)
     return { outcome: 'ALREADY_CHECKED_IN', reservationId: reservation.id, display }
   }
+
   if (!evaluateKioskWindow({ startsAt: reservation.startsAt, now: at, noShowGraceMin: graceMin })) {
     throw notFound()
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
-  if (reservation.status === 'NO_SHOW') {
+  const corregirNoAsistio = async (): Promise<ConsumeChallengeResult> => {
     // Tecleó su teléfono sin red y el «No asistió» automático corrió antes de que subiera. Como la lista (D4): se corrige
     // con la hora en que lo tecleó y el gerente se entera (la hora la midió el aparato).
     const undone = await prisma.$transaction(tx =>
@@ -466,22 +478,43 @@ export async function checkInByIdentifier(args: {
     })
     return { outcome: 'CHECKED_IN', reservationId: reservation.id, display }
   }
+  if (reservation.status === 'NO_SHOW') return corregirNoAsistio()
   if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) throw notFound()
 
-  const result = await prisma.$transaction(tx =>
-    checkInReservation(tx, {
-      reservationId: reservation.id,
-      venueId: args.venueId,
-      actor,
-      source: 'KIOSK',
-      now: at,
-      method: 'PHONE',
-      opId: args.opId,
-    }),
-  )
+  let result
+  try {
+    result = await prisma.$transaction(tx =>
+      checkInReservation(tx, {
+        reservationId: reservation.id,
+        venueId: args.venueId,
+        actor,
+        source: 'KIOSK',
+        now: at,
+        method: 'PHONE',
+        opId: args.opId,
+      }),
+    )
+  } catch (err) {
+    // Codex r2 #4: el «No asistió» automático ganó entre la lectura y el check-in. Desde la cola (hora real) se corrige;
+    // en vivo, el 409 de siempre.
+    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
+    const ahora = await prisma.reservation.findFirst({ where: { id: reservation.id, venueId: args.venueId }, select: { status: true } })
+    if (ahora?.status !== 'NO_SHOW') throw err
+    return corregirNoAsistio()
+  }
 
   logger.info('✅ [KIOSK CHECK-IN] Check-in por identificador', { venueId: args.venueId, reservationId: reservation.id })
   return { outcome: result.outcome, reservationId: reservation.id, display }
+}
+
+/** Deja el `opId` de una repetición en la historia de la reserva, sin cambiar su estado (Codex r2 #3). */
+async function anotarOpIdRepetida(reservationId: string, venueId: string, opId: string, now: Date): Promise<void> {
+  const entrada = JSON.stringify([
+    { status: 'CHECKED_IN', at: now.toISOString(), by: 'service:kiosk', source: 'KIOSK', opId, repetida: true },
+  ])
+  await prisma.$executeRaw`
+    UPDATE "Reservation" SET "statusLog" = COALESCE("statusLog", '[]'::jsonb) || ${entrada}::jsonb
+    WHERE "id" = ${reservationId} AND "venueId" = ${venueId} AND "status" = 'CHECKED_IN'`
 }
 
 export type KioskCheckInChallengeRow = Prisma.KioskCheckInChallengeGetPayload<{}>

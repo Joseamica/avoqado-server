@@ -215,6 +215,11 @@ describe('conceptoDe — asistencia verificada: la clase dice cómo llegaron (16
       'Reformer · 6 con celular, 1 con teléfono, 1 a mano por Ana P.',
     )
   })
+  it('con «Corregir conteo» rotula lo registrado y dice a cuánto se corrigió el pago (Codex r2 #6)', () => {
+    expect(conceptoDe(clase({ qr: 0, phone: 3, staff: 0, list: 0, pass: 0, sinMetodo: 0, aMano: [], corregidoA: 1 }))).toBe(
+      'Reformer · llegadas registradas: 3 con teléfono · pago corregido a mano a 1 lugar',
+    )
+  })
   it('sin desglose (quien reservó, o una foto de antes) queda como siempre', () => {
     expect(conceptoDe(clase(null))).toBe('Reformer')
   })

@@ -23,6 +23,7 @@ import { checkInReservation } from '@/services/reservation/checkIn.service'
 import { undoNoShow } from '@/services/reservation/undoNoShow.service'
 import { afterNoShowCorrection } from '@/services/reservation/noShowNotices.service'
 import { checkInByIdentifier } from '@/services/reservation/kioskCheckIn.service'
+import { ConflictError } from '@/errors/AppError'
 
 /**
  * Asistencia verificada (16-nov-2026, spec D-D): la alumna sin celular teclea su teléfono en el kiosco. Cuenta, marcada
@@ -122,5 +123,37 @@ describe('Teléfono tecleado en el kiosco', () => {
       code: 'CHECK_IN_TOO_OLD',
     })
     expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r2 #3: desde la cola, «ya estaba registrada» también deja su opId (un reintento tras deshacer no re-marca)', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue(reserva({ status: 'CHECKED_IN' }) as any)
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
+    const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-9' })
+    expect(out.outcome).toBe('ALREADY_CHECKED_IN')
+    const [pedazos, ...valores] = (prismaMock.$executeRaw as jest.Mock).mock.calls[0] as [string[], ...unknown[]]
+    expect(pedazos.join('?')).toMatch(/"status" = 'CHECKED_IN'/)
+    expect(String(valores[0])).toContain('"opId":"fila-9"')
+    expect(checkInReservation).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r2 #4: el «No asistió» gana entre la lectura y el check-in ⇒ desde la cola se corrige igual', async () => {
+    ;(checkInReservation as jest.Mock).mockRejectedValue(new ConflictError('cambió', 'RESERVATION_NOT_CHECKINABLE'))
+    prismaMock.reservation.findFirst.mockResolvedValueOnce(reserva() as any).mockResolvedValueOnce({ status: 'NO_SHOW' } as any)
+    ;(undoNoShow as jest.Mock).mockResolvedValue({ outcome: 'UNDONE', correction: { id: 'corr-9' } })
+    const out = await checkInByIdentifier({
+      ...base,
+      now: new Date('2026-11-16T18:30:00Z'),
+      occurredAt: new Date('2026-11-16T17:59:00Z'),
+      opId: 'fila-2',
+    })
+    expect(out.outcome).toBe('CHECKED_IN')
+    expect(undoNoShow).toHaveBeenCalled()
+  })
+
+  it('Codex r2 #5: la cola tiene 30 intentos por minuto para su teléfono; lo tecleado en vivo, 5', async () => {
+    await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-3' })
+    await checkInByIdentifier(base)
+    const ups = prismaMock.kioskCheckInAttempt.upsert.mock.calls.map(c => (c[0] as any).where.venueId_scope_windowStart.scope)
+    expect(ups.filter((x: string) => x.startsWith('identifier:'))).toHaveLength(2)
   })
 })
