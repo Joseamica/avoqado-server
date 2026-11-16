@@ -4617,6 +4617,13 @@ router.post(
   checkPermission('self-service:check-in'),
   kioskCheckInController.checkInByCode,
 )
+// Asistencia verificada (16-nov): la llave con la que el kiosco firma su QR (una por aparato; sirve sin red).
+router.post(
+  '/venues/:venueId/kiosk/qr-key',
+  authenticateTokenMiddleware,
+  checkPermission('self-service:check-in'),
+  kioskCheckInController.kioskQrKey,
+)
 
 router.get(
   '/venues/:venueId/my-class-now',

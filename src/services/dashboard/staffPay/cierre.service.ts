@@ -72,7 +72,11 @@ export interface ResultadoCierre {
 }
 
 export function descriptorDeClase(
-  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'> & { regla?: ReglaDeClase | null },
+  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'> & {
+    regla?: ReglaDeClase | null
+    countMode?: ClaseValorada['countMode']
+    llegadas?: ClaseValorada['llegadas']
+  },
   sede: { nombre: string; tz: string },
 ): Prisma.InputJsonObject {
   return {
@@ -83,6 +87,9 @@ export function descriptorDeClase(
     coach: c.staffName,
     // La regla de clase que movió el monto (spec fase 3 §6.6): el recibo cerrado la dice aunque después cambie la tabla.
     ...(c.regla ? { regla: c.regla } : {}),
+    // Asistencia verificada (Codex r1 #7): en «sólo quien llegó», cómo llegaron, congelado al cerrar. Lo que cambie
+    // después sin mover dinero no reabre el recibo; la reserva sí enseña su llegada.
+    ...(c.countMode === 'ATTENDED' && c.llegadas ? { llegadas: c.llegadas as unknown as Prisma.InputJsonObject } : {}),
   }
 }
 

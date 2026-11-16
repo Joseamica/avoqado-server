@@ -709,6 +709,7 @@ model Venue {
   // Promociones del POS (tier PRO, código PROMOTIONS)
   promotions             Promotion[]
   kioskCheckInChallenges KioskCheckInChallenge[]
+  kioskQrKeys            KioskQrKey[]
   kioskCheckInAttempts   KioskCheckInAttempt[]
   kioskOutreachOutbox    KioskOutreachOutbox[]
 
@@ -1215,6 +1216,7 @@ model Staff {
   // Reservations
   reservationsAssigned     Reservation[]             @relation("ReservationStaff")
   reservationsCreated      Reservation[]             @relation("ReservationCreatedBy")
+  reservationsCheckedIn    Reservation[]             @relation("ReservationCheckedInBy")
   classSessionsAssigned    ClassSession[]            @relation("ClassSessionStaff")
   classSessionsCreated     ClassSession[]            @relation("ClassSessionCreatedBy")
   slotHolds                SlotHold[]
@@ -14943,6 +14945,15 @@ enum ReservationStatus {
   NO_SHOW // Guest didn't arrive within grace period
 }
 
+/// Cómo se demostró una llegada (asistencia verificada, 16-nov-2026).
+enum ReservationCheckInMethod {
+  QR // con celular: la sesión de la clienta consumió un QR del kiosco
+  PHONE // con teléfono o código tecleado en el kiosco
+  STAFF // a mano: panel, POS, MCP o «Sí llegó» de una persona
+  KIOSK_LIST // toque por nombre en la lista del kiosco (apps viejas)
+  PASS // conector de pases (TotalPass, Wellhub)
+}
+
 enum ReservationChannel {
   DASHBOARD // Created by staff
   WEB // Customer self-service (booking page/widget)
@@ -15069,6 +15080,11 @@ model Reservation {
   // Status timestamps (audit trail for MVP — proper ReservationHistory in Phase 2)
   confirmedAt DateTime?
   checkedInAt DateTime?
+  /// Cómo se demostró la llegada (asistencia verificada, 16-nov-2026). null = antes de esa fecha o sin llegada.
+  checkInMethod      ReservationCheckInMethod?
+  /// Quién la marcó cuando fue a mano (STAFF) o desde la lista de una app vieja (KIOSK_LIST: la sesión del aparato).
+  checkedInByStaffId String?
+  checkedInBy        Staff?                    @relation("ReservationCheckedInBy", fields: [checkedInByStaffId], references: [id], onDelete: SetNull)
   completedAt DateTime?
   cancelledAt DateTime?
   noShowAt    DateTime?
@@ -19663,6 +19679,25 @@ model KioskCheckInChallenge {
 
   @@index([venueId, status, expiresAt])
   @@index([terminalId, stationKey, status])
+}
+
+/// Llave del QR firmado por el aparato (asistencia verificada, 16-nov-2026).
+///
+/// El kiosco pinta cada 30 s un QR con `HMAC(secreto, "v2|venueId|keyId|ts")`, sin pedirle nada al servidor (así sale
+/// sin internet y le sirve a toda la fila). El secreto NO se guarda: es `HMAC(OTP_PEPPER, "kiosk-qr|" + id)` y se le
+/// entrega al aparato una sola vez. Revocar = `revokedAt`.
+model KioskQrKey {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Identidad estable del aparato que la pidió (la de su cola sin red). Una llave nueva revoca las anteriores del mismo.
+  deviceKey       String    @db.VarChar(128)
+  issuedByStaffId String?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([venueId, deviceKey])
 }
 
 enum KioskCheckInChallengeStatus {

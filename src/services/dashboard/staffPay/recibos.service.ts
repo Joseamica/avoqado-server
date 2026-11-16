@@ -300,7 +300,8 @@ async function fuenteDelRecibo(
              e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
              e.descriptor->'regla' AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
              (e.descriptor->>'base')::numeric AS base, (e.descriptor->>'tasa')::numeric AS tasa, e.descriptor->>'limite' AS limite,
-             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
+             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo,
+             e.descriptor->'llegadas' AS llegadas
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
         ${fila.status === 'CLOSED' ? Prisma.empty : Prisma.sql`AND e.concept IN ('RECONCILE', 'MANUAL')`}`)
@@ -316,7 +317,8 @@ async function fuenteDelRecibo(
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
                vv.conteo AS lugares, vv.monto, vv.regla AS regla, NULL::text AS orden, NULL::text AS esquema,
-               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, NULL::text AS motivo
+               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, NULL::text AS motivo,
+               CASE WHEN vv."countMode" = 'ATTENDED' THEN vv.llegadas END AS llegadas
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
     }
@@ -336,7 +338,7 @@ async function fuenteDelRecibo(
           SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,
                  v."venueId", v."fechaLocal" AS fecha, v.hora, NULL::text AS clase, v.sede AS "sedeFoto", NULL::text AS reason,
                  NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.tasa,
-                 v.limite, v.motivo
+                 v.limite, v.motivo, NULL::jsonb AS llegadas
           FROM (${ventas}) v`)
       }
     }
@@ -384,6 +386,7 @@ export const COLUMNAS_FUENTE_RECIBO = [
   'tasa',
   'limite',
   'motivo',
+  'llegadas',
   'agrupada',
   'cobros',
 ] as const
@@ -404,7 +407,7 @@ function armarFuente(crudo: Prisma.Sql[], agruparPropinas: boolean): Prisma.Sql 
     UNION ALL
     SELECT 'PROPINA', MIN(c.instante), 'T:' || c."venueId" || ':' || c.fecha || ':' || c.motivo, c."venueId", c.fecha,
            NULL::text, NULL::text, MAX(c."sedeFoto"), NULL::text, NULL::text, NULL::int, SUM(c.monto),
-           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, NULL::text, c.motivo, true, COUNT(*)::int
+           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, NULL::text, c.motivo, NULL::jsonb, true, COUNT(*)::int
     FROM crudo c
     WHERE c.tipo = 'PROPINA'
     GROUP BY c."venueId", c.fecha, c.motivo`

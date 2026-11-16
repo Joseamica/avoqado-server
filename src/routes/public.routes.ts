@@ -414,6 +414,19 @@ router.post(
   kioskCheckInController.consumeChallenge,
 )
 
+// Asistencia verificada (16-nov): el QR que firma el propio kiosco (rota cada 30 s, sirve a toda la fila y sin internet
+// en el local). Mismas guardas que el reto: CORS acotado al widget y sesión de cliente obligatoria.
+router.options('/venues/:venueSlug/customer/checkin-qr', kioskCheckInCors)
+router.post(
+  '/venues/:venueSlug/customer/checkin-qr',
+  kioskCheckInCors,
+  writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  activarReservasSiFalta,
+  kioskCheckInController.consumeQr,
+)
+
 // ---- Customer Portal (authenticated) ----
 
 // Toda cuenta nueva se crea con código (seguridad, 1-oct): esta ruta sólo responde, igual siempre, para páginas viejas en caché.

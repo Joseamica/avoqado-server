@@ -3,7 +3,23 @@ import logger from '../../../config/logger'
 import { utcTs } from '../../../utils/sqlDates'
 
 export type EstadoValoracion = 'OK' | 'EXCLUIDA' | 'EXCEPCION'
-export type MotivoExcepcion = 'SIN_COACH' | 'COACH_SIN_NIVEL' | 'SIN_TABLA' | 'SIN_MONTO_PARA_ESE_CONTEO'
+export type MotivoExcepcion = 'SIN_COACH' | 'COACH_SIN_NIVEL' | 'SIN_TABLA' | 'SIN_MONTO_PARA_ESE_CONTEO' | 'GRUPO_POR_CONFIRMAR'
+
+/**
+ * Asistencia verificada (16-nov-2026): cómo se demostraron las llegadas de una clase, en LUGARES (`partySize`). Son las
+ * llegadas registradas; si alguien corrigió el conteo a mano (`payCountOverride`), el pago usa ese número y esto sigue
+ * diciendo lo registrado (Codex r1 #6: dos datos distintos, rotulados distinto).
+ */
+export interface LlegadasPorMetodo {
+  qr: number
+  phone: number
+  staff: number
+  list: number
+  pass: number
+  sinMetodo: number
+  /** Quiénes marcaron a mano o desde la lista de una app vieja, para decir «a mano por Ana P.». */
+  aMano: string[]
+}
 type Db = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 /** Tope de horas de las dos reglas de clase: el CHECK de `ServicePayTableVersion` (spec fase 3 §7.3). */
@@ -89,6 +105,8 @@ export interface ClaseValorada {
   canceladaTarde: boolean
   /** La regla que movió el pago, con sus horas de aviso, para decir POR QUÉ; null si ninguna. */
   regla: ReglaDeClase | null
+  /** Asistencia verificada: las llegadas registradas por método (en cualquier modo; en «quien reservó» es informativo). */
+  llegadas: LlegadasPorMetodo
 }
 
 export interface ResumenSede {
@@ -243,7 +261,13 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       -- Fase 3: una cancelada tarde se paga como clase de 0 lugares (la celda del sueldo base), con o sin conteo corregido.
       SELECT r0.*,
              CASE WHEN r0.cancelada_tarde THEN 0 ELSE cnt.n END AS conteo_calculado,
-             CASE WHEN r0.cancelada_tarde THEN 0 ELSE COALESCE(r0."payCountOverride", cnt.n) END AS conteo
+             CASE WHEN r0.cancelada_tarde THEN 0 ELSE COALESCE(r0."payCountOverride", cnt.n) END AS conteo,
+             lleg.qr AS lleg_qr, lleg.phone AS lleg_phone, lleg.staff AS lleg_staff, lleg.list AS lleg_list, lleg.pass AS lleg_pass,
+             lleg.sin_metodo AS lleg_sin_metodo, lleg.a_mano AS lleg_a_mano,
+             -- Fase 0b (Codex §12.2-5): en «sólo quien llegó» el check-in es por reserva; un grupo de 3 donde llegó 1 contaría 3.
+             -- Hasta que alguien corrija el conteo (o acuerde el monto), la clase no se paga sola.
+             (r0."countMode" = 'ATTENDED' AND lleg.grupo AND r0."payCountOverride" IS NULL AND r0."payAmountOverride" IS NULL
+              AND NOT r0.cancelada_tarde) AS grupo_por_confirmar
       FROM con_flags r0
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(r."partySize"), 0)::int AS n
@@ -256,6 +280,24 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                      OR (r.status = 'NO_SHOW' AND r."confirmedAt" IS NOT NULL)))
           )
       ) cnt ON true
+      -- Asistencia verificada (16-nov): las llegadas de la clase por método, en lugares, y si alguna es un grupo.
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" = 'QR'), 0)::int AS qr,
+               COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" = 'PHONE'), 0)::int AS phone,
+               COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" = 'STAFF'), 0)::int AS staff,
+               COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" = 'KIOSK_LIST'), 0)::int AS list,
+               COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" = 'PASS'), 0)::int AS pass,
+               COALESCE(SUM(r."partySize") FILTER (WHERE r."checkInMethod" IS NULL), 0)::int AS sin_metodo,
+               COALESCE(bool_or(r."partySize" > 1), false) AS grupo,
+               COALESCE(
+                 array_agg(DISTINCT NULLIF(TRIM(CONCAT(sm."firstName", ' ', sm."lastName")), ''))
+                   FILTER (WHERE r."checkInMethod" IN ('STAFF', 'KIOSK_LIST') AND sm.id IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS a_mano
+        FROM "Reservation" r
+        LEFT JOIN "Staff" sm ON sm.id = r."checkedInByStaffId"
+        WHERE r."venueId" = r0."venueId" AND r."classSessionId" = r0.id AND r.status IN ('CHECKED_IN', 'COMPLETED')
+      ) lleg ON true
     ),
     valoradas AS (
       SELECT cc.id AS "classSessionId", cc."venueId", cc."productId", p.name AS "productName", cc."startsAt",
@@ -272,6 +314,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida THEN 'EXCLUIDA'
                WHEN cc."assignedStaffId" IS NULL THEN 'EXCEPCION'
                WHEN cc."payAmountOverride" IS NOT NULL THEN 'OK'
+               WHEN cc.grupo_por_confirmar THEN 'EXCEPCION'
                WHEN cc."payLevelId" IS NULL THEN 'EXCEPCION'
                WHEN cc.version_id IS NULL THEN 'EXCEPCION'
                WHEN cell.amount IS NULL THEN 'EXCEPCION'
@@ -281,6 +324,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida THEN NULL
                WHEN cc."assignedStaffId" IS NULL THEN 'SIN_COACH'
                WHEN cc."payAmountOverride" IS NOT NULL THEN NULL
+               WHEN cc.grupo_por_confirmar THEN 'GRUPO_POR_CONFIRMAR'
                WHEN cc."payLevelId" IS NULL THEN 'COACH_SIN_NIVEL'
                WHEN cc.version_id IS NULL THEN 'SIN_TABLA'
                WHEN cell.amount IS NULL THEN 'SIN_MONTO_PARA_ESE_CONTEO'
@@ -289,6 +333,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              CASE
                WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida OR cc."assignedStaffId" IS NULL THEN NULL
                WHEN cc."payAmountOverride" IS NOT NULL THEN cc."payAmountOverride"
+               WHEN cc.grupo_por_confirmar THEN NULL
                WHEN cc.suplencia_tarde THEN cell.amount + cc.cover_monto
                ELSE cell.amount
              END AS monto,
@@ -308,7 +353,9 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                  THEN jsonb_build_object('tipo', 'SUPLENCIA',
                         'horas', GREATEST(0, floor(extract(epoch FROM cc."startsAt" - cc.asignada_en) / 3600))::int,
                         'bono', cc.cover_monto::text)
-             END AS regla
+             END AS regla,
+             jsonb_build_object('qr', cc.lleg_qr, 'phone', cc.lleg_phone, 'staff', cc.lleg_staff, 'list', cc.lleg_list,
+                                'pass', cc.lleg_pass, 'sinMetodo', cc.lleg_sin_metodo, 'aMano', to_jsonb(cc.lleg_a_mano)) AS llegadas
       FROM con_conteo cc
       JOIN "Product" p ON p.id = cc."productId"
       LEFT JOIN "Staff" s ON s.id = cc."assignedStaffId"

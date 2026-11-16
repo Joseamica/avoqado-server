@@ -154,6 +154,7 @@ describe('conceptoDe — una comisión dice su esquema UNA vez y su tasa (E6a-fi
     tasa: new Prisma.Decimal('0.0300'),
     limite: null,
     motivo: 'VENTA',
+    llegadas: null,
     agrupada: false,
     cobros: 1,
     ...x,
@@ -181,5 +182,40 @@ describe('conceptoDe — una comisión dice su esquema UNA vez y su tasa (E6a-fi
     [{ motivo: 'ANULACION', orden: null, limite: 'TOPE' }, 'Anulación · comisión Estándar Meseros 3 %'],
   ] as Array<[Partial<FilaRecibo>, string]>)('%o ⇒ %s', (x, esperado) => {
     expect(conceptoDe(fila(x))).toBe(esperado)
+  })
+})
+
+describe('conceptoDe — asistencia verificada: la clase dice cómo llegaron (16-nov)', () => {
+  const clase = (llegadas: unknown): FilaRecibo => ({
+    tipo: 'CLASE',
+    instante: new Date('2026-11-10T15:00:00Z'),
+    id: 'cs1',
+    venueId: 'v1',
+    fecha: '2026-11-10',
+    hora: '09:00',
+    clase: 'Reformer',
+    sedeFoto: null,
+    reason: null,
+    origen: null,
+    lugares: 8,
+    monto: new Prisma.Decimal(530),
+    regla: null,
+    orden: null,
+    esquema: null,
+    base: null,
+    tasa: null,
+    limite: null,
+    motivo: null,
+    llegadas: llegadas as any,
+    agrupada: false,
+    cobros: 1,
+  })
+  it('«sólo quien llegó»: con celular, con teléfono y a mano por quién; lo que vale 0 no se dice', () => {
+    expect(conceptoDe(clase({ qr: 6, phone: 1, staff: 1, list: 0, pass: 0, sinMetodo: 0, aMano: ['Ana P.'] }))).toBe(
+      'Reformer · 6 con celular, 1 con teléfono, 1 a mano por Ana P.',
+    )
+  })
+  it('sin desglose (quien reservó, o una foto de antes) queda como siempre', () => {
+    expect(conceptoDe(clase(null))).toBe('Reformer')
   })
 })

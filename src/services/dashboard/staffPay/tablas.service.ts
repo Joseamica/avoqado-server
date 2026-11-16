@@ -176,8 +176,9 @@ interface VersionInput extends ReglasInput {
 
 /** Reglas que no necesitan base: también las aplica el service porque el MCP no pasa por el Zod de la ruta. */
 function validarForma(input: VersionInput) {
-  if (input.countMode === 'ATTENDED') throw new BadRequestError('«Sólo quien llegó» todavía no está disponible; usa «quien reservó»')
-  if (input.countMode !== 'BOOKED') throw new BadRequestError('Modo de conteo inválido')
+  // Asistencia verificada (16-nov-2026): «sólo quien llegó» ya se puede usar. Lo que lo frenaba (fase 0b) quedó resuelto:
+  // la llegada guarda cómo se demostró y su hora real sin red, y un grupo pide «Corregir conteo» antes de pagarse.
+  if (input.countMode !== 'BOOKED' && input.countMode !== 'ATTENDED') throw new BadRequestError('Modo de conteo inválido')
   if (!Number.isInteger(input.maxCount) || input.maxCount < 0 || input.maxCount > MAX_TECHO)
     throw new BadRequestError(`El techo debe ser un número entero de 0 a ${MAX_TECHO}: Máximo ${MAX_TECHO} lugares`)
   const vistas = new Set<string>()
