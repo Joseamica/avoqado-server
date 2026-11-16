@@ -62,6 +62,10 @@ describe('horaDelMovimientoDeLaCola — con la espera medida por el aparato (Cod
     }
   })
 
+  it('Codex r4 #1: sin hora de pared creíble pero con espera medida, vale «llegada − espera»', () => {
+    expect(horaDelMovimientoDeLaCola({ edadMs: OCHO_MIN }, caja, LLEGADA)).toEqual(VEINTE_03)
+  })
+
   it('regresión: sin hora ni edad, undefined (la de hoy, como siempre)', () => {
     expect(horaDelMovimientoDeLaCola({}, caja, LLEGADA)).toBeUndefined()
   })
