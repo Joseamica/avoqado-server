@@ -22,7 +22,15 @@ let productId: string
 const device1 = `aparato-1-${fixture}`
 let seq = 0
 
-const replay = (intents: any[]) => processIntents({ venueId, staffId: staffA, deviceId: device1, intents, authorizeIntent: () => true })
+// La cola manda en el orden en que se ENCOLÓ (`seq`): el lote se numera en el orden en que se escribe aquí, como en el aparato.
+const replay = (intents: any[]) =>
+  processIntents({
+    venueId,
+    staffId: staffA,
+    deviceId: device1,
+    intents: intents.map(i => ({ ...i, seq: ++seq })),
+    authorizeIntent: () => true,
+  })
 const intent = (type: string, payload: Record<string, unknown>, createdAtLocal?: number) => ({
   id: randomUUID(),
   seq: ++seq,
