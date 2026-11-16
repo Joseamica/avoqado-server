@@ -104,6 +104,29 @@ describe('OTP Auth Public Service', () => {
     })
   })
 
+  // D11 (16-nov): contar y crear eran dos pasos sueltos; dos pedidos simultáneos se saltaban los 30 s y el máximo por hora. Ahora van
+  // dentro de UNA transacción con un candado por negocio + teléfono + propósito (sin Redis). La carrera real: integración.
+  describe('D11: el tope por teléfono es atómico', () => {
+    it('toma el candado del destino ANTES de contar, y cuenta, invalida y crea dentro de la misma transacción', async () => {
+      const orden: string[] = []
+      prismaMock.$queryRaw.mockImplementation((async (...a: any[]) => {
+        orden.push(`lock:${a.slice(1).join('|')}`)
+        return []
+      }) as any)
+      prismaMock.otpChallenge.count.mockImplementation((async () => (orden.push('count'), 0)) as any)
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 0 })
+      prismaMock.otpChallenge.create.mockImplementation((async () => (orden.push('create'), { id: 'otp-1' })) as any)
+
+      await requestOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW })
+
+      expect(prismaMock.$transaction).toHaveBeenCalled()
+      expect(orden[0]).toBe(`lock:otp:${VENUE_ID}:CUSTOMER_LOGIN:${PHONE_NORM}`)
+      expect(orden.slice(1)).toEqual(['count', 'count', 'create'])
+      // El WhatsApp sale DESPUÉS de soltar el candado: no se detiene a los demás teléfonos mientras el proveedor contesta.
+      expect(sendOtpWhatsApp).toHaveBeenCalledTimes(1)
+    })
+  })
+
   // D17 (tienda híbrida): si el proveedor no aceptó el código, la página no puede decir «te lo enviamos». El código se manda a
   // CUALQUIER contacto sin buscar su ficha, así que «no salió» no dice si alguien tiene cuenta.
   describe('D17: el código que no salió', () => {
