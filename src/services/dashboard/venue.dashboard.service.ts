@@ -60,6 +60,7 @@ import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
+import { asegurarCuentasDeCobroDelAlta } from './cuentasDeCobroDelAlta'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -884,6 +885,9 @@ async function setupPaymentProcessing(tx: any, venueId: string, venueData: Enhan
   }
 
   const routingRules = venueData.routingRules || defaultRoutingRules
+
+  // D25: una cuenta de cobro que no existe es un 400 en español, no la llave foránea tronando como 500.
+  await asegurarCuentasDeCobroDelAlta(tx, venueData)
 
   // Create venue payment configuration
   const paymentConfig = await tx.venuePaymentConfig.create({
