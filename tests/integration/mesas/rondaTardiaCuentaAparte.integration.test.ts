@@ -333,6 +333,23 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await prisma.order.findUniqueOrThrow({ where: { id: aparte } })).toMatchObject({ status: 'CANCELLED', rondaTardiaDeId: null })
   })
 
+  it('Codex r3 #1: la caja juntó la cuenta aparte con OTRA cuenta aparte: el cobro sigue a la cuenta del aparato y la cobrada no cambia', async () => {
+    const primera = await mesaCobradaPorLaCaja()
+    const segunda = await mesaCobradaPorLaCaja()
+    const [a] = await replay([ronda(primera.cobrada)])
+    const [b] = await replay([ronda(segunda.cobrada, coca)], caja, aparatoCaja)
+    const aparteA = String((a.result as any).cuentaAparte?.orderId)
+    const aparteB = String((b.result as any).cuentaAparte?.orderId)
+
+    await mergeOrders(venueId, aparteB, aparteA, caja)
+    const [cobro] = await replay([cobroSinRed(primera.cobrada, 2000)])
+
+    expect(cobro.status).toBe('ACKED')
+    expect((cobro.result as any).cuentaAparte?.orderId).toBe(aparteA)
+    expect(await fotoDe(primera.cobrada)).toMatchObject({ pagos: 1, total: 25 })
+    expect(await fotoDe(aparteA)).toMatchObject({ pagos: 1 })
+  })
+
   it('una venta SIN mesa ya cobrada sigue rechazando la ronda tardía (no entra en este arreglo)', async () => {
     const t = await mesa()
     const cobrada = (await assignTable(venueId, t, mesera, 2)).order.id

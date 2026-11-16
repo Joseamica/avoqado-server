@@ -1545,9 +1545,11 @@ async function aplicarRondaTardia(p: {
 
 /**
  * D7: el cobro sin red de ESTE aparato a una cuenta que otra caja ya cobró, cuando una ronda suya ya cayó en una cuenta aparte: va a
- * la última de su cadena que no esté anulada (lo que la mesera cobró incluye esa ronda; si ya quedó saldada, lo de más se marca como
- * sobrepago ahí, nunca vuelve a la cobrada). Si el cobro de esta llave ya está en una cuenta de la cadena (reintento), ésa: el
- * destino no depende de lo que pasó después (Codex r0 #2, r1 #2). Sin cadena, o de otro aparato, null: el cobro de hoy (S1).
+ * la ÚLTIMA de su cadena (lo que la mesera cobró incluye esa ronda; si ya quedó saldada, lo de más se marca como sobrepago ahí, nunca
+ * vuelve a la cobrada). Si el cobro de esta llave ya está en una cuenta de la cadena (reintento), ésa: el destino no depende de lo que
+ * pasó después (Codex r0 #2, r1 #2). Sin cadena, o de otro aparato, null: el cobro de hoy (S1).
+ * Si mientras viajaba la caja reorganizó la cuenta aparte con internet (la separó o la juntó), el cobro se comporta como el de
+ * cualquier cuenta hoy: cae en la cuenta que nombra (Codex r3: misma familia que una cuenta normal; ver la promesa).
  */
 async function cuentaAparteDelCobroTardio(venueId: string, orderId: string, aparato: string, intentId: string): Promise<string | null> {
   const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
@@ -1559,7 +1561,10 @@ async function cuentaAparteDelCobroTardio(venueId: string, orderId: string, apar
     select: { orderId: true },
   })
   if (pagoDeLaLlave && cadena.some(c => c.id === pagoDeLaLlave.orderId)) return pagoDeLaLlave.orderId
-  return [...cadena].reverse().find(c => c.status !== 'CANCELLED' && c.status !== 'DELETED')?.id ?? null
+  // Aunque esté anulada (Codex r3 #1: la caja la juntó con otra cuenta que ya traía su propio vínculo): es lo que hoy pasa con el
+  // cobro sin red de CUALQUIER cuenta que la caja anuló o juntó mientras viajaba (`reabrirSiRecibeDinero`, founder 3-oct, «como Square
+  // y Toast»): el dinero queda en la cuenta que el aparato cobró, con su aviso. Nunca vuelve a la cobrada.
+  return cadena.at(-1)?.id ?? null
 }
 
 /**
