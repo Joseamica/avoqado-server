@@ -201,7 +201,7 @@ const checkInLimit = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: porVi
 // Entrar con código (founder, 16-nov, «A: subir a 30»): alumnas SIN sesión llegan juntas por el WiFi del estudio, o sea por
 // UNA IP. Pedir el código iba en `writeLimit` (5 por minuto por IP) y verificarlo + crear la ficha en `authLimit` (10, compartido
 // con Google): la sexta del minuto se frenaba. Topes propios por IP: 30 códigos por minuto, y 60 para verificar y crear la ficha
-// (dos pasos por persona). Lo demás no cambia: por teléfono, un código cada 30 s y su tope por hora; por reto, sus intentos.
+// (dos pasos por persona). «Cambiar mi número» gasta del mismo cupo de 30 (y conserva su 5 de `writeLimit`). Lo demás no cambia: por teléfono, un código cada 30 s y su tope por hora; por reto, sus intentos.
 const otpRequestLimit = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const otpAccessLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
@@ -466,9 +466,11 @@ router.patch(
 )
 
 // S8 (P2-1): cambiar de número. Nunca editando el campo (`customer/profile` lo sigue prohibiendo): se prueba el nuevo con su código.
+// También manda un código por WhatsApp: gasta del MISMO cupo que entrar con código, para que el total por IP siga en 30.
 router.post(
   '/venues/:venueSlug/customer/phone/request',
   writeLimit,
+  otpRequestLimit,
   resolveVenueBySlug,
   authenticateCustomerParaCambioDeNumero,
   validateRequest(customerPhoneChangeRequestSchema),

@@ -328,6 +328,7 @@ it.each([
     '/venues/:venueSlug/customer/phone/request',
     [
       'writeLimit',
+      'otpRequestLimit',
       'resolveVenueBySlug',
       'authenticateCustomerParaCambioDeNumero',
       'validateRequest',

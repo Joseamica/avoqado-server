@@ -111,6 +111,10 @@ describe('los limitadores del código viven en un solo módulo', () => {
       /'\/venues\/:venueSlug\/auth\/otp\/verify',\s*otpAccessLimit,\s*validateRequest/,
     )
     expect(cadena('/venues/:venueSlug/auth/session/nueva-ficha')).toMatch(/nueva-ficha',\s*otpAccessLimit,\s*validateRequest/)
+    // «Cambiar mi número» también manda un código: conserva su writeLimit y además gasta del MISMO cupo de 30 (Codex r13 #1).
+    expect(cadena('/venues/:venueSlug/customer/phone/request')).toMatch(
+      /phone\/request',\s*writeLimit,\s*otpRequestLimit,\s*resolveVenueBySlug/,
+    )
     // Google no cambia: sigue en el tope compartido.
     expect(cadena('/venues/:venueSlug/auth/google')).toMatch(/auth\/google',\s*authLimit,\s*validateRequest/)
   })
