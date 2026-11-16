@@ -5,6 +5,7 @@
  * Tracks open/close, pay-in, pay-out, and cash sales.
  */
 
+import { horaDentroDeLaCaja } from '@/services/shared/horaRealSinRed'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
@@ -265,6 +266,11 @@ interface PayInOutParams {
    * `authContext.overrideAuthorizedBy`). Aditivo: sin él todo queda como siempre.
    */
   authorizedByStaffVenueId?: string | null
+  /**
+   * Encargo 921513: cuándo se hizo el movimiento EN EL APARATO (ISO o epoch ms; el POS lo manda desde su cola). Se guarda acotado a la
+   * vida de su caja (`horaDentroDeLaCaja`, la misma regla que `/cash-drawer/sync`). Ausente o ilegible: la de hoy, como siempre.
+   */
+  createdAt?: string | number | null
 }
 
 /**
@@ -309,7 +315,10 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // Se valida ANTES de tocar la base: una llave basura no puede llegar al índice único.
   const localId = normalizeLocalId(params.localId)
   const session = params.sessionId
-    ? await prisma.cashDrawerSession.findFirst({ where: { id: params.sessionId, venueId }, select: { id: true, status: true } })
+    ? await prisma.cashDrawerSession.findFirst({
+        where: { id: params.sessionId, venueId },
+        select: { id: true, status: true, openedAt: true, closedAt: true },
+      })
     : await getOpenSession(venueId)
   if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
   const amountDecimal = dollarsToDecimal(amount)
@@ -326,6 +335,13 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
     authorizedBy = { id: params.authorizedByStaffVenueId, name: name || 'Gerente' }
   }
 
+  // Encargo 921513 (founder 16-nov «A»): el movimiento que sube de la cola sin red guarda la hora en que se hizo en el aparato, dentro
+  // de la vida de su caja. Sólo cuenta al CREAR: un reintento con la misma llave devuelve la fila de la primera escritura. Y sólo con
+  // llave (la cola siempre la manda): sin ella, la caja cerrada relee «el último movimiento» por hora y una fecha atrás lo confundiría.
+  const horaDelAparato =
+    localId && session.openedAt
+      ? horaDentroDeLaCaja(params.createdAt, { openedAt: session.openedAt, closedAt: session.closedAt ?? null }, new Date())
+      : undefined
   const row = {
     sessionId: session.id,
     venueId,
@@ -335,6 +351,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
     staffName,
     note: note || null,
     localId,
+    ...(horaDelAparato ? { createdAt: horaDelAparato } : {}),
   }
 
   const action = type === 'PAY_IN' ? 'CASH_DRAWER_PAY_IN' : 'CASH_DRAWER_PAY_OUT'
@@ -352,6 +369,8 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
         note,
         source: 'MOBILE',
         ...(authorizedBy ? { authorizedByStaffVenueId: authorizedBy.id, authorizedByName: authorizedBy.name } : {}),
+        // Encargo 921513: lo que dijo el aparato y lo que se guardó (acotado a la caja), como la apertura N1.
+        ...(horaDelAparato ? { horaDelAparato: params.createdAt, horaGuardada: horaDelAparato.toISOString() } : {}),
       },
     })
 
