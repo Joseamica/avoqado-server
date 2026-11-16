@@ -34,9 +34,10 @@ const TREINTA_DIAS_MS = 30 * 24 * 60 * 60 * 1000
 
 /**
  * La hora REAL de un ingreso o retiro que sube de la cola, ya dentro de su caja. El aparato manda su hora (`createdAt`) y cuánto
- * esperó en la cola (`edadMs` = su «ahora» − esa hora, medido con SU reloj). Con una edad creíble, la hora es `llegada − edadMs`:
- * un reloj adelantado o atrasado se cancela solo (Codex r2). Sin edad creíble (app que no la manda, o un reloj movido hacia atrás
- * durante la espera, que da edad negativa), la hora que dijo el aparato. Las dos, acotadas a la vida de la caja (`horaDentroDeLaCaja`).
+ * esperó en la cola (`edadMs`), medido con su reloj MONOTÓNICO (el que no se mueve a mano; ANDROID sólo la manda si no se reinició
+ * mientras esperaba). Con una edad creíble, la hora es `llegada − edadMs`: ni un reloj de pared desfasado ni uno movido durante la
+ * espera la cambian (Codex r2 y r3). Sin edad creíble (app que no la manda, o se reinició), la hora que dijo el aparato. Las dos,
+ * acotadas a la vida de la caja (`horaDentroDeLaCaja`).
  */
 export function horaDelMovimientoDeLaCola(
   aparato: { createdAt?: string | number | Date | null; edadMs?: unknown },
