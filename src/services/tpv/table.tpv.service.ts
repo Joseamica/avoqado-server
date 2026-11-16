@@ -529,8 +529,11 @@ const SELECT_CUENTA_DE_RONDA_TARDIA = {
   servedById: true,
   tableId: true,
 } as const
-/** Tope de la cadena: cada eslabón exige que el anterior ya se haya cobrado antes de otra ronda tardía; más de 20 no ocurre. */
-const ESLABONES_MAX = 20
+/**
+ * Tope de la cadena, el MISMO para leerla y para crecerla (Codex r2 #3): cada eslabón exige que el anterior ya se haya cobrado antes
+ * de otra ronda tardía. Llegado el tope, otra ronda tardía se rechaza (queda por revisar) en vez de nacer donde nadie la encuentra.
+ */
+export const ESLABONES_MAX = 50
 
 /**
  * D7 (hz:033d44ca:D7): las cuentas aparte que las rondas tardías de UN aparato abrieron a partir de `cuentaPedida`, en orden. Cada una
@@ -589,8 +592,14 @@ export async function cuentaAparteParaRondaTardia(p: {
   const result = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(${7_310_115}::int, hashtext(${JSON.stringify([venueId, tableId])}))::text`
     const scope = await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [tableId] })
-    const ultima = (await cadenaDeRondaTardia(tx, venueId, p.cuentaPedida, p.aparato)).at(-1)
+    const cadena = await cadenaDeRondaTardia(tx, venueId, p.cuentaPedida, p.aparato)
+    const ultima = cadena.at(-1)
     if (ultima && cuentaQueDebe(ultima)) return { orderId: ultima.id, version: ultima.version, isNewOrder: false as const }
+    if (cadena.length >= ESLABONES_MAX) {
+      throw new BadRequestError(
+        `Esta cuenta ya tiene ${ESLABONES_MAX} cuentas aparte de rondas tardías de este aparato. Revísala con la caja.`,
+      )
+    }
 
     const table = await tx.table.findFirst({ where: { id: tableId, venueId }, select: { id: true, number: true, status: true } })
     if (!table) throw new NotFoundError('Table not found or does not belong to this venue')

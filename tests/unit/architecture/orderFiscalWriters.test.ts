@@ -959,6 +959,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'new empty order; detaching zombie orders only clears tableId',
     markers: NEW_ORDER,
   },
+  'src/services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia': {
+    class: 'PRIVATE_CREATION',
+    why: 'D7: new empty late-round order (its round enters through addItemsToOrder); only points the table to it',
+    markers: NEW_ORDER,
+  },
   'src/services/kds/kitchenTicketAuthoring.service.ts#limpiarMarca': { class: 'METADATA', why: 'clears the kitchenPendingAt marker' },
   // Tienda híbrida T9: un folio que el cobro ya dejó COMPLETED se marca para la cocina aparte (la cuenta no se reescribe).
   'src/services/online-ordering/folios.service.ts#prepararFolioPagadoEnTx': {
@@ -1334,6 +1339,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/controllers/tpv/order-table.tpv.controller.ts#mergeOrders': 1,
   'src/controllers/tpv/order-table.tpv.controller.ts#cancelOrder': 1,
   'src/services/tpv/table.tpv.service.ts#assignTable': 1,
+  'src/services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia': 1,
   'src/services/tpv/table.tpv.service.ts#clearTable': 1,
   'src/services/tpv/table.tpv.service.ts#releaseTableIfSettled': 1,
   'src/services/tpv/table.tpv.service.ts#moveOrderToTable': 1,

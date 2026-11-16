@@ -12,7 +12,7 @@
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { mergeOrders, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { assignTable, clearTable } from '@/services/tpv/table.tpv.service'
 import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 
@@ -314,6 +314,23 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(acks[2].result).toMatchObject({ mesaSinCambios: true })
     expect(await fotoDe(otraVisita)).toMatchObject({ paymentStatus: 'PENDING', renglones: 1 })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ status: 'OCCUPIED', currentOrderId: otraVisita })
+  })
+
+  it('Codex r2 #1: la caja FUSIONÓ la cuenta aparte con otra cuenta viva: el cobro sin red de la mesera sigue a los productos', async () => {
+    const { t, cobrada } = await mesaCobradaPorLaCaja()
+    const otraVisita = (await assignTable(venueId, t, caja, 4)).order.id
+    await addItemsToOrder(venueId, otraVisita, [{ productId: coca, quantity: 1 }] as any, 1, true)
+    const [deLaRonda] = await replay([ronda(cobrada)])
+    const aparte = String((deLaRonda.result as any).cuentaAparte?.orderId)
+
+    await mergeOrders(venueId, otraVisita, aparte, caja)
+    const [cobro] = await replay([cobroSinRed(cobrada, 2000)])
+
+    expect(cobro.status).toBe('ACKED')
+    expect((cobro.result as any).cuentaAparte?.orderId).toBe(otraVisita)
+    expect(await fotoDe(cobrada)).toMatchObject({ pagos: 1, total: 25 })
+    expect(await fotoDe(otraVisita)).toMatchObject({ renglones: 2, total: 45, pagos: 1 })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: aparte } })).toMatchObject({ status: 'CANCELLED', rondaTardiaDeId: null })
   })
 
   it('una venta SIN mesa ya cobrada sigue rechazando la ronda tardía (no entra en este arreglo)', async () => {

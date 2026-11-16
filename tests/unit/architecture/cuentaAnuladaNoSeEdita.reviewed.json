@@ -539,6 +539,11 @@
   "services/tpv/table.tpv.service.ts#assignTable": {
     "clase": "EDITOR_TOPOLOGICO"
   },
+  "services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "D7: sólo crea la cuenta aparte de la ronda tardía y escribe la mesa; una cuenta aparte anulada nunca se reusa (nace otra)."
+  },
   "services/tpv/table.tpv.service.ts#moveOrderToTableInTransaction": {
     "clase": "EDITOR_TOPOLOGICO"
   },

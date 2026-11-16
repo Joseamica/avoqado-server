@@ -904,8 +904,7 @@ async function applyIntent(ctx: {
         return await applyKdsTicketMark(venueId, intent)
       case 'KDS_ITEM_PROGRESS': {
         let orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
-        if (orderId)
-          orderId = (await cuentaAparteDeLaComanda(venueId, orderId, aparatoDeLaRonda(ctx.deviceId, staffId), intent.payload)) ?? orderId
+        if (orderId) orderId = (await cuentaAparteDeLaComanda(venueId, orderId, intent.payload)) ?? orderId
         if (!orderId && typeof intent.payload.sourceKey === 'string') {
           const ticket = await prisma.kdsOrder.findFirst({
             where: { venueId, sourceKey: intent.payload.sourceKey },
@@ -1564,21 +1563,14 @@ async function cuentaAparteDelCobroTardio(venueId: string, orderId: string, apar
 }
 
 /**
- * D7 (Codex r0 #6, r1 #6): una marca de cocina sobre una ronda que cayó en una cuenta aparte llega con la cuenta cobrada; sus productos
- * viven en la comanda de la aparte y la acción esperaba para siempre (`PREPARATION_DEPENDENCY_PENDING`). Si TODAS las comandas de la
- * acción (por su `sourceKey`) son de una sola cuenta de la cadena, la acción va a ella. Si junta productos de la cobrada y de la
- * aparte, se rechaza con su razón (nunca un reintento eterno que frena la fila de cocina del aparato).
+ * D7 (Codex r0 #6, r1 #6, r2 #2): una marca de cocina sobre una ronda que cayó en una cuenta aparte llega con la cuenta cobrada; sus
+ * productos viven en la comanda de la aparte y la acción esperaba para siempre (`PREPARATION_DEPENDENCY_PENDING`). La marca puede
+ * venir de OTRO aparato (la pantalla de cocina que recibió la ronda por el WiFi del local), así que no se busca por aparato: cada
+ * `sourceKey` es UNA comanda del negocio (llave única). Si todas las comandas de la acción son de una sola cuenta que desciende de la
+ * cobrada por rondas tardías, la acción va a ella. Si junta productos de la cobrada y de la aparte, se rechaza con su razón (nunca un
+ * reintento eterno que frena la fila de cocina del aparato). Si la comanda todavía no llega (la ronda no ha subido), como hoy.
  */
-async function cuentaAparteDeLaComanda(
-  venueId: string,
-  orderId: string,
-  aparato: string,
-  payload: Record<string, unknown>,
-): Promise<string | null> {
-  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-  if (cuenta?.paymentStatus !== 'PAID') return null
-  const cadena = await tableService.cadenaDeRondaTardia(prisma, venueId, orderId, aparato)
-  if (!cadena.length) return null
+async function cuentaAparteDeLaComanda(venueId: string, orderId: string, payload: Record<string, unknown>): Promise<string | null> {
   const items = Array.isArray(payload.items) ? (payload.items as any[]).slice(0, 101) : []
   const llaves = [
     ...new Set(
@@ -1586,19 +1578,37 @@ async function cuentaAparteDeLaComanda(
     ),
   ]
   if (!llaves.length) return null
+  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+  if (cuenta?.paymentStatus !== 'PAID') return null
   const comandas = await prisma.kdsOrder.findMany({
-    where: { venueId, sourceKey: { in: llaves }, orderId: { in: [orderId, ...cadena.map(c => c.id)] } },
+    where: { venueId, sourceKey: { in: llaves } },
     select: { orderId: true },
     take: llaves.length,
   })
   const cuentas = [...new Set(comandas.map(c => c.orderId))]
+  const ajena = cuentas.find(c => c !== orderId)
+  if (!ajena || !(await desciendePorRondaTardia(venueId, ajena, orderId))) return null
   if (cuentas.length > 1) {
     throw new ConflictError(
       'Esta marca de cocina junta productos de dos cuentas (una ronda llegó después de que se cobró la mesa). Márcalos por separado.',
       'PREPARATION_ITEMS_CHANGED',
     )
   }
-  return cuentas[0] && cuentas[0] !== orderId ? cuentas[0] : null
+  return ajena
+}
+
+/** ¿`cuenta` nació, por rondas tardías (de cualquier aparato), de `origen`? Sube la cadena por `rondaTardiaDeId`. */
+async function desciendePorRondaTardia(venueId: string, cuenta: string, origen: string): Promise<boolean> {
+  let actual: string | null = cuenta
+  for (let i = 0; actual && i < tableService.ESLABONES_MAX; i++) {
+    const fila: { rondaTardiaDeId: string | null } | null = await prisma.order.findFirst({
+      where: { id: actual, venueId },
+      select: { rondaTardiaDeId: true },
+    })
+    if (fila?.rondaTardiaDeId === origen) return true
+    actual = fila?.rondaTardiaDeId ?? null
+  }
+  return false
 }
 
 /**
