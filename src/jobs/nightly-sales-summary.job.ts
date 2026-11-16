@@ -21,7 +21,7 @@ import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard
 import emailService from '../services/email.service'
 import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
-import { lineRevenueAsChargedSql } from '../services/dashboard/lineRevenue'
+import { lineModifiersSql, lineRevenueAsChargedSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
@@ -527,6 +527,11 @@ export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: 
   return rows
 }
 
+/** Items sold on a line: 0 once the delivery provider removed it. */
+const lineUnitsCountSql = `(CASE WHEN oi."removedAt" IS NULL THEN oi.quantity ELSE 0 END)`
+/** Price × units sold + modifiers, before any discount (removed or not): the fallback weight. */
+const lineListValueSql = `(oi."unitPrice" * COALESCE(oi."weightQuantity", oi.quantity) + ${lineModifiersSql()})`
+
 /**
  * Get sales breakdown by category — every category, net desc (`reconcileCategoryBreakdown` folds the tail). Bounded by
  * the venue's own categories (one row each).
@@ -536,14 +541,13 @@ export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: 
  * alone do not add up to the order when the discount lives only on the order (a Rappi/Uber promotion the venue pays, an
  * account discount from before the per-line split) or when a weighed line was rounded when charged (2 × 0.333 kg at
  * $199.99 charged $133.20, the lines say $133.19). Square shares order discounts the same way. Cents are rounded so the
- * categories add up exactly to the orders' net (largest remainder). An order whose lines are worth 0 cannot be shared out:
- * it is left out, like an order with no lines.
+ * categories add up exactly to the orders' net (largest remainder).
  *
  * A line the delivery provider removed sold no ITEMS, but it keeps its weight: the order's subtotal still has it and its
  * refund takes it back out in «Devoluciones», like the headline. Without it, its value would land on the other lines.
+ * A cortesía weighs 0. When the lines earned nothing between them but the order charged something, the order is shared by
+ * list value instead; an order whose every line is a cortesía cannot be shared and is left out, like an order with no lines.
  */
-const lineUnitsCountSql = `(CASE WHEN oi."removedAt" IS NULL THEN oi.quantity ELSE 0 END)`
-
 export async function getCategoryBreakdown(
   venueId: string,
   startDate: Date,
@@ -555,7 +559,9 @@ export async function getCategoryBreakdown(
         oi."orderId" AS order_id,
         COALESCE(c.name, 'Sin categorizar') AS name,
         ${Prisma.raw(lineUnitsCountSql)} AS quantity,
-        ${Prisma.raw(lineRevenueAsChargedSql())} AS revenue,
+        -- A cortesía earned nothing (Codex r2 #1: a comped combo piece reads $101 in the line formula): weight 0.
+        CASE WHEN oi."isCortesia" THEN 0 ELSE ${Prisma.raw(lineRevenueAsChargedSql())} END AS revenue,
+        CASE WHEN oi."isCortesia" THEN 0 ELSE ${Prisma.raw(lineListValueSql)} END AS list_value,
         o.subtotal - LEAST(o."discountAmount", o.subtotal) + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))} AS order_net
       FROM "OrderItem" oi
       JOIN "Order" o ON oi."orderId" = o.id
@@ -571,12 +577,22 @@ export async function getCategoryBreakdown(
         AND ${sqlOrdenSinTarjetas('o.id')}
     ),
     shared AS (
-      SELECT name, quantity, revenue, order_net, SUM(revenue) OVER (PARTITION BY order_id) AS order_revenue FROM lines
+      SELECT
+        name, quantity, revenue, list_value, order_net,
+        SUM(revenue) OVER (PARTITION BY order_id) AS order_revenue,
+        SUM(list_value) OVER (PARTITION BY order_id) AS order_list_value
+      FROM lines
     )
     SELECT
       name,
       COALESCE(SUM(quantity), 0) AS items_sold,
-      COALESCE(SUM(CASE WHEN order_revenue <> 0 THEN order_net * revenue / order_revenue ELSE 0 END), 0) AS net_sales
+      COALESCE(SUM(CASE
+        WHEN order_revenue > 0 THEN order_net * revenue / order_revenue
+        -- Codex r2 #2: lines that earned ~0 between them (weighed lines rounded when charged, a discount of almost all)
+        -- still sold what the order charged: share it by list value.
+        WHEN order_list_value > 0 THEN order_net * list_value / order_list_value
+        ELSE 0
+      END), 0) AS net_sales
     FROM shared
     GROUP BY name
     ORDER BY net_sales DESC

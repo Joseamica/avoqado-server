@@ -111,6 +111,53 @@ beforeAll(async () => {
     })
   }
 
+  // Codex r2 #1: pieza de combo de lista $200 vendida en $99 y luego regalada desde Mesas (isCortesia, total 0,
+  // discountAmount 99: la fórmula por renglón la lee como $101) junto a un café de $100. La cuenta cobró $100: todo es café.
+  const postres = await prisma.menuCategory.create({ data: { venueId, name: 'Postres', slug: `postres-${suffix}` } as any })
+  const pastel = await prisma.product.create({
+    data: { venueId, categoryId: postres.id, sku: `PASTEL-${suffix}`, name: 'Pastel', price: 200 } as any,
+  })
+  const regalo = await sembrarCobro({
+    venueId,
+    staffId,
+    saleCents: 10000,
+    items: [{ productId: cafe.id, productName: 'Café', quantity: 1, totalCents: 10000 }],
+  })
+  await prisma.orderItem.create({
+    data: {
+      orderId: regalo.order.id,
+      productId: pastel.id,
+      productName: 'Pastel',
+      quantity: 1,
+      unitPrice: 200,
+      discountAmount: 99,
+      total: 0,
+      taxAmount: 0,
+      isCortesia: true,
+      cortesiaReason: 'cumpleaños',
+    } as any,
+  })
+
+  // Codex r2 #2: dos pesadas de 0.5 kg a $100.01/kg ($50.01 cada una, subtotal $100.02) con un descuento de cuenta de $100.01
+  // repartido 50.01 / 50.00: los renglones valen −0.005 y +0.005 (suman 0) y la cuenta cobró $0.01, que es café.
+  const casiGratis = await sembrarCobro({ venueId, staffId, saleCents: 1 })
+  for (const descuento of [50.01, 50]) {
+    await prisma.orderItem.create({
+      data: {
+        orderId: casiGratis.order.id,
+        productId: cafe.id,
+        productName: 'Café',
+        quantity: 1,
+        unitPrice: 100.01,
+        weightQuantity: 0.5,
+        discountAmount: descuento,
+        taxAmount: 0,
+        total: 50.01 - descuento,
+      } as any,
+    })
+  }
+  await prisma.order.update({ where: { id: casiGratis.order.id }, data: { subtotal: 100.02, discountAmount: 100.01, total: 0.01 } })
+
   hasta = new Date(Date.now() + 2 * 60 * 60 * 1000)
 })
 
@@ -131,22 +178,25 @@ afterAll(async () => {
 describe('D21 · el desglose por categoría del correo nocturno suma las ventas netas', () => {
   it('las categorías cuentan las mismas cuentas que las ventas netas (sin PENDING ni DELETED)', async () => {
     const categorias = await getCategoryBreakdown(venueId, desde, hasta)
-    // Café: 100 + 146 (la promoción de la cuenta repartida a su renglón) + 133.20 (lo que se cobró por las pesadas).
+    // Café: 100 + 146 (la promoción de la cuenta repartida a su renglón) + 133.20 (lo que se cobró por las pesadas) + 100 (la
+    // cuenta con el pastel regalado) + 0.01 (las pesadas casi gratis). El pastel regalado no cobró nada.
     expect(categorias).toEqual([
-      { name: 'Bebidas', itemsSold: 4, netSales: 379.2 },
+      { name: 'Bebidas', itemsSold: 7, netSales: 479.21 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
+      { name: 'Postres', itemsSold: 1, netSales: 0 },
     ])
   })
 
   it('🔴 el desglose del correo suma las ventas netas del Resumen, al centavo, con su renglón de importe libre', async () => {
     const r = await getSalesSummary(venueId, { startDate: desde.toISOString(), endDate: hasta.toISOString(), timezone: TZ })
-    // 100 + 50 + 26.99 + 146 + 133.20 vendidos − 10 devueltos.
-    expect(r.summary.netSales).toBeCloseTo(446.19, 2)
+    // 100 + 50 + 26.99 + 146 + 133.20 + 100 + 0.01 vendidos − 10 devueltos.
+    expect(r.summary.netSales).toBeCloseTo(546.2, 2)
 
     const filas = reconcileCategoryBreakdown(await getCategoryBreakdown(venueId, desde, hasta), r.summary.netSales ?? 0, r.summary.refunds)
     expect(filas).toEqual([
-      { name: 'Bebidas', itemsSold: 4, netSales: 379.2 },
+      { name: 'Bebidas', itemsSold: 7, netSales: 479.21 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
+      { name: 'Postres', itemsSold: 1, netSales: 0 },
       { name: 'Devoluciones', itemsSold: null, netSales: -10 },
       { name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: 26.99 },
     ])
