@@ -859,7 +859,7 @@ async function applyIntent(ctx: {
   try {
     switch (intent.type) {
       case 'OPEN_TABLE':
-        return await applyOpenTable(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyOpenTable(venueId, staffId, intent, localRefMap, dejarHuella, ctx.deviceId)
       case 'ADD_ITEMS':
         return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'PAY_CASH':
@@ -873,7 +873,7 @@ async function applyIntent(ctx: {
       case 'ASSIGN_ORDER':
         return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent)
       case 'CLEAR_TABLE':
-        return await applyClearTable(venueId, staffId, intent, localRefMap)
+        return await applyClearTable(venueId, staffId, intent, localRefMap, ctx.deviceId)
       case 'SPLIT_ORDER':
         return await applySplitOrder(venueId, staffId, intent, localRefMap)
       case 'SPLIT_BY_SEAT':
@@ -1022,6 +1022,7 @@ async function applyOpenTable(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  deviceId?: string,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const tableId = String(intent.payload.tableId ?? '')
@@ -1100,6 +1101,8 @@ async function applyOpenTable(
           otrasCuentas: admitida.otrasCuentas,
           localOrderId,
           intentId: intent.id,
+          // D75b: con él, el «Liberar mesa» de una app vieja (sólo la mesa) encuentra la cuenta aparte de ESTE aparato.
+          deviceId: deviceId ?? null,
           abiertaSinRedEn: abiertaSinRedEn?.toISOString() ?? null,
           ...(cuentasDeOtroMesero.length ? { cuentasDeOtroMesero } : {}),
         },
@@ -1741,12 +1744,16 @@ async function applyOrderMutation(
  * por la otra cuenta (`BUSINESS_RULE` o `TABLE_OWNED_BY_OTHER`) y quedaba una «operación por revisar» que nadie puede resolver. Va
  * antes de la propiedad de mesa y no escribe nada: no puede liberar ni re-apuntar la cuenta de otro. El ACK no nombra la cuenta: en
  * ANDROID un `orderId` en el resultado confirma la sesión de esa cuenta (`TableSyncCoordinator`).
+ *
+ * D75b (15-nov-2026, antes de publicar D51/D71): las apps viejas (TPV 2.10–2.20, iOS, ANDROID ≤2.25.44) sólo mandan la mesa. Para
+ * ellas, la cuenta que quisieron soltar es la cuenta aparte que ESE aparato abrió en esa mesa (`cuentaAparteDelAparatoSaldada`).
  */
 async function applyClearTable(
   venueId: string,
   staffId: string,
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
+  deviceId?: string,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const tableId = typeof intent.payload.tableId === 'string' ? intent.payload.tableId : null
@@ -1758,6 +1765,16 @@ async function applyClearTable(
       `🪑 [POS SYNC] CLEAR_TABLE ${intent.id}: la cuenta ${suCuenta} ya no debe y la mesa ${tableId} sigue con otra — sin cambios`,
     )
     return { id: intent.id, status: 'ACKED', result: { tableId, mesaSinCambios: true } }
+  }
+  const traeCuenta = typeof intent.payload.orderId === 'string' || typeof intent.payload.localOrderId === 'string'
+  if (!traeCuenta && deviceId) {
+    const cuentaAparte = await cuentaAparteDelAparatoSaldada(venueId, tableId, deviceId)
+    if (cuentaAparte) {
+      logger.info(
+        `🪑 [POS SYNC] CLEAR_TABLE ${intent.id} (app vieja): la cuenta aparte ${cuentaAparte} de ${deviceId} ya no debe y la mesa ${tableId} sigue con otra — sin cambios`,
+      )
+      return { id: intent.id, status: 'ACKED', result: { tableId, mesaSinCambios: true } }
+    }
   }
 
   // Propiedad de mesa: liberar la mesa de otro requiere override (misma regla
@@ -1817,6 +1834,41 @@ async function nadaSuyoQueLiberar(venueId: string, tableId: string, orderId: str
     select: { id: true },
   })
   return otraQueDebe !== null
+}
+
+const NOTA_VIGENTE_MS = 24 * 60 * 60 * 1000
+const TOPE_CUENTAS_QUE_DEBEN = 20
+
+/**
+ * D75b: la cuenta aparte que ESTE aparato abrió sin red en esta mesa (nota `MESA_SIN_RED_EN_CUENTA_APARTE` con su `deviceId`), si ya
+ * no debe y TODO lo que debe la mesa son cuentas que ya estaban cuando nació (`otrasCuentas` de la nota). Una cuenta nacida después,
+ * otro aparato, una nota de más de 24 h o la cuenta aparte todavía debiendo → null (el rechazo de hoy). Sólo decide el ACK sin
+ * cambios, que no escribe nada.
+ */
+async function cuentaAparteDelAparatoSaldada(venueId: string, tableId: string, deviceId: string): Promise<string | null> {
+  const deben = await prisma.order.findMany({
+    where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, paymentStatus: { not: 'PAID' } },
+    select: { id: true, createdAt: true },
+    take: TOPE_CUENTAS_QUE_DEBEN + 1,
+  })
+  if (deben.length === 0 || deben.length > TOPE_CUENTAS_QUE_DEBEN) return null
+  // La nota nace después de las cuentas que conoce: el rango de fechas acota la búsqueda (índice por fecha) y descarta las viejas.
+  const desde = new Date(Math.max(Date.now() - NOTA_VIGENTE_MS, Math.min(...deben.map(o => o.createdAt.getTime()))))
+  const nota = await prisma.activityLog.findFirst({
+    where: {
+      venueId,
+      action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
+      entity: 'Order',
+      createdAt: { gte: desde },
+      AND: [{ data: { path: ['tableId'], equals: tableId } }, { data: { path: ['deviceId'], equals: deviceId } }],
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { entityId: true, data: true },
+  })
+  const otrasCuentas = (nota?.data as { otrasCuentas?: unknown } | null)?.otrasCuentas
+  if (!nota?.entityId || !Array.isArray(otrasCuentas)) return null
+  if (!deben.every(o => otrasCuentas.includes(o.id))) return null
+  return (await nadaSuyoQueLiberar(venueId, tableId, nota.entityId)) ? nota.entityId : null
 }
 
 /**

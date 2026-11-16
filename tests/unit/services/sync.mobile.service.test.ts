@@ -34,7 +34,8 @@ jest.mock('@/utils/prismaClient', () => ({
       delete: jest.fn(),
       deleteMany: jest.fn(),
     },
-    order: { findFirst: jest.fn(), updateMany: jest.fn() },
+    // findMany: las cuentas que deben en la mesa (D75b, CLEAR_TABLE de app vieja); vacío = como hoy.
+    order: { findFirst: jest.fn(), updateMany: jest.fn(), findMany: jest.fn(async () => []) },
     terminal: { findFirst: jest.fn() },
     shift: { findFirst: jest.fn() },
     payment: { findUnique: jest.fn() },
