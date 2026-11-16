@@ -324,6 +324,47 @@ describe('D75 · «Liberar mesa» de la cuenta aparte', () => {
       expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
     })
 
+    it('Codex r1 #1 · después de su cuenta aparte el aparato le cobra un abono a la OTRA cuenta y libera → el rechazo de hoy', async () => {
+      const t = await mesa(libre)
+      const b = await otraCuenta(libre, t)
+      // B con importe de verdad (ADD_ITEMS recalcula el total), ANTES de la cuenta aparte.
+      const [conProducto] = await replay(
+        libre,
+        [{ id: randomUUID(), seq: ++seq, type: 'ADD_ITEMS' as const, payload: { orderId: b, items: [{ productId: libre.productId, quantity: 1 }] } }],
+        libre.otro,
+      )
+      expect(conProducto.status).toBe('ACKED')
+      await mesaSinRedCobrada(libre, t, randomUUID())
+      const abono = {
+        id: randomUUID(),
+        seq: ++seq,
+        type: 'PAY_CASH' as const,
+        payload: { orderId: b, amountCents: 1000, tipCents: 0, method: 'CASH' },
+      }
+
+      const [pagoB, ack] = await replay(libre, [abono, clear(t)])
+
+      expect(pagoB.status).toBe('ACKED')
+      expect(await huellaDe(b)).toMatchObject({ paymentStatus: 'PARTIAL' })
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    })
+
+    it('Codex r1 #2 · sin tope: 21 cuentas que ya estaban y su cuenta aparte pagada → ACK sin cambios', async () => {
+      const t = await mesa(libre)
+      const otras: string[] = []
+      for (let i = 0; i < 21; i++) {
+        const [abierta] = await replay(libre, [open(t, Date.now() - 60_000)], libre.otro, `aparato-21-${i}-${randomUUID().slice(0, 4)}`)
+        expect(abierta).toMatchObject({ status: 'ACKED', result: { isNewOrder: true } })
+        otras.push(String(abierta.result!.orderId))
+      }
+      const propia = await mesaSinRedCobrada(libre, t, randomUUID())
+      expect(((await notaDe(propia)).data as { otrasCuentas: string[] }).otrasCuentas).toEqual(expect.arrayContaining(otras))
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: t, mesaSinCambios: true } })
+    })
+
     it('control · la nota de la cuenta aparte tiene más de 24 h → el rechazo de hoy', async () => {
       const t = await mesa(libre)
       await otraCuenta(libre, t)

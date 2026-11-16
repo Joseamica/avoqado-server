@@ -1837,37 +1837,50 @@ async function nadaSuyoQueLiberar(venueId: string, tableId: string, orderId: str
 }
 
 const NOTA_VIGENTE_MS = 24 * 60 * 60 * 1000
-const TOPE_CUENTAS_QUE_DEBEN = 20
 
 /**
  * D75b: la cuenta aparte que ESTE aparato abrió sin red en esta mesa (nota `MESA_SIN_RED_EN_CUENTA_APARTE` con su `deviceId`), si ya
- * no debe y TODO lo que debe la mesa son cuentas que ya estaban cuando nació (`otrasCuentas` de la nota). Una cuenta nacida después,
- * otro aparato, una nota de más de 24 h o la cuenta aparte todavía debiendo → null (el rechazo de hoy). Sólo decide el ACK sin
- * cambios, que no escribe nada.
+ * no debe, TODO lo que debe la mesa son cuentas que ya estaban cuando nació (`otrasCuentas` de la nota) y ninguna de ellas cambió
+ * después de la nota. Si no → null (el rechazo de hoy):
+ * - una cuenta nacida después;
+ * - una que cambió después (Codex r1 #1: el aparato le cobró un abono a otra cuenta y el CLEAR puede ser de ESA);
+ * - otro aparato;
+ * - una nota de más de 24 h;
+ * - la cuenta aparte todavía debiendo.
+ *
+ * Sin tope de cuentas (Codex r1 #2). Sólo decide el ACK sin cambios, que no escribe nada.
  */
 async function cuentaAparteDelAparatoSaldada(venueId: string, tableId: string, deviceId: string): Promise<string | null> {
-  const deben = await prisma.order.findMany({
-    where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, paymentStatus: { not: 'PAID' } },
-    select: { id: true, createdAt: true },
-    take: TOPE_CUENTAS_QUE_DEBEN + 1,
-  })
-  if (deben.length === 0 || deben.length > TOPE_CUENTAS_QUE_DEBEN) return null
-  // La nota nace después de las cuentas que conoce: el rango de fechas acota la búsqueda (índice por fecha) y descarta las viejas.
-  const desde = new Date(Math.max(Date.now() - NOTA_VIGENTE_MS, Math.min(...deben.map(o => o.createdAt.getTime()))))
+  const queDeben: Prisma.OrderWhereInput = {
+    venueId,
+    tableId,
+    status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+    paymentStatus: { not: 'PAID' },
+  }
+  // Sin nada que deba, el CLEAR_TABLE de hoy libera la mesa: el camino de todos los días no paga la búsqueda de la nota.
+  if (!(await prisma.order.findFirst({ where: queDeben, select: { id: true } }))) return null
   const nota = await prisma.activityLog.findFirst({
     where: {
       venueId,
       action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
       entity: 'Order',
-      createdAt: { gte: desde },
+      createdAt: { gte: new Date(Date.now() - NOTA_VIGENTE_MS) },
       AND: [{ data: { path: ['tableId'], equals: tableId } }, { data: { path: ['deviceId'], equals: deviceId } }],
     },
     orderBy: { createdAt: 'desc' },
-    select: { entityId: true, data: true },
+    select: { entityId: true, data: true, createdAt: true },
   })
   const otrasCuentas = (nota?.data as { otrasCuentas?: unknown } | null)?.otrasCuentas
   if (!nota?.entityId || !Array.isArray(otrasCuentas)) return null
-  if (!deben.every(o => otrasCuentas.includes(o.id))) return null
+  const conocidas = otrasCuentas.filter((id): id is string => typeof id === 'string')
+  const nuevaOTocada = await prisma.order.findFirst({
+    where: {
+      ...queDeben,
+      OR: [{ id: { notIn: [...conocidas, nota.entityId] } }, { id: { in: conocidas }, updatedAt: { gt: nota.createdAt } }],
+    },
+    select: { id: true },
+  })
+  if (nuevaOTocada) return null
   return (await nadaSuyoQueLiberar(venueId, tableId, nota.entityId)) ? nota.entityId : null
 }
 
