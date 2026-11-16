@@ -34,6 +34,10 @@ function catalogo(filas = CATALOGO) {
     )
     return r.slice(0, take)
   })
+  // Los extras del negocio `v1` (su código en el menú es `MOD-<id>`).
+  ;(prisma.modifier.findMany as jest.Mock).mockImplementation(async ({ where }: any) =>
+    where.group.venueId === 'v1' ? ['m1'].filter(id => where.id.in.includes(id)).map(id => ({ id })) : [],
+  )
 }
 
 /** Las filas que devuelve el candado (`SELECT … FOR UPDATE`). */

@@ -1202,7 +1202,8 @@ describe('productos del canal por id (`config.productoIds`)', () => {
 
     expect(r.outcome).toBe('PUBLISHED')
     const soloZ = { ...SIN_ID, categories: [{ name: 'BARRA DE CAFE', products: [producto('Z')] }] }
-    const precios = { markupPercent: 30, overrides: { Z: 79, 'MOD-m1': 5 } }
+    // `MOD-m1` no es extra de ningún producto de esta copia: no viaja (Codex impl r1 #2, el prefijo no prueba que sea extra).
+    const precios = { markupPercent: 30, overrides: { Z: 79 } }
     expect(a.buildMenuPayload).toHaveBeenCalledWith(soloZ, { availability: undefined, precios })
     expect(a.publishMenu).toHaveBeenCalledWith(soloZ, 'store1', { availability: undefined, precios })
   })

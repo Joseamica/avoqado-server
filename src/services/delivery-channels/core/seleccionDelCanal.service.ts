@@ -4,8 +4,8 @@
  * El código de un producto cambia por muchos caminos (Shopify, variantes, importaciones) y uno nuevo puede tomar un código
  * viejo; el id no cambia nunca. Por eso todo lo que escribe la selección guarda `productoIds` y `precios.porProducto`, y
  * rehace la copia por código (`productos`, `precios.overrides`) con los códigos vigentes: la API vieja la sigue leyendo y una
- * vuelta atrás de versión publica lo último guardado, no todo el catálogo. Los precios de extras (`MOD-…`, código estable) se
- * quedan en `overrides`.
+ * vuelta atrás de versión publica lo último guardado, no todo el catálogo. Los precios de extras (`MOD-<id>`, código estable) se
+ * quedan en `overrides`, pero sólo si `<id>` es un extra del negocio: el prefijo no lo prueba (Codex impl r1 #2).
  *
  * 🔴 Corre sobre la config YA MEZCLADA (Codex plan r3 #2): así convertir la lista vieja arrastra también sus precios guardados.
  */
@@ -112,15 +112,9 @@ export async function normalizarSeleccion(
     porProducto = porProductoBase
   } else if (reemplaza || convertirGuardados) {
     porProducto = {}
-    const sinDueno: string[] = []
     for (const [codigo, precio] of Object.entries(overrides)) {
       const id = idDe.get(codigo) // un código de producto gana, aunque empiece con `MOD-`
       if (id) porProducto[id] = precio
-      else if (!codigo.startsWith('MOD-')) sinDueno.push(codigo)
-    }
-    // Enviado: se nombra. Guardado: se descarta (no es de ningún producto ni extra).
-    if (reemplaza && sinDueno.length) {
-      throw new ValidationError(`Estos precios fijos no son de ningún producto ni extra de tu negocio: ${sinDueno.join(', ')}`)
     }
   }
 
@@ -130,9 +124,27 @@ export async function normalizarSeleccion(
     resultado.productos = productoIds && productoIds.flatMap(id => (codigoDe.has(id) ? [codigoDe.get(id)!] : []))
   }
   if (porProducto !== undefined) {
-    const copia: Record<string, unknown> = Object.fromEntries(
-      Object.entries(overrides).filter(([codigo]) => codigo.startsWith('MOD-') && !idDe.has(codigo)),
+    // 🔴 Codex impl r1 #2: un `MOD-<id>` que no es código de producto es precio de extra sólo si `<id>` es un extra de ESTE negocio
+    // (UNA consulta, por id y con tope). Lo demás no es de nadie: enviado se nombra; guardado se descarta.
+    const posibles = [
+      ...new Set(Object.keys(overrides).flatMap(c => (c.startsWith('MOD-') && !idDe.has(c) && c.length > 4 ? [c.slice(4)] : []))),
+    ]
+    const extras = new Set(
+      posibles.length === 0
+        ? []
+        : (
+            await db.modifier.findMany({
+              where: { id: { in: posibles }, group: { venueId } },
+              select: { id: true },
+              take: posibles.length,
+            })
+          ).map(m => `MOD-${m.id}`),
     )
+    const sinDueno = Object.keys(comoObjeto(enviados?.overrides) ?? {}).filter(c => !idDe.has(c) && !extras.has(c))
+    if (sinDueno.length) {
+      throw new ValidationError(`Estos precios fijos no son de ningún producto ni extra de tu negocio: ${sinDueno.join(', ')}`)
+    }
+    const copia: Record<string, unknown> = Object.fromEntries(Object.entries(overrides).filter(([codigo]) => extras.has(codigo)))
     for (const [id, precio] of Object.entries(porProducto)) if (codigoDe.has(id)) copia[codigoDe.get(id)!] = precio
     const { porProducto: _viejo, ...resto }: Record<string, unknown> = precios ?? {}
     // Un canal con lista por id siempre lleva `porProducto` (aunque vacío): así lo guardado no se vuelve a convertir.

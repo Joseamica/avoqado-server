@@ -8,6 +8,7 @@ import { ValidationError } from '@/errors/AppError'
 import { aplicarSeleccion } from '@/services/delivery-channels/core/productosDelCanal'
 import { normalizarSeleccion, sumarRevisados } from '@/services/delivery-channels/core/seleccionDelCanal.service'
 import type { MenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
+import { construirMenuRappi } from '@/services/delivery-channels/providers/rappi/rappi.menuMapper'
 
 /** Los productos del negocio (archivados incluidos): la base de mentira filtra como el `findMany` real. */
 const CATALOGO = [
@@ -16,27 +17,49 @@ const CATALOGO = [
   { id: 'p2', sku: 'CAP' },
 ]
 
+/** Los extras (modificadores) del negocio `v1`, por id: su código en el menú es `MOD-<id>`. */
+const EXTRAS = ['m1']
+
 function baseDe(catalogo = CATALOGO) {
   const findMany = jest.fn(
     async ({ where }: { where: { venueId: string; OR: Array<{ id?: { in: string[] }; sku?: { in: string[] } }> } }) =>
       catalogo.filter(p => where.venueId === 'v1' && where.OR.some(c => c.id?.in.includes(p.id) || c.sku?.in.includes(p.sku))),
   )
-  return { db: { product: { findMany } } as unknown as Prisma.TransactionClient, findMany }
+  const findModifiers = jest.fn(async ({ where }: { where: { id: { in: string[] }; group: { venueId: string } } }) =>
+    EXTRAS.filter(id => where.group.venueId === 'v1' && where.id.in.includes(id)).map(id => ({ id })),
+  )
+  return {
+    db: { product: { findMany }, modifier: { findMany: findModifiers } } as unknown as Prisma.TransactionClient,
+    findMany,
+    findModifiers,
+  }
 }
 
-const conId = (productId: string, plu: string) => ({
+const conId = (productId: string, plu: string, extras: string[] = []) => ({
   plu,
   name: plu,
   description: null,
   price: 50,
   imageUrl: null,
-  modifierGroups: [],
+  modifierGroups: extras.length
+    ? [
+        {
+          id: 'g1',
+          name: 'Extras',
+          required: false,
+          allowMultiple: true,
+          minSelections: 0,
+          maxSelections: null,
+          modifiers: extras.map(e => ({ plu: e, name: e, price: 5 })),
+        },
+      ]
+    : [],
   productId,
 })
-const menuCon = (...productos: Array<[string, string]>): MenuSnapshot => ({
+const menuCon = (...productos: Array<[string, string, string[]?]>): MenuSnapshot => ({
   venueId: 'v1',
   generatedAt: 'x',
-  categories: [{ name: 'TODO', products: productos.map(([id, plu]) => conId(id, plu)) }],
+  categories: [{ name: 'TODO', products: productos.map(([id, plu, extras]) => conId(id, plu, extras)) }],
 })
 
 describe('normalizarSeleccion — la lista por código se guarda por producto', () => {
@@ -104,7 +127,7 @@ describe('normalizarSeleccion — precios por producto', () => {
     expect(r.productos).toEqual(['A'])
 
     // Después pA cambia a Z: se publica Z a 79 y el extra a 5.
-    const { snapshot, precios } = aplicarSeleccion(menuCon(['pA', 'Z'], ['p2', 'A']), r)
+    const { snapshot, precios } = aplicarSeleccion(menuCon(['pA', 'Z', ['MOD-m1']], ['p2', 'A']), r)
     expect(snapshot.categories[0].products.map(p => p.plu)).toEqual(['Z'])
     expect(precios?.overrides).toEqual({ Z: 79, 'MOD-m1': 5 })
   })
@@ -182,6 +205,85 @@ describe('normalizarSeleccion — precios por producto', () => {
       { productos: ['MOD-raro'] },
     )
     expect(r.precios).toEqual({ porProducto: { pM: 9 }, overrides: { 'MOD-raro': 9 } })
+  })
+})
+
+describe('normalizarSeleccion — un `MOD-…` es precio de extra sólo si el extra es de este negocio (Codex impl r1 #2)', () => {
+  it('🔴 Codex impl r1 #2: el producto `MOD-raro` a $79 cambia a Z y otro toma `MOD-raro` ⇒ Rappi publica Z a 79 y el otro a 50', async () => {
+    const { db } = baseDe([
+      { id: 'p1', sku: 'MOD-raro' },
+      { id: 'p2', sku: 'B' },
+    ])
+    // Se convierte el canal viejo (lista y precio por código).
+    const r = await normalizarSeleccion(
+      db,
+      'v1',
+      { productos: ['MOD-raro', 'B'], precios: { overrides: { 'MOD-raro': 79 } } },
+      { productos: ['MOD-raro', 'B'] },
+    )
+    expect(r.productoIds).toEqual(['p1', 'p2'])
+    expect(r.precios).toEqual({ porProducto: { p1: 79 }, overrides: { 'MOD-raro': 79 } })
+
+    // p1 pasa a Z y p2 toma `MOD-raro` (desde la ficha o Shopify): la copia por código guardada todavía dice `MOD-raro: 79`.
+    const { snapshot, precios } = aplicarSeleccion(menuCon(['p1', 'Z'], ['p2', 'MOD-raro']), r)
+    expect(precios?.overrides).toEqual({ Z: 79 })
+    const { payload } = construirMenuRappi(snapshot, 'store1', { precios })
+    expect(payload.items.map(i => [i.sku, i.price])).toEqual([
+      ['Z', 79],
+      ['MOD-raro', 50],
+    ])
+
+    // Y el siguiente guardado (sólo el horario, con sus precios por producto) rehace la copia por código sin `MOD-raro`.
+    const despues = await normalizarSeleccion(
+      baseDe([
+        { id: 'p1', sku: 'Z' },
+        { id: 'p2', sku: 'MOD-raro' },
+      ]).db,
+      'v1',
+      { ...r, deliveryHours: null, precios: { porProducto: { p1: 79 }, overrides: { 'MOD-raro': 79 } } },
+      { deliveryHours: null, precios: { porProducto: { p1: 79 } } },
+    )
+    expect(despues.precios).toEqual({ porProducto: { p1: 79 }, overrides: { Z: 79 } })
+  })
+
+  it('un `MOD-…` GUARDADO cuyo extra no es del negocio se descarta al convertir; el de un extra del negocio se queda', async () => {
+    const { db, findModifiers } = baseDe()
+    const r = await normalizarSeleccion(
+      db,
+      'v1',
+      { productos: ['A'], precios: { overrides: { A: 79, 'MOD-m1': 5, 'MOD-raro': 9 } } },
+      { productos: ['A'] },
+    )
+    expect(r.precios).toEqual({ porProducto: { pA: 79 }, overrides: { A: 79, 'MOD-m1': 5 } })
+    // UNA consulta de extras: del negocio, por id y con tope.
+    expect(findModifiers).toHaveBeenCalledTimes(1)
+    expect(findModifiers.mock.calls[0][0]).toEqual({
+      where: { id: { in: ['m1', 'raro'] }, group: { venueId: 'v1' } },
+      select: { id: true },
+      take: 2,
+    })
+  })
+
+  it('un `MOD-…` ENVIADO cuyo extra no es del negocio ⇒ ValidationError que lo nombra (con o sin `porProducto`)', async () => {
+    const { db } = baseDe()
+    const solo = normalizarSeleccion(
+      db,
+      'v1',
+      { precios: { overrides: { 'MOD-ajeno': 3 } } },
+      { precios: { overrides: { 'MOD-ajeno': 3 } } },
+    )
+    await expect(solo).rejects.toThrow(ValidationError)
+    await expect(solo).rejects.toThrow(/MOD-ajeno/)
+
+    const enviados = { porProducto: { p1: 60 }, overrides: { 'MOD-m1': 5, 'MOD-ajeno': 3 } }
+    const conPorProducto = normalizarSeleccion(db, 'v1', { productoIds: ['p1'], precios: enviados }, { precios: enviados })
+    await expect(conPorProducto).rejects.toThrow(/MOD-ajeno/)
+  })
+
+  it('sin llaves `MOD-` que no sean de producto, no consulta los extras', async () => {
+    const { db, findModifiers } = baseDe()
+    await normalizarSeleccion(db, 'v1', { productos: ['A'], precios: { overrides: { A: 79 } } }, { productos: ['A'] })
+    expect(findModifiers).not.toHaveBeenCalled()
   })
 })
 

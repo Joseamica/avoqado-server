@@ -193,11 +193,33 @@ describe('aplicarSeleccion — filtra y arma los precios sobre la MISMA copia de
   })
 
   it('🔴 precios por producto: el código sale de ESTA copia; la llave vieja de producto se ignora y la del extra se conserva', () => {
-    const { precios } = aplicarSeleccion(copia('Z', 'LATTE', 'TE'), {
+    const menu = copia('Z', 'LATTE', 'TE')
+    menu.categories[1].products[0].modifierGroups = [
+      {
+        id: 'g1',
+        name: 'Leche',
+        required: false,
+        allowMultiple: false,
+        minSelections: 0,
+        maxSelections: 1,
+        modifiers: [{ plu: 'MOD-m1', name: 'Avena', price: 10 }],
+      },
+    ]
+    const { precios } = aplicarSeleccion(menu, {
       productoIds: ['p1', 'p3'],
       precios: { markupPercent: 30, porProducto: { p1: 79 }, overrides: { LATTE: 50, 'MOD-m1': 5 } },
     })
     expect(precios).toEqual({ markupPercent: 30, overrides: { Z: 79, 'MOD-m1': 5 } })
+  })
+
+  it('🔴 Codex impl r1 #2: con porProducto, un `MOD-…` guardado sólo viaja si es un extra de ESTA copia y no el código de un producto', () => {
+    // p2 tomó el código `MOD-raro` que antes era de otro producto: su precio guardado por código NO se le pasa.
+    const { precios } = aplicarSeleccion(copia('Z', 'MOD-raro', 'TE'), {
+      productoIds: ['p1', 'p2'],
+      precios: { porProducto: { p1: 79 }, overrides: { 'MOD-raro': 79, 'MOD-m1': 5 } },
+    })
+    // `MOD-m1` tampoco viaja: no es extra de ningún producto de esta copia.
+    expect(precios).toEqual({ overrides: { Z: 79 } })
   })
 
   it('precios por producto de un producto que no se publica no viajan', () => {
