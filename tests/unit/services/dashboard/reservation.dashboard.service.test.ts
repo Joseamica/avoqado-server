@@ -163,6 +163,8 @@ describe('Reservation Dashboard Service', () => {
     prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
     // Cancelar devuelve el paquete dentro de su transacción: sin canjes, no hay nada que devolver.
     prismaMock.creditTransaction.findMany.mockResolvedValue([])
+    // D6: el detalle le pone nombre a los autores del historial; sin personal en la base, ninguno.
+    prismaMock.staff.findMany.mockResolvedValue([])
     prismaMock.$transaction.mockImplementation(async (arg: any) => {
       if (typeof arg === 'function') return arg(prismaMock)
       return arg
@@ -1769,6 +1771,40 @@ describe('Reservation Dashboard Service', () => {
           where: { id: 'res-1', venueId: VENUE_ID },
         }),
       )
+    })
+
+    // D6 (16-nov): el historial dice QUIÉN. `byName` es nuevo y opcional; `by` (lo que leen las apps) no cambia.
+    it('D6: cada entrada del historial trae el nombre corto de la persona; el kiosco y los ids desconocidos quedan sin nombre', async () => {
+      const mockRes = {
+        ...createMockReservation(),
+        statusLog: [
+          { status: 'CONFIRMED', at: '2026-11-16T10:00:00.000Z', by: 'staff-ana' },
+          { status: 'CHECKED_IN', at: '2026-11-16T14:05:00.000Z', by: 'service:kiosk', method: 'PHONE' },
+          { status: 'CHECKED_IN', at: '2026-11-16T14:06:00.000Z', by: 'staff-borrado' },
+          { status: 'PENDING', at: '2026-11-16T09:00:00.000Z', by: null },
+        ],
+      }
+      prismaMock.reservation.findFirst.mockResolvedValue(mockRes as any)
+      prismaMock.staff.findMany.mockResolvedValue([{ id: 'staff-ana', firstName: 'Ana', lastName: 'Pérez' }] as any)
+
+      const result: any = await getReservationById(VENUE_ID, 'res-1')
+
+      expect(result.statusLog).toEqual([
+        { status: 'CONFIRMED', at: '2026-11-16T10:00:00.000Z', by: 'staff-ana', byName: 'Ana P.' },
+        { status: 'CHECKED_IN', at: '2026-11-16T14:05:00.000Z', by: 'service:kiosk', method: 'PHONE' },
+        { status: 'CHECKED_IN', at: '2026-11-16T14:06:00.000Z', by: 'staff-borrado' },
+        { status: 'PENDING', at: '2026-11-16T09:00:00.000Z', by: null },
+      ])
+      // Una sola lectura acotada, y sólo de ids de personas (no de «service:…»).
+      const args = prismaMock.staff.findMany.mock.calls[0][0] as any
+      expect(args.where.id.in.sort()).toEqual(['staff-ana', 'staff-borrado'])
+      expect(args.take).toBeLessThanOrEqual(50)
+    })
+
+    it('D6: sin entradas de personas no lee Staff', async () => {
+      prismaMock.reservation.findFirst.mockResolvedValue({ ...createMockReservation(), statusLog: [] } as any)
+      await getReservationById(VENUE_ID, 'res-1')
+      expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
     })
 
     it('should throw NotFoundError when reservation does not exist', async () => {
