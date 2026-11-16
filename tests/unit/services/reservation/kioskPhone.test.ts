@@ -171,7 +171,7 @@ describe('Teléfono tecleado en el kiosco', () => {
   it('Codex r2 #5 y r4 #4: la cola no gasta el tope por teléfono (5/min); lo tecleado en vivo, sí', async () => {
     await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-4' })
     await checkInByIdentifier(base)
-    const ups = prismaMock.kioskCheckInAttempt.upsert.mock.calls.map(c => (c[0] as any).where.venueId_scope_windowStart.scope)
+    const ups = prismaMock.kioskCheckInAttempt.upsert.mock.calls.map((c: any[]) => (c[0] as any).where.venueId_scope_windowStart.scope)
     expect(ups.filter((x: string) => x.startsWith('identifier:'))).toHaveLength(1)
   })
 })

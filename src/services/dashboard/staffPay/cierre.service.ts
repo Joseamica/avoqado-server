@@ -74,7 +74,7 @@ export interface ResultadoCierre {
 export function descriptorDeClase(
   c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'> & {
     regla?: ReglaDeClase | null
-    countMode?: ClaseValorada['countMode']
+    countMode?: string | null
     llegadas?: ClaseValorada['llegadas']
   },
   sede: { nombre: string; tz: string },
