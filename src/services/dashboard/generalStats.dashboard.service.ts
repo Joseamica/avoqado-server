@@ -592,8 +592,10 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
 
   // Puente legacy de MindForm (ver mergedPayments.service.ts): sus pagos QR no
   // están en Postgres, así que se suman aquí con las MISMAS reglas.
+  // D15: si el puente no contestó alguna página, las tarjetas traen una suma parcial y lo dicen (`legacyUnavailable`).
+  let legacyUnavailable = false
   if (venueId === MINDFORM_NEW_VENUE_ID) {
-    await forEachLegacyAnalyticsPayment(fromDate, toDate, p => {
+    legacyUnavailable = await forEachLegacyAnalyticsPayment(fromDate, toDate, p => {
       summary.totalAmount = round2(summary.totalAmount + p.amount)
       summary.totalTips = round2(summary.totalTips + p.tipAmount)
       summary.totalTransactions += 1
@@ -642,6 +644,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
       reviewsTruncated: reviewStats.total > transformedReviews.length,
       reviewsTotal: reviewStats.total,
     },
+    ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
   }
 }
 
@@ -708,13 +711,14 @@ function round2(n: number): number {
 /**
  * Pagos QR legacy de MindForm ya filtrados con las reglas de analytics (COMPLETED,
  * sin REFUND). Sólo se llama para ese venue; para los demás nunca abre el pool.
+ * Devuelve `true` si el puente no pudo contestar alguna página (lo consumido es parcial).
  */
 async function forEachLegacyAnalyticsPayment(
   fromDate: Date,
   toDate: Date,
   consume: (payment: { id: string; amount: number; tipAmount: number; method: string; createdAt: Date }) => void,
-) {
-  await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
+): Promise<boolean> {
+  const { unavailable } = await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
     for (const payment of rows) {
       if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
       consume({
@@ -726,6 +730,7 @@ async function forEachLegacyAnalyticsPayment(
       })
     }
   })
+  return unavailable
 }
 
 type MindFormDetailsCursor = { createdAt: string; id: string }
@@ -810,6 +815,8 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
       return {
         items: visible.map(payment => transformBasicMetricPayment(payment)),
         nextCursor: hasMore && visible.length > 0 ? encodeMindFormDetailsCursor(visible[visible.length - 1]) : null,
+        // D15: a esta página le faltan los cobros QR legacy; quien arma el archivo lo tiene que decir.
+        ...(legacyPage.unavailable ? { legacyUnavailable: true as const } : {}),
       }
     }
 
@@ -1022,7 +1029,8 @@ async function getTipsOverTimeData(venueId: string, dateFilter: { createdAt: { g
     tips: [{ amount: payment.tipAmount }],
   }))
 
-  return { payments: transformedPayments }
+  // D15: la marca del puente se lee del arreglo ORIGINAL (`.map` la pierde) y viaja con la serie.
+  return { payments: transformedPayments, ...(payments.legacyUnavailable ? { legacyUnavailable: true as const } : {}) }
 }
 
 async function getSalesByPaymentMethodData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
@@ -1041,7 +1049,7 @@ async function getSalesByPaymentMethodData(venueId: string, dateFilter: { create
     createdAt: payment.createdAt.toISOString(),
   }))
 
-  return { payments: transformedPayments }
+  return { payments: transformedPayments, ...(payments.legacyUnavailable ? { legacyUnavailable: true as const } : {}) }
 }
 
 // Strategic Analytics Chart Data Functions

@@ -27,6 +27,14 @@ import {
 import { getAvailableBalance, getBalanceByCardType } from '@/services/dashboard/availableBalance.dashboard.service'
 import { getSettlementsLandingInWeek, venueWeekBounds } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import { hasPermission } from '@/services/access/access.service'
+import { AVISO_PUENTE_QR_CAIDO } from '@/services/legacy/qrPayments.legacy.service'
+
+/**
+ * D15: el servicio marcó `legacyUnavailable` porque el puente de cobros QR legacy (sólo MindForm) no contestó. Las cifras
+ * de la respuesta pueden estar incompletas y el asistente tiene que decirlo: va la marca y un `aviso` listo para leerse.
+ * Sólo agrega texto a la respuesta; con el puente sano (o en cualquier otro negocio) no agrega nada.
+ */
+const avisoPuenteQr = (puenteCaido: unknown) => (puenteCaido ? { legacyUnavailable: true as const, aviso: AVISO_PUENTE_QR_CAIDO } : {})
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -620,6 +628,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         grossCollected: { total: round2(grossByMethod.reduce((s, m) => s + m.total, 0)), byMethod: grossByMethod },
         netSales: { total: round2(netByMethod.reduce((s, m) => s + m.total, 0)), byMethod: netByMethod },
         giftCardLoads: { total: round2(cargas.amount), count: cargas.count },
+        ...avisoPuenteQr(grossRows.legacyUnavailable || netRows.legacyUnavailable),
         note:
           'grossCollected = todo lo que entró por método INCLUYENDO propinas, ya neteados los reembolsos (filas negativas) e incluyendo órdenes canceladas — cuadra 1:1 con el panel "Métodos de Pago" del dashboard. netSales = ventas netas: valor de venta menos reembolsos, SIN canceladas y SIN propinas.' +
           ' Tarjetas de regalo: grossCollected es dinero, así que la venta de una tarjeta se queda en el método con que se pagó y lo pagado con saldo no entra (no es dinero nuevo); netSales es venta, así que deja fuera la venta de tarjetas (va aparte en giftCardLoads) y muestra lo pagado con saldo como GIFT_CARD. Por eso, con tarjetas de regalo, la diferencia entre las dos cifras también incluye las tarjetas vendidas (sólo en grossCollected) y lo pagado con saldo (sólo en netSales).',
@@ -681,9 +690,12 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const tz = venue?.timezone || 'America/Mexico_City'
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const data = (await getVenueChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
+      const data = (await getVenueChartData(venueId, 'tips-over-time', { fromDate, toDate })) as {
+        payments: TipPaymentRow[]
+        legacyUnavailable?: true
+      }
       const result = summarizeTipsByDay(data.payments, tz)
-      return text({ venueId, ...result })
+      return text({ venueId, ...result, ...avisoPuenteQr(data.legacyUnavailable) })
     },
   )
 
@@ -711,7 +723,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       // Same payment universe as tips_over_time (COMPLETED, no refunds, no cancelled orders,
       // MindForm legacy QR included) so both tools cuadran to the cent.
       // Summed per cashier in Postgres — never one row per payment (2026-09-01 incident).
-      const result = rankProcessorTips(await aggregateTipsByProcessor(venueId, { fromDate: from, toDate: to }))
+      const porCajero = await aggregateTipsByProcessor(venueId, { fromDate: from, toDate: to })
+      const result = rankProcessorTips(porCajero)
       const staff = staffId ? result.staff.filter(s => s.staffId === staffId) : result.staff
       return text({
         venueId,
@@ -720,6 +733,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         tippedPayments: result.count,
         staff,
         unattributed: result.unattributed,
+        ...avisoPuenteQr(porCajero.legacyUnavailable), // se lee del arreglo original: `rankProcessorTips` no la conserva
         note: 'Propina atribuida a quien COBRÓ cada pago — la misma regla que el corte de caja. `unattributed` = pagos sin cajero (QR/autoservicio). NO uses los "tips" de staff_ranking para esta pregunta (ésos van al creador de la orden).',
       })
     },
@@ -902,7 +916,15 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         includeMerchantBreakdown: true,
       })
       const { rows } = flattenSalesSummaryForExport(report, requested)
-      return text({ venueId, mode: 'summary', window: range, timezone: tz, sections: requested, rows })
+      return text({
+        venueId,
+        mode: 'summary',
+        window: range,
+        timezone: tz,
+        sections: requested,
+        ...avisoPuenteQr(report.legacyUnavailable),
+        rows,
+      })
     },
   )
 }

@@ -346,19 +346,34 @@ export async function getLegacyPayments(filters?: LegacyPaymentFilters): Promise
 
 export type LegacyPayment = ReturnType<typeof mapToPaymentShape>
 
-/** Recorre historia legacy en ventanas fijas; el callback nunca recibe más de 500 filas. */
+/**
+ * Lo que se le dice a quien lee un total que el puente dejó a medias, fuera del panel (exportes, MCP). El panel trae su
+ * propio texto traducido; el correo nocturno, el suyo (ahí no hay nada que «volver a intentar»).
+ */
+export const AVISO_PUENTE_QR_CAIDO =
+  'No pudimos leer todos los cobros del sistema anterior de QR. Este total puede estar incompleto: vuelve a intentar.'
+
+/**
+ * Recorre historia legacy en ventanas fijas; el callback nunca recibe más de 500 filas.
+ *
+ * 🔴 Devuelve `unavailable: true` si el puente no pudo contestar ALGUNA página, y se detiene ahí (D15, 16-nov-2026). Antes
+ * una página fallida (filas vacías) se tomaba por «ya no hay más»: si el puente se caía a media lectura, lo ya entregado al
+ * callback era una suma PARCIAL que cinco reportes de Mindform devolvían como completa. Quien llama no debe fallar (una caída
+ * del puente no tumba la pantalla): propaga la marca como `legacyUnavailable` junto a su total.
+ */
 export async function forEachLegacyPaymentPage(
   filters: Omit<LegacyPaymentFilters, 'limit' | 'before' | 'includeTotal'>,
   consume: (rows: LegacyPayment[]) => void | Promise<void>,
-): Promise<void> {
+): Promise<{ unavailable: boolean }> {
   const pageSize = 500
   let before: LegacyPaymentFilters['before']
 
   for (;;) {
     const page = await getLegacyPayments({ ...filters, limit: pageSize, before, includeTotal: false })
-    if (page.rows.length === 0) return
+    if (page.unavailable) return { unavailable: true }
+    if (page.rows.length === 0) return { unavailable: false }
     await consume(page.rows)
-    if (page.rows.length < pageSize) return
+    if (page.rows.length < pageSize) return { unavailable: false }
     const last = page.rows[page.rows.length - 1]
     before = { createdAt: last.createdAt.toISOString(), id: last.id }
   }

@@ -3093,6 +3093,8 @@ Avoqado Dashboard
         platformFees: number
         transactionCount: number
       }
+      /** D15: alguno de los resúmenes del correo no pudo leer los cobros QR legacy; sus totales pueden estar incompletos. */
+      legacyUnavailable?: true
     },
     _weeklyChange: number = 0,
   ): Promise<boolean> {
@@ -3176,6 +3178,18 @@ Avoqado Dashboard
         <a href="${data.dashboardUrl}" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Abrir Dashboard</a>
       </p>
     </div>
+    ${
+      data.legacyUnavailable
+        ? `
+    <!-- Aviso: totales incompletos (puente QR legacy) -->
+    <div style="border: 1px solid #f59e0b; border-radius: 8px; background-color: #fffbeb; padding: 16px; margin: 8px 0 0 0;">
+      <p style="margin: 0; font-size: 14px; color: #000;">
+        <strong>No pudimos leer todos los cobros del sistema anterior de QR.</strong>
+        Los totales y las comparaciones de este correo pueden estar incompletos: revísalos en el panel.
+      </p>
+    </div>`
+        : ''
+    }
 
     <!-- Key Metrics Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; margin: 24px 0; overflow: hidden;">

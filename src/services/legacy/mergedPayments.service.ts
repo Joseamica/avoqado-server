@@ -74,6 +74,20 @@ export interface AnalyticsPayment {
   processedByName?: string | null
 }
 
+/**
+ * Un arreglo de este servicio, con la marca de que el puente QR legacy no pudo contestar (D15): la lista o la suma puede
+ * estar incompleta y quien la muestra tiene que decirlo. Ausente cuando el puente contestó, y siempre para otros negocios.
+ *
+ * ponytail: la marca va como propiedad del arreglo para no cambiar la forma que ya consumen las herramientas del MCP, las
+ * gráficas de Inicio y sus pruebas. `.map`, `.filter`, el spread y `JSON.stringify` la PIERDEN: léela antes de transformar.
+ * Si aparece un tercer consumidor que la olvide, cambia el retorno a `{ rows, legacyUnavailable }`.
+ */
+export type ConAvisoLegacy<T> = T[] & { legacyUnavailable?: true }
+
+function conAvisoLegacy<T>(rows: T[], puenteCaido: boolean): ConAvisoLegacy<T> {
+  return puenteCaido ? Object.assign(rows, { legacyUnavailable: true as const }) : rows
+}
+
 /** Filtros de analítica → `where` de Prisma. UNA sola definición para las filas y para las sumas. */
 function analyticsWhere(venueId: string, filters: AnalyticsPaymentFilters): Prisma.PaymentWhereInput {
   const { fromDate, toDate, includeRefunds = false, excludeCancelledOrders = true } = filters
@@ -93,6 +107,8 @@ function analyticsWhere(venueId: string, filters: AnalyticsPaymentFilters): Pris
  * ⚠️ Gate: para cualquier otro venue devuelve [] SIN tocar la base legacy — el pool
  * (`legacyPool.ts`) sigue perezoso y nunca abre conexión. NO mover la comprobación
  * debajo del `await getLegacyPayments`.
+ *
+ * Devuelve `true` si el puente no pudo contestar alguna página: lo entregado a `consume` es parcial.
  */
 async function visitLegacyAnalyticsPayments(
   venueId: string,
@@ -100,8 +116,8 @@ async function visitLegacyAnalyticsPayments(
   /** Qué cuenta `nativeCount` en el log: filas del rango, o sólo las que el agregado consideró. */
   native: { count: number; scope: 'rows' | 'by-method' | 'tips>0' },
   consume: (payment: AnalyticsPayment) => void,
-): Promise<number> {
-  if (venueId !== MINDFORM_NEW_VENUE_ID) return 0
+): Promise<boolean> {
+  if (venueId !== MINDFORM_NEW_VENUE_ID) return false
   const { fromDate, toDate, includeRefunds = false } = filters
 
   logger.info('[MergedPayments] MindForm detected — merging legacy QR payments into analytics', {
@@ -113,7 +129,7 @@ async function visitLegacyAnalyticsPayments(
   })
 
   let kept = 0
-  await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
+  const { unavailable } = await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
     for (const payment of rows) {
       if (payment.status !== 'COMPLETED') continue
       if (!includeRefunds && payment.type === 'REFUND') continue
@@ -137,19 +153,10 @@ async function visitLegacyAnalyticsPayments(
     legacyKept: kept,
     total: native.count + kept,
     nativeScope: native.scope,
+    legacyUnavailable: unavailable,
   })
 
-  return kept
-}
-
-async function legacyAnalyticsPayments(
-  venueId: string,
-  filters: AnalyticsPaymentFilters,
-  native: { count: number; scope: 'rows' | 'by-method' | 'tips>0' },
-): Promise<AnalyticsPayment[]> {
-  const rows: AnalyticsPayment[] = []
-  await visitLegacyAnalyticsPayments(venueId, filters, native, payment => rows.push(payment))
-  return rows
+  return unavailable
 }
 
 /**
@@ -161,7 +168,10 @@ async function legacyAnalyticsPayments(
  * necesitas es un TOTAL, usa `aggregatePaymentsByMethod` / `aggregateTipsByProcessor`
  * de abajo: suman en Postgres y devuelven una fila por grupo.
  */
-export async function fetchPaymentsForAnalytics(venueId: string, filters: AnalyticsPaymentFilters): Promise<AnalyticsPayment[]> {
+export async function fetchPaymentsForAnalytics(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+): Promise<ConAvisoLegacy<AnalyticsPayment>> {
   const newPayments = await prisma.payment.findMany({
     where: analyticsWhere(venueId, filters),
     select: {
@@ -190,13 +200,19 @@ export async function fetchPaymentsForAnalytics(venueId: string, filters: Analyt
     processedByName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() || null : null,
   }))
 
-  // ⚠️ Gate: short-circuit for non-MindForm venues (see legacyAnalyticsPayments).
+  // ⚠️ Gate: short-circuit for non-MindForm venues (see visitLegacyAnalyticsPayments).
   if (venueId !== MINDFORM_NEW_VENUE_ID) {
     return normalized
   }
 
-  const legacyNormalized = await legacyAnalyticsPayments(venueId, filters, { count: normalized.length, scope: 'rows' })
-  return [...normalized, ...legacyNormalized].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+  const legacyNormalized: AnalyticsPayment[] = []
+  const puenteCaido = await visitLegacyAnalyticsPayments(venueId, filters, { count: normalized.length, scope: 'rows' }, payment =>
+    legacyNormalized.push(payment),
+  )
+  return conAvisoLegacy(
+    [...normalized, ...legacyNormalized].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()),
+    puenteCaido,
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -233,7 +249,7 @@ export async function aggregatePaymentsByMethod(
   venueId: string,
   filters: AnalyticsPaymentFilters,
   vista: VistaDeCobros = 'ventas',
-): Promise<AnalyticsMethodTotal[]> {
+): Promise<ConAvisoLegacy<AnalyticsMethodTotal>> {
   const grupos = await prisma.payment.groupBy({
     by: ['method', 'tenderTypeId'],
     where: {
@@ -271,7 +287,7 @@ export async function aggregatePaymentsByMethod(
     nativeCount += g._count._all
   }
 
-  await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'by-method' }, p => {
+  const puenteCaido = await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'by-method' }, p => {
     const e = porMetodo.get(p.method) ?? { method: p.method, amount: 0, tips: 0, count: 0 }
     e.amount += p.amount
     e.tips += p.tipAmount
@@ -279,7 +295,7 @@ export async function aggregatePaymentsByMethod(
     porMetodo.set(p.method, e)
   })
 
-  return [...porMetodo.values()]
+  return conAvisoLegacy([...porMetodo.values()], puenteCaido)
 }
 
 /**
@@ -317,7 +333,10 @@ export interface AnalyticsProcessorTips {
   payments: number
 }
 
-export async function aggregateTipsByProcessor(venueId: string, filters: AnalyticsPaymentFilters): Promise<AnalyticsProcessorTips[]> {
+export async function aggregateTipsByProcessor(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+): Promise<ConAvisoLegacy<AnalyticsProcessorTips>> {
   const grupos = await prisma.payment.groupBy({
     by: ['processedById'],
     where: { ...analyticsWhere(venueId, filters), tipAmount: { gt: 0 } },
@@ -359,7 +378,7 @@ export async function aggregateTipsByProcessor(venueId: string, filters: Analyti
     nativeCount += g._count._all
   }
 
-  await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'tips>0' }, p => {
+  const puenteCaido = await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'tips>0' }, p => {
     if (p.tipAmount <= 0) return
     const e = porCajero.get(null) ?? { processedById: null, processedByName: null, tips: 0, payments: 0 }
     e.tips += p.tipAmount
@@ -367,5 +386,5 @@ export async function aggregateTipsByProcessor(venueId: string, filters: Analyti
     porCajero.set(null, e)
   })
 
-  return [...porCajero.values()]
+  return conAvisoLegacy([...porCajero.values()], puenteCaido)
 }

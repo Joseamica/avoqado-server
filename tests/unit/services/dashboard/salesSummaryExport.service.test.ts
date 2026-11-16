@@ -49,6 +49,24 @@ describe('flattenSalesSummaryForExport', () => {
     const { rows } = svc.flattenSalesSummaryForExport(report, ['totals'])
     expect(rows.some(r => r.section === 'paymentMethods')).toBe(false)
   })
+
+  // D15 (Codex r1 #3): el aviso se veía en pantalla y desaparecía al descargar el mismo reporte.
+  it('🔴 un reporte marcado `legacyUnavailable` lleva el aviso como PRIMERA fila, y las cifras siguen saliendo', () => {
+    const { rows } = svc.flattenSalesSummaryForExport({ ...report, legacyUnavailable: true }, ['totals'])
+    expect(rows[0]).toEqual({
+      section: 'aviso',
+      label: 'No pudimos leer todos los cobros del sistema anterior de QR. Este total puede estar incompleto: vuelve a intentar.',
+      count: null,
+      amount: null,
+      percentage: null,
+    })
+    expect(rows.some(r => r.label === 'Ventas brutas' && r.amount === 1000)).toBe(true)
+  })
+
+  it('un reporte sin la marca no lleva ninguna fila de aviso', () => {
+    const { rows } = svc.flattenSalesSummaryForExport(report, ['totals', 'paymentMethods'])
+    expect(rows.some(r => r.section === 'aviso')).toBe(false)
+  })
 })
 
 describe('detailed rows where-clause + cap', () => {
