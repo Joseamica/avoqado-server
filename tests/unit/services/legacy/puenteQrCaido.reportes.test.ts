@@ -22,7 +22,7 @@ import {
 import { getPaymentsSummary } from '@/services/dashboard/paymentSummary.dashboard.service'
 import { aggregatePaymentsByMethod, aggregateTipsByProcessor, fetchPaymentsForAnalytics } from '@/services/legacy/mergedPayments.service'
 import { getBasicMetricsData, getBasicMetricsDetailsPage, getChartData } from '@/services/dashboard/generalStats.dashboard.service'
-import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { getSalesSummary, type SalesSummaryFilters } from '@/services/dashboard/sales-summary.dashboard.service'
 
 const OTRO_NEGOCIO = 'venue-restaurante'
 const DESDE = '2026-10-01T06:00:00.000Z'
@@ -40,6 +40,7 @@ beforeEach(() => {
   ;(prismaMock.payment.groupBy as jest.Mock).mockResolvedValue([])
   ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([])
   ;(prismaMock.payment.count as jest.Mock).mockResolvedValue(0)
+  ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: null, tipAmount: null } })
   ;(prismaMock.commissionCalculation.aggregate as jest.Mock).mockResolvedValue({ _sum: { netCommission: null } })
   ;(prismaMock.venue.findUnique as jest.Mock).mockImplementation(async ({ where }: { where: { id: string } }) => ({
     id: where.id,
@@ -84,6 +85,17 @@ describe('Resumen de pagos (getPaymentsSummary)', () => {
     expect(await getPaymentsSummary(MINDFORM, { startDate: DESDE, endDate: HASTA, methods: ['CREDIT_CARD'] })).not.toHaveProperty(
       'legacyUnavailable',
     )
+  })
+
+  // Codex r2 #2, confirmación: los otros filtros que dejan fuera todo lo legacy (por origen, y los de un solo valor).
+  it.each([
+    ['por origen', { sources: ['TPV'] }],
+    ['por método, de un solo valor', { method: 'DEBIT_CARD' }],
+    ['por origen, de un solo valor', { source: 'TPV' }],
+  ])('filtro %s que excluye todo el QR legacy, con el puente caído: sin aviso y sin preguntarle', async (_nombre, filtro) => {
+    fallaLaSegundaPagina()
+    expect(await getPaymentsSummary(MINDFORM, { startDate: DESDE, endDate: HASTA, ...filtro })).not.toHaveProperty('legacyUnavailable')
+    expect(consultasAlPuente()).toBe(0)
   })
 
   it('otro negocio: nunca toca el puente ni avisa', async () => {
@@ -179,6 +191,17 @@ describe('Inicio (generalStats)', () => {
     const pagina = await getBasicMetricsDetailsPage(MINDFORM, { ...RANGO, kind: 'payments', limit: 10 })
 
     expect(pagina).toEqual({ items: [], nextCursor: null, legacyUnavailable: true })
+  })
+
+  // Codex r2 #2, confirmación: el detalle de RESEÑAS no lleva cobros, así que no pregunta al puente ni avisa.
+  it('detalle de reseñas con el puente caído: sin marca y sin preguntarle', async () => {
+    fallaLaSegundaPagina()
+    ;(prismaMock.review.findMany as jest.Mock).mockResolvedValue([])
+
+    const pagina = await getBasicMetricsDetailsPage(MINDFORM, { ...RANGO, kind: 'reviews', limit: 10 })
+
+    expect(pagina).toEqual({ items: [], nextCursor: null })
+    expect(consultasAlPuente()).toBe(0)
   })
 
   it('detalle con el puente sano: sin marca', async () => {
@@ -282,5 +305,67 @@ describe('Resumen de ventas (getSalesSummary)', () => {
     puenteSinConfigurar()
     expect(await getSalesSummary(OTRO_NEGOCIO, RANGO)).not.toHaveProperty('legacyUnavailable')
     expect(consultasAlPuente()).toBe(0)
+  })
+
+  // Codex r2 #2 (regresión del arreglo): «Otros» y «Tarjeta → Débito / Amex / Internacional» no admiten NINGÚN cobro QR legacy
+  // (`legacyAdmission(...).include === false`). El recorrido de totales preguntaba igual al puente y copiaba su caída: el panel
+  // y el exporte avisaban «puede estar incompleto» de un total en el que ningún cobro del puente puede entrar.
+  describe('un filtro que excluye todo el QR legacy', () => {
+    const EXCLUYEN: Array<[string, Pick<SalesSummaryFilters, 'paymentMethod' | 'cardType'>]> = [
+      ['«Otros»', { paymentMethod: 'OTHER' }],
+      ['«Tarjeta → Débito»', { paymentMethod: 'CARD', cardType: 'DEBIT' }],
+      ['«Tarjeta → Amex»', { paymentMethod: 'CARD', cardType: 'AMEX' }],
+      ['«Tarjeta → Internacional»', { paymentMethod: 'CARD', cardType: 'INTERNATIONAL' }],
+    ]
+    const INCLUYEN: Array<[string, Pick<SalesSummaryFilters, 'paymentMethod' | 'cardType'>]> = [
+      ['sin filtro', {}],
+      ['«Efectivo»', { paymentMethod: 'CASH' }],
+      ['«Tarjeta»', { paymentMethod: 'CARD' }],
+      ['«Tarjeta → Crédito»', { paymentMethod: 'CARD', cardType: 'CREDIT' }],
+      ['«QR legacy»', { paymentMethod: 'QR_LEGACY' }],
+    ]
+
+    beforeEach(() => {
+      // Avoqado SÍ tiene cobros propios en estas pruebas: así «las mismas cifras» no es comparar ceros con ceros.
+      ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: 700, tipAmount: 70 } })
+      ;(prismaMock.payment.count as jest.Mock).mockResolvedValue(7)
+    })
+
+    it.each(EXCLUYEN)(
+      '🔴 %s con el puente caído: sin marca, sin preguntarle al puente y con las mismas cifras',
+      async (_nombre, filtro) => {
+        // Lo que salía antes del arreglo de D15 (y lo que sale con el puente sano): el filtro ya dejaba fuera todo lo legacy.
+        puenteContesta(cobrosLegacy(3))
+        const conPuenteSano = await getSalesSummary(MINDFORM, { ...RANGO, ...filtro })
+
+        fallaLaSegundaPagina()
+        const conPuenteCaido = await getSalesSummary(MINDFORM, { ...RANGO, ...filtro })
+
+        expect(conPuenteCaido).not.toHaveProperty('legacyUnavailable')
+        expect(consultasAlPuente()).toBe(0)
+        expect(conPuenteCaido.summary).toEqual(conPuenteSano.summary)
+        expect(conPuenteCaido.summary).toMatchObject({ tips: 70, totalCollected: 770, transactionCount: 7 }) // sólo lo de Avoqado
+      },
+    )
+
+    it.each(EXCLUYEN)('🔴 %s con el puente sin configurar: sin marca', async (_nombre, filtro) => {
+      puenteSinConfigurar()
+      expect(await getSalesSummary(MINDFORM, { ...RANGO, ...filtro })).not.toHaveProperty('legacyUnavailable')
+    })
+
+    it.each(EXCLUYEN)(
+      '%s con gráfica por día y el puente caído: tampoco marca (la consulta por periodos ya lo respetaba)',
+      async (_n, filtro) => {
+        puenteContesta(PUENTE_CAIDO, PUENTE_CAIDO)
+        const reporte = await getSalesSummary(MINDFORM, { ...RANGO, ...filtro, reportType: 'days' })
+        expect(reporte).not.toHaveProperty('legacyUnavailable')
+        expect(consultasAlPuente()).toBe(0)
+      },
+    )
+
+    it.each(INCLUYEN)('%s SÍ admite cobros QR legacy: con el puente caído se sigue marcando', async (_nombre, filtro) => {
+      fallaLaSegundaPagina()
+      expect((await getSalesSummary(MINDFORM, { ...RANGO, ...filtro })).legacyUnavailable).toBe(true)
+    })
   })
 })

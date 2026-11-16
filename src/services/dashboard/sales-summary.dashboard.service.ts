@@ -1279,7 +1279,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
   // D15: true when ANY legacy read of this report could not answer (the page walk here, the period query below).
   let legacyUnavailable = false
-  if (venueId === MINDFORM_NEW_VENUE_ID) {
+  // A filter that admits NO legacy row (OTHER, CARD → DEBIT / AMEX / INTERNATIONAL) never asks the bridge: nothing of it can
+  // be part of that total, so its outage cannot make the total incomplete either. Asking anyway copied the bridge failure
+  // into a total it does not feed — a false "may be incomplete" (Codex r2 #2). Same gate as the period query below.
+  if (venueId === MINDFORM_NEW_VENUE_ID && legacyAdmission(paymentMethod, cardType).include) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
     const paginas = await forEachLegacyPaymentPage(
       { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
