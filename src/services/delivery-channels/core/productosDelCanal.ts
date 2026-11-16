@@ -22,6 +22,9 @@ import type { MenuSnapshot, MenuSnapshotProduct } from './menuSnapshot.service'
 /** Tope de productos por canal: muy por encima de un menú real (Rappi acepta pocos cientos por pasillo). */
 export const MAX_PRODUCTOS = 5000
 
+/** Una lista por id nunca queda vacía (la casilla del producto, el PATCH y el MCP dicen lo mismo). */
+export const LISTA_VACIA = 'Un canal necesita al menos un producto; pausa el canal si no quieres vender ahí'
+
 /** Cómo se nombra cada lista en sus mensajes. Los de `productos` son los de siempre: no se cambian. */
 const LISTAS = {
   productos: { varios: 'SKU', uno: 'un SKU' },
@@ -32,7 +35,11 @@ const LISTAS = {
 function problemaDeLaLista(v: unknown, llave: keyof typeof LISTAS = 'productos'): string | null {
   const { varios, uno } = LISTAS[llave]
   if (!Array.isArray(v)) return `\`${llave}\` debe ser una lista de ${varios} (o null para publicar todo el catálogo)`
-  if (v.length === 0) return 'La lista de productos del canal necesita al menos un producto (o null para publicar todo el catálogo)'
+  if (v.length === 0) {
+    return llave === 'productoIds'
+      ? LISTA_VACIA
+      : 'La lista de productos del canal necesita al menos un producto (o null para publicar todo el catálogo)'
+  }
   if (v.length > MAX_PRODUCTOS) return `La lista de productos del canal admite hasta ${MAX_PRODUCTOS} ${varios}`
   if (v.some(x => typeof x !== 'string' || x.trim() === '')) return `Cada producto del canal debe ser ${uno} (texto no vacío)`
   return null

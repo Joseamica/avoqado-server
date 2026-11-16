@@ -139,8 +139,9 @@ describe('ponerProductoEnCanales — desmarcar (false)', () => {
   it('canal sin lista: la vuelve explícita con todo lo no archivado (apagados incluidos) menos éste', async () => {
     canales({ id: 'l1', config: { precios: { markupPercent: 30 } } })
     await ponerProductoEnCanales('v1', 'p2', { l1: false })
+    // En orden de id: el mismo catálogo da siempre la misma lista (y la misma huella).
     expect(prisma.product.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: 'v1', deletedAt: null }, take: MAX_PRODUCTOS + 1 }),
+      expect.objectContaining({ where: { venueId: 'v1', deletedAt: null }, orderBy: { id: 'asc' }, take: MAX_PRODUCTOS + 1 }),
     )
     expect(escrito()).toEqual({
       precios: { markupPercent: 30 },
@@ -169,6 +170,15 @@ describe('ponerProductoEnCanales — candado, negocio y listas dañadas', () => 
     expect(sql).toMatch(/ORDER BY "id" FOR UPDATE/)
     expect(valores[0]).toBe('v1')
     expect(valores[1].values).toEqual(['l1', 'l2'])
+  })
+
+  it('más de 20 canales ⇒ ValidationError (el MCP no pasa por el esquema de la ruta), sin abrir la transacción', async () => {
+    const veintiuno = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`l${i}`, true]))
+    const p = ponerProductoEnCanales('v1', 'p2', veintiuno)
+    await expect(p).rejects.toThrow(ValidationError)
+    await expect(p).rejects.toThrow('Envía de 1 a 20 canales')
+    expect(prisma.$queryRaw).not.toHaveBeenCalled()
+    expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
   })
 
   it('un canal de otro negocio (o inexistente) ⇒ NotFoundError, nada escrito', async () => {

@@ -20,7 +20,8 @@ import { deRappiAPesos } from '@/services/delivery-channels/providers/rappi/rapp
 
 const MAX_CANALES = 200
 
-const objeto = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null)
+const objeto = (v: unknown): Record<string, unknown> | null =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
 
 /** Precio en pesos que se publica para un producto; con `porProducto` sólo cuenta SU entrada (no hay copia del catálogo aquí). */
 function precioQueSePublica(provider: string, config: unknown, productId: string, sku: string, mostrador: number): number {
@@ -32,7 +33,9 @@ function precioQueSePublica(provider: string, config: unknown, productId: string
     const propio = Object.prototype.hasOwnProperty.call(porProducto, productId) ? { [sku]: porProducto[productId] as number } : {}
     precios = { ...resto, overrides: propio }
   }
-  return provider === 'RAPPI' ? deRappiAPesos(precioRappi(sku, mostrador, precios, [])).toNumber() : precioUber(sku, mostrador, precios) / 100
+  return provider === 'RAPPI'
+    ? deRappiAPesos(precioRappi(sku, mostrador, precios, [])).toNumber()
+    : precioUber(sku, mostrador, precios) / 100
 }
 
 export function registerDeliveryChannelProductTools(server: McpServer, scope: McpScope): void {
@@ -83,14 +86,14 @@ export function registerDeliveryChannelProductTools(server: McpServer, scope: Mc
           select: { id: true, sku: true, name: true, active: true, price: true },
           take: tam,
         })
-        const yaNoExisten = ids
-          ? ids.filter(id => !filas.some(p => p.id === id))
-          : [...codigos!].filter(c => !filas.some(p => p.sku === c))
+        const yaNoExisten = ids ? ids.filter(id => !filas.some(p => p.id === id)) : [...codigos!].filter(c => !filas.some(p => p.sku === c))
         let nuevos = 0
         if (ids) {
           const revisados = objeto(l.config)?.productosRevisados
           const excluir = [...new Set([...ids, ...(Array.isArray(revisados) ? (revisados as string[]) : [])])]
-          nuevos = await prisma.product.count({ where: { venueId, deletedAt: null, createdAt: { gt: l.createdAt }, id: { notIn: excluir } } })
+          nuevos = await prisma.product.count({
+            where: { venueId, deletedAt: null, createdAt: { gt: l.createdAt }, id: { notIn: excluir } },
+          })
         }
         channels.push({
           ...base,
@@ -132,7 +135,7 @@ export function registerDeliveryChannelProductTools(server: McpServer, scope: Mc
         select: { id: true, provider: true, config: true },
         take: 1,
       })
-      if (!link) throw new AppError('Canal de delivery no encontrado', 404, true, 'NOT_FOUND')
+      if (!link) return text({ ok: false, error: 'Canal de delivery no encontrado' })
 
       if (confirm !== true) {
         let publicaTodo = false
@@ -149,9 +152,11 @@ export function registerDeliveryChannelProductTools(server: McpServer, scope: Mc
           linkId,
           productId,
           vender,
-          ...(publicaTodo && !vender && {
-            aviso: 'Este canal publica todo el catálogo: la lista se vuelve explícita (todos los productos menos éste) y los productos nuevos ya no entrarán solos.',
-          }),
+          ...(publicaTodo &&
+            !vender && {
+              aviso:
+                'Este canal publica todo el catálogo: la lista se vuelve explícita (todos los productos menos éste) y los productos nuevos ya no entrarán solos.',
+            }),
         })
       }
 

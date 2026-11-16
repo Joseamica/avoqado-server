@@ -35,14 +35,26 @@ jest.mock('@/services/delivery-channels/core/productoEnCanales.service', () => (
   ponerProductoEnCanales: (...a: unknown[]) => mockPoner(...a),
 }))
 
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map(), scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
+  perVenueAccess: new Map(),
+  scopes: ['mcp:read', 'mcp:write'],
+} as unknown as McpScope
 
 let server: McpServer
 let client: Client
 const call = async (name: string, args: Record<string, unknown>) =>
   JSON.parse(((await client.callTool({ name, arguments: args })).content as Array<{ text: string }>)[0].text)
 
-const link = (id: string, provider: string, config: unknown = {}) => ({ id, provider, status: 'ACTIVE', createdAt: new Date('2026-01-01'), config })
+const link = (id: string, provider: string, config: unknown = {}) => ({
+  id,
+  provider,
+  status: 'ACTIVE',
+  createdAt: new Date('2026-01-01'),
+  config,
+})
 const prod = (id: string, sku: string, price: number) => ({ id, sku, name: `P ${sku}`, active: true, price })
 
 beforeEach(async () => {
@@ -149,7 +161,11 @@ describe('set_delivery_channel_product', () => {
 
   it('con token y mismos argumentos: llama al servicio una vez y audita', async () => {
     const p = await call('set_delivery_channel_product', args)
-    const r = await call('set_delivery_channel_product', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+    const r = await call('set_delivery_channel_product', {
+      ...p.confirmationArguments,
+      confirm: true,
+      confirmationToken: p.confirmationToken,
+    })
     expect(r.ok).toBe(true)
     expect(mockPoner).toHaveBeenCalledTimes(1)
     expect(mockPoner).toHaveBeenCalledWith('v1', 'p1', { l1: true }, 's1')
@@ -159,8 +175,19 @@ describe('set_delivery_channel_product', () => {
   it('un AppError vuelve como ok:false', async () => {
     mockPoner.mockRejectedValue(new AppError('Producto no encontrado', 404, true, 'NOT_FOUND'))
     const p = await call('set_delivery_channel_product', args)
-    const r = await call('set_delivery_channel_product', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+    const r = await call('set_delivery_channel_product', {
+      ...p.confirmationArguments,
+      confirm: true,
+      confirmationToken: p.confirmationToken,
+    })
     expect(r).toEqual({ ok: false, error: 'Producto no encontrado' })
+  })
+
+  it('un canal que no existe (o de otro negocio) vuelve como ok:false, igual que los demás errores', async () => {
+    mockLinks.mockResolvedValue([])
+    expect(await call('set_delivery_channel_product', args)).toEqual({ ok: false, error: 'Canal de delivery no encontrado' })
+    expect(mockPoner).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 
   it('sin plan: planRequired y no escribe', async () => {

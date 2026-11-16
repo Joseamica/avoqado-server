@@ -528,7 +528,9 @@ describe('deliveryChannelLink.service', () => {
       it('estación de otro venue (no regresa del findMany) → ValidationError y no escribe', async () => {
         ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([])
         await expect(updateChannelLink('venue1', 'link1', { config: { impresion: IMPRESION } })).rejects.toThrow(ValidationError)
-        expect(prisma.printStation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue1', id: { in: ['cA'] } } }))
+        expect(prisma.printStation.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { venueId: 'venue1', id: { in: ['cA'] } } }),
+        )
         expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
       })
 
@@ -712,6 +714,14 @@ describe('deliveryChannelLink.service', () => {
         createChannelLink('venue1', { provider: 'UBER_EATS', externalLocationId: 'store-x', config: { productos: [] } } as any),
       ).rejects.toThrow(ValidationError)
       expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
+    })
+
+    it('D1: el PATCH con `productoIds: []` contesta que el canal necesita un producto y que se pause, y no escribe', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { productoIds: ['p1'], productos: ['LATTE'] } }])
+      const p = updateChannelLink('venue1', 'link1', { config: { productoIds: [] } })
+      await expect(p).rejects.toThrow(ValidationError)
+      await expect(p).rejects.toThrow(/^Un canal necesita al menos un producto; pausa el canal si no quieres vender ahí$/)
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
     })
 
     it('`agotarPorInventario` acepta sí/no (o null = como siempre) y rechaza otra cosa', async () => {

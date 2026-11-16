@@ -18,10 +18,11 @@ import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
 import { deliveryTenderLabel } from './deliveryTenderProvisioning.service'
 import { configComoObjeto } from './llavesDelSistema'
-import { idsDelCanal, MAX_PRODUCTOS, productosDelCanal } from './productosDelCanal'
+import { idsDelCanal, LISTA_VACIA, MAX_PRODUCTOS, productosDelCanal } from './productosDelCanal'
 import { normalizarSeleccion, sumarRevisados } from './seleccionDelCanal.service'
 
-const LISTA_VACIA = 'Un canal necesita al menos un producto; pausa el canal si no quieres vender ahí'
+/** Tope de canales por petición: el mismo que el esquema de la ruta (el MCP no pasa por él). */
+const MAX_CANALES = 20
 
 /** Lee la lista guardada; si está dañada, un error en español que nombra el canal (nunca se lee como «todo el catálogo»). */
 function listaLegible<T>(leer: () => T, provider: DeliveryProvider): T {
@@ -42,6 +43,7 @@ export async function ponerProductoEnCanales(
 ): Promise<Array<{ linkId: string; dentro: boolean }>> {
   const ids = Object.keys(canales).sort()
   if (ids.length === 0) throw new ValidationError('Elige al menos un canal')
+  if (ids.length > MAX_CANALES) throw new ValidationError(`Envía de 1 a ${MAX_CANALES} canales`)
 
   const { resultado, codigosDescartados, idsDescartados } = await prisma.$transaction(async tx => {
     const producto = await tx.product.findFirst({ where: { id: productId, venueId }, select: { deletedAt: true } })
@@ -57,7 +59,12 @@ export async function ponerProductoEnCanales(
     let catalogo: string[] | undefined
     const todoElCatalogo = async () => {
       if (!catalogo) {
-        const ps = await tx.product.findMany({ where: { venueId, deletedAt: null }, select: { id: true }, take: MAX_PRODUCTOS + 1 })
+        const ps = await tx.product.findMany({
+          where: { venueId, deletedAt: null },
+          select: { id: true },
+          orderBy: { id: 'asc' },
+          take: MAX_PRODUCTOS + 1,
+        })
         if (ps.length > MAX_PRODUCTOS) {
           const tope = MAX_PRODUCTOS.toLocaleString('es-MX')
           throw new ValidationError(
