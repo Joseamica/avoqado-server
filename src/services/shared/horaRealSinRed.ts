@@ -28,3 +28,22 @@ export function horaDentroDeLaCaja(
   const hasta = caja.closedAt ? new Date(caja.closedAt).getTime() : llegada.getTime()
   return new Date(Math.min(Math.max(t, desde), Math.max(hasta, desde)))
 }
+
+/** Edad máxima creíble de un movimiento de la cola (como `edadDeLaVentaMs` del cobro): más es un reloj roto. */
+const TREINTA_DIAS_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * La hora REAL de un ingreso o retiro que sube de la cola, ya dentro de su caja. El aparato manda su hora (`createdAt`) y cuánto
+ * esperó en la cola (`edadMs` = su «ahora» − esa hora, medido con SU reloj). Con una edad creíble, la hora es `llegada − edadMs`:
+ * un reloj adelantado o atrasado se cancela solo (Codex r2). Sin edad creíble (app que no la manda, o un reloj movido hacia atrás
+ * durante la espera, que da edad negativa), la hora que dijo el aparato. Las dos, acotadas a la vida de la caja (`horaDentroDeLaCaja`).
+ */
+export function horaDelMovimientoDeLaCola(
+  aparato: { createdAt?: string | number | Date | null; edadMs?: unknown },
+  caja: { openedAt: Date; closedAt: Date | null },
+  llegada: Date,
+): Date | undefined {
+  const e = aparato.edadMs
+  const edadCreible = typeof e === 'number' && Number.isFinite(e) && e >= 0 && e <= TREINTA_DIAS_MS
+  return horaDentroDeLaCaja(edadCreible ? new Date(llegada.getTime() - (e as number)) : aparato.createdAt, caja, llegada)
+}

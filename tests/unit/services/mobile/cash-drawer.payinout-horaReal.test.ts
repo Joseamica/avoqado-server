@@ -82,6 +82,15 @@ describe('ingreso y retiro sin red — la hora real del movimiento', () => {
     expect(guardadas[0].createdAt).toEqual(cierre)
   })
 
+  it('P1 Codex r2: reloj del aparato 1 h adelantado, con la espera medida: queda a la hora real (llegada − espera)', async () => {
+    caja({ status: 'OPEN', closedAt: null })
+    const antes = Date.now()
+    await payOut(retiro({ createdAt: new Date(antes + 3_600_000).toISOString(), edadMs: 5 * 60_000 }))
+    const guardada = guardadas[0].createdAt.getTime()
+    expect(guardada).toBeGreaterThanOrEqual(antes - 5 * 60_000)
+    expect(guardada).toBeLessThanOrEqual(Date.now() - 5 * 60_000)
+  })
+
   it('regresión: sin hora (app vieja), el movimiento no lleva createdAt, como siempre', async () => {
     caja({ status: 'OPEN', closedAt: null })
     await payOut(retiro())
