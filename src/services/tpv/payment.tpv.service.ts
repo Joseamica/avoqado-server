@@ -362,6 +362,7 @@ import {
   type RegistroEntrante,
 } from './registroRepetido'
 import { candadoDeReferencia, esVencimientoDeCandado } from './candadoDeReferencia'
+import { esInventarioDelExtra, inventarioDelExtra, type InventarioDelExtra } from '../inventory/inventarioDelExtra'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
@@ -1403,22 +1404,23 @@ type CommittedStandaloneSettlement = {
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
 /**
- * Extra ligado a un platillo (encargo 27771e): de la foto del vale de inventario (`payloadSnapshot`, congelada al cobrar), qué platillo
- * descontaba cada extra de cada renglón. Un vale anterior al campo no trae `linkedProductId`: ese extra no entra al mapa y se usa el
- * vivo (igual que el aplicador del vale).
+ * «Una sola foto» (encargo 27771e, Codex r2 #5 y r3 #2): de la foto del vale de inventario (`payloadSnapshot`, congelada al cobrar),
+ * qué inventario movía cada extra de cada renglón: insumo, cantidad, unidad, modo y platillo ligado, todo junto. El descuento
+ * inmediato del cobro TPV la usa igual que el recuperador del vale, así los dos caminos descuentan lo mismo aunque el dueño cambie el
+ * extra mientras el cobro espera al cajón, al costo o al recibo. Un vale anterior al platillo ligado no trae `linkedProductId`: ese
+ * extra no entra al mapa y se usa el vivo (como antes).
  */
-export function ligadosDeLaFotoDelVale(payloadSnapshot: unknown): Map<string, Map<string, string | null>> {
-  const porRenglon = new Map<string, Map<string, string | null>>()
+export function fotoDeExtrasDelVale(payloadSnapshot: unknown): Map<string, Map<string, InventarioDelExtra>> {
+  const porRenglon = new Map<string, Map<string, InventarioDelExtra>>()
   const items = (payloadSnapshot as { items?: unknown } | null | undefined)?.items
   if (!Array.isArray(items)) return porRenglon
   for (const item of items as Array<{ id?: unknown; modifiers?: unknown }>) {
     if (typeof item?.id !== 'string' || !Array.isArray(item.modifiers)) continue
-    const porExtra = new Map<string, string | null>()
-    for (const m of item.modifiers as Array<{ modifier?: { id?: unknown; linkedProductId?: unknown } }>) {
-      const id = m?.modifier?.id
-      if (typeof id !== 'string' || !m.modifier || !('linkedProductId' in m.modifier)) continue
-      const ligado = m.modifier.linkedProductId
-      porExtra.set(id, typeof ligado === 'string' ? ligado : null)
+    const porExtra = new Map<string, InventarioDelExtra>()
+    for (const m of item.modifiers as Array<{ modifier?: Record<string, unknown> }>) {
+      const foto = m?.modifier
+      if (!foto || typeof foto.id !== 'string' || !esInventarioDelExtra(foto)) continue
+      porExtra.set(foto.id, inventarioDelExtra(foto as any))
     }
     if (porExtra.size > 0) porRenglon.set(item.id, porExtra)
   }
@@ -2243,15 +2245,15 @@ async function updateOrderTotalsForStandalonePayment(
     let tpvClaimStamp: Date | null = null
     let tpvValeAjeno = false
     let tpvValeIlegible = false
-    // Extra ligado a un platillo (encargo 27771e; Codex r2 #5): el platillo que cada extra descuenta se toma de la FOTO del vale
-    // (renglón → extra → platillo ligado), no del extra de ahora: el dueño puede cambiarlo mientras este cobro espera al cajón, al
-    // costo o al recibo, y el barredor descontaría el de la foto. Así los dos caminos descuentan lo mismo.
-    let tpvLigadosCongelados = new Map<string, Map<string, string | null>>()
+    // «Una sola foto» (encargo 27771e; Codex r2 #5 y r3 #2): lo que cada extra descuenta se toma de la FOTO del vale, no del extra
+    // de ahora: el dueño puede cambiarlo mientras este cobro espera al cajón, al costo o al recibo, y el barredor descontaría el de
+    // la foto. Así los dos caminos descuentan lo mismo.
+    let tpvFotoDeExtras = new Map<string, Map<string, InventarioDelExtra>>()
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
         tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
-        tpvLigadosCongelados = ligadosDeLaFotoDelVale(
+        tpvFotoDeExtras = fotoDeExtrasDelVale(
           (await prisma.inventoryPosting.findUnique({ where: { id: tpvPostingId }, select: { payloadSnapshot: true } }))?.payloadSnapshot,
         )
         const stamp = new Date()
@@ -2347,22 +2349,33 @@ async function updateOrderTotalsForStandalonePayment(
         const orderModifiers: OrderModifierForInventory[] =
           item.modifiers
             ?.filter(m => m.modifier)
-            .map(m => ({
-              quantity: m.quantity,
-              modifier: {
-                id: m.modifier!.id,
-                name: m.modifier!.name,
-                groupId: m.modifier!.groupId,
-                rawMaterialId: m.modifier!.rawMaterialId,
-                quantityPerUnit: m.modifier!.quantityPerUnit,
-                unit: m.modifier!.unit,
-                inventoryMode: m.modifier!.inventoryMode,
-                // La foto del vale manda si el renglón la tiene (también un `null`: al cobrar no estaba ligado).
-                linkedProductId: tpvLigadosCongelados.get(item.id)?.has(m.modifier!.id)
-                  ? tpvLigadosCongelados.get(item.id)!.get(m.modifier!.id)
-                  : m.modifier!.linkedProductId,
-              },
-            })) || []
+            .map(m => {
+              // La foto del vale manda si el renglón la tiene: TODO lo que el extra descontaba al cobrar, junto (Codex r3 #2).
+              const foto = tpvFotoDeExtras.get(item.id)?.get(m.modifier!.id)
+              return {
+                quantity: m.quantity,
+                modifier: {
+                  id: m.modifier!.id,
+                  name: m.modifier!.name,
+                  groupId: m.modifier!.groupId,
+                  ...(foto
+                    ? {
+                        rawMaterialId: foto.rawMaterialId,
+                        quantityPerUnit: foto.quantityPerUnit != null ? new Prisma.Decimal(foto.quantityPerUnit) : null,
+                        unit: foto.unit as any,
+                        inventoryMode: (foto.inventoryMode ?? m.modifier!.inventoryMode) as any,
+                        linkedProductId: foto.linkedProductId,
+                      }
+                    : {
+                        rawMaterialId: m.modifier!.rawMaterialId,
+                        quantityPerUnit: m.modifier!.quantityPerUnit,
+                        unit: m.modifier!.unit,
+                        inventoryMode: m.modifier!.inventoryMode,
+                        linkedProductId: m.modifier!.linkedProductId,
+                      }),
+                },
+              }
+            }) || []
 
         // Venta por peso: weighted lines deduct the weighed kilos (quantity is
         // always 1 on them); the same effective quantity feeds the compensation

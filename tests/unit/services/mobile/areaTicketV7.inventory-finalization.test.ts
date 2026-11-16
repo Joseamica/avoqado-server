@@ -1424,6 +1424,23 @@ describe('🍟 Extra ligado a un platillo del menú en los vales por área (enca
       },
     ],
   })
+  const foto = (linkedProductId: string | null, raw: { id: string; qty: string; unit: string } | null = null) => ({
+    modifiersSnapshot: [
+      {
+        modifierId: 'mod-papas',
+        name: 'Papas',
+        quantity: 1,
+        price: '0.00',
+        inventario: {
+          rawMaterialId: raw?.id ?? null,
+          quantityPerUnit: raw?.qty ?? null,
+          unit: raw?.unit ?? null,
+          inventoryMode: 'ADDITION',
+          linkedProductId,
+        },
+      },
+    ],
+  })
   const boundId = (values: unknown[]): string | undefined =>
     values.find((v): v is string => typeof v === 'string' && v.startsWith('inventory-'))
 
@@ -1462,7 +1479,11 @@ describe('🍟 Extra ligado a un platillo del menú en los vales por área (enca
       quantityBaseUnits: new Prisma.Decimal('2.000'),
     }
     prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([apartadoA])
-    prismaMock.orderItem.findMany.mockResolvedValue([renglon('line-burger', platilloPorPiezas('p-aros', 'inventory-aros'))])
+    // Al emitir estaba ligado a Papas (la foto del vale); hoy el extra está ligado a Aros.
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { ...renglon('line-burger', platilloPorPiezas('p-aros', 'inventory-aros')), areaTicketLine: foto('p-papas') },
+    ])
+    prismaMock.product.findMany.mockResolvedValue([platilloPorPiezas('p-papas', 'inventory-papas')])
 
     await expect(finalize()).resolves.toEqual({ areaTicketOrder: true, sessionId })
 
@@ -1562,6 +1583,15 @@ describe('🍟 Vales por área: la reserva es la foto de los extras al emitir (C
         quantity: 1,
         weightQuantity: null,
         product: { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
+        // La foto del vale: al emitir, el extra estaba ligado al platillo Papas.
+        areaTicketLine: {
+          modifiersSnapshot: [
+            {
+              modifierId: 'mod-papas',
+              inventario: { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: 'ADDITION', linkedProductId: 'p-papas' },
+            },
+          ],
+        },
         modifiers: [
           {
             quantity: 1,
@@ -1594,10 +1624,106 @@ describe('🍟 Vales por área: la reserva es la foto de los extras al emitir (C
       return []
     }) as any)
 
+    prismaMock.product.findMany.mockResolvedValue([
+      {
+        id: 'p-papas',
+        name: 'Papas',
+        venueId,
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        soldByWeight: false,
+        inventory: { id: 'inventory-papas' },
+        recipe: null,
+      },
+    ])
+
     await finalize()
 
     expect(tocados).not.toContain('raw-aceite')
     expect(prismaMock.rawMaterialMovement.create).not.toHaveBeenCalled()
+  })
+
+  it('Codex r3 #1: apartó «Papas» y el principal; hoy el extra está ligado al MISMO principal ⇒ el principal sale una vez, no dos', async () => {
+    primePaidCheckout()
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov' })
+    const apartado = (inventoryId: string) => ({
+      id: `reservation-${inventoryId}`,
+      areaTicketLineId: 'line-burger',
+      inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+      inventoryId,
+      quantityBaseUnits: new Prisma.Decimal('1.000'),
+    })
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([apartado('inventory-papas'), apartado('inventory-burger')])
+    const burger = {
+      id: 'p-burger',
+      name: 'Hamburguesa',
+      venueId,
+      trackInventory: true,
+      inventoryMethod: 'QUANTITY',
+      soldByWeight: false,
+      inventory: { id: 'inventory-burger' },
+      recipe: null,
+    }
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-burger',
+        areaTicketLineId: 'line-burger',
+        areaTicketLine: {
+          modifiersSnapshot: [
+            {
+              modifierId: 'mod-papas',
+              inventario: { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: 'ADDITION', linkedProductId: 'p-papas' },
+            },
+          ],
+        },
+        quantity: 1,
+        weightQuantity: null,
+        product: burger,
+        modifiers: [
+          {
+            quantity: 1,
+            modifier: {
+              id: 'mod-papas',
+              groupId: 'g1',
+              rawMaterialId: null,
+              quantityPerUnit: null,
+              unit: null,
+              inventoryMode: 'ADDITION',
+              rawMaterial: null,
+              linkedProduct: burger,
+            },
+          },
+        ],
+      },
+    ])
+    prismaMock.product.findMany.mockResolvedValue([
+      {
+        id: 'p-papas',
+        name: 'Papas',
+        venueId,
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        soldByWeight: false,
+        inventory: { id: 'inventory-papas' },
+        recipe: null,
+      },
+    ])
+    const descontado: Record<string, number> = {}
+    prismaMock.$queryRaw.mockImplementation((async (query: unknown, ...values: unknown[]) => {
+      const sql = sqlText(query)
+      const id = values.find((v): v is string => typeof v === 'string' && v.startsWith('inventory-'))
+      if (sql.includes('UPDATE "Inventory"') && id) {
+        const qty = values.find(v => v instanceof Prisma.Decimal) as Prisma.Decimal | undefined
+        descontado[id] = (descontado[id] ?? 0) + Number(qty ?? 0)
+        return [{ id, currentStock: new Prisma.Decimal('9.000'), previousStock: new Prisma.Decimal('10.000') }]
+      }
+      if (sql.includes('FROM "Inventory"')) return [{ id, currentStock: new Prisma.Decimal('10.000') }]
+      return []
+    }) as any)
+
+    await finalize()
+
+    expect(descontado['inventory-burger'] ?? 0).toBeLessThanOrEqual(1)
   })
 
   it('regresión: un insumo SIN unidad propia nunca se apartó (no está en la foto) y se sigue consumiendo al cobrar', async () => {
@@ -1662,5 +1788,34 @@ describe('🍟 Vales por área: la reserva es la foto de los extras al emitir (C
     await finalize()
 
     expect(tocados).toContain('raw-leche')
+  })
+})
+
+describe('🍟 La foto de inventario de los extras en el vale (encargo 27771e, Codex r3)', () => {
+  const { buildReservationSpecs } = jest.requireActual('@/services/mobile/areaTicketV7.mobile.service')
+
+  it('Codex r3 #4: con el principal SIN inventario, una SUSTITUCIÓN no se aparta (no sustituye nada), una ADICIÓN sí', async () => {
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
+    ])
+    const conInsumo = (id: string, mode: string, raw: string) => ({
+      id,
+      groupId: 'g1',
+      inventoryMode: mode,
+      rawMaterial: { id: raw, name: raw, unit: 'GRAM' },
+      quantityPerUnit: new Prisma.Decimal('30'),
+      unit: 'GRAM',
+      linkedProduct: null,
+    })
+    prismaMock.modifier.findMany.mockResolvedValue([
+      conInsumo('m-lechuga', 'SUBSTITUTION', 'raw-lechuga'),
+      conInsumo('m-queso', 'ADDITION', 'raw-queso'),
+    ])
+    const specs = await buildReservationSpecs(
+      venueId,
+      [{ clientLineId: 'l1', modifierIds: ['m-lechuga', 'm-queso'] }],
+      [{ productId: 'p-burger', quantity: '1', weightKg: null }],
+    )
+    expect(specs.map((s: any) => s.inventoryId)).toEqual(['raw-queso'])
   })
 })

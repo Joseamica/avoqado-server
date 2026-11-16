@@ -272,6 +272,26 @@ describe('Extra ligado a un platillo del menú', () => {
     expect(venueHasFeatureAccess).not.toHaveBeenCalled()
   })
 
+  it('Codex r3 #3: lo que manda el DASHBOARD (limpiar el ingrediente con nulls) no borra el costo del platillo ligado', async () => {
+    const limpiarIngrediente = { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: null }
+    await updateModifier(
+      params.venueId,
+      params.modifierGroupId,
+      params.modifierId,
+      parseEdicion({ ...limpiarIngrediente, linkedProductId: PAPAS_ID }),
+    )
+    expect((prismaMock.modifier.update.mock.calls[0][0] as any).data.cost.toString()).toBe('12.5')
+
+    prismaMock.modifier.findFirst.mockResolvedValue({
+      id: params.modifierId,
+      name: 'Papas',
+      rawMaterialId: null,
+      linkedProductId: PAPAS_ID,
+    } as any)
+    await updateModifier(params.venueId, params.modifierGroupId, params.modifierId, parseEdicion({ ...limpiarIngrediente, price: 30 }))
+    expect('cost' in (prismaMock.modifier.update.mock.calls[1][0] as any).data).toBe(false)
+  })
+
   it('la ficha del extra devuelve el platillo ligado con lo que la pantalla necesita para avisar', async () => {
     prismaMock.modifier.findFirst.mockResolvedValue({ id: params.modifierId } as any)
     await getModifierById(params.venueId, params.modifierGroupId, params.modifierId)

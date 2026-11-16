@@ -1488,6 +1488,13 @@ export async function updateModifier(
     if (cost) updateData.cost = cost
   }
 
+  // Codex r3 #3: con un platillo ligado (y sin insumo), el costo del extra ES el del platillo. El DASHBOARD manda
+  // `quantityPerUnit: null` para limpiar el ingrediente, y eso no puede borrar ese costo.
+  if (effectiveLinkedProductId && !effectiveRawMaterialId) {
+    if (linkedProduct) updateData.cost = linkedProduct.cost
+    else delete updateData.cost
+  }
+
   const updatedModifier = await prisma.modifier.update({
     where: { id: modifierId },
     data: updateData,
