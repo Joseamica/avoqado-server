@@ -551,3 +551,40 @@ describe('el candado de la ruta respeta el 403 y el error de la base (las dos ru
     expect(conPin.status).toBe(200)
   })
 })
+
+// Encargo 1afe04 (Codex r2 #1): un carrito guardado con el descuento del cliente, restaurado después de que el dueño prendió
+// «Requiere aprobación» en ese descuento: sin la acreditación de la ruta no entra; de la cola entra con rastro.
+describe('descuento del cliente que ahora pide aprobación', () => {
+  const pideAprobacion = () =>
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === frecuente.id && where.venueId === 'venue-1' ? { ...frecuente, requiresApproval: true } : null,
+    )
+
+  it('en línea sin la acreditación: 403 y no nace la venta', async () => {
+    pideAprobacion()
+    await expect(vender({ descuentoConPermisoPropio: true })).rejects.toMatchObject({ statusCode: 403, code: 'PERMISSION_DENIED' })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('con el PIN del encargado: entra y la fila guarda al aprobador', async () => {
+    pideAprobacion()
+    await vender({ descuentoConPermisoPropio: true, aprobacionDelDescuento: { porPin: 'sv-encargado' } })
+    expect(filasCreadas()[0]).toMatchObject({ discountId: 'disc-1', authorizedById: 'sv-encargado' })
+  })
+
+  it('de la cola sin la acreditación: entra con su rastro DESCUENTO_SIN_APROBACION_SIN_RED', async () => {
+    pideAprobacion()
+    await vender({ descuentoConPermisoPropio: true, isOfflineReplay: true, createdAtLocal: Date.now() } as Partial<CreateOrderInput>)
+    expect(prismaMock.order.create).toHaveBeenCalled()
+    const rastros = (prismaMock.activityLog.create as jest.Mock).mock.calls.filter(
+      c => c[0]?.data?.action === 'DESCUENTO_SIN_APROBACION_SIN_RED',
+    )
+    expect(rastros).toHaveLength(1)
+    expect(rastros[0][0].data.data).toMatchObject({ discountId: 'disc-1' })
+  })
+
+  it('regresión: sin «Requiere aprobación» entra como hoy', async () => {
+    await vender({ descuentoConPermisoPropio: true })
+    expect(Number(ordenCreada().total)).toBe(90)
+  })
+})

@@ -991,6 +991,13 @@ export const pideAprobacionDeGerente = (d: { readonly [key: string]: unknown } |
 const sinAprobacionDelDescuento = () =>
   new ForbiddenError('Este descuento necesita la aprobación de un gerente (permiso «Aplicar descuentos en TPV»).', 'PERMISSION_DENIED')
 
+/** Encargo 1afe04: el 403 del servicio para un «Ajuste de precio» sin la acreditación de la ruta. */
+const sinAprobacionDelAjuste = () =>
+  new ForbiddenError(
+    'El ajuste de precio necesita la aprobación de un encargado (permiso «Aplicar descuentos en TPV»).',
+    'PERMISSION_DENIED',
+  )
+
 /** D4: la membresía activa de la sesión (quien aplica y, sin PIN, quien aprueba con su propio permiso). */
 export async function membresiaDeLaSesion(
   tx: Prisma.TransactionClient,
@@ -1401,6 +1408,12 @@ export async function buildOrderItemsData(
           : ajusteCents * item.quantity
         : null
     const ajuste = lineaAjustadaCents !== null ? roundPesos(Math.max(0, lineBase - lineaAjustadaCents / 100)) : 0
+    // Encargo 1afe04 (founder «A», 15-nov): un ajuste que sí baja el precio pide la acreditación de la ruta (`tpv-orders:discount` o
+    // el PIN del encargado), como un descuento con «Requiere aprobación». Falla cerrado. Una venta de la cola ya se cobró: entra
+    // (la creación la registra sin aprobador, con rastro y aviso al dueño).
+    if (ajuste > 0 && !compAuthority?.aprobacionDelDescuento && compAuthority?.isOfflineReplay !== true) {
+      throw sinAprobacionDelAjuste()
+    }
 
     let lineDiscount = 0
     // Con el ajuste honrado (`lineaAjustadaCents`), el catálogo va en centavos aunque el descuento manual redondee a 0 (peso): las apps igual.
@@ -1912,9 +1925,12 @@ export async function crearVentaDeMostradorEnTx(
   }
   // D4: el de cuenta que pide aprobación — de catálogo, del cupón o la etiqueta del importe libre (sin catálogo ni cupón; su dinero
   // sigue siendo `discount`) —, con la acreditación de la ruta. Bajo esta transacción: lo que valga es lo de ahora.
+  // Encargo 1afe04 (Codex r2 #1): también el descuento del CLIENTE (su `discountId`). Un carrito guardado días antes de que el dueño
+  // prendiera «Requiere aprobación» lo traería sin pedir nada; desde ahí el descuento del cliente ya no se ofrece solo.
+  const idDeLaEtiqueta = input.descuentoDeCatalogoId ?? input.descuentoDelCliente?.discountId
   const etiquetaDeCuenta =
-    !orderDiscount && input.descuentoDeCatalogoId && (input.discount ?? 0) > 0
-      ? await tx.discount.findFirst({ where: { id: input.descuentoDeCatalogoId, venueId }, select: { requiresApproval: true, type: true } })
+    !orderDiscount && idDeLaEtiqueta && (input.discount ?? 0) > 0
+      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true } })
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
   // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.
@@ -1922,7 +1938,8 @@ export async function crearVentaDeMostradorEnTx(
   if (cuentaPideAprobacion && !input.aprobacionDelDescuento && !sinAprobacionEnLaCola) throw sinAprobacionDelDescuento()
   // D4: quien lo aplicó es la SESIÓN (no el vendedor elegido, Codex r2 #4); quien lo aprobó, el gerente del PIN o la sesión.
   const sesionQueAplica =
-    (input.aprobacionDelDescuento || sinAprobacionEnLaCola) && (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente))
+    (input.aprobacionDelDescuento || sinAprobacionEnLaCola) &&
+    (cuentaPideAprobacion || discounts.some(pideAprobacionDeGerente) || ajustesDePrecio.length > 0)
       ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
       : null
   const aprobador = input.aprobacionDelDescuento ? (input.aprobacionDelDescuento.porPin ?? sesionQueAplica) : null
@@ -1937,7 +1954,12 @@ export async function crearVentaDeMostradorEnTx(
   /** D22: lo que entró sin aprobación, para el aviso al dueño después del commit. */
   const sinAprobacion: NonNullable<VentaDeMostradorCreada['sinAprobacion']> = []
   /** D4 r5: el rastro de un descuento que pedía aprobación y entró de la cola sin ella, en ESTA transacción (como el regalo de D2). */
-  const anotarSiEntroSinAprobacion = async (fila: Prisma.OrderDiscountUncheckedCreateInput, pide: boolean): Promise<void> => {
+  const anotarSiEntroSinAprobacion = async (
+    fila: Prisma.OrderDiscountUncheckedCreateInput,
+    pide: boolean,
+    /** Encargo 1afe04: el «Ajuste de precio» no es del catálogo; su rastro no se cuelga de la etiqueta de cuenta. */
+    sinCatalogo = false,
+  ): Promise<void> => {
     if (!pide || !sinAprobacionEnLaCola) return
     sinAprobacion.push({ nombre: fila.name, importeCents: Math.round(Number(fila.amount) * 100) })
     await writeLegacyActivityAuditTx(tx, {
@@ -1948,7 +1970,7 @@ export async function crearVentaDeMostradorEnTx(
       entityId: fila.orderId,
       data: {
         orderId: fila.orderId,
-        discountId: fila.discountId ?? input.descuentoDeCatalogoId ?? null,
+        discountId: sinCatalogo ? null : (fila.discountId ?? input.descuentoDeCatalogoId ?? null),
         nombre: fila.name,
         importePesos: Number(fila.amount),
         externalId,
@@ -2099,14 +2121,19 @@ export async function crearVentaDeMostradorEnTx(
     await anotarSiEntroSinAprobacion(fila, pideAprobacionDeGerente(discount))
   }
   // D12: UNA fila «Ajuste de precio» con todos los renglones ajustados (el descuento ya vive en cada uno ⇒ espejo).
+  // Encargo 1afe04: pide aprobación como un descuento con «Requiere aprobación» ⇒ la sesión que lo aplicó y quién lo aprobó; de la
+  // cola sin la acreditación, sin aprobador y con el rastro `DESCUENTO_SIN_APROBACION_SIN_RED` (+ aviso al dueño, D22).
   if (ajustesDePrecio.length > 0) {
-    await tx.orderDiscount.create({
-      data: filaDeAjustesDePrecio({
+    const fila = conAprobador(
+      filaDeAjustesDePrecio({
         orderId: createdOrder.id,
         renglones: ajustesDePrecio,
         appliedById: appliedByStaffVenue?.id ?? null,
       }),
-    })
+      true,
+    )
+    await tx.orderDiscount.create({ data: fila })
+    await anotarSiEntroSinAprobacion(fila, true, true)
   }
 
   const cortesiaItems = createdOrder.items.filter(item => item.isCortesia)

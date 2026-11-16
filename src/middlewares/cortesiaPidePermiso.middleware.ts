@@ -234,6 +234,41 @@ export function aprobacionDelDescuento(req: Request): { porPin?: string } | unde
 const idValido = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 64
 
 /**
+ * Encargo 1afe04 (founder «A», 15-nov, como Toast): el «Ajuste de precio» (D12, `items[].adjustedUnitPrice`) baja el precio a mano;
+ * lo aplica quien tiene `tpv-orders:discount` o un encargado con su PIN, igual que un descuento con «Requiere aprobación». Cuenta
+ * lo mismo que `buildOrderItemsData` podría honrar: un entero ≥ 1 centavo en un renglón que no es cortesía.
+ */
+const ajustesDelCuerpo = (items: any[]): Array<{ productId: unknown; centavos: number }> =>
+  items
+    .filter(item => item?.isCortesia !== true && Number.isSafeInteger(item?.adjustedUnitPrice) && (item.adjustedUnitPrice as number) >= 1)
+    .map(item => ({ productId: item.productId, centavos: item.adjustedUnitPrice as number }))
+
+export const traeAjusteDePrecio = (items: any[]): boolean => ajustesDelCuerpo(items).length > 0
+
+/**
+ * Codex r1 #4: ¿algún ajuste BAJA el precio de catálogo de su producto? Si no lo baja, el servicio lo ignora y no hay nada que
+ * aprobar (un carrito viejo con un ajuste a $90 sobre un producto que ya bajó a $80). El servicio lo honra sólo bajo el precio que
+ * decide (`precio` ≤ catálogo), así que «baja el catálogo» lo cubre siempre: el PIN se puede pedir de más en el caso raro del precio
+ * que vio el cliente, nunca de menos (ahí el servicio falla cerrado). Un producto que no aparece cuenta como «lo baja».
+ */
+async function algunAjusteBajaElPrecio(venueId: string, items: any[]): Promise<boolean> {
+  const ajustes = ajustesDelCuerpo(items)
+  if (ajustes.length === 0) return false
+  const ids = [...new Set(ajustes.map(a => a.productId).filter(idValido))]
+  if (ids.length < new Set(ajustes.map(a => a.productId)).size) return true
+  const productos = await prisma.product.findMany({
+    where: { venueId, id: { in: ids } },
+    select: { id: true, price: true },
+    take: ids.length,
+  })
+  const centavos = new Map(productos.map(p => [p.id, Math.round(Number(p.price) * 100)]))
+  return ajustes.some(a => {
+    const precio = centavos.get(a.productId as string)
+    return precio === undefined || a.centavos < precio
+  })
+}
+
+/**
  * D4 (founder «B», 12-nov): un % o fijo de catálogo con «Requiere aprobación» lo aplica quien tiene `tpv-orders:discount` (de
  * fábrica gerente, administrador y dueño); a quien no, se lo autoriza un superior con su PIN, sin cambiar de sesión. Va por
  * `checkPermission`: consume `X-Permission-Override` o contesta el 403 canónico (con `overridable` si el negocio tiene el PIN).
@@ -253,20 +288,30 @@ export const checkAprobacionDelDescuento = async (req: Request, res: Response, n
     const items: any[] = Array.isArray(body.items) ? body.items : []
     const ids = [
       ...new Set(
-        [body.discountId, body.orderDiscountId, body.descuentoDeCatalogoId, ...items.map(item => item?.discountId)].filter(idValido),
+        [
+          body.discountId,
+          body.orderDiscountId,
+          body.descuentoDeCatalogoId,
+          // Encargo 1afe04 (Codex r2 #1): el descuento del cliente de un carrito guardado antes de prender «Requiere aprobación».
+          body.descuentoDelCliente?.discountId,
+          ...items.map(item => item?.discountId),
+        ].filter(idValido),
       ),
     ]
     const cupon = traeCuponEnLinea(body) ? (body.couponCode as string).trim().toUpperCase() : null
-    if (!venueId || (ids.length === 0 && !cupon)) return next()
-    const pideAprobacion = await prisma.discount.findFirst({
-      where: {
-        venueId,
-        requiresApproval: true,
-        type: { not: DiscountType.COMP },
-        OR: [...(ids.length > 0 ? [{ id: { in: ids } }] : []), ...(cupon ? [{ couponCodes: { some: { code: cupon } } }] : [])],
-      },
-      select: { id: true },
-    })
+    if (!venueId || (ids.length === 0 && !cupon && !traeAjusteDePrecio(items))) return next()
+    // Encargo 1afe04: un «Ajuste de precio» que baja el precio pide aprobación; los demás, según su descuento.
+    const pideAprobacion =
+      (await algunAjusteBajaElPrecio(venueId, items)) ||
+      (await prisma.discount.findFirst({
+        where: {
+          venueId,
+          requiresApproval: true,
+          type: { not: DiscountType.COMP },
+          OR: [...(ids.length > 0 ? [{ id: { in: ids } }] : []), ...(cupon ? [{ couponCodes: { some: { code: cupon } } }] : [])],
+        },
+        select: { id: true },
+      })) !== null
     if (!pideAprobacion) return next()
     const externalId = typeof body.externalId === 'string' ? body.externalId.trim() : ''
     if (externalId && (await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: { id: true } }))) {

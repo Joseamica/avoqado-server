@@ -54,7 +54,13 @@ const lineasCreadas = () => datosDeLaOrden().items.create as Array<{ total: Deci
 const pesada = (kg: number, extra: Record<string, unknown> = {}) => ({ productId: 'prod-1', quantity: 1, weightQuantity: kg, ...extra })
 
 function crear(items: unknown[]) {
-  return createOrderWithItems('venue-1', { staffId: 'staff-1', source: 'AVOQADO_ANDROID', items } as CreateOrderInput)
+  // Encargo 1afe04: el «Ajuste de precio» pide la acreditación de la ruta; aquí se prueba el dinero, con la ruta ya pasada.
+  return createOrderWithItems('venue-1', {
+    staffId: 'staff-1',
+    source: 'AVOQADO_ANDROID',
+    items,
+    aprobacionDelDescuento: {},
+  } as CreateOrderInput)
 }
 
 beforeEach(() => {

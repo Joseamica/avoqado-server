@@ -341,3 +341,51 @@ describe('D4 · Mostrador: la venta nueva', () => {
     }
   })
 })
+
+// Encargo 1afe04 (founder «A», 15-nov, como Toast): el «Ajuste de precio» (D12) pide lo mismo que un descuento con aprobación.
+describe('Ajuste de precio · la venta nueva', () => {
+  const conAjuste = () => ({ items: [{ productId, quantity: 1, externalId: cuid(), adjustedUnitPrice: 8000 }] })
+
+  it('cajera sin permiso ni PIN: 403 overridable y la venta no nace', async () => {
+    const { response, externalId } = await vender('cajera', conAjuste())
+    expect(response.status).toBe(403)
+    expect(response.body).toMatchObject({ required: 'tpv-orders:discount', overridable: true })
+    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(0)
+  })
+
+  it('cajera con el PIN del encargado: nace en $80, la fila «Ajuste de precio» guarda a la cajera y al encargado', async () => {
+    const pin = await token('tpv-orders:discount')
+    const { response } = await vender('cajera', conAjuste(), { 'x-permission-override': pin })
+    expect(response.status).toBe(201)
+    expect(response.body.order).toMatchObject({ discountAmount: 20, total: 80 })
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: response.body.order.id, name: 'Ajuste de precio' } })
+    expect([Number(fila.amount), fila.appliedById, fila.authorizedById]).toEqual([20, cajeraVenueId, gerenteVenueId])
+    expect((await prisma.permissionOverride.findUniqueOrThrow({ where: { token: pin } })).consumedAt).not.toBeNull()
+  })
+
+  it('gerente con el permiso: entra directo y queda como quien lo aprobó', async () => {
+    const { response } = await vender('gerente', conAjuste())
+    expect(response.status).toBe(201)
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: response.body.order.id, name: 'Ajuste de precio' } })
+    expect([fila.appliedById, fila.authorizedById]).toEqual([gerenteVenueId, gerenteVenueId])
+  })
+
+  it('venta de la cola de la cajera sin el permiso: 201 en $80, sin aprobador y con rastro', async () => {
+    const { response } = await vender('cajera', { ...conAjuste(), isOfflineReplay: true, createdAtLocal: Date.now() })
+    expect(response.status).toBe(201)
+    expect(response.body.order).toMatchObject({ discountAmount: 20, total: 80 })
+    const orderId = response.body.order.id
+    const fila = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, name: 'Ajuste de precio' } })
+    expect([fila.appliedById, fila.authorizedById]).toEqual([cajeraVenueId, null])
+    const rastro = await prisma.activityLog.findFirstOrThrow({
+      where: { venueId, action: 'DESCUENTO_SIN_APROBACION_SIN_RED', entityId: orderId },
+    })
+    expect(rastro.data).toMatchObject({ orderId, discountId: null, nombre: 'Ajuste de precio', importePesos: 20 })
+  })
+
+  it('regresión: la venta de la cajera sin ajuste sale como hoy', async () => {
+    const { response } = await vender('cajera', {})
+    expect(response.status).toBe(201)
+    expect(response.body.order).toMatchObject({ total: 100 })
+  })
+})

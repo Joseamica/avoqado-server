@@ -21,6 +21,8 @@ jest.mock('@/services/shared/repartoDescuentoTx', () => ({
 }))
 
 import { Decimal } from '@prisma/client/runtime/library'
+import type { Request } from 'express'
+import { autoridadDeLaVenta } from '@/controllers/mobile/order.mobile.controller'
 import { buildOrderItemsData, createOrderWithItems, type CreateOrderInput } from '@/services/mobile/order.mobile.service'
 import { filaDeAjustesDePrecio } from '@/services/shared/discount.service'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -67,8 +69,18 @@ const filasDeAjuste = () => filasDeDescuento().filter(f => f.name === 'Ajuste de
 /** Lo que el cliente paga por el renglón (bruto menos todo su descuento), en pesos. */
 const netoDelRenglon = (k = 0) => Number(lineasCreadas()[k].total) - Number(lineasCreadas()[k].discountAmount)
 
+/**
+ * Encargo 1afe04: desde el 15-nov el ajuste pide la acreditación de la ruta (`tpv-orders:discount` o el PIN de un encargado). Estas
+ * pruebas de DINERO la traen (es lo que deja el middleware cuando pasó); sin ella, abajo («Ajuste de precio pide aprobación»).
+ */
 function crear(extra: Partial<CreateOrderInput>) {
-  return createOrderWithItems('venue-1', { staffId: 'staff-1', source: 'AVOQADO_ANDROID', items: [], ...extra } as CreateOrderInput)
+  return createOrderWithItems('venue-1', {
+    staffId: 'staff-1',
+    source: 'AVOQADO_ANDROID',
+    items: [],
+    aprobacionDelDescuento: {},
+    ...extra,
+  } as CreateOrderInput)
 }
 
 const descuento = (extra: Record<string, unknown> = {}) => ({
@@ -438,5 +450,76 @@ describe('filaDeAjustesDePrecio', () => {
     })
     expect(Number(fila.amount)).toBe(30.5)
     expect(fila.reparto).toMatchObject({ alcance: 'DIRIGIDO', espejo: true, renglones: { i1: 2000, i2: 1050 } })
+  })
+})
+
+describe('«Ajuste de precio» pide aprobación (encargo 1afe04, founder «A», 15-nov)', () => {
+  const conAjuste = { productId: 'prod-1', quantity: 1, externalId: 'e1', adjustedUnitPrice: 8000 }
+  const rastros = () =>
+    (prismaMock.activityLog.create as jest.Mock).mock.calls.filter(c => c[0]?.data?.action === 'DESCUENTO_SIN_APROBACION_SIN_RED')
+
+  it('en línea sin la acreditación de la ruta: 403 PERMISSION_DENIED y la venta no nace', async () => {
+    await expect(crear({ items: [conAjuste], aprobacionDelDescuento: undefined })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'PERMISSION_DENIED',
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('con el PIN de un encargado: entra; la fila guarda a la sesión que lo aplicó y al encargado que lo aprobó', async () => {
+    await crear({ items: [conAjuste], performedBy: 'staff-1', aprobacionDelDescuento: { porPin: 'sv-encargado' } })
+    expect(filasDeAjuste()[0]).toMatchObject({ appliedById: 'sv-1', authorizedById: 'sv-encargado' })
+    expect(Number(datosDeLaOrden().total)).toBe(80)
+    expect(rastros()).toHaveLength(0)
+  })
+
+  it('con el permiso propio: la sesión queda como quien lo aprobó', async () => {
+    await crear({ items: [conAjuste], performedBy: 'staff-1', aprobacionDelDescuento: {} })
+    expect(filasDeAjuste()[0]).toMatchObject({ appliedById: 'sv-1', authorizedById: 'sv-1' })
+  })
+
+  it('venta de la cola sin la acreditación: entra con el ajuste (el efectivo ya se cobró), sin aprobador, con rastro', async () => {
+    await crear({
+      items: [conAjuste],
+      performedBy: 'staff-1',
+      aprobacionDelDescuento: undefined,
+      isOfflineReplay: true,
+      createdAtLocal: Date.now() - 60_000,
+    } as Partial<CreateOrderInput>)
+    expect(Number(datosDeLaOrden().total)).toBe(80)
+    const fila = filasDeAjuste()[0]
+    expect(fila.appliedById).toBe('sv-1')
+    expect(fila.authorizedById ?? null).toBeNull()
+    expect(rastros()).toHaveLength(1)
+    expect(rastros()[0][0].data).toMatchObject({
+      venueId: 'venue-1',
+      entity: 'Order',
+      data: expect.objectContaining({ nombre: 'Ajuste de precio', discountId: null, importePesos: 20 }),
+    })
+  })
+
+  it('regresión: un ajuste que NO baja el precio se ignora y no pide nada (sin acreditación, sin 403)', async () => {
+    await crear({ items: [{ ...conAjuste, adjustedUnitPrice: 10000 }], aprobacionDelDescuento: undefined })
+    expect(filasDeAjuste()).toHaveLength(0)
+    expect(Number(datosDeLaOrden().total)).toBe(100)
+  })
+
+  it('regresión: una venta sin ajuste no pide nada', async () => {
+    await crear({ items: [{ productId: 'prod-1', quantity: 1 }], aprobacionDelDescuento: undefined })
+    expect(Number(datosDeLaOrden().total)).toBe(100)
+  })
+})
+
+describe('autoridadDeLaVenta con «Ajuste de precio» (Codex r1 #1)', () => {
+  const req = { params: { venueId: 'venue-1' }, authContext: { userId: 'sesion-1' }, body: {}, headers: {} } as unknown as Request
+
+  it('una venta con sólo un ajuste lleva la SESIÓN (quien lo aplicó), nunca el vendedor elegido', async () => {
+    const venta = { staffId: 'vendedor-1', items: [{ productId: 'prod-1', quantity: 1, adjustedUnitPrice: 8000 }] } as CreateOrderInput
+    expect(await autoridadDeLaVenta(req, venta)).toMatchObject({ performedBy: 'sesion-1' })
+  })
+
+  it('regresión: sin ajuste ni descuentos no agrega performedBy', async () => {
+    const venta = { staffId: 'vendedor-1', items: [{ productId: 'prod-1', quantity: 1 }] } as CreateOrderInput
+    expect(await autoridadDeLaVenta(req, venta)).not.toHaveProperty('performedBy')
   })
 })
