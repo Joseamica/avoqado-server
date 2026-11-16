@@ -51,6 +51,18 @@ describe('validateRequest — customerId en el body público', () => {
     expect(err?.code).toBe('CUSTOMER_ID_NOT_ALLOWED')
   })
 
+  // D655: con sesión (entró con Google) no hay teléfono; la tienda manda `phone: ''`. El servicio decide si hace falta.
+  it('D655: checkout sin teléfono o con teléfono vacío pasa la validación', async () => {
+    for (const contacto of [{ email: 'a@b.com' }, { email: 'a@b.com', phone: '' }]) {
+      const { next } = await run(
+        publicCheckoutSchema,
+        { ...contacto, successUrl: 'https://x/ok', cancelUrl: 'https://x/no' },
+        { venueSlug: 'x', packId: 'p' },
+      )
+      expect((next as jest.Mock).mock.calls[0]).toEqual([])
+    }
+  })
+
   it('regresión: reserva pública SIN customerId pasa y req.body queda sin la clave', async () => {
     const schema = z.object({ params: z.object({ venueSlug: z.string() }), body: publicCreateReservationBodySchema })
     const { req, next } = await run(

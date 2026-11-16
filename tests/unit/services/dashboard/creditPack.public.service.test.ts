@@ -414,6 +414,19 @@ describe('CreditPack Public Service', () => {
       expect(params.metadata).toEqual(expect.objectContaining({ customerId: 'c_sesion' }))
     })
 
+    // D655: quien entró con Google no tiene teléfono; la tienda manda `phone: ''`. Con sesión, la compra va por su id.
+    it('D655: con customerId y SIN teléfono crea el pago, sin customerPhone en la metadata', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      mockStripeCheckoutCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' })
+
+      await createCheckoutSession(VENUE_ID, PACK_ID, 'jose@x.com', '', successUrl, cancelUrl, { customerId: 'c_sesion' })
+
+      const [params] = mockStripeCheckoutCreate.mock.calls[0]
+      expect(params.metadata).toEqual(expect.objectContaining({ customerId: 'c_sesion' }))
+      expect(params.metadata).not.toHaveProperty('customerPhone')
+    })
+
     it('con customerId: maxPerCustomer cuenta por ese id, NO busca por el email del body', async () => {
       prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
