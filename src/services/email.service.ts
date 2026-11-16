@@ -3207,12 +3207,12 @@ Avoqado Dashboard
           <td style="padding: 24px; border-right: 1px solid #e0e0e0; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Ventas netas</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(data.metrics.netSales)}</div>
-            <div style="font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)};">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)} semanal</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)};">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)} vs el mismo día de la semana pasada</div>
           </td>
           <td style="padding: 24px; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Pedido promedio</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(avgOrder)}</div>
-            <div style="font-size: 14px; color: ${weeklyColorFor(avgOrder, lastWeekAvgOrder)};">${weeklyChangeFor(avgOrder, lastWeekAvgOrder)} semanal</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(avgOrder, lastWeekAvgOrder)};">${weeklyChangeFor(avgOrder, lastWeekAvgOrder)} vs el mismo día de la semana pasada</div>
           </td>
         </tr>
       </table>
@@ -3233,7 +3233,7 @@ Avoqado Dashboard
         <tr style="border-bottom: 1px solid #e0e0e0;">
           <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000;">Descripcion</td>
           <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">Monto</td>
-          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">Semanal</td>
+          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">vs el mismo día de la semana pasada</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000;">Ventas brutas</td>

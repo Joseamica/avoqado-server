@@ -2,11 +2,12 @@
  * Nightly Sales Summary Email Job
  *
  * Daily cron job that sends sales summary emails to venue admins and owners.
- * Runs at 10:00 PM Mexico City time (after most venues close).
+ * Runs at 07:02 Mexico City time and reports YESTERDAY's full calendar day of each venue, in the venue's zone
+ * (D17, founder 16-nov-2026: in the morning with yesterday complete, like Square and Toast).
  *
  * What it does:
  * 1. Finds all active venues
- * 2. For each venue, calculates the day's sales metrics
+ * 2. For each venue, calculates the reported day's sales metrics (and the day before / same day last week)
  * 3. Gets all admins and owners for that venue
  * 4. Sends a formatted sales summary email (similar to Square's daily digest)
  *
@@ -24,12 +25,29 @@ import { lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
+import { fromZonedTime } from 'date-fns-tz'
+import { zonaValida } from '../utils/datetime'
+import { venueCivilDate } from '../utils/venueDateKeys'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 // ============================================================
 // Types
 // ============================================================
+
+/** Qué día de calendario del negocio reporta el correo: el de `now` o el anterior. */
+export type NightlyReportDay = 'today' | 'yesterday'
+
+/**
+ * D17 (founder, 16-nov-2026): el correo sale en la mañana con el día COMPLETO de ayer, como Square y Toast. 'today' sólo
+ * sirve con un envío al cierre del día; el de las 22:02 dejaba fuera lo que se vendía después.
+ */
+const NIGHTLY_REPORT_DAY: NightlyReportDay = 'yesterday'
+
+export interface ReportWindow {
+  start: Date
+  end: Date
+}
 
 // Email-shaped metrics: the nightly job never passes a paymentMethod filter, so
 // order-derived fields are always present at runtime. We coerce nulls to 0 at
@@ -88,8 +106,8 @@ interface VenueSalesSummaryData {
     returning: number
   }
   /**
-   * D15: el puente QR legacy (MindForm) no contestó en alguno de los tres resúmenes del correo (hoy, ayer o la semana
-   * pasada): el total o sus comparaciones pueden estar incompletos y el correo lo dice.
+   * D15: el puente QR legacy (MindForm) no contestó en alguno de los tres resúmenes del correo (el día reportado, el
+   * anterior o el mismo día de la semana pasada): el total o sus comparaciones pueden estar incompletos y el correo lo dice.
    */
   legacyUnavailable?: true
 }
@@ -109,11 +127,12 @@ export class NightlySalesSummaryJob {
   private isRunning: boolean = false
 
   constructor() {
-    // Run daily at 10:02 PM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits)
-    // This gives time for most venues to close their business day
+    // Run daily at 07:02 AM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits).
+    // By then the calendar day being reported (yesterday, NIGHTLY_REPORT_DAY) has closed in every Mexican zone
+    // (Tijuana is 05:02-06:02, Cancún 08:02), so the reported day is complete.
     this.job = scheduleJob(
       'nightly-sales-summary',
-      '2 22 * * *', // At 22:02 every day
+      '2 7 * * *', // At 07:02 every day
       async () => {
         await this.sendSalesSummaries()
       },
@@ -129,7 +148,7 @@ export class NightlySalesSummaryJob {
   start(): void {
     if (this.job) {
       this.job.start()
-      logger.info('Nightly Sales Summary Job started - daily at 10:00 PM Mexico City')
+      logger.info('Nightly Sales Summary Job started - daily at 07:02 AM Mexico City (reports yesterday)')
     }
   }
 
@@ -214,6 +233,9 @@ export class NightlySalesSummaryJob {
 
       logger.info(`Found ${venues.length} active venues to process`)
 
+      // One anchor for the whole run: every venue reports the same calendar day even if the run takes minutes.
+      const now = new Date()
+
       // Process each venue
       for (const venue of venues) {
         try {
@@ -246,53 +268,38 @@ export class NightlySalesSummaryJob {
             continue
           }
 
-          // Calculate today's date range in venue's timezone
-          const now = new Date()
-          const timezone = venue.timezone || 'America/Mexico_City'
+          // D17: the reported day, the day before and the same day last week, as calendar days in the VENUE's zone
+          // (never the process's: production runs in UTC). An unknown or broken zone falls back to Mexico City.
+          const timezone = zonaValida(venue.timezone)
+          const { reportDay, previousDay, sameDayLastWeek, reportDate } = nightlyReportWindows(now, timezone, NIGHTLY_REPORT_DAY)
 
-          // Get start and end of today in venue's timezone
-          const todayStart = new Date(now.toLocaleString('en-US', { timeZone: timezone }).split(',')[0] + ' 00:00:00')
-          const todayEnd = new Date(now.toLocaleString('en-US', { timeZone: timezone }).split(',')[0] + ' 23:59:59')
-
-          // Get yesterday for comparison
-          const yesterdayStart = new Date(todayStart)
-          yesterdayStart.setDate(yesterdayStart.getDate() - 1)
-          const yesterdayEnd = new Date(todayEnd)
-          yesterdayEnd.setDate(yesterdayEnd.getDate() - 1)
-
-          // Get last week same day for comparison
-          const lastWeekStart = new Date(todayStart)
-          lastWeekStart.setDate(lastWeekStart.getDate() - 7)
-          const lastWeekEnd = new Date(todayEnd)
-          lastWeekEnd.setDate(lastWeekEnd.getDate() - 7)
-
-          // Get sales summary for today
+          // Get sales summary for the reported day
           const todaySummary = await getSalesSummary(venue.id, {
-            startDate: todayStart.toISOString(),
-            endDate: todayEnd.toISOString(),
+            startDate: reportDay.start.toISOString(),
+            endDate: reportDay.end.toISOString(),
             groupBy: 'paymentMethod',
             timezone,
           })
 
-          // Get yesterday's summary for comparison
+          // Get the day before for comparison
           const yesterdaySummary = await getSalesSummary(venue.id, {
-            startDate: yesterdayStart.toISOString(),
-            endDate: yesterdayEnd.toISOString(),
+            startDate: previousDay.start.toISOString(),
+            endDate: previousDay.end.toISOString(),
             timezone,
           })
 
-          // Get last week's summary for comparison
+          // Get last week's same day for comparison
           const lastWeekSummary = await getSalesSummary(venue.id, {
-            startDate: lastWeekStart.toISOString(),
-            endDate: lastWeekEnd.toISOString(),
+            startDate: sameDayLastWeek.start.toISOString(),
+            endDate: sameDayLastWeek.end.toISOString(),
             timezone,
           })
 
           // Get category breakdown
-          const categoryBreakdown = await getCategoryBreakdown(venue.id, todayStart, todayEnd)
+          const categoryBreakdown = await getCategoryBreakdown(venue.id, reportDay.start, reportDay.end)
 
           // Get order sources breakdown
-          const orderSources = await getOrderSourcesBreakdown(venue.id, todayStart, todayEnd)
+          const orderSources = await getOrderSourcesBreakdown(venue.id, reportDay.start, reportDay.end)
 
           // Prepare email data
           const lwSummary = lastWeekSummary.summary
@@ -301,7 +308,7 @@ export class NightlySalesSummaryJob {
             venueName: venue.name,
             venueTimezone: timezone,
             venueCurrency: venue.currency || 'MXN',
-            reportDate: now,
+            reportDate,
             businessHoursStart: '', // Not tracked per venue yet
             businessHoursEnd: '',
             dashboardUrl: `${FRONTEND_URL}/venues/${venue.slug}`,
@@ -419,6 +426,36 @@ export class NightlySalesSummaryJob {
 // ============================================================
 // Helper Functions
 // ============================================================
+
+/**
+ * D17: the windows of the nightly email, as calendar days in the venue's zone, whatever the zone of the process.
+ *
+ * The old code formatted the venue's date and parsed «MM/DD/YYYY 00:00:00» back with `new Date`, which reads it in the
+ * PROCESS zone: in production (UTC) a Mexico City «today» ran from 18:00 of the day before to 17:59. The day arithmetic
+ * here is on the civil date (UTC calendar math, no hours), so a DST day lasts its real 23 or 25 hours and «last week»
+ * lands on that day's own midnight. Each window is inclusive: 00:00:00.000 to 23:59:59.999 in the venue's zone.
+ */
+export function nightlyReportWindows(
+  now: Date,
+  timezone: string | null | undefined,
+  day: NightlyReportDay,
+): { reportDay: ReportWindow; previousDay: ReportWindow; sameDayLastWeek: ReportWindow; reportDate: Date } {
+  const tz = zonaValida(timezone)
+  const hoy = venueCivilDate(now, tz)
+  const llave = (offset: number) => new Date(Date.UTC(hoy.year, hoy.month - 1, hoy.day + offset)).toISOString().slice(0, 10)
+  const dia = (offset: number): ReportWindow => ({
+    start: fromZonedTime(`${llave(offset)}T00:00:00.000`, tz),
+    end: fromZonedTime(`${llave(offset)}T23:59:59.999`, tz),
+  })
+  const base = day === 'today' ? 0 : -1
+  return {
+    reportDay: dia(base),
+    previousDay: dia(base - 1),
+    sameDayLastWeek: dia(base - 7),
+    // The email prints it with toLocaleDateString(…, { timeZone: venue }): the venue's noon is always inside its day.
+    reportDate: fromZonedTime(`${llave(base)}T12:00:00.000`, tz),
+  }
+}
 
 /**
  * Get sales breakdown by category
