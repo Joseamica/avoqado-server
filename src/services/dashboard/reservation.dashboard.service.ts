@@ -1926,7 +1926,14 @@ export async function rescheduleReservation(
 
   const channel = data.notificationChannel
   let notificationSentVia: CanalDeAviso | null = null
-  if (channel && channel !== 'none') {
+  // La cita ya estaba a esa hora: es el reenvío de una petición que sí se aplicó (la cola sin red de
+  // ANDROID/iOS repite el mismo cuerpo si se perdió la respuesta) o un reagendar que no mueve nada.
+  // No se vuelve a avisar: el cliente ya recibió (o no necesita) ese aviso.
+  const notificationSkipped = originalStartsAt.getTime() === newStartsAt.getTime() ? ('SAME_TIME' as const) : null
+  if (notificationSkipped && channel && channel !== 'none') {
+    logger.info(`[RESERVATION] Reschedule of ${rescheduled.confirmationCode} keeps the same start — notice not sent again`)
+  }
+  if (channel && channel !== 'none' && !notificationSkipped) {
     const customerName =
       [original.customer?.firstName, original.customer?.lastName].filter(Boolean).join(' ').trim() || rescheduled.guestName || 'cliente'
     const phone = original.customer?.phone || rescheduled.guestPhone
@@ -1973,7 +1980,7 @@ export async function rescheduleReservation(
           continue
         }
         try {
-          await emailService.sendReservationRescheduledEmail(email, {
+          const enviado = await emailService.sendReservationRescheduledEmail(email, {
             customerName,
             venueName,
             serviceName: original.product?.name,
@@ -1982,6 +1989,11 @@ export async function rescheduleReservation(
             confirmationCode: rescheduled.confirmationCode,
             customMessage: data.customMessage,
           })
+          // El remitente devuelve `false` si Resend lo rechaza: no se anota como avisado.
+          if (!enviado) {
+            logger.error(`❌ [RESERVATION] Email reschedule rejected for ${rescheduled.confirmationCode}`)
+            continue
+          }
           notificationSentVia = 'email'
           logger.info(`✅ [RESERVATION] Email reschedule sent for ${rescheduled.confirmationCode} → ${email}`)
           break
@@ -2004,6 +2016,7 @@ export async function rescheduleReservation(
       confirmationCode: rescheduled.confirmationCode,
       notificationChannel: channel ?? null,
       notificationSentVia,
+      notificationSkipped,
       customMessage: data.customMessage ?? null,
     },
   })

@@ -3126,7 +3126,7 @@ describe('Reservation Dashboard Service', () => {
       prismaMock.reservation.update.mockImplementation(async (args: any) => ({ ...existing, ...args.data }))
       prismaMock.reservation.findUniqueOrThrow.mockImplementation(async () => existing)
       jest.spyOn(whatsappService, 'sendReservationRescheduleWhatsApp').mockResolvedValue(true)
-      jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(undefined as never)
+      jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(true)
       return existing
     }
 
@@ -3259,6 +3259,48 @@ describe('Reservation Dashboard Service', () => {
       expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
       expect(activityLogService.logAction).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ notificationSentVia: null }) }),
+      )
+    })
+
+    it('el correo que Resend rechaza (false) no se anota como enviado', async () => {
+      prepararReagendar({ guestPhone: null, guestEmail: 'juan@example.com' })
+      jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(false)
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ notificationSentVia: null }) }),
+      )
+    })
+
+    it('repetir el mismo reagendar (cola sin red que reenvía) no vuelve a avisar', async () => {
+      // La cita YA está a las 21:00Z: es el reenvío de una petición que sí se aplicó.
+      prepararReagendar({
+        startsAt: new Date('2026-11-12T21:00:00.000Z'),
+        endsAt: new Date('2026-11-12T22:00:00.000Z'),
+        guestEmail: 'juan@example.com',
+      })
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ notificationSentVia: null, notificationSkipped: 'SAME_TIME' }),
+        }),
       )
     })
 
