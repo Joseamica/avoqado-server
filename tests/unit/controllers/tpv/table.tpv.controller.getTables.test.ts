@@ -73,6 +73,8 @@ describe('table.tpv.controller.getTables — response shape', () => {
       viewer: { staffId: 'staff-1', canManageAllTables: false },
       tablesVersion: 'mesas-v1',
       floorPlanVersion: 'plano-v1',
+      // D8: la TPV recibe la misma respuesta; Gson ignora el campo que no conoce.
+      capabilities: { openTableNewVisit: true },
     })
   })
 

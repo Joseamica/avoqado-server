@@ -1128,7 +1128,7 @@ async function applyOpenTable(
         abiertaSinRedEn,
         // D71: sin propiedad de mesa (o con permiso de mesas ajenas), la llamada de D51 (ocho argumentos). D8: la visita nueva, el
         // décimo (con el noveno aunque no haya propiedad de mesa).
-        ...(visitaNueva ? [soloCuentasDe, true] : soloCuentasDe ? [soloCuentasDe] : []),
+        ...((visitaNueva ? [soloCuentasDe, true] : soloCuentasDe ? [soloCuentasDe] : []) as [string?, boolean?]),
       )
     : await tableService.assignTable(
         venueId,
