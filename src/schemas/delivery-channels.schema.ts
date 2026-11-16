@@ -36,6 +36,10 @@ export const updateChannelSchema = z.object({
       orderAcceptanceMode: z.enum(ORDER_ACCEPTANCE_MODE_VALUES, { message: 'Modo de aceptación inválido' }).optional(),
       autoSyncMenu: z.boolean({ message: 'El auto-sync de menú debe ser verdadero o falso' }).optional(),
       config: z.record(z.any()).nullable().optional(),
+      // D1: la huella de la selección que tenía la pantalla al abrir (`seleccionHuella` del listado) → 409 si alguien la cambió.
+      seleccionEsperada: z.string().min(1).optional(),
+      // D1: ids de productos que la persona vio y dejó fuera; se suman a `productosRevisados`.
+      marcarRevisados: z.array(z.string().min(1)).max(10000).optional(),
     })
     .strict()
     .refine(body => Object.keys(body).length > 0, { message: 'Envía al menos un campo para actualizar' }),

@@ -21,7 +21,8 @@ import { DeliveryChannelLink, DeliveryChannelStatus, DeliveryProvider, OrderAcce
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
-import { validarProductosDelCanal } from './productosDelCanal'
+import { huellaDeSeleccion, validarProductosDelCanal } from './productosDelCanal'
+import { normalizarSeleccion, sumarRevisados } from './seleccionDelCanal.service'
 import { leerImpresion, validarEstacionesDeImpresion, validarFormaImpresion } from './impresionDelCanal'
 import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
@@ -112,6 +113,8 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
       // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
       // invita a que alguien la use como si significara algo.
       injectionRate: tasas.get(l.provider) ?? null,
+      // D1: la huella de lo que el dueño eligió; la pantalla la regresa en `seleccionEsperada` para el compara-y-cambia.
+      seleccionHuella: huellaDeSeleccion(l.config),
     }
   }) as unknown as DeliveryChannelLinkSafe[]
 }
@@ -150,9 +153,21 @@ export async function createChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
   // Codex r1 #4: crear valida `config` igual que editar (horario, precios, lista de productos).
+  // Mismo filtro que el PATCH: las llaves del sistema no se siembran desde fuera (ver `mezclarConfig`), y la lista y los precios
+  // se guardan por producto (D1).
+  let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
   if (data.config != null) {
     validarConfig(data.config as Prisma.InputJsonValue)
     await validarEstacionesDelCanal(venueId, data.config)
+    config = mezclarConfig({}, data.config)
+    if (typeof data.config === 'object' && !Array.isArray(data.config)) {
+      config = (await normalizarSeleccion(
+        prisma,
+        venueId,
+        config as Record<string, unknown>,
+        data.config as Record<string, unknown>,
+      )) as Prisma.InputJsonValue
+    }
   }
 
   const webhookSecret = crypto.randomBytes(32).toString('hex')
@@ -169,8 +184,7 @@ export async function createChannelLink(
         orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
         status: DeliveryChannelStatus.PENDING,
         autoSyncMenu: data.autoSyncMenu ?? true,
-        // Mismo filtro que el PATCH: las llaves del sistema no se siembran desde fuera (ver `mezclarConfig`).
-        config: data.config != null ? mezclarConfig({}, data.config) : undefined,
+        config,
       },
       select: SAFE_SELECT,
     })) as unknown as DeliveryChannelLinkSafe
@@ -205,7 +219,14 @@ export interface UpdateChannelLinkInput {
   orderAcceptanceMode?: OrderAcceptanceMode
   autoSyncMenu?: boolean
   config?: Prisma.InputJsonValue | null
+  /** D1: `seleccionHuella` del listado al abrir la pantalla. Si alguien cambió la selección desde entonces → 409. */
+  seleccionEsperada?: string
+  /** D1: ids de productos que la persona vio y dejó fuera; se suman a `productosRevisados`. */
+  marcarRevisados?: string[]
 }
+
+/** El 409 del compara-y-cambia de la pantalla del canal (D1). */
+const CANAL_CAMBIADO = 'Alguien cambió este canal mientras lo editabas. Recarga y vuelve a guardar.'
 
 /**
  * Los canales tal como los necesita el POS: id, proveedor, estado y hasta cuándo dura la
@@ -307,16 +328,12 @@ function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null):
   )
   // 🔴 Codex r1 #3: el DASHBOARD guarda el margen como `precios: {}` o `{ markupPercent }` y no conoce los precios por SKU.
   // Un `precios` SIN la llave `overrides` conserva los que había; quitarlos es mandar `overrides` explícito (`{}` = ninguno).
-  const preciosBase = base.precios as { overrides?: unknown } | undefined
+  // D1: igual `porProducto` (los precios por id). Un `overrides` enviado sin `porProducto` los reemplaza en `normalizarSeleccion`.
+  const preciosBase = base.precios as { overrides?: unknown; porProducto?: unknown } | undefined
   const preciosPedido = pedido.precios
-  if (
-    preciosPedido &&
-    typeof preciosPedido === 'object' &&
-    !Array.isArray(preciosPedido) &&
-    !('overrides' in preciosPedido) &&
-    preciosBase?.overrides !== undefined
-  ) {
-    pedido.precios = { ...preciosPedido, overrides: preciosBase.overrides }
+  if (preciosPedido && typeof preciosPedido === 'object' && !Array.isArray(preciosPedido)) {
+    const conservados = (['overrides', 'porProducto'] as const).filter(l => !(l in preciosPedido) && preciosBase?.[l] !== undefined)
+    if (conservados.length) pedido.precios = { ...preciosPedido, ...Object.fromEntries(conservados.map(l => [l, preciosBase![l]])) }
   }
   return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue
 }
@@ -382,12 +399,36 @@ export async function updateChannelLink(
     }
 
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
-    if (data.config !== undefined) {
-      // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
-      // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
+    if (data.config !== undefined || data.seleccionEsperada !== undefined || data.marcarRevisados !== undefined) {
+      // Tenant-scoped igual que la mutación: un link de otro venue no da fila → NotFoundError, sin filtrar nada.
       const [actual] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
         SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} AND "venueId" = ${venueId} FOR UPDATE`
-      config = mezclarConfig(actual?.config, data.config)
+      if (!actual) throw new NotFoundError('Canal de delivery no encontrado')
+      let nuevo: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+        data.config !== undefined ? mezclarConfig(actual.config, data.config) : (actual.config as Prisma.InputJsonValue)
+      // D1: la lista y los precios se guardan por producto (id), sobre lo ya mezclado y con la fila bloqueada.
+      if (typeof data.config === 'object' && data.config !== null && !Array.isArray(data.config)) {
+        nuevo = (await normalizarSeleccion(
+          tx,
+          venueId,
+          nuevo as Record<string, unknown>,
+          data.config as Record<string, unknown>,
+        )) as Prisma.InputJsonValue
+      }
+      // 🔴 D1, compara-y-cambia: si alguien cambió la selección desde que la pantalla la leyó, 409. Salvo que lo pedido YA sea lo
+      // que hay: es el mismo guardado reenviado (respuesta perdida), no un choque. La huella es canónica: el orden de llaves no cuenta.
+      if (data.seleccionEsperada !== undefined) {
+        const enLaBase = huellaDeSeleccion(actual.config)
+        if (data.seleccionEsperada !== enLaBase && huellaDeSeleccion(nuevo) !== enLaBase) {
+          throw new ConflictError(CANAL_CAMBIADO, 'CHANNEL_CHANGED')
+        }
+      }
+      if (data.marcarRevisados !== undefined) {
+        const c = nuevo === Prisma.JsonNull ? {} : configComoObjeto(nuevo)
+        const lista = Array.isArray(c.productoIds) ? (c.productoIds as string[]) : null
+        nuevo = { ...c, productosRevisados: sumarRevisados(c.productosRevisados, data.marcarRevisados, lista) } as Prisma.InputJsonValue
+      }
+      if (data.config !== undefined || data.marcarRevisados !== undefined) config = nuevo
     }
 
     // 🔴 Con consentimiento del dueño, la identidad de la tienda NO se cambia a mano (spec §4.2):
