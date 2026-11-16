@@ -282,3 +282,95 @@ describe('D17 · nightlyReportWindows', () => {
     expect(nightlyReportWindows(now, zona, 'today')).toEqual(nightlyReportWindows(now, CDMX, 'today'))
   })
 })
+
+/**
+ * Codex r1 (16-nov): el servidor acepta cualquier zona IANA. Donde el reloj salta a medianoche, `fromZonedTime('…T00:00')`
+ * de una hora que no existe cae en el día ANTERIOR y esa hora se contaba en dos días. Regla: un día empieza en el primer
+ * instante cuya fecha civil es la suya y termina 1 ms antes de que empiece el siguiente; así los días quedan pegados, sin
+ * huecos ni encimes, y la hora repetida de un atraso a medianoche es de un solo día.
+ */
+describe('D17 · días que no empiezan a las 00:00 (Codex r1)', () => {
+  it('🔴 Santiago, 6-sep-2026: la medianoche no existe (00:00 → 01:00); el día empieza a la 01:00 y no a las 23:00 del 5', () => {
+    const v = nightlyReportWindows(new Date('2026-09-07T13:02:00.000Z'), 'America/Santiago', 'yesterday')
+    expect(iso(v.reportDay)).toEqual({ start: '2026-09-06T04:00:00.000Z', end: '2026-09-07T02:59:59.999Z' })
+    expect(horas(v.reportDay)).toBe(23)
+    expect(iso(v.previousDay)).toEqual({ start: '2026-09-05T04:00:00.000Z', end: '2026-09-06T03:59:59.999Z' })
+    expect(venueDayKey(v.reportDate, 'America/Santiago')).toBe('2026-09-06')
+  })
+
+  it('🔴 La Habana, 8-mar-2026: la medianoche no existe; el día empieza a la 01:00 (05:00Z)', () => {
+    const v = nightlyReportWindows(new Date('2026-03-09T13:02:00.000Z'), 'America/Havana', 'yesterday')
+    expect(iso(v.reportDay)).toEqual({ start: '2026-03-08T05:00:00.000Z', end: '2026-03-09T03:59:59.999Z' })
+    expect(iso(v.previousDay)).toEqual({ start: '2026-03-07T05:00:00.000Z', end: '2026-03-08T04:59:59.999Z' })
+  })
+
+  it('Santiago, 4-abr-2026: la hora repetida (23:00–23:59, el reloj regresa a medianoche) es sólo del 4', () => {
+    const v = nightlyReportWindows(new Date('2026-04-05T15:00:00.000Z'), 'America/Santiago', 'today') // 5-abr 11:00
+    expect(iso(v.previousDay)).toEqual({ start: '2026-04-04T03:00:00.000Z', end: '2026-04-05T03:59:59.999Z' })
+    expect(horas(v.previousDay)).toBe(25)
+    expect(v.reportDay.start.toISOString()).toBe('2026-04-05T04:00:00.000Z')
+  })
+
+  const ZONAS = [
+    'America/Mexico_City',
+    'America/Cancun',
+    'America/Merida',
+    'America/Monterrey',
+    'America/Matamoros',
+    'America/Chihuahua',
+    'America/Ciudad_Juarez',
+    'America/Ojinaga',
+    'America/Mazatlan',
+    'America/Bahia_Banderas',
+    'America/Hermosillo',
+    'America/Tijuana',
+    'America/Santiago',
+    'America/Havana',
+    'America/Asuncion',
+    'Asia/Beirut',
+  ]
+  const MS_DIA = 24 * HORA
+  const llave = (t: number) => new Date(t).toISOString().slice(0, 10)
+
+  it.each(ZONAS)('🔴 %s, cada día de 2026: pegado al anterior, empieza y termina en SU fecha civil', zona => {
+    const fallas: string[] = []
+    for (let t = Date.UTC(2026, 0, 1); t < Date.UTC(2027, 0, 1); t += MS_DIA) {
+      const ahora = new Date(t + 12 * HORA) // las 12:00Z: en estas zonas (UTC−8 a UTC+3) siempre es ese mismo día civil
+      const v = nightlyReportWindows(ahora, zona, 'today')
+      const hoy = venueDayKey(ahora, zona)
+      const ayer = llave(Date.parse(`${hoy}T00:00:00.000Z`) - MS_DIA)
+      const haceSiete = llave(Date.parse(`${hoy}T00:00:00.000Z`) - 7 * MS_DIA)
+      const manana = llave(Date.parse(`${hoy}T00:00:00.000Z`) + MS_DIA)
+      const enZona = (d: Date) => venueDayKey(d, zona)
+      const masUno = (d: Date) => new Date(d.getTime() + 1)
+      const menosUno = (d: Date) => new Date(d.getTime() - 1)
+      const revisa = (cond: boolean, que: string) => {
+        if (!cond) fallas.push(`${hoy}: ${que}`)
+      }
+      revisa(v.previousDay.end.getTime() + 1 === v.reportDay.start.getTime(), 'el día anterior no termina 1 ms antes')
+      revisa(
+        enZona(v.reportDay.start) === hoy && enZona(menosUno(v.reportDay.start)) === ayer,
+        'el inicio no es el primer instante del día',
+      )
+      revisa(enZona(v.reportDay.end) === hoy && enZona(masUno(v.reportDay.end)) === manana, 'el fin no es el último instante del día')
+      revisa(
+        enZona(v.previousDay.start) === ayer && enZona(menosUno(v.previousDay.start)) !== ayer,
+        'el día anterior no empieza en su fecha',
+      )
+      revisa(
+        enZona(v.sameDayLastWeek.start) === haceSiete && enZona(menosUno(v.sameDayLastWeek.start)) !== haceSiete,
+        'la semana pasada no empieza en su fecha',
+      )
+      revisa(
+        enZona(v.sameDayLastWeek.end) === haceSiete && enZona(masUno(v.sameDayLastWeek.end)) !== haceSiete,
+        'la semana pasada no termina en su fecha',
+      )
+      revisa(enZona(v.reportDate) === hoy, 'la fecha del correo no es la del día')
+      // 'yesterday' desde cualquier instante de mañana reporta exactamente este mismo día.
+      const desdeManana = nightlyReportWindows(masUno(v.reportDay.end), zona, 'yesterday')
+      revisa(desdeManana.reportDay.start.getTime() === v.reportDay.start.getTime(), "'yesterday' no da el mismo inicio")
+      revisa(desdeManana.reportDay.end.getTime() === v.reportDay.end.getTime(), "'yesterday' no da el mismo fin")
+    }
+    expect(fallas).toEqual([])
+  })
+})

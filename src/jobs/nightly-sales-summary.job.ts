@@ -27,7 +27,7 @@ import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
 import { fromZonedTime } from 'date-fns-tz'
 import { zonaValida } from '../utils/datetime'
-import { venueCivilDate } from '../utils/venueDateKeys'
+import { venueCivilDate, venueDayKey } from '../utils/venueDateKeys'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
@@ -433,7 +433,12 @@ export class NightlySalesSummaryJob {
  * The old code formatted the venue's date and parsed «MM/DD/YYYY 00:00:00» back with `new Date`, which reads it in the
  * PROCESS zone: in production (UTC) a Mexico City «today» ran from 18:00 of the day before to 17:59. The day arithmetic
  * here is on the civil date (UTC calendar math, no hours), so a DST day lasts its real 23 or 25 hours and «last week»
- * lands on that day's own midnight. Each window is inclusive: 00:00:00.000 to 23:59:59.999 in the venue's zone.
+ * lands on that day's own midnight.
+ *
+ * A day starts at the first instant whose civil date in the zone is that day and ends 1 ms before the next one starts
+ * (inclusive window; 00:00:00.000 to 23:59:59.999 wherever midnight exists). Consecutive days are contiguous and never
+ * overlap in any IANA zone (Codex r1): where midnight does not exist (Santiago, Havana, Beirut) the day starts at the jump,
+ * and a repeated hour before midnight belongs only to the day it shows.
  */
 export function nightlyReportWindows(
   now: Date,
@@ -444,17 +449,37 @@ export function nightlyReportWindows(
   const hoy = venueCivilDate(now, tz)
   const llave = (offset: number) => new Date(Date.UTC(hoy.year, hoy.month - 1, hoy.day + offset)).toISOString().slice(0, 10)
   const dia = (offset: number): ReportWindow => ({
-    start: fromZonedTime(`${llave(offset)}T00:00:00.000`, tz),
-    end: fromZonedTime(`${llave(offset)}T23:59:59.999`, tz),
+    start: new Date(firstInstantOfDay(llave(offset), tz)),
+    end: new Date(firstInstantOfDay(llave(offset + 1), tz) - 1),
   })
   const base = day === 'today' ? 0 : -1
+  const reportDay = dia(base)
   return {
-    reportDay: dia(base),
+    reportDay,
     previousDay: dia(base - 1),
     sameDayLastWeek: dia(base - 7),
-    // The email prints it with toLocaleDateString(…, { timeZone: venue }): the venue's noon is always inside its day.
-    reportDate: fromZonedTime(`${llave(base)}T12:00:00.000`, tz),
+    // The email prints it with toLocaleDateString(…, { timeZone: venue }): the middle of the window is always inside its day.
+    reportDate: new Date(Math.floor((reportDay.start.getTime() + reportDay.end.getTime()) / 2)),
   }
+}
+
+/**
+ * The first instant (epoch ms) whose civil date in `tz` is `dayKey` (yyyy-mm-dd). `fromZonedTime` of a midnight that does
+ * not exist lands on the day before, and of a repeated hour it picks either occurrence, so its answer is only a starting
+ * point: if it is not the first instant of the day, binary-search the jump within ±12 h of it.
+ */
+function firstInstantOfDay(dayKey: string, tz: string): number {
+  const guess = fromZonedTime(`${dayKey}T00:00:00.000`, tz).getTime()
+  const civil = (t: number) => venueDayKey(new Date(t), tz)
+  if (civil(guess) === dayKey && civil(guess - 1) < dayKey) return guess
+  let before = guess - 12 * 3_600_000 // civil(before) < dayKey
+  let from = guess + 12 * 3_600_000 // civil(from) >= dayKey
+  while (from - before > 1) {
+    const mid = Math.floor((before + from) / 2)
+    if (civil(mid) < dayKey) before = mid
+    else from = mid
+  }
+  return from
 }
 
 /**
