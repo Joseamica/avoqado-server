@@ -3131,6 +3131,14 @@ Avoqado Dashboard
 
     const reportDateCapitalized = reportDateFormatted.charAt(0).toUpperCase() + reportDateFormatted.slice(1)
 
+    // D20: the venue's zone the way the time-zone database names it in Mexican Spanish («hora de Tijuana», «hora de Cancún»).
+    // The text body used to say «CST» by hand, false outside the central zone.
+    const venueZoneLabel =
+      new Intl.DateTimeFormat('es-MX', { timeZone: data.venueTimezone, timeZoneName: 'shortGeneric' })
+        .formatToParts(data.reportDate)
+        .find(p => p.type === 'timeZoneName')?.value ?? data.venueTimezone
+    const businessHours = data.businessHoursStart && data.businessHoursEnd ? ` ${data.businessHoursStart} - ${data.businessHoursEnd}` : ''
+
     // Calculate average order
     const avgOrder = data.metrics.transactionCount > 0 ? data.metrics.netSales / data.metrics.transactionCount : 0
 
@@ -3174,7 +3182,7 @@ Avoqado Dashboard
       ${
         data.businessHoursStart && data.businessHoursEnd
           ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
-        ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} (${data.venueTimezone})
+        ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} (${venueZoneLabel})
       </p>`
           : ''
       }
@@ -3386,7 +3394,7 @@ Avoqado Dashboard
     const text = `
 Resumen de ventas - ${data.venueName}
 ${reportDateCapitalized}
-${reportDateFormatted} ${data.businessHoursStart} - ${data.businessHoursEnd} CST
+${reportDateFormatted}${businessHours} (${venueZoneLabel})
 ${avisoCobrosQr ? `\nAVISO: ${avisoCobrosQr.queFallo} ${avisoCobrosQr.queHacer}\n` : ''}
 METRICAS CLAVE
 --------------
