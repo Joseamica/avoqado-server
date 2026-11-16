@@ -28,7 +28,9 @@ function catalogo(filas = CATALOGO) {
         ? where.OR.some((c: any) => c.id?.in.includes(p.id) || c.sku?.in.includes(p.sku))
         : where.sku
           ? where.sku.in.includes(p.sku)
-          : where.deletedAt === null && p.deletedAt === null,
+          : where.id
+            ? where.id.in.includes(p.id)
+            : where.deletedAt === null && p.deletedAt === null,
     )
     return r.slice(0, take)
   })
@@ -54,6 +56,20 @@ describe('ponerProductoEnCanales — marcar (true)', () => {
     expect(r).toEqual([{ linkId: 'l1', dentro: true }])
     expect(escritos()[0].where).toEqual({ id: 'l1', venueId: 'v1' })
     expect(escrito()).toEqual({ productoIds: ['p1', 'p2'], productos: ['LATTE', 'CAP'], productosRevisados: ['p9'] })
+  })
+
+  it('un id guardado que ya no es de ningún producto se quita sin error (el archivado se queda) y la bitácora lo nombra', async () => {
+    canales({ id: 'l1', config: { productoIds: ['p1', 'pX', 'pBorrado'], productos: ['LATTE', 'VIEJO'] } })
+    expect(await ponerProductoEnCanales('v1', 'p2', { l1: true }, 'u1')).toEqual([{ linkId: 'l1', dentro: true }])
+    expect(prisma.product.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'v1', id: { in: ['p1', 'pX', 'pBorrado'] } }, take: 3 }),
+    )
+    expect(escrito()).toEqual({ productoIds: ['p1', 'pX', 'p2'], productos: ['LATTE', 'VIEJO', 'CAP'], productosRevisados: [] })
+    expect((logAction as jest.Mock).mock.calls[0][0].data).toEqual({
+      productId: 'p2',
+      canales: { l1: true },
+      idsDescartados: { l1: ['pBorrado'] },
+    })
   })
 
   it('ya dentro ⇒ no escribe', async () => {
