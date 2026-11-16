@@ -11901,7 +11901,8 @@ router.get(
 router.get(
   '/venues/:venueId/discounts/applied',
   authenticateTokenMiddleware,
-  checkPermission('discounts:read'),
+  // Vive en Reportes del DASHBOARD («Descuentos»): el mismo permiso que los demás reportes y que la tool del MCP.
+  checkPermission('reports:read'),
   validateRequest(
     z.object({
       params: DiscountVenueParamsSchema,

@@ -32,9 +32,9 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('list_applied_discounts (read)', () => {
-  it('rechaza un negocio fuera de alcance o sin discounts:read, sin leer nada', async () => {
+  it('rechaza un negocio fuera de alcance o sin reports:read, sin leer nada', async () => {
     await expect(call({ venueId: 'foreign' })).rejects.toThrow('out of scope')
-    await expect(call({ venueId: 'no-perm' })).rejects.toThrow('discounts:read')
+    await expect(call({ venueId: 'no-perm' })).rejects.toThrow('reports:read')
     expect(mockListar).not.toHaveBeenCalled()
   })
 

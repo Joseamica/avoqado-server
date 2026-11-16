@@ -99,7 +99,7 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, from, to, reason, page, pageSize }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('discounts:read', venueId)
+      guard.requirePermission('reports:read', venueId) // mismo candado que el reporte «Descuentos» del dashboard
       try {
         const r = await listarDescuentosAplicados(venueId, { from, to, reason, page, pageSize })
         return text({
