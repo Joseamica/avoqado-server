@@ -3065,7 +3065,8 @@ Avoqado Dashboard
       }
       categoryBreakdown: Array<{
         name: string
-        itemsSold: number
+        /** null on a row that is not a category (free-amount sales, refunds): it has no items. */
+        itemsSold: number | null
         netSales: number
       }>
       orderSources: Array<{
@@ -3308,7 +3309,7 @@ Avoqado Dashboard
             cat => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">${cat.name}</td>
-          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${cat.itemsSold}</td>
+          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${cat.itemsSold ?? '—'}</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(cat.netSales)}</td>
         </tr>
         `,

@@ -72,12 +72,8 @@ interface VenueSalesSummaryData {
     avgOrder: number
     transactionCount: number
   }
-  // Category breakdown
-  categoryBreakdown: Array<{
-    name: string
-    itemsSold: number
-    netSales: number
-  }>
+  // Category breakdown (D21: Σ rows = metrics.netSales; rows that are not a category carry itemsSold null)
+  categoryBreakdown: CategoryRow[]
   // Order source breakdown
   orderSources: Array<{
     source: string
@@ -295,8 +291,13 @@ export class NightlySalesSummaryJob {
             timezone,
           })
 
-          // Get category breakdown
-          const categoryBreakdown = await getCategoryBreakdown(venue.id, reportDay.start, reportDay.end)
+          // Get category breakdown (D21: adds up to the headline net sales)
+          const categoryBreakdown = reconcileCategoryBreakdown(
+            await getCategoryBreakdown(venue.id, reportDay.start, reportDay.end),
+            todaySummary.summary.netSales ?? 0,
+            todaySummary.summary.refunds,
+            venue.id,
+          )
 
           // Get order sources breakdown
           const orderSources = await getOrderSourcesBreakdown(venue.id, reportDay.start, reportDay.end)
@@ -482,8 +483,53 @@ function firstInstantOfDay(dayKey: string, tz: string): number {
   return from
 }
 
+export type CategoryRow = { name: string; itemsSold: number | null; netSales: number }
+
+const CATEGORY_ROWS = 10
+
 /**
- * Get sales breakdown by category
+ * D21 (16-nov-2026): the email's «Desglose de ventas» adds up to the same email's net sales, to the cent.
+ *
+ * The categories are built from the order LINES, so a sale with no lines never reached them: the TPV quick charge
+ * (FAST-…, free amount) and a manual entry from the dashboard. Measured on av-db-25: 160 orders, $28,757.69 (Avoqado Full
+ * 27-oct: categories $446.00 against net sales $472.99, the 3 FAST orders). Square does the same with a custom amount:
+ * it lands in its «Uncategorized» bucket. Here it gets its own row, because «Sin categorizar» already means «product with
+ * no category».
+ *
+ * The rows: the top 10 categories, the rest folded into «Otras categorías» (the old LIMIT 10 dropped them), the day's
+ * refunds as a negative row (the headline subtracts them; they have no category), and what is left of the headline after
+ * all that as «Ventas sin producto». That remainder is, measured, sales with no lines (and Mindform's legacy QR payments,
+ * which the headline adds and carry no lines here either; in a demo venue with the IVA charged ON TOP, also that IVA, which
+ * the lines never include). A remainder below zero means lines worth MORE than their order
+ * (damaged rows, 2 in av-db-25): no negative row is invented, it is logged.
+ */
+export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: number, refunds: number, venueId?: string): CategoryRow[] {
+  const cents = (n: number) => Math.round(n * 100)
+  const rows: CategoryRow[] = categories.slice(0, CATEGORY_ROWS).map(c => ({ ...c, netSales: cents(c.netSales) / 100 }))
+  const rest = categories.slice(CATEGORY_ROWS)
+  if (rest.length > 0) {
+    rows.push({
+      name: 'Otras categorías',
+      itemsSold: rest.reduce((s, c) => s + (c.itemsSold ?? 0), 0),
+      netSales: rest.reduce((s, c) => s + cents(c.netSales), 0) / 100,
+    })
+  }
+  if (cents(refunds) > 0) rows.push({ name: 'Devoluciones', itemsSold: null, netSales: -cents(refunds) / 100 })
+  const remainder = cents(netSales) - rows.reduce((s, r) => s + cents(r.netSales), 0)
+  if (remainder > 0) rows.push({ name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: remainder / 100 })
+  else if (remainder < 0) {
+    logger.warn('⚠️ Desglose por categoría mayor que las ventas netas: renglones que valen más que su cuenta (data dañada)', {
+      venueId,
+      netSales,
+      excessCents: -remainder,
+    })
+  }
+  return rows
+}
+
+/**
+ * Get sales breakdown by category — every category, net desc (`reconcileCategoryBreakdown` folds the tail). Bounded by
+ * the venue's own categories (one row each).
  */
 export async function getCategoryBreakdown(
   venueId: string,
@@ -505,12 +551,14 @@ export async function getCategoryBreakdown(
     WHERE o."venueId" = ${venueId}
       AND o."createdAt" >= ${utcTs(startDate)}
       AND o."createdAt" <= ${utcTs(endDate)}
-      AND o.status NOT IN ('CANCELLED')
+      -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
+      -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
+      AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND ${sqlOrdenSinTarjetas('o.id')}
       AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY c.name
     ORDER BY net_sales DESC
-    LIMIT 10
   `
 
   return result.map(r => ({
