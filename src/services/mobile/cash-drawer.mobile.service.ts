@@ -5,7 +5,7 @@
  * Tracks open/close, pay-in, pay-out, and cash sales.
  */
 
-import { horaDentroDeLaCaja } from '@/services/shared/horaRealSinRed'
+import { horaDelMovimientoDeLaCola } from '@/services/shared/horaRealSinRed'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
@@ -271,6 +271,11 @@ interface PayInOutParams {
    * vida de su caja (`horaDentroDeLaCaja`, la misma regla que `/cash-drawer/sync`). Ausente o ilegible: la de hoy, como siempre.
    */
   createdAt?: string | number | null
+  /**
+   * Encargo 921513 (Codex r2): cuánto esperó el movimiento en la cola, en ms, medido con el reloj del aparato (`ahora − createdAt`).
+   * Con una edad creíble la hora es `llegada − edadMs` (`horaDelMovimientoDeLaCola`): el desfase del reloj se cancela solo.
+   */
+  edadMs?: unknown
 }
 
 /**
@@ -340,7 +345,11 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // llave (la cola siempre la manda): sin ella, la caja cerrada relee «el último movimiento» por hora y una fecha atrás lo confundiría.
   const horaDelAparato =
     localId && session.openedAt
-      ? horaDentroDeLaCaja(params.createdAt, { openedAt: session.openedAt, closedAt: session.closedAt ?? null }, new Date())
+      ? horaDelMovimientoDeLaCola(
+          { createdAt: params.createdAt, edadMs: params.edadMs },
+          { openedAt: session.openedAt, closedAt: session.closedAt ?? null },
+          new Date(),
+        )
       : undefined
   const row = {
     sessionId: session.id,
