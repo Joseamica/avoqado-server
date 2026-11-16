@@ -430,8 +430,9 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
       venueId,
       id,
       {
-        startsAt: new Date(startsAt),
-        endsAt: new Date(endsAt),
+        // Tal cual: una hora sin zona es hora del negocio y la convierte el servicio con la zona del venue.
+        startsAt,
+        endsAt,
         notificationChannel,
         customMessage,
       },

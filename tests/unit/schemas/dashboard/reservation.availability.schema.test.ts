@@ -113,6 +113,38 @@ describe('updateReservationBodySchema — rollback duration bridge', () => {
   })
 })
 
+describe('rescheduleBodySchema — la hora sin zona llega intacta al servicio (encargo e781ce)', () => {
+  it('conserva el texto sin zona del DASHBOARD (no lo convierte con la zona del proceso)', () => {
+    const parsed = rescheduleBodySchema.parse({ startsAt: '2026-11-12T15:00', endsAt: '2026-11-12T16:00' })
+    expect(parsed.startsAt).toBe('2026-11-12T15:00')
+    expect(parsed.endsAt).toBe('2026-11-12T16:00')
+  })
+
+  it('sigue aceptando el instante con Z de ANDROID e iOS', () => {
+    expect(rescheduleBodySchema.parse({ startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z' })).toMatchObject({
+      startsAt: '2026-11-12T21:00:00.000Z',
+    })
+  })
+
+  it('rechaza una hora que no es fecha, en español', () => {
+    const r = rescheduleBodySchema.safeParse({ startsAt: 'mañana', endsAt: '2026-11-12T16:00' })
+    expect(r.success).toBe(false)
+    expect(JSON.stringify((r as any).error.issues)).toContain('La fecha u hora no es válida')
+  })
+
+  it('rechaza un fin antes del inicio (dos horas sin zona)', () => {
+    const r = rescheduleBodySchema.safeParse({ startsAt: '2026-11-12T16:00', endsAt: '2026-11-12T15:00' })
+    expect(r.success).toBe(false)
+    expect(JSON.stringify((r as any).error.issues)).toContain('La fecha de fin debe ser posterior')
+  })
+
+  it('pide las dos horas', () => {
+    const r = rescheduleBodySchema.safeParse({ endsAt: '2026-11-12T16:00' })
+    expect(r.success).toBe(false)
+    expect(JSON.stringify((r as any).error.issues)).toContain('La nueva fecha de inicio es requerida')
+  })
+})
+
 describe.each([
   {
     name: 'availability',
