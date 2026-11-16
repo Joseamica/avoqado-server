@@ -41,6 +41,8 @@ function mkTx(row: Partial<any>, opts: { casCount?: number; rereadStatus?: strin
     ...row,
   }
   const tx: any = {
+    // Codex r5 #1: el candado de la fila al empezar.
+    $queryRaw: jest.fn(async () => []),
     reservation: {
       findFirst: jest.fn(async () => reservation),
       updateMany: jest.fn(async () => ({ count: opts.casCount ?? 1 })),

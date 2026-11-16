@@ -69,6 +69,7 @@ const MOTIVOS: Record<MotivoExcepcion, string> = {
   COACH_SIN_NIVEL: 'La coach no tiene nivel',
   SIN_TABLA: 'No hay tabla de pagos para esta clase',
   SIN_MONTO_PARA_ESE_CONTEO: 'Falta el monto para ese número de lugares',
+  GRUPO_POR_CONFIRMAR: 'Llegó una reserva de varios lugares: confirma cuántos llegaron con «Corregir conteo»',
 }
 /** Por qué existe cada diferencia, con las mismas palabras que el dashboard (QA bloque B, defecto 4). */
 function causaSinRegla(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongelado' | 'coachActualNombre'>): string | null {

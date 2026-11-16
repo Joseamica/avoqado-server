@@ -469,6 +469,7 @@ describe('D4 · undoNoShow', () => {
       at: NOW.toISOString(),
       by: 'staff-1',
       source: 'DASHBOARD',
+      method: 'STAFF',
       correctionOf: 'NO_SHOW',
       reason: 'sí vino, no tocó el kiosco',
     })

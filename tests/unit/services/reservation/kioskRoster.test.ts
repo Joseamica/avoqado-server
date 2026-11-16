@@ -91,10 +91,10 @@ describe('getKioskRoster', () => {
     await expect(getKioskRoster({ venueId: V, now })).resolves.toBeNull()
   })
 
-  it('devuelve la clase que empieza primero, «Nombre I.», lugar y llegada; nunca teléfono ni correo', async () => {
+  it('🔴 asistencia verificada: devuelve la clase que empieza primero y cuántas llegaron, SIN ningún nombre', async () => {
     prismaMock.reservation.findMany.mockResolvedValue([
       row(),
-      row({ id: 'r2', status: 'CONFIRMED', spotIds: [], customer: null, guestName: 'Luis Pérez Gómez' }),
+      row({ id: 'r2', status: 'CONFIRMED', spotIds: [], customer: null, guestName: 'Luis Pérez Gómez', partySize: 2 }),
       row({ id: 'r3', status: 'CONFIRMED', startsAt: new Date('2026-10-28T19:15:00.000Z'), classSessionId: 's2' }),
     ] as any)
 
@@ -102,12 +102,17 @@ describe('getKioskRoster', () => {
 
     expect(r!.classTitle).toBe('Yoga')
     expect(r!.staffFirstName).toBe('María')
-    expect(r!.people).toHaveLength(2)
-    expect(r!.people[0]).toEqual({ reservationId: 'r1', displayName: 'Ana R.', checkedIn: true, spotLabel: 'Tapete 4' })
-    expect(r!.people[1]).toEqual({ reservationId: 'r2', displayName: 'Luis P.', checkedIn: false, spotLabel: null })
+    // La lista para tocar se acabó (decisión del founder, 15-nov): el campo sigue, vacío, para las apps viejas.
+    expect(r!.people).toEqual([])
+    expect(r!.arrivedCount).toBe(1)
+    expect(r!.expectedCount).toBe(3) // r1 (1) + r2 (grupo de 2); r3 es otra clase
     expect(r!.closesAt).toEqual(new Date('2026-10-28T19:20:00.000Z'))
     expect(r!.closesInMs).toBe(20 * 60_000) // 19:10 + 10 min − 19:00
-    expect(JSON.stringify(r)).not.toMatch(/5512345678|a@x\.mx/)
+    expect(JSON.stringify(r)).not.toMatch(/Ana|Ruiz|Luis|5512345678|a@x\.mx/)
+    // Ni siquiera se leen los nombres de la base.
+    const select = prismaMock.reservation.findMany.mock.calls[0][0].select as any
+    expect(select.customer).toBeUndefined()
+    expect(select.guestName).toBeUndefined()
   })
 })
 
@@ -124,6 +129,8 @@ describe('kioskCheckInReservation', () => {
       actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' },
       source: 'KIOSK',
       now,
+      method: 'KIOSK_LIST',
+      byStaffId: null,
     })
   })
 
@@ -214,6 +221,8 @@ describe('kioskCheckInReservation', () => {
         source: 'KIOSK',
         now: later,
         arrivedAt: new Date(tappedAt),
+        method: 'KIOSK_LIST',
+        byStaffId: null,
       })
       expect(afterNoShowCorrection).toHaveBeenCalledWith('c1')
       expect(notifyNoShowNeedsReview).not.toHaveBeenCalled()

@@ -12,12 +12,19 @@
  * idempotencia en la base, el rastro y el pendiente con «Marcar resuelto». No abre cuenta (decisión 2 del plan).
  * `VALID_TRANSITIONS` no cambia: NO_SHOW → CHECKED_IN sólo existe aquí.
  */
-import { Prisma, PrismaClient } from '@prisma/client'
+import { Prisma, PrismaClient, ReservationCheckInMethod } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
 import { NO_SHOW_REFUND_REASON_PREFIX, RESERVATION_INCLUDE } from '@/services/dashboard/reservation.dashboard.service'
-import { activityActorFields, actorLabel, venueOrganizationId, type CheckInActor, type CheckInSource } from './checkIn.service'
+import {
+  activityActorFields,
+  actorLabel,
+  checkInMethodFor,
+  venueOrganizationId,
+  type CheckInActor,
+  type CheckInSource,
+} from './checkIn.service'
 import { ALIVE_ORDER_EXCLUDED_STATUSES } from './createOrderFromReservation'
 
 export const NO_SHOW_UNDO_NOT_APPLICABLE = 'NO_SHOW_UNDO_NOT_APPLICABLE'
@@ -211,6 +218,11 @@ export interface UndoNoShowCommand {
   /** Hora del toque del kiosco; a mano es la hora de la corrección (`now`). */
   arrivedAt?: Date
   reason?: string
+  /** Cómo se demostró la llegada (asistencia verificada). Sin él, `checkInMethodFor` lo deriva del `source`. */
+  method?: ReservationCheckInMethod
+  byStaffId?: string | null
+  /** Id de la operación de una cola sin red (ver `CheckInCommand.opId`). */
+  opId?: string
 }
 
 export interface UndoNoShowResult {
@@ -266,6 +278,7 @@ export async function undoNoShow(tx: Prisma.TransactionClient, cmd: UndoNoShowCo
   const paidOrder = await hasPaidOrder(tx, venueId, reservationId, current.classSessionId)
   const { plan, takes } = computePlan({ reservation: current, paidOrder, creditTxs, balances, now })
 
+  const metodo = checkInMethodFor(cmd)
   const entries = Array.isArray(current.statusLog) ? (current.statusLog as Prisma.JsonArray) : []
   const statusLog = [
     ...entries,
@@ -274,6 +287,8 @@ export async function undoNoShow(tx: Prisma.TransactionClient, cmd: UndoNoShowCo
       at: now.toISOString(),
       by: actorLabel(actor),
       source,
+      method: metodo.checkInMethod,
+      ...(cmd.opId ? { opId: cmd.opId } : {}),
       correctionOf: 'NO_SHOW',
       ...(cmd.reason ? { reason: cmd.reason } : {}),
     },
@@ -285,6 +300,8 @@ export async function undoNoShow(tx: Prisma.TransactionClient, cmd: UndoNoShowCo
       status: 'CHECKED_IN',
       noShowAt: null,
       checkedInAt: cmd.arrivedAt ?? now,
+      checkInMethod: metodo.checkInMethod,
+      checkedInByStaffId: metodo.checkedInByStaffId,
       statusLog,
       ...(plan.clearFee ? { noShowFeeAmount: null } : {}),
       ...(plan.restoreDeposit ? { depositStatus: 'PAID' as const } : {}),
@@ -347,6 +364,7 @@ export async function undoNoShow(tx: Prisma.TransactionClient, cmd: UndoNoShowCo
         to: 'CHECKED_IN',
         confirmationCode: current.confirmationCode,
         source,
+        method: metodo.checkInMethod,
         reason: cmd.reason ?? null,
         correctionId: correction.id,
         ...plan,

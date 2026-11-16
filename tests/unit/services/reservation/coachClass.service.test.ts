@@ -10,7 +10,14 @@ describe('getMyClassNow — socios de pase', () => {
       capacity: 10,
       product: { name: 'Barre', layoutConfig: null },
       reservations: [
-        { id: 'r1', status: 'CONFIRMED', spotIds: [], customer: { firstName: 'Ana', lastName: 'Gómez' }, guestName: null, aggregatorBooking: { provider: 'TOTALPASS' } },
+        {
+          id: 'r1',
+          status: 'CONFIRMED',
+          spotIds: [],
+          customer: { firstName: 'Ana', lastName: 'Gómez' },
+          guestName: null,
+          aggregatorBooking: { provider: 'TOTALPASS' },
+        },
         { id: 'r2', status: 'CHECKED_IN', spotIds: [], customer: null, guestName: 'Luis Pérez', aggregatorBooking: null },
       ],
     } as any)

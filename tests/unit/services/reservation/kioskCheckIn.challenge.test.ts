@@ -20,9 +20,28 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
   const now = new Date('2026-08-24T18:00:00Z')
   const future = new Date('2026-08-24T18:05:00Z')
 
+  // Asistencia verificada (Codex r2 #1): el reto viejo también exige una sesión que probó su contacto.
+  const SES = { tipo: 'SESION', contactos: [{ tipo: 'PHONE' as const, valor: '+525512345678', metodo: 'WHATSAPP' as const, probadoEn: 1 }] }
+
   beforeEach(() => {
     jest.clearAllMocks()
     ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+  })
+
+  it('🔴 Codex r2 #1: una sesión sin contacto probado (contraseña vieja) no consume el reto', async () => {
+    const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
+    await expect(
+      consumeKioskCheckInChallenge({
+        sesion: { tipo: 'SESION', contactos: [] },
+        venueId: 'venue-1',
+        challengeId: 'ch-1',
+        secret: 'abc',
+        customerId: 'cust-1',
+        now,
+      }),
+    ).rejects.toMatchObject({ statusCode: 401, code: 'CHECK_IN_NEEDS_CODE' })
+    expect(prismaMock.kioskCheckInChallenge.findFirst).not.toHaveBeenCalled()
   })
 
   describe('crearlo', () => {
@@ -103,7 +122,7 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
       const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
       await expect(
-        consumeKioskCheckInChallenge({ venueId: 'venue-1', challengeId: 'ch-1', secret: 'no-es', customerId: 'cust-1', now }),
+        consumeKioskCheckInChallenge({ sesion: SES, venueId: 'venue-1', challengeId: 'ch-1', secret: 'no-es', customerId: 'cust-1', now }),
       ).rejects.toMatchObject({ statusCode: 404, code: 'CHECK_IN_NOT_FOUND' })
     })
 
@@ -115,7 +134,7 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
       const { consumeKioskCheckInChallenge, __hashSecretForTest } = await import('@/services/reservation/kioskCheckIn.service')
       await expect(
-        consumeKioskCheckInChallenge({ venueId: 'venue-1', challengeId: 'ch-1', secret: 'abc', customerId: 'cust-1', now }),
+        consumeKioskCheckInChallenge({ sesion: SES, venueId: 'venue-1', challengeId: 'ch-1', secret: 'abc', customerId: 'cust-1', now }),
       ).rejects.toMatchObject({ statusCode: 410, code: 'CHECK_IN_CHALLENGE_EXPIRED' })
       expect(typeof __hashSecretForTest).toBe('function')
     })
@@ -130,7 +149,7 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
       const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
       await expect(
-        consumeKioskCheckInChallenge({ venueId: 'venue-1', challengeId: 'ch-1', secret: 'abc', customerId: 'OTRA', now }),
+        consumeKioskCheckInChallenge({ sesion: SES, venueId: 'venue-1', challengeId: 'ch-1', secret: 'abc', customerId: 'OTRA', now }),
       ).rejects.toMatchObject({ statusCode: 409, code: 'CHECK_IN_ALREADY_CLAIMED' })
     })
 
@@ -145,6 +164,7 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
       const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
       const out = await consumeKioskCheckInChallenge({
+        sesion: SES,
         venueId: 'venue-1',
         challengeId: 'ch-1',
         secret: 'abc',
