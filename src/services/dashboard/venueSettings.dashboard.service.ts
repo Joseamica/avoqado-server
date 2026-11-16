@@ -140,7 +140,7 @@ export async function updateVenueSettings(
 
   // Encargo f998c8: «Pedir motivo en los descuentos» + la lista del negocio. Se valida contra lo guardado (no se prende con la lista
   // vacía; prendido no se quita el último motivo) y la lista se guarda limpia (recortada, sin vacíos ni repetidos). Codex r2 #1: se
-  // vuelve a validar con la fila BLOQUEADA en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
+  // vuelve a validar con el candado del negocio en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
   // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
   const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
   if (tocaMotivos) {
@@ -305,12 +305,13 @@ export async function updateVenueSettings(
 }
 
 /**
- * Encargo f998c8 (Codex r2 #1): bloquea la fila del negocio (`FOR UPDATE`) y vuelve a validar el cambio YA normalizado contra lo que
- * hay ahora. Sin fila no hay qué bloquear, y tampoco hay lista que vaciar: la combinación peligrosa (prendido sin motivos) necesita
- * una fila con motivos. Lanza el mismo 400 en español que la primera validación.
+ * Encargo f998c8 (Codex r2 #1 y r3 #1): toma un candado por negocio (`pg_advisory_xact_lock`) y vuelve a validar el cambio YA
+ * normalizado contra lo que hay ahora. El candado no depende de que exista la fila: con `FOR UPDATE`, dos primeros guardados al
+ * mismo tiempo (sin fila) no se esperaban y podían dejar «Pedir motivo» prendido con la lista vacía. Lanza el mismo 400 en español
+ * que la primera validación.
  */
 async function revalidarMotivosConCandado(tx: Prisma.TransactionClient, venueId: string, updates: Prisma.VenueSettingsUpdateInput) {
-  await tx.$queryRaw`SELECT 1 FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`motivos-de-descuento:${venueId}`}, 0))::text`
   const ahora = await tx.venueSettings.findUnique({
     where: { venueId },
     select: { discountReasonRequired: true, discountReasons: true },

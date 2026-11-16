@@ -91,7 +91,7 @@ describe('motivo de descuentos: PUT', () => {
     await expect(updateVenueSettings('venue-1', { discountReasons: ['Error', 'error'] } as any, 'staff-1')).rejects.toThrow(/repetido/)
   })
 
-  it('Codex r2 #1: valida otra vez con la fila BLOQUEADA en la transacción que escribe (dos administradores a la vez)', async () => {
+  it('Codex r2 #1: valida otra vez con el candado del negocio en la transacción que escribe (dos administradores a la vez)', async () => {
     // Primera lectura: switch apagado con un motivo (quitarlo pasa). Dentro de la transacción, otro administrador ya lo prendió.
     let lecturas = 0
     db.venueSettings.findUnique.mockImplementation(async () => {
@@ -102,7 +102,22 @@ describe('motivo de descuentos: PUT', () => {
     })
     await expect(updateVenueSettings('venue-1', { discountReasons: [] } as any, 'staff-1')).rejects.toThrow(/apaga/)
     expect(db.$queryRaw).toHaveBeenCalled()
-    expect(String(db.$queryRaw.mock.calls[0][0].join('?'))).toMatch(/FOR UPDATE/)
+    expect(String(db.$queryRaw.mock.calls[0][0].join('?'))).toMatch(/pg_advisory_xact_lock/)
+    expect(db.$queryRaw.mock.calls[0][1]).toBe('motivos-de-descuento:venue-1')
+    expect(db.venueSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('Codex r3 #1: sin fila, el candado es del negocio (no de la fila) y la segunda petición ve lo que creó la primera', async () => {
+    // Primera lectura: el negocio aún no tiene ajustes (quitar todo pasa). Ya con el candado, el otro administrador creó la fila
+    // prendida con un motivo: vaciar la lista tiene que ser 400. Con `FOR UPDATE` no había fila que esperar.
+    let lecturas = 0
+    db.venueSettings.findUnique.mockImplementation(async () => {
+      lecturas += 1
+      return lecturas === 1 ? null : { id: 's', discountReasonRequired: true, discountReasons: ['A'] }
+    })
+    await expect(updateVenueSettings('venue-1', { discountReasons: [] } as any, 'staff-1')).rejects.toThrow(/apaga/)
+    expect(String(db.$queryRaw.mock.calls[0][0].join('?'))).not.toMatch(/FOR UPDATE/)
+    expect(String(db.$queryRaw.mock.calls[0][0].join('?'))).toMatch(/pg_advisory_xact_lock/)
     expect(db.venueSettings.upsert).not.toHaveBeenCalled()
   })
 
