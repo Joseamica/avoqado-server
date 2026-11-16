@@ -58,4 +58,3 @@ export async function metodoDeLaSesion(args: {
     LIMIT 1`
   return filas[0] ? { method: 'STAFF', byStaffId: filas[0].staffId } : { method: 'QR' }
 }
-
