@@ -91,6 +91,13 @@ describe('ingreso y retiro sin red — la hora real del movimiento', () => {
     expect(guardada).toBeLessThanOrEqual(Date.now() - 5 * 60_000)
   })
 
+  it('Codex r5: la espera se resta de la llegada que tomó el controlador al ENTRAR, no de la hora tras las consultas', async () => {
+    caja({ status: 'OPEN', closedAt: null })
+    const llegada = new Date('2026-11-12T02:11:42.000Z')
+    await payOut(retiro({ edadMs: 8 * 60_000 + 42_000, llegada }))
+    expect(guardadas[0].createdAt).toEqual(new Date(VEINTE_03))
+  })
+
   it('regresión: sin hora (app vieja), el movimiento no lleva createdAt, como siempre', async () => {
     caja({ status: 'OPEN', closedAt: null })
     await payOut(retiro())
