@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, crearMundo, Mundo, TZ } from './_mundo'
+import { activar } from './_ventas'
 
 /**
  * Asistencia verificada (Mindform, 16-nov-2026, spec D-E): «sólo quien llegó» se paga por las llegadas, y cada clase
@@ -38,6 +39,8 @@ const valorar = async (claseId: string) =>
 
 beforeAll(async () => {
   m = await crearMundo('asistencia')
+  // Pago al personal activado (con su sede) para poder leer el reporte del periodo como el dueño.
+  await activar(m, { desde: '2026-11-01', propinasDesde: null })
 })
 afterAll(async () => {
   await borrarMundo(m)
@@ -58,6 +61,7 @@ describe('«Sólo quien llegó» con desglose por método', () => {
         { status: 'CHECKED_IN', checkInMethod: 'PHONE' },
         { status: 'CHECKED_IN', checkInMethod: 'STAFF', checkedInByStaffId: m.owner },
         { status: 'CHECKED_IN' }, // antes del 16-nov: sin método
+        { status: 'CHECKED_IN', checkInMethod: 'KIOSK_LIST', checkedInByStaffId: m.sofia },
         { status: 'CONFIRMED' }, // reservó y no llegó
         { status: 'NO_SHOW' },
       ],
@@ -65,9 +69,19 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     const v = await valorar(id)
     expect(v.estado).toBe('OK')
     expect(v.countMode).toBe('ATTENDED')
-    expect(v.conteo).toBe(5)
-    expect(new Prisma.Decimal(v.monto!).toNumber()).toBe(500)
-    expect(v.llegadas).toEqual({ qr: 2, phone: 1, staff: 1, list: 0, pass: 0, sinMetodo: 1, aMano: ['Owner QA'], corregidoA: null })
+    expect(v.conteo).toBe(6)
+    expect(new Prisma.Decimal(v.monto!).toNumber()).toBe(600)
+    expect(v.llegadas).toEqual({
+      qr: 2,
+      phone: 1,
+      staff: 1,
+      list: 1,
+      pass: 0,
+      sinMetodo: 1,
+      aMano: ['Owner QA'],
+      desdeLaLista: ['Sofia QA'],
+      corregidoA: null,
+    })
   })
 
   it('🔴 un grupo de 3 que llegó queda «por confirmar» y no se paga solo (fase 0b)', async () => {
@@ -113,6 +127,13 @@ describe('«Sólo quien llegó» con desglose por método', () => {
     })
     const ana = filas.find(f => f.staffId === m.ana)!
     // Sólo las clases OK: la del grupo por confirmar no entra al resumen.
-    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 0, pass: 0, sinMetodo: 1 })
+    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
+  })
+
+  it('Codex r3 #6: el reporte del periodo dice, por coach, cómo llegaron sus lugares', async () => {
+    const { reportePeriodo } = await import('@/services/dashboard/staffPay/reporte.service')
+    const r = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-11-15', offset: 0, limit: 50 })
+    const ana = r.personas.items.find(i => i.staffId === m.ana) as any
+    expect(ana.llegadas).toEqual({ qr: 2, phone: 4, staff: 1, list: 1, pass: 0, sinMetodo: 1 })
   })
 })

@@ -107,12 +107,14 @@ export function textoDeLlegadas(llegadas: Prisma.JsonValue | null | undefined): 
   if (!llegadas || typeof llegadas !== 'object' || Array.isArray(llegadas)) return null
   const l = llegadas as Record<string, unknown>
   const n = (k: string) => (typeof l[k] === 'number' ? (l[k] as number) : 0)
-  const aMano = Array.isArray(l.aMano) ? (l.aMano as unknown[]).filter((x): x is string => typeof x === 'string') : []
+  const nombres = (k: string) => (Array.isArray(l[k]) ? (l[k] as unknown[]).filter((x): x is string => typeof x === 'string') : [])
+  const aMano = nombres('aMano')
+  const lista = nombres('desdeLaLista')
   const partes = [
     n('qr') ? `${n('qr')} con celular` : null,
     n('phone') ? `${n('phone')} con teléfono` : null,
     n('staff') ? `${n('staff')} a mano${aMano.length ? ` por ${aMano.join(', ')}` : ''}` : null,
-    n('list') ? `${n('list')} desde la lista` : null,
+    n('list') ? `${n('list')} desde la lista${lista.length ? ` (sesión de ${lista.join(', ')})` : ''}` : null,
     n('pass') ? `${n('pass')} con pase` : null,
     n('sinMetodo') ? `${n('sinMetodo')} sin método` : null,
   ].filter(Boolean)

@@ -176,6 +176,7 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
     throw new ConflictError(`La reservacion esta en estado ${current.status} y ya no admite check-in`, RESERVATION_NOT_CHECKINABLE)
   }
   if (decision === 'ALREADY') {
+    await anotarOpIdSiYaEstaba(tx, cmd)
     return finish(tx, cmd, 'ALREADY_CHECKED_IN')
   }
 
@@ -223,7 +224,10 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
   })
   if (cas.count === 0) {
     const reread = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, select: { status: true } })
-    if (reread.status === 'CHECKED_IN') return finish(tx, cmd, 'ALREADY_CHECKED_IN')
+    if (reread.status === 'CHECKED_IN') {
+      await anotarOpIdSiYaEstaba(tx, cmd)
+      return finish(tx, cmd, 'ALREADY_CHECKED_IN')
+    }
     throw new ConflictError(`La reservacion cambio a ${reread.status} y ya no admite check-in`, RESERVATION_NOT_CHECKINABLE)
   }
 
@@ -252,6 +256,21 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
 
   logger.info(`✅ [CHECK_IN] ${current.confirmationCode} ${current.status} → CHECKED_IN source=${cmd.source} by=${actorLabel(cmd.actor)}`)
   return finish(tx, cmd, 'CHECKED_IN')
+}
+
+/**
+ * Codex r2 #3 y r3 #1 (pasada completa de la familia): CADA «ya estaba» de una operación de cola deja su `opId` en la historia,
+ * sin cambiar el estado: si su respuesta se pierde y alguien deshace la llegada, el reintento la reconoce y no la vuelve a
+ * marcar. Cubre los dos caminos: ya llegada al leer, y el perdedor del CAS. En la MISMA transacción, una sola sentencia.
+ */
+async function anotarOpIdSiYaEstaba(tx: Prisma.TransactionClient, cmd: CheckInCommand): Promise<void> {
+  if (!cmd.opId) return
+  const entrada = JSON.stringify([
+    { status: 'CHECKED_IN', at: cmd.now.toISOString(), by: actorLabel(cmd.actor), source: cmd.source, opId: cmd.opId, repetida: true },
+  ])
+  await tx.$executeRaw`
+    UPDATE "Reservation" SET "statusLog" = COALESCE("statusLog", '[]'::jsonb) || ${entrada}::jsonb
+    WHERE "id" = ${cmd.reservationId} AND "venueId" = ${cmd.venueId} AND "status" = 'CHECKED_IN'`
 }
 
 async function finish(tx: Prisma.TransactionClient, cmd: CheckInCommand, outcome: CheckInResult['outcome']): Promise<CheckInResult> {

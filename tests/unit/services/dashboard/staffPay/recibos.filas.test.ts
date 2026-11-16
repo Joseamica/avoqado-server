@@ -220,6 +220,11 @@ describe('conceptoDe — asistencia verificada: la clase dice cómo llegaron (16
       'Reformer · llegadas registradas: 3 con teléfono · pago corregido a mano a 1 lugar',
     )
   })
+  it('Codex r3 #7: la lista de una app vieja dice con la sesión de quién se tocó', () => {
+    expect(conceptoDe(clase({ qr: 0, phone: 0, staff: 0, list: 2, pass: 0, sinMetodo: 0, aMano: [], desdeLaLista: ['Ana P.'] }))).toBe(
+      'Reformer · 2 desde la lista (sesión de Ana P.)',
+    )
+  })
   it('sin desglose (quien reservó, o una foto de antes) queda como siempre', () => {
     expect(conceptoDe(clase(null))).toBe('Reformer')
   })

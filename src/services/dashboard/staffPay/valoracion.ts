@@ -17,14 +17,16 @@ export interface LlegadasPorMetodo {
   list: number
   pass: number
   sinMetodo: number
-  /** Quiénes marcaron a mano o desde la lista de una app vieja, para decir «a mano por Ana P.». */
+  /** Quiénes marcaron a mano, para decir «a mano por Ana P.». */
   aMano: string[]
+  /** Con la sesión de quién se tocó la lista de una app vieja (Codex r3 #7). */
+  desdeLaLista: string[]
   /** «Corregir conteo» de la clase (Codex r2 #6): el pago usa este número; el desglose sigue diciendo lo registrado. */
   corregidoA: number | null
 }
 
 /** Totales de llegadas de una persona en el periodo (Codex r2 #7), sólo de sus clases en «sólo quien llegó». */
-export type LlegadasDePersona = Omit<LlegadasPorMetodo, 'aMano' | 'corregidoA'>
+export type LlegadasDePersona = Omit<LlegadasPorMetodo, 'aMano' | 'desdeLaLista' | 'corregidoA'>
 type Db = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 /** Tope de horas de las dos reglas de clase: el CHECK de `ServicePayTableVersion` (spec fase 3 §7.3). */
@@ -270,7 +272,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              CASE WHEN r0.cancelada_tarde THEN 0 ELSE cnt.n END AS conteo_calculado,
              CASE WHEN r0.cancelada_tarde THEN 0 ELSE COALESCE(r0."payCountOverride", cnt.n) END AS conteo,
              lleg.qr AS lleg_qr, lleg.phone AS lleg_phone, lleg.staff AS lleg_staff, lleg.list AS lleg_list, lleg.pass AS lleg_pass,
-             lleg.sin_metodo AS lleg_sin_metodo, lleg.a_mano AS lleg_a_mano,
+             lleg.sin_metodo AS lleg_sin_metodo, lleg.a_mano AS lleg_a_mano, lleg.a_lista AS lleg_a_lista,
              -- Fase 0b (Codex §12.2-5): en «sólo quien llegó» el check-in es por reserva; un grupo de 3 donde llegó 1 contaría 3.
              -- Hasta que alguien corrija el conteo (o acuerde el monto), la clase no se paga sola.
              (r0."countMode" = 'ATTENDED' AND lleg.grupo AND r0."payCountOverride" IS NULL AND r0."payAmountOverride" IS NULL
@@ -298,9 +300,15 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                COALESCE(bool_or(r."partySize" > 1), false) AS grupo,
                COALESCE(
                  array_agg(DISTINCT NULLIF(TRIM(CONCAT(sm."firstName", ' ', sm."lastName")), ''))
-                   FILTER (WHERE r."checkInMethod" IN ('STAFF', 'KIOSK_LIST') AND sm.id IS NOT NULL),
+                   FILTER (WHERE r."checkInMethod" = 'STAFF' AND sm.id IS NOT NULL),
                  ARRAY[]::text[]
-               ) AS a_mano
+               ) AS a_mano,
+               -- Codex r3 #7: la lista de una app vieja también dice con la sesión de quién se marcó.
+               COALESCE(
+                 array_agg(DISTINCT NULLIF(TRIM(CONCAT(sm."firstName", ' ', sm."lastName")), ''))
+                   FILTER (WHERE r."checkInMethod" = 'KIOSK_LIST' AND sm.id IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS a_lista
         FROM "Reservation" r
         LEFT JOIN "Staff" sm ON sm.id = r."checkedInByStaffId"
         WHERE r."venueId" = r0."venueId" AND r."classSessionId" = r0.id AND r.status IN ('CHECKED_IN', 'COMPLETED')
@@ -363,6 +371,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              END AS regla,
              jsonb_build_object('qr', cc.lleg_qr, 'phone', cc.lleg_phone, 'staff', cc.lleg_staff, 'list', cc.lleg_list,
                                 'pass', cc.lleg_pass, 'sinMetodo', cc.lleg_sin_metodo, 'aMano', to_jsonb(cc.lleg_a_mano),
+                                'desdeLaLista', to_jsonb(cc.lleg_a_lista),
                                 'corregidoA', cc."payCountOverride") AS llegadas
       FROM con_conteo cc
       JOIN "Product" p ON p.id = cc."productId"

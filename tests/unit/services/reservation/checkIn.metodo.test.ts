@@ -46,6 +46,7 @@ function mkTx(row: Partial<any> = {}) {
     order: { findFirst: jest.fn(async () => null), findMany: jest.fn(async () => []) },
     reservationNoShowCorrection: { findUnique: jest.fn(async () => null) },
     payment: { findFirst: jest.fn(async () => null) },
+    $executeRaw: jest.fn(async () => 1),
   } as any
 }
 
@@ -126,5 +127,45 @@ describe('opId de una cola: nunca se vuelve a aplicar (Codex r2 #3)', () => {
     })
     expect(out.outcome).toBe('ALREADY_CHECKED_IN')
     expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('opId en CADA «ya estaba» del escritor central (Codex r3 #1)', () => {
+  it('ya llegada al leer ⇒ deja el opId sin cambiar el estado', async () => {
+    const tx = mkTx({ status: 'CHECKED_IN', checkInMethod: 'QR' })
+    await checkInReservation(tx, {
+      reservationId: 'res-1',
+      venueId: 'v1',
+      actor: KIOSK,
+      source: 'KIOSK',
+      now: NOW,
+      method: 'PHONE',
+      opId: 'fila-7',
+    })
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1)
+    const [pedazos, ...valores] = tx.$executeRaw.mock.calls[0]
+    expect((pedazos as string[]).join('?')).toMatch(/"status" = 'CHECKED_IN'/)
+    expect(String(valores[0])).toContain('"opId":"fila-7"')
+    expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+  })
+  it('perdió el CAS contra otro check-in ⇒ también deja el opId', async () => {
+    const tx = mkTx({ status: 'CONFIRMED' })
+    tx.reservation.updateMany.mockResolvedValue({ count: 0 })
+    tx.reservation.findUniqueOrThrow.mockResolvedValue({ status: 'CHECKED_IN' })
+    await checkInReservation(tx, {
+      reservationId: 'res-1',
+      venueId: 'v1',
+      actor: KIOSK,
+      source: 'KIOSK',
+      now: NOW,
+      method: 'PHONE',
+      opId: 'fila-8',
+    })
+    expect(String(tx.$executeRaw.mock.calls[0][1])).toContain('"opId":"fila-8"')
+  })
+  it('sin opId (en vivo) no escribe nada', async () => {
+    const tx = mkTx({ status: 'CHECKED_IN' })
+    await checkInReservation(tx, { reservationId: 'res-1', venueId: 'v1', actor: HUMAN, source: 'DASHBOARD', now: NOW })
+    expect(tx.$executeRaw).not.toHaveBeenCalled()
   })
 })
