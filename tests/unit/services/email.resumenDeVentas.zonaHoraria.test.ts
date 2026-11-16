@@ -44,10 +44,13 @@ describe('D20 · el correo diario dice la zona del negocio, no «CST»', () => {
     ['America/Tijuana', 'hora de Tijuana'],
     ['America/Cancun', 'hora de Cancún'],
     ['America/Mexico_City', 'hora de Ciudad de México'],
-  ])('🔴 %s: el texto dice «%s» y nunca «CST»', async (zona, legible) => {
-    const { text } = await cuerpos(zona)
+  ])('🔴 %s: el texto y el HTML dicen «%s» y nunca «CST»', async (zona, legible) => {
+    const { text, html } = await cuerpos(zona)
     expect(text).toContain(`(${legible})`)
     expect(text).not.toMatch(/\bCST\b/)
+    // Codex r1 #4: el job manda el horario vacío, y sin horario el HTML no decía ninguna zona.
+    expect(html).toContain(`(${legible})`)
+    expect(html).not.toMatch(/\bCST\b/)
   })
 
   it('🔴 con horario, el HTML dice la zona legible, no el identificador «America/Tijuana»', async () => {
