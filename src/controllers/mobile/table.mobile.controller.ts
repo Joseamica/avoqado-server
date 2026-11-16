@@ -61,6 +61,9 @@ export async function getTables(req: Request, res: Response): Promise<void> {
         canManageAllTables,
       },
       ...(versions ? { tablesVersion: versions.tablesVersion, floorPlanVersion: versions.floorPlanVersion } : {}),
+      // D8 (hz:033d44ca:D8): este servidor entiende `OPEN_TABLE.visitaNueva` (la cuenta nueva de una mesa soltada sin red nunca se mete
+      // en otra cuenta de la mesa). Sin esto, ANDROID no suelta la mesa cobrada sin red (un servidor viejo podría juntarlas).
+      capabilities: { openTableNewVisit: true },
     })
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error getting tables: ${error.message}`)

@@ -264,6 +264,13 @@ export async function assignTable(
    * el reducer la rechazaba (TABLE_OWNED_BY_OTHER) y el efectivo ya cobrado sin red quedaba en cuarentena. Sin él, como D51.
    */
   soloCuentasDe?: string,
+  /**
+   * D8 (hz:033d44ca:D8, 16-nov-2026): sólo el reducer `OPEN_TABLE`, con `abiertaSinRedEn`. El aparato soltó sin red esta mesa tras cobrar
+   * su cuenta y abrió OTRA visita, POR SU COLA (nunca intentó abrirla en línea: no hay una apertura perdida que unir). No se adopta
+   * NINGUNA cuenta viva de la mesa (la anterior que quedó debiendo, una separada de ella, la de otra caja): la nueva nace junto a ellas,
+   * sin soltarlas ni moverles el puntero, con la nota de D51. Sin él, como D51/D71.
+   */
+  visitaNueva?: boolean,
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -321,8 +328,10 @@ export async function assignTable(
     // D71: con la propiedad de mesa, además, sólo lo de ESTE mesero. Una cuenta sin mesero tampoco (Codex r2 #1): su apertura en línea
     // perdida nació a su nombre (`servedById: staffId`, abajo), así que una sin mesero no es suya y absorbería su venta.
     const delMesero = (o: { servedById: string | null }) => !soloCuentasDe || o.servedById === soloCuentasDe
+    // D8: una visita nueva declarada (sólo con la hora sin red) no adopta nada.
+    const sinAdoptar = !!visitaNueva && !!adoptarHasta
     const adoptable = (o: { createdAt: Date; servedById: string | null }) =>
-      delMesero(o) && (!adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime()))
+      !sinAdoptar && delMesero(o) && (!adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime()))
 
     // If table already has an active order, return it
     const punteroVivo =
@@ -344,13 +353,14 @@ export async function assignTable(
     }
 
     let vivas: typeof scope.orders = []
-    if (table.status === 'OCCUPIED') {
+    // D8: la visita nueva tampoco suelta de la mesa una cuenta viva aunque la mesa no diga OCUPADA: queda junto a ella.
+    if (table.status === 'OCCUPIED' || sinAdoptar) {
       vivas = scope.orders
         .filter(o => o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status) && o.paymentStatus !== 'PAID')
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       const candidate = vivas[0]
       const sibling =
-        candidate && mesaQuieta
+        candidate && mesaQuieta && !sinAdoptar
           ? await tx.order.findFirst({
               where: {
                 // D51: con la hora, la más antigua que se PUEDE adoptar (la misma regla que `adoptable`).
