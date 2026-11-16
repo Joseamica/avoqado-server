@@ -9,7 +9,7 @@ import { borrarMundo, crearMundo, Mundo } from './_mundo'
 let m: Mundo
 const TEL = '+525511112222'
 
-async function reserva(minutosDesdeAhora: number) {
+async function reserva(minutosDesdeAhora: number, guestPhone: string = TEL) {
   const startsAt = new Date(Date.now() + minutosDesdeAhora * 60_000)
   const endsAt = new Date(startsAt.getTime() + 50 * 60_000)
   return prisma.reservation.create({
@@ -23,7 +23,7 @@ async function reserva(minutosDesdeAhora: number) {
       blockedEndsAt: endsAt,
       duration: 50,
       guestName: 'Ana Ruiz',
-      guestPhone: TEL,
+      guestPhone,
       confirmedAt: new Date(),
     },
   })
@@ -80,5 +80,16 @@ describe('Recibo idempotente de la cola del teléfono', () => {
     await prisma.reservation.update({ where: { id: r.id }, data: { status: 'CHECKED_IN', checkInMethod: 'QR' } })
     expect((await llegada(`${m.key}-op-3`)).outcome).toBe('ALREADY_CHECKED_IN')
     expect(await prisma.kioskCheckInOp.findUnique({ where: { opId: `${m.key}-op-3` } })).toMatchObject({ reservationId: r.id })
+  })
+
+  // D4: contra Postgres de verdad, porque el prefiltro es SQL (los dígitos sin espacios) y `phonesMatch` confirma la lada.
+  it('D4 · el teléfono guardado con espacios se encuentra; otra lada con los mismos 10 dígitos NO', async () => {
+    await prisma.reservation.deleteMany({ where: { venueId: m.venueId } })
+    const conEspacios = await reserva(5, '55 1111 2222')
+    const tecleado = (identifier: string) =>
+      checkInByIdentifier({ venueId: m.venueId, terminalId: null, stationKey: 'B', identifier, now: new Date() })
+    await expect(tecleado('+15511112222')).rejects.toMatchObject({ statusCode: 404 })
+    expect((await prisma.reservation.findUniqueOrThrow({ where: { id: conEspacios.id } })).status).toBe('CONFIRMED')
+    expect(await tecleado(TEL)).toMatchObject({ outcome: 'CHECKED_IN', reservationId: conEspacios.id })
   })
 })

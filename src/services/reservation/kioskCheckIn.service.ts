@@ -15,10 +15,12 @@
  */
 
 import { createHash, randomBytes } from 'crypto'
-import { NotificationType, Prisma } from '@prisma/client'
+import { NotificationType, Prisma, ReservationStatus } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { utcTs } from '@/utils/sqlDates'
+import { phonesMatch } from '@/utils/phone'
 import { formatInTimeZone } from 'date-fns-tz'
 import { ConflictError, GoneError, NotFoundError, TooManyRequestsError, ValidationError } from '@/errors/AppError'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
@@ -370,8 +372,8 @@ export async function checkInByIdentifier(args: {
   }
   const raw = args.identifier.trim()
   const code = raw.toUpperCase().slice(0, 32)
-  // Un identificador de puros dígitos es un teléfono. Se comparan los ÚLTIMOS 10 para
-  // que dé igual si lo teclea con lada, con +52 o sin nada.
+  // Un identificador con 10 dígitos o más es un teléfono: la base prefiltra por los ÚLTIMOS 10 y después se confirma el
+  // número completo con su lada (D4, `reservaDelTelefono`).
   const digits = raw.replace(/\D/g, '')
   const phoneTail = digits.length >= 10 ? digits.slice(-10) : null
 
@@ -406,22 +408,20 @@ export async function checkInByIdentifier(args: {
   const windowFrom = new Date(at.getTime() - graceMin * 60_000)
   const windowTo = new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000)
 
-  const reservation = await prisma.reservation.findFirst({
-    where: {
-      venueId: args.venueId,
-      startsAt: { gte: windowFrom, lte: windowTo },
-      // Sólo las que pueden contestar algo: una cancelada no tapa a la buena del mismo teléfono. «No asistió» sólo cuenta
-      // si la llegada viene de la cola sin red (su hora real cae antes de que corriera el «No asistió»).
-      status: { in: args.occurredAt ? ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] : ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
-      ...(phoneTail
-        ? {
-            OR: [{ guestPhone: { endsWith: phoneTail } }, { customer: { phone: { endsWith: phoneTail } } }],
-          }
-        : { confirmationCode: code }),
-    },
-    orderBy: { startsAt: 'asc' },
-    select: DISPLAY_SELECT,
-  })
+  // Sólo las que pueden contestar algo: una cancelada no tapa a la buena del mismo teléfono. «No asistió» sólo cuenta
+  // si la llegada viene de la cola sin red (su hora real cae antes de que corriera el «No asistió»).
+  const statuses: ReservationStatus[] = args.occurredAt
+    ? ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW']
+    : ['PENDING', 'CONFIRMED', 'CHECKED_IN']
+  const ventana = { venueId: args.venueId, startsAt: { gte: windowFrom, lte: windowTo }, status: { in: statuses } }
+
+  const reservation = phoneTail
+    ? await reservaDelTelefono({ venueId: args.venueId, tecleado: raw, phoneTail, windowFrom, windowTo, statuses, ventana })
+    : await prisma.reservation.findFirst({
+        where: { ...ventana, confirmationCode: code },
+        orderBy: { startsAt: 'asc' },
+        select: DISPLAY_SELECT,
+      })
 
   // Respuesta genérica: no revela si el código existe.
   const notFound = () => new NotFoundError('No encontramos esa reservación lista para check-in', CHECK_IN_NOT_FOUND)
@@ -525,6 +525,43 @@ export async function checkInByIdentifier(args: {
 
 /** Otra petición con el mismo `opId` ya dejó su recibo: ésta no escribe nada. */
 class OpYaRegistrada extends Error {}
+
+/**
+ * D4 (16-nov, full-testing de asistencia verificada): la reserva del teléfono tecleado, comparando el número COMPLETO con su lada.
+ * Antes era un `endsWith` de los últimos 10 dígitos sobre el texto guardado: una invitada guardada «55 1234 5678» no se
+ * encontraba, y un +1 551 234 5678 marcaba la llegada de un +52 55 1234 5678 (cuenta para el pago a la coach).
+ * 1. La base prefiltra por los últimos 10 dígitos SIN espacios ni guiones (índice `venueId, startsAt`: es la ventana de una clase).
+ * 2. `phonesMatch` confirma el número completo (otra lada ⇒ no empata; si no se entiende ⇒ no empata), como el resto del servidor.
+ */
+async function reservaDelTelefono(a: {
+  venueId: string
+  tecleado: string
+  phoneTail: string
+  windowFrom: Date
+  windowTo: Date
+  statuses: ReservationStatus[]
+  ventana: Prisma.ReservationWhereInput
+}) {
+  // ponytail: tope de 20 con los mismos 10 dígitos en la ventana de una clase (la misma persona o un teléfono compartido).
+  const ids = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT r.id FROM "Reservation" r
+    LEFT JOIN "Customer" c ON c.id = r."customerId"
+    WHERE r."venueId" = ${a.venueId}
+      AND r."startsAt" >= ${utcTs(a.windowFrom)} AND r."startsAt" <= ${utcTs(a.windowTo)}
+      AND r.status::text IN (${Prisma.join(a.statuses)})
+      AND (regexp_replace(COALESCE(r."guestPhone", ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail}
+        OR regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail})
+    ORDER BY r."startsAt" ASC, r.id ASC
+    LIMIT 20`
+  if (ids.length === 0) return null
+  const candidatas = await prisma.reservation.findMany({
+    where: { ...a.ventana, id: { in: ids.map(r => r.id) } },
+    orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+    take: 20,
+    select: { ...DISPLAY_SELECT, guestPhone: true, customer: { select: { firstName: true, lastName: true, phone: true } } },
+  })
+  return candidatas.find(r => phonesMatch(a.tecleado, r.guestPhone) || phonesMatch(a.tecleado, r.customer?.phone)) ?? null
+}
 
 const DISPLAY_SELECT = {
   id: true,

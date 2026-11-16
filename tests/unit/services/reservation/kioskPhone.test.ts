@@ -43,7 +43,8 @@ function reserva(over: Record<string, unknown> = {}) {
     guestName: null,
     statusLog: [],
     spotIds: ['t4'],
-    customer: { firstName: 'Ana', lastName: 'Ruiz' },
+    guestPhone: null,
+    customer: { firstName: 'Ana', lastName: 'Ruiz', phone: '+525512345678' },
     classSession: { assignedStaff: { firstName: 'María' }, product: yoga },
     product: yoga,
     ...over,
@@ -56,7 +57,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   prismaMock.kioskCheckInAttempt.upsert.mockResolvedValue({ count: 1 } as any)
-  prismaMock.reservation.findFirst.mockResolvedValue(reserva() as any)
+  ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ id: 'res-1' }])
+  prismaMock.reservation.findMany.mockResolvedValue([reserva()] as any)
   prismaMock.kioskCheckInOp.findUnique.mockResolvedValue(null)
   ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
   ;(checkInReservation as jest.Mock).mockResolvedValue({ outcome: 'CHECKED_IN', reservation: {}, services: [] })
@@ -69,20 +71,20 @@ describe('Teléfono tecleado en el kiosco', () => {
     expect(out.display).toMatchObject({ displayName: 'Ana R.', spotLabel: 'Tapete 4', staffLabel: 'con María' })
     expect((checkInReservation as jest.Mock).mock.calls[0][1]).toMatchObject({ method: 'PHONE', source: 'KIOSK', now: NOW })
     // Una cancelada del mismo teléfono no tapa a la buena; sin cola, «No asistió» no entra.
-    expect((prismaMock.reservation.findFirst.mock.calls[0][0] as any).where.status).toEqual({ in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] })
+    expect((prismaMock.reservation.findMany.mock.calls[0][0] as any).where.status).toEqual({ in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] })
   })
 
   it('desde la cola sin red: busca la clase por la hora en que se tecleó, no por ahora', async () => {
     const tecleado = new Date('2026-11-16T17:50:00Z')
     const later = new Date('2026-11-16T19:30:00Z')
     await checkInByIdentifier({ ...base, now: later, occurredAt: tecleado, opId: 'fila-1234' })
-    const where = (prismaMock.reservation.findFirst.mock.calls[0][0] as any).where
+    const where = (prismaMock.reservation.findMany.mock.calls[0][0] as any).where
     expect(where.startsAt).toEqual({ gte: new Date('2026-11-16T17:40:00Z'), lte: new Date('2026-11-16T18:10:00Z') })
     expect((checkInReservation as jest.Mock).mock.calls[0][1]).toMatchObject({ now: tecleado, method: 'PHONE', opId: 'fila-1234' })
   })
 
   it('desde la cola, el «No asistió» automático ya había corrido ⇒ se corrige con la hora tecleada y se avisa', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(reserva({ status: 'NO_SHOW' }) as any)
+    prismaMock.reservation.findMany.mockResolvedValue([reserva({ status: 'NO_SHOW' })] as any)
     ;(undoNoShow as jest.Mock).mockResolvedValue({ outcome: 'UNDONE', correction: { id: 'corr-1' } })
     const tecleado = new Date('2026-11-16T17:58:00Z')
     const out = await checkInByIdentifier({ ...base, now: new Date('2026-11-16T19:00:00Z'), occurredAt: tecleado, opId: 'fila-1' })
@@ -92,7 +94,7 @@ describe('Teléfono tecleado en el kiosco', () => {
   })
 
   it('🔴 en vivo, un «No asistió» no se corrige desde el kiosco (eso es del panel: «Sí llegó»)', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(null)
+    prismaMock.reservation.findMany.mockResolvedValue([])
     await expect(checkInByIdentifier(base)).rejects.toMatchObject({ statusCode: 404 })
     expect(undoNoShow).not.toHaveBeenCalled()
   })
@@ -142,11 +144,11 @@ describe('Teléfono tecleado en el kiosco', () => {
       statusCode: 422,
       code: 'CHECK_IN_TOO_OLD',
     })
-    expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.findMany).not.toHaveBeenCalled()
   })
 
   it('🔴 Codex r2 #3: desde la cola, «ya estaba registrada» también deja su recibo (un reintento tras deshacer no re-marca)', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(reserva({ status: 'CHECKED_IN' }) as any)
+    prismaMock.reservation.findMany.mockResolvedValue([reserva({ status: 'CHECKED_IN' })] as any)
     const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-9' })
     expect(out.outcome).toBe('ALREADY_CHECKED_IN')
     const valores = (prismaMock.$executeRaw as jest.Mock).mock.calls[0].slice(1)
@@ -156,7 +158,7 @@ describe('Teléfono tecleado en el kiosco', () => {
 
   it('🔴 Codex r2 #4: el «No asistió» gana entre la lectura y el check-in ⇒ desde la cola se corrige igual', async () => {
     ;(checkInReservation as jest.Mock).mockRejectedValue(new ConflictError('cambió', 'RESERVATION_NOT_CHECKINABLE'))
-    prismaMock.reservation.findFirst.mockResolvedValueOnce(reserva() as any).mockResolvedValueOnce({ status: 'NO_SHOW' } as any)
+    prismaMock.reservation.findFirst.mockResolvedValueOnce({ status: 'NO_SHOW' } as any)
     ;(undoNoShow as jest.Mock).mockResolvedValue({ outcome: 'UNDONE', correction: { id: 'corr-9' } })
     const out = await checkInByIdentifier({
       ...base,
@@ -173,5 +175,49 @@ describe('Teléfono tecleado en el kiosco', () => {
     await checkInByIdentifier(base)
     const ups = prismaMock.kioskCheckInAttempt.upsert.mock.calls.map((c: any[]) => (c[0] as any).where.venueId_scope_windowStart.scope)
     expect(ups.filter((x: string) => x.startsWith('identifier:'))).toHaveLength(1)
+  })
+
+  // D4 (16-nov, full-testing de asistencia verificada): el teléfono guardado con espacios no se encontraba, y un +1 con los
+  // mismos 10 dígitos que un +52 marcaba la llegada de OTRA persona (cuenta para el pago a la coach).
+  describe('D4 · el número completo, con su lada', () => {
+    it('una invitada guardada «55 1234 5678» (con espacios) SÍ se encuentra al teclear +52 55 1234 5678', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ customer: null, guestName: 'Ana Ruiz', guestPhone: '55 1234 5678' }),
+      ] as any)
+      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
+      expect(out.outcome).toBe('CHECKED_IN')
+      // El prefiltro de la base compara los dígitos SIN espacios ni guiones (no un `endsWith` sobre el texto guardado).
+      const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0] as { strings?: string[]; sql?: string }
+      expect(JSON.stringify(sql)).toMatch(/regexp_replace/)
+    })
+
+    it('🔴 un +1 551 234 5678 NO marca la reserva de un +52 55 1234 5678 (mismos 10 dígitos, otra lada)', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ customer: { firstName: 'Ana', lastName: 'Ruiz', phone: '+525512345678' } }),
+      ] as any)
+      await expect(checkInByIdentifier({ ...base, identifier: '+15512345678' })).rejects.toMatchObject({ statusCode: 404 })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    it('si la primera de la ventana es de otra lada, marca la que SÍ es suya', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ id: 'res-otra', customer: { firstName: 'Bob', lastName: 'Lee', phone: '+15512345678' } }),
+        reserva({ id: 'res-suya', customer: null, guestName: 'Ana Ruiz', guestPhone: '55-1234-5678' }),
+      ] as any)
+      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
+      expect(out.reservationId).toBe('res-suya')
+      expect((checkInReservation as jest.Mock).mock.calls[0][1]).toMatchObject({ reservationId: 'res-suya' })
+    })
+
+    it('una app vieja que manda sólo 10 dígitos sigue encontrando un celular mexicano', async () => {
+      const out = await checkInByIdentifier({ ...base, identifier: '5512345678' })
+      expect(out.outcome).toBe('CHECKED_IN')
+    })
+
+    it('el prefiltro no encontró nada ⇒ ni siquiera se lee la reserva, 404 genérico', async () => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+      await expect(checkInByIdentifier(base)).rejects.toMatchObject({ statusCode: 404 })
+      expect(prismaMock.reservation.findMany).not.toHaveBeenCalled()
+    })
   })
 })
