@@ -1050,6 +1050,17 @@ type ModifierGroupQuery = {
   sortOrder?: 'asc' | 'desc'
 }
 
+/** Lo que la ficha del extra necesita del platillo ligado para enseñarlo y avisar si dejó de llevar inventario (encargo 27771e). */
+const LINKED_PRODUCT_SELECT = {
+  id: true,
+  name: true,
+  trackInventory: true,
+  inventoryMethod: true,
+  soldByWeight: true,
+  active: true,
+  deletedAt: true,
+} as const
+
 export async function getModifierGroups(venueId: string, query: ModifierGroupQuery = {}): Promise<ModifierGroup[]> {
   const { page, limit, search, active, sortBy, sortOrder } = query
 
@@ -1076,6 +1087,8 @@ export async function getModifierGroups(venueId: string, query: ModifierGroupQue
           rawMaterial: {
             select: { id: true, name: true, unit: true, currentStock: true },
           },
+          // Extra ligado a un platillo del menú (encargo 27771e). Campo nuevo y opcional: las apps viejas lo ignoran.
+          linkedProduct: { select: LINKED_PRODUCT_SELECT },
         },
       },
     },
@@ -1130,6 +1143,7 @@ export async function getModifierGroupById(venueId: string, modifierGroupId: str
           rawMaterial: {
             select: { id: true, name: true, unit: true, currentStock: true },
           },
+          linkedProduct: { select: LINKED_PRODUCT_SELECT },
         },
       },
     },
@@ -1211,6 +1225,116 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
   return rawMaterial
 }
 
+/**
+ * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo y Toast). Valida el platillo que se quiere
+ * ligar y devuelve su costo por porción. Premium (INVENTORY_TRACKING) sólo para PONERLO: quitarlo nunca lo pide, para que bajar de
+ * plan no deje el extra atorado. Mismo negocio, no borrado, con inventario (por piezas o por receta) y que no se venda por kilo: si
+ * no, el extra no descontaría nada sin decirlo (Codex r1 #5).
+ */
+async function findLinkableProductForModifier(venueId: string, productId: string) {
+  if (!(await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING'))) {
+    throw new AppError(
+      'Ligar un extra a un platillo del menú es parte del plan Premium (inventario). Sube a Premium para usarlo.',
+      403,
+      true,
+      'MODIFIER_LINK_REQUIRES_PREMIUM',
+    )
+  }
+  const product = await prisma.product.findFirst({
+    where: { id: productId, venueId, deletedAt: null },
+    select: {
+      id: true,
+      name: true,
+      trackInventory: true,
+      inventoryMethod: true,
+      soldByWeight: true,
+      cost: true,
+      recipe: { select: { totalCost: true } },
+    },
+  })
+  if (!product) {
+    throw new NotFoundError('Ese platillo no existe en este negocio.', 'MODIFIER_LINK_PRODUCT_NOT_FOUND')
+  }
+  if (product.soldByWeight) {
+    throw new BadRequestError(
+      `«${product.name}» se vende por kilo: un extra no puede descontarlo. Elige un platillo que se venda por pieza.`,
+      'MODIFIER_LINK_SOLD_BY_WEIGHT',
+    )
+  }
+  const method = product.trackInventory ? (product.inventoryMethod ?? (product.recipe ? 'RECIPE' : null)) : null
+  if (!method) {
+    throw new BadRequestError(
+      `«${product.name}» no lleva inventario. Actívale el inventario (por piezas o por receta) para que este extra lo descuente.`,
+      'MODIFIER_LINK_NOT_INVENTORIED',
+    )
+  }
+  const cost = method === 'RECIPE' ? (product.recipe?.totalCost ?? null) : (product.cost ?? null)
+  return { id: product.id, name: product.name, cost: cost != null ? new Prisma.Decimal(cost) : null }
+}
+
+/** Página del buscador de platillos para ligar (encargo 27771e): 20 por omisión, 50 como tope impuesto por el servidor. */
+export const LINKABLE_PRODUCTS_PAGE = 20
+export const LINKABLE_PRODUCTS_MAX = 50
+
+/**
+ * Busca los platillos del negocio que un extra puede «ser» (encargo 27771e). Acotado en el servidor: búsqueda por nombre, orden fijo
+ * (nombre, id), página con cursor y el total de coincidencias, para que el selector nunca baje el menú entero. Devuelve también los que
+ * hoy no se pueden ligar (sin inventario o por kilo) con su motivo, para que la pantalla los enseñe en gris y diga cómo arreglarlo.
+ */
+export async function searchLinkableProducts(venueId: string, query: { search?: string; cursor?: string; limit?: number }) {
+  const take = Math.min(Math.max(query.limit ?? LINKABLE_PRODUCTS_PAGE, 1), LINKABLE_PRODUCTS_MAX)
+  const where: Prisma.ProductWhereInput = {
+    venueId,
+    deletedAt: null,
+    ...(query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+  }
+  const [total, filas] = await Promise.all([
+    prisma.product.count({ where }),
+    prisma.product.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        active: true,
+        trackInventory: true,
+        inventoryMethod: true,
+        soldByWeight: true,
+        recipe: { select: { id: true } },
+        category: { select: { name: true } },
+      },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      take: take + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+    }),
+  ])
+  const hasMore = filas.length > take
+  const pagina = filas.slice(0, take)
+  return {
+    data: pagina.map(p => {
+      const method = p.trackInventory ? (p.inventoryMethod ?? (p.recipe ? 'RECIPE' : null)) : null
+      const blockedReason = p.soldByWeight ? 'SOLD_BY_WEIGHT' : !method ? 'NOT_INVENTORIED' : null
+      return {
+        id: p.id,
+        name: p.name,
+        active: p.active,
+        categoryName: p.category?.name ?? null,
+        inventoryMethod: method,
+        linkable: blockedReason === null,
+        blockedReason,
+      }
+    }),
+    total,
+    hasMore,
+    nextCursor: hasMore ? pagina[pagina.length - 1].id : null,
+  }
+}
+
+const linkAndRawMaterialError = () =>
+  new BadRequestError(
+    'Un extra descuenta un insumo o un platillo del menú, no los dos. Quita uno antes de poner el otro.',
+    'MODIFIER_LINK_AND_RAW_MATERIAL',
+  )
+
 function modifierCost(
   rawMaterial: { avgCostPerUnit: Prisma.Decimal } | null,
   quantityPerUnit: Prisma.Decimal | number | null | undefined,
@@ -1224,7 +1348,9 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
+  if (data.rawMaterialId && data.linkedProductId) throw linkAndRawMaterialError()
   const rawMaterial = data.rawMaterialId ? await findVenueRawMaterialForModifier(venueId, data.rawMaterialId) : null
+  const linkedProduct = data.linkedProductId ? await findLinkableProductForModifier(venueId, data.linkedProductId) : null
 
   const modifier = await prisma.modifier.create({
     data: {
@@ -1243,10 +1369,17 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
             cost: modifierCost(rawMaterial, data.quantityPerUnit),
           }
         : {}),
+      ...(linkedProduct ? { linkedProduct: { connect: { id: linkedProduct.id } }, cost: linkedProduct.cost } : {}),
     },
   })
 
-  logAction({ venueId, action: 'MODIFIER_CREATED', entity: 'Modifier', entityId: modifier.id, data: { name: modifier.name } })
+  logAction({
+    venueId,
+    action: 'MODIFIER_CREATED',
+    entity: 'Modifier',
+    entityId: modifier.id,
+    data: { name: modifier.name, ...(linkedProduct ? { linkedProduct: { id: linkedProduct.id, name: linkedProduct.name } } : {}) },
+  })
 
   return modifier
 }
@@ -1263,6 +1396,7 @@ export async function getModifierById(venueId: string, modifierGroupId: string, 
       rawMaterial: {
         select: { id: true, name: true, unit: true, currentStock: true },
       },
+      linkedProduct: { select: LINKED_PRODUCT_SELECT },
     },
   })
   if (!modifier) {
@@ -1294,6 +1428,25 @@ export async function updateModifier(
   if (data.sku !== undefined) updateData.sku = data.sku
   if (data.durationMin !== undefined) updateData.durationMin = data.durationMin
 
+  // Insumo o platillo ligado, nunca los dos (encargo 27771e): se mira lo que QUEDARÍA guardado tras esta petición.
+  const effectiveRawMaterialId = data.rawMaterialId === undefined ? existing.rawMaterialId : data.rawMaterialId
+  const effectiveLinkedProductId = data.linkedProductId === undefined ? existing.linkedProductId : data.linkedProductId
+  if (effectiveRawMaterialId && effectiveLinkedProductId) throw linkAndRawMaterialError()
+
+  let linkedProduct: Awaited<ReturnType<typeof findLinkableProductForModifier>> | null = null
+  // Re-mandar el MISMO platillo es no tocarlo: no pide Premium otra vez (un negocio que bajó de plan sigue editando el precio).
+  if (data.linkedProductId !== undefined && data.linkedProductId !== existing.linkedProductId) {
+    if (data.linkedProductId !== null) {
+      linkedProduct = await findLinkableProductForModifier(venueId, data.linkedProductId)
+      updateData.linkedProduct = { connect: { id: linkedProduct.id } }
+      updateData.cost = linkedProduct.cost
+    } else {
+      updateData.linkedProduct = { disconnect: true }
+      // Sin platillo ni insumo no hay costo; con insumo, el costo lo calcula su bloque de abajo.
+      if (!effectiveRawMaterialId) updateData.cost = null
+    }
+  }
+
   // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
   let needsCostRecalculation = false
   let rawMaterialForCost: { avgCostPerUnit: Prisma.Decimal } | null = null
@@ -1303,8 +1456,8 @@ export async function updateModifier(
     if (data.rawMaterialId !== null) {
       rawMaterialForCost = await findVenueRawMaterialForModifier(venueId, data.rawMaterialId)
       needsCostRecalculation = true
-    } else {
-      // rawMaterialId is being set to null - clear cost
+    } else if (!effectiveLinkedProductId) {
+      // rawMaterialId is being set to null - clear cost (si queda ligado a un platillo, el costo es el del platillo)
       updateData.cost = null
     }
     updateData.rawMaterial = data.rawMaterialId ? { connect: { id: data.rawMaterialId } } : { disconnect: true }
@@ -1342,6 +1495,7 @@ export async function updateModifier(
       rawMaterial: {
         select: { id: true, name: true, unit: true, currentStock: true },
       },
+      linkedProduct: { select: LINKED_PRODUCT_SELECT },
     },
   })
 
@@ -1353,6 +1507,9 @@ export async function updateModifier(
     data: {
       name: updatedModifier.name,
       ...(data.sku !== undefined && data.sku !== existing.sku ? { sku: { from: existing.sku, to: data.sku } } : {}),
+      ...(data.linkedProductId !== undefined && data.linkedProductId !== existing.linkedProductId
+        ? { linkedProduct: { from: existing.linkedProductId, to: data.linkedProductId } }
+        : {}),
     },
   })
 

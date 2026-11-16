@@ -189,6 +189,32 @@ export async function createModifierHandler(
   }
 }
 
+/** Buscador acotado del platillo que un extra «es» (encargo 27771e). */
+export async function searchLinkableProductsHandler(
+  req: Request<{ venueId: string }, {}, {}, { search?: string; cursor?: string; limit?: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId, req.authContext?.role || '')
+
+    const { search, cursor, limit } = req.query
+    const result = await menuCategoryService.searchLinkableProducts(venueId, {
+      search: search || undefined,
+      cursor: cursor || undefined,
+      limit: limit ? Number(limit) : undefined,
+    })
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function getModifierHandler(
   req: Request<{ venueId: string; modifierGroupId: string; modifierId: string }>,
   res: Response,

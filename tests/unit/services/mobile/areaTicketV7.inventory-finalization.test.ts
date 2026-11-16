@@ -1389,3 +1389,278 @@ describe('🔴 R12: dinero capturado sobre una sesión cancelada y reservas viej
     })
   })
 })
+
+describe('🍟 Extra ligado a un platillo del menú en los vales por área (encargo 27771e)', () => {
+  const platilloPorPiezas = (id: string, inventoryId: string, over: Record<string, unknown> = {}) => ({
+    id,
+    name: `Platillo ${id}`,
+    venueId,
+    trackInventory: true,
+    inventoryMethod: 'QUANTITY',
+    soldByWeight: false,
+    inventory: { id: inventoryId },
+    recipe: null,
+    ...over,
+  })
+  const renglon = (areaTicketLineId: string | null, linkedProduct: unknown, quantity = 2) => ({
+    id: 'item-burger',
+    areaTicketLineId,
+    quantity,
+    weightQuantity: null,
+    product: { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
+    modifiers: [
+      {
+        quantity: 1,
+        modifier: {
+          id: 'mod-papas',
+          groupId: 'g1',
+          rawMaterialId: null,
+          quantityPerUnit: null,
+          unit: null,
+          inventoryMode: 'ADDITION',
+          rawMaterial: null,
+          linkedProduct,
+        },
+      },
+    ],
+  })
+  const boundId = (values: unknown[]): string | undefined =>
+    values.find((v): v is string => typeof v === 'string' && v.startsWith('inventory-'))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    primePaidCheckout()
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov' })
+    prismaMock.$queryRaw.mockImplementation((async (query: unknown, ...values: unknown[]) => {
+      const sql = sqlText(query)
+      const id = boundId(values) ?? 'inventory-x'
+      if (sql.includes('UPDATE "Inventory"')) {
+        return [{ id, currentStock: new Prisma.Decimal('8.000'), previousStock: new Prisma.Decimal('10.000') }]
+      }
+      if (sql.includes('FROM "Inventory"')) return [{ id, currentStock: new Prisma.Decimal('10.000') }]
+      return []
+    }) as any)
+  })
+
+  it('un renglón sin vale apartado consume el platillo ligado: 2 hamburguesas con «Papas» bajan 2 papas', async () => {
+    prismaMock.orderItem.findMany.mockResolvedValue([renglon(null, platilloPorPiezas('p-papas', 'inventory-papas'))])
+
+    await expect(finalize()).resolves.toEqual({ areaTicketOrder: true, sessionId })
+
+    expect(prismaMock.inventoryMovement.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.inventoryMovement.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ inventoryId: 'inventory-papas', quantity: new Prisma.Decimal('-2.000'), reference: orderId }),
+    })
+  })
+
+  it('🔴 Codex r1 #3: si el vale ya apartó (con el ligado A) y hoy el extra está ligado a B, sólo sale A: nunca dos platillos', async () => {
+    const apartadoA = {
+      id: 'reservation-a',
+      areaTicketLineId: 'line-burger',
+      inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+      inventoryId: 'inventory-papas',
+      quantityBaseUnits: new Prisma.Decimal('2.000'),
+    }
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([apartadoA])
+    prismaMock.orderItem.findMany.mockResolvedValue([renglon('line-burger', platilloPorPiezas('p-aros', 'inventory-aros'))])
+
+    await expect(finalize()).resolves.toEqual({ areaTicketOrder: true, sessionId })
+
+    const inventarios = (prismaMock.inventoryMovement.create as jest.Mock).mock.calls.map(c => c[0].data.inventoryId)
+    expect(inventarios).not.toContain('inventory-aros')
+  })
+
+  it('un ligado de OTRO negocio, por kilo o sin inventario no mueve nada', async () => {
+    for (const ligado of [
+      platilloPorPiezas('p-x', 'inventory-x', { venueId: 'otro' }),
+      platilloPorPiezas('p-x', 'inventory-x', { soldByWeight: true }),
+      platilloPorPiezas('p-x', 'inventory-x', { trackInventory: false }),
+    ]) {
+      jest.clearAllMocks()
+      primePaidCheckout()
+      prismaMock.orderItem.findMany.mockResolvedValue([renglon(null, ligado)])
+      await finalize()
+      expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+    }
+  })
+})
+
+describe('🍟 Vales por área: la reserva es la foto de los extras al emitir (Codex r2, encargo 27771e)', () => {
+  const { buildReservationSpecs } = jest.requireActual('@/services/mobile/areaTicketV7.mobile.service')
+
+  it('Codex r2 #3: con el platillo principal SIN inventario, el extra ligado y el de insumo igual se apartan', async () => {
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([
+      {
+        id: 'mod-papas',
+        groupId: 'g1',
+        inventoryMode: 'ADDITION',
+        rawMaterial: null,
+        quantityPerUnit: null,
+        unit: null,
+        linkedProduct: {
+          id: 'p-papas',
+          name: 'Papas',
+          venueId,
+          trackInventory: true,
+          inventoryMethod: null,
+          soldByWeight: false,
+          inventory: null,
+          // Codex r2 #2: receta vieja (sin método escrito) también cuenta como receta.
+          recipe: {
+            lines: [
+              {
+                quantity: new Prisma.Decimal('150'),
+                unit: 'GRAM',
+                isOptional: false,
+                rawMaterial: { id: 'raw-papa', name: 'Papa', unit: 'GRAM' },
+              },
+            ],
+          },
+        },
+      },
+      {
+        id: 'mod-queso',
+        groupId: 'g1',
+        inventoryMode: 'ADDITION',
+        rawMaterial: { id: 'raw-queso', name: 'Queso', unit: 'GRAM' },
+        quantityPerUnit: new Prisma.Decimal('30'),
+        unit: 'GRAM',
+        linkedProduct: null,
+      },
+    ])
+
+    const specs = await buildReservationSpecs(
+      venueId,
+      [{ clientLineId: 'l1', modifierIds: ['mod-papas', 'mod-queso'] }],
+      [{ productId: 'p-burger', quantity: '2', weightKg: null }],
+    )
+
+    const porDestino = Object.fromEntries(specs.map((s: any) => [s.inventoryId, s.quantityBaseUnits.toString()]))
+    expect(porDestino).toEqual({ 'raw-papa': '300', 'raw-queso': '60' })
+  })
+
+  it('Codex r2 #1: apartó «Papas» (platillo) y hoy el extra descuenta el insumo «Aceite» ⇒ al cobrar sólo sale lo apartado', async () => {
+    primePaidCheckout()
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov' })
+    prismaMock.rawMaterialMovement.create.mockResolvedValue({ id: 'mov-raw' })
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([
+      {
+        id: 'reservation-papas',
+        areaTicketLineId: 'line-burger',
+        inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+        inventoryId: 'inventory-papas',
+        quantityBaseUnits: new Prisma.Decimal('1.000'),
+      },
+    ])
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-burger',
+        areaTicketLineId: 'line-burger',
+        quantity: 1,
+        weightQuantity: null,
+        product: { id: 'p-burger', name: 'Hamburguesa', trackInventory: false, inventoryMethod: null, inventory: null, recipe: null },
+        modifiers: [
+          {
+            quantity: 1,
+            modifier: {
+              id: 'mod-papas',
+              groupId: 'g1',
+              rawMaterialId: 'raw-aceite',
+              quantityPerUnit: new Prisma.Decimal('10'),
+              unit: 'MILLILITER',
+              inventoryMode: 'ADDITION',
+              rawMaterial: { id: 'raw-aceite', name: 'Aceite', unit: 'MILLILITER' },
+              linkedProduct: null,
+            },
+          },
+        ],
+      },
+    ])
+    const tocados: string[] = []
+    prismaMock.$queryRaw.mockImplementation((async (query: unknown, ...values: unknown[]) => {
+      const sql = sqlText(query)
+      const id = values.find((v): v is string => typeof v === 'string' && (v.startsWith('inventory-') || v.startsWith('raw-')))
+      if (id) tocados.push(id)
+      if (sql.includes('UPDATE "Inventory"')) {
+        return [{ id, currentStock: new Prisma.Decimal('9.000'), previousStock: new Prisma.Decimal('10.000') }]
+      }
+      if (sql.includes('FROM "Inventory"')) return [{ id, currentStock: new Prisma.Decimal('10.000') }]
+      if (sql.includes('FROM "RawMaterial"')) return [{ id, currentStock: new Prisma.Decimal('1000'), unit: 'MILLILITER' }]
+      if (sql.includes('FROM "StockBatch"'))
+        return [{ id: 'b', remainingQuantity: new Prisma.Decimal('1000'), costPerUnit: new Prisma.Decimal('1') }]
+      return []
+    }) as any)
+
+    await finalize()
+
+    expect(tocados).not.toContain('raw-aceite')
+    expect(prismaMock.rawMaterialMovement.create).not.toHaveBeenCalled()
+  })
+
+  it('regresión: un insumo SIN unidad propia nunca se apartó (no está en la foto) y se sigue consumiendo al cobrar', async () => {
+    primePaidCheckout()
+    prismaMock.rawMaterialMovement.create.mockResolvedValue({ id: 'mov-raw' })
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov' })
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([
+      {
+        id: 'reservation-base',
+        areaTicketLineId: 'line-cafe',
+        inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+        inventoryId: 'inventory-cafe',
+        quantityBaseUnits: new Prisma.Decimal('1.000'),
+      },
+    ])
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-cafe',
+        areaTicketLineId: 'line-cafe',
+        quantity: 1,
+        weightQuantity: null,
+        product: {
+          id: 'p-cafe',
+          name: 'Café',
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          inventory: { id: 'inventory-cafe' },
+          recipe: null,
+        },
+        modifiers: [
+          {
+            quantity: 1,
+            modifier: {
+              id: 'mod-leche',
+              groupId: 'g1',
+              rawMaterialId: 'raw-leche',
+              quantityPerUnit: new Prisma.Decimal('50'),
+              unit: null,
+              inventoryMode: 'ADDITION',
+              rawMaterial: { id: 'raw-leche', name: 'Leche', unit: 'MILLILITER' },
+              linkedProduct: null,
+            },
+          },
+        ],
+      },
+    ])
+    const tocados: string[] = []
+    prismaMock.$queryRaw.mockImplementation((async (query: unknown, ...values: unknown[]) => {
+      const sql = sqlText(query)
+      const id = values.find((v): v is string => typeof v === 'string' && (v.startsWith('inventory-') || v.startsWith('raw-')))
+      if (id) tocados.push(id)
+      if (sql.includes('UPDATE "Inventory"')) {
+        return [{ id, currentStock: new Prisma.Decimal('9.000'), previousStock: new Prisma.Decimal('10.000') }]
+      }
+      if (sql.includes('FROM "Inventory"')) return [{ id, currentStock: new Prisma.Decimal('10.000') }]
+      if (sql.includes('FROM "RawMaterial"')) return [{ id, currentStock: new Prisma.Decimal('1000'), unit: 'MILLILITER' }]
+      if (sql.includes('FROM "StockBatch"'))
+        return [{ id: 'b', remainingQuantity: new Prisma.Decimal('1000'), costPerUnit: new Prisma.Decimal('1') }]
+      return []
+    }) as any)
+
+    await finalize()
+
+    expect(tocados).toContain('raw-leche')
+  })
+})

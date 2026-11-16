@@ -947,7 +947,8 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
 
     const inventoryMethod = await getProductInventoryMethod(item.productId)
     const hasInventoryModifiers = item.modifiers?.some(
-      (orderModifier: any) => orderModifier.modifier?.rawMaterialId && orderModifier.modifier?.quantityPerUnit,
+      (orderModifier: any) =>
+        (orderModifier.modifier?.rawMaterialId && orderModifier.modifier?.quantityPerUnit) || orderModifier.modifier?.linkedProductId,
     )
     if (!inventoryMethod && !hasInventoryModifiers) {
       logger.info('⏭️ [WITH ITEMS] Skipping inventory deduction for untracked product', {
@@ -974,6 +975,7 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
               quantityPerUnit: m.modifier.quantityPerUnit,
               unit: m.modifier.unit,
               inventoryMode: m.modifier.inventoryMode,
+              linkedProductId: m.modifier.linkedProductId,
             },
           })) || []
 

@@ -49,8 +49,15 @@ type SalePostingItem = {
   releasedAreaTicketLineId?: string | null
 }
 
+/**
+ * ¿El renglón trae un extra que mueve inventario? Uno con insumo (`rawMaterialId` + `quantityPerUnit`) o uno ligado a un platillo del
+ * menú (`linkedProductId`, encargo 27771e). Los dos son efectos aparte del producto: si el renglón se cae a medias, va a conciliación
+ * manual en vez de repetir o perder el extra. Su espejo en SQL es `ordenDescuentaInventarioSql`.
+ */
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
-  !!item.modifiers?.some(m => (m.modifier as any)?.rawMaterialId && (m.modifier as any)?.quantityPerUnit)
+  !!item.modifiers?.some(
+    m => ((m.modifier as any)?.rawMaterialId && (m.modifier as any)?.quantityPerUnit) || (m.modifier as any)?.linkedProductId,
+  )
 
 /**
  * La MISMA pregunta del bucle de abajo —«¿a este renglón le nace línea de deducción?»— pero en
@@ -70,7 +77,8 @@ const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
  *    tenant que pide su `venueId`—, con `trackInventory`, y con `inventoryMethod` explícito o
  *    —fallback de los productos legacy— una `Recipe`;
  *  · o el renglón trae un modificador con materia prima (`itemHasInventoryModifiers` exige
- *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario.
+ *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario;
+ *  · o un modificador ligado a un platillo del menú (`linkedProductId`, encargo 27771e).
  *  · D1: el renglón de un vale que se volvió a cobrar en otra cuenta (`esValeRevendido`) no descuenta aquí.
  *
  * ⚠️ Falso NEGATIVO conocido, y va hacia el silencio: `OrderItemModifier.modifierId` es
@@ -98,7 +106,8 @@ export function ordenDescuentaInventarioSql(alias = 'o'): string {
                 OR EXISTS (
                   SELECT 1 FROM "OrderItemModifier" oim
                   JOIN "Modifier" m ON m.id = oim."modifierId"
-                  WHERE oim."orderItemId" = oi.id AND m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL
+                  WHERE oim."orderItemId" = oi.id
+                    AND ((m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL) OR m."linkedProductId" IS NOT NULL)
                 )
               )
           )`
@@ -275,6 +284,8 @@ export async function createSalePostingInTx(
                 quantityPerUnit: (m.modifier as any).quantityPerUnit != null ? String((m.modifier as any).quantityPerUnit) : null,
                 unit: (m.modifier as any).unit ?? null,
                 inventoryMode: (m.modifier as any).inventoryMode ?? null,
+                // El platillo ligado se congela AL COBRAR, igual que el insumo: quitar el ligado después no cambia lo vendido.
+                linkedProductId: (m.modifier as any).linkedProductId ?? null,
               },
             })),
         })),
@@ -473,6 +484,8 @@ export async function applySalePosting(
               quantityPerUnit: m.modifier.quantityPerUnit != null ? new Prisma.Decimal(m.modifier.quantityPerUnit) : null,
               unit: m.modifier.unit,
               inventoryMode: m.modifier.inventoryMode,
+              // Un vale congelado antes del campo no lo trae: undefined ⇒ sin platillo ligado (era lo que existía al cobrar).
+              linkedProductId: m.modifier.linkedProductId ?? null,
             },
           }))
       : (item?.modifiers
@@ -487,6 +500,7 @@ export async function applySalePosting(
               quantityPerUnit: m.modifier.quantityPerUnit,
               unit: m.modifier.unit,
               inventoryMode: m.modifier.inventoryMode,
+              linkedProductId: m.modifier.linkedProductId ?? null,
             },
           })) ?? [])
 

@@ -46,6 +46,26 @@ export interface ModifierUsageStats {
   }
   inventoryMode: ModifierInventoryMode | null
   quantityPerUnit: number | null
+  /**
+   * Extra ligado a un platillo del menú (encargo 27771e): qué platillo descuenta y cuánto cuesta una porción HOY (su receta, o el
+   * costo del producto si es por piezas). El extra no cuenta como venta de ese platillo: aquí sólo se ve su uso y su costo.
+   */
+  linkedProduct?: {
+    id: string
+    name: string
+    costPerPortion: number | null
+  }
+}
+
+/** Costo de UNA porción del platillo ligado: el de su receta si es por receta; si no, el costo del producto. */
+function linkedProductCostPerPortion(product: {
+  inventoryMethod: string | null
+  cost: Prisma.Decimal | null
+  recipe: { totalCost: Prisma.Decimal } | null
+}): number | null {
+  const cost =
+    product.inventoryMethod === 'RECIPE' || (!product.inventoryMethod && product.recipe) ? product.recipe?.totalCost : product.cost
+  return cost != null ? parseFloat(cost.toString()) : null
 }
 
 export interface ModifierLowStockItem {
@@ -126,6 +146,9 @@ export async function getModifierUsageStats(
             costPerUnit: true,
           },
         },
+        linkedProduct: {
+          select: { id: true, name: true, inventoryMethod: true, cost: true, recipe: { select: { totalCost: true } } },
+        },
       },
     },
     orderItem: {
@@ -167,6 +190,9 @@ export async function getModifierUsageStats(
         const costPerUnit = parseFloat(mod.rawMaterial.costPerUnit.toString())
         costImpact = totalQtyUsed * qtyPerUnit * costPerUnit
       }
+      // Extra ligado a un platillo: 1 porción por selección, al costo de hoy de una porción.
+      const linkedCost = mod.linkedProduct ? linkedProductCostPerPortion(mod.linkedProduct) : null
+      if (linkedCost != null) costImpact = totalQtyUsed * linkedCost
 
       if (existing) {
         existing.timesUsed += 1
@@ -192,6 +218,9 @@ export async function getModifierUsageStats(
             : undefined,
           inventoryMode: mod.inventoryMode,
           quantityPerUnit: mod.quantityPerUnit ? parseFloat(mod.quantityPerUnit.toString()) : null,
+          ...(mod.linkedProduct
+            ? { linkedProduct: { id: mod.linkedProduct.id, name: mod.linkedProduct.name, costPerPortion: linkedCost } }
+            : {}),
         })
       }
     }
@@ -302,7 +331,8 @@ export async function getModifierInventorySummary(
   const totalModifiersWithInventory = await prisma.modifier.count({
     where: {
       group: { venueId },
-      rawMaterialId: { not: null },
+      // Con insumo o ligado a un platillo del menú (encargo 27771e): los dos mueven inventario.
+      OR: [{ rawMaterialId: { not: null } }, { linkedProductId: { not: null } }],
     },
   })
 
@@ -350,6 +380,9 @@ export async function getModifiersWithInventory(
     groupName: string
     rawMaterialId: string | null
     rawMaterialName: string | null
+    /** Extra ligado a un platillo del menú (encargo 27771e). */
+    linkedProductId: string | null
+    linkedProductName: string | null
     quantityPerUnit: number | null
     unit: string | null
     inventoryMode: ModifierInventoryMode
@@ -380,6 +413,7 @@ export async function getModifiersWithInventory(
           currentStock: true,
         },
       },
+      linkedProduct: { select: { id: true, name: true } },
     },
     orderBy: [{ group: { displayOrder: 'asc' } }, { name: 'asc' }],
   })
@@ -391,6 +425,8 @@ export async function getModifiersWithInventory(
     groupName: mod.group.name,
     rawMaterialId: mod.rawMaterialId,
     rawMaterialName: mod.rawMaterial?.name || null,
+    linkedProductId: mod.linkedProductId ?? null,
+    linkedProductName: mod.linkedProduct?.name ?? null,
     quantityPerUnit: mod.quantityPerUnit ? parseFloat(mod.quantityPerUnit.toString()) : null,
     unit: mod.unit,
     inventoryMode: mod.inventoryMode,

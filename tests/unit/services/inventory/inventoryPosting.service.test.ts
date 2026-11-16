@@ -657,3 +657,163 @@ describe('🔴 R12-2: aplicar el vale de VENTA no toca reservas', () => {
     expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
   })
 })
+
+describe('🍟 Extra ligado a un platillo del menú (encargo 27771e): el vale lo congela y lo cuenta como efecto propio', () => {
+  const extraLigado = {
+    quantity: 2,
+    modifier: {
+      id: 'mod-papas',
+      name: 'Papas',
+      groupId: 'g1',
+      rawMaterialId: null,
+      quantityPerUnit: null,
+      unit: null,
+      inventoryMode: 'ADDITION',
+      linkedProductId: 'p-papas',
+    },
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(null as any)
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-1', status: 'PENDING' } as any)
+  })
+
+  it('un platillo SIN inventario con un extra ligado sí lleva línea (el ligado es lo que se descuenta) y el snapshot congela el ligado', async () => {
+    getInventoryMethodsMock.mockImplementation(async (ids: string[]) => new Map(ids.map(id => [id, null])))
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: [{ id: 'oi-1', productId: 'p-burger', quantity: 1, weightQuantity: null, modifiers: [extraLigado] }] as any,
+    })
+    const data = (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
+    expect(data.status).toBeUndefined()
+    expect(data.lines.create).toHaveLength(1)
+    expect(data.payloadSnapshot.items[0].hasInventoryModifiers).toBe(true)
+    expect(data.payloadSnapshot.items[0].modifiers[0].modifier.linkedProductId).toBe('p-papas')
+  })
+
+  it('regresión: un extra sin insumo ni platillo ligado no crea línea en un platillo sin inventario', async () => {
+    getInventoryMethodsMock.mockImplementation(async (ids: string[]) => new Map(ids.map(id => [id, null])))
+    const sinNada = { quantity: 1, modifier: { ...extraLigado.modifier, linkedProductId: null } }
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: [{ id: 'oi-1', productId: 'p-burger', quantity: 1, weightQuantity: null, modifiers: [sinNada] }] as any,
+    })
+    const data = (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
+    expect(data.status).toBe('SKIPPED')
+    expect(data.payloadSnapshot.items[0].modifiers[0].modifier.linkedProductId).toBeNull()
+  })
+
+  it('al aplicar, el ligado del SNAPSHOT llega a deductInventoryForProduct aunque el extra ya no esté ligado hoy', async () => {
+    prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.inventoryPostingLine.update.mockResolvedValue({} as any)
+    prismaMock.inventoryMovement.count.mockResolvedValue(0 as any)
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({
+      id: 'post-1',
+      venueId: VENUE,
+      orderId: ORDER,
+      sourceId: ORDER,
+      status: 'PENDING',
+      lines: [
+        {
+          id: 'line-1',
+          effectKey: 'oi-1',
+          orderItemId: 'oi-1',
+          productId: 'p-burger',
+          status: 'PENDING',
+          expectedQuantityBase: new Prisma.Decimal(1),
+        },
+      ],
+      payloadSnapshot: { items: [{ id: 'oi-1', hasInventoryModifiers: true, modifiers: [extraLigado] }] },
+    } as any)
+    // Hoy el extra ya no está ligado (el dueño lo quitó después del cobro): manda lo vendido.
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'oi-1',
+        productId: 'p-burger',
+        quantity: 1,
+        modifiers: [{ quantity: 2, modifier: { ...extraLigado.modifier, linkedProductId: null } }],
+      },
+    ] as any)
+    deductInventoryMock.mockResolvedValue({ inventoryMethod: null })
+
+    await applySalePosting('post-1', 'staff-1')
+
+    const mods = deductInventoryMock.mock.calls[0][5]
+    expect(mods[0].modifier.linkedProductId).toBe('p-papas')
+  })
+
+  it('vale anterior al campo (sin snapshot de extras): toma el ligado de la relación viva', async () => {
+    prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.inventoryPostingLine.update.mockResolvedValue({} as any)
+    prismaMock.inventoryMovement.count.mockResolvedValue(0 as any)
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({
+      id: 'post-1',
+      venueId: VENUE,
+      orderId: ORDER,
+      sourceId: ORDER,
+      status: 'PENDING',
+      lines: [
+        {
+          id: 'line-1',
+          effectKey: 'oi-1',
+          orderItemId: 'oi-1',
+          productId: 'p-burger',
+          status: 'PENDING',
+          expectedQuantityBase: new Prisma.Decimal(1),
+        },
+      ],
+      payloadSnapshot: null,
+    } as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi-1', productId: 'p-burger', quantity: 1, modifiers: [extraLigado] }] as any)
+    deductInventoryMock.mockResolvedValue({ inventoryMethod: null })
+
+    await applySalePosting('post-1', 'staff-1')
+
+    expect(deductInventoryMock.mock.calls[0][5][0].modifier.linkedProductId).toBe('p-papas')
+  })
+
+  it('🚨 con movimientos parciales, un renglón con extra ligado va a conciliación manual (no repite ni pierde el platillo)', async () => {
+    prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.inventoryPostingLine.update.mockResolvedValue({} as any)
+    prismaMock.inventoryMovement.count.mockResolvedValue(1 as any)
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({
+      id: 'post-1',
+      venueId: VENUE,
+      orderId: ORDER,
+      sourceId: ORDER,
+      status: 'PENDING',
+      lines: [
+        {
+          id: 'line-1',
+          effectKey: 'oi-1',
+          orderItemId: 'oi-1',
+          productId: 'p-burger',
+          status: 'PENDING',
+          expectedQuantityBase: new Prisma.Decimal(1),
+        },
+      ],
+      payloadSnapshot: null,
+    } as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi-1', productId: 'p-burger', quantity: 1, modifiers: [extraLigado] }] as any)
+
+    await applySalePosting('post-1', 'staff-1')
+
+    expect(deductInventoryMock).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED', reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE' }) }),
+    )
+  })
+})
+
+describe('🍟 ordenDescuentaInventarioSql (vigilante de dinero) espeja al extra ligado', () => {
+  it('cuenta como «descuenta inventario» un renglón con un extra ligado a un platillo', () => {
+    const { ordenDescuentaInventarioSql } = jest.requireActual('@/services/inventory/inventoryPosting.service')
+    expect(ordenDescuentaInventarioSql('o')).toMatch(/m\."linkedProductId" IS NOT NULL/)
+  })
+})

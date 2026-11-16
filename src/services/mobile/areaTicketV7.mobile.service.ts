@@ -687,7 +687,71 @@ export function buildSnapshotLines(
   })
 }
 
-async function buildReservationSpecs(
+/** Lo que hace falta leer del platillo ligado a un extra para apartarlo o consumirlo (encargo 27771e). */
+const LINKED_PRODUCT_INVENTORY_SELECT = {
+  id: true,
+  name: true,
+  venueId: true,
+  trackInventory: true,
+  inventoryMethod: true,
+  soldByWeight: true,
+  inventory: { select: { id: true } },
+  recipe: {
+    select: {
+      lines: {
+        select: {
+          quantity: true,
+          unit: true,
+          isOptional: true,
+          rawMaterial: { select: { id: true, name: true, unit: true } },
+        },
+      },
+    },
+  },
+} as const
+
+type LinkedProductForInventory = Prisma.ProductGetPayload<{ select: typeof LINKED_PRODUCT_INVENTORY_SELECT }>
+
+/**
+ * Extra ligado a un PLATILLO del menú (encargo 27771e): qué inventario mueve `portions` porciones de ese platillo. Por piezas, su fila de
+ * `Inventory`; por receta, cada ingrediente no opcional de su receta (sin sustituciones: el platillo ligado se vende sin extras). Igual que
+ * `deductInventoryForProduct` en el cobro normal: un ligado sin inventario, por kilo, de otro negocio, o sin su fila/receta no mueve nada
+ * (no se frena la venta por la configuración de un extra).
+ */
+function linkedProductTargets(
+  venueId: string,
+  product: LinkedProductForInventory | null | undefined,
+  portions: Prisma.Decimal,
+): Array<{ inventoryKind: AreaTicketInventoryTarget; inventoryId: string; quantityBaseUnits: Prisma.Decimal; label: string }> {
+  if (!product || product.venueId !== venueId || !product.trackInventory || product.soldByWeight || portions.lessThanOrEqualTo(0)) return []
+  // Receta vieja: `inventoryMethod` vacío con receta = por receta, igual que `getProductInventoryMethod` en el cobro normal (Codex r2 #2).
+  const method = product.inventoryMethod ?? (product.recipe ? 'RECIPE' : null)
+  if (method === 'QUANTITY') {
+    if (!product.inventory) return []
+    return [
+      {
+        inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+        inventoryId: product.inventory.id,
+        quantityBaseUnits: portions,
+        label: product.name,
+      },
+    ]
+  }
+  if (method === 'RECIPE' && product.recipe) {
+    return product.recipe.lines
+      .filter(line => !line.isOptional)
+      .map(line => ({
+        inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+        inventoryId: line.rawMaterial.id,
+        quantityBaseUnits: convertUnit(line.quantity, line.unit, line.rawMaterial.unit).mul(portions),
+        label: line.rawMaterial.name,
+      }))
+  }
+  return []
+}
+
+/** Exportada sólo para sus pruebas (encargo 27771e): qué inventario aparta cada renglón al emitir el vale. */
+export async function buildReservationSpecs(
   venueId: string,
   inputs: AreaTicketLineInput[],
   snapshots: SnapshotLine[],
@@ -711,14 +775,38 @@ async function buildReservationSpecs(
       id: { in: inputs.flatMap(line => line.modifierIds ?? []) },
       group: { venueId },
     },
-    include: { rawMaterial: { select: { id: true, name: true, unit: true } } },
+    include: {
+      rawMaterial: { select: { id: true, name: true, unit: true } },
+      linkedProduct: { select: LINKED_PRODUCT_INVENTORY_SELECT },
+    },
   })
 
   const specs: ReservationSpec[] = []
   snapshots.forEach((snapshot, lineIndex) => {
     const product = products.find(candidate => candidate.id === snapshot.productId)
-    if (!product?.trackInventory) return
+    if (!product) return
     const effectiveQuantity = new Prisma.Decimal(snapshot.weightKg ?? snapshot.quantity)
+
+    // Los extras se apartan aunque el platillo principal no lleve inventario, igual que en el cobro (Codex r2 #3, encargo 27771e): antes
+    // un principal sin inventario saltaba también sus extras, y al cobrar se consumían sin haberse apartado. Además, así la reserva es
+    // la foto EXACTA de lo que el extra descontaba al emitir (`esExtraApartable`, usado al consumir).
+    for (const modifier of modifiers.filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))) {
+      // Extra ligado a un platillo: 1 porción por pieza del renglón (en una línea pesada la cantidad es 1: es por renglón).
+      for (const target of linkedProductTargets(venueId, modifier.linkedProduct, new Prisma.Decimal(snapshot.quantity))) {
+        specs.push({ lineIndex, ...target })
+      }
+      if (!modifier.rawMaterial || !modifier.quantityPerUnit || !modifier.unit) continue
+      const normalized = convertUnit(modifier.quantityPerUnit, modifier.unit, modifier.rawMaterial.unit)
+      specs.push({
+        lineIndex,
+        inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+        inventoryId: modifier.rawMaterial.id,
+        quantityBaseUnits: normalized.mul(effectiveQuantity),
+        label: modifier.rawMaterial.name,
+      })
+    }
+
+    if (!product.trackInventory) return
 
     if (product.inventoryMethod === 'QUANTITY') {
       if (!product.inventory) {
@@ -754,18 +842,6 @@ async function buildReservationSpecs(
           label: recipeLine.rawMaterial.name,
         })
       }
-    }
-
-    for (const modifier of modifiers.filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))) {
-      if (!modifier.rawMaterial || !modifier.quantityPerUnit || !modifier.unit) continue
-      const normalized = convertUnit(modifier.quantityPerUnit, modifier.unit, modifier.rawMaterial.unit)
-      specs.push({
-        lineIndex,
-        inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
-        inventoryId: modifier.rawMaterial.id,
-        quantityBaseUnits: normalized.mul(effectiveQuantity),
-        label: modifier.rawMaterial.name,
-      })
     }
   })
 
@@ -3222,6 +3298,12 @@ interface AreaOrderInventoryDemand {
   inventoryId: string
   quantityBaseUnits: Prisma.Decimal
   label: string
+  /**
+   * Sale de un extra que, con su configuración de HOY, se habría apartado al emitir el vale (insumo con unidad, o platillo ligado;
+   * `buildReservationSpecs`). Si el renglón del vale apartó inventario y este destino no está entre lo apartado, el extra cambió de
+   * configuración después de emitir: lo que apartó entonces es la foto y esto no se suma (Codex r1 #3 y r2 #1, encargo 27771e).
+   */
+  extraApartable?: boolean
 }
 
 interface AggregatedAreaOrderInventoryDemand {
@@ -3294,6 +3376,7 @@ async function buildUnreservedAreaOrderInventoryDemands(
               unit: true,
               inventoryMode: true,
               rawMaterial: { select: { id: true, name: true, unit: true } },
+              linkedProduct: { select: LINKED_PRODUCT_INVENTORY_SELECT },
             },
           },
         },
@@ -3354,6 +3437,14 @@ async function buildUnreservedAreaOrderInventoryDemands(
 
     for (const orderModifier of item.modifiers) {
       const modifier = orderModifier.modifier
+      // Extra ligado a un platillo: 1 porción por selección y por pieza del renglón (por renglón en una línea pesada).
+      for (const target of linkedProductTargets(
+        venueId,
+        modifier?.linkedProduct,
+        new Prisma.Decimal(item.quantity).mul(orderModifier.quantity),
+      )) {
+        demands.push({ areaTicketLineId: item.areaTicketLineId, orderItemId: item.id, ...target, extraApartable: true })
+      }
       if (!modifier?.rawMaterial || modifier.quantityPerUnit == null) continue
       const consumesInventory = modifier.inventoryMode === 'ADDITION' || consumedSubstitutionModifierIds.has(modifier.id)
       if (!consumesInventory) continue
@@ -3366,23 +3457,15 @@ async function buildUnreservedAreaOrderInventoryDemands(
         inventoryId: modifier.rawMaterial.id,
         quantityBaseUnits: perSelection.mul(effectiveQuantity).mul(orderModifier.quantity),
         label: modifier.rawMaterial.name,
+        // Al emitir sólo se aparta el insumo con unidad propia (`buildReservationSpecs`): el que no la tiene nunca está en la foto.
+        extraApartable: modifier.unit != null,
       })
     }
   }
 
-  // A single reservation can aggregate base + modifier demand for the same
-  // line/target, so aggregate before matching it against reservation coverage.
-  const byLineTarget = new Map<string, AreaOrderInventoryDemand>()
-  for (const demand of demands) {
-    const lineKey = demand.areaTicketLineId ?? `order-item:${demand.orderItemId}`
-    const key = `${lineKey}:${demand.inventoryKind}:${demand.inventoryId}`
-    const current = byLineTarget.get(key)
-    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(demand.quantityBaseUnits)
-    else byLineTarget.set(key, { ...demand })
-  }
-
   const areaTicketLineIds = [...new Set(items.map(item => item.areaTicketLineId).filter((id): id is string => !!id))]
   const coveredTargets = new Map<string, Prisma.Decimal>()
+  const lineasConReserva = new Set<string>()
   if (areaTicketLineIds.length > 0) {
     const reservations = await tx.areaTicketInventoryReservation.findMany({
       where: {
@@ -3397,7 +3480,30 @@ async function buildUnreservedAreaOrderInventoryDemands(
     for (const reservation of reservations) {
       const key = `${reservation.areaTicketLineId}:${reservation.inventoryKind}:${reservation.inventoryId}`
       coveredTargets.set(key, (coveredTargets.get(key) ?? new Prisma.Decimal(0)).add(reservation.quantityBaseUnits))
+      lineasConReserva.add(reservation.areaTicketLineId)
     }
+  }
+
+  // A single reservation can aggregate base + modifier demand for the same
+  // line/target, so aggregate before matching it against reservation coverage.
+  const byLineTarget = new Map<string, AreaOrderInventoryDemand>()
+  for (const demand of demands) {
+    // 🔴 Codex r1 #3 y r2 #1 (encargo 27771e): la reserva es la foto de lo que cada extra descontaba al EMITIR. Un extra que hoy se
+    // habría apartado, en un renglón que sí apartó, pero cuyo destino no está entre lo apartado, cambió de configuración después de
+    // emitir (platillo A → platillo B, platillo → insumo, insumo → otro insumo): sumarlo descontaría dos cosas por una selección.
+    if (
+      demand.extraApartable &&
+      demand.areaTicketLineId &&
+      lineasConReserva.has(demand.areaTicketLineId) &&
+      !coveredTargets.has(`${demand.areaTicketLineId}:${demand.inventoryKind}:${demand.inventoryId}`)
+    ) {
+      continue
+    }
+    const lineKey = demand.areaTicketLineId ?? `order-item:${demand.orderItemId}`
+    const key = `${lineKey}:${demand.inventoryKind}:${demand.inventoryId}`
+    const current = byLineTarget.get(key)
+    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(demand.quantityBaseUnits)
+    else byLineTarget.set(key, { ...demand })
   }
 
   const byTarget = new Map<string, AggregatedAreaOrderInventoryDemand>()
