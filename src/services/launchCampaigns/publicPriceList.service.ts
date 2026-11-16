@@ -1,4 +1,4 @@
-import { FEATURE_CATALOG, FEATURE_CATEGORIES, type FeatureCatalogEntry } from '@/config/featureCatalog'
+import { FEATURE_CATALOG, FEATURE_CATEGORIES, RETIRADAS_DE_LA_VENTA, type FeatureCatalogEntry } from '@/config/featureCatalog'
 import { BadRequestError } from '@/errors/AppError'
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
@@ -106,7 +106,7 @@ export async function getPublicPriceList(): Promise<PublicPriceList> {
     return price === undefined ? [] : [{ tier, name: tier === 'PRO' ? 'Pro' : 'Premium', price }]
   })
   const order = (category: string) => (FEATURE_CATEGORIES as readonly string[]).indexOf(category)
-  const features = [...FEATURE_CATALOG]
+  const features = FEATURE_CATALOG.filter(entry => !RETIRADAS_DE_LA_VENTA.includes(entry.id))
     .sort((a, b) => order(a.category) - order(b.category))
     .flatMap((entry): PublicFeature[] => {
       const kind = kindOf(entry)
