@@ -42,6 +42,7 @@ import {
 } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
+  AVISO_PUENTE_QR_CAIDO,
   forEachLegacyPaymentPage,
   getLegacyPeriodMetrics,
   type LegacyPeriodMetric,
@@ -229,6 +230,8 @@ export interface SalesSummaryResponse {
    * broken query, pool not configured). Without it, "legacy rows are zero" and "the legacy query
    * failed" are indistinguishable — a COALESCE on the enum `method` column failed for weeks and the
    * report silently under-counted Mindform's QR revenue whenever a method filter was applied.
+   * D15 (2026-11-16): it also covers the page walk behind the headline totals — a bridge failure on a later page
+   * used to leave a PARTIAL sum reported as complete. Any legacy read that fails sets it; none of them clears it.
    */
   legacyUnavailable?: true
 }
@@ -897,14 +900,17 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let amount = 0
     let tips = 0
     let legacyCount = 0
-    await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
-      for (const payment of rows) {
-        if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-        amount += Number(payment.amount)
-        tips += Number(payment.tipAmount)
-        legacyCount += 1
-      }
-    })
+    const paginas = await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          amount += Number(payment.amount)
+          tips += Number(payment.tipAmount)
+          legacyCount += 1
+        }
+      },
+    )
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
@@ -917,7 +923,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // the period bars match this legacy-only headline total. Order-derived
     // metrics are null; payment-derived metrics come from the legacy aggregate.
     let byPeriod: TimePeriodMetrics[] | undefined
-    let legacyUnavailable = false
+    // The headline total above is partial if the page walk failed; the period query below can only ADD to the flag.
+    let legacyUnavailable = paginas.unavailable
     if ((reportType as string) !== 'summary') {
       const legacyPeriod = await getLegacyPeriodMetrics(
         parsedStartDate.toISOString(),
@@ -925,7 +932,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         reportType as LegacyPeriodReportType,
         timezone, // no methodFilter — all legacy
       )
-      legacyUnavailable = legacyPeriod.unavailable
+      legacyUnavailable ||= legacyPeriod.unavailable
       const legacyRowsByPeriod = legacyPeriod.rows
       const legacyMap = new Map(legacyRowsByPeriod.map(r => [r.periodKey, r]))
       const allPeriods = generateAllPeriods(reportType)
@@ -1270,17 +1277,26 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // DELETE this block when the native QR module ships — search the repo for
   // MINDFORM_NEW_VENUE_ID to find every gate.
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
-  if (venueId === MINDFORM_NEW_VENUE_ID) {
+  // D15: true when ANY legacy read of this report could not answer (the page walk here, the period query below).
+  let legacyUnavailable = false
+  // A filter that admits NO legacy row (OTHER, CARD → DEBIT / AMEX / INTERNATIONAL) never asks the bridge: nothing of it can
+  // be part of that total, so its outage cannot make the total incomplete either. Asking anyway copied the bridge failure
+  // into a total it does not feed — a false "may be incomplete" (Codex r2 #2). Same gate as the period query below.
+  if (venueId === MINDFORM_NEW_VENUE_ID && legacyAdmission(paymentMethod, cardType).include) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
-    await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
-      for (const payment of rows) {
-        if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-        if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
-        legacyAggregate!.amount += Number(payment.amount)
-        legacyAggregate!.tips += Number(payment.tipAmount)
-        legacyAggregate!.count += 1
-      }
-    })
+    const paginas = await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
+          legacyAggregate!.amount += Number(payment.amount)
+          legacyAggregate!.tips += Number(payment.tipAmount)
+          legacyAggregate!.count += 1
+        }
+      },
+    )
+    legacyUnavailable = paginas.unavailable
 
     if (legacyAggregate.count > 0) {
       // Payment-derived totals always include matching legacy volume.
@@ -1585,7 +1601,6 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // ============================================================
 
   let byPeriod: TimePeriodMetrics[] | undefined
-  let legacyUnavailable = false
 
   if (reportType !== 'summary') {
     const periodos = await calculateTimePeriodMetrics(
@@ -1599,7 +1614,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       cardType,
     )
     byPeriod = periodos.periods
-    legacyUnavailable = periodos.legacyUnavailable
+    legacyUnavailable ||= periodos.legacyUnavailable
   }
 
   // Per-merchant card breakdown for the reconciliation view (additive; opt-in).
@@ -1664,7 +1679,8 @@ export type SalesSummaryExportSection = 'totals' | 'paymentMethods' | 'cardTypes
 
 /** One flattened row for the summary-mode export (rendered by encodeExport columns). */
 export interface SalesSummaryExportRow {
-  section: SalesSummaryExportSection
+  /** `'aviso'` is not a requestable section: it is the warning row a `legacyUnavailable` report carries (D15). */
+  section: SalesSummaryExportSection | 'aviso'
   label: string
   count: number | null
   amount: number | null
@@ -1698,6 +1714,12 @@ export function flattenSalesSummaryForExport(
   const want = new Set(sections)
   const rows: SalesSummaryExportRow[] = []
   const s = report.summary
+
+  // D15: the screen warns that the totals may be incomplete; the file (and the MCP export) must say it too. First row,
+  // whatever sections were requested, so nobody reads the numbers below as complete.
+  if (report.legacyUnavailable) {
+    rows.push({ section: 'aviso', label: AVISO_PUENTE_QR_CAIDO, count: null, amount: null, percentage: null })
+  }
 
   if (want.has('totals')) {
     const t = (label: string, amount: number | null, count: number | null = null): SalesSummaryExportRow => ({

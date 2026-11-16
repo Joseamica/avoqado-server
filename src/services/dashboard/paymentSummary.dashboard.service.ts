@@ -62,6 +62,11 @@ export interface PaymentsSummary {
   filteredGroups: PaymentSummaryGroup[]
   total: number
   filteredTotal: number
+  /**
+   * Aditivo (D15): sólo aparece cuando el puente QR legacy de MindForm no pudo contestar alguna página. Los conteos y las
+   * sumas traen lo de Avoqado y lo que sí se alcanzó a leer: pueden estar incompletos y la pantalla lo dice.
+   */
+  legacyUnavailable?: true
 }
 
 // ─── El WHERE, predicado por predicado (espejo de buildPaymentsWhereClause) ────
@@ -273,16 +278,16 @@ async function foldLegacyPages(
   client: PaymentClientFilters | undefined,
   groups: PaymentSummaryGroup[],
   filteredGroups: PaymentSummaryGroup[],
-): Promise<{ groups: PaymentSummaryGroup[]; filteredGroups: PaymentSummaryGroup[] }> {
-  if (venueId !== MINDFORM_NEW_VENUE_ID) return { groups, filteredGroups }
+): Promise<{ groups: PaymentSummaryGroup[]; filteredGroups: PaymentSummaryGroup[]; legacyUnavailable: boolean }> {
+  if (venueId !== MINDFORM_NEW_VENUE_ID) return { groups, filteredGroups, legacyUnavailable: false }
   const legacyFilter = {
     methods: filters?.methods ?? (filters?.method ? [filters.method] : undefined),
     sources: filters?.sources ?? (filters?.source ? [filters.source] : undefined),
   }
-  if (!shouldIncludeLegacyPayments(legacyFilter)) return { groups, filteredGroups }
+  if (!shouldIncludeLegacyPayments(legacyFilter)) return { groups, filteredGroups, legacyUnavailable: false }
   const withClient = hasClientFilters(client)
 
-  await forEachLegacyPaymentPage(
+  const { unavailable } = await forEachLegacyPaymentPage(
     { startDate: filters?.startDate, endDate: filters?.endDate, search: filters?.search, methods: legacyFilter.methods },
     rows => {
       const legacy = filterLegacyRowsByMethodSource(rows, legacyFilter)
@@ -295,7 +300,7 @@ async function foldLegacyPages(
         : groups
     },
   )
-  return { groups, filteredGroups }
+  return { groups, filteredGroups, legacyUnavailable: unavailable }
 }
 
 export async function getPaymentsSummary(
@@ -306,18 +311,22 @@ export async function getPaymentsSummary(
   if (!venueId) throw new NotFoundError('Venue ID es requerido')
 
   const withClient = hasClientFilters(client)
-  let { groups, filteredGroups } = await groupPayments(
-    paymentsSqlScope(venueId, filters),
-    withClient ? paymentsClientSqlScope(client) : Prisma.sql`TRUE`,
-  )
+  const nativos = await groupPayments(paymentsSqlScope(venueId, filters), withClient ? paymentsClientSqlScope(client) : Prisma.sql`TRUE`)
 
-  ;({ groups, filteredGroups } = await foldLegacyPages(venueId, filters, client, groups, filteredGroups))
+  const { groups, filteredGroups, legacyUnavailable } = await foldLegacyPages(
+    venueId,
+    filters,
+    client,
+    nativos.groups,
+    nativos.filteredGroups,
+  )
 
   return {
     groups,
     filteredGroups,
     total: sumGroupCount(groups),
     filteredTotal: sumGroupCount(filteredGroups),
+    ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
   }
 }
 

@@ -35,7 +35,8 @@ jest.mock('@/services/legacy/qrPayments.legacy.service', () => ({
   MINDFORM_NEW_VENUE_ID: 'cmisvi38o001fhr2828ygmxi2',
   forEachLegacyPaymentPage: async (filters: unknown, consume: (rows: unknown[]) => unknown) => {
     const page = await mockGetLegacy(filters)
-    return consume(page.rows)
+    await consume(page.rows)
+    return { unavailable: false } // el recorrido real dice si el puente contestó (D15); aquí siempre contesta
   },
 }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))

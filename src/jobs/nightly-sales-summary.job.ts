@@ -87,6 +87,11 @@ interface VenueSalesSummaryData {
     new: number
     returning: number
   }
+  /**
+   * D15: el puente QR legacy (MindForm) no contestó en alguno de los tres resúmenes del correo (hoy, ayer o la semana
+   * pasada): el total o sus comparaciones pueden estar incompletos y el correo lo dice.
+   */
+  legacyUnavailable?: true
 }
 
 interface JobResult {
@@ -336,6 +341,9 @@ export class NightlySalesSummaryJob {
             },
             categoryBreakdown,
             orderSources,
+            ...(todaySummary.legacyUnavailable || yesterdaySummary.legacyUnavailable || lastWeekSummary.legacyUnavailable
+              ? { legacyUnavailable: true as const }
+              : {}),
           }
 
           // Calculate weekly comparison — coerce nullable netSales to 0 because

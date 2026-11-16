@@ -32,7 +32,7 @@ import {
 import { BadRequestError } from '@/errors/AppError'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
 import { VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
-import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
+import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
@@ -344,6 +344,9 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       requestedColumnIds: allColumns.map(c => c.id),
       rows,
       title: 'Resumen de ventas',
+      // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF corta las celdas largas con «…», así
+      // que además lo lleva completo bajo el título.
+      ...(report.legacyUnavailable ? { resumen: [AVISO_PUENTE_QR_CAIDO] } : {}),
     })
     logger.info('[SalesSummary export summary]', { venueId, format, sections })
     sendExport(res, encoded, 'resumen-ventas')

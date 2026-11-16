@@ -3093,6 +3093,8 @@ Avoqado Dashboard
         platformFees: number
         transactionCount: number
       }
+      /** D15: alguno de los resúmenes del correo no pudo leer los cobros QR legacy; sus totales pueden estar incompletos. */
+      legacyUnavailable?: true
     },
     _weeklyChange: number = 0,
   ): Promise<boolean> {
@@ -3139,6 +3141,15 @@ Avoqado Dashboard
     // Logo URL (hosted on avoqado.io)
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
+    // D15: alguno de los resúmenes del correo (hoy, ayer o la semana pasada) no pudo leer los cobros QR legacy. Va en los DOS
+    // cuerpos, antes de las cifras: el de texto es el que lee un cliente de correo sin HTML (Codex r2 #1: sólo estaba en el HTML).
+    const avisoCobrosQr = data.legacyUnavailable
+      ? {
+          queFallo: 'No pudimos leer todos los cobros del sistema anterior de QR.',
+          queHacer: 'Los totales y las comparaciones de este correo pueden estar incompletos: revísalos en el panel.',
+        }
+      : null
+
     const html = `
 <!DOCTYPE html>
 <html>
@@ -3176,6 +3187,18 @@ Avoqado Dashboard
         <a href="${data.dashboardUrl}" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Abrir Dashboard</a>
       </p>
     </div>
+    ${
+      avisoCobrosQr
+        ? `
+    <!-- Aviso: totales incompletos (puente QR legacy) -->
+    <div style="border: 1px solid #f59e0b; border-radius: 8px; background-color: #fffbeb; padding: 16px; margin: 8px 0 0 0;">
+      <p style="margin: 0; font-size: 14px; color: #000;">
+        <strong>${avisoCobrosQr.queFallo}</strong>
+        ${avisoCobrosQr.queHacer}
+      </p>
+    </div>`
+        : ''
+    }
 
     <!-- Key Metrics Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; margin: 24px 0; overflow: hidden;">
@@ -3363,7 +3386,7 @@ Avoqado Dashboard
 Resumen de ventas - ${data.venueName}
 ${reportDateCapitalized}
 ${reportDateFormatted} ${data.businessHoursStart} - ${data.businessHoursEnd} CST
-
+${avisoCobrosQr ? `\nAVISO: ${avisoCobrosQr.queFallo} ${avisoCobrosQr.queHacer}\n` : ''}
 METRICAS CLAVE
 --------------
 Ventas netas: ${formatCurrency(data.metrics.netSales)}
