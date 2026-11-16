@@ -513,6 +513,85 @@ export async function assignTable(
 }
 
 /**
+ * D7 (hz:033d44ca:D7, founder 16-nov-2026: «A, cuenta aparte»): la cuenta donde cae una ronda que el aparato mandó SIN red a una cuenta
+ * de mesa que otra caja ya cobró. Sólo la usa la cola sin red (`ADD_ITEMS`). Nunca adopta una cuenta viva de la mesa (puede ser otra
+ * visita): bajo el MISMO candado que `assignTable`, primero busca la cuenta aparte que ya se le abrió a esta ronda tardía (`existente`:
+ * la llave es la nota de la bitácora; así un reintento o una retoma no abren otra) y, si no hay, crea una nueva a nombre del mesero.
+ * - Mesa sin cuentas vivas (y no reservada): la cuenta aparte la ocupa, para que la caja la vea en el plano con su saldo.
+ * - Mesa con otra visita viva: nace junto a ella, sin soltarla ni moverle el puntero (como D51).
+ * - Mesa reservada: nace junto, sin tocar la mesa.
+ * `dentroDeLaTx` escribe la nota en la misma transacción que la cuenta (una caída después del commit no la pierde).
+ */
+export async function cuentaAparteParaRondaTardia(p: {
+  venueId: string
+  tableId: string
+  staffId: string
+  covers: number
+  existente: (tx: Prisma.TransactionClient) => Promise<string | null>
+  dentroDeLaTx: (tx: Prisma.TransactionClient, nueva: { orderId: string; otrasCuentas: string[] }) => Promise<void>
+}): Promise<{ orderId: string; isNewOrder: boolean }> {
+  const { venueId, tableId, staffId } = p
+  const result = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${7_310_115}::int, hashtext(${JSON.stringify([venueId, tableId])}))::text`
+    const scope = await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [tableId] })
+    const yaAbierta = await p.existente(tx)
+    if (yaAbierta) return { orderId: yaAbierta, isNewOrder: false as const }
+
+    const table = await tx.table.findFirst({ where: { id: tableId, venueId }, select: { id: true, number: true, status: true } })
+    if (!table) throw new NotFoundError('Table not found or does not belong to this venue')
+    await assertVenueSalesEnabled(venueId, tx)
+
+    const otrasCuentas = scope.orders
+      .filter(
+        o => o.tableId === table.id && !(ESTADOS_FUERA_DE_LA_MESA as readonly string[]).includes(o.status) && o.paymentStatus !== 'PAID',
+      )
+      .map(o => o.id)
+    const turnoVivo = await turnoAbiertoDelNegocio(tx, venueId)
+    const nueva = await tx.order.create({
+      data: {
+        venueId,
+        shiftId: turnoVivo?.id ?? null,
+        tableId: table.id,
+        covers: p.covers,
+        orderNumber: `ORD-${Date.now()}`,
+        servedById: staffId,
+        terminalId: null,
+        status: 'PENDING',
+        paymentStatus: PaymentStatus.PENDING,
+        kitchenStatus: 'PENDING',
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; la ronda que entra después trae IVA incluido (plan 2)
+        version: 1,
+      },
+      select: { id: true, orderNumber: true },
+    })
+    const tomaLaMesa = otrasCuentas.length === 0 && table.status !== TableStatus.RESERVED
+    if (tomaLaMesa) await tx.table.update({ where: { id: table.id }, data: { status: 'OCCUPIED', currentOrderId: nueva.id } })
+    await p.dentroDeLaTx(tx, { orderId: nueva.id, otrasCuentas })
+    const staff = tomaLaMesa ? await tx.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } }) : null
+    return { orderId: nueva.id, isNewOrder: true as const, tomaLaMesa, table, orderNumber: nueva.orderNumber, staff }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (!result.isNewOrder) return { orderId: result.orderId, isNewOrder: false }
+  logger.info(`🪑 [TABLE SERVICE] Ronda tardía: cuenta aparte ${result.orderNumber} en la mesa ${result.table.number}`)
+  if (result.tomaLaMesa) {
+    socketManager.getBroadcastingService()?.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+      tableId: result.table.id,
+      tableNumber: result.table.number,
+      status: 'OCCUPIED',
+      orderId: result.orderId,
+      orderNumber: result.orderNumber,
+      covers: p.covers,
+      waiter: { id: staffId, name: result.staff ? `${result.staff.firstName} ${result.staff.lastName}`.trim() : '' },
+    })
+  }
+  return { orderId: result.orderId, isNewOrder: true }
+}
+
+/**
  * Clear table after payment is completed
  * Marks table as AVAILABLE and removes currentOrderId link
  *
