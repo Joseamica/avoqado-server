@@ -1,6 +1,7 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
   isItemLevelDiscount,
+  isItemLevelDiscountSql,
   lineBase,
   lineGross,
   lineGrossSql,
@@ -160,6 +161,32 @@ describe('isItemLevelDiscount — only count a giveaway once', () => {
   it('ignores a line with no discount at all', () => {
     expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50 })).toBe(false)
   })
+
+  it('counts a combo piece with paid extras (total = list - share + extras)', () => {
+    const pieza = { quantity: 1, unitPrice: 120, discountAmount: 12, total: 123, modifiers: [{ price: 15 }] }
+    expect(isItemLevelDiscount({ ...pieza, orderPromotionId: 'p1' })).toBe(true)
+  })
+
+  it('does NOT count the same numbers on a normal line (no promotion)', () => {
+    const linea = { quantity: 1, unitPrice: 120, discountAmount: 12, total: 123, modifiers: [{ price: 15 }] }
+    expect(isItemLevelDiscount(linea)).toBe(false)
+    expect(isItemLevelDiscount({ ...linea, orderPromotionId: null })).toBe(false)
+  })
+
+  it('ignores a promotion line with no discount', () => {
+    expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50, orderPromotionId: 'p1' })).toBe(false)
+  })
+
+  it('does NOT count a combo piece with a TPV cortesía (mirrored on the header)', () => {
+    expect(
+      isItemLevelDiscount({ quantity: 1, unitPrice: 120, discountAmount: 120, total: 108, orderPromotionId: 'p1', modifiers: [] }),
+    ).toBe(false)
+  })
+
+  it('SQL twin: a promotion line also matches total = lineBase + modifiers', () => {
+    const sql = isItemLevelDiscountSql('oi')
+    expect(sql).toContain('oi."orderPromotionId" IS NOT NULL AND ABS(')
+  })
 })
 
 describe('shift top products — revenue is net of the line discount', () => {
@@ -291,5 +318,22 @@ describe('shift top products — revenue is net of the line discount', () => {
 
     const shift = await getShiftById('venue-1', 'shift-1')
     expect(shift.orders[0].items[0].price).toBe(89)
+  })
+})
+
+describe('lineGross / lineRevenue — extras de un combo (hamburguesa $120 + papas $80 de lista, combo $180, queso $15)', () => {
+  // Lo que el motor deja: cada pieza con su parte del combo en `unitPrice`/`discountAmount` y el extra como modificador.
+  // Hamburguesa: lista 120, combo la deja en 108 (descuento 12) + queso 15. Papas: lista 80, combo 72 (descuento 8).
+  const lineas = [
+    { quantity: 1, unitPrice: 120, discountAmount: 12, modifiers: [{ price: 15, quantity: 1 }] },
+    { quantity: 1, unitPrice: 80, discountAmount: 8, modifiers: [] },
+  ]
+
+  it('Σ lineGross = 215 (lista $200 + extra $15)', () => {
+    expect(lineas.reduce((a, l) => a + lineGross(l), 0)).toBe(215)
+  })
+
+  it('Σ lineRevenue = 195 (combo $180 + extra $15)', () => {
+    expect(lineas.reduce((a, l) => a + lineRevenue(l), 0)).toBe(195)
   })
 })

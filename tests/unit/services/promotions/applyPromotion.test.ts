@@ -280,3 +280,138 @@ describe('applyPromotionToOrder', () => {
     expect(lineas.every((l: any) => Number(l.taxAmount) === 0)).toBe(true)
   })
 })
+
+describe('extras de las piezas', () => {
+  const grupoTermino = { id: 'g-termino', name: 'Término', required: false, allowMultiple: false, minSelections: 0, maxSelections: null }
+  const conExtras = (extraIds: string[] = ['queso']) =>
+    params({
+      selections: [
+        { groupId: 'g1', optionId: 'o1', modifierIds: extraIds },
+        { groupId: 'g2', optionId: 'o2' },
+      ],
+    })
+
+  beforeEach(() => {
+    prismaMock.orderItem.create.mockResolvedValue({ id: 'oi-1' })
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([{ productId: 'hamburguesa', group: grupoTermino }])
+    prismaMock.modifier.findMany.mockResolvedValue([{ id: 'queso', name: 'Queso', price: 15, groupId: 'g-termino' }])
+  })
+
+  const totalBase = async () => {
+    jest.clearAllMocks()
+    await applyPromotionToOrder(params())
+    const lineas = prismaMock.orderItem.createMany.mock.calls[0][0].data
+    const ham = lineas.find((l: any) => l.productId === 'hamburguesa')
+    return { total: Number(ham.total), descuento: Number(ham.discountAmount) }
+  }
+
+  it('FIXED_TOTAL $99 + queso $15: el extra va encima, el combo no cambia', async () => {
+    const base = await totalBase()
+    jest.clearAllMocks()
+    prismaMock.orderItem.create.mockResolvedValue({ id: 'oi-1' })
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([{ productId: 'hamburguesa', group: grupoTermino }])
+    prismaMock.modifier.findMany.mockResolvedValue([{ id: 'queso', name: 'Queso', price: 15, groupId: 'g-termino' }])
+    prismaMock.orderPromotion.findUnique.mockResolvedValue(null)
+    prismaMock.orderPromotion.create.mockResolvedValue({ id: 'op-1' })
+
+    await applyPromotionToOrder(conExtras())
+
+    const ham = prismaMock.orderItem.create.mock.calls[0][0].data
+    expect(ham.productId).toBe('hamburguesa')
+    expect(Number(ham.total)).toBeCloseTo(base.total + 15, 2)
+    expect(Number(ham.discountAmount)).toBeCloseTo(base.descuento, 2)
+    expect(ham.modifiers.create).toEqual([{ modifierId: 'queso', name: 'Queso', quantity: 1, price: 15 }])
+    // El refresco sigue por createMany, sin extras.
+    expect(prismaMock.orderItem.createMany.mock.calls[0][0].data.map((l: any) => l.productId)).toEqual(['refresco'])
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op).toMatchObject({ netCents: 9900, needsReview: false, reviewReason: null })
+    expect(op.snapshotJson.selections[0].extras).toEqual([{ modifierId: 'queso', name: 'Queso', priceCents: 1500 }])
+  })
+
+  it('PER_UNIT: el mismo extra suma $15 encima', async () => {
+    prismaMock.promotion.findFirst.mockResolvedValue({ ...promocionEnBase(), pricingMode: 'PER_UNIT', priceCents: 0 })
+
+    await applyPromotionToOrder(conExtras())
+
+    const ham = prismaMock.orderItem.create.mock.calls[0][0].data
+    expect(Number(ham.total)).toBeCloseTo(80 + 15, 2)
+    expect(prismaMock.orderPromotion.create.mock.calls[0][0].data.netCents).toBe(12000)
+  })
+
+  it('fuera de vigencia: lista + $15, la razón de vigencia se conserva y se añaden las de extras', async () => {
+    prismaMock.promotion.findFirst.mockResolvedValue({ ...promocionEnBase(), validUntil: new Date('2026-01-01T00:00:00Z') })
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([{ productId: 'hamburguesa', group: { ...grupoTermino, required: true } }])
+
+    await applyPromotionToOrder(conExtras([]))
+
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op.needsReview).toBe(true)
+    expect(op.reviewReason).toMatch(/vigencia/i)
+    expect(op.reviewReason).toContain('Faltó elegir «Término» de Hamburguesa.')
+
+    jest.clearAllMocks()
+    prismaMock.orderPromotion.findUnique.mockResolvedValue(null)
+    prismaMock.orderPromotion.create.mockResolvedValue({ id: 'op-1' })
+    prismaMock.orderItem.create.mockResolvedValue({ id: 'oi-1' })
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([{ productId: 'hamburguesa', group: grupoTermino }])
+    prismaMock.modifier.findMany.mockResolvedValue([{ id: 'queso', name: 'Queso', price: 15, groupId: 'g-termino' }])
+    await applyPromotionToOrder(conExtras())
+    expect(Number(prismaMock.orderItem.create.mock.calls[0][0].data.total)).toBeCloseTo(80 + 15, 2)
+  })
+
+  it('obligatorio faltante no lanza: needsReview con la razón', async () => {
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([{ productId: 'hamburguesa', group: { ...grupoTermino, required: true } }])
+
+    await expect(applyPromotionToOrder(conExtras([]))).resolves.toMatchObject({ created: true })
+
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op.needsReview).toBe(true)
+    expect(op.reviewReason).toContain('Faltó elegir «Término» de Hamburguesa.')
+    expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('sin llave no consulta modificadores', async () => {
+    await applyPromotionToOrder(params())
+
+    expect(prismaMock.productModifierGroup.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.modifier.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+    expect(prismaMock.orderItem.createMany.mock.calls[0][0].data).toHaveLength(2)
+    expect(prismaMock.orderPromotion.create.mock.calls[0][0].data).toMatchObject({ needsReview: false, reviewReason: null })
+  })
+
+  it('reintento con el mismo instanceId: no crea renglones ni filas', async () => {
+    prismaMock.orderPromotion.findUnique.mockResolvedValue({ id: 'op-previo', netCents: 9900 })
+
+    await applyPromotionToOrder(conExtras())
+
+    expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+    expect(prismaMock.orderItem.createMany).not.toHaveBeenCalled()
+  })
+
+  it('las consultas llevan tope y llegar al tope de grupos marca revisión', async () => {
+    const liga = { productId: 'hamburguesa', group: grupoTermino }
+    prismaMock.productModifierGroup.findMany.mockResolvedValue(Array.from({ length: 50 }, () => liga))
+
+    await applyPromotionToOrder(conExtras())
+
+    expect(prismaMock.productModifierGroup.findMany.mock.calls[0][0].take).toBe(50)
+    expect(prismaMock.modifier.findMany.mock.calls[0][0].take).toBe(1)
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op.needsReview).toBe(true)
+    expect(op.reviewReason).toContain('No se revisaron todos los grupos de modificadores')
+  })
+
+  it('modificador de otro venue se omite: la consulta filtra por venueId', async () => {
+    prismaMock.modifier.findMany.mockResolvedValue([])
+
+    await applyPromotionToOrder(conExtras(['ajeno']))
+
+    expect(prismaMock.modifier.findMany.mock.calls[0][0].where).toEqual({ id: { in: ['ajeno'] }, group: { venueId: 'venue-1' } })
+    expect(prismaMock.productModifierGroup.findMany.mock.calls[0][0].where).toMatchObject({ group: { venueId: 'venue-1', active: true } })
+    expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+    const op = prismaMock.orderPromotion.create.mock.calls[0][0].data
+    expect(op.needsReview).toBe(true)
+    expect(op.reviewReason).toContain('ya no existe')
+  })
+})

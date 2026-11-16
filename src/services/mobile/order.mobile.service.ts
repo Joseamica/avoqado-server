@@ -79,7 +79,7 @@ import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazo
 import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
-import { applyPromotionToOrder } from '../promotions/promotion.service'
+import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
@@ -275,11 +275,7 @@ export interface CreateOrderItemInput {
   promotionRef?: {
     promotionId: string
     promotionInstanceId: string
-    selections: Array<{
-      groupId: string
-      optionId: string
-      serviceCourse?: ServiceCourseSnapshot | null
-    }>
+    selections: PromotionSelection[]
   }
 }
 
