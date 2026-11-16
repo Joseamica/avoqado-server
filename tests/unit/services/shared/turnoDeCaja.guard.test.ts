@@ -22,7 +22,8 @@ const esperado: Record<string, number> = {
   // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
   // (orden de mostrador) y `sellSerializedItem`, que ahora estampan `Order.shiftId`.
   'tpv/order.tpv.service.ts': 3,
-  'tpv/table.tpv.service.ts': 1,
+  // D7 (16-nov): la cuenta aparte de una ronda tardía nace en el turno abierto del negocio, como assignTable.
+  'tpv/table.tpv.service.ts': 2,
   // 5i (4-sep): pasó al claim transaccional (`claimShiftForCapturedPayment`).
   'dashboard/manualPayment.service.ts': 0,
   'dashboard/refund.dashboard.service.ts': 0,
