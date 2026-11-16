@@ -939,6 +939,14 @@ model VenueSettings {
   /// de plan. Switch canónico en el dashboard; el POS sólo lo lee.
   managerPinOverrideEnabled Boolean @default(false)
 
+  /// Motivo obligatorio en los descuentos del POS (encargo f998c8, founder «A» 15-nov, como Toast «Discount reason required»).
+  /// Prendido: quien pone a mano un descuento o un «Ajuste de precio» en el POS elige un motivo de `discountReasons` (+ comentario
+  /// opcional). Nace OFF, todos los planes. Switch canónico en el dashboard; el POS sólo lo lee. El SERVIDOR nunca rechaza una
+  /// venta sin motivo (apps viejas y la cola sin red): lo exige la app.
+  discountReasonRequired    Boolean  @default(false)
+  /// La lista de motivos del negocio (≤ 30, ≤ 60 letras c/u, sin repetidos). No se prende el switch con la lista vacía.
+  discountReasons           String[] @default([])
+
   /// Cambio de talla o de producto en una venta ya cobrada (spec 2026-10-20). `null` = el default por giro, que resuelve el
   /// SERVIDOR (prendido en tiendas y servicios; apagado en restaurantes, bares y entretenimiento); `true`/`false` = decisión
   /// explícita del negocio. Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
@@ -9875,6 +9883,11 @@ model OrderDiscount {
 
   // Comp-specific
   compReason String? @db.Text
+
+  // Motivo del descuento (encargo f998c8): texto COPIADO de la lista del negocio al aplicarlo (no FK: renombrar o quitar un
+  // motivo no cambia lo vendido). Null = «Sin motivo» (apps viejas, la TPV, descuentos que nadie elige a mano).
+  reason        String?
+  reasonComment String?
 
   // Loyalty redemption: when a check discount came from redeeming points, this
   // ties it to its REDEEM transaction so removing the discount ALWAYS refunds

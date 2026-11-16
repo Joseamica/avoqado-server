@@ -37,6 +37,7 @@ import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
  * detrás de un paywall sería indefendible.
  */
 
+import type { MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { Prisma } from '@prisma/client'
 
 import logger from '../../config/logger'
@@ -480,6 +481,8 @@ async function crearEspejosDelVale(
     discounts: Array<{ id: string; [key: string]: any }>
     /** D4: la sesión que aprobó con su permiso propio (aquí no hay PIN) los descuentos que piden aprobación. */
     apruebaLaSesion?: string
+    /** Encargo f998c8: el motivo que eligió la caja por renglón (por su id); sin él, la fila queda «Sin motivo». */
+    motivosPorRenglon?: Map<string, MotivoDeDescuento>
   },
 ): Promise<void> {
   const conDescuento = p.renglones.filter(r => r.appliedDiscountId)
@@ -499,8 +502,9 @@ async function crearEspejosDelVale(
       discountAmountPesos: Number(r.discountAmount),
       appliedById: otorgadoPor?.id ?? null,
     })
+    const conMotivo = { ...fila, ...p.motivosPorRenglon?.get(r.id) }
     await tx.orderDiscount.create({
-      data: aprobo && pideAprobacionDeGerente(discount) ? { ...fila, appliedById: aprobo, authorizedById: aprobo } : fila,
+      data: aprobo && pideAprobacionDeGerente(discount) ? { ...conMotivo, appliedById: aprobo, authorizedById: aprobo } : conMotivo,
     })
   }
 }
@@ -553,7 +557,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // 🔴 El área la pone el SERVER desde el binding de la terminal, jamás el payload.
-  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(
+  const { itemsData, subtotal, itemDiscountTotal, discounts, motivosPorRenglon } = await buildOrderItemsData(
     venueId,
     input.items,
     terminal.fulfillmentAreaId,
@@ -603,6 +607,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
         staffId,
         renglones: order.items,
         discounts,
+        motivosPorRenglon,
         ...(input.aprobacionDelDescuento && input.performedBy ? { apruebaLaSesion: input.performedBy } : {}),
       })
 
@@ -699,7 +704,14 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // Misma aritmética que abrir la cuenta y que el mostrador: una sola función.
-  const { itemsData, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId, undefined, undefined, input)
+  const { itemsData, discounts, motivosPorRenglon } = await buildOrderItemsData(
+    venueId,
+    input.items,
+    terminal.fulfillmentAreaId,
+    undefined,
+    undefined,
+    input,
+  )
 
   const updated = await prisma.$transaction(async tx => {
     // Plan 3b: lock the Order (route venue) before reading what decides the write. A claim, a partial payment, a tip,
@@ -751,6 +763,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
       staffId: input.staffId,
       renglones: creados,
       discounts,
+      motivosPorRenglon,
       ...(input.aprobacionDelDescuento && input.performedBy ? { apruebaLaSesion: input.performedBy } : {}),
     })
 

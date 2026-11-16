@@ -10,13 +10,14 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { ForbiddenError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { VenueSettings, Prisma } from '@prisma/client'
 import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { validarAjusteDeMotivos } from '../shared/motivoDelDescuento'
 
 /**
  * Default settings for new venues
@@ -137,6 +138,26 @@ export async function updateVenueSettings(
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
+  // Encargo f998c8: «Pedir motivo en los descuentos» + la lista del negocio. Se valida contra lo guardado (no se prende con la lista
+  // vacía; prendido no se quita el último motivo) y la lista se guarda limpia (recortada, sin vacíos ni repetidos).
+  if ('discountReasonRequired' in updates || 'discountReasons' in updates) {
+    const guardado = await prisma.venueSettings.findUnique({
+      where: { venueId },
+      select: { discountReasonRequired: true, discountReasons: true },
+    })
+    const resultado = validarAjusteDeMotivos(
+      {
+        ...(typeof updates.discountReasonRequired === 'boolean' ? { required: updates.discountReasonRequired } : {}),
+        ...(Array.isArray(updates.discountReasons) ? { reasons: updates.discountReasons as unknown[] } : {}),
+      },
+      { required: guardado?.discountReasonRequired ?? false, reasons: guardado?.discountReasons ?? [] },
+    )
+    if (!resultado.ok) throw new BadRequestError(resultado.mensaje)
+    delete updates.discountReasonRequired
+    delete updates.discountReasons
+    Object.assign(updates, resultado.cambios)
+  }
+
   // Prepare create data with defaults
   const createData: Prisma.VenueSettingsUncheckedCreateInput = {
     venueId,
@@ -181,6 +202,9 @@ export async function updateVenueSettings(
     // fila nacería en false — el POS nunca ofrecería el PIN.
     ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
     ...(typeof updates.exchangesEnabled === 'boolean' && { exchangesEnabled: updates.exchangesEnabled }),
+    // Motivo en los descuentos (f998c8): un venue SIN fila toma esta rama; sin estas líneas el primer «prender» nacía apagado.
+    ...(typeof updates.discountReasonRequired === 'boolean' && { discountReasonRequired: updates.discountReasonRequired }),
+    ...(Array.isArray(updates.discountReasons) && { discountReasons: updates.discountReasons as string[] }),
     // «Sólo saldo a favor»: mismo caso. Un venue SIN fila toma esta rama y, sin esta línea, el primer «prender» nacía en false.
     ...(typeof updates.storeCreditOnly === 'boolean' && { storeCreditOnly: updates.storeCreditOnly }),
     // «Sólo el dueño de la mesa»: mismo caso. Sin esta línea el primer «prender» nacía en false y el POS no lo aplicaba.

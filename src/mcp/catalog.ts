@@ -202,6 +202,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   landing_leads: 'read',
   list_aggregator_visits: 'read',
   list_announcements: 'read',
+  list_applied_discounts: 'read',
   list_areas: 'read',
   list_asset_types: 'read',
   list_cash_drawer_sessions: 'read',

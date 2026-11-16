@@ -32,6 +32,7 @@ import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.m
 import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/services/mobile/cortesia-pendiente.public'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 import { esTpvQueTruncaElDescuento } from '../../services/shared/descuentoDeTpvVieja'
+import { motivoDelDescuento } from '../../services/shared/motivoDelDescuento'
 
 /** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
 export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
@@ -330,6 +331,9 @@ export function leerVentaDeMostrador(
       discount: typeof discount === 'number' ? discount : 0,
       // Descuento de catálogo de la cuenta (como `/tpv/with-items`); validado arriba.
       orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
+      // Encargo f998c8: el motivo del descuento de la cuenta. Opcional y nunca rechaza (el servicio lo recorta); una app vieja no lo manda.
+      ...(typeof body.orderDiscountReason === 'string' ? { orderDiscountReason: body.orderDiscountReason } : {}),
+      ...(typeof body.orderDiscountReasonComment === 'string' ? { orderDiscountReasonComment: body.orderDiscountReasonComment } : {}),
       // D5: validado arriba; el servicio lo revalida y calcula en línea.
       couponCode: typeof couponCode === 'string' ? couponCode.trim() : null,
       ...(typeof descuentoDeCatalogoId === 'string' ? { descuentoDeCatalogoId } : {}),
@@ -1007,7 +1011,7 @@ async function puedeCambiarClienteEnVentaCobrada(req: Request): Promise<boolean>
 /**
  * POST /mobile/venues/:venueId/orders/:orderId/discounts
  * TABLE_SERVICE — applies an ORDER-scope catalog discount to the open check.
- * Body: { discountId: string }
+ * Body: { discountId: string, reason?: string, reasonComment?: string } (motivo opcional, encargo f998c8: nunca rechaza)
  */
 export const applyOrderDiscount = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -1026,6 +1030,7 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
         staffId,
         tieneCortesiaAutorizada(req),
         aprobacionDelDescuento(req),
+        motivoDelDescuento(req.body?.reason, req.body?.reasonComment),
       )
       return res.json({ success: true, data: result })
     }
@@ -1043,6 +1048,7 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
         staffId,
         tieneCortesiaAutorizada(req),
         aprobacionDelDescuento(req),
+        motivoDelDescuento(req.body?.reason, req.body?.reasonComment),
       )
       const auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
       return {

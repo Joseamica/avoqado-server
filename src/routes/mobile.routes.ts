@@ -2484,6 +2484,8 @@ router.patch(
  *                     plan: { type: object, description: Omitido si no se pudo leer }
  *                     promotions: { type: object }
  *                     managerPinOverrideEnabled: { type: boolean }
+ *                     discountReasonRequired: { type: boolean, description: 'Motivo obligatorio en los descuentos (encargo f998c8). Opcional; ausente = false' }
+ *                     discountReasons: { type: array, items: { type: string }, description: 'La lista de motivos del negocio. Opcional; ausente = []' }
  *                     receiptInfo: { type: object, description: Omitido si no se pudo leer }
  *                     receiptLayout: { type: object, description: Omitido si no se pudo leer }
  *                     fingerprints:

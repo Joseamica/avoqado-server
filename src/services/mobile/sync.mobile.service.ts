@@ -50,6 +50,7 @@ import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
+import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -1660,6 +1661,8 @@ async function applyOrderMutation(
         staffId,
         authorizeIntent?.(intent, 'orders:comp') === true,
         authorizeIntent?.(intent, 'tpv-orders:discount') === true ? {} : undefined,
+        // Encargo f998c8: el motivo viaja en el payload (opcional; uno viejo no lo trae y entra «Sin motivo», nunca REJECTED).
+        motivoDelDescuento(p.reason, p.reasonComment),
       )
       break
     }

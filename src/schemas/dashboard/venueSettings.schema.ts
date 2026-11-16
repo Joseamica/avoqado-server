@@ -59,6 +59,14 @@ export const UpdateVenueSettingsSchema = z.object({
     // el POS sólo lo lee. Sin esta línea el PUT descartaba el campo en silencio
     // y el switch parecería funcionar sin guardar nada.
     managerPinOverrideEnabled: z.boolean().optional(),
+    // Motivo en los descuentos (encargo f998c8). Sólo la forma; las reglas (tope, repetidos, lista vacía) viven en el servicio.
+    discountReasonRequired: z
+      .boolean({ invalid_type_error: 'El ajuste «Pedir motivo en los descuentos» debe ser true o false' })
+      .optional(),
+    discountReasons: z
+      .array(z.string({ invalid_type_error: 'Cada motivo debe ser un texto' }), { invalid_type_error: 'Los motivos deben ser una lista' })
+      .max(100, 'Demasiados motivos')
+      .optional(),
     exchangesEnabled: z.boolean({ invalid_type_error: 'El ajuste de cambios debe ser true o false' }).optional(),
     // «Sólo saldo a favor» (spec 2026-10-30): sin esta línea el middleware tiraría el campo en silencio y el switch no guardaría nada.
     storeCreditOnly: z.boolean({ invalid_type_error: 'El ajuste «Sólo saldo a favor» debe ser true o false' }).optional(),
