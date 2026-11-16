@@ -1886,6 +1886,17 @@ function canalesAIntentar(
   return []
 }
 
+async function yaSeAvisoEsteMovimiento(venueId: string, reservationId: string, startsAt: Date, endsAt: Date): Promise<boolean> {
+  const ultimo = await prisma.activityLog.findFirst({
+    where: { venueId, entity: 'Reservation', entityId: reservationId, action: 'RESERVATION_RESCHEDULED' },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { data: true },
+  })
+  const d = (ultimo?.data ?? null) as { startsAt?: string; endsAt?: string; notificationSentVia?: string | null } | null
+  if (!d?.notificationSentVia || !d.startsAt || !d.endsAt) return false
+  return new Date(d.startsAt).getTime() === startsAt.getTime() && new Date(d.endsAt).getTime() === endsAt.getTime()
+}
+
 export async function rescheduleReservation(
   venueId: string,
   reservationId: string,
@@ -1926,12 +1937,16 @@ export async function rescheduleReservation(
 
   const channel = data.notificationChannel
   let notificationSentVia: CanalDeAviso | null = null
-  // La cita ya estaba a esa hora: es el reenvío de una petición que sí se aplicó (la cola sin red de
-  // ANDROID/iOS repite el mismo cuerpo si se perdió la respuesta) o un reagendar que no mueve nada.
-  // No se vuelve a avisar: el cliente ya recibió (o no necesita) ese aviso.
-  const notificationSkipped = originalStartsAt.getTime() === newStartsAt.getTime() ? ('SAME_TIME' as const) : null
-  if (notificationSkipped && channel && channel !== 'none') {
-    logger.info(`[RESERVATION] Reschedule of ${rescheduled.confirmationCode} keeps the same start — notice not sent again`)
+  // Reenvío de la cola sin red de ANDROID/iOS (repite el mismo cuerpo si se perdió la respuesta): si la cita
+  // ya empieza a esa hora y el último reagendar de ESTE mismo movimiento (mismo inicio y fin pedidos) ya le
+  // avisó al cliente, no se vuelve a avisar. Si aquel aviso no salió, si fue «Sin notificación» o si cambia
+  // el fin, sí se avisa. Dos peticiones simultáneas al mismo horario aún pueden avisar dos veces (raro).
+  let notificationSkipped: 'ALREADY_NOTIFIED' | null = null
+  if (channel && channel !== 'none' && originalStartsAt.getTime() === newStartsAt.getTime()) {
+    if (await yaSeAvisoEsteMovimiento(venueId, reservationId, newStartsAt, newEndsAt)) {
+      notificationSkipped = 'ALREADY_NOTIFIED'
+      logger.info(`[RESERVATION] Reschedule of ${rescheduled.confirmationCode} already notified for this time — not sent again`)
+    }
   }
   if (channel && channel !== 'none' && !notificationSkipped) {
     const customerName =

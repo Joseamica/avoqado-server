@@ -3279,29 +3279,66 @@ describe('Reservation Dashboard Service', () => {
       )
     })
 
-    it('repetir el mismo reagendar (cola sin red que reenvía) no vuelve a avisar', async () => {
-      // La cita YA está a las 21:00Z: es el reenvío de una petición que sí se aplicó.
-      prepararReagendar({
-        startsAt: new Date('2026-11-12T21:00:00.000Z'),
-        endsAt: new Date('2026-11-12T22:00:00.000Z'),
-        guestEmail: 'juan@example.com',
-      })
-
-      await rescheduleReservation(
+    // Reenvío de la cola sin red: la cita YA está a las 21:00Z y el último reagendar de ESTE movimiento ya avisó.
+    const yaMovidaA21 = { startsAt: new Date('2026-11-12T21:00:00.000Z'), endsAt: new Date('2026-11-12T22:00:00.000Z') }
+    const avisoPrevio = (data: Record<string, unknown>) =>
+      prismaMock.activityLog.findFirst.mockResolvedValue({
+        data: { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', ...data },
+      } as any)
+    const reagendarA21 = (endsAt = '2026-11-12T22:00:00.000Z', notificationChannel: any = 'push') =>
+      rescheduleReservation(
         VENUE_ID,
         'res-1',
-        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt, notificationChannel },
         DASHBOARD_WRITE,
         STAFF_ID,
       )
 
+    it('repetir el mismo reagendar que YA avisó (cola sin red que reenvía) no vuelve a avisar', async () => {
+      prepararReagendar({ ...yaMovidaA21, guestEmail: 'juan@example.com' })
+      avisoPrevio({ notificationSentVia: 'whatsapp' })
+
+      await reagendarA21()
+
+      expect(prismaMock.activityLog.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: VENUE_ID, entityId: 'res-1', action: 'RESERVATION_RESCHEDULED' }),
+        }),
+      )
       expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
       expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
       expect(activityLogService.logAction).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ notificationSentVia: null, notificationSkipped: 'SAME_TIME' }),
+          data: expect.objectContaining({ notificationSentVia: null, notificationSkipped: 'ALREADY_NOTIFIED' }),
         }),
       )
+    })
+
+    it('mismo inicio pero OTRO fin sí avisa (es un cambio real)', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: 'whatsapp' })
+
+      await reagendarA21('2026-11-12T23:00:00.000Z')
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    })
+
+    it('mismo movimiento cuyo aviso anterior NO salió (o fue «Sin notificación») sí avisa ahora', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: null })
+
+      await reagendarA21()
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    })
+
+    it('si la cita se movió de verdad, no consulta el historial', async () => {
+      prepararReagendar()
+
+      await reagendarA21()
+
+      expect(prismaMock.activityLog.findFirst).not.toHaveBeenCalled()
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
     })
 
     it('«Sin notificación» no avisa a nadie', async () => {
