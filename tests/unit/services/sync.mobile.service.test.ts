@@ -35,6 +35,8 @@ jest.mock('@/utils/prismaClient', () => ({
       deleteMany: jest.fn(),
     },
     order: { findFirst: jest.fn(), updateMany: jest.fn() },
+    // La nota de la cuenta aparte (D75b, CLEAR_TABLE de app vieja); sin nota = como hoy.
+    activityLog: { findFirst: jest.fn(async () => null) },
     terminal: { findFirst: jest.fn() },
     shift: { findFirst: jest.fn() },
     payment: { findUnique: jest.fn() },

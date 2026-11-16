@@ -7,7 +7,10 @@
  * una «operación por revisar» que nadie puede resolver. Medido en D3 + SAMSUNG el 14-nov (`PosSyncIntent` seq 111, 119, 123, 127).
  *
  * Regla: el `CLEAR_TABLE` trae (opcional) la cuenta que el aparato quiso liberar. Si esa cuenta ya no debe y lo que debe la mesa es
- * OTRA cuenta, ACK sin tocar nada. Sin el campo (apps viejas), con la cuenta todavía debiendo o sin otra cuenta, como hoy.
+ * OTRA cuenta, ACK sin tocar nada. Con la cuenta todavía debiendo o sin otra cuenta, como hoy.
+ *
+ * D75b (15-nov-2026): sin el campo (apps viejas), la cuenta es la cuenta aparte que ESE aparato abrió en esa mesa (nota con su deviceId),
+ * si lo que debe la mesa ya estaba cuando nació y la nota tiene menos de 24 h. Si no, como hoy.
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
@@ -31,8 +34,8 @@ interface Negocio {
 let libre: Negocio // propiedad de mesa APAGADA (D51)
 let conDueno: Negocio // propiedad de mesa ENCENDIDA (D71)
 
-const replay = (n: Negocio, intents: any[], staffId = n.mesero) =>
-  processIntents({ venueId: n.venueId, staffId, deviceId: `aparato-${staffId}`, intents, authorizeIntent: () => true })
+const replay = (n: Negocio, intents: any[], staffId = n.mesero, deviceId = `aparato-${staffId}`) =>
+  processIntents({ venueId: n.venueId, staffId, deviceId, intents, authorizeIntent: () => true })
 const open = (tableId: string, createdAtLocal = Date.now() - 60_000, localOrderId: string = randomUUID()) => ({
   id: randomUUID(),
   seq: ++seq,
@@ -213,23 +216,168 @@ describe('D75 · «Liberar mesa» de la cuenta aparte', () => {
     expect(await laMesa(t)).toEqual({ status: 'AVAILABLE', currentOrderId: null })
   })
 
-  it('control · app vieja (sin la cuenta): el rechazo de hoy, con propiedad apagada y encendida', async () => {
-    const t1 = await mesa(libre)
-    const b = await otraCuenta(libre, t1)
-    await mesaSinRedCobrada(libre, t1, randomUUID())
-    const [sinDueno] = await replay(libre, [clear(t1)])
-    const numeroB = (await prisma.order.findUniqueOrThrow({ where: { id: b }, select: { orderNumber: true } })).orderNumber
-    expect(sinDueno).toMatchObject({
-      status: 'REJECTED',
-      errorCode: 'BUSINESS_RULE',
-      message: `Cannot clear table with unpaid order ${numeroB}`,
+  // ── D75b (15-nov-2026): las apps viejas mandan el CLEAR_TABLE sin la cuenta (TPV 2.10–2.20, iOS, ANDROID ≤2.25.44). La cuenta que
+  // quisieron soltar es la cuenta aparte que ESE aparato abrió en esa mesa (nota MESA_SIN_RED_EN_CUENTA_APARTE con su deviceId). ──
+  describe('D75b · app vieja (sin la cuenta)', () => {
+    const notaDe = (orderId: string) =>
+      prisma.activityLog.findFirstOrThrow({ where: { entityId: orderId, action: 'MESA_SIN_RED_EN_CUENTA_APARTE' } })
+
+    it('propiedad apagada: su cuenta aparte ya está pagada y la mesa debe OTRA → ACK sin tocar nada', async () => {
+      const t = await mesa(libre)
+      const b = await otraCuenta(libre, t)
+      const antesB = await huellaDe(b)
+      const propia = await mesaSinRedCobrada(libre, t, randomUUID())
+      expect((await notaDe(propia)).data).toMatchObject({ tableId: t, deviceId: `aparato-${libre.mesero}` })
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: t, mesaSinCambios: true } })
+      expect(ack.result).not.toHaveProperty('orderId')
+      expect(await huellaDe(b)).toEqual(antesB)
+      expect(await laMesa(t)).toEqual({ status: 'OCCUPIED', currentOrderId: b })
     })
 
-    const t2 = await mesa(conDueno)
-    await otraCuenta(conDueno, t2)
-    await mesaSinRedCobrada(conDueno, t2, randomUUID())
-    const [conDuenoAck] = await replay(conDueno, [clear(t2)])
-    expect(conDuenoAck).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    it('propiedad encendida: la otra cuenta es de María → ACK sin tocar nada, ya no TABLE_OWNED_BY_OTHER', async () => {
+      const t = await mesa(conDueno)
+      const deMaria = await otraCuenta(conDueno, t)
+      const antes = await huellaDe(deMaria)
+      await mesaSinRedCobrada(conDueno, t, randomUUID())
+
+      const [ack] = await replay(conDueno, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: t, mesaSinCambios: true } })
+      expect(await huellaDe(deMaria)).toEqual(antes)
+      expect(await laMesa(t)).toEqual({ status: 'OCCUPIED', currentOrderId: deMaria })
+    })
+
+    it('en el MISMO lote que la apertura sin red (el replay de siempre) → ACK sin cambios', async () => {
+      const t = await mesa(libre)
+      const b = await otraCuenta(libre, t)
+      const local = randomUUID()
+
+      const acks = await replay(libre, [open(t, Date.now() - 60_000, local), add(libre, local), pay(local, 24000), clear(t)])
+
+      expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED', 'ACKED'])
+      expect(acks[3].result).toMatchObject({ mesaSinCambios: true })
+      expect(await laMesa(t)).toEqual({ status: 'OCCUPIED', currentOrderId: b })
+    })
+
+    it('la TPV (su deviceId es la serie) entra por el mismo camino → ACK sin cambios', async () => {
+      const t = await mesa(libre)
+      await otraCuenta(libre, t)
+      const local = randomUUID()
+      const tpv = `PAX-A910S-${randomUUID().slice(0, 6)}`
+
+      const acks = await replay(libre, [open(t, Date.now() - 60_000, local), add(libre, local), pay(local, 24000), clear(t)], libre.mesero, tpv)
+
+      expect(acks[3]).toMatchObject({ status: 'ACKED', result: { mesaSinCambios: true } })
+    })
+
+    it('control · su cuenta aparte TODAVÍA debe → el rechazo de hoy (propiedad apagada y encendida)', async () => {
+      const t1 = await mesa(libre)
+      await otraCuenta(libre, t1)
+      const l1 = randomUUID()
+      await replay(libre, [open(t1, Date.now() - 60_000, l1), add(libre, l1), pay(l1, 10000)])
+      const [r1] = await replay(libre, [clear(t1)])
+      expect(r1).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+
+      const t2 = await mesa(conDueno)
+      await otraCuenta(conDueno, t2)
+      const l2 = randomUUID()
+      await replay(conDueno, [open(t2, Date.now() - 60_000, l2), add(conDueno, l2), pay(l2, 10000)])
+      const [r2] = await replay(conDueno, [clear(t2)])
+      expect(r2).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    })
+
+    it('control · OTRO aparato sin cuenta aparte en esa mesa → el rechazo de hoy', async () => {
+      const t = await mesa(libre)
+      const b = await otraCuenta(libre, t)
+      await mesaSinRedCobrada(libre, t, randomUUID())
+      const numeroB = (await prisma.order.findUniqueOrThrow({ where: { id: b }, select: { orderNumber: true } })).orderNumber
+
+      const [ack] = await replay(libre, [clear(t)], libre.mesero, `otro-aparato-${randomUUID().slice(0, 6)}`)
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE', message: `Cannot clear table with unpaid order ${numeroB}` })
+    })
+
+    it('control · mesa con una sola cuenta (la suya, pagada, sin cuenta aparte) → se libera como hoy', async () => {
+      const t = await mesa(libre)
+      await mesaSinRedCobrada(libre, t, randomUUID())
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: t } })
+      expect(ack.result).not.toHaveProperty('mesaSinCambios')
+      expect(await laMesa(t)).toEqual({ status: 'AVAILABLE', currentOrderId: null })
+    })
+
+    it('control · una cuenta que nació DESPUÉS de la cuenta aparte también debe → el rechazo de hoy', async () => {
+      const t = await mesa(libre)
+      await otraCuenta(libre, t)
+      await mesaSinRedCobrada(libre, t, randomUUID())
+      // Otro aparato abre la mesa sin red: nace una tercera cuenta que la cuenta aparte no conocía.
+      const [tercera] = await replay(libre, [open(t, Date.now() - 60_000)], libre.otro)
+      expect(tercera).toMatchObject({ status: 'ACKED', result: { isNewOrder: true } })
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    })
+
+    it('Codex r1 #1 · después de su cuenta aparte el aparato le cobra un abono a la OTRA cuenta y libera → el rechazo de hoy', async () => {
+      const t = await mesa(libre)
+      const b = await otraCuenta(libre, t)
+      // B con importe de verdad (ADD_ITEMS recalcula el total), ANTES de la cuenta aparte.
+      const [conProducto] = await replay(
+        libre,
+        [{ id: randomUUID(), seq: ++seq, type: 'ADD_ITEMS' as const, payload: { orderId: b, items: [{ productId: libre.productId, quantity: 1 }] } }],
+        libre.otro,
+      )
+      expect(conProducto.status).toBe('ACKED')
+      await mesaSinRedCobrada(libre, t, randomUUID())
+      const abono = {
+        id: randomUUID(),
+        seq: ++seq,
+        type: 'PAY_CASH' as const,
+        payload: { orderId: b, amountCents: 1000, tipCents: 0, method: 'CASH' },
+      }
+
+      const [pagoB, ack] = await replay(libre, [abono, clear(t)])
+
+      expect(pagoB.status).toBe('ACKED')
+      expect(await huellaDe(b)).toMatchObject({ paymentStatus: 'PARTIAL' })
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    })
+
+    it('Codex r1 #2 · sin tope: 21 cuentas que ya estaban y su cuenta aparte pagada → ACK sin cambios', async () => {
+      const t = await mesa(libre)
+      const otras: string[] = []
+      for (let i = 0; i < 21; i++) {
+        const [abierta] = await replay(libre, [open(t, Date.now() - 60_000)], libre.otro, `aparato-21-${i}-${randomUUID().slice(0, 4)}`)
+        expect(abierta).toMatchObject({ status: 'ACKED', result: { isNewOrder: true } })
+        otras.push(String(abierta.result!.orderId))
+      }
+      const propia = await mesaSinRedCobrada(libre, t, randomUUID())
+      expect(((await notaDe(propia)).data as { otrasCuentas: string[] }).otrasCuentas).toEqual(expect.arrayContaining(otras))
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: t, mesaSinCambios: true } })
+    })
+
+    it('control · la nota de la cuenta aparte tiene más de 24 h → el rechazo de hoy', async () => {
+      const t = await mesa(libre)
+      await otraCuenta(libre, t)
+      const propia = await mesaSinRedCobrada(libre, t, randomUUID())
+      await prisma.activityLog.updateMany({
+        where: { entityId: propia, action: 'MESA_SIN_RED_EN_CUENTA_APARTE' },
+        data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+      })
+
+      const [ack] = await replay(libre, [clear(t)])
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    })
   })
 
   it('control · su cuenta TODAVÍA debe: el rechazo de hoy (propiedad apagada y encendida)', async () => {
