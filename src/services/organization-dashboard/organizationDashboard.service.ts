@@ -28,6 +28,7 @@ import {
   venueStartOfDayOffset,
   venueStartOfMonth,
 } from '../../utils/datetime'
+import { venueCivilDate } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
@@ -1135,7 +1136,7 @@ class OrganizationDashboardService {
       const goal = goalMap.get(sv.venueId)
       const monthGoal = goal ? Number(goal.salesGoal) : 50000
 
-      const dayOfMonth = new Date().getDate()
+      const dayOfMonth = venueCivilDate(new Date(), timezone).day // D19: the venue's day, not the process's (UTC)
       const estimatedMonthSales = (weekSales / 7) * dayOfMonth
       const goalProgress = monthGoal > 0 ? (estimatedMonthSales / monthGoal) * 100 : 0
 

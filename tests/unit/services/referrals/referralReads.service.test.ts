@@ -7,6 +7,8 @@ jest.mock('@/utils/prismaClient', () => ({
     referral: { findMany: jest.fn(), count: jest.fn() },
     customer: { findFirst: jest.fn(), findMany: jest.fn() },
     discount: { count: jest.fn() },
+    // getReferralSummary lee la zona del negocio (D19); sin fila cae a America/Mexico_City.
+    venue: { findUnique: jest.fn() },
   },
 }))
 

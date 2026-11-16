@@ -6,6 +6,10 @@
 import prisma from '../../utils/prismaClient'
 import { CashDepositStatus } from '@prisma/client'
 import { logAction } from '../dashboard/activity-log.service'
+import { getVenueTimezone } from '../dashboard/commission/commission-utils'
+import { formatInTimeZone } from 'date-fns-tz'
+import { venueStartOfDay, venueStartOfDayOffset, zonaValida } from '../../utils/datetime'
+import { venueCivilDate, venueDayKey } from '../../utils/venueDateKeys'
 
 // Types for the service responses
 export interface PromoterSummary {
@@ -78,8 +82,10 @@ class PromotersService {
    * Get list of promoters with today's stats for a venue
    */
   async getPromotersList(venueId: string): Promise<PromotersListResponse> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    // D19: «hoy» empieza en la medianoche del NEGOCIO. `setHours(0, 0, 0, 0)` daba la del proceso (UTC en producción):
+    // en CDMX sumaba la tarde-noche de ayer y a las 18:00 se reiniciaba.
+    const timezone = zonaValida(await getVenueTimezone(venueId))
+    const todayStart = venueStartOfDay(timezone)
 
     // Get all promoters (staff with CASHIER/WAITER role) for this venue
     const staffVenues = await prisma.staffVenue.findMany({
@@ -217,8 +223,9 @@ class PromotersService {
    * Get detailed info for a specific promoter
    */
   async getPromoterDetail(venueId: string, promoterId: string): Promise<PromoterDetail | null> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    // D19: hoy, el calendario y el retardo se cuentan en la zona del negocio (ver getPromotersList).
+    const timezone = zonaValida(await getVenueTimezone(venueId))
+    const todayStart = venueStartOfDay(timezone)
 
     // Get promoter info
     const staffVenue = await prisma.staffVenue.findFirst({
@@ -291,10 +298,8 @@ class PromotersService {
       orderBy: { clockInTime: 'asc' },
     })
 
-    // Get last 30 days attendance from TimeEntry
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-    thirtyDaysAgo.setHours(0, 0, 0, 0)
+    // Get last 30 days attendance from TimeEntry (today and the 29 days before, in the venue's zone)
+    const thirtyDaysAgo = venueStartOfDayOffset(timezone, -29)
 
     const timeEntries = await prisma.timeEntry.findMany({
       where: {
@@ -307,22 +312,17 @@ class PromotersService {
 
     // Build attendance calendar
     const attendanceDays: Array<{ date: string; status: 'PRESENT' | 'ABSENT' | 'LATE' | 'HALF_DAY' }> = []
+    const today = venueCivilDate(new Date(), timezone)
     for (let i = 29; i >= 0; i--) {
-      const date = new Date()
-      date.setDate(date.getDate() - i)
-      date.setHours(0, 0, 0, 0)
-      const dateStr = date.toISOString().split('T')[0]
+      // Calendar math on the venue's civil date (no hours), so the process zone never moves the day.
+      const dateStr = new Date(Date.UTC(today.year, today.month - 1, today.day - i)).toISOString().slice(0, 10)
 
       // Find time entry for this day
-      const entry = timeEntries.find(r => {
-        const recordDate = new Date(r.clockInTime)
-        recordDate.setHours(0, 0, 0, 0)
-        return recordDate.getTime() === date.getTime()
-      })
+      const entry = timeEntries.find(r => venueDayKey(r.clockInTime, timezone) === dateStr)
 
       let status: 'PRESENT' | 'ABSENT' | 'LATE' | 'HALF_DAY' = 'ABSENT'
       if (entry) {
-        const checkInHour = entry.clockInTime.getHours()
+        const checkInHour = Number(formatInTimeZone(entry.clockInTime, timezone, 'H'))
         if (checkInHour >= 10) {
           status = 'LATE'
         } else {

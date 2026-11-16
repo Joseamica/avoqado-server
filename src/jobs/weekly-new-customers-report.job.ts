@@ -19,7 +19,7 @@
 
 import { CronJob } from 'cron'
 import { PlanTier, VenueStatus } from '@prisma/client'
-import { formatInTimeZone, toZonedTime } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
@@ -150,7 +150,13 @@ export class WeeklyNewCustomersReportJob {
   }
 }
 
-/** Monday 00:00:00 through Sunday 23:59:59 (Mexico City) of the week before `at`'s week. */
+/**
+ * Monday 00:00:00 through Sunday 23:59:59.999 (Mexico City) of the week before `at`'s week, as real instants.
+ *
+ * The calendar math runs on Mexico City wall-clock fields held in a process-local Date (`toZonedTime`); D19: without
+ * `fromZonedTime` at the end the process zone (UTC in production) read those fields as its own, and the week ran from
+ * Sunday 18:00 to Sunday 17:59 in Mexico City.
+ */
 function getLastCompleteWeek(at: Date): { weekStart: Date; weekEnd: Date } {
   const zoned = toZonedTime(at, TIMEZONE)
   const dayOfWeek = zoned.getDay() // 0=Sun..6=Sat
@@ -163,10 +169,10 @@ function getLastCompleteWeek(at: Date): { weekStart: Date; weekEnd: Date } {
   const weekStart = new Date(thisMonday)
   weekStart.setDate(weekStart.getDate() - 7)
 
-  const weekEnd = new Date(thisMonday)
-  weekEnd.setMilliseconds(weekEnd.getMilliseconds() - 1) // one week later, minus 1ms = prior Sunday 23:59:59.999
-
-  return { weekStart, weekEnd }
+  return {
+    weekStart: fromZonedTime(weekStart, TIMEZONE),
+    weekEnd: new Date(fromZonedTime(thisMonday, TIMEZONE).getTime() - 1), // prior Sunday 23:59:59.999
+  }
 }
 
 function buildReportHtml(customers: NewCustomerRow[], weekStart: Date, weekEnd: Date): string {
