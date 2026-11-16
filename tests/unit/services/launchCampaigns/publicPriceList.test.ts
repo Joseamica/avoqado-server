@@ -64,6 +64,15 @@ describe('getPublicPriceList', () => {
     expect(list.features.filter(f => f.kind === 'SE_COTIZA').every(f => f.price === null)).toBe(true)
   })
 
+  it('«Centro bancario» (BANKING_HUB) es legacy: no se ofrece aunque tenga precio activo y venga en Pro (D37, 15-nov)', async () => {
+    setup({ proComposition: [...PRO, 'BANKING_HUB'] })
+    board.mockResolvedValue([row('FEATURE:BANKING_HUB', 49), row('FEATURE:CFDI', 229), row('PLAN:PRO', 1158.84)])
+    const list = await getPublicPriceList()
+    expect(byId(list, 'BANKING_HUB')).toBeUndefined()
+    expect(byId(list, 'CFDI')).toMatchObject({ kind: 'SUELTA', price: 229 })
+    expect(() => priceSelection(list, ['BANKING_HUB'])).toThrow()
+  })
+
   it('omite la función pausada y la que no tiene precio', async () => {
     const list = await getPublicPriceList()
     expect(byId(list, 'UPSELL')).toBeUndefined()

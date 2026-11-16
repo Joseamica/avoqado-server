@@ -56,10 +56,19 @@ afterEach(() => {
 })
 
 describe('feature grid', () => {
-  it('lists all 47 catalog entries, in catalog order', async () => {
+  it('lists the 46 catalog entries still on sale, in catalog order', async () => {
     const grid = await getHybridFeatureGrid('venue')
-    expect(grid.entries.map(e => e.id)).toEqual(FEATURE_CATALOG.map(e => e.id))
-    expect(grid.entries).toHaveLength(47)
+    expect(grid.entries.map(e => e.id)).toEqual(FEATURE_CATALOG.map(e => e.id).filter(id => id !== 'BANKING_HUB'))
+    expect(grid.entries).toHaveLength(46)
+  })
+
+  it('«Centro bancario» (BANKING_HUB) es legacy: no sale en la cuadrícula aunque el plan lo dé (D37, 15-nov)', async () => {
+    tier.mockResolvedValue('PREMIUM')
+    granted.mockResolvedValue(['BANKING_HUB'])
+    bestOffers.mockResolvedValue(offers([['FEATURE:BANKING_HUB', view('pub_bank', 49, { includedFeatureCodes: ['BANKING_HUB'] })]]))
+    const grid = await getHybridFeatureGrid('venue')
+    expect(grid.entries.find(e => e.featureCode === 'BANKING_HUB' || e.id === 'BANKING_HUB')).toBeUndefined()
+    expect(entry(grid, 'AVAILABLE_BALANCE')).toBeDefined()
   })
 
   it('with sales off shows every function without prices and never reads offers', async () => {

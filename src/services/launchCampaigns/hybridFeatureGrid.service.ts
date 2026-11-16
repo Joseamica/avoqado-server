@@ -1,6 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
-import { FEATURE_CATALOG, type FeatureCatalogEntry } from '@/config/featureCatalog'
+import { FEATURE_CATALOG, RETIRADAS_DE_LA_VENTA, type FeatureCatalogEntry } from '@/config/featureCatalog'
 import {
   FREE_TIER_CODES,
   elPlanConcede,
@@ -134,7 +134,7 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
     purchasesEnabled,
     plans: { PRO: best.get('PLAN:PRO') ?? null, PREMIUM: best.get('PLAN:PREMIUM') ?? null },
     planListOffers: { PRO: list.get('PLAN:PRO') ?? null, PREMIUM: list.get('PLAN:PREMIUM') ?? null },
-    entries: FEATURE_CATALOG.map(entry => {
+    entries: FEATURE_CATALOG.filter(entry => !RETIRADAS_DE_LA_VENTA.includes(entry.id)).map(entry => {
       const offer = (entry.featureCode && best.get(`FEATURE:${entry.featureCode}`)) || null
       const listOffer = (entry.featureCode && list.get(`FEATURE:${entry.featureCode}`)) || null
       return {

@@ -703,3 +703,12 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),
 )
+
+/**
+ * Funciones LEGACY que ya no se venden ni se anuncian: no salen en la lista de precios pública ni en la cuadrícula de
+ * funciones del plan. Siguen en `FEATURE_CATALOG` a propósito: quitarlas cambiaría `catalogVersion` y lo que conceden
+ * los planes y los contratos, y quien ya las tiene conserva el acceso por la liga directa.
+ * - `BANKING_HUB` «Centro bancario» (banca en vivo, transferencias y SPEI): legacy (founder, 11-nov-2026); escondido para
+ *   todos (D35 en el DASHBOARD y D37 aquí, 15-nov).
+ */
+export const RETIRADAS_DE_LA_VENTA: readonly string[] = Object.freeze(['BANKING_HUB'])
