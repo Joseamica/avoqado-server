@@ -58,6 +58,7 @@ import {
 } from '@/services/giftCards/giftCardMarks'
 import { montoSaldoAFavorSql, sqlNoEsDelMedioSaldoAFavor } from '@/services/storeCredit/saldoAFavorEnLectores'
 import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 
 // ============================================================
 // Types
@@ -975,13 +976,16 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
   logger.info('Calculating sales summary', { venueId, startDate, endDate, groupBy, merchantAccountId, paymentMethod, cardType })
 
-  // Base date filter for orders
+  // Base date filter. Orders and payments are filtered by their REAL time (D93, «B» like Square): the device time of a sale made
+  // without internet (`clientCreatedAt`) or, if none, its arrival (`createdAt`). `enElRango` wraps the caller's where in an AND, so
+  // it never collides with its own OR/AND keys (card-type filters). Commissions keep their own `createdAt` (`dateFilter`).
   const dateFilter = {
     createdAt: {
       gte: parsedStartDate,
       lte: parsedEndDate,
     },
   }
+  const enElRango = <W extends object>(where: W) => dondeHoraRealEntre(where, parsedStartDate, parsedEndDate)
 
   // When filtering by merchant, we scope orders to only those that have at
   // least one Payment linked to the target merchantAccountId.
@@ -997,7 +1001,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const paymentVolumeForFilteredPromise: Promise<number> = isFiltered
     ? prisma.payment
         .aggregate({
-          where: { venueId, ...dateFilter, status: 'COMPLETED', ...paymentLevelFilter },
+          where: enElRango({ venueId, status: 'COMPLETED' as const, ...paymentLevelFilter }),
           _sum: { amount: true },
         })
         .then(r => Number(r._sum.amount || 0))
@@ -1027,8 +1031,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       SELECT SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) AS subtotal, SUM("taxAmount") AS tax, SUM(LEAST("discountAmount", subtotal)) AS discounts
       FROM "Order"
       WHERE "venueId" = $1
-        AND "createdAt" >= ${utcTsParam(2)}
-        AND "createdAt" <= ${utcTsParam(3)}
+        AND ${sqlRangoHoraReal('"Order"', utcTsParam(2), utcTsParam(3))}
         AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
         AND "paymentStatus" NOT IN ('REFUNDED')
         AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
@@ -1054,15 +1057,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // scope through the SAME order filter as grossSalesResult so the numbers stay
   // coherent. Cobrar cortesías are excluded by total=0 (they already create an
   // OrderDiscount COMP row — counting them here would double-count).
-  const giveawayOrderScope = {
+  const giveawayOrderScope = enElRango({
     venueId,
-    ...dateFilter,
     status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as any },
     paymentStatus: { notIn: ['REFUNDED'] as any },
     ...merchantOrderFilter,
     // Tarjetas de regalo (spec §7): la cuenta de tarjetas no es mercancía (además no admite promociones ni cortesías, A5).
     ...WHERE_ORDEN_SIN_TARJETAS,
-  }
+  }) as Prisma.OrderWhereInput
   const [promoGiveawayResult, compGiveawayResult] = !isFiltered
     ? await Promise.all([
         prisma.orderPromotion.aggregate({
@@ -1085,10 +1087,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // sprint, which creates Payments with type=REFUND, status=COMPLETED, negative
   // amount and negative tipAmount (post-2026-04-19 tip split fix).
   const refundsResult = await prisma.payment.aggregate({
-    where: {
+    where: enElRango({
       venueId,
-      ...dateFilter,
-      type: 'REFUND',
+      type: 'REFUND' as const,
       ...paymentLevelFilter,
       // Tarjetas de regalo: la cancelación de una venta de tarjetas no es devolución de mercancía (resta de «tarjetas cargadas»).
       // El REFUND de un cobro con saldo SÍ se queda: devuelve mercancía.
@@ -1096,8 +1097,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // resta, igual que su venta no se suma arriba. Sin esto, devolver un pedido rechazado que el negocio había cobrado a mano en
       // su Stripe dejaba las ventas netas en −$250. Codex r4 H5: sólo sin filtro de método; filtrada, la vista es de movimientos
       // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
-      order: isFiltered ? WHERE_ORDEN_SIN_TARJETAS : { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] } },
-    },
+      order: isFiltered
+        ? WHERE_ORDEN_SIN_TARJETAS
+        : { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] as Array<'CANCELLED' | 'DELETED'> } },
+    }),
     _sum: {
       amount: true,
       tipAmount: true,
@@ -1109,14 +1112,13 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Skipped under a payment-method filter (order-derived).
   const deferredResult = !isFiltered
     ? await prisma.order.aggregate({
-        where: {
+        where: enElRango({
           venueId,
-          ...dateFilter,
-          status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
-          paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+          status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as Array<'PENDING' | 'CANCELLED' | 'DELETED'> },
+          paymentStatus: { in: ['PENDING', 'PARTIAL'] as Array<'PENDING' | 'PARTIAL'> },
           ...merchantOrderFilter,
           ...WHERE_ORDEN_SIN_TARJETAS,
-        },
+        }) as Prisma.OrderWhereInput,
         _sum: {
           remainingBalance: true,
         },
@@ -1126,12 +1128,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
   // 5. Tips - From completed payments (more accurate than order tips)
   const tipsResult = await prisma.payment.aggregate({
-    where: {
+    where: enElRango({
       venueId,
-      ...dateFilter,
-      status: 'COMPLETED',
+      status: 'COMPLETED' as const,
       ...paymentLevelFilter,
-    },
+    }),
     _sum: {
       tipAmount: true,
     },
@@ -1153,8 +1154,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     FROM "Payment" p
     LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
-      AND p."createdAt" >= ${utcTsParam(2)}
-      AND p."createdAt" <= ${utcTsParam(3)}
+      AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
       AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
@@ -1183,13 +1183,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros se cuentan como las ventas brutas, sin los de cuentas de
   // tarjetas (lo pagado con saldo SÍ cuenta). Con filtro es la vista de dinero y no se toca.
   const transactionCountResult = await prisma.payment.count({
-    where: {
+    where: enElRango({
       venueId,
-      ...dateFilter,
-      status: 'COMPLETED',
+      status: 'COMPLETED' as const,
       ...paymentLevelFilter,
       ...(!isFiltered ? { AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] } : {}),
-    },
+    }),
   })
 
   // ============================================================
@@ -1337,14 +1336,13 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   if (groupBy === 'paymentMethod' && !isFiltered) {
     const paymentsByMethod = await prisma.payment.groupBy({
       by: ['method'],
-      where: {
+      where: enElRango({
         venueId,
-        ...dateFilter,
-        status: 'COMPLETED',
+        status: 'COMPLETED' as const,
         ...merchantPaymentFilter,
         // Tarjetas de regalo: lo pagado con saldo no se mezcla con OTHER (va en `giftCardBalanceBreakdown`).
         AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO],
-      },
+      }),
       _sum: {
         amount: true,
         tipAmount: true,
@@ -1385,13 +1383,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     if (tarjetas && (await prisma.giftCard.findFirst({ where: { venueId }, select: { id: true } }))) {
       const ventas = await prisma.payment.groupBy({
         by: ['method'],
-        where: {
+        where: enElRango({
           venueId,
-          ...dateFilter,
-          status: 'COMPLETED',
+          status: 'COMPLETED' as const,
           ...merchantPaymentFilter,
           AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_SIN_TARJETAS }],
-        },
+        }),
         _sum: { amount: true, tipAmount: true },
         _count: true,
       })
@@ -1474,8 +1471,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         FROM "Payment" p
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         WHERE p."venueId" = ${venueId}
-          AND p."createdAt" >= ${utcTs(parsedStartDate)}
-          AND p."createdAt" <= ${utcTs(parsedEndDate)}
+          AND ${sqlRangoHoraRealSql('p', parsedStartDate, parsedEndDate)}
           AND p."status" = 'COMPLETED'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
@@ -1491,8 +1487,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                COALESCE(SUM(ABS(p."amount" + p."tipAmount")), 0)::text AS "refunds"
         FROM "Payment" p
         WHERE p."venueId" = ${venueId}
-          AND p."createdAt" >= ${utcTs(parsedStartDate)}
-          AND p."createdAt" <= ${utcTs(parsedEndDate)}
+          AND ${sqlRangoHoraRealSql('p', parsedStartDate, parsedEndDate)}
           AND p."type" = 'REFUND'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
@@ -1916,46 +1911,40 @@ async function calculateTimePeriodMetrics(
   const safeTz = sanitizeTimezone(timezone)
 
   // Determine SQL grouping based on reportType
-  let groupByExpression: string
-  let orderByExpression: string
-
-  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
-  // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02. Kept
-  // unqualified on purpose — the platform-fees query rewrites `"createdAt"` to `p."createdAt"`.
-  const wall = localWallClockRaw(safeTz, '"createdAt"')
-
   // Time-based periods are returned as the INSTANT the bucket starts (midnight / hour on the
   // venue clock): formatPeriod/formatPeriodLabel and the dashboard format them in the venue zone.
-  switch (reportType) {
-    case 'hours':
-      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('hour', ${wall})`)
-      orderByExpression = 'period'
-      break
-    case 'days':
-      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
-      orderByExpression = 'period'
-      break
-    case 'weeks':
-      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
-      orderByExpression = 'period'
-      break
-    case 'months':
-      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
-      orderByExpression = 'period'
-      break
-    case 'hourlySum':
-      // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM ${wall})`
-      orderByExpression = 'period'
-      break
-    case 'dailySum':
-      // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM ${wall})`
-      orderByExpression = 'period'
-      break
-    default:
-      return { periods: [], legacyUnavailable: false }
+  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
+  // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02.
+  const agruparPor = (columna: string): string | null => {
+    const wall = localWallClockRaw(safeTz, columna)
+    switch (reportType) {
+      case 'hours':
+        return localInstantRaw(safeTz, `DATE_TRUNC('hour', ${wall})`)
+      case 'days':
+        return localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
+      case 'weeks':
+        return localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
+      case 'months':
+        return localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
+      case 'hourlySum':
+        // Group by hour of day (0-23)
+        return `EXTRACT(HOUR FROM ${wall})`
+      case 'dailySum':
+        // Group by day of week (0=Sunday, 6=Saturday)
+        return `EXTRACT(DOW FROM ${wall})`
+      default:
+        return null
+    }
   }
+  // D93 («B», como Square): órdenes y cobros van a la barra de su hora REAL (la del aparato si se hicieron sin internet; si no, la
+  // llegada), la misma que el rango de arriba (`enElRango`), para que las barras sigan sumando la cabecera. Sin calificar a propósito:
+  // la consulta de comisiones de plataforma la reescribe a `p.`. Las comisiones del personal (sin esa columna) van por su `createdAt`.
+  const groupByExpressionOrNull = agruparPor(sqlHoraReal())
+  if (!groupByExpressionOrNull) return { periods: [], legacyUnavailable: false }
+  const groupByExpression: string = groupByExpressionOrNull
+  const commissionGroupByExpression = agruparPor('"createdAt"') as string
+  const orderByExpression = 'period'
+  const rangoHoraReal = sqlRangoHoraReal('', '$2::timestamp', '$3::timestamp')
 
   // Optional merchant filter clause for raw SQL queries
   const merchantPaymentClause = merchantAccountId ? `AND "merchantAccountId" = $4` : ''
@@ -1989,8 +1978,7 @@ async function calculateTimePeriodMetrics(
       FROM "OrderItem" WHERE "orderId" = "Order".id AND "isCortesia" = TRUE AND total = 0
     ) comp ON TRUE
     WHERE "venueId" = $1
-      AND "createdAt" >= $2::timestamp
-      AND "createdAt" <= $3::timestamp
+      AND ${rangoHoraReal}
       -- Must mirror the summary grossSales filter (status notIn PENDING/CANCELLED/DELETED)
       -- so the period bars sum to the headline total. Previously this only excluded
       -- CANCELLED, double-counting PENDING/DELETED orders vs the summary card.
@@ -2015,8 +2003,7 @@ async function calculateTimePeriodMetrics(
       COUNT(*)${cobrosQueCuentan} as transaction_count
     FROM "Payment"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2::timestamp
-      AND "createdAt" <= $3::timestamp
+      AND ${rangoHoraReal}
       AND status = 'COMPLETED'
       ${merchantPaymentClause}
       ${paymentSqlClause}
@@ -2033,8 +2020,7 @@ async function calculateTimePeriodMetrics(
       COALESCE(SUM(ABS(amount) + ABS("tipAmount")), 0) as refunds
     FROM "Payment"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2::timestamp
-      AND "createdAt" <= $3::timestamp
+      AND ${rangoHoraReal}
       AND type = 'REFUND'
       AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
       ${
@@ -2056,8 +2042,7 @@ async function calculateTimePeriodMetrics(
       COALESCE(SUM("remainingBalance"), 0) as deferred_sales
     FROM "Order"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2::timestamp
-      AND "createdAt" <= $3::timestamp
+      AND ${rangoHoraReal}
       -- Mirror the summary deferred filter (status notIn PENDING/CANCELLED/DELETED).
       AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" IN ('PENDING', 'PARTIAL')
@@ -2070,8 +2055,9 @@ async function calculateTimePeriodMetrics(
   // Query platform fees (Avoqado fees) grouped by period.
   // Source: TransactionCost.venueChargeAmount joined to Payment for venueId/date.
   // VenueTransaction.feeAmount is not currently synced from TransactionCost.
-  const platformFeesGroupBy = groupByExpression.replace(/"createdAt"/g, 'p."createdAt"')
-  const platformFeesOrderBy = orderByExpression.replace(/"createdAt"/g, 'p."createdAt"')
+  const conAliasP = (sql: string) => sql.replace(/"createdAt"/g, 'p."createdAt"').replace(/"clientCreatedAt"/g, 'p."clientCreatedAt"')
+  const platformFeesGroupBy = conAliasP(groupByExpression)
+  const platformFeesOrderBy = conAliasP(orderByExpression)
   // Codex r4 H1 y A2: la misma comisión que la cabecera (costo con su cuota fija, o `Payment.feeAmount` del cobro sin costo).
   const platformFeesQuery = `
     SELECT
@@ -2080,8 +2066,7 @@ async function calculateTimePeriodMetrics(
     FROM "Payment" p
     LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
-      AND p."createdAt" >= $2::timestamp
-      AND p."createdAt" <= $3::timestamp
+      AND ${conAliasP(rangoHoraReal)}
       AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${merchantPlatformClause}
       ${paymentSqlClauseWithPrefix}
@@ -2098,7 +2083,7 @@ async function calculateTimePeriodMetrics(
     : ''
   const staffCommissionsQuery = `
     SELECT
-      ${groupByExpression} as period,
+      ${commissionGroupByExpression} as period,
       COALESCE(SUM("netCommission"), 0) as staff_commissions
     FROM "CommissionCalculation"
     WHERE "venueId" = $1
@@ -2107,7 +2092,7 @@ async function calculateTimePeriodMetrics(
       AND status != 'VOIDED'
       ${merchantCommissionClause}
       ${staffCommissionsPaymentSubquery}
-    GROUP BY ${groupByExpression}
+    GROUP BY ${commissionGroupByExpression}
     ORDER BY ${orderByExpression}
   `
 
@@ -2222,7 +2207,8 @@ async function calculateTimePeriodMetrics(
     // Codex r5 (H1): también los periodos que sólo traen cobros, devoluciones o comisión (una devolución otro día sin pedidos nuevos):
     // antes la barra se descartaba y la gráfica no sumaba la cabecera. Por clave, en orden de tiempo.
     const porClave = new Map<string, Date | number>()
-    for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics])
+    // Codex D93 r1 #1: y las de comisión del personal SOLA (su cobro ahora puede caer en otra barra por su hora real).
+    for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics, staffCommissionsMetrics])
       for (const f of filas) if (!porClave.has(String(Number(f.period)))) porClave.set(String(Number(f.period)), f.period)
     const nativePeriods = [...porClave.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, period]) => period)
     const seen = new Set(porClave.keys())

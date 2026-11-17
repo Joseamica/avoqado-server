@@ -220,3 +220,54 @@ describe('hora de la venta de la cola de la terminal (loyaltySaleAt) — por HTT
     expect(orden.loyaltySaleAt).toEqual(new Date(a))
   })
 })
+
+/**
+ * D93 (encargo 18cc7f, founder 16-nov «B», como Square): la MISMA hora del aparato también queda en `clientCreatedAt` de la orden y
+ * del cobro, SÓLO para reportes; `createdAt` sigue siendo la llegada. A diferencia de `loyaltySaleAt`, un reloj adelantado o una hora
+ * de hace más de 24 h no se guarda (no se recorta a la orilla).
+ */
+describe('D93 · hora del aparato para los reportes (clientCreatedAt) — por HTTP y contra Postgres', () => {
+  const cobroDe = (n: Negocio, idempotencyKey: string) =>
+    prisma.payment.findUniqueOrThrow({
+      where: { venueId_idempotencyKey: { venueId: n.venueId, idempotencyKey } },
+      select: { createdAt: true, clientCreatedAt: true, order: { select: { createdAt: true, clientCreatedAt: true } } },
+    })
+
+  it('/tpv/fast de la cola: orden y cobro guardan la hora del aparato; createdAt es la llegada', async () => {
+    const n = await negocio()
+    const anoche = Date.now() - 10 * 3_600_000
+    const cuerpo = cobroDeTerminal(n, { isOfflineReplay: true, createdAtLocal: anoche })
+    expect((await request(app).post(`/api/v1/tpv/venues/${n.venueId}/fast`).set(n.como).send(cuerpo)).status).toBe(201)
+    const c = await cobroDe(n, cuerpo.idempotencyKey)
+    expect(c.clientCreatedAt).toEqual(new Date(anoche))
+    expect(c.order!.clientCreatedAt).toEqual(new Date(anoche))
+    expect(c.createdAt.getTime()).toBeGreaterThan(Date.now() - 60_000)
+    expect(c.order!.createdAt.getTime()).toBeGreaterThan(Date.now() - 60_000)
+  })
+
+  it('/tpv/orders/:orderId de la cola: el cobro guarda la hora del aparato; la cuenta (creada en línea) no', async () => {
+    const n = await negocio()
+    const orderId = await cuenta(n, 2)
+    const anoche = Date.now() - 10 * 3_600_000
+    const cuerpo = cobroDeTerminal(n, { amount: 10000, isOfflineReplay: true, createdAtLocal: anoche })
+    expect((await request(app).post(`/api/v1/tpv/venues/${n.venueId}/orders/${orderId}`).set(n.como).send(cuerpo)).status).toBe(201)
+    const c = await cobroDe(n, cuerpo.idempotencyKey)
+    expect(c.clientCreatedAt).toEqual(new Date(anoche))
+    expect(c.order!.clientCreatedAt).toBeNull()
+  })
+
+  it('reloj adelantado, más de 24 h o en línea: no se guarda', async () => {
+    const n = await negocio()
+    for (const extra of [
+      { isOfflineReplay: true, createdAtLocal: Date.now() + 86_400_000 },
+      { isOfflineReplay: true, createdAtLocal: Date.now() - 30 * 3_600_000 },
+      { createdAtLocal: Date.now() - 3_600_000 },
+    ]) {
+      const cuerpo = cobroDeTerminal(n, extra)
+      expect((await request(app).post(`/api/v1/tpv/venues/${n.venueId}/fast`).set(n.como).send(cuerpo)).status).toBe(201)
+      const c = await cobroDe(n, cuerpo.idempotencyKey)
+      expect(c.clientCreatedAt).toBeNull()
+      expect(c.order!.clientCreatedAt).toBeNull()
+    }
+  })
+})

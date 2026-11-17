@@ -19,7 +19,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
 import emailService from '../services/email.service'
-import { utcTs } from '../utils/sqlDates'
+import { sqlRangoHoraRealSql } from '../services/shared/horaRealDelAparato'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
@@ -503,8 +503,7 @@ export async function getCategoryBreakdown(
     LEFT JOIN "Product" p ON oi."productId" = p.id
     LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
@@ -546,8 +545,7 @@ async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Da
         o.subtotal - o."discountAmount" as net_sales
       FROM "Order" o
       WHERE o."venueId" = ${venueId}
-        AND o."createdAt" >= ${utcTs(startDate)}
-        AND o."createdAt" <= ${utcTs(endDate)}
+        AND ${sqlRangoHoraRealSql('o', startDate, endDate)}
         AND o.status NOT IN ('CANCELLED')
         AND o."paymentStatus" NOT IN ('REFUNDED')
         -- D43: the same per-order net as getOrderSourcesBreakdown (a table cortesía is already out of the subtotal).
@@ -626,8 +624,7 @@ export async function getOrderSourcesBreakdown(
       + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
     GROUP BY o.source
@@ -650,8 +647,7 @@ export async function getOrderSourcesBreakdown(
     JOIN "Order" o ON o.id = p."orderId"
     WHERE p."venueId" = ${venueId}
       AND p.type = 'REFUND'
-      AND p."createdAt" >= ${utcTs(startDate)}
-      AND p."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('p', startDate, endDate)}
       AND o.status NOT IN ('CANCELLED', 'DELETED')
       AND ${sqlOrdenSinTarjetas('o.id')}
     GROUP BY COALESCE(o.source::text, 'TPV')
