@@ -46,3 +46,41 @@ describe('getVenueStaffTimeSummary — aislamiento entre negocios', () => {
     )
   })
 })
+
+// Foto de entrada (encargo b0c1a1, 15-nov): la lista de checadas trae `checkInPhotoViewUrl`, lista para pintarse.
+jest.mock('@/services/privateStorage.service', () => ({
+  PRIVATE_PREFIX: 'private',
+  savePrivateFile: jest.fn(),
+  deletePrivateFile: jest.fn(),
+  signPrivateFileUrl: jest.fn(async (p: string) => `https://firmada/${p}`),
+}))
+
+describe('getVenueTimeEntries — foto de entrada para ver', () => {
+  beforeEach(() => {
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    ;(prismaMock.$transaction as jest.Mock).mockResolvedValue([
+      [
+        { id: 'te-1', checkInPhotoUrl: `private/dev/attendance/${VENUE_ID}/s1/1_entrada.jpg` },
+        { id: 'te-2', checkInPhotoUrl: 'https://firebasestorage.googleapis.com/a.jpg' },
+        { id: 'te-3', checkInPhotoUrl: null },
+        { id: 'te-4', checkInPhotoUrl: 'private/dev/staff/venue-otro/s9/ine.jpg' },
+      ],
+      4,
+    ])
+  })
+
+  it('firma la foto privada del negocio, deja la pública y no enseña lo ajeno; el resto de la respuesta sigue igual', async () => {
+    const { getVenueTimeEntries } = await import('@/services/dashboard/attendance.dashboard.service')
+    const r = await getVenueTimeEntries(VENUE_ID, { startDate: '2026-11-15', endDate: '2026-11-15' })
+
+    expect(r.timeEntries.map((e: any) => e.checkInPhotoViewUrl)).toEqual([
+      `https://firmada/private/dev/attendance/${VENUE_ID}/s1/1_entrada.jpg`,
+      'https://firebasestorage.googleapis.com/a.jpg',
+      null,
+      null,
+    ])
+    // Regresión: el campo crudo y el total no cambian (el panel de organización y las apps leen la forma vieja).
+    expect(r.timeEntries[1].checkInPhotoUrl).toBe('https://firebasestorage.googleapis.com/a.jpg')
+    expect(r.total).toBe(4)
+  })
+})

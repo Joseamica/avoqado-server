@@ -1,5 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
+import { assertFotoNoPrivada } from '../dashboard/fotoDeEntrada'
+import { conCandadoDeEntrada } from './candadoDeEntrada'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -181,6 +183,8 @@ export async function clockIn(params: ClockInParams) {
 
   // Interruptor de asistencia: apagado = 403 con mensaje que la app ya sabe mostrar.
   await assertAttendanceEnabled(venueId)
+  // La TPV manda la URL pública de Firebase; una ruta del almacén privado sólo la escribe el servidor (Asistencia la firma).
+  assertFotoNoPrivada(checkInPhotoUrl)
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -188,46 +192,49 @@ export async function clockIn(params: ClockInParams) {
     throw new UnauthorizedError('PIN inválido')
   }
 
-  // Check if staff member is already clocked in
-  const existingEntry = await prisma.timeEntry.findFirst({
-    where: {
-      staffId,
-      venueId,
-      status: {
-        in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
-      },
-    },
-  })
-
-  if (existingEntry) {
-    throw new BadRequestError('El empleado ya tiene entrada registrada. Primero marca la salida.')
-  }
-
-  // Create new time entry with photo and GPS data
-  const timeEntry = await prisma.timeEntry.create({
-    data: {
-      staffId,
-      venueId,
-      clockInTime: new Date(),
-      jobRole,
-      checkInPhotoUrl, // Store anti-fraud photo URL if provided
-      clockInLatitude: latitude, // GPS latitude
-      clockInLongitude: longitude, // GPS longitude
-      clockInAccuracy: accuracy, // GPS accuracy in meters
-      facadePhotoUrl: facadePhotoUrl || null, // Store front photo at clock-in
-      status: TimeEntryStatus.CLOCKED_IN,
-      breakMinutes: 0,
-    },
-    include: {
-      staff: {
-        select: {
-          firstName: true,
-          lastName: true,
-          employeeCode: true,
+  // Mismo candado que el POS: un solo «¿ya tiene entrada? → crearla» a la vez por persona (Codex r1 #4).
+  const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
+    // Check if staff member is already clocked in
+    const existingEntry = await tx.timeEntry.findFirst({
+      where: {
+        staffId,
+        venueId,
+        status: {
+          in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
         },
       },
-      breaks: true,
-    },
+    })
+
+    if (existingEntry) {
+      throw new BadRequestError('El empleado ya tiene entrada registrada. Primero marca la salida.')
+    }
+
+    // Create new time entry with photo and GPS data
+    return tx.timeEntry.create({
+      data: {
+        staffId,
+        venueId,
+        clockInTime: new Date(),
+        jobRole,
+        checkInPhotoUrl, // Store anti-fraud photo URL if provided
+        clockInLatitude: latitude, // GPS latitude
+        clockInLongitude: longitude, // GPS longitude
+        clockInAccuracy: accuracy, // GPS accuracy in meters
+        facadePhotoUrl: facadePhotoUrl || null, // Store front photo at clock-in
+        status: TimeEntryStatus.CLOCKED_IN,
+        breakMinutes: 0,
+      },
+      include: {
+        staff: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true,
+          },
+        },
+        breaks: true,
+      },
+    })
   })
 
   return timeEntry

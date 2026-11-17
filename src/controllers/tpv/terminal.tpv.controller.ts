@@ -464,7 +464,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.
       requireAvoqadoServerForCardPayment: terminalTpvSettings.requireAvoqadoServerForCardPayment,
-      // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
+      // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config).
+      // 🔴 NO se le suma la «Foto de entrada» del negocio (VenueSettings.requireClockInPhoto, que manda en el POS): la TPV
+      // devuelve TODOS sus ajustes al guardar uno, y un valor heredado se pegaba a la terminal o la apagaba (Codex r1 #1 y
+      // r2 #1-#2, 15-nov). La terminal sigue con su propio ajuste, que se cambia en su configuración.
     }
 
     // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer

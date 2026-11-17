@@ -10,6 +10,10 @@
 
 import { TimeEntryStatus } from '@prisma/client'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
+import { assertFotoNoPrivada, decodificarSelfie, guardarSelfieDeEntrada, negocioPideFotoDeEntrada } from '../dashboard/fotoDeEntrada'
+import { deletePrivateFile } from '../privateStorage.service'
+import { conCandadoDeEntrada } from '../tpv/candadoDeEntrada'
+import { logAction } from '../dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -21,6 +25,8 @@ interface ClockInParams {
   pin: string
   jobRole?: string
   checkInPhotoUrl?: string
+  /** Selfie del POS en base64 (JPEG). Va a la caja fuerte privada; gana sobre `checkInPhotoUrl`. */
+  checkInPhoto?: string
   latitude?: number
   longitude?: number
   accuracy?: number
@@ -72,6 +78,9 @@ export async function identifyByPin(venueId: string, pin: string) {
   if (!staffVenue) {
     throw new UnauthorizedError('PIN inválido')
   }
+
+  // «Foto de Entrada» del negocio: la app pide la selfie antes de marcar Entrada. Campo nuevo y opcional.
+  const requireClockInPhoto = await negocioPideFotoDeEntrada(venueId)
 
   // Find active time entry for this staff
   const activeEntry = await prisma.timeEntry.findFirst({
@@ -155,6 +164,7 @@ export async function identifyByPin(venueId: string, pin: string) {
       : null,
     // Last completed entry (for auto clock-out notification)
     lastEntry,
+    requireClockInPhoto,
   }
 }
 
@@ -164,10 +174,13 @@ export async function identifyByPin(venueId: string, pin: string) {
  * Clock in a staff member (identified by PIN)
  */
 export async function clockIn(params: ClockInParams) {
-  const { venueId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = params
+  const { venueId, pin, jobRole, checkInPhotoUrl, checkInPhoto, latitude, longitude, accuracy, note } = params
 
   // Interruptor de asistencia: apagado = 403 con mensaje que la app ya sabe mostrar.
   await assertAttendanceEnabled(venueId)
+  // Una ruta privada la escribe sólo el servidor (si no, el panel firmaría el INE de otra persona).
+  assertFotoNoPrivada(checkInPhotoUrl)
+  const selfie = checkInPhoto === undefined || checkInPhoto === null ? null : decodificarSelfie(checkInPhoto)
 
   logger.info(`📱 [TIME-ENTRY.MOBILE] Clock-in request | venue=${venueId}`)
 
@@ -196,43 +209,77 @@ export async function clockIn(params: ClockInParams) {
 
   const staffId = staffVenue.staffId
 
-  // Check if already clocked in
-  const existingEntry = await prisma.timeEntry.findFirst({
-    where: {
-      staffId,
-      venueId,
-      status: {
-        in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
-      },
-    },
-  })
-
-  if (existingEntry) {
-    throw new BadRequestError('Ya tienes entrada registrada. Primero marca la salida.')
+  // Un reintento de quien ya tiene entrada no sube otra foto (Codex r4 #1). Es sólo un atajo: lo que manda es la revisión
+  // dentro del candado, más abajo.
+  if (selfie) {
+    const yaAdentro = await prisma.timeEntry.findFirst({
+      where: { staffId, venueId, status: { in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK] } },
+      select: { id: true },
+    })
+    if (yaAdentro) throw new BadRequestError('Ya tienes entrada registrada. Primero marca la salida.')
   }
 
-  // Create time entry
-  const timeEntry = await prisma.timeEntry.create({
-    data: {
-      staffId,
-      venueId,
-      clockInTime: new Date(),
-      jobRole,
-      checkInPhotoUrl,
-      clockInLatitude: latitude,
-      clockInLongitude: longitude,
-      clockInAccuracy: accuracy,
-      notes: note,
-      status: TimeEntryStatus.CLOCKED_IN,
-    },
-    include: {
-      staff: {
-        select: {
-          firstName: true,
-          lastName: true,
+  // La foto se sube ANTES del candado: subirla tarda, y no se debe detener a nadie más mientras tanto. Si la entrada no se
+  // registra, se borra.
+  const rutaDeLaSelfie = selfie ? await guardarSelfieDeEntrada({ venueId, staffId, foto: selfie }) : null
+
+  // Si la entrada no se registra (ya tenía una, o falla la base), la foto recién subida se borra: un dato personal sin
+  // checada no se queda en la caja fuerte (Codex r3 #3).
+  const borrarSelfie = () => {
+    if (!rutaDeLaSelfie) return
+    // Si el borrado falla, la ruta queda en la bitácora para limpiarla después: no se pierde en silencio (Codex r4 #1).
+    void deletePrivateFile(rutaDeLaSelfie).catch(error =>
+      logAction({
+        venueId,
+        staffId,
+        action: 'CLOCK_IN_PHOTO_ORPHANED',
+        entity: 'TimeEntry',
+        data: { path: rutaDeLaSelfie, error: error instanceof Error ? error.message : String(error) },
+      }),
+    )
+  }
+  const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
+    // Check if already clocked in
+    const existingEntry = await tx.timeEntry.findFirst({
+      where: {
+        staffId,
+        venueId,
+        status: {
+          in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
         },
       },
-    },
+    })
+
+    if (existingEntry) {
+      throw new BadRequestError('Ya tienes entrada registrada. Primero marca la salida.')
+    }
+
+    // Create time entry
+    return tx.timeEntry.create({
+      data: {
+        staffId,
+        venueId,
+        clockInTime: new Date(),
+        jobRole,
+        checkInPhotoUrl: rutaDeLaSelfie ?? (selfie ? null : checkInPhotoUrl),
+        clockInLatitude: latitude,
+        clockInLongitude: longitude,
+        clockInAccuracy: accuracy,
+        notes: note,
+        status: TimeEntryStatus.CLOCKED_IN,
+      },
+      include: {
+        staff: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+  }).catch(error => {
+    borrarSelfie()
+    throw error
   })
 
   logger.info(
