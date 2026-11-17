@@ -332,6 +332,19 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
               AND ${sqlNoEsDelMedioSaldoAFavor('r')}
               AND COALESCE(r."processorData"->>'isInternational', '') <> 'true'`
         }
+        // D5: con la MISMA regla, las devoluciones de tarjeta que copiaron el método PROVISIONAL (crédito del aviso del banco)
+        // aprenden el método que acredita la terminal; si no, el cobro pasaba a débito y su devolución se quedaba en crédito.
+        if (r.method) {
+          await tx.$executeRaw`
+            UPDATE "Payment" r SET "method" = CAST(${r.method} AS "PaymentMethod"), "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+            WHERE r."venueId" = ${venueId}
+              AND r."type" = 'REFUND'
+              AND r."processorData"->>'originalPaymentId' = ${existente.id}
+              AND r."method" IN ('CREDIT_CARD', 'DEBIT_CARD')
+              AND r."method" <> CAST(${r.method} AS "PaymentMethod")
+              AND ${sqlPaymentIsNotExchangeCredit('r')}
+              AND ${sqlNoEsDelMedioSaldoAFavor('r')}`
+        }
         // S2: si el costo estaba PENDIENTE esperando la marca (Payment nacido del webhook), que el worker lo tome ya.
         await tx.paymentEffect.updateMany({
           where: { paymentId: existente.id, kind: 'TRANSACTION_COST', status: 'PENDING' },
