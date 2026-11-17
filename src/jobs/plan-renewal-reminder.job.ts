@@ -64,6 +64,12 @@ export const TOPE_PRUEBAS = 200
 /** Plan Básico: días hacia atrás en que el job todavía avisa «Tu prueba terminó» si el webhook no lo hizo. */
 export const DIAS_RESPALDO_TERMINADO = 7
 
+/** ¿Terminó SIN cobro (prueba o Pro pagado) en los últimos `DIAS_RESPALDO_TERMINADO` días? Lo de antes ya no se avisa. */
+const terminoHacePoco = (sub: Stripe.Subscription, now: number) => {
+  const endedAt = (sub as unknown as { ended_at?: number | null }).ended_at
+  return comoTermino(sub) !== null && typeof endedAt === 'number' && endedAt * 1000 >= now - DIAS_RESPALDO_TERMINADO * DIA_MS
+}
+
 /** La fecha de calendario (YYYY-MM-DD) de un instante en la zona del negocio. */
 function diaLocal(ms: number, timeZone: string): string {
   return new Date(ms).toLocaleDateString('en-CA', { timeZone })
@@ -138,40 +144,35 @@ export class PlanRenewalReminderJob {
   }
 
   /**
-   * Plan Básico: respaldo de «Tu prueba terminó» cuando el webhook `customer.subscription.deleted` no lo mandó. Filas de
-   * `PLAN_PRO` ya inactivas cuya prueba terminó en los últimos `DIAS_RESPALDO_TERMINADO` días y sin el sello (≥ el fin);
-   * la suscripción REAL decide si terminó sin cobro. Si el negocio ya contrató algo (Básico o un plan), no se le dice.
+   * Plan Básico: respaldo de «Tu prueba terminó» / «Tu Pro terminó» cuando el webhook `customer.subscription.deleted` no
+   * lo entregó (revisión final #3). Aquí, las filas de `PLAN_PRO` que el webhook ya apagó: la prueba terminó en los últimos
+   * `DIAS_RESPALDO_TERMINADO` días sin el sello, o la fila se apagó en esos días (el Pro pagado no tiene otra fecha de
+   * fin en la fila). Las que el webhook nunca apagó (siguen `active`) las toma `run()` con el estado real de Stripe. La
+   * suscripción REAL decide si terminó sin cobro; `avisarPlanTerminado` sella una sola vez.
    */
   private async avisarPlanesTerminados(): Promise<void> {
     const now = Date.now()
-    const pagina = (despues: { trialEndDate: Date; id: string } | null) =>
+    const desde = new Date(now - DIAS_RESPALDO_TERMINADO * DIA_MS)
+    const pagina = (despues: string | null) =>
       retry(
         () =>
           prisma.venueFeature.findMany({
             take: TOPE_PRUEBAS,
-            orderBy: [{ trialEndDate: 'asc' }, { id: 'asc' }],
+            orderBy: { id: 'asc' },
             where: {
               active: false,
               stripeSubscriptionId: { not: null },
               feature: { code: 'PLAN_PRO' },
-              trialEndDate: { gte: new Date(now - DIAS_RESPALDO_TERMINADO * DIA_MS), lte: new Date(now) },
-              AND: [
+              OR: [
                 {
+                  trialEndDate: { gte: desde, lte: new Date(now) },
                   OR: [{ renewalReminderSentAt: null }, { renewalReminderSentAt: { lt: prisma.venueFeature.fields.trialEndDate } }],
                 },
-                ...(despues
-                  ? [
-                      {
-                        OR: [
-                          { trialEndDate: { gt: despues.trialEndDate } },
-                          { trialEndDate: despues.trialEndDate, id: { gt: despues.id } },
-                        ],
-                      },
-                    ]
-                  : []),
+                { updatedAt: { gte: desde } },
               ],
+              ...(despues ? { id: { gt: despues } } : {}),
             },
-            select: { id: true, venueId: true, stripeSubscriptionId: true, trialEndDate: true },
+            select: { id: true, venueId: true, stripeSubscriptionId: true },
           }),
         {
           retries: 2,
@@ -182,14 +183,14 @@ export class PlanRenewalReminderJob {
       )
 
     let enviados = 0
-    let despues: { trialEndDate: Date; id: string } | null = null
+    let despues: string | null = null
     for (;;) {
       const filas = await pagina(despues)
       for (const vf of filas) {
         try {
-          if (!vf.stripeSubscriptionId || !vf.trialEndDate) continue
+          if (!vf.stripeSubscriptionId) continue
           const sub = await stripe.subscriptions.retrieve(vf.stripeSubscriptionId)
-          if (comoTermino(sub) !== 'TRIAL') continue
+          if (!terminoHacePoco(sub, now)) continue
           const plan = await getPlanState(vf.venueId)
           if (plan.basicPlan?.active || (plan.origin && plan.origin.kind !== 'NONE')) continue
           if (await avisarPlanTerminado(sub)) enviados++
@@ -201,8 +202,8 @@ export class PlanRenewalReminderJob {
         }
       }
       const ultima = filas[filas.length - 1]
-      if (filas.length < TOPE_PRUEBAS || !ultima?.trialEndDate) break
-      despues = { trialEndDate: ultima.trialEndDate, id: ultima.id }
+      if (filas.length < TOPE_PRUEBAS || !ultima) break
+      despues = ultima.id
     }
     logger.info('✅ Ended-plan notice backup complete', { sent: enviados })
   }
@@ -416,6 +417,13 @@ export class PlanRenewalReminderJob {
       try {
         if (avisadas.has(vf.stripeSubscriptionId!)) continue
         const sub = await stripe.subscriptions.retrieve(vf.stripeSubscriptionId!)
+
+        // Plan Básico (revisión final #3): la fila sigue activa pero Stripe ya la borró — el webhook de la baja no llegó.
+        // «Tu prueba terminó» / «Tu Pro terminó» con el estado real; el sello de `avisarPlanTerminado` lo deja en una vez.
+        if (sub.status === 'canceled' && terminoHacePoco(sub, now)) {
+          if (await avisarPlanTerminado(sub)) sentCount++
+          continue
+        }
 
         if (sub.status !== 'active' && sub.status !== 'trialing') continue
 

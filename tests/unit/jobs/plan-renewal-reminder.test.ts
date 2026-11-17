@@ -1131,7 +1131,7 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       })
     })
 
-    it('lee sólo planes Pro inactivos cuya prueba terminó en los últimos días y faltan por avisar, con tope', async () => {
+    it('lee planes Pro apagados cuya prueba terminó, o que se apagaron, en los últimos días; con tope y por llave', async () => {
       porConsulta()
       await new PlanRenewalReminderJob().runNow()
       expect(mockPrisma.venueFeature.findMany).toHaveBeenCalledWith(
@@ -1140,11 +1140,59 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
             active: false,
             stripeSubscriptionId: { not: null },
             feature: { code: 'PLAN_PRO' },
-            trialEndDate: { gte: expect.any(Date), lte: expect.any(Date) },
+            OR: [
+              expect.objectContaining({ trialEndDate: { gte: expect.any(Date), lte: expect.any(Date) } }),
+              { updatedAt: { gte: expect.any(Date) } },
+            ],
           }),
+          orderBy: { id: 'asc' },
           take: TOPE_PRUEBAS,
         }),
       )
+    })
+
+    // Un Pro PAGADO que terminó al fin de su periodo con «Terminar mi Pro» (la prueba fue hace meses).
+    const proTerminado = (over: Record<string, unknown> = {}) =>
+      terminada({
+        id: 'sub_t',
+        trial_end: FIN_S - 60 * 86400,
+        current_period_start: FIN_S - 30 * 86400,
+        current_period_end: FIN_S,
+        ...over,
+      })
+
+    it('🔴 Pro pagado que terminó y el envío del webhook falló → el job lo retoma, «Tu Pro terminó», una sola vez', async () => {
+      porConsulta({ terminadas: [{ ...filaTerminada, trialEndDate: new Date((FIN_S - 60 * 86400) * 1000) }] })
+      mockRetrieve.mockResolvedValue(proTerminado())
+      endedSpy.mockResolvedValueOnce(false) // el webhook: Resend falló, sin sello
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      await expect(avisarPlanTerminado(proTerminado())).resolves.toBe(false)
+      expect(estado.renewalReminderSentAt).toBeNull()
+      await new PlanRenewalReminderJob().runNow()
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).toHaveBeenCalledTimes(2)
+      expect(endedSpy.mock.calls[1][1]).toMatchObject({ kind: 'PRO', idempotencyKey: 'plan-termino:sub_t' })
+    })
+
+    it('🔴 el webhook nunca llegó (la fila sigue activa) → el job decide con Stripe y avisa una vez (prueba y Pro)', async () => {
+      for (const sub of [terminada(), proTerminado()]) {
+        endedSpy.mockClear()
+        estado.renewalReminderSentAt = null
+        porConsulta({ cobros: [row({ stripeSubscriptionId: 'sub_t' })] })
+        mockRetrieve.mockResolvedValue(sub)
+        await new PlanRenewalReminderJob().runNow()
+        await new PlanRenewalReminderJob().runNow()
+        expect(endedSpy).toHaveBeenCalledTimes(1)
+        expect(renewalSpy).not.toHaveBeenCalled()
+      }
+    })
+
+    it('terminó hace más de una semana → ya no se avisa, aunque la fila siga activa', async () => {
+      const vieja = Math.floor((Date.now() - 30 * DAY) / 1000)
+      porConsulta({ cobros: [row({ stripeSubscriptionId: 'sub_t' })] })
+      mockRetrieve.mockResolvedValue(terminada({ trial_end: vieja, ended_at: vieja }))
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).not.toHaveBeenCalled()
     })
 
     it('🔴 una sola vez aunque lleguen el webhook y el job (y el job otra vez al día siguiente)', async () => {
