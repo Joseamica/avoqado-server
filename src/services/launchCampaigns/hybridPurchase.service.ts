@@ -222,9 +222,11 @@ const PLAN_NAMES = { PRO: 'Pro', PREMIUM: 'Premium' } as const
 
 /**
  * The Básico is bought from Free (Codex r4 #3, #6): never while a Pro/Premium lives (trial or paid, replacing it or not),
- * and never twice in a venue, whatever the publications. Repeated at acceptance by the same re-observation.
+ * and never twice in a venue, whatever the publications. Repeated at acceptance by the same re-observation AND under the
+ * purchase lock (final review #2), where a plan granted or a Básico delivered in between shows up.
  */
 async function assertBasicPurchasable(
+  db: Prisma.TransactionClient,
   venueId: string,
   timezone: string,
   inventory: InventarioDeObligaciones,
@@ -253,7 +255,7 @@ async function assertBasicPurchasable(
       : '. Cuando termine podrás contratar el Básico.'
     throw new ConflictError(`Tu ${PLAN_NAMES[plan.tier]} sigue activo${until}`, 'HYBRID_BASIC_PLAN_ALIVE')
   }
-  const live = await prisma.hybridContract.findFirst({
+  const live = await db.hybridContract.findFirst({
     where: { venueId, endedAt: null, publication: { definition: BASIC_PLAN_DEFINITION_WHERE } },
     select: { id: true },
   })
@@ -273,6 +275,9 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   })
   if (publications.length !== body.lines.length || new Set(publications.map(p => p.campaignId)).size !== publications.length)
     throw new BadRequestError('La selección contiene una oferta desconocida o repetida.')
+  // Final review #2: combined with any other line, the Básico would skip its own rules (and cancel a live Pro).
+  if (publications.length > 1 && publications.some(p => isBasicPlanDefinition(p.definition)))
+    throw new BadRequestError('El Básico se contrata solo')
   const parentListKeys: string[] = []
   for (const publication of publications) {
     const definition = hybridOfferDefinition.parse(publication.definition)
@@ -319,7 +324,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   const retained = await readRetained(prisma, venueId, inventory, body.replaceSubscriptionIds, now)
   // «A purchase whose only line is the Básico»: only then a frozen card and one-click charge.
   const basic = publications.length === 1 && isBasicPlanDefinition(publications[0].definition)
-  if (basic) await assertBasicPurchasable(venueId, venue.timezone, inventory, retained.legacy.filter(isPlanRow))
+  if (basic) await assertBasicPurchasable(prisma, venueId, venue.timezone, inventory, retained.legacy.filter(isPlanRow))
   const retainedCodes = [
     ...new Set([
       ...inventory.vivas
@@ -487,6 +492,8 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       // Spec §4.2 rule 5: a cancellation scheduled after the re-observation above only shows up here, under the lock.
       // Reads only: no campaign row is written before lockProducts below.
       const retained = await readRetained(tx, venueId, inventory, saved.replaces, now)
+      if (observed.publications.length === 1 && isBasicPlanDefinition(observed.publications[0].definition))
+        await assertBasicPurchasable(tx, venueId, observed.venue.timezone, inventory, retained.legacy.filter(isPlanRow))
       assertCartDependencyTerms(retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }), saved.lines, now)
       const claimed = await tx.hybridPurchase.updateMany({
         where: { id: quoteId, venueId, status: 'QUOTED', quoteExpiresAt: { gt: now } },

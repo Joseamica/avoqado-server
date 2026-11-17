@@ -1,7 +1,8 @@
 /**
  * Task 5 del Plan Básico: contratarlo con UN clic desde Gratis, por la compra híbrida de hoy. La tarjeta se resuelve y se
  * congela en la cotización (`quote.paymentMethodId`, dentro del `quoteHash`); `provisionHybridPurchase` la lee del snapshot
- * guardado y sólo entonces manda `default_payment_method` + `allow_incomplete`. Cualquier otra compra sigue igual que hoy.
+ * guardado; crea sin cobrar (`default_incomplete`), certifica la factura y sólo entonces la cobra con esa tarjeta (paso
+ * `PAY_INVOICE`). Cualquier otra compra sigue igual que hoy.
  */
 import { prismaMock } from '../../../__helpers__/setup'
 const inventory = jest.fn()
@@ -10,6 +11,8 @@ const subsList = jest.fn()
 const subsCreate = jest.fn()
 const subsRetrieve = jest.fn()
 const paymentMethod = jest.fn()
+const invoicePay = jest.fn()
+const invoiceRetrieve = jest.fn()
 jest.mock('@/services/access/inventarioDeObligaciones', () => ({ inventarioDeObligaciones: (...a: unknown[]) => inventory(...a) }))
 jest.mock('@/services/stripe.service', () => ({
   stripe: {
@@ -23,6 +26,7 @@ jest.mock('@/services/stripe.service', () => ({
       retrieve: (...a: unknown[]) => subsRetrieve(...a),
     },
     paymentMethods: { retrieve: (...a: unknown[]) => paymentMethod(...a) },
+    invoices: { pay: (...a: unknown[]) => invoicePay(...a), retrieve: (...a: unknown[]) => invoiceRetrieve(...a) },
   },
   getOrCreateStripeCustomer: jest.fn(),
   STRIPE_DENTRO_DEL_CANDADO: { timeout: 15000, maxNetworkRetries: 0 },
@@ -237,6 +241,20 @@ describe('cotizar el Básico desde Gratis', () => {
     await expect(createHybridQuote('venue', 'staff', basicInput)).resolves.toMatchObject({ status: 'QUOTED' })
   })
 
+  it('el Básico combinado con otra línea (p. ej. CFDI) → 400 «El Básico se contrata solo», también reemplazando el Pro', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([basicPublication, otherPublication])
+    inventory.mockResolvedValue(proTrial)
+    const combined = {
+      lines: [...basicInput.lines, { publicationId: otherPubId, selectedFeatureCodes: [] }],
+      replaceSubscriptionIds: ['sub_pro'],
+    }
+    await expect(createHybridQuote('venue', 'staff', combined)).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'El Básico se contrata solo',
+    })
+    expect(prismaMock.hybridPurchase.create).not.toHaveBeenCalled()
+  })
+
   it('regresión: una oferta que no es el Básico no lee ninguna tarjeta ni cambia la forma de su snapshot', async () => {
     prismaMock.hybridOfferPublication.findMany.mockResolvedValue([otherPublication])
     prismaMock.hybridContract.findFirst.mockClear()
@@ -263,6 +281,33 @@ describe('aceptar el Básico', () => {
       acceptHybridQuote('venue', 'staff', 'quote', { quoteHash: purchase.quoteHash, clientKey: 'clave-intento-1' }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_QUOTE_STALE', message: 'Cambió tu tarjeta; revisa de nuevo' })
     expect(autorizar).not.toHaveBeenCalled()
+  })
+
+  it('bajo el candado: un Pro dado sin suscripción entre cotizar y aceptar → 409, sin aceptar el intento', async () => {
+    const purchase = await quoted()
+    autorizar.mockImplementation(async (_venue: string, _customer: string, _intent: unknown, crear: any) => {
+      // Granted by superadmin after the re-observation: only the read under the lock can see it.
+      prismaMock.venueFeature.findMany.mockResolvedValue([
+        { stripeSubscriptionId: null, endDate: new Date('2026-12-17T18:00:00.000Z'), feature: { code: 'PLAN_PRO' } },
+      ])
+      return crear(prismaMock, { vivas: [], detalle: {}, conCambiosProgramados: [] })
+    })
+    await expect(
+      acceptHybridQuote('venue', 'staff', 'quote', { quoteHash: purchase.quoteHash, clientKey: 'clave-intento-1' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_BASIC_PLAN_ALIVE' })
+    expect(prismaMock.hybridPurchase.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('bajo el candado: otro Básico entregado entre cotizar y aceptar → 409 «Ya tienes el Básico»', async () => {
+    const purchase = await quoted()
+    autorizar.mockImplementation(async (_venue: string, _customer: string, _intent: unknown, crear: any) => {
+      contracts = [{ venueId: 'venue', endedAt: null, basic: true }]
+      return crear(prismaMock, { vivas: [], detalle: {}, conCambiosProgramados: [] })
+    })
+    await expect(
+      acceptHybridQuote('venue', 'staff', 'quote', { quoteHash: purchase.quoteHash, clientKey: 'clave-intento-1' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_BASIC_ALREADY' })
+    expect(prismaMock.hybridPurchase.updateMany).not.toHaveBeenCalled()
   })
 
   it('con la misma tarjeta pasa a la regla común; el reintento de un intento ya aceptado no vuelve a leer la tarjeta', async () => {
@@ -312,20 +357,26 @@ describe('el clic cobra: provisionar el Básico con la tarjeta congelada', () =>
       ...invoice,
     },
   })
-  let op: any
+  const paidInvoice = { ...subscription({}).latest_invoice, status: 'paid', attempted: true }
+  const openInvoice = { ...subscription({}).latest_invoice, status: 'open', attempted: false }
+  // The journal survives between calls, like the rows: one operation per step, the second attempt sees the first's request.
+  let ops: Record<string, any>
   beforeEach(() => {
-    op = null
+    ops = {}
     prismaMock.hybridPurchase.findUnique.mockResolvedValue(accepted({ paymentMethodId: 'pm_saved' }))
     prismaMock.hybridPurchase.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.hybridOfferPublication.findMany.mockResolvedValue([
       { id: basicPubId, definitionHash: basicPublication.definitionHash, stripePriceId: 'price_basic', stripeProductId: 'prod_basic' },
     ])
-    // The journal survives between calls, like the row: the second attempt sees the first one's request.
     prismaMock.hybridBillingOperation.upsert.mockImplementation(async ({ create: data }: any) => {
-      op ??= { id: 'op', ...data, createdAt: new Date(), providerId: null }
-      return op
+      ops[data.step] ??= { id: `op-${data.step}`, ...data, createdAt: new Date(), providerId: null }
+      return ops[data.step]
     })
-    prismaMock.hybridBillingOperation.update.mockResolvedValue({})
+    prismaMock.hybridBillingOperation.update.mockImplementation(async ({ where, data }: any) => {
+      const hit = Object.values(ops).find(o => o.id === where.id)
+      if (hit) Object.assign(hit, data)
+      return hit
+    })
     prismaMock.$transaction.mockImplementation(async (fn: any) => fn(prismaMock))
     prismaMock.hybridContract.createMany.mockResolvedValue({ count: 1 })
     prismaMock.hybridContract.findMany.mockResolvedValue([
@@ -333,11 +384,14 @@ describe('el clic cobra: provisionar el Básico con la tarjeta congelada', () =>
     ])
     prismaMock.activityLog.create.mockResolvedValue({})
     subsList.mockResolvedValue({ data: [], has_more: false })
-    subsCreate.mockReset().mockResolvedValue(subscription({}))
-    subsRetrieve.mockReset().mockResolvedValue(subscription({}))
+    // `default_incomplete` never charges: the subscription comes back with its invoice still open.
+    subsCreate.mockReset().mockResolvedValue({ ...subscription({ status: 'open' }), status: 'incomplete' })
+    subsRetrieve.mockReset().mockResolvedValue({ ...subscription({ status: 'open' }), status: 'incomplete' })
+    invoicePay.mockReset().mockResolvedValue(paidInvoice)
+    invoiceRetrieve.mockReset().mockResolvedValue(openInvoice)
   })
 
-  it('cobra $578.84 al momento con la tarjeta del snapshot: pagada, sin enlace de Stripe, contrato sin fin con las 5 funciones', async () => {
+  it('crea sin cobrar, certifica la factura y SÓLO después cobra $578.84 con la tarjeta del snapshot: pagada, sin enlace', async () => {
     await expect(provisionHybridPurchase('venue', 'purchase')).resolves.toEqual({
       purchaseId: 'purchase',
       status: 'ACTIVATION_PENDING',
@@ -348,11 +402,18 @@ describe('el clic cobra: provisionar el Básico con la tarjeta congelada', () =>
       expect.objectContaining({
         customer: 'cus_test',
         default_payment_method: 'pm_saved',
-        payment_behavior: 'allow_incomplete',
+        payment_behavior: 'default_incomplete',
         items: [{ price: 'price_basic', quantity: 1 }],
       }),
-      expect.objectContaining({ idempotencyKey: 'hybrid:op' }),
+      expect.objectContaining({ idempotencyKey: 'hybrid:op-SUBSCRIPTION' }),
     )
+    expect(invoicePay).toHaveBeenCalledTimes(1)
+    expect(invoicePay).toHaveBeenCalledWith(
+      'in_basic',
+      { payment_method: 'pm_saved' },
+      expect.objectContaining({ idempotencyKey: 'hybrid:op-PAY_INVOICE' }),
+    )
+    expect(subsCreate.mock.invocationCallOrder[0]).toBeLessThan(invoicePay.mock.invocationCallOrder[0])
     // The card comes from the stored snapshot, never from the customer again.
     expect(customers).not.toHaveBeenCalled()
     const [{ data }] = prismaMock.hybridContract.createMany.mock.calls[0] as any
@@ -363,35 +424,72 @@ describe('el clic cobra: provisionar el Básico con la tarjeta congelada', () =>
     )
   })
 
-  it('respuesta perdida, cambio de tarjeta predeterminada y reintento → mismos parámetros, recupera el cobro, una sola suscripción', async () => {
-    subsCreate.mockRejectedValueOnce(new Error('socket hang up')) // Stripe charged; the answer never arrived
+  it('el saldo aceptado ya no está (la factura pide otro monto) → HYBRID_INVOICE_MISMATCH SIN haber cobrado', async () => {
+    // Accepted $378.84 thanks to a $200 balance; another renewal consumed it, so Stripe now asks for $578.84.
+    prismaMock.hybridPurchase.findUnique.mockResolvedValue(accepted({ paymentMethodId: 'pm_saved', dueNow: '378.84' }))
+    await expect(provisionHybridPurchase('venue', 'purchase')).rejects.toMatchObject({ cause: { code: 'HYBRID_INVOICE_MISMATCH' } })
+    expect(subsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_behavior: 'default_incomplete' }), expect.anything())
+    expect(invoicePay).not.toHaveBeenCalled()
+    expect(prismaMock.hybridContract.createMany).not.toHaveBeenCalled()
+  })
+
+  it('respuesta perdida al crear, cambio de tarjeta predeterminada y reintento → mismos parámetros, una sola suscripción y un solo cobro', async () => {
+    subsCreate.mockRejectedValueOnce(new Error('socket hang up')) // Stripe created it; the answer never arrived
     await expect(provisionHybridPurchase('venue', 'purchase')).rejects.toMatchObject({ code: 'HYBRID_PROVIDER_UNKNOWN' })
-    const firstRequest = op.request
+    expect(invoicePay).not.toHaveBeenCalled()
+    const firstRequest = ops.SUBSCRIPTION.request
+    const firstHash = ops.SUBSCRIPTION.requestHash
     customers.mockResolvedValue({ id: 'cus_test', balance: 0, invoice_settings: { default_payment_method: 'pm_otra' } })
-    subsList.mockResolvedValue({ data: [subscription({})], has_more: false })
+    subsList.mockResolvedValue({ data: [{ ...subscription({ status: 'open' }), status: 'incomplete' }], has_more: false })
     await expect(provisionHybridPurchase('venue', 'purchase')).resolves.toMatchObject({ status: 'ACTIVATION_PENDING' })
     expect(subsCreate).toHaveBeenCalledTimes(1)
-    expect(firstRequest).toMatchObject({ default_payment_method: 'pm_saved', payment_behavior: 'allow_incomplete' })
-    expect(prismaMock.hybridBillingOperation.upsert.mock.calls[1][0].create.requestHash).toBe(op.requestHash)
+    expect(invoicePay).toHaveBeenCalledTimes(1)
+    expect(firstRequest).toMatchObject({ default_payment_method: 'pm_saved', payment_behavior: 'default_incomplete' })
+    expect(hybridHash(firstRequest)).toBe(firstHash)
     expect(subsRetrieve).toHaveBeenCalledWith('sub_basic', expect.anything(), expect.anything())
   })
 
-  it('tarjeta que pide 3DS (o rechazada) → el enlace «Pagar» de hoy', async () => {
-    subsCreate.mockResolvedValue({ ...subscription({ status: 'open' }), status: 'incomplete' })
+  it('respuesta perdida al cobrar → el reintento lee la factura ya pagada y NO vuelve a cobrar', async () => {
+    invoicePay.mockRejectedValueOnce(new Error('socket hang up')) // charged; the answer never arrived
+    await expect(provisionHybridPurchase('venue', 'purchase')).rejects.toMatchObject({ code: 'HYBRID_PROVIDER_UNKNOWN' })
+    prismaMock.hybridPurchase.findUnique.mockResolvedValue({
+      ...accepted({ paymentMethodId: 'pm_saved' }),
+      status: 'PROVISIONING',
+      stripeSubscriptionId: 'sub_basic',
+    })
+    invoiceRetrieve.mockResolvedValue(paidInvoice)
+    await expect(provisionHybridPurchase('venue', 'purchase')).resolves.toMatchObject({ status: 'ACTIVATION_PENDING' })
+    expect(invoicePay).toHaveBeenCalledTimes(1)
+  })
+
+  it('tarjeta que pide 3DS (o rechazada) → el enlace «Pagar» de hoy, sin un segundo intento de cobro', async () => {
+    invoicePay.mockRejectedValue(
+      Object.assign(new Error('requires action'), { type: 'StripeCardError', code: 'invoice_payment_intent_requires_action' }),
+    )
+    // Before the attempt Stripe reports it unattempted; after the failed charge, attempted and still open.
+    invoiceRetrieve.mockResolvedValueOnce(openInvoice).mockResolvedValue({ ...openInvoice, attempted: true })
     await expect(provisionHybridPurchase('venue', 'purchase')).resolves.toEqual({
       purchaseId: 'purchase',
       status: 'PAYMENT_PENDING',
       paymentUrl: 'https://invoice.stripe.com/i/basic',
     })
+    // Polling again recovers the attempt and keeps the link; it never charges the card twice.
+    prismaMock.hybridPurchase.findUnique.mockResolvedValue({
+      ...accepted({ paymentMethodId: 'pm_saved' }),
+      status: 'PAYMENT_PENDING',
+      stripeSubscriptionId: 'sub_basic',
+    })
+    await expect(provisionHybridPurchase('venue', 'purchase')).resolves.toMatchObject({ status: 'PAYMENT_PENDING' })
+    expect(invoicePay).toHaveBeenCalledTimes(1)
   })
 
-  it('sin tarjeta congelada el Básico sigue el camino de hoy (default_incomplete y enlace)', async () => {
+  it('sin tarjeta congelada el Básico sigue el camino de hoy (default_incomplete y enlace, sin cobro)', async () => {
     prismaMock.hybridPurchase.findUnique.mockResolvedValue(accepted({}))
-    subsCreate.mockResolvedValue(subscription({ status: 'open' }))
     await provisionHybridPurchase('venue', 'purchase')
     const [params] = subsCreate.mock.calls[0]
     expect(params).toMatchObject({ payment_behavior: 'default_incomplete' })
     expect(params).not.toHaveProperty('default_payment_method')
+    expect(invoicePay).not.toHaveBeenCalled()
   })
 
   it('regresión: una oferta híbrida que no es el Básico sigue con default_incomplete', async () => {
