@@ -13,6 +13,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import * as discountService from '@/services/dashboard/discount.dashboard.service'
+import { listarDescuentosAplicados } from '../../services/dashboard/descuentosAplicados.service'
 import {
   getDiscountsQuerySchema,
   createDiscountBodySchema,
@@ -167,6 +168,26 @@ export async function getDiscountStats(req: Request, res: Response, next: NextFu
     const stats = await discountService.getDiscountStats(venueId)
 
     res.json(stats)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Reporte «Descuentos» (encargo f998c8): agrupado por motivo + lista paginada (tope del servidor). Query ya validada en la ruta.
+ */
+export async function getAppliedDiscounts(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const q = req.query as Record<string, string | undefined>
+    const reporte = await listarDescuentosAplicados(venueId, {
+      from: q.from,
+      to: q.to,
+      reason: q.reason,
+      page: q.page ? Number(q.page) : undefined,
+      pageSize: q.pageSize ? Number(q.pageSize) : undefined,
+    })
+    res.json(reporte)
   } catch (error) {
     next(error)
   }

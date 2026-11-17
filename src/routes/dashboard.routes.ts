@@ -11903,6 +11903,52 @@ router.get(
  *         description: Discount statistics
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/applied:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Descuentos aplicados en un periodo, agrupados por motivo, con la lista paginada (encargo f998c8)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: from, in: query, schema: { type: string }, description: 'AAAA-MM-DD (día del negocio). Sin fechas, los últimos 30 días' }
+ *       - { name: to, in: query, schema: { type: string } }
+ *       - { name: reason, in: query, schema: { type: string }, description: 'Un motivo exacto, o __SIN_MOTIVO__' }
+ *       - { name: page, in: query, schema: { type: integer } }
+ *       - { name: pageSize, in: query, schema: { type: integer, maximum: 100 } }
+ *     responses:
+ *       200: { description: 'totales, porMotivo, rows y pagination' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/discounts/applied',
+  authenticateTokenMiddleware,
+  // Vive en Reportes del DASHBOARD («Descuentos»): el mismo permiso que los demás reportes y que la tool del MCP.
+  checkPermission('reports:read'),
+  validateRequest(
+    z.object({
+      params: DiscountVenueParamsSchema,
+      query: z.object({
+        from: z.string().max(40, 'La fecha inicial no es válida').optional(),
+        to: z.string().max(40, 'La fecha final no es válida').optional(),
+        reason: z.string().max(100, 'El motivo es demasiado largo').optional(),
+        page: z.coerce
+          .number({ invalid_type_error: 'La página debe ser un número' })
+          .int('La página debe ser un número entero')
+          .min(1, 'La página empieza en 1')
+          .optional(),
+        pageSize: z.coerce
+          .number({ invalid_type_error: 'El tamaño de página debe ser un número' })
+          .int('El tamaño de página debe ser un número entero')
+          .min(1, 'El tamaño de página mínimo es 1')
+          .optional(),
+      }),
+    }),
+  ),
+  discountController.getAppliedDiscounts,
+)
+
 router.get(
   '/venues/:venueId/discounts/stats',
   authenticateTokenMiddleware,

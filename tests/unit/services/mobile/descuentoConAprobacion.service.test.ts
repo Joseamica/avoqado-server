@@ -174,6 +174,16 @@ describe('D4 · Mesas: aplicar un % o fijo que pide aprobación a la cuenta abie
     const [fila] = cuenta.filas()
     expect(fila.authorizedById ?? null).toBeNull()
     expect(fila.appliedById).toBe('sv-sesion-1')
+    // f998c8: sin motivo la fila queda como siempre («Sin motivo»).
+    expect(fila.reason ?? null).toBeNull()
+  })
+
+  it('f998c8: el motivo que eligió la caja se copia a la fila del descuento de la mesa', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    await applyOrderDiscount(VENUE, cuenta.id, LIBRE, 'sesion-1', false, undefined, { reason: 'Queja del cliente', reasonComment: 'tardó' })
+    const [fila] = cuenta.filas()
+    expect(fila).toMatchObject({ reason: 'Queja del cliente', reasonComment: 'tardó' })
   })
 })
 

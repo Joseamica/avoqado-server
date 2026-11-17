@@ -63,6 +63,7 @@ import {
   enqueuePaymentEffect,
   enqueueRefundPaymentEffectsInTx,
 } from '../tpv/paymentEffects.service'
+import { agruparPorMotivo, motivoDelDescuento, type MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import {
   accionDeCortesia,
   filaDeAjustesDePrecio,
@@ -268,6 +269,12 @@ export interface CreateOrderItemInput {
    */
   adjustedUnitPrice?: number | null
   /**
+   * Encargo f998c8: el motivo que eligió la caja para el descuento de ESTE renglón (el de catálogo y/o su «Ajuste de precio»), y un
+   * comentario libre. Opcionales; se recortan y se copian como texto a la fila del descuento. Nunca rechazan una venta.
+   */
+  discountReason?: string | null
+  discountReasonComment?: string | null
+  /**
    * Promoción tocada en el POS. OPCIONAL y sin precios: lleva QUÉ promoción y
    * QUÉ eligió la persona; la aritmética la hace el server (mismo contrato que
    * `items[].promotionRef` del reducer de ADD_ITEMS — deben permanecer iguales,
@@ -310,6 +317,9 @@ export interface CreateOrderInput {
    * Todavía no se combina con promociones (400).
    */
   orderDiscountId?: string | null
+  /** Encargo f998c8: el motivo (y comentario) del descuento de la CUENTA. Opcionales; nunca rechazan una venta. */
+  orderDiscountReason?: string | null
+  orderDiscountReasonComment?: string | null
   /**
    * D5: el cupón que la caja validó. En línea el servidor lo revalida y calcula (el `discount` de la app no manda); una venta de la
    * cola «ya ocurrió» y nunca se rechaza por él: las apps no encolan ventas con cupón, y si llega una, su `discount` queda como libre.
@@ -1130,6 +1140,8 @@ export async function buildOrderItemsData(
   preciosRespetados: PrecioRespetado[]
   /** D12: los renglones con «Ajuste de precio» (su `id` ya viaja en `itemsData`) y los pesos que cada uno descuenta. */
   ajustesDePrecio: Array<{ itemId: string; pesos: number }>
+  /** Encargo f998c8: el motivo de cada renglón con descuento o ajuste que lo trajo (su `id` ya viaja en `itemsData`). */
+  motivosPorRenglon: Map<string, MotivoDeDescuento>
 }> {
   // Validate items array
   if (!items || items.length === 0) {
@@ -1142,6 +1154,7 @@ export async function buildOrderItemsData(
   let subtotal = 0
   let itemDiscountTotal = 0
   const ajustesDePrecio: Array<{ itemId: string; pesos: number }> = []
+  const motivosPorRenglon = new Map<string, MotivoDeDescuento>()
 
   const productInputs = items.filter(
     (item): item is CreateOrderItemInput & { productId: string } => typeof item.productId === 'string' && item.productId.length > 0,
@@ -1431,8 +1444,12 @@ export async function buildOrderItemsData(
     }
     const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
     itemDiscountTotal += discountAmount
-    const id = ajuste > 0 ? cuid() : null
-    if (id) ajustesDePrecio.push({ itemId: id, pesos: ajuste })
+    // Encargo f998c8: un renglón con descuento o ajuste y motivo lleva id propio, para que su fila de descuento lo copie.
+    const motivo = appliedDiscount || ajuste > 0 ? motivoDelDescuento(item.discountReason, item.discountReasonComment) : {}
+    const tieneMotivo = Object.keys(motivo).length > 0
+    const id = ajuste > 0 || tieneMotivo ? cuid() : null
+    if (id && ajuste > 0) ajustesDePrecio.push({ itemId: id, pesos: ajuste })
+    if (id && tieneMotivo) motivosPorRenglon.set(id, motivo)
 
     return {
       ...(id ? { id } : {}),
@@ -1518,6 +1535,7 @@ export async function buildOrderItemsData(
     cambiosDePrecio,
     preciosRespetados,
     ajustesDePrecio,
+    motivosPorRenglon,
   }
 }
 
@@ -1885,6 +1903,7 @@ export async function crearVentaDeMostradorEnTx(
     cambiosDePrecio,
     preciosRespetados,
     ajustesDePrecio,
+    motivosPorRenglon,
   } = itemsNormales.length > 0
     ? await buildOrderItemsData(venueId, itemsNormales, undefined, precioMostrado, tx, input)
     : {
@@ -1895,6 +1914,7 @@ export async function crearVentaDeMostradorEnTx(
         cambiosDePrecio: [] as CambioDePrecio[],
         preciosRespetados: [] as PrecioRespetado[],
         ajustesDePrecio: [] as Array<{ itemId: string; pesos: number }>,
+        motivosPorRenglon: new Map<string, MotivoDeDescuento>(),
       }
 
   // El helper también crea vales: sólo ESTE flujo aplica cortesías, sobre el bruto ya calculado con peso y extras.
@@ -2116,6 +2136,8 @@ export async function crearVentaDeMostradorEnTx(
       : null
   // D12: el renglón ajustado lleva el ajuste Y, si tiene, su descuento de catálogo; la fila del catálogo sólo explica lo suyo.
   const ajusteDelRenglon = new Map(ajustesDePrecio.map(a => [a.itemId, a.pesos]))
+  // Encargo f998c8: el motivo del descuento de la cuenta (el de catálogo, el libre o el del cliente; la app sólo lo manda si lo pidió).
+  const motivoDeLaCuenta = motivoDelDescuento(input.orderDiscountReason, input.orderDiscountReasonComment)
   for (const item of discountedItems) {
     const discount = discounts.find(d => d.id === item.appliedDiscountId)
     if (!discount) continue
@@ -2129,22 +2151,24 @@ export async function crearVentaDeMostradorEnTx(
       }),
       pideAprobacionDeGerente(discount),
     )
-    await tx.orderDiscount.create({ data: fila })
+    await tx.orderDiscount.create({ data: { ...fila, ...motivosPorRenglon.get(item.id) } })
     await anotarSiEntroSinAprobacion(fila, pideAprobacionDeGerente(discount))
   }
   // D12: UNA fila «Ajuste de precio» con todos los renglones ajustados (el descuento ya vive en cada uno ⇒ espejo).
   // Encargo 1afe04: pide aprobación como un descuento con «Requiere aprobación» ⇒ la sesión que lo aplicó y quién lo aprobó; de la
   // cola sin la acreditación, sin aprobador y con el rastro `DESCUENTO_SIN_APROBACION_SIN_RED` (+ aviso al dueño, D22).
-  if (ajustesDePrecio.length > 0) {
+  // Encargo f998c8: con motivos distintos, una fila por motivo (mismo nombre) para que el reporte por motivo cuadre al centavo; sin
+  // motivos (o todos iguales), UNA fila como siempre.
+  for (const grupo of agruparPorMotivo(ajustesDePrecio, motivosPorRenglon)) {
     const fila = conAprobador(
       filaDeAjustesDePrecio({
         orderId: createdOrder.id,
-        renglones: ajustesDePrecio,
+        renglones: grupo.renglones,
         appliedById: appliedByStaffVenue?.id ?? null,
       }),
       true,
     )
-    await tx.orderDiscount.create({ data: fila })
+    await tx.orderDiscount.create({ data: { ...fila, ...grupo.motivo } })
     await anotarSiEntroSinAprobacion(fila, true, true)
   }
 
@@ -2229,7 +2253,8 @@ export async function crearVentaDeMostradorEnTx(
             ...firmasDelDescuentoLibre(appliedById, regaloSinPromociones, prep.descuentoDelCliente),
           })
       const fila = conAprobador(filaSinAprobador, cuentaPideAprobacion)
-      await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+      const conMotivo = { ...fila, ...motivoDeLaCuenta }
+      await tx.orderDiscount.create({ data: cupon ? ligarCupon(conMotivo, cupon) : conMotivo })
       await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
@@ -2345,7 +2370,10 @@ export async function crearVentaDeMostradorEnTx(
       }),
       cuentaPideAprobacion,
     )
-    await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
+    const conMotivo = { ...fila, ...motivoDeLaCuenta }
+    await tx.orderDiscount.create({
+      data: cupon ? { ...ligarCupon(conMotivo, cupon), type: fila.type, value: fila.value } : conMotivo,
+    })
     await anotarSiEntroSinAprobacion(fila, cuentaPideAprobacion)
     await sincronizarRepartos(tx, createdOrder.id)
   }
@@ -3024,6 +3052,8 @@ export async function applyOrderDiscountInTransaction(
   puedeRegalar = false,
   /** D4: la acreditación de la ruta o de la cola (PIN o `tpv-orders:discount`). Falla cerrado: sin ella, un % o fijo que pide aprobación es 403. */
   aprobacion?: { porPin?: string },
+  /** Encargo f998c8: el motivo y comentario que eligió la caja (ya recortados con `motivoDelDescuento`). Sin él, «Sin motivo». */
+  motivo: MotivoDeDescuento = {},
 ) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
@@ -3109,8 +3139,9 @@ export async function applyOrderDiscountInTransaction(
       reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
       appliedById: aplico,
       ...(aprobo ? { authorizedById: aprobo } : {}),
+      ...motivo,
     },
-    select: { id: true, name: true, amount: true, authorizedById: true },
+    select: { id: true, name: true, amount: true, authorizedById: true, reason: true },
   })
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
@@ -3124,9 +3155,10 @@ export async function applyOrderDiscount(
   staffId?: string,
   puedeRegalar = false,
   aprobacion?: { porPin?: string },
+  motivo: MotivoDeDescuento = {},
 ) {
   const { row, totals } = await prisma.$transaction(
-    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion),
+    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion, motivo),
     ORDER_LOCK_WAIT_BUDGET,
   )
 
@@ -3136,7 +3168,13 @@ export async function applyOrderDiscount(
     entityId: orderId,
     staffId,
     venueId,
-    data: { discountId, name: row.name, amount: Number(row.amount), ...(row.authorizedById ? { aprobadoPor: row.authorizedById } : {}) },
+    data: {
+      discountId,
+      name: row.name,
+      amount: Number(row.amount),
+      ...(row.authorizedById ? { aprobadoPor: row.authorizedById } : {}),
+      ...(row.reason ? { motivo: row.reason } : {}),
+    },
   })
 
   return { orderDiscountId: row.id, name: row.name, amount: Number(row.amount), ...totals }

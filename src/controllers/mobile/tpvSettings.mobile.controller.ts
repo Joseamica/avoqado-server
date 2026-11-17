@@ -145,6 +145,8 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
             promotionsPanelCashier: true,
             promotionsPanelCustomer: true,
             managerPinOverrideEnabled: true,
+            discountReasonRequired: true,
+            discountReasons: true,
             exchangesEnabled: true,
             storeCreditOnly: true,
           },
@@ -267,6 +269,10 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         // es el comportamiento de hoy. Es de VENUE, no de terminal — por eso vive
         // aquí y no dentro de `settings`.
         managerPinOverrideEnabled: venueSettings?.managerPinOverrideEnabled ?? false,
+        // Motivo en los descuentos (encargo f998c8). Aditivos y opcionales (mismo contrato que `plan`): un POS viejo los ignora; uno
+        // nuevo sin ellos no pide motivo (lo de hoy). Prendido sin lista no se puede guardar, pero si llegara, el POS no pide nada.
+        discountReasonRequired: venueSettings?.discountReasonRequired ?? false,
+        discountReasons: venueSettings?.discountReasons ?? [],
         exchangesEnabled: effectiveExchangesEnabled(venueSettings?.exchangesEnabled, venue?.type),
         // Saldo a favor (spec 2026-10-30 §5.1). Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo ignora; uno nuevo sin
         // el campo cae a false. `storeCreditOnly` es de VENUE; `storeCreditAvailable` = el SERVIDOR sabe dar saldo (las dos llaves).
@@ -283,7 +289,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         componentsStatus: {
           receipt: recibo.status,
           plan: plan ? 'ok' : 'failed',
-          promotionsPanel: venueSettingsLeido.ok ? 'ok' : 'failed', // cubre también managerPinOverrideEnabled (misma fila)
+          promotionsPanel: venueSettingsLeido.ok ? 'ok' : 'failed', // cubre también managerPinOverrideEnabled y el motivo de descuentos (misma fila)
           customerDisplay: pantalla.status,
         },
         ...(pantalla.block ? { customerDisplay: pantalla.block } : {}),

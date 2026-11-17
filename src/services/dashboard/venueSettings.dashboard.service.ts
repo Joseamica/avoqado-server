@@ -10,13 +10,14 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { ForbiddenError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { VenueSettings, Prisma } from '@prisma/client'
 import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { validarAjusteDeMotivos } from '../shared/motivoDelDescuento'
 
 /**
  * Default settings for new venues
@@ -137,6 +138,29 @@ export async function updateVenueSettings(
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
+  // Encargo f998c8: «Pedir motivo en los descuentos» + la lista del negocio. Se valida contra lo guardado (no se prende con la lista
+  // vacía; prendido no se quita el último motivo) y la lista se guarda limpia (recortada, sin vacíos ni repetidos). Codex r2 #1: se
+  // vuelve a validar con el candado del negocio en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
+  // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
+  const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
+  if (tocaMotivos) {
+    const guardado = await prisma.venueSettings.findUnique({
+      where: { venueId },
+      select: { discountReasonRequired: true, discountReasons: true },
+    })
+    const resultado = validarAjusteDeMotivos(
+      {
+        ...(typeof updates.discountReasonRequired === 'boolean' ? { required: updates.discountReasonRequired } : {}),
+        ...(Array.isArray(updates.discountReasons) ? { reasons: updates.discountReasons as unknown[] } : {}),
+      },
+      { required: guardado?.discountReasonRequired ?? false, reasons: guardado?.discountReasons ?? [] },
+    )
+    if (!resultado.ok) throw new BadRequestError(resultado.mensaje)
+    delete updates.discountReasonRequired
+    delete updates.discountReasons
+    Object.assign(updates, resultado.cambios)
+  }
+
   // Prepare create data with defaults
   const createData: Prisma.VenueSettingsUncheckedCreateInput = {
     venueId,
@@ -181,6 +205,9 @@ export async function updateVenueSettings(
     // fila nacería en false — el POS nunca ofrecería el PIN.
     ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
     ...(typeof updates.exchangesEnabled === 'boolean' && { exchangesEnabled: updates.exchangesEnabled }),
+    // Motivo en los descuentos (f998c8): un venue SIN fila toma esta rama; sin estas líneas el primer «prender» nacía apagado.
+    ...(typeof updates.discountReasonRequired === 'boolean' && { discountReasonRequired: updates.discountReasonRequired }),
+    ...(Array.isArray(updates.discountReasons) && { discountReasons: updates.discountReasons as string[] }),
     // «Sólo saldo a favor»: mismo caso. Un venue SIN fila toma esta rama y, sin esta línea, el primer «prender» nacía en false.
     ...(typeof updates.storeCreditOnly === 'boolean' && { storeCreditOnly: updates.storeCreditOnly }),
     // «Sólo el dueño de la mesa»: mismo caso. Sin esta línea el primer «prender» nacía en false y el POS no lo aplicaba.
@@ -214,6 +241,7 @@ export async function updateVenueSettings(
         where: { venueId },
         select: { id: true, cashReconciliationEnabled: true },
       })
+      if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
 
       const settings = await tx.venueSettings.upsert({
         where: { venueId },
@@ -244,11 +272,16 @@ export async function updateVenueSettings(
   const previous = (await prisma.venueSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
 
   // Upsert settings (create if not exists, update if exists)
-  const settings = await prisma.venueSettings.upsert({
-    where: { venueId },
-    create: createData,
-    update: updates,
-  })
+  const settings = tocaMotivos
+    ? await prisma.$transaction(async tx => {
+        await revalidarMotivosConCandado(tx, venueId, updates)
+        return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
+      })
+    : await prisma.venueSettings.upsert({
+        where: { venueId },
+        create: createData,
+        update: updates,
+      })
 
   const updatedFields = Object.keys(updates)
   logger.info(`Updated VenueSettings for venue: ${venueId}`, { updatedFields })
@@ -269,6 +302,28 @@ export async function updateVenueSettings(
   })
 
   return settings
+}
+
+/**
+ * Encargo f998c8 (Codex r2 #1 y r3 #1): toma un candado por negocio (`pg_advisory_xact_lock`) y vuelve a validar el cambio YA
+ * normalizado contra lo que hay ahora. El candado no depende de que exista la fila: con `FOR UPDATE`, dos primeros guardados al
+ * mismo tiempo (sin fila) no se esperaban y podían dejar «Pedir motivo» prendido con la lista vacía. Lanza el mismo 400 en español
+ * que la primera validación.
+ */
+async function revalidarMotivosConCandado(tx: Prisma.TransactionClient, venueId: string, updates: Prisma.VenueSettingsUpdateInput) {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`motivos-de-descuento:${venueId}`}, 0))::text`
+  const ahora = await tx.venueSettings.findUnique({
+    where: { venueId },
+    select: { discountReasonRequired: true, discountReasons: true },
+  })
+  const resultado = validarAjusteDeMotivos(
+    {
+      ...(typeof updates.discountReasonRequired === 'boolean' ? { required: updates.discountReasonRequired } : {}),
+      ...(Array.isArray(updates.discountReasons) ? { reasons: updates.discountReasons as unknown[] } : {}),
+    },
+    { required: ahora?.discountReasonRequired ?? false, reasons: ahora?.discountReasons ?? [] },
+  )
+  if (!resultado.ok) throw new BadRequestError(resultado.mensaje)
 }
 
 // TPV Settings functions removed (2025-11-29)

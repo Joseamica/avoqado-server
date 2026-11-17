@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createDiscount } from '@/services/dashboard/discount.dashboard.service'
+import { listarDescuentosAplicados } from '@/services/dashboard/descuentosAplicados.service'
 import { validarCambioDeDescuento } from '@/services/dashboard/reglasDeDescuento'
 
 // D14 v2 (Codex r2 #2): los errores de tipo de los límites, en español; 0 y negativos los decide la regla única.
@@ -82,6 +83,46 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
           ...(d.deactivatedReason ? { deactivatedReason: d.deactivatedReason } : {}),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'list_applied_discounts',
+    'Discounts that were actually GIVEN on sales in a venue you can access, for a period: totals and a breakdown by REASON (the reason the cashier picked at the POS when the venue requires one; "Sin motivo" when none), plus a page of the individual discounts with ticket number, discount name, amount (pesos), reason, comment, who applied it and who approved it. Answers "¿por qué se dieron descuentos esta semana?" / "¿cuánto se descontó por queja del cliente?". Dates are the venue\'s calendar days (YYYY-MM-DD); without dates, the last 30 days. Only live sales (not cancelled). Pass venueId.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      from: z.string().optional().describe('First day, YYYY-MM-DD (venue-local)'),
+      to: z.string().optional().describe('Last day, YYYY-MM-DD (venue-local)'),
+      reason: z.string().optional().describe('Only this exact reason; use "__SIN_MOTIVO__" for discounts without a reason'),
+      page: z.number().int().min(1).optional().describe('Page of the list (default 1)'),
+      pageSize: z.number().int().min(1).max(100).optional().describe('Rows per page (default 50, max 100)'),
+    },
+    async ({ venueId, from, to, reason, page, pageSize }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reports:read', venueId) // mismo candado que el reporte «Descuentos» del dashboard
+      try {
+        const r = await listarDescuentosAplicados(venueId, { from, to, reason, page, pageSize })
+        return text({
+          ok: true,
+          periodo: { from: r.from.toISOString(), to: r.to.toISOString() },
+          totales: r.totales,
+          porMotivo: r.porMotivo.map(m => ({ ...m, reason: m.reason ?? 'Sin motivo' })),
+          motivosRecortados: r.motivosRecortados,
+          descuentos: r.rows.map(d => ({
+            fecha: d.createdAt.toISOString(),
+            folio: d.orderNumber,
+            descuento: d.name,
+            monto: d.amount,
+            motivo: d.reason ?? 'Sin motivo',
+            comentario: d.reasonComment,
+            aplico: d.appliedBy,
+            aprobo: d.authorizedBy,
+          })),
+          pagination: r.pagination,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 
