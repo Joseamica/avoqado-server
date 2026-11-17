@@ -455,6 +455,8 @@ export const CreateModifierSchema = z.object({
       .nullable()
       .optional(),
     inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).nullable().optional(),
+    /** Platillo del menú que este extra «es» (encargo 27771e): al venderse descuenta su inventario. null lo quita. */
+    linkedProductId: existingId('El ID del platillo ligado no es válido').nullable().optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('El ID del negocio no es válido'),
@@ -802,6 +804,22 @@ export const GetModifierGroupParamsSchema = z.object({
     modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
+
+/**
+ * Buscador del platillo que un extra «es» (encargo 27771e): página acotada en el servidor, nunca el menú entero.
+ * `cursor` es el id del último platillo de la página anterior.
+ */
+export const SearchLinkableProductsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('El ID del negocio no es válido'),
+  }),
+  query: z.object({
+    search: z.string().trim().max(100, 'La búsqueda es muy larga').optional(),
+    cursor: existingId('El cursor no es válido').optional(),
+    limit: z.coerce.number().int('El límite debe ser entero').min(1).optional(),
+  }),
+})
+export type SearchLinkableProductsQuery = z.infer<typeof SearchLinkableProductsSchema>['query']
 
 export const GetModifierParamsSchema = z.object({
   params: z.object({

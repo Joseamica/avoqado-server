@@ -447,6 +447,48 @@ describe('sync.mobile.service processIntents', () => {
     expect(tableService.assignTable).not.toHaveBeenCalled()
   })
 
+  describe('D8 · visitaNueva (la cuenta nueva de una mesa soltada sin red)', () => {
+    const abrir = (payload: Record<string, unknown>, createdAtLocal?: number) =>
+      processIntents(
+        baseParams([
+          {
+            id: `d8-${Math.random()}`,
+            seq: 1,
+            type: 'OPEN_TABLE',
+            payload: { tableId: 't1', covers: 2, localOrderId: 'local-D8', ...payload },
+            ...(createdAtLocal !== undefined ? { createdAtLocal } : {}),
+          },
+        ]),
+      )
+    beforeEach(() => {
+      ;(tableService.assignTable as jest.Mock).mockResolvedValue({ order: { id: 'order-d8', version: 1 }, isNewOrder: true })
+    })
+
+    it('con la hora sin red y visitaNueva=true, viaja como décimo argumento (y el noveno vacío sin propiedad de mesa)', async () => {
+      const hora = Date.now() - 60_000
+      await abrir({ visitaNueva: true }, hora)
+      const args = (tableService.assignTable as jest.Mock).mock.calls[0]
+      expect(args).toHaveLength(10)
+      expect(args[7]).toEqual(new Date(hora))
+      expect(args[8]).toBeUndefined()
+      expect(args[9]).toBe(true)
+    })
+
+    it('sin visitaNueva (o con otro valor que no sea true), la llamada de D51 con ocho argumentos, como hoy', async () => {
+      const hora = Date.now() - 60_000
+      for (const valor of [undefined, false, 'true', 1, null]) {
+        ;(tableService.assignTable as jest.Mock).mockClear()
+        await abrir(valor === undefined ? {} : { visitaNueva: valor }, hora)
+        expect((tableService.assignTable as jest.Mock).mock.calls[0]).toHaveLength(8)
+      }
+    })
+
+    it('sin la hora sin red, la llamada de hoy (seis argumentos) aunque diga visitaNueva', async () => {
+      await abrir({ visitaNueva: true })
+      expect(tableService.assignTable).toHaveBeenCalledWith(VENUE, 't1', STAFF, 2, undefined, expect.any(Function))
+    })
+  })
+
   it('batch OPEN_TABLE + ADD_ITEMS: el segundo resuelve el orderId del primero y usa la versión ACTUAL del server', async () => {
     ;(tableService.assignTable as jest.Mock).mockResolvedValue({
       order: { id: 'order-2', orderNumber: 'A-4001', version: 1 },

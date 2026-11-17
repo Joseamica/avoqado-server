@@ -3065,7 +3065,8 @@ Avoqado Dashboard
       }
       categoryBreakdown: Array<{
         name: string
-        itemsSold: number
+        /** null on a row that is not a category (free-amount sales, refunds): it has no items. */
+        itemsSold: number | null
         netSales: number
       }>
       orderSources: Array<{
@@ -3130,6 +3131,14 @@ Avoqado Dashboard
 
     const reportDateCapitalized = reportDateFormatted.charAt(0).toUpperCase() + reportDateFormatted.slice(1)
 
+    // D20: the venue's zone the way the time-zone database names it in Mexican Spanish («hora de Tijuana», «hora de Cancún»).
+    // The text body used to say «CST» by hand, false outside the central zone.
+    const venueZoneLabel =
+      new Intl.DateTimeFormat('es-MX', { timeZone: data.venueTimezone, timeZoneName: 'shortGeneric' })
+        .formatToParts(data.reportDate)
+        .find(p => p.type === 'timeZoneName')?.value ?? data.venueTimezone
+    const businessHours = data.businessHoursStart && data.businessHoursEnd ? ` ${data.businessHoursStart} - ${data.businessHoursEnd}` : ''
+
     // Calculate average order
     const avgOrder = data.metrics.transactionCount > 0 ? data.metrics.netSales / data.metrics.transactionCount : 0
 
@@ -3170,13 +3179,9 @@ Avoqado Dashboard
     <!-- Title Section -->
     <div style="padding-bottom: 16px;">
       <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">${reportDateCapitalized}, ${data.venueName}</h1>
-      ${
-        data.businessHoursStart && data.businessHoursEnd
-          ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
-        ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} (${data.venueTimezone})
-      </p>`
-          : ''
-      }
+      <p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
+        ${reportDateFormatted}${businessHours} (${venueZoneLabel})
+      </p>
       <p style="margin: 0 0 8px 0; font-size: 14px; color: #666;">
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>
@@ -3207,12 +3212,12 @@ Avoqado Dashboard
           <td style="padding: 24px; border-right: 1px solid #e0e0e0; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Ventas netas</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(data.metrics.netSales)}</div>
-            <div style="font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)};">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)} semanal</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)};">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)} vs el mismo día de la semana pasada</div>
           </td>
           <td style="padding: 24px; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Pedido promedio</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(avgOrder)}</div>
-            <div style="font-size: 14px; color: ${weeklyColorFor(avgOrder, lastWeekAvgOrder)};">${weeklyChangeFor(avgOrder, lastWeekAvgOrder)} semanal</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(avgOrder, lastWeekAvgOrder)};">${weeklyChangeFor(avgOrder, lastWeekAvgOrder)} vs el mismo día de la semana pasada</div>
           </td>
         </tr>
       </table>
@@ -3233,7 +3238,7 @@ Avoqado Dashboard
         <tr style="border-bottom: 1px solid #e0e0e0;">
           <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000;">Descripcion</td>
           <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">Monto</td>
-          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">Semanal</td>
+          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">vs el mismo día de la semana pasada</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000;">Ventas brutas</td>
@@ -3308,7 +3313,7 @@ Avoqado Dashboard
             cat => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">${cat.name}</td>
-          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${cat.itemsSold}</td>
+          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${cat.itemsSold ?? '—'}</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(cat.netSales)}</td>
         </tr>
         `,
@@ -3385,7 +3390,7 @@ Avoqado Dashboard
     const text = `
 Resumen de ventas - ${data.venueName}
 ${reportDateCapitalized}
-${reportDateFormatted} ${data.businessHoursStart} - ${data.businessHoursEnd} CST
+${reportDateFormatted}${businessHours} (${venueZoneLabel})
 ${avisoCobrosQr ? `\nAVISO: ${avisoCobrosQr.queFallo} ${avisoCobrosQr.queHacer}\n` : ''}
 METRICAS CLAVE
 --------------

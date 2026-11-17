@@ -1,4 +1,5 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
+import { inventarioDelExtra, type InventarioDelExtra } from '@/services/inventory/inventarioDelExtra'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
@@ -1133,6 +1134,8 @@ export async function buildOrderItemsData(
   itemDiscountTotal: number
   discounts: Array<{ id: string; [key: string]: any }>
   modifierSkus: Record<string, string | null>
+  /** Vales por área: qué descuenta cada extra AL EMITIR (la foto de `modifiersSnapshot.inventario`, encargo 27771e). */
+  modifierInventory: Record<string, InventarioDelExtra>
   cambiosDePrecio: CambioDePrecio[]
   preciosRespetados: PrecioRespetado[]
   /** D12: los renglones con «Ajuste de precio» (su `id` ya viaja en `itemsData`) y los pesos que cada uno descuenta. */
@@ -1519,12 +1522,16 @@ export async function buildOrderItemsData(
   // Caja externa: el SKU de cada extra, para que el vale lo congele SIN meterlo en
   // `modifiers.create` (OrderItemModifier no tiene esa columna y Prisma rechazaría la orden).
   const modifierSkus: Record<string, string | null> = Object.fromEntries(modifiers.map(modifier => [modifier.id, modifier.sku ?? null]))
+  const modifierInventory: Record<string, InventarioDelExtra> = Object.fromEntries(
+    modifiers.map(modifier => [modifier.id, inventarioDelExtra(modifier)]),
+  )
   return {
     itemsData,
     subtotal,
     itemDiscountTotal,
     discounts,
     modifierSkus,
+    modifierInventory,
     cambiosDePrecio,
     preciosRespetados,
     ajustesDePrecio,
@@ -3821,6 +3828,8 @@ export async function mergeOrdersInTransaction(
       posRawData: true,
       taxAmount: true,
       kitchenPendingAt: true,
+      rondaTardiaDeId: true,
+      rondaTardiaAparato: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
       serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
@@ -3844,6 +3853,7 @@ export async function mergeOrdersInTransaction(
       originSystem: true,
       source: true,
       posRawData: true,
+      rondaTardiaDeId: true,
     },
   })
   if (!freshSource || !freshTarget) {
@@ -3994,6 +4004,17 @@ export async function mergeOrdersInTransaction(
           .map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
       ],
       skipDuplicates: true,
+    })
+  }
+
+  // D7 (hz:033d44ca:D7, Codex r2 #1): el origen es la cuenta aparte de una ronda tardía. Lo que su aparato todavía mande para la
+  // cuenta cobrada (su cobro sin red, otra ronda) debe seguir a sus productos: el vínculo pasa al destino, si éste no trae uno propio.
+  // Primero se suelta del origen (la pareja es única). El origen todavía debe, así que nada cuelga de él en la cadena.
+  if (freshSource.rondaTardiaDeId && !freshTarget.rondaTardiaDeId) {
+    await tx.order.update({ where: { id: source.id }, data: { rondaTardiaDeId: null, rondaTardiaAparato: null } })
+    await tx.order.update({
+      where: { id: target.id },
+      data: { rondaTardiaDeId: freshSource.rondaTardiaDeId, rondaTardiaAparato: freshSource.rondaTardiaAparato },
     })
   }
 

@@ -224,6 +224,46 @@ describe('deductTrackedInventoryForFreeCart — vales por área', () => {
 
     expect(deductInventoryMock).toHaveBeenCalledWith('venue-1', 'prod-untracked', 2, 'order-modifier', 'staff-1', modifiers)
   })
+  it('🍟 Codex r1 #6: un extra ligado a un platillo también pasa el filtro de la cortesía y llega con su ligado', async () => {
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
+    getInventoryMethodMock.mockResolvedValue(null)
+    const modifiers = [
+      {
+        quantity: 1,
+        modifier: {
+          id: 'modifier-papas',
+          name: 'Papas',
+          groupId: 'group-1',
+          rawMaterialId: null,
+          quantityPerUnit: null,
+          unit: null,
+          inventoryMode: 'ADDITION',
+          linkedProductId: 'prod-papas',
+        },
+      },
+    ]
+
+    await deductTrackedInventoryForFreeCart(
+      {
+        id: 'order-cortesia',
+        venueId: 'venue-1',
+        items: [
+          {
+            id: 'item-burger',
+            areaTicketLineId: null,
+            productId: 'prod-burger',
+            productName: 'Hamburguesa',
+            quantity: 1,
+            weightQuantity: null,
+            modifiers,
+          },
+        ],
+      },
+      'staff-1',
+    )
+
+    expect(deductInventoryMock).toHaveBeenCalledWith('venue-1', 'prod-burger', 1, 'order-cortesia', 'staff-1', modifiers)
+  })
 })
 
 // ── Issues que la deducción devuelve al cajero (Square-parity, toast post-cobro) ──

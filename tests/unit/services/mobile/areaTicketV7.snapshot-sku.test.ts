@@ -1,4 +1,4 @@
-import { buildSnapshotLines, canonicalSnapshotHash } from '@/services/mobile/areaTicketV7.mobile.service'
+import { buildSnapshotLines, canonicalSnapshotHash, mapTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 
 const itemsData = [
   {
@@ -37,5 +37,36 @@ describe('Snapshot del vale: SKU de cada extra', () => {
     const conSku = buildSnapshotLines(inputs as any, itemsData, { 'm-shot': 'P000672' })
     const sinSku = buildSnapshotLines(inputs as any, itemsData, {})
     expect(canonicalSnapshotHash('MXN', conSku)).toBe(canonicalSnapshotHash('MXN', sinSku))
+  })
+})
+
+describe('Snapshot del vale: la foto de inventario de cada extra (encargo 27771e, Codex r3)', () => {
+  const fotos = {
+    'm-shot': { rawMaterialId: 'raw-cafe', quantityPerUnit: '18', unit: 'GRAM', inventoryMode: 'ADDITION', linkedProductId: null },
+    'm-sin': { rawMaterialId: null, quantityPerUnit: null, unit: null, inventoryMode: 'ADDITION', linkedProductId: 'p-azucar' },
+  }
+
+  it('al emitir, cada extra guarda lo que descuenta (insumo, cantidad, unidad, modo y platillo ligado)', () => {
+    const [line] = buildSnapshotLines(inputs as any, itemsData, {}, fotos)
+    expect(line.modifiersSnapshot.map((m: any) => m.inventario)).toEqual([fotos['m-shot'], fotos['m-sin']])
+  })
+
+  it('la foto no entra al hash: los vales ya emitidos no cambian de huella', () => {
+    expect(canonicalSnapshotHash('MXN', buildSnapshotLines(inputs as any, itemsData, {}, fotos))).toBe(
+      canonicalSnapshotHash('MXN', buildSnapshotLines(inputs as any, itemsData, {})),
+    )
+  })
+
+  it('la respuesta del vale a las apps NO lleva la foto interna (contrato de siempre)', () => {
+    const [line] = buildSnapshotLines(inputs as any, itemsData, { 'm-shot': 'P000672' }, fotos)
+    const ticket = new Proxy(
+      { lines: [new Proxy({ ...line, id: 'l1' }, { get: (t: any, k) => (k in t ? t[k] : 0) })] },
+      { get: (t: any, k) => (k in t ? t[k] : 0) },
+    )
+    const out = mapTicket(ticket)
+    expect(out.lines[0].modifiersSnapshot).toEqual([
+      { modifierId: 'm-shot', name: 'Shot de espresso', quantity: 1, price: '15.00', sku: 'P000672' },
+      { modifierId: 'm-sin', name: 'Sin azúcar', quantity: 1, price: '0.00', sku: null },
+    ])
   })
 })

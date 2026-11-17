@@ -67,6 +67,9 @@ describe('buildMenuSnapshot', () => {
                 modifiers: [{ plu: 'MOD-mod1', name: 'Extra queso', price: 10 }],
               },
             ],
+            // D1: la copia lleva el id para que la lista del canal (por id) se filtre sobre ELLA; `aplicarSeleccion` lo quita
+            // antes de publicar.
+            productId: 'prod1',
           },
         ],
       },

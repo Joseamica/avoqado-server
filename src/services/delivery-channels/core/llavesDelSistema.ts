@@ -25,6 +25,8 @@ export const LLAVES_DEL_SISTEMA = [
   'menuProblemas',
   'horarioPublicado',
   'cerradaEnElProveedor',
+  // D1 (16-nov): ids de productos que alguien ya vio y dejó fuera del canal. Sólo los suma `marcarRevisados` del PATCH.
+  'productosRevisados',
 ] as const
 export type LlaveDelSistema = (typeof LLAVES_DEL_SISTEMA)[number]
 

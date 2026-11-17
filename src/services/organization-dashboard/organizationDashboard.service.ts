@@ -28,6 +28,7 @@ import {
   venueStartOfDayOffset,
   venueStartOfMonth,
 } from '../../utils/datetime'
+import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
@@ -1052,9 +1053,11 @@ class OrganizationDashboardService {
    * IMPORTANT: Uses venue timezone for date calculations.
    */
   async getManagerDashboard(orgId: string, managerId: string, timezone: string = DEFAULT_TIMEZONE): Promise<ManagerDashboard | null> {
-    // DB stores local time — use venue helpers
-    const todayStart = venueStartOfDay(timezone)
-    const weekStart = venueStartOfDayOffset(timezone, -7)
+    // D19: one clock read per request, and every bound from the venue's civil date (no process zone can move them).
+    const today = venueDayKey(new Date(), timezone)
+    const midnight = (key: string) => fromZonedTime(`${key}T00:00:00.000`, timezone)
+    const todayStart = midnight(today)
+    const weekStart = midnight(addCivilDays(today, -7))
 
     // Get manager info
     const manager = await prisma.staff.findFirst({
@@ -1096,7 +1099,7 @@ class OrganizationDashboardService {
       },
     })
 
-    const monthStart = venueStartOfMonth(timezone)
+    const monthStart = midnight(`${today.slice(0, 7)}-01`)
     const allVenueIds = managedStores.map(sv => sv.venueId)
 
     // 5 bulk queries instead of 5N (avoids N+1 per store)
@@ -1135,7 +1138,7 @@ class OrganizationDashboardService {
       const goal = goalMap.get(sv.venueId)
       const monthGoal = goal ? Number(goal.salesGoal) : 50000
 
-      const dayOfMonth = new Date().getDate()
+      const dayOfMonth = Number(today.slice(8, 10)) // D19: the venue's day of the request, not the process's (UTC)
       const estimatedMonthSales = (weekSales / 7) * dayOfMonth
       const goalProgress = monthGoal > 0 ? (estimatedMonthSales / monthGoal) * 100 : 0
 

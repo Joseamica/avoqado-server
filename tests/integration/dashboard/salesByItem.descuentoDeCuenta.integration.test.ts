@@ -151,8 +151,10 @@ describe('reportes por artículo: descuento de cuenta repartido', () => {
       WHERE oi."productId" = ${ids.Pizza.productId} AND o."venueId" = ${n.venueId}`
     expect(cents(Number(agg.revenue))).toBe(51000)
 
+    // D21: el correo reparte el neto de CADA cuenta entre sus categorías para sumar sus ventas netas; la única diferencia con
+    // el reporte por artículo es C, cuyo descuento de $8 no tiene reparto por renglón: en el correo sí se resta (80 − 8).
     const cat = await getCategoryBreakdown(n.venueId, new Date(FROM_ISO), new Date(TO_ISO))
-    expect(cat.reduce((s, c) => s + cents(c.netSales), 0)).toBe(51000 + 34000 + 8000 + 8000 + 7000 + 5000)
+    expect(cat.reduce((s, c) => s + cents(c.netSales), 0)).toBe(51000 + 34000 + 8000 + 7200 + 7000 + 5000)
   })
 
   it('el gemelo JS (lineRevenue, reporte de turno) da lo mismo que lineRevenueSql en cada renglón', async () => {

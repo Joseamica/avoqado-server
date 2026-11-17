@@ -23,6 +23,7 @@
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { esInventarioDelExtra } from './inventarioDelExtra'
 import { deductInventoryForProduct, getProductInventoryMethods } from '../dashboard/productInventoryIntegration.service'
 import { esValeRevendido } from '../shared/renglonDeVale'
 import { PostingFenceLostError } from './postingFence'
@@ -49,8 +50,15 @@ type SalePostingItem = {
   releasedAreaTicketLineId?: string | null
 }
 
+/**
+ * ¿El renglón trae un extra que mueve inventario? Uno con insumo (`rawMaterialId` + `quantityPerUnit`) o uno ligado a un platillo del
+ * menú (`linkedProductId`, encargo 27771e). Los dos son efectos aparte del producto: si el renglón se cae a medias, va a conciliación
+ * manual en vez de repetir o perder el extra. Su espejo en SQL es `ordenDescuentaInventarioSql`.
+ */
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
-  !!item.modifiers?.some(m => (m.modifier as any)?.rawMaterialId && (m.modifier as any)?.quantityPerUnit)
+  !!item.modifiers?.some(
+    m => ((m.modifier as any)?.rawMaterialId && (m.modifier as any)?.quantityPerUnit) || (m.modifier as any)?.linkedProductId,
+  )
 
 /**
  * La MISMA pregunta del bucle de abajo —«¿a este renglón le nace línea de deducción?»— pero en
@@ -70,7 +78,8 @@ const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
  *    tenant que pide su `venueId`—, con `trackInventory`, y con `inventoryMethod` explícito o
  *    —fallback de los productos legacy— una `Recipe`;
  *  · o el renglón trae un modificador con materia prima (`itemHasInventoryModifiers` exige
- *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario.
+ *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario;
+ *  · o un modificador ligado a un platillo del menú (`linkedProductId`, encargo 27771e).
  *  · D1: el renglón de un vale que se volvió a cobrar en otra cuenta (`esValeRevendido`) no descuenta aquí.
  *
  * ⚠️ Falso NEGATIVO conocido, y va hacia el silencio: `OrderItemModifier.modifierId` es
@@ -98,7 +107,8 @@ export function ordenDescuentaInventarioSql(alias = 'o'): string {
                 OR EXISTS (
                   SELECT 1 FROM "OrderItemModifier" oim
                   JOIN "Modifier" m ON m.id = oim."modifierId"
-                  WHERE oim."orderItemId" = oi.id AND m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL
+                  WHERE oim."orderItemId" = oi.id
+                    AND ((m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL) OR m."linkedProductId" IS NOT NULL)
                 )
               )
           )`
@@ -125,7 +135,7 @@ export async function createSalePostingInTx(
   },
 ) {
   const { venueId, orderId, skipReason } = params
-  const items = params.items ?? []
+  let items = params.items ?? []
 
   // 🔴 El pre-check va ANTES del create, no en un catch de P2002: dentro de una
   // transacción interactiva Postgres ABORTA la tx entera al violar el UNIQUE, y
@@ -168,26 +178,42 @@ export async function createSalePostingInTx(
   const lineasDeVale = skipReason
     ? []
     : [...new Set(items.map(i => i.areaTicketLineId).filter((id): id is string => typeof id === 'string' && id.length > 0))]
-  const lineasPropias = new Set(
+  const filasDeVale = (
     lineasDeVale.length > 0
-      ? (
-          await tx.areaTicketLine.findMany({
-            where: {
-              id: { in: lineasDeVale },
-              areaTicket: { venueId, orderId: { not: null } },
-              reservations: { none: { status: 'CONSUMED' } },
-            },
-            select: { id: true, orderItem: { select: { id: true } } },
-            take: lineasDeVale.length,
-          })
-        )
-          // D1 (Codex r2 #1 / r3): el renglón tiene que ser el DUEÑO VIVO del vínculo, no una lectura vieja que todavía lo trae. Si el
-          // vale se volvió a cobrar en otra cuenta, su vínculo ya es de otro renglón: éste no se descuenta ni suelta la reserva ajena.
-          // Dividir o fusionar (R13-2) mueve el MISMO renglón, así que sigue siendo el dueño y sigue descontando.
-          .filter(l => l.orderItem != null && items.some(i => i.id === l.orderItem!.id && i.areaTicketLineId === l.id))
-          .map(l => l.id)
-      : [],
+      ? await tx.areaTicketLine.findMany({
+          where: {
+            id: { in: lineasDeVale },
+            areaTicket: { venueId, orderId: { not: null } },
+            reservations: { none: { status: 'CONSUMED' } },
+          },
+          // `modifiersSnapshot`: la foto de inventario de los extras al emitir el vale (Codex r4 #2, abajo).
+          select: { id: true, orderItem: { select: { id: true } }, modifiersSnapshot: true },
+          take: lineasDeVale.length,
+        })
+      : []
   )
+    // D1 (Codex r2 #1 / r3): el renglón tiene que ser el DUEÑO VIVO del vínculo, no una lectura vieja que todavía lo trae. Si el
+    // vale se volvió a cobrar en otra cuenta, su vínculo ya es de otro renglón: éste no se descuenta ni suelta la reserva ajena.
+    // Dividir o fusionar (R13-2) mueve el MISMO renglón, así que sigue siendo el dueño y sigue descontando.
+    .filter(l => l.orderItem != null && items.some(i => i.id === l.orderItem!.id && i.areaTicketLineId === l.id))
+  const lineasPropias = new Set(filasDeVale.map(l => l.id))
+
+  // «Una sola foto» (encargo 27771e, Codex r4 #2): el renglón de un vale por área descuenta lo que sus extras descontaban AL EMITIR
+  // (`modifiersSnapshot[].inventario`), cierre quien cierre la venta (la sesión del vale, un pago manual, liquidar desde el panel…).
+  // Sin esto, otro canal congelaba aquí el extra de ahora y la misma venta descontaba distinto según por dónde se cerró.
+  const fotoPorLinea = new Map(filasDeVale.map(l => [l.id, l.modifiersSnapshot]))
+  items = items.map(item => {
+    const fotos = item.areaTicketLineId ? fotoPorLinea.get(item.areaTicketLineId) : undefined
+    if (!Array.isArray(fotos) || !item.modifiers?.length) return item
+    return {
+      ...item,
+      modifiers: item.modifiers.map(m => {
+        const entrada = m.modifier ? (fotos as any[]).find(f => f?.modifierId === (m.modifier as any).id) : undefined
+        if (!entrada || !esInventarioDelExtra(entrada.inventario)) return m
+        return { ...m, modifier: { ...m.modifier, ...entrada.inventario } }
+      }),
+    }
+  })
 
   if (!skipReason) {
     // UNA consulta clasifica todos los productos (antes: un findUnique con
@@ -275,6 +301,8 @@ export async function createSalePostingInTx(
                 quantityPerUnit: (m.modifier as any).quantityPerUnit != null ? String((m.modifier as any).quantityPerUnit) : null,
                 unit: (m.modifier as any).unit ?? null,
                 inventoryMode: (m.modifier as any).inventoryMode ?? null,
+                // El platillo ligado se congela AL COBRAR, igual que el insumo: quitar el ligado después no cambia lo vendido.
+                linkedProductId: (m.modifier as any).linkedProductId ?? null,
               },
             })),
         })),
@@ -473,6 +501,8 @@ export async function applySalePosting(
               quantityPerUnit: m.modifier.quantityPerUnit != null ? new Prisma.Decimal(m.modifier.quantityPerUnit) : null,
               unit: m.modifier.unit,
               inventoryMode: m.modifier.inventoryMode,
+              // Un vale congelado antes del campo no lo trae: undefined ⇒ sin platillo ligado (era lo que existía al cobrar).
+              linkedProductId: m.modifier.linkedProductId ?? null,
             },
           }))
       : (item?.modifiers
@@ -487,6 +517,7 @@ export async function applySalePosting(
               quantityPerUnit: m.modifier.quantityPerUnit,
               unit: m.modifier.unit,
               inventoryMode: m.modifier.inventoryMode,
+              linkedProductId: m.modifier.linkedProductId ?? null,
             },
           })) ?? [])
 

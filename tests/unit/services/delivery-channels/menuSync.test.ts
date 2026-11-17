@@ -1152,3 +1152,185 @@ describe('interruptor `agotarPorInventario` del canal (Testarudo, 12-nov: insumo
     expect(r).toEqual({ agotados: 1, revividos: 0 })
   })
 })
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+//  D1 (16-nov): la lista del canal por PRODUCTO (`config.productoIds`) se filtra sobre la MISMA copia que se publica
+// ═════════════════════════════════════════════════════════════════════════════════════════
+describe('productos del canal por id (`config.productoIds`)', () => {
+  const producto = (plu: string) => ({ plu, name: plu, description: null, price: 50, imageUrl: null, modifierGroups: [] })
+  const conId = (productId: string, plu: string) => ({ ...producto(plu), productId })
+  /** Lo que arma `buildMenuSnapshot` desde D1: cada producto con su id. p1 ya se llama Z y p2 tomó LATTE. */
+  const COPIA = {
+    venueId: 'venue1',
+    generatedAt: 'x',
+    categories: [
+      { name: 'BARRA DE CAFE', products: [conId('p1', 'Z'), conId('p2', 'LATTE')] },
+      { name: 'CERVEZAS', products: [conId('p3', 'CORONA')] },
+    ],
+  }
+  /** La misma copia SIN ids: lo que se publicaba antes de D1. */
+  const SIN_ID = {
+    venueId: 'venue1',
+    generatedAt: 'x',
+    categories: [
+      { name: 'BARRA DE CAFE', products: [producto('Z'), producto('LATTE')] },
+      { name: 'CERVEZAS', products: [producto('CORONA')] },
+    ],
+  }
+  const sha = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedHasAdapter.mockReturnValue(true)
+    mockedSnapshot.mockResolvedValue(COPIA)
+    mockedUpdate.mockResolvedValue({})
+  })
+
+  it('🔴 sólo viajan los productos de la lista (por id), y los precios por producto con el código de ESA copia', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(
+      link({
+        config: {
+          productoIds: ['p1'],
+          productos: ['LATTE'], // la copia por código vieja: con ids se ignora
+          precios: { markupPercent: 30, porProducto: { p1: 79 }, overrides: { LATTE: 50, 'MOD-m1': 5 } },
+        },
+      }),
+    )
+
+    expect(r.outcome).toBe('PUBLISHED')
+    const soloZ = { ...SIN_ID, categories: [{ name: 'BARRA DE CAFE', products: [producto('Z')] }] }
+    // `MOD-m1` no es extra de ningún producto de esta copia: no viaja (Codex impl r1 #2, el prefijo no prueba que sea extra).
+    const precios = { markupPercent: 30, overrides: { Z: 79 } }
+    expect(a.buildMenuPayload).toHaveBeenCalledWith(soloZ, { availability: undefined, precios })
+    expect(a.publishMenu).toHaveBeenCalledWith(soloZ, 'store1', { availability: undefined, precios })
+  })
+
+  it('🔴 una lista de ids que no deja NINGÚN producto activo no publica un menú vacío', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link({ config: { productoIds: ['p-archivado'] } }))
+
+    expect(r.outcome).toBe('FAILED')
+    expect(a.publishMenu).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una lista de ids mal escrita NO publica nada: FAILED', async () => {
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link({ config: { productoIds: 'p1' } }))
+
+    expect(r.outcome).toBe('FAILED')
+    expect(a.publishMenu).not.toHaveBeenCalled()
+  })
+
+  it('🔴 sin productoIds la huella del payload no cambia respecto de hoy (el id de la copia no viaja)', async () => {
+    // Un adaptador sin traductor publica la copia tal cual: si el id viajara, la huella cambiaría y TODOS los canales se
+    // republicarían de golpe al desplegar.
+    const a = { publishMenu: jest.fn(async () => ({ ok: true, status: 204, raw: '' })) }
+    mockedAdapterFor.mockReturnValue(a)
+
+    await syncChannelMenu(link({ config: { precios: { markupPercent: 30 } } }))
+
+    expect(a.publishMenu).toHaveBeenCalledWith(SIN_ID, 'store1', { availability: undefined, precios: { markupPercent: 30 } })
+    expect(mockedUpdate.mock.calls[0][0].data.lastMenuHash).toBe(sha(SIN_ID))
+  })
+
+  it('con la lista vieja por código, la copia y los precios que recibe el traductor son los de hoy', async () => {
+    const precios = { markupPercent: 30, overrides: { LATTE: 99 } }
+    const a = {
+      buildMenuPayload: jest.fn((s: unknown, o: { precios?: unknown }) => ({ s, precios: o.precios })),
+      publishMenu: jest.fn(async () => ({ ok: true, status: 204, raw: '' })),
+    }
+    mockedAdapterFor.mockReturnValue(a)
+
+    await syncChannelMenu(link({ config: { productos: ['LATTE'], precios } }))
+
+    const hoy = { ...SIN_ID, categories: [{ name: 'BARRA DE CAFE', products: [producto('LATTE')] }] }
+    expect(mockedUpdate.mock.calls[0][0].data.lastMenuHash).toBe(sha({ s: hoy, precios }))
+  })
+})
+
+describe('disponibilidad con productos del canal por id (`config.productoIds`)', () => {
+  const mockedProducts = (prisma as any).product.findMany as jest.Mock
+  const mockedQueryRaw = (prisma as any).$queryRaw as jest.Mock
+  const dec = (n: number) => new Prisma.Decimal(n)
+  const sinCarne = { portionYield: 1, lines: [{ quantity: dec(0.2), rawMaterial: { currentStock: dec(0), name: 'Carne' } }] }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(hasAdapter as jest.Mock).mockReturnValue(true)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    ;(prisma as any).deliveryChannelLink.update.mockResolvedValue({})
+    mockedQueryRaw.mockResolvedValue([{ config: {} }])
+  })
+
+  it('🔴 sólo agota productos cuyo id está en la lista (existencias y recetas), y las consultas piden el id', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts
+      .mockResolvedValueOnce([
+        { id: 'p1', sku: 'LATTE' },
+        { id: 'p2', sku: 'CORONA' },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'p3', sku: 'HAMBURGUESA', recipe: sinCarne },
+        { id: 'p4', sku: 'TACO', recipe: sinCarne },
+      ])
+
+    const r = await syncChannelAvailability(link({ config: { productoIds: ['p1', 'p3'], soldOutSkus: [] } }))
+
+    expect(r).toEqual({ agotados: 2, revividos: 0 })
+    expect(a.setItemSoldOut).toHaveBeenCalledTimes(2)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', true)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('HAMBURGUESA', 'store1', true)
+    expect(mockedProducts.mock.calls[0][0].select).toEqual(expect.objectContaining({ id: true, sku: true }))
+    expect(mockedProducts.mock.calls[1][0].select).toEqual(expect.objectContaining({ id: true, sku: true }))
+  })
+
+  it('🔴 el código de la lista vieja ya no decide: p2 tomó LATTE, pero la lista es [p1]: no se agota', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([{ id: 'p2', sku: 'LATTE' }]).mockResolvedValueOnce([])
+
+    const r = await syncChannelAvailability(link({ config: { productoIds: ['p1'], productos: ['LATTE'], soldOutSkus: [] } }))
+
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+    expect(r).toEqual({ agotados: 0, revividos: 0 })
+  })
+
+  it('revive sólo lo agotado cuyo producto está en la lista; la consulta va acotada al negocio y a esos códigos', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts
+      .mockResolvedValueOnce([]) // nada sin existencias
+      .mockResolvedValueOnce([]) // ninguna receta sin ingrediente
+      .mockResolvedValueOnce([
+        { id: 'p1', sku: 'LATTE' },
+        { id: 'p2', sku: 'CORONA' },
+      ])
+
+    const r = await syncChannelAvailability(link({ config: { productoIds: ['p1'], soldOutSkus: ['LATTE', 'CORONA'] } }))
+
+    expect(r).toEqual({ agotados: 0, revividos: 1 })
+    expect(a.setItemSoldOut).toHaveBeenCalledTimes(1)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('LATTE', 'store1', false)
+    expect(mockedProducts.mock.calls[2][0]).toEqual({
+      where: { venueId: 'venue1', sku: { in: ['LATTE', 'CORONA'] } },
+      select: { id: true, sku: true },
+      take: 2,
+    })
+  })
+
+  it('🔴 una lista de ids mal escrita truena (no agota ni revive con una lista que no se entiende)', async () => {
+    const a = { setItemSoldOut: jest.fn(async () => ({ ok: true, status: 200, raw: '' })) }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+
+    await expect(syncChannelAvailability(link({ config: { productoIds: [], soldOutSkus: ['LATTE'] } }))).rejects.toThrow(/productoIds/)
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+  })
+})

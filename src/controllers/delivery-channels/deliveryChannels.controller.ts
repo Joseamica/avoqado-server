@@ -9,6 +9,7 @@ import * as deliveryChannelLinkService from '../../services/delivery-channels/co
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
 import * as connectIntentService from '../../services/delivery-channels/core/deliveryConnectIntent.service'
+import { ponerProductoEnCanales } from '../../services/delivery-channels/core/productoEnCanales.service'
 import { desconectarTiendaRappi } from '../../services/delivery-channels/providers/rappi/rappi.desconectar'
 
 /** GET /venues/:venueId/channels */
@@ -41,6 +42,18 @@ export async function updateChannel(req: Request, res: Response, next: NextFunct
     const { userId } = (req as any).authContext
     const result = await deliveryChannelLinkService.updateChannelLink(venueId, linkId, req.body, userId)
     res.status(200).json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/products/:productId/channels — pone o quita UN producto en varios canales (D1, «Vender en»). */
+export async function setProductChannels(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, productId } = req.params
+    const { userId } = (req as any).authContext
+    const data = await ponerProductoEnCanales(venueId, productId, req.body.canales, userId)
+    res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)
   }
