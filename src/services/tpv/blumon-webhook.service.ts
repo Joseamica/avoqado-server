@@ -615,6 +615,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           eventLogId: event.id,
           attemptId: ctx.attemptId,
           error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
         })
         return {
           success: false,
@@ -669,6 +670,14 @@ export async function reconcileBlumonEvent(
   payload: BlumonWebhookPayload,
   ctx: { scopeVenueIds?: string[] } = {},
 ): Promise<WebhookProcessingResult> {
+  // Tarea 6 (hallazgo 7): un evento que entró CON contexto se recupera por el vínculo con la identidad y la tarifa del
+  // INGRESO, nunca con la configuración de ahora, y no cae en el emparejamiento débil. Sin contexto guardado nunca crea: un
+  // vínculo que llegó después del aviso no tiene identidad ni tarifa acreditadas (lo completa el REST).
+  const guardado = contextoGuardado(payload)
+  if (guardado) {
+    const r = await confirmarBlumonPorVinculo({ payload, eventLogId, ctx: guardado })
+    if (r) return { ...r, eventLogId }
+  }
   const correlationId = `blumon-recon-${eventLogId.slice(-8)}`
   const resolvedScope = ctx.scopeVenueIds ? null : await resolveBlumonScope(payload.serialNumber)
   const scopeVenueIds = ctx.scopeVenueIds ?? resolvedScope!.venueIds

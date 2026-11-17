@@ -36,6 +36,10 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  *    if still no match).
  * 4. Once per pass, sweep events older than 24h still PENDING → ERROR with
  *    errorReason=ORPHANED. Ops dashboards filter on that.
+ * 5. (SDK propio, Tarea 6) Nothing is touched before its `nextAttemptAt` (the
+ *    receiver's exclusive window). An event that entered WITH our attempt link
+ *    is recovered by `reconcileBlumonEvent` through the shared core, with the
+ *    identity and tariff saved at ingress — never the weak matching.
  *
  * Pattern matches the existing `AbandonedOrdersCleanupJob` / `tpvHealthMonitorJob`
  * structure used elsewhere in the codebase. Singleton, registered in
@@ -102,25 +106,33 @@ export class BlumonWebhookReconciliationJob {
    * Pull PENDING events and retry matching once each.
    * Returns the count of events that newly transitioned out of PENDING.
    */
-  private async reconcilePending(): Promise<number> {
-    const cutoff = new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS)
+  async reconcilePending(): Promise<number> {
+    const now = new Date()
+    const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const pending = await retry(
       () =>
         prisma.providerEventLog.findMany({
+          take: this.BATCH_SIZE,
           where: {
             provider: ProviderType.PAYMENT_PROCESSOR,
             status: EventStatus.PENDING,
-            createdAt: { gte: cutoff },
             // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
             // Use a startsWith to leave room for other providers in the same table.
             eventId: { startsWith: 'blumon-tpv-' },
-            // Reversals are informational — they must never enter the sale
-            // reconciliation path. Written as an explicit exclusion (rather than
-            // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
-            // keep being reconciled.
-            OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
+            AND: [
+              // Reversals are informational — they must never enter the sale
+              // reconciliation path. Written as an explicit exclusion (rather than
+              // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
+              // keep being reconciled.
+              { OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }] },
+              // Tarea 6: la exclusiva del receptor (y de quien programe el siguiente turno): nada antes de su `nextAttemptAt`.
+              // Los PENDING de antes (`nextAttemptAt` null) siguen como hoy.
+              { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
+              // La ventana de 24 h. Un evento con turno (con contexto) que la cruzó esperando su turno recibe su último
+              // intento por el vínculo; si sigue PENDING, `markOrphaned` lo vence justo después en el mismo pase.
+              { OR: [{ createdAt: { gte: cutoff } }, { nextAttemptAt: { not: null } }] },
+            ],
           },
-          take: this.BATCH_SIZE,
           orderBy: { createdAt: 'asc' },
           select: { id: true, payload: true },
         }),
@@ -138,7 +150,8 @@ export class BlumonWebhookReconciliationJob {
         // MerchantAccount (one merchant → N venues) doesn't get pinned to the
         // single terminal's venue that was cached at insert time.
         const result = await reconcileBlumonEvent(row.id, payload)
-        if (result.action !== 'NOT_FOUND') resolved++
+        // Con contexto, el núcleo contesta PENDING cuando el evento sigue esperando (p. ej. AMOUNT_MISMATCH): no salió.
+        if (result.action !== 'NOT_FOUND' && result.action !== 'PENDING') resolved++
       } catch (err) {
         logger.error('❌ [Blumon recon] Failed to retry event', {
           eventLogId: row.id,
@@ -154,17 +167,22 @@ export class BlumonWebhookReconciliationJob {
    * Promote stale PENDING events (> TTL) to ERROR with errorReason=ORPHANED.
    * Bulk update is fine — these are not eligible for further retries.
    */
-  private async markOrphaned(): Promise<number> {
-    const cutoff = new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS)
+  async markOrphaned(): Promise<number> {
+    const now = new Date()
+    const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const orphanWhere = {
       provider: ProviderType.PAYMENT_PROCESSOR,
       status: EventStatus.PENDING,
       createdAt: { lt: cutoff },
       eventId: { startsWith: 'blumon-tpv-' },
-      // Never orphan-alert a reversal: it is money LEAVING, so "charge with no
-      // Avoqado payment" would be a false alarm. Same NULL-tolerant exclusion
-      // as the pending sweep above.
-      OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
+      AND: [
+        // Never orphan-alert a reversal: it is money LEAVING, so "charge with no
+        // Avoqado payment" would be a false alarm. Same NULL-tolerant exclusion
+        // as the pending sweep above.
+        { OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }] },
+        // Tarea 6: nunca se vence un evento antes de su turno: su recuperación por el vínculo todavía va a correr.
+        { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
+      ],
     } satisfies Prisma.ProviderEventLogWhereInput
 
     // Fetch the rows BEFORE flipping them so we can emit a per-event alert with

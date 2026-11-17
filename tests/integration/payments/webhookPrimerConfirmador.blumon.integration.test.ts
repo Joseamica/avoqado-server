@@ -3,14 +3,21 @@
  * (`confirmarAvisoPorVinculo`). Sólo con todo a la vez: `VENTA`, `codeResponse === '00'`, `reference` = un intento con vínculo,
  * UNA afiliación con ese serial y configurada en el venue del vínculo, serial que no contradice la terminal del vínculo e
  * importe = base + propina exacto. Lo demás sigue por el emparejamiento de hoy.
+ * Tarea 6: la red de 30 s respeta el turno del receptor (`nextAttemptAt`) y recupera con el contexto guardado AL INGRESO.
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { confirmarBlumonPorVinculo, contextoGuardado, processBlumonPaymentWebhook } from '@/services/tpv/blumon-webhook.service'
+import {
+  confirmarBlumonPorVinculo,
+  contextoGuardado,
+  processBlumonPaymentWebhook,
+  reconcileBlumonEvent,
+} from '@/services/tpv/blumon-webhook.service'
 import * as registrador from '@/services/tpv/payment.tpv.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { blumonPaymentAuditJob } from '@/jobs/blumon-payment-audit.job'
+import { blumonWebhookReconciliationJob as red } from '@/jobs/blumon-webhook-reconciliation.job'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { NS_CANDADO_INTENTO } from '@/services/tpv/candadoDeIntento'
@@ -418,5 +425,272 @@ describe('el aviso de Blumon crea el cobro por vínculo', () => {
     expect(r.action).toBe('REVERSAL_RECEIVED')
     expect(await pagos()).toHaveLength(0)
     expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSAL_UNMATCHED', attemptId: null })
+  })
+})
+
+// ─── Tarea 6: la red de 30 s respeta la exclusiva y recupera con la identidad del INGRESO ───
+describe('la red de 30 s (hallazgo 7)', () => {
+  /** Mueve el turno del evento al pasado: ya le toca a la red. */
+  const tocaYa = (id: string) => prisma.providerEventLog.update({ where: { id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } })
+  /**
+   * El aviso entra con su contexto y el registrador se cae UNA vez (como si el proceso muriera tras el ingreso durable): el
+   * evento queda PENDING con su contexto, su tarifa congelada y su turno (`nextAttemptAt`) 60 s adelante.
+   */
+  async function ingresoYCaida(payload: Aviso) {
+    const espia = jest.spyOn(registrador, 'recordFastPayment').mockRejectedValueOnce(new Error('caída simulada'))
+    try {
+      const r = await aviso(payload)
+      expect(r.action).toBe('ERROR')
+      expect(await pagos()).toHaveLength(0)
+      const ev = await eventoDe(r.eventLogId)
+      expect(ev).toMatchObject({ status: 'PENDING', paymentId: null })
+      expect(contextoGuardado(ev.payload)).not.toBeNull()
+      return ev
+    } finally {
+      espia.mockRestore()
+    }
+  }
+
+  it('la red no toca un evento PENDING antes de su nextAttemptAt; ya en su turno, lo recupera por el vínculo', async () => {
+    await f.conAfiliacionBlumon()
+    const { requestId, attemptId } = await intentoVinculado()
+    const ev = await ingresoYCaida(f.eventoBlumon(attemptId))
+    expect(ev.nextAttemptAt!.getTime()).toBeGreaterThan(Date.now())
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING', paymentId: null, errorReason: 'PROCESSING_ERROR' })
+
+    await tocaYa(ev.id)
+    await red.reconcilePending()
+
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(todos[0]).toMatchObject({ idempotencyKey: attemptId, terminalPaymentRequestId: requestId })
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+  })
+
+  it('ingreso → caída → cambio de configuración → recuperación: CONFIRMED con la afiliación y la tarifa del ingreso', async () => {
+    // Serial virtual: al ingreso vale por la terminal del vínculo porque ESA terminal tiene la afiliación. Recalcularlo después
+    // (sin la asignación ni la configuración) daría LINK_TERMINAL_MISMATCH / LINK_VENUE_MISMATCH.
+    const virtual = `${f.serialCrudo}2`
+    const { merchantAccountId } = await f.conAfiliacionBlumon({ serial: virtual })
+    await f.conTarifas({ secundaria: { merchantAccountId } })
+    try {
+      const { requestId, attemptId } = await intentoVinculado()
+      const ev = await ingresoYCaida(f.eventoBlumon(attemptId, { serialNumber: virtual }))
+      expect(avoqadoDe(ev)?.contextoDelIngreso).toMatchObject({
+        merchantAccountId,
+        receiverVenueId: f.venueId,
+        terminalSerialEfectivo: f.llaveTerminal,
+      })
+
+      // Después de la caída: la afiliación sale de la configuración y de la terminal, y las tarifas cambian.
+      await f.quitarDeLaConfiguracion(merchantAccountId)
+      const terminal = await exigir(prisma.terminal.findUnique({ where: { serialNumber: f.serial } }))
+      await prisma.terminal.update({
+        where: { serialNumber: f.serial },
+        data: { assignedMerchantIds: { set: terminal.assignedMerchantIds.filter(id => id !== merchantAccountId) } },
+      })
+      await prisma.venuePricingStructure.updateMany({ where: { venueId: f.venueId }, data: { creditRate: 0.08 } })
+      await tocaYa(ev.id)
+
+      await red.reconcilePending()
+
+      const todos = await pagos()
+      expect(todos).toHaveLength(1)
+      const [pago] = todos
+      expect(pago).toMatchObject({ merchantAccountId, idempotencyKey: attemptId, terminalPaymentRequestId: requestId, status: 'COMPLETED' })
+      expect((pago.processorData as Record<string, any>).pricing).toMatchObject({
+        merchantAccountId,
+        slot: 'SECONDARY',
+        venue: { creditRate: '0.025' },
+      })
+      expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: pago.id })
+
+      // Un segundo pase no duplica.
+      await red.reconcilePending()
+      expect(await pagos()).toHaveLength(1)
+    } finally {
+      await f.sinTarifas()
+    }
+  })
+
+  it('al ingreso la afiliación NO estaba en la configuración: aunque se agregue después, la recuperación sigue en LINK_VENUE_MISMATCH', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon({ enConfiguracion: false })
+    const { requestId, attemptId } = await intentoVinculado()
+    const r = await aviso(f.eventoBlumon(attemptId))
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'LINK_VENUE_MISMATCH' })
+    expect(contextoGuardado((await eventoDe(r.eventLogId)).payload)).toMatchObject({ receiverVenueId: null })
+    // Como si el proceso hubiera muerto ANTES de sellar el evento; después el negocio agrega la afiliación.
+    await prisma.providerEventLog.update({
+      where: { id: r.eventLogId! },
+      data: { status: 'PENDING', errorReason: null, processedAt: null, nextAttemptAt: new Date(Date.now() - 1000) },
+    })
+    await prisma.venuePaymentConfig.upsert({
+      where: { venueId: f.venueId },
+      update: { secondaryAccountId: merchantAccountId },
+      create: { venueId: f.venueId, primaryAccountId: f.merchantId, secondaryAccountId: merchantAccountId },
+    })
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'LINK_VENUE_MISMATCH', paymentId: null })
+    expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+  })
+
+  it('un evento sin contexto guardado nunca crea aunque hoy exista el vínculo (el vínculo llegó después del aviso)', async () => {
+    await f.conAfiliacionBlumon()
+    const { requestId } = await f.solicitud()
+    const attemptId = randomUUID()
+    const r = await aviso(f.eventoBlumon(attemptId)) // todavía sin vínculo ⇒ sin contexto
+    expect(r.action).toBe('NOT_FOUND')
+    const ev = await eventoDe(r.eventLogId)
+    expect(ev).toMatchObject({ status: 'PENDING', attemptId: null, nextAttemptAt: null })
+    expect(contextoGuardado(ev.payload)).toBeNull()
+    await vincular(requestId, attemptId)
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING', paymentId: null })
+    expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+  })
+
+  it('un contexto guardado malformado no crea: sigue el emparejamiento de hoy', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    const ev = await ingresoYCaida(f.eventoBlumon(attemptId))
+    const p = ev.payload as Record<string, any>
+    await prisma.providerEventLog.update({
+      where: { id: ev.id },
+      data: {
+        nextAttemptAt: new Date(Date.now() - 1000),
+        payload: { ...p, _avoqado: { ...p._avoqado, contextoDelIngreso: { ...p._avoqado.contextoDelIngreso, merchantAccountId: '' } } },
+      },
+    })
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING', paymentId: null })
+  })
+
+  it('un PENDING con contexto no cae en el emparejamiento débil: un REST ajeno con el mismo operationNumber no lo sella', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado({ tipCents: 500 })
+    const payload = f.eventoBlumon(attemptId)
+    const r = await aviso(payload)
+    expect(r).toMatchObject({ action: 'PENDING', errorReason: 'AMOUNT_MISMATCH' })
+    await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: payload.operationNumber })
+    await tocaYa(r.eventLogId!)
+
+    await red.reconcilePending()
+
+    expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PENDING', errorReason: 'AMOUNT_MISMATCH', paymentId: null })
+    expect(await prisma.payment.count({ where: { venueId: f.venueId } })).toBe(1)
+  })
+
+  it('receptor y red a la vez sobre el mismo evento ⇒ un solo Payment (H22: los dos registradores se cruzan en el candado del intento)', async () => {
+    await f.conAfiliacionBlumon()
+    const { requestId, attemptId } = await intentoVinculado()
+    const payload = f.eventoBlumon(attemptId)
+    const esperanElCandado = async () => {
+      const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_locks
+        WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND classid::text::bigint = ${NS_CANDADO_INTENTO}::bigint
+          AND objid::text::bigint = (hashtext(${attemptId})::bigint & 4294967295)`
+      return n
+    }
+    const real = registrador.recordFastPayment
+    let deLaRed: ReturnType<typeof reconcileBlumonEvent> | undefined
+    let cruzaron = false
+    const espia = jest.spyOn(registrador, 'recordFastPayment').mockImplementationOnce(async (...args) => {
+      // El receptor llegó al registrador con su evento PENDING ya guardado: la red arranca sobre ESE evento, y una
+      // transacción ajena retiene el candado del intento hasta que los DOS registradores lo están esperando.
+      const ev = await exigir(prisma.providerEventLog.findFirst({ where: { attemptId } }))
+      let liberar!: () => void
+      let tomado!: () => void
+      const liberada = new Promise<void>(res => (liberar = res))
+      const yaTomado = new Promise<void>(res => (tomado = res))
+      const ajena = prisma.$transaction(
+        async tx => {
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(${NS_CANDADO_INTENTO}::int, hashtext(${attemptId}))::text`
+          tomado()
+          await liberada
+        },
+        { timeout: 20_000 },
+      )
+      await yaTomado
+      deLaRed = reconcileBlumonEvent(ev.id, ev.payload as unknown as Parameters<typeof reconcileBlumonEvent>[1])
+      const delReceptor = real(...args)
+      try {
+        cruzaron = await f.esperar(async () => (await esperanElCandado()) >= 2, 6000)
+      } finally {
+        liberar()
+        await ajena
+      }
+      return delReceptor
+    })
+    let r: Awaited<ReturnType<typeof aviso>>
+    try {
+      r = await aviso(payload)
+    } finally {
+      espia.mockRestore()
+    }
+    const rRed = await deLaRed!
+
+    expect(cruzaron).toBe(true)
+    const todos = await prisma.payment.findMany({ where: { venueId: f.venueId, idempotencyKey: attemptId } })
+    expect(todos).toHaveLength(1)
+    expect([r.action, rRed.action]).toContain('CONFIRMED')
+    expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+    expect(await fila(requestId)).toMatchObject({ status: 'COMPLETED', paymentId: todos[0].id })
+    expect(await prisma.providerEventLog.count({ where: { attemptId } })).toBe(1)
+  })
+
+  // ─── regresión ───
+  it('los PENDING viejos (nextAttemptAt null) siguen en la red y a las 24 h pasan a ORPHANED', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const reciente = f.eventoBlumon(undefined)
+    const r1 = await aviso(reciente)
+    expect(await eventoDe(r1.eventLogId)).toMatchObject({ status: 'PENDING', nextAttemptAt: null })
+    const rest = await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: reciente.operationNumber })
+
+    await red.reconcilePending()
+
+    expect(await eventoDe(r1.eventLogId)).toMatchObject({ status: 'PROCESSED', paymentId: rest.id })
+
+    const r2 = await aviso(f.eventoBlumon(undefined))
+    await prisma.$executeRaw`UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours' WHERE id = ${r2.eventLogId}`
+
+    await red.markOrphaned()
+
+    expect(await eventoDe(r2.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+  })
+
+  it('un PENDING con contexto no se vence antes de su turno, y pasadas las 24 h recibe su recuperación antes del ORPHANED', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    const ev = await ingresoYCaida(f.eventoBlumon(attemptId))
+    await prisma.$executeRaw`
+      UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours', "nextAttemptAt" = now() + interval '5 minutes'
+      WHERE id = ${ev.id}`
+
+    await red.markOrphaned()
+
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING' })
+
+    await tocaYa(ev.id)
+    // El orden de `run`: primero la recuperación, después el vencimiento.
+    await red.reconcilePending()
+    await red.markOrphaned()
+
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
   })
 })

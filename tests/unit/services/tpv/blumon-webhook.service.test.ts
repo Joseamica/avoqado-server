@@ -1,4 +1,4 @@
-import { reconcileBlumonEvent } from '@/services/tpv/blumon-webhook.service'
+import { contextoGuardado, reconcileBlumonEvent } from '@/services/tpv/blumon-webhook.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -132,5 +132,53 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
     const result = await reconcileBlumonEvent('evt_notip', tippedPayload, { scopeVenueIds: ['venue_1'] })
 
     expect(result.action).toBe('MATCHED')
+  })
+})
+
+// Tarea 6: la red sólo recupera por vínculo con el contexto que el ingreso guardó con su forma EXACTA; lo demás no crea dinero.
+describe('contextoGuardado — forma exacta o null', () => {
+  const valido = {
+    attemptId: 'att_1',
+    requestId: 'req_1',
+    linkVenueId: 'venue_1',
+    linkTerminalId: 'n86abc',
+    merchantAccountId: 'ma_1',
+    receiverVenueId: 'venue_1',
+    terminalSerialEfectivo: 'N86ABC',
+  }
+  const con = (ctx: unknown) => ({ amount: '100.00', _avoqado: { contextoDelIngreso: ctx } })
+
+  it('devuelve el contexto completo; receiverVenueId null es válido (⇒ LINK_VENUE_MISMATCH en el núcleo)', () => {
+    expect(contextoGuardado(con(valido))).toEqual(valido)
+    expect(contextoGuardado(con({ ...valido, receiverVenueId: null }))).toEqual({ ...valido, receiverVenueId: null })
+  })
+
+  it.each(['attemptId', 'requestId', 'linkVenueId', 'linkTerminalId', 'merchantAccountId', 'terminalSerialEfectivo'])(
+    'sin %s, vacío o no textual ⇒ null',
+    campo => {
+      const sinCampo: Record<string, unknown> = { ...valido }
+      delete sinCampo[campo]
+      expect(contextoGuardado(con(sinCampo))).toBeNull()
+      expect(contextoGuardado(con({ ...valido, [campo]: '' }))).toBeNull()
+      expect(contextoGuardado(con({ ...valido, [campo]: 7 }))).toBeNull()
+    },
+  )
+
+  it.each([
+    ['receiverVenueId ausente', (({ receiverVenueId: _r, ...resto }) => resto)(valido)],
+    ['receiverVenueId vacío', { ...valido, receiverVenueId: '' }],
+    ['receiverVenueId no textual', { ...valido, receiverVenueId: 5 }],
+  ])('%s ⇒ null', (_caso, ctx) => {
+    expect(contextoGuardado(con(ctx))).toBeNull()
+  })
+
+  it.each([
+    ['payload null', null],
+    ['payload sin _avoqado', { amount: '100.00' }],
+    ['_avoqado sin contexto', { _avoqado: { receivedByMerchantAccountId: 'ma_1' } }],
+    ['contexto no objeto', con('att_1')],
+    ['contexto null', con(null)],
+  ])('%s ⇒ null', (_caso, payload) => {
+    expect(contextoGuardado(payload)).toBeNull()
   })
 })
