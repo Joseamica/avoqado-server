@@ -943,6 +943,9 @@ function descuentoDelRenglonEnLaCabecera(
  *    configuración por categoría. La selección ahora se hace en memoria, donde
  *    "sin categoría" es un caso explícito y no un accidente del filtro.
  */
+/** Cuántas filas de descuento de una orden se leen para la base por categoría (ver `loadOrderCommissionLines`). */
+const TOPE_DE_FILAS = 500
+
 async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
@@ -972,16 +975,18 @@ async function loadOrderCommissionLines(
       },
     }),
     db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
-    // Las filas de descuento de UNA orden (unas cuantas). El tope sólo protege: si cortara, sus partes ya no cuadran con la
-    // cabecera y `descuentoDeOrdenDeLaVenta` vuelve al prorrateo.
+    // Las filas de descuento de UNA orden (unas cuantas). Se pide una de más que el tope para saber si se cortó (Codex r2).
     db.orderDiscount.findMany({
       where: { orderId },
       select: { type: true, isComp: true, discountId: true, appliedToItemIds: true, reparto: true },
       orderBy: { id: 'asc' },
-      take: 500,
+      take: TOPE_DE_FILAS + 1,
     }),
   ])
 
+  // 🔴 Codex r2: con más filas que el tope no se ven todos los espejos; clasificar con una parte restaría dos veces lo que no se
+  // vio. Esa orden (cientos de descuentos) se lee con la regla de antes: todos los descuentos de renglón están en la cabecera.
+  const filasCompletas = filas.length <= TOPE_DE_FILAS
   const espejos = { hay: filas.length > 0, conEspejo: renglonesConEspejo(filas, orderItems) }
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
     // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
@@ -990,8 +995,9 @@ async function loadOrderCommissionLines(
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
     taxRate: tasaDelRenglon(item),
-    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item, espejos),
-    parteDeLasFilas: lineOrderDiscount(item, filas),
+    ...(filasCompletas
+      ? { descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item, espejos), parteDeLasFilas: lineOrderDiscount(item, filas) }
+      : {}),
   }))
 
   const { orderLevelDiscount, porRenglon } = descuentoDeOrdenDeLaVenta(decimalToNumber(order?.discountAmount), lines)

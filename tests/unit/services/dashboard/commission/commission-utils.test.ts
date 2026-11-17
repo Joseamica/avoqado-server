@@ -437,7 +437,10 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
   const montar = (renglones: Renglon[], cabecera: number, filas: unknown[] = []) => {
     ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue(renglones)
     orden(cabecera)
-    ;(prisma.orderDiscount.findMany as jest.Mock).mockResolvedValue(filas)
+    // Como la base: nunca más filas que el `take` que se pidió.
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockImplementation(async (args?: { take?: number }) =>
+      args?.take === undefined ? filas : filas.slice(0, args.take),
+    )
   }
   // Coca y Agua en «bebidas», Café en «cafés».
   const mesas = () => [
@@ -546,6 +549,22 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
         montar([{ ...combo(), total: 0 }, r('c-cafe', 100, 100, 0, 'cafes')], 0)
         expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
       })
+    })
+
+    it('🔴 Codex r2: con más filas que el tope (no se ven todos los espejos) usa la regla de antes y no resta dos veces', async () => {
+      // 600 espejos de $1 sobre renglones bruto de $10 y un Café de $100 sin descuento: lo cobrado es 600 × 9 + 100 = $5,500. Si se
+      // clasificara con los espejos que alcanzó a leer, los demás descuentos contarían como «de cuenta» y bajarían también al Café.
+      const renglones = Array.from({ length: 600 }, (_, i) => r(`a-${String(i).padStart(3, '0')}`, 10, 10, 1, 'bebidas'))
+      const espejos = renglones.map(x => ({
+        type: 'FIXED_AMOUNT',
+        isComp: false,
+        discountId: null,
+        appliedToItemIds: [x.id],
+        ...fila({ [x.id]: 100 }, true),
+      }))
+      montar([...renglones, r('z-cafe', 100, 100, 0, 'cafes')], 600, espejos)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(5500)
     })
 
     it('una fila espejo de la forma VIEJA (sin reparto: descuento de catálogo ligado al renglón) también cuenta', async () => {
