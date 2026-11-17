@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { fichaDeLaInvitada } from '@/services/reservation/fichaDeInvitada'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { getReservationSettings, isStaffAware, type ReservationConfig } from './reservationSettings.service'
@@ -328,8 +329,11 @@ export async function createReservation(
   const requestedPartySize = data.partySize ?? 1
   const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
+  // D7: la ficha creada para la invitada (si se creó), para su ActivityLog fuera de la transacción.
+  let fichaNueva: string | null = null
   const reservation = await withSerializableRetry(
     async tx => {
+      fichaNueva = null
       // 🔴 Fase 1 — el gate va PRIMERO, dentro de la MISMA transacción serializable que va a
       // apartar el lugar. Fuera de ella no sirve: "leo APPROVED → la dueña rechaza → inserto"
       // commitea igual, porque Postgres puede serializarlo como "la reserva ocurrió antes del
@@ -638,6 +642,15 @@ export async function createReservation(
 
       const statusLog = appendStatusLog(null, initialStatus, createdById ?? null)
 
+      // D7 (founder 16-nov, «A»): recepción reserva a una invitada nueva desde el panel ⇒ queda con su ficha (buscada por el
+      // teléfono completo, o creada) para poder llegar con el QR del kiosco. Con el teléfono de OTRA persona no se liga. Sólo el
+      // personal (panel y MCP): la página pública y la app ya resuelven su ficha al entrar.
+      const ficha =
+        (context.writeOrigin === 'DASHBOARD' || context.writeOrigin === 'MCP') && !data.customerId
+          ? await fichaDeLaInvitada(tx, venueId, { guestName: data.guestName, guestPhone: data.guestPhone })
+          : null
+      if (ficha?.creada) fichaNueva = ficha.customerId
+
       const reservation = await tx.reservation.create({
         data: {
           venueId,
@@ -648,7 +661,7 @@ export async function createReservation(
           endsAt: finalEndsAt,
           blockedEndsAt,
           duration: finalDuration,
-          customerId: data.customerId,
+          customerId: data.customerId ?? ficha?.customerId,
           guestName: data.guestName,
           guestPhone: data.guestPhone,
           guestEmail: data.guestEmail,
@@ -731,6 +744,17 @@ export async function createReservation(
         reservationId: reservation.reservation.id,
       }),
     )
+  }
+
+  if (fichaNueva) {
+    logAction({
+      staffId: createdById,
+      venueId,
+      action: 'CUSTOMER_CREATED',
+      entity: 'Customer',
+      entityId: fichaNueva,
+      data: { origen: `invitada de una reserva (${context.writeOrigin}, D7)`, reservationId: reservation.reservation.id },
+    })
   }
 
   logAction({

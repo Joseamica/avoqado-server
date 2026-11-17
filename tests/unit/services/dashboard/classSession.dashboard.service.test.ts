@@ -15,6 +15,8 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   cancelReservation: jest.fn(),
 }))
 
+// D7: la ficha de la invitada tiene su propia prueba (fichaDeInvitada.test.ts); aquí, por defecto, «sin ficha» (como antes).
+jest.mock('@/services/reservation/fichaDeInvitada', () => ({ __esModule: true, fichaDeLaInvitada: jest.fn(async () => null) }))
 jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
   __esModule: true,
   publishPushNotification: jest.fn().mockResolvedValue(undefined),
@@ -42,6 +44,7 @@ import { cancelReservation } from '@/services/dashboard/reservation.dashboard.se
 import { assertOrganizationStaffAvailability, lockAppointmentVenue } from '@/services/dashboard/appointmentStaffAssignment.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import * as passCapacity from '@/services/aggregators/passCapacity.service'
+import { fichaDeLaInvitada } from '@/services/reservation/fichaDeInvitada'
 
 // ---- Constants ----
 
@@ -1341,6 +1344,36 @@ describe('ClassSession Dashboard Service', () => {
         .mockResolvedValueOnce(sessionRowData ? [sessionRowData] : []) // ClassSession FOR UPDATE
         .mockResolvedValueOnce([{ total: BigInt(enrolled) }]) // Enrolled count FOR UPDATE
     }
+
+    // D7 (founder 16-nov, «A»): la invitada nueva queda con su ficha para poder llegar con el QR del kiosco.
+    it('D7: una invitada con teléfono queda ligada a su ficha (encontrada o creada) y la ficha nueva deja su ActivityLog', async () => {
+      ;(fichaDeLaInvitada as jest.Mock).mockResolvedValueOnce({ customerId: 'c-nueva', creada: true })
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CONFIRMED', classSessionId: SESSION_ID }))
+
+      await addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)
+
+      expect(fichaDeLaInvitada).toHaveBeenCalledWith(expect.anything(), VENUE_ID, { guestName: 'Ana Lopez', guestPhone: '+525551234567' })
+      expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'c-nueva' }) }),
+      )
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'CUSTOMER_CREATED', entity: 'Customer', entityId: 'c-nueva', staffId: STAFF_ID }),
+      )
+    })
+
+    it('D7: si recepción eligió una clienta existente, no se busca otra ficha', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'c-ana', firstName: 'Ana', lastName: 'Lopez' } as any)
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CONFIRMED', classSessionId: SESSION_ID }))
+
+      await addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, customerId: 'c-ana' } as any, STAFF_ID)
+
+      expect(fichaDeLaInvitada).not.toHaveBeenCalled()
+      expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'c-ana' }) }),
+      )
+    })
 
     it('should create a CONFIRMED reservation linked to the session', async () => {
       const createdReservation = makeReservation({ status: 'CONFIRMED', classSessionId: SESSION_ID })

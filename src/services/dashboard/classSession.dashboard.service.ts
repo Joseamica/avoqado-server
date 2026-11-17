@@ -16,6 +16,7 @@ import { withSerializableRetry } from '@/utils/serializableRetry'
 import { utcTs } from '@/utils/sqlDates'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
+import { fichaDeLaInvitada } from '@/services/reservation/fichaDeInvitada'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
@@ -774,8 +775,11 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
   }
   if (!guestName) throw new BadRequestError('Se requiere guestName o customerId')
 
+  // D7: la ficha que se creó para la invitada (si se creó), para su ActivityLog fuera de la transacción.
+  let fichaNueva: string | null = null
   // Use serializable transaction to prevent race conditions on capacity
-  return withSerializableRetry(async tx => {
+  const resultado = await withSerializableRetry(async tx => {
+    fichaNueva = null
     // Lock the ClassSession row and verify it exists + belongs to venue
     const session = await lockClassSession(tx, venueId, sessionId, 'Sesión no encontrada')
 
@@ -791,6 +795,11 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
     }
 
     const confirmationCode = generateConfirmationCode()
+
+    // D7 (founder 16-nov, «A»): una invitada nueva con teléfono queda con su ficha (buscada por el teléfono completo, o creada),
+    // para que pueda llegar con el QR del kiosco. Con el teléfono de OTRA persona (otro nombre) no se liga.
+    const ficha = data.customerId ? null : await fichaDeLaInvitada(tx, venueId, { guestName, guestPhone: data.guestPhone })
+    if (ficha?.creada) fichaNueva = ficha.customerId
 
     // Walk-in flow short-circuits: when `checkInImmediately` is true the
     // reservation arrives already-checked-in and we build the cashier Order
@@ -817,7 +826,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         guestEmail: data.guestEmail ?? null,
         partySize,
         specialRequests: data.specialRequests ?? null,
-        customerId: data.customerId ?? null,
+        customerId: data.customerId ?? ficha?.customerId ?? null,
         createdById: staffId,
         confirmedAt: new Date(),
         checkedInAt: data.checkInImmediately ? new Date() : null,
@@ -876,6 +885,17 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
 
     return { reservation, orderId }
   })
+  if (fichaNueva) {
+    void logAction({
+      venueId,
+      action: 'CUSTOMER_CREATED',
+      entity: 'Customer',
+      entityId: fichaNueva,
+      staffId,
+      data: { origen: 'invitada de una clase (D7)', sessionId },
+    })
+  }
+  return resultado
 }
 
 // ---- Remove attendee ----

@@ -27,6 +27,7 @@ import * as appointmentSlotHoldService from '@/services/reservation/appointmentS
 import * as basePlanService from '@/services/access/basePlan.service'
 import * as rabbitCalendarPublisher from '@/communication/rabbitmq/gcal-push-consumer'
 import * as activityLogService from '@/services/dashboard/activity-log.service'
+import * as fichaDeInvitadaModule from '@/services/reservation/fichaDeInvitada'
 import * as whatsappService from '@/services/whatsapp.service'
 import emailService from '@/services/email.service'
 import { getDefaultOperatingHours, type ReservationConfig } from '@/services/dashboard/reservationSettings.service'
@@ -230,6 +231,46 @@ describe('Reservation Dashboard Service', () => {
           data: expect.objectContaining({ productId: 'prod-1', productIds: ['prod-1', 'prod-2'] }),
         }),
       )
+    })
+
+    // D7 (founder 16-nov, «A»): recepción reserva a una invitada nueva desde el panel ⇒ queda con su ficha (o se crea).
+    it.each([
+      ['DASHBOARD', DASHBOARD_WRITE, true],
+      ['MCP (el asistente del negocio)', { writeOrigin: 'MCP' as const }, true],
+      ['PUBLIC (la página ya resuelve su ficha al entrar)', { writeOrigin: 'PUBLIC' as const }, false],
+    ])('D7: invitada con teléfono desde %s', async (_label, contexto, liga) => {
+      const ficha = jest.spyOn(fichaDeInvitadaModule, 'fichaDeLaInvitada').mockResolvedValue({ customerId: 'c-nueva', creada: true })
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.product.findMany.mockResolvedValue([
+        { id: 'prod-1', price: new Prisma.Decimal(100), eventCapacity: null, type: 'APPOINTMENTS_SERVICE' },
+      ] as any)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+
+      await createReservation(
+        VENUE_ID,
+        {
+          startsAt: new Date('2026-03-01T14:00:00Z'),
+          endsAt: new Date('2026-03-01T15:00:00Z'),
+          duration: 60,
+          productId: 'prod-1',
+          guestName: 'Ana Ruiz',
+          guestPhone: '55 1234 5678',
+        },
+        contexto as any,
+        STAFF_ID,
+      )
+
+      const data = (prismaMock.reservation.create.mock.calls[0][0] as any).data
+      if (liga) {
+        expect(ficha).toHaveBeenCalledWith(expect.anything(), VENUE_ID, { guestName: 'Ana Ruiz', guestPhone: '55 1234 5678' })
+        expect(data.customerId).toBe('c-nueva')
+        expect(activityLogService.logAction).toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'CUSTOMER_CREATED', entity: 'Customer', entityId: 'c-nueva', staffId: STAFF_ID }),
+        )
+      } else {
+        expect(ficha).not.toHaveBeenCalled()
+        expect(data.customerId).toBeUndefined()
+      }
     })
 
     it.each([
