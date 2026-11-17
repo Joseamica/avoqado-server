@@ -32,6 +32,7 @@ import {
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
 import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
+import { modalidadDePrueba, type ModalidadDePrueba } from './billing/modalidadDePrueba'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -738,6 +739,12 @@ export interface CreatePlanSubscriptionInput {
    * `Date.now()`): el fin del candado de la regla común, no una duración.
    */
   autenticarEnElNavegador?: { primerCobroEsperadoCents: number; terminarAntesDe: number }
+  /**
+   * 🔴 Plan Básico (17-nov): la prueba de Pro TERMINA SOLA SIN COBRAR. Va en el MISMO create (`cancel_at_period_end: true`,
+   * que en prueba corta al terminar la prueba) con `metadata.basicPlanChosen`. Sólo con `trialPeriodDays > 0`: sin prueba
+   * cancelaría un plan pagado. Nunca se escribe sobre una suscripción que ya existe (el reuso de abajo la devuelve tal cual).
+   */
+  cancelAtTrialEnd?: boolean
 }
 
 /** Los códigos con que Stripe dice «el banco pide autenticar el primer cobro». El primero es el que devuelve la API
@@ -954,6 +961,9 @@ export async function suscripcionVendeElPlan(
 }
 
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
+  if (input.cancelAtTrialEnd && !(input.trialPeriodDays > 0)) {
+    throw new Error('cancelAtTrialEnd sólo aplica a una prueba gratis (trialPeriodDays > 0)')
+  }
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
 
@@ -996,6 +1006,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     ...(input.venueName ? { venueName: input.venueName } : {}),
     ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
     ...(input.extraMetadata ?? {}),
+    ...(input.cancelAtTrialEnd ? { basicPlanChosen: 'true' } : {}),
   }
   const params: Stripe.SubscriptionCreateParams = {
     customer: input.customerId,
@@ -1013,6 +1024,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
     collection_method: 'charge_automatically',
     payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
+    ...(input.cancelAtTrialEnd ? { cancel_at_period_end: true } : {}),
   }
 
   input.antesDeCobrar?.()
@@ -1083,6 +1095,20 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
         error: error instanceof Error ? error.message : String(error),
       })
     })
+  }
+
+  // Plan Básico: la tarjeta del alta queda como la del cliente, para que el clic del día 30 compre sin pedirla otra vez.
+  // Es comodidad, no garantía: si falla, se registra y el alta sigue.
+  if (input.cancelAtTrialEnd) {
+    await stripe.customers
+      .update(input.customerId, { invoice_settings: { default_payment_method: input.paymentMethodId } }, STRIPE_DENTRO_DEL_CANDADO)
+      .catch(error =>
+        logger.warn('createPlanSubscription: no se pudo fijar la tarjeta predeterminada del cliente (Plan Básico)', {
+          subscriptionId: subscription.id,
+          venueId: input.venueId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
   }
 
   // 🔴 V5-A paso 6: aquí sólo se COBRA. El acceso lo escribe `entregarSuscripcionDePlan`, que el llamador corre después
@@ -1826,6 +1852,15 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
     descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
   }
+}
+
+/**
+ * Plan Básico: la modalidad de la prueba de UNA suscripción, leída de Stripe ahora (`modalidadDePrueba`). Acotada: un
+ * intento de 5 s sin reintentos, porque la usan respuestas del alta y `GET /progress`. Si Stripe no contesta, LANZA: quien
+ * llama omite el campo, nunca inventa una modalidad.
+ */
+export async function modalidadDeLaSuscripcion(subscriptionId: string): Promise<ModalidadDePrueba> {
+  return modalidadDePrueba(await stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 }))
 }
 
 /** El id del producto de un precio de Stripe, venga como id o expandido. */

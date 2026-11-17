@@ -235,6 +235,13 @@ export interface PlanConfirmationEmailData {
    */
   nextChargeAmountCents?: number
   billingPortalUrl: string
+  /**
+   * 🔴 Plan Básico (17-nov): la prueba de Pro TERMINA SIN COBRAR (la suscripción real trae `cancel_at_period_end`). El
+   * correo no anuncia el cobro de Pro: dice que no se cobra nada y que ese día podrá contratar el Básico con un clic.
+   */
+  trialEndsFree?: boolean
+  /** Precio del Básico sin IVA, en centavos sólo para escribirlo («$499 + IVA»). Sin él, el texto va sin precio. */
+  basicPlanPriceWithoutTaxCents?: number
 }
 
 export interface PlanRenewalReminderEmailData {
@@ -4970,6 +4977,31 @@ Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
       }
+    } else if (data.trialEndsFree) {
+      // Plan Básico: la prueba de Pro termina sola, sin cobro.
+      subject = data.locale === 'en' ? `Your Avoqado ${planName} trial has started` : `Tu prueba de Avoqado ${planName} empezó`
+      ctaLabel = data.locale === 'en' ? 'View my plan' : 'Ver mi plan'
+      const precio = data.basicPlanPriceWithoutTaxCents != null ? fmt(data.basicPlanPriceWithoutTaxCents).replace(/\.00$/, '') : null
+      const frase =
+        data.locale === 'en'
+          ? `30 days free with all of Pro. It ends on ${dateFormatted} and you won't be charged anything; that day you can get Básico${precio ? ` for ${precio} + VAT a month` : ''} with one click.`
+          : `30 días gratis con todo Pro. Termina el ${dateFormatted} y no se te cobra nada; ese día podrás contratar el Básico${precio ? ` por ${precio} + IVA al mes` : ''} con un clic.`
+      const cambialo = data.locale === 'en' ? 'Change it in «Your plan».' : 'Cámbialo en «Tu plan».'
+      greeting = data.locale === 'en' ? 'Hi,' : 'Hola,'
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${frase}</p>
+      <p style="font-size: 14px; margin: 0 0 24px 0; color: #666;">${cambialo}</p>`
+      text = `${greeting}
+
+${frase}
+${cambialo}
+
+${descargaTexto}
+
+${data.locale === 'en' ? 'View my plan' : 'Ver mi plan'}: ${data.billingPortalUrl}
+
+${data.locale === 'en' ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     } else {
       // Trial variant
       subject = data.locale === 'en' ? `Your Avoqado ${planName} trial has started` : `Tu prueba de Avoqado ${planName} empezó`

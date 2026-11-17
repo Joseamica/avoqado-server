@@ -361,6 +361,21 @@ describe('PlanRenewalReminderJob.runNow', () => {
     expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
   })
 
+  // Plan Básico (17-nov): la prueba que termina sin cobrar no anuncia cobro; «Quedarme en Pro» (= Reactivar plan) quita
+  // cancel_at_period_end y el recordatorio vuelve a anunciar el cobro de Pro (`noHabraCobro` deja de aplicar).
+  it('🔴 Básico: prueba que termina sin cobrar → sin aviso; tras «Quedarme en Pro» → avisa el cobro de Pro', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    mockRetrieve.mockResolvedValue(stripeSub(8, { status: 'trialing', cancel_at_period_end: true }))
+    await new PlanRenewalReminderJob().runNow()
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
+
+    mockRetrieve.mockResolvedValue(stripeSub(8, { status: 'trialing', cancel_at_period_end: false }))
+    await new PlanRenewalReminderJob().runNow()
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ isTrialEnd: true, planName: 'Pro', amountCents: 115884 })
+  })
+
   it('cancel_at at the period end → no send', async () => {
     mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
     const sub = stripeSub(8)

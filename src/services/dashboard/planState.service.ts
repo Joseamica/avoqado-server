@@ -7,6 +7,7 @@
  * derivePlanState (access/basePlan.service.ts) and is shared with the superadmin overview.
  */
 
+import { modalidadDePrueba } from '@/services/billing/modalidadDePrueba'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -125,6 +126,12 @@ export interface PlanState {
   origin?: PlanOrigin
   /** Whether the retention PAUSE can be applied right now (the same checks as applyRetentionOffer 'pause'). */
   pauseOfferEligible?: boolean
+  /**
+   * Plan Básico (17-nov): cómo termina la prueba de Pro, leído de la suscripción REAL — `ENDS_FREE` (trae
+   * `cancel_at_period_end`: termina sin cobrar) o `RENEWS_AS_PRO`. `null` fuera de una prueba o sin Stripe.
+   * La fecha es `trialEndsAt` (de arriba, sin cambiar).
+   */
+  trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE' | null
 }
 
 /** Where "Tu plan" comes from: ONE obligation, with its own tier, price and dates (spec §4.2). */
@@ -413,6 +420,8 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
     retentionOfferEligible,
     origin,
     pauseOfferEligible,
+    trialModality:
+      modalidadDePrueba({ status: stripeSub?.status, cancel_at_period_end: stripeSub?.cancelAtPeriodEnd }).trialModality ?? null,
   }
 }
 

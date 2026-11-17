@@ -37,6 +37,56 @@ describe('Subscription lifecycle plan emails', () => {
       expect(html).not.toContain('21 de octubre de 2027')
     })
 
+    it('🔴 Plan Básico: la prueba que termina sin cobrar dice Básico y NO anuncia el cobro de Pro', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+        trialEndsFree: true,
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      const correo = JSON.stringify(spy.mock.calls.at(-1))
+      expect(correo).toContain(
+        '30 días gratis con todo Pro. Termina el 17 de diciembre de 2026 y no se te cobra nada; ese día podrás contratar el Básico por $499 + IVA al mes con un clic.',
+      )
+      expect(correo).toContain('Cámbialo en «Tu plan».')
+      expect(correo).not.toContain('1,158.84')
+      expect(correo).not.toContain('primer cobro')
+    })
+
+    it('Plan Básico sin precio vigente: el texto sale sin precio, nunca inventado', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+        trialEndsFree: true,
+      })
+      const correo = JSON.stringify(spy.mock.calls.at(-1))
+      expect(correo).toContain('ese día podrás contratar el Básico con un clic.')
+      expect(correo).not.toContain('1,158.84')
+    })
+
+    it('regresión: la prueba de Pro normal sigue anunciando su primer cobro', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+      })
+      expect(JSON.stringify(spy.mock.calls.at(-1))).toContain('Tu primer cobro será de <strong>$1,158.84</strong>')
+    })
+
     it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
       const original = Intl.NumberFormat
       ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))

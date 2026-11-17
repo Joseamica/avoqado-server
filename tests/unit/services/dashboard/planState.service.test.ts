@@ -110,6 +110,22 @@ describe('planState.service', () => {
       expect(result.retentionOfferEligible).toBe(true)
     })
 
+    it.each([
+      ['trialing + cancel_at_period_end → ENDS_FREE', { status: 'trialing', cancelAtPeriodEnd: true }, 'ENDS_FREE'],
+      ['trialing sin cancelar → RENEWS_AS_PRO', { status: 'trialing', cancelAtPeriodEnd: false }, 'RENEWS_AS_PRO'],
+      ['active → null (no es prueba)', { status: 'active', cancelAtPeriodEnd: true }, null],
+    ])('Plan Básico: trialModality %s', async (_caso, sub, esperado) => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary(sub))
+      expect((await getPlanState('venue_1')).trialModality).toBe(esperado)
+    })
+
+    it('Plan Básico: si Stripe no contesta, trialModality null (nunca se inventa)', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      mockStripe.retrievePlanSubscription.mockRejectedValue(new Error('Stripe caído'))
+      expect((await getPlanState('venue_1')).trialModality).toBeNull()
+    })
+
     it('🔴 Codex C8: con DOS filas de plan (la vieja retirada primero) administra la VIGENTE', async () => {
       prismaMock.venueFeature.findMany.mockResolvedValue([
         planProFeature({ id: 'vf_viejo', active: false, stripeSubscriptionId: null }),
@@ -202,6 +218,18 @@ describe('planState.service', () => {
       const result = await reactivatePlan('venue_1')
       expect(mockStripe.setSubscriptionCancelAtPeriodEnd).toHaveBeenCalledWith('sub_123', false)
       expect(result.state).toBe('active')
+    })
+
+    // Plan Básico (17-nov): «Quedarme en Pro» es este «Reactivar plan» sobre una prueba que termina sin cobrar.
+    it('🔴 «Quedarme en Pro»: reactivar una prueba ENDS_FREE quita cancel_at_period_end y queda RENEWS_AS_PRO', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValueOnce([planProFeature()]).mockResolvedValueOnce([planProFeature()])
+      mockStripe.setSubscriptionCancelAtPeriodEnd.mockResolvedValue({} as any)
+      mockStripe.retrievePlanSubscription
+        .mockResolvedValueOnce(subSummary({ status: 'trialing', cancelAtPeriodEnd: true })) // antes: termina sin cobrar
+        .mockResolvedValueOnce(subSummary({ status: 'trialing', cancelAtPeriodEnd: false })) // después del flip
+      const result = await reactivatePlan('venue_1')
+      expect(mockStripe.setSubscriptionCancelAtPeriodEnd).toHaveBeenCalledWith('sub_123', false)
+      expect(result.trialModality).toBe('RENEWS_AS_PRO')
     })
 
     it('cancelPlan throws BadRequestError when there is no Stripe subscription', async () => {
