@@ -1375,14 +1375,19 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     })
 
     it('el dueño apagó estos avisos → no sale (y no se reintenta)', async () => {
-      ;(prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference.findUnique.mockResolvedValueOnce(
-        {
-          channels: ['IN_APP'],
-        },
+      // Apagado en el tipo PROPIO de estos avisos; la misma fila en cualquier otro tipo no contaría.
+      const prefs = (prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference
+      prefs.findUnique.mockImplementation(async (args: { where: { staffId_venueId_type: { type: string } } }) =>
+        args.where.staffId_venueId_type.type === 'SUBSCRIPTION_CANCELLED' ? { enabled: true, channels: ['IN_APP'] } : null,
       )
       await handleSubscriptionDeleted(borrada())
       expect(emailService.sendPlanEndedEmail).not.toHaveBeenCalled()
       expect(sello).not.toBeNull()
+      expect(prefs.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { staffId_venueId_type: { staffId: 'staff_owner', venueId: 'venue_1', type: 'SUBSCRIPTION_CANCELLED' } },
+        }),
+      )
     })
 
     it('el correo falla → el webhook no truena y no se sella (el job lo reintenta)', async () => {

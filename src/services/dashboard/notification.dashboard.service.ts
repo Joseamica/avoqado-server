@@ -1,6 +1,7 @@
 import { Notification, NotificationChannel, NotificationPreference, NotificationPriority, NotificationType, Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { canalesAlCrear, MENSAJE_TIPO_RESERVADO, TIPO_AVISOS_SIN_COBRO } from '../notifications/avisosSinCobro'
 import prisma from '../../utils/prismaClient'
 import logger from '@/config/logger'
 import * as pushService from '../mobile/push.mobile.service'
@@ -61,6 +62,8 @@ export interface PaginationOptions {
  * Create a new notification
  */
 export async function createNotification(data: CreateNotificationDto): Promise<Notification> {
+  // Plan Básico: este tipo es la preferencia de los avisos sin cobro; mandarlo crearía sola una fila [IN_APP] que los apaga.
+  if (data.type === TIPO_AVISOS_SIN_COBRO) throw new BadRequestError(MENSAJE_TIPO_RESERVADO)
   // Check if recipient exists
   const recipient = await prisma.staff.findUnique({
     where: { id: data.recipientId },
@@ -420,7 +423,7 @@ export async function getUserNotificationPreferences(
         venueId,
         type,
         enabled: true,
-        channels: [NotificationChannel.IN_APP],
+        channels: canalesAlCrear(type) ?? [NotificationChannel.IN_APP],
         priority: NotificationPriority.NORMAL,
       },
     })
@@ -467,12 +470,14 @@ export async function updateNotificationPreferences(
       data: updates,
     })
   } else {
+    const channels = canalesAlCrear(type, updates.channels)
     return await prisma.notificationPreference.create({
       data: {
         staffId,
         venueId,
         type,
         ...updates,
+        ...(channels ? { channels } : {}),
       },
     })
   }
@@ -523,9 +528,10 @@ export async function updateManyNotificationPreferences(
             }),
           )
         } else {
+          const nacen = canalesAlCrear(type, data.channels)
           results.push(
             await tx.notificationPreference.create({
-              data: { staffId, venueId, type, ...data },
+              data: { staffId, venueId, type, ...data, ...(nacen ? { channels: nacen } : {}) },
             }),
           )
         }

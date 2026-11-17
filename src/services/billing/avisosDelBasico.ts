@@ -10,7 +10,7 @@
  *   baja en un clic. El aviso de un cobro no se apaga.
  */
 import type Stripe from 'stripe'
-import { NotificationChannel, NotificationType } from '@prisma/client'
+import { NotificationChannel } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import emailService, { type PlanNoticeUnsubscribe, type PlanRenewalReminderEmailData } from '@/services/email.service'
@@ -21,6 +21,7 @@ import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import { BASE_URL, FRONTEND_URL } from '@/config/env'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { BASIC_PLAN_DEFINITION_WHERE } from '@/services/launchCampaigns/basicPlanAccess'
+import { TIPO_AVISOS_SIN_COBRO } from '@/services/notifications/avisosSinCobro'
 import { descuentoDelPlan } from './descuentoDelPlan'
 import { isLastDiscountedPeriod, type SuscripcionConDescuento } from './ultimoPeriodoConDescuento'
 
@@ -46,14 +47,8 @@ export function precioSinIvaCents(basico: { priceWithoutTax: string }): number {
   return Math.round(Number(basico.priceWithoutTax) * 100)
 }
 
-/**
- * La preferencia que apaga los avisos SIN cobro. 🔴 NO es `SUBSCRIPTION_TRIAL_ENDING`: `createNotification` de ese tipo (el
- * `trial_will_end` de planes y de funciones) crea sola una fila `[IN_APP]` para cada OWNER/ADMIN, y se leía como «lo apagó»
- * (revisión de Task 6, hallazgo 1). `SUBSCRIPTION_CANCELLED` no lo usa ningún aviso del producto, así que una fila suya sólo
- * la escribe una decisión explícita: la baja en un clic (categoría `PLAN`) o su interruptor. Un guardia de pruebas falla si
- * alguien empieza a mandar avisos con este tipo. Sin migración.
- */
-export const TIPO_AVISOS_SIN_COBRO = NotificationType.SUBSCRIPTION_CANCELLED
+/** La preferencia que apaga estos avisos: ver `notifications/avisosSinCobro.ts` (nunca `SUBSCRIPTION_TRIAL_ENDING`). */
+export { TIPO_AVISOS_SIN_COBRO }
 
 /** `true` si el dueño apagó estos avisos por correo (fila apagada o sin EMAIL de `TIPO_AVISOS_SIN_COBRO`; sin fila = prendido). */
 export async function avisoDelPlanApagado(staffId: string | null | undefined, venueId: string): Promise<boolean> {

@@ -3,12 +3,14 @@
  * porque ningún aviso del producto usa ese tipo: una fila suya sólo la escribe una decisión explícita (la baja en un clic o
  * su interruptor). Si alguien empieza a mandar avisos con él, `createNotification` crearía sola una fila `[IN_APP]` y esa
  * fila apagaría en silencio «Tu prueba termina» / «Tu prueba terminó» — justo el defecto que se corrigió. Este guardia lo
- * impide: el tipo sólo puede aparecer en los dos archivos de la baja.
+ * impide: el tipo sólo puede aparecer en `notifications/avisosSinCobro.ts`. Además el servidor rechaza mandarlo
+ * (`createNotification` y los envíos del dashboard) y toda fila nueva suya nace con correo (`canalesAlCrear`).
  */
 import fs from 'fs'
 import path from 'path'
 
-const PERMITIDOS = new Set(['src/services/billing/avisosDelBasico.ts', 'src/services/notifications/emailUnsubscribe.service.ts'])
+// Los demás usan la constante `TIPO_AVISOS_SIN_COBRO`; sólo su módulo nombra el tipo.
+const PERMITIDOS = new Set(['src/services/notifications/avisosSinCobro.ts'])
 
 function archivos(dir: string): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
