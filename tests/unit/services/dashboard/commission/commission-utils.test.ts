@@ -403,3 +403,164 @@ describe('A1e · «sin IVA» con la regla de la póliza contable (D5 enmendada, 
     expect(r.baseAmount).toBe(200)
   })
 })
+
+/**
+ * 🔴 hz:nube0000:na966167 / hz:8024bc1c:D41 (encargo 04edc5, founder «C», 16-nov): la MISMA cortesía se guarda de dos formas
+ * según la pantalla, y la comisión por categoría y el sobrante tienen que dar lo mismo con las dos.
+ *
+ *   · Mostrador / «Cobrar» (ANDROID y TPV): renglón a precio LLENO, `discountAmount` = lo regalado, la cabecera lo INCLUYE
+ *     (subtotal 75, descuento 25.50) y una fila COMP espejo lo duplica.
+ *   · Mesas (`comp-item.mobile.service.ts`): renglón en $0, `discountAmount` = precio, y ni la cabecera ni ninguna fila lo traen
+ *     (subtotal 55, descuento 5.50 = la fila del 10 %).
+ *
+ * Restar a la cabecera TODOS los descuentos de renglón (lo de antes) borraba el 10 % en Mesas: 5.50 − 20 < 0 ⇒ 0, y se
+ * comisionaban $55 en vez de $49.50. Ahora, si las filas explican la cabecera al centavo, el descuento de orden es la suma de las
+ * que no son espejo; si no, la regla de siempre. Coca $25 + Agua $20 de cortesía + Café $30, 10 % de cuenta ($5.50).
+ */
+describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (encargo 04edc5)', () => {
+  type Renglon = {
+    id: string
+    unitPrice: number
+    quantity: number
+    total: number
+    discountAmount: number
+    taxAmount: number
+    isCortesia?: boolean
+    orderPromotionId?: string | null
+    weightQuantity?: number | null
+    product: { categoryId: string } | null
+  }
+  const r = (id: string, unitPrice: number, total: number, discountAmount: number, categoryId: string, extra: Partial<Renglon> = {}) =>
+    ({ id, unitPrice, quantity: 1, total, discountAmount, taxAmount: 0, product: { categoryId }, ...extra }) as Renglon
+  /** Una fila como la deja `sincronizarRepartos`: su importe y su reparto (centavos por renglón). */
+  const fila = (amount: number, renglones: Record<string, number>, espejo = false) => ({
+    amount,
+    reparto: { v: 1, alcance: espejo ? 'DIRIGIDO' : 'CUENTA', conPromociones: espejo ? null : false, espejo, renglones },
+  })
+  const montar = (renglones: Renglon[], cabecera: number, filas: unknown[] = []) => {
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue(renglones)
+    orden(cabecera)
+    // Como la base: nunca más filas que el `take` que se pidió.
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockImplementation(async (args?: { take?: number }) =>
+      args?.take === undefined ? filas : filas.slice(0, args.take),
+    )
+  }
+  // Coca y Agua en «bebidas», Café en «cafés».
+  const mesas = () => [
+    r('a-coca', 25, 25, 0, 'bebidas'),
+    r('b-agua', 20, 0, 20, 'bebidas', { isCortesia: true }),
+    r('c-cafe', 30, 30, 0, 'cafes'),
+  ]
+  const mostrador = () => [
+    r('a-coca', 25, 25, 0, 'bebidas'),
+    r('b-agua', 20, 20, 20, 'bebidas', { isCortesia: true }),
+    r('c-cafe', 30, 30, 0, 'cafes'),
+  ]
+  const DIEZ_POR_CIENTO = fila(5.5, { 'a-coca': 250, 'c-cafe': 300 })
+  const CORTESIA_ESPEJO = fila(20, { 'b-agua': 2000 }, true)
+
+  afterEach(() => {
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockResolvedValue([])
+  })
+
+  it('🔴 Mesas: la cuenta entera comisiona $49.50 (antes $55)', async () => {
+    montar(mesas(), 5.5, [DIEZ_POR_CIENTO])
+    expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+  })
+
+  it('🔴 por categoría, las dos formas dan lo mismo: bebidas $22.50 y cafés $27 (suman $49.50)', async () => {
+    for (const [renglones, cabecera, filas] of [
+      [mesas(), 5.5, [DIEZ_POR_CIENTO]],
+      [mostrador(), 25.5, [CORTESIA_ESPEJO, DIEZ_POR_CIENTO]],
+    ] as const) {
+      montar([...renglones], cabecera, [...filas])
+      expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(22.5)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+      expect(await calculateLeftoverAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(27)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    }
+  })
+
+  it('«precio de lista» no cambia: $75 en las dos formas', async () => {
+    montar(mesas(), 5.5, [DIEZ_POR_CIENTO])
+    expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(75)
+    montar(mostrador(), 25.5, [CORTESIA_ESPEJO, DIEZ_POR_CIENTO])
+    expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(75)
+  })
+
+  describe('cuando las filas no explican la cabecera: la regla de siempre (nunca resta dos veces)', () => {
+    it('orden sin filas (anterior a B2): igual que antes', async () => {
+      montar(mesas(), 5.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(55)
+      montar(mostrador(), 25.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    })
+
+    it('🔴 Codex r3: un espejo viejo SIN reparto (su descuento se borró del catálogo) no se resta dos veces', async () => {
+      // Producto de $1,000 con $900 de descuento (renglón bruto) + Café $100; la cabecera trae los $900; se cobraron $200.
+      montar([r('a-rebajado', 1000, 1000, 900, 'otros'), r('c-cafe', 100, 100, 0, 'cafes')], 900, [{ amount: 900, reparto: null }])
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(200)
+    })
+
+    it('las filas no suman la cabecera («Descuento anterior» fuera de ellas): igual que antes', async () => {
+      montar(mesas(), 15.5, [DIEZ_POR_CIENTO])
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(55)
+    })
+
+    it('🔴 Codex r5: un renglón con el precio cambiado a media cuenta (total ≠ precio × cantidad) usa la regla de antes', async () => {
+      // Dos productos de $45 reenviados a $50 (total nuevo, `unitPrice` viejo) + Agua $20 de cortesía en Mesas, 10 % de cuenta
+      // ($10, sobre los totales). Antes daba $45 a cada categoría; con la fila sobre la base de $45 caía a $40.
+      montar([r('a-uno', 45, 50, 0, 'uno'), r('b-agua', 20, 0, 20, 'otros', { isCortesia: true }), r('c-dos', 45, 50, 0, 'dos')], 10, [
+        fila(10, { 'a-uno': 500, 'c-dos': 500 }),
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['uno'], CONFIG_DEFAULT)).toBe(45)
+      expect(await calculateCategoryFilteredAmount('o', ['dos'], CONFIG_DEFAULT)).toBe(45)
+    })
+
+    it('🔴 Codex r2: con más filas que el tope (no se ven todas) se usa la regla de antes', async () => {
+      // 600 espejos de $1 sobre renglones brutos de $10 + Café $100: se cobraron 600 × 9 + 100 = $5,500.
+      const renglones = Array.from({ length: 600 }, (_, i) => r(`a-${String(i).padStart(3, '0')}`, 10, 10, 1, 'bebidas'))
+      montar(
+        [...renglones, r('z-cafe', 100, 100, 0, 'cafes')],
+        600,
+        renglones.map(x => fila(1, { [x.id]: 100 }, true)),
+      )
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(5500)
+    })
+  })
+
+  describe('los casos de Codex r1 y r4 con filas que sí explican la cabecera', () => {
+    // 2 bebidas de $100 en 2×1 (renglón neto $100, regalo de la promoción $100) regaladas por `compItems` de la TPV: su
+    // `discountAmount` pasa a $100 (su total) y la fila COMP espejo lo duplica en la cabecera. + Café $100.
+    const combo = () => r('a-combo', 100, 100, 100, 'bebidas', { quantity: 2, isCortesia: true, orderPromotionId: 'promo-2x1' })
+
+    it('🔴 r1: el café pagado completo comisiona $100', async () => {
+      montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 100, [fila(100, { 'a-combo': 10000 }, true)])
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+    })
+
+    it('r1: con 10 % de cuenta, el café queda como el prorrateo de siempre ($95), no $45', async () => {
+      montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 110, [fila(100, { 'a-combo': 10000 }, true), fila(10, { 'c-cafe': 1000 })])
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(95)
+    })
+
+    it('🔴 r4: una cortesía en $0 cuyo descuento SÍ está en la cabecera (tiene espejo) no le resta al café', async () => {
+      // `compItems` de la TPV sobre un renglón por peso que luego se reenvía con 1 g: total $0, descuento $20 y su espejo.
+      montar([r('a-peso', 20, 0, 20, 'bebidas', { isCortesia: true, weightQuantity: 0.001 }), r('c-cafe', 100, 100, 0, 'cafes')], 20, [
+        fila(20, { 'a-peso': 2000 }, true),
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+    })
+
+    it('r4: un descuento dirigido sin espejo se prorratea como siempre (no cambia de reparto a media cuenta)', async () => {
+      // $100 dirigidos a la primera categoría por `applyDiscount` (fila DIRIGIDA, no espejo; el renglón no lo guarda).
+      montar([r('a-uno', 100, 100, 0, 'uno'), r('b-dos', 100, 100, 0, 'dos')], 100, [
+        { amount: 100, reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { 'a-uno': 10000 } } },
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['uno'], CONFIG_DEFAULT)).toBe(50)
+      expect(await calculateCategoryFilteredAmount('o', ['dos'], CONFIG_DEFAULT)).toBe(50)
+    })
+  })
+})

@@ -23,7 +23,7 @@ import { isDeadlockError } from '../../../utils/serializableRetry'
 import {
   baseSinIvaPorTasa,
   commissionableAmount,
-  orderLevelDiscountOf,
+  descuentoDeOrdenDeLaVenta,
   precioTraeIva,
   resolveCommissionBase,
   selectCommissionableLines,
@@ -894,6 +894,24 @@ export async function findActiveCommissionConfigs(
 }
 
 /**
+ * ¿El importe de lista del renglón (`importeDelRenglon`: precio × cantidad + extras) es el que guardó su `total`? (Codex r5)
+ * Vale cualquiera de las formas reales, al centavo: bruto (Mostrador), sin extras (los escritores que no los suman al `total`),
+ * neto de su descuento (cortesía de Mesas en $0, pieza de combo) o neto y sin extras.
+ */
+function renglonCuadraConSuTotal(it: Parameters<typeof importeDelRenglon>[0]): boolean {
+  if (it.total == null) return false
+  const c = (n: number) => Math.round(n * 100)
+  const bruto = c(importeDelRenglon(it))
+  const extras = c((it.modifiers ?? []).reduce((s, m) => s + Number(m.price) * m.quantity, 0) * it.quantity)
+  const descuento = c(Number(it.discountAmount ?? 0))
+  const total = c(Number(it.total))
+  return [bruto, bruto - extras, bruto - descuento, bruto - extras - descuento].some(v => Math.abs(v - total) <= 1)
+}
+
+/** Cuántas filas de descuento de una orden lee la base por categoría (ver `descuentoDeOrdenDeLaVenta`). */
+const TOPE_DE_FILAS = 500
+
+/**
  * Lee la orden COMPLETA una sola vez y la normaliza a las líneas que consume la
  * base única, con el descuento de ORDEN ya separado del de renglón.
  *
@@ -913,7 +931,15 @@ async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
 ): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; ivaIncluidoEnPrecio: boolean }> {
-  const [orderItems, order] = await Promise.all([
+  const [filas, orderItems, order] = await Promise.all([
+    // Encargo 04edc5: las filas de descuento de UNA orden (unas cuantas). Una de más que el tope para saber si se cortó.
+    // Va PRIMERO: el `take` de esta consulta no debe caer en la ventana del guardia de `orderItem.findMany` (que no lo lleva).
+    db.orderDiscount.findMany({
+      where: { orderId },
+      select: { amount: true, reparto: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_FILAS + 1,
+    }),
     db.orderItem.findMany({
       where: { orderId },
       // A1e: en orden de `id`, para que el residuo de centavos de `baseSinIvaPorTasa` no dependa del orden de la consulta.
@@ -946,9 +972,13 @@ async function loadOrderCommissionLines(
 
   return {
     lines,
-    orderLevelDiscount: orderLevelDiscountOf(
+    // Encargo 04edc5: con filas que explican la cabecera, las que no son espejo; si no (o cortadas), la regla de siempre.
+    orderLevelDiscount: descuentoDeOrdenDeLaVenta(
       decimalToNumber(order?.discountAmount),
       lines.map(line => line.lineDiscount),
+      // Codex r5: las filas reparten sobre los `total` guardados y esta base parte del precio × cantidad. Si algún renglón no cuadra
+      // (p. ej. precio cambiado a media cuenta: `total` nuevo, `unitPrice` viejo), la regla de siempre.
+      filas.length <= TOPE_DE_FILAS && orderItems.every(renglonCuadraConSuTotal) ? filas : null,
     ),
     // A1e: IVA_INCLUIDO, o DESCONOCIDO sin IVA registrado ⇒ los renglones traen el IVA y «sin IVA» lo separa por tasa; aparte
     // (o DESCONOCIDO con IVA registrado, la regla P12) los renglones ya vienen sin IVA.

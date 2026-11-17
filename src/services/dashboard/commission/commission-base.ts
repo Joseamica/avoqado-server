@@ -35,6 +35,7 @@
  */
 import { Prisma } from '@prisma/client'
 import { splitIvaByRate } from '../../fiscal/ivaMath'
+import { aCentavos, leerReparto } from '../../shared/repartoDescuento'
 import { redondearRepartido } from './repartoPorCobro'
 
 // ============================================
@@ -201,6 +202,47 @@ export interface OrderLineForCommission {
 export function orderLevelDiscountOf(orderDiscountTotal: number, lineDiscounts: number[]): number {
   const lineTotal = lineDiscounts.reduce((sum, d) => sum + d, 0)
   return Math.max(0, roundPesos(orderDiscountTotal - lineTotal))
+}
+
+/** Una fila de descuento de la orden (`OrderDiscount`) como la lee la comisión: su importe y su reparto. */
+export interface FilaDeDescuentoDeLaOrden {
+  amount: Prisma.Decimal | number | string | null
+  reparto: unknown
+}
+
+/**
+ * El descuento de ORDEN de una venta (encargo 04edc5, founder «C»; rediseño tras Codex r1–r4).
+ *
+ * 🔴 La MISMA cortesía se guarda de dos formas según la pantalla: en Mostrador/«Cobrar» el renglón queda bruto, la cabecera la
+ * incluye y una fila ESPEJO la duplica; en Mesas el renglón queda en $0 y ni la cabecera ni ninguna fila la traen. Restarle a la
+ * cabecera TODOS los descuentos de renglón (`orderLevelDiscountOf`) borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y la
+ * comisión por categoría pagaba de más ($55 en vez de $49.50).
+ *
+ * Desde B2 la cabecera es la suma de sus filas, y cada fila dice si es espejo de un descuento de renglón (`reparto.espejo`). Así
+ * que, cuando las filas la explican AL CENTAVO y todas tienen reparto legible, el descuento de orden es la suma de las filas que
+ * NO son espejo: no hace falta adivinar qué renglón está en la cabecera. Adivinarlo (por la forma del renglón o por sus espejos)
+ * se equivocó en casos raros y restaba dos veces (Codex r1–r4). Si las filas no la explican (orden anterior a B2, «Descuento
+ * anterior» sin reparto, delivery, importada, más filas que el tope), la regla de siempre.
+ */
+export function descuentoDeOrdenDeLaVenta(
+  orderDiscountTotal: number,
+  lineDiscounts: number[],
+  filas: FilaDeDescuentoDeLaOrden[] | null,
+): number {
+  const deSiempre = orderLevelDiscountOf(orderDiscountTotal, lineDiscounts)
+  if (!filas || filas.length === 0) return deSiempre
+  let todas = 0
+  let deCuenta = 0
+  for (const fila of filas) {
+    const reparto = leerReparto(fila.reparto)
+    if (!reparto) return deSiempre
+    const centavos = aCentavos(fila.amount)
+    if (centavos < 0) return deSiempre
+    todas += centavos
+    if (!reparto.espejo) deCuenta += centavos
+  }
+  if (todas !== aCentavos(orderDiscountTotal)) return deSiempre
+  return deCuenta / 100
 }
 
 /**
