@@ -88,7 +88,7 @@ describe('D32 etapa 1 · /config en modo sombra', () => {
       'x-tpv-command-token': LLAVE,
       'x-app-version-code': '131',
       'x-app-version-name': '2.20.0',
-      'x-tpv-processor': 'BLUMON',
+      'x-tpv-processor': 'PAX',
     })
     expect(campos).toMatchObject({
       serialNumber,
@@ -97,7 +97,7 @@ describe('D32 etapa 1 · /config en modo sombra', () => {
       puertaLlaveSinAlta: false,
       appVersionCode: '131',
       appVersionName: '2.20.0',
-      tpvProcessor: 'BLUMON',
+      tpvProcessor: 'PAX',
       terminalBrand: 'PAX',
     })
   })
@@ -113,8 +113,27 @@ describe('D32 etapa 1 · /config en modo sombra', () => {
     expect(campos).toMatchObject({ puertaVeredicto: veredicto, puertaHabriaNegado: habriaNegado, puertaLlaveSinAlta: llaveSinAlta })
   })
 
+  it('Codex r5: los encabezados de versión y procesador se acotan antes del log (sin rechazar el pedido)', async () => {
+    const limpio = await pedir(HASH, { 'x-tpv-command-token': LLAVE })
+    for (const raro of [
+      { 'x-app-version-code': '1'.repeat(12000), 'x-app-version-name': 'v'.repeat(12000), 'x-tpv-processor': 'BLUMON' },
+      { 'x-app-version-code': '13a', 'x-app-version-name': LLAVE, 'x-tpv-processor': HASH },
+      { 'x-app-version-code': ['131', '131'], 'x-app-version-name': '2.20.0 <script>', 'x-tpv-processor': 'pax' },
+    ]) {
+      const { res, campos } = await pedir(HASH, { 'x-tpv-command-token': LLAVE, ...raro })
+      expect(res.__status).toBe(200)
+      expect(sinHora(res.__body)).toBe(sinHora(limpio.res.__body))
+      expect(campos.appVersionCode).toBeUndefined()
+      expect(campos.appVersionName).toBeUndefined()
+      expect(campos.tpvProcessor).toBeUndefined()
+      expect(campos.puertaVeredicto).toBe('CON_LLAVE')
+    }
+    const { campos } = await pedir(HASH, { 'x-app-version-code': '131', 'x-app-version-name': '1.4.2-sandbox', 'x-tpv-processor': 'NEXGO' })
+    expect(campos).toMatchObject({ appVersionCode: '131', appVersionName: '1.4.2-sandbox', tpvProcessor: 'NEXGO' })
+  })
+
   it('nunca escribe la llave ni su hash en ningún log', async () => {
-    await pedir(HASH, { 'x-tpv-command-token': LLAVE })
+    await pedir(HASH, { 'x-tpv-command-token': LLAVE, 'x-app-version-name': LLAVE, 'x-tpv-processor': HASH })
     const todo = JSON.stringify(
       ['info', 'warn', 'error', 'debug'].flatMap(n => ((logger as any)[n] as jest.Mock | undefined)?.mock?.calls ?? []),
     )

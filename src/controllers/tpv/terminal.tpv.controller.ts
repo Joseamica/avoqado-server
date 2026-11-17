@@ -593,7 +593,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
 
     // D32 etapa 1 (sombra): anota si la puerta HABRÍA negado por no traer la llave del aparato. No niega ni cambia la
     // respuesta; nunca escribe la llave ni su hash. La versión es sólo para medir (se falsifica), nunca para decidir.
+    // Los encabezados de versión son texto libre del cliente: sólo se anotan si tienen la forma que manda la TPV (Codex r5).
     const headers = req.headers ?? {}
+    const acotado = (valor: unknown, forma: RegExp) => (typeof valor === 'string' && forma.test(valor) ? valor : undefined)
     const puerta = veredictoPuerta(terminal.commandTokenHash, headers['x-tpv-command-token'])
     logger.info('[Terminal Config] Successfully fetched config', {
       terminalId: terminal.id,
@@ -605,9 +607,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       puertaVeredicto: puerta.veredicto,
       puertaHabriaNegado: puerta.habriaNegado,
       puertaLlaveSinAlta: puerta.llaveSinAlta,
-      appVersionCode: headers['x-app-version-code'],
-      appVersionName: headers['x-app-version-name'],
-      tpvProcessor: headers['x-tpv-processor'],
+      appVersionCode: acotado(headers['x-app-version-code'], /^\d{1,9}$/),
+      appVersionName: acotado(headers['x-app-version-name'], /^[\w.+-]{1,32}$/),
+      tpvProcessor: acotado(headers['x-tpv-processor'], /^(PAX|NEXGO)$/),
       terminalBrand: terminal.brand,
     })
 
