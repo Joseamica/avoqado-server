@@ -3703,8 +3703,12 @@ router.get(
  *                 description: Lo genera la terminal UNA vez por declaración; el replay con el mismo id es idempotente
  *               statement:
  *                 type: string
- *                 enum: [NO_INSTRUMENT_PRESENTED, NO_BANK_TRACE_AFTER_WINDOW]
+ *                 enum: [NO_INSTRUMENT_PRESENTED, NO_BANK_TRACE_AFTER_WINDOW, UNCHARGED_VERIFIED]
  *                 description: >
+ *                   `UNCHARGED_VERIFIED` (D22, 17-nov) = el CAJERO revisó la terminal y no se cobró. Sólo en un Pago rápido
+ *                   (sin solicitud del POS: con ella, 409 ATTEMPT_NOT_ELIGIBLE), con el permiso `payments:reconcile-uncharged`
+ *                   y con `amountCents`/`tipCents` obligatorios. Mismo veto de dinero; queda en la bitácora como
+ *                   TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED.
  *                   `NO_BANK_TRACE_AFTER_WINDOW` (ronda 20, 23-sep) = la TERMINAL, no una persona: esperó el aviso del banco
  *                   y no llegó. Sólo en un Pago rápido (sin solicitud del POS), sin `supervisorPin`, sin pedir permiso de
  *                   declarar, y sólo donde el aviso del banco del comercio de ESE cobro (`merchantAccountId`) está
@@ -3715,6 +3719,12 @@ router.get(
  *                 description: >
  *                   Ronda 21. Obligatorio con `NO_BANK_TRACE_AFTER_WINDOW`: el comercio con el que se hizo ese cobro. Tiene
  *                   que ser AngelPay y del negocio; si no, 409 ATTEMPT_NOT_ELIGIBLE.
+ *               amountCents:
+ *                 type: integer
+ *                 description: D22. Obligatorio con `UNCHARGED_VERIFIED` y prohibido con los otros dos — el monto del cobro según la terminal, en centavos
+ *               tipCents:
+ *                 type: integer
+ *                 description: D22. Igual que `amountCents`, para la propina
  *               statementVersion:
  *                 type: integer
  *                 enum: [1]
