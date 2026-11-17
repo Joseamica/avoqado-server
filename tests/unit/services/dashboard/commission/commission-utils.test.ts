@@ -432,7 +432,7 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
     ({ id, unitPrice, quantity: 1, total, discountAmount, taxAmount: 0, product: { categoryId }, ...extra }) as Renglon
   /** El reparto que deja `sincronizarRepartos`: centavos por renglón. */
   const fila = (renglones: Record<string, number>, espejo = false) => ({
-    reparto: { v: 1, alcance: espejo ? 'DIRIGIDO' : 'CUENTA', conPromociones: false, espejo, renglones },
+    reparto: { v: 1, alcance: espejo ? 'DIRIGIDO' : 'CUENTA', conPromociones: espejo ? null : false, espejo, renglones },
   })
   const montar = (renglones: Renglon[], cabecera: number, filas: unknown[] = []) => {
     ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue(renglones)
@@ -516,6 +516,45 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       ])
       expect(await calculateCategoryFilteredAmount('o', ['combos'], CONFIG_DEFAULT)).toBe(40)
       expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+    })
+
+    describe('🔴 Codex r1: un combo regalado por `compItems` de la TPV sí está en la cabecera (tiene su espejo)', () => {
+      // 2 bebidas de $100 en 2×1 (renglón neto $100) + Café $100. La TPV regala el combo: `discountAmount` = su total ($100),
+      // la cabecera suma $100 y la fila COMP espejo lo duplica. Por la forma, el renglón parecía «ya neto» y el café perdía
+      // la mitad de su base ($50). Con el espejo: el café comisiona sus $100, como antes.
+      const combo = () => r('a-combo', 100, 100, 100, 'bebidas', { quantity: 2, isCortesia: true, orderPromotionId: 'promo-2x1' })
+      const espejoDelCombo = {
+        type: 'COMP',
+        isComp: true,
+        discountId: null,
+        appliedToItemIds: ['a-combo'],
+        ...fila({ 'a-combo': 10000 }, true),
+      }
+
+      it('el café pagado completo comisiona $100 (la regla por forma daba $50)', async () => {
+        montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 100, [espejoDelCombo])
+        expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+        expect(await calculateLeftoverAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(100)
+      })
+
+      it('con 10 % de cuenta repartido sólo al café: $90 (la regla por forma daba $45)', async () => {
+        montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 110, [espejoDelCombo, fila({ 'c-cafe': 1000 })])
+        expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(90)
+      })
+
+      it('el mismo combo regalado desde Mesas (renglón en $0, sin fila) deja al café en $100', async () => {
+        montar([{ ...combo(), total: 0 }, r('c-cafe', 100, 100, 0, 'cafes')], 0)
+        expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+      })
+    })
+
+    it('una fila espejo de la forma VIEJA (sin reparto: descuento de catálogo ligado al renglón) también cuenta', async () => {
+      // Coca $25 con $5 de su descuento de catálogo (renglón bruto) + Café $30; la cabecera trae los $5. Fila anterior a B2.
+      montar([r('a-coca', 25, 25, 5, 'bebidas', { appliedDiscountId: 'd-5' } as Partial<Renglon>), r('c-cafe', 30, 30, 0, 'cafes')], 5, [
+        { type: 'FIXED_AMOUNT', isComp: false, discountId: 'd-5', appliedToItemIds: ['a-coca'], reparto: null },
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(20)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(30)
     })
 
     it('si los repartos no explican la cabecera (descuento viejo sin reparto), vuelve al prorrateo de siempre', async () => {

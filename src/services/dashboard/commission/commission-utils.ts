@@ -36,6 +36,7 @@ import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro
 import { validarTasa } from './tasasDelEsquema'
 import { importePorPesoCents, importePorPesoViejoCents } from '../../shared/importePorPeso'
 import { isItemLevelDiscount, lineOrderDiscount } from '../lineRevenue'
+import { renglonesConEspejo } from '../../shared/repartoDescuento'
 
 // ============================================
 // Type Definitions
@@ -895,24 +896,32 @@ export async function findActiveCommissionConfigs(
 }
 
 /**
- * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»). La regla de los reportes:
+ * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»; Codex r1).
  *
- * - la cortesía de Mesas (`isCortesia` con total $0, `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`) ⇒ NO;
- * - un renglón ya neto de su descuento (`isItemLevelDiscount` de `lineRevenue.ts`: un combo, una promoción) ⇒ NO;
- * - lo demás (Mostrador, «Cobrar», un descuento de catálogo por renglón: renglón bruto) ⇒ SÍ, como siempre.
- *
- * Sin `total` en la lectura no se sabe: SÍ, lo de siempre.
+ * - **La orden tiene filas de descuento** (todo lo de B2 en adelante): la cabecera es la suma de sus filas, así que la trae sólo
+ *   si una fila la DUPLICA (espejo; `renglonesConEspejo`, la misma pregunta que `conservarDescuentoHistorico`). La cortesía de
+ *   Mostrador/«Cobrar» y la de `compItems` de la TPV tienen su espejo; la de Mesas (renglón en $0) y el regalo de un combo no.
+ *   Por la forma del renglón no se puede: un combo regalado por `compItems` (2 × $100 en 2×1, total $100, descuento $100) parece
+ *   «ya neto» y sí está en la cabecera (Codex r1).
+ * - **Sin filas** (orden anterior a B2, delivery, importada): por la forma del renglón, con la regla de los reportes —la cortesía
+ *   de Mesas (`isCortesia` con total $0, `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`) y un renglón ya neto
+ *   (`isItemLevelDiscount` de `lineRevenue.ts`) NO; lo demás, renglón bruto, SÍ—. Sin `total` en la lectura: SÍ, lo de siempre.
  */
-function descuentoDelRenglonEnLaCabecera(item: {
-  total?: Decimal | number | null
-  isCortesia?: boolean | null
-  quantity: number
-  unitPrice: Decimal | number
-  discountAmount?: Decimal | number | null
-  orderPromotionId?: string | null
-  weightQuantity?: Decimal | number | null
-  modifiers?: Array<{ price: Decimal | number; quantity: number }>
-}): boolean {
+function descuentoDelRenglonEnLaCabecera(
+  item: {
+    id: string
+    total?: Decimal | number | null
+    isCortesia?: boolean | null
+    quantity: number
+    unitPrice: Decimal | number
+    discountAmount?: Decimal | number | null
+    orderPromotionId?: string | null
+    weightQuantity?: Decimal | number | null
+    modifiers?: Array<{ price: Decimal | number; quantity: number }>
+  },
+  filas: { hay: boolean; conEspejo: Set<string> },
+): boolean {
+  if (filas.hay) return filas.conEspejo.has(item.id)
   if (item.total == null) return true
   if (item.isCortesia === true && Number(item.total) === 0) return false
   return !isItemLevelDiscount({ ...item, total: item.total })
@@ -955,6 +964,7 @@ async function loadOrderCommissionLines(
         id: true,
         isCortesia: true,
         orderPromotionId: true,
+        appliedDiscountId: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
@@ -964,9 +974,15 @@ async function loadOrderCommissionLines(
     db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
     // Las filas de descuento de UNA orden (unas cuantas). El tope sólo protege: si cortara, sus partes ya no cuadran con la
     // cabecera y `descuentoDeOrdenDeLaVenta` vuelve al prorrateo.
-    db.orderDiscount.findMany({ where: { orderId }, select: { reparto: true }, orderBy: { id: 'asc' }, take: 500 }),
+    db.orderDiscount.findMany({
+      where: { orderId },
+      select: { type: true, isComp: true, discountId: true, appliedToItemIds: true, reparto: true },
+      orderBy: { id: 'asc' },
+      take: 500,
+    }),
   ])
 
+  const espejos = { hay: filas.length > 0, conEspejo: renglonesConEspejo(filas, orderItems) }
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
     // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
     gross: importeDelRenglon(item),
@@ -974,7 +990,7 @@ async function loadOrderCommissionLines(
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
     taxRate: tasaDelRenglon(item),
-    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item),
+    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item, espejos),
     parteDeLasFilas: lineOrderDiscount(item, filas),
   }))
 

@@ -325,10 +325,11 @@ describe('calculateCategoryFilteredAmount', () => {
         total: true,
         taxAmount: true,
         discountAmount: true,
-        // Encargo 04edc5: ¿la cabecera trae el descuento del renglón? (cortesía de Mesas, combo) y su parte de los repartos.
+        // Encargo 04edc5: ¿la cabecera trae el descuento del renglón? (su fila espejo, o la forma sin filas) y su parte de los repartos.
         id: true,
         isCortesia: true,
         orderPromotionId: true,
+        appliedDiscountId: true,
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
         product: { select: { categoryId: true, taxRate: true, ivaTratamiento: true } },
