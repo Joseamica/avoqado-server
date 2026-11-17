@@ -235,10 +235,14 @@ export const planParamsSchema = z.object({
 
 export type PlanParamsDto = z.infer<typeof planParamsSchema.shape.params>
 
+// Plan Básico (Task 9, R7): `BASIC_PLAN` marca «Terminar mi Pro al acabar el periodo»; el servidor sólo lo deja en el último
+// periodo con descuento. Ausente = «Cancelar plan» de siempre.
+const planEndPurpose = z.enum(['BASIC_PLAN'], { errorMap: () => ({ message: 'El motivo de terminar el plan no es válido.' }) }).optional()
+
 // Schema for POST /venues/:venueId/plan/cancel. The body is optional: dashboards that predate the reason send none.
 export const cancelPlanSchema = z.object({
   params: planParamsSchema.shape.params,
-  body: z.object(cancellationFields).default({}),
+  body: z.object({ ...cancellationFields, purpose: planEndPurpose }).default({}),
 })
 
 // Schema for creating a Stripe Checkout session for a base plan (Pro o Premium).
@@ -286,6 +290,7 @@ export const downgradeToFreeSchema = z.object({
       })
       .default([]),
     ...cancellationFields,
+    purpose: planEndPurpose,
   }),
 })
 

@@ -11,7 +11,7 @@ import { modalidadDePrueba } from '@/services/billing/modalidadDePrueba'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { derivePlanState, PAID_PLAN_TIER_CODES, IVA_RATE, type PlanStateValue } from '@/services/access/basePlan.service'
 import { getVenueBaseTier } from '@/services/access/basePlan.service'
 import { daAcceso } from '@/services/access/ventanaDeAcceso'
@@ -512,6 +512,36 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
 /** What cancelling carries: the owner's reason (optional) and who asked. */
 export interface CancelPlanInput extends CancellationInput {
   staffId?: string
+  /**
+   * Plan Básico (Task 9, R7): `BASIC_PLAN` = «Terminar mi Pro al acabar el periodo» de «Tu plan». Sólo esa acción lleva el
+   * candado del último periodo con descuento; «Cancelar plan» de siempre (sin `purpose`) no cambia.
+   */
+  purpose?: 'BASIC_PLAN'
+}
+
+/**
+ * R7: terminar Pro para pasar al Básico sólo en el ÚLTIMO periodo con descuento (`isLastDiscountedPeriod`, la misma regla de
+ * `basicOffer.canEndProNow`). Un descuento vigente que no se entiende es desconocido y también se rechaza. Lectura ESTRICTA de
+ * Stripe: si no contesta, el error sube y no se cancela nada. Sin plan o sin suscripción, `setCancelIntent` da su mensaje.
+ */
+async function assertProCanEndForBasic(venueId: string): Promise<void> {
+  const vf = await findPlanProFeature(venueId)
+  if (!vf?.stripeSubscriptionId) return
+  const sub = await retrievePlanSubscription(vf.stripeSubscriptionId)
+  const desconocido = sub.hasActiveDiscount && !sub.descuento
+  if (!desconocido && isLastDiscountedPeriod(sub, new Date())) return
+  const hasta = sub.descuento?.endsAt ?? null
+  let fecha: string | null = null
+  if (hasta) {
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    fecha = new Intl.DateTimeFormat('es-MX', { dateStyle: 'long', timeZone: venue?.timezone || 'America/Mexico_City' }).format(hasta)
+  }
+  throw new ConflictError(
+    fecha
+      ? `Tu descuento sigue hasta el ${fecha}. Te avisaremos antes para que elijas el Básico.`
+      : 'Tu descuento sigue vigente. Te avisaremos antes para que elijas el Básico.',
+    'BASIC_PLAN_DISCOUNT_ACTIVE',
+  )
 }
 
 /** Shared cancel/reactivate core: validate plan + Stripe sub, flip the flag, return fresh state. */
@@ -554,6 +584,7 @@ async function setCancelIntent(venueId: string, cancel: boolean, input: CancelPl
       subscriptionId: vf.stripeSubscriptionId,
       cancelAtPeriodEnd: cancel,
       ...(cancel ? cancellationAuditData(input) : {}),
+      ...(cancel && input.purpose ? { purpose: input.purpose } : {}),
     },
   })
 
@@ -569,6 +600,7 @@ async function setCancelIntent(venueId: string, cancel: boolean, input: CancelPl
 
 /** Schedule cancellation at period end (venue stays entitled until currentPeriodEnd), with the owner's reason if given. */
 export async function cancelPlan(venueId: string, input: CancelPlanInput = {}): Promise<PlanState> {
+  if (input.purpose === 'BASIC_PLAN') await assertProCanEndForBasic(venueId)
   return setCancelIntent(venueId, true, input)
 }
 
