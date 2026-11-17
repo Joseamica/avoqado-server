@@ -417,9 +417,15 @@ export async function checkInByIdentifier(args: {
 
   // Codex r3 #3: el recibo de la cola SIEMPRE gana. Si otra entrega del mismo `opId` registró la llegada mientras ésta buscaba,
   // se contesta «ya registrada» con SU reserva, nunca un 404/409 que la cola de ANDROID mandaría a cuarentena.
+  // Codex r4 #1: con el candado de la operación (`candadoDeLaOperacion`), esta lectura ESPERA a que otra entrega del mismo `opId`
+  // que está guardando su recibo termine; sin él, un recibo aún sin confirmar no se ve y se contestaba 409 antes de tiempo.
   const reciboOError = async (err: unknown): Promise<ConsumeChallengeResult> => {
     if (args.opId) {
-      const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { venueId: true, reservationId: true } })
+      const opId = args.opId
+      const previa = await prisma.$transaction(async tx => {
+        await candadoDeLaOperacion(tx, opId)
+        return tx.kioskCheckInOp.findUnique({ where: { opId }, select: { venueId: true, reservationId: true } })
+      })
       if (previa && previa.venueId === args.venueId) return yaRegistrada(args.venueId, previa.reservationId)
     }
     throw err
@@ -456,6 +462,9 @@ export async function checkInByIdentifier(args: {
       if (!fila || !(phonesMatch(raw, fila.guestPhone) || phonesMatch(raw, fila.customerPhone))) throw notFound()
     }
     if (args.opId) {
+      // Codex r4 #1: el candado de la operación se queda hasta confirmar; otra entrega del mismo `opId` que vaya a rechazar,
+      // espera aquí y ve el recibo (`reciboOError`).
+      await candadoDeLaOperacion(tx, args.opId)
       const n = await tx.$executeRaw`
         INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
         VALUES (${args.opId}, ${args.venueId}, ${reservation.id})
@@ -550,6 +559,10 @@ export async function checkInByIdentifier(args: {
 
 /** Otra petición con el mismo `opId` ya dejó su recibo: ésta no escribe nada. */
 class OpYaRegistrada extends Error {}
+
+/** Codex r4 #1: un candado por operación de la cola (sin Redis): dura hasta que su transacción confirma o se deshace. */
+const candadoDeLaOperacion = (tx: Prisma.TransactionClient, opId: string) =>
+  tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kiosk-op:${opId}`}, 0))::text`
 
 /**
  * D4 (16-nov, full-testing de asistencia verificada): la reserva del teléfono tecleado, comparando el número COMPLETO con su lada.

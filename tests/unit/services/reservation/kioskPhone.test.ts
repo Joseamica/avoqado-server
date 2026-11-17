@@ -268,6 +268,16 @@ describe('Teléfono tecleado en el kiosco', () => {
       const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-doble' })
       expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-primera' })
       expect(checkInReservation).not.toHaveBeenCalled()
+      // Codex r4 #1: antes de releer el recibo toma el candado de ESA operación (espera a otra entrega que lo esté guardando).
+      const candados = (prismaMock.$queryRaw as jest.Mock).mock.calls.filter(c => c[0].join('?').includes('pg_advisory_xact_lock'))
+      expect(candados.map(c => c[1])).toContain('kiosk-op:fila-doble')
+    })
+
+    it('el recibo se escribe con el candado de su operación tomado (la otra entrega espera, no rechaza)', async () => {
+      await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-c' })
+      const sqls = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(c => c[0].join('?'))
+      expect(sqls.findIndex(q => q.includes('pg_advisory_xact_lock'))).toBeGreaterThan(-1)
+      expect(prismaMock.$executeRaw).toHaveBeenCalled()
     })
 
     // Codex r2 #2: con el tope lleno no se sabe si hay otra persona fuera de las 20: no se adivina.
