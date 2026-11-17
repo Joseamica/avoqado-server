@@ -92,6 +92,8 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-in
  */
 export const payIn = async (req: Request, res: Response, next: NextFunction) => {
+  // Encargo 921513 (Codex r4/r5): la llegada se toma al ENTRAR, antes de cualquier consulta: es el ancla de «llegada − espera».
+  const llegada = new Date()
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
@@ -109,6 +111,10 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
       note,
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
+      // Encargo 921513: la hora del aparato (ISO o epoch ms) y cuánto esperó en su cola; el servicio la acota a la vida de la caja.
+      createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
+      edadMs: typeof req.body.edadMs === 'number' ? req.body.edadMs : undefined,
+      llegada,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -156,6 +162,8 @@ export const devolverRetiroYaRegistrado = async (req: Request, res: Response, ne
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-out
  */
 export const payOut = async (req: Request, res: Response, next: NextFunction) => {
+  // Encargo 921513 (Codex r4/r5): la llegada se toma al ENTRAR, antes de cualquier consulta: es el ancla de «llegada − espera».
+  const llegada = new Date()
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
@@ -180,6 +188,10 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       localId,
       sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
       authorizedByStaffVenueId: autorizo,
+      // Encargo 921513: la hora del aparato (ISO o epoch ms) y cuánto esperó en su cola; el servicio la acota a la vida de la caja.
+      createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
+      edadMs: typeof req.body.edadMs === 'number' ? req.body.edadMs : undefined,
+      llegada,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event, authorizedBy })
