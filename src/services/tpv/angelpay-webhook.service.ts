@@ -638,6 +638,7 @@ async function liberarPorRechazo(args: {
   return r.reason === 'ERROR' ? 'REINTENTAR' : 'OK'
 }
 
+/** El traductor de AngelPay: lo propio de su aviso (llave, estado, importe, serial, huella) y el núcleo compartido. */
 async function confirmarPorVinculo(args: {
   payload: AngelPayWebhookPayload
   eventLogId: string
@@ -648,7 +649,6 @@ async function confirmarPorVinculo(args: {
   propietario?: Record<string, unknown>
 }): Promise<AngelPayWebhookResult | null> {
   const { payload, eventLogId, rawEventId, merchantAccount, receiverVenueId, correlationId } = args
-  const propietario = args.propietario ?? {}
   const attemptId = typeof payload.payload.integratorReference === 'string' ? payload.payload.integratorReference.trim() : ''
   if (!attemptId) return null
   // Codex R14-3: la MISMA clasificación que el receptor, el backfill y S6 (`"  Approved  "` es APROBADO en todas partes).
@@ -658,11 +658,89 @@ async function confirmarPorVinculo(args: {
   // de liberación directamente y nunca el camino del webhook. El enganche vive donde sí se alcanza.
   if (clasificarEstadoBancario(payload.payload.status) !== 'APROBADO') return null
 
+  const importe = Number(payload.payload.amount)
+  return confirmarAvisoPorVinculo({
+    etiqueta: 'AngelPay',
+    attemptId,
+    eventLogId,
+    receiverVenueId,
+    merchantAccountId: merchantAccount.id,
+    terminalSerial: typeof payload.payload.terminalSerial === 'string' ? payload.payload.terminalSerial : null,
+    importeCentavos: Number.isInteger(importe) ? importe : null,
+    datosDelRegistro: {
+      referenceNumber: typeof payload.payload.transactionId === 'string' ? payload.payload.transactionId : undefined,
+    },
+    huella: {
+      clave: 'angelpayWebhook',
+      datos: {
+        eventId: rawEventId,
+        transactionId: payload.payload.transactionId ?? null,
+        integratorReference: attemptId,
+        terminalSerial: payload.payload.terminalSerial ?? null,
+        timestamp: payload.payload.timestamp ?? null,
+        status: payload.payload.status ?? null,
+      },
+    },
+    propietario: args.propietario ?? {},
+    correlationId,
+    alSellar: async () => {
+      await prisma.merchantAccount.update({ where: { id: merchantAccount.id }, data: { angelpayWebhookLastReceivedAt: new Date() } })
+    },
+  })
+}
+
+/**
+ * Un aviso del procesador (AngelPay o Blumon) ya traducido: aprobado y con la llave de un intento. Lo que no depende de la
+ * forma del aviso vive en `confirmarAvisoPorVinculo`; cada procesador sólo traduce.
+ */
+export interface AvisoAprobadoDelIntento {
+  /** Sólo para el texto del log. */
+  etiqueta: 'AngelPay' | 'Blumon'
+  /** La llave canónica del intento. */
+  attemptId: string
+  eventLogId: string
+  /** Venue de la afiliación que recibió el aviso. */
+  receiverVenueId: string | null
+  /** La afiliación que cobró. */
+  merchantAccountId: string
+  /** Serial que dice el aviso; `null` = no lo dice. */
+  terminalSerial: string | null
+  /** `null` = ilegible ⇒ AMOUNT_MISMATCH. */
+  importeCentavos: number | null
+  /** Se fusionan en el `paymentData` del registrador (mismos nombres que su entrada). */
+  datosDelRegistro: {
+    referenceNumber?: string
+    authorizationNumber?: string
+    cardBrand?: string
+    blumonOperationNumber?: number
+    blumonSerialNumber?: string
+  }
+  /**
+   * La huella en `Payment.processorData`: `datos` va bajo `clave`, y el núcleo le agrega `receivedAt` (tras el registrador,
+   * como siempre) y `firstConfirmer`. `extra` son llaves sueltas al primer nivel (p. ej. `reversoIncierto`).
+   */
+  huella: { clave: 'angelpayWebhook' | 'blumonWebhook'; datos: Record<string, unknown>; extra?: Record<string, unknown> }
+  /** `{ claimToken }` del dueño del evento, o `{}`. */
+  propietario: Record<string, unknown>
+  correlationId?: string
+  /** Se corre justo después de sellar el evento como dueño (AngelPay: `angelpayWebhookLastReceivedAt`). */
+  alSellar?: () => Promise<void>
+}
+
+/**
+ * El núcleo «el aviso aprobado confirma el cobro por vínculo», en este orden: vínculo → venue → serial → solicitud →
+ * importe exacto → cajero → registrador → retenciones → huella → sello del evento → `alSellar` → aviso al POS si fue el
+ * PRIMER confirmador. `null` = no aplica: el llamador sigue con el flujo de siempre.
+ */
+export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): Promise<AngelPayWebhookResult | null> {
+  const { etiqueta, attemptId, eventLogId, receiverVenueId, propietario, correlationId } = aviso
+  const merchantAccount = { id: aviso.merchantAccountId }
+
   const { terminalPaymentService } = await import('../terminal-payment.service')
   const link = await terminalPaymentService.findAttemptLink(attemptId)
   if (!link) return null
   if (!receiverVenueId || link.venueId !== receiverVenueId) {
-    logger.error('🚨 [AngelPay webhook] El vínculo del intento pertenece a OTRO venue que el merchant del secreto — no se crea dinero', {
+    logger.error(`🚨 [${etiqueta} webhook] El vínculo del intento pertenece a OTRO venue que el merchant del secreto — no se crea dinero`, {
       correlationId,
       attemptId,
       linkVenueId: link.venueId,
@@ -677,10 +755,10 @@ async function confirmarPorVinculo(args: {
   }
   // Codex R1 (P1-2): si el webhook FIRMADO dice en qué terminal se cobró, tiene que ser la del vínculo. Una contradicción
   // conserva la evidencia y alarma, pero NO crea ni cierra dinero para esa solicitud.
-  const serialDelWebhook = typeof payload.payload.terminalSerial === 'string' ? payload.payload.terminalSerial.trim() : ''
+  const serialDelWebhook = aviso.terminalSerial?.trim() ?? ''
   if (serialDelWebhook && terminalIdentityKey(serialDelWebhook) !== terminalIdentityKey(link.terminalId)) {
     logger.error(
-      '🚨 [AngelPay webhook] El serial del webhook CONTRADICE la terminal del vínculo — evidencia conservada, no se crea dinero',
+      `🚨 [${etiqueta} webhook] El serial del webhook CONTRADICE la terminal del vínculo — evidencia conservada, no se crea dinero`,
       {
         correlationId,
         attemptId,
@@ -728,10 +806,10 @@ async function confirmarPorVinculo(args: {
   if (!request) return null
 
   const esperado = request.amountCents + (request.tipCents ?? 0)
-  const recibido = Number(payload.payload.amount)
-  if (!Number.isInteger(recibido) || recibido !== esperado) {
+  const recibido = aviso.importeCentavos
+  if (recibido === null || recibido !== esperado) {
     logger.error(
-      '🚨 [AngelPay webhook] Importe distinto del contrato de la solicitud (base + propina) — no se crea dinero ni se inventa propina',
+      `🚨 [${etiqueta} webhook] Importe distinto del contrato de la solicitud (base + propina) — no se crea dinero ni se inventa propina`,
       {
         correlationId,
         attemptId,
@@ -782,7 +860,7 @@ async function confirmarPorVinculo(args: {
     source: 'TPV',
     splitType: 'FULLPAYMENT',
     staffId,
-    referenceNumber: typeof payload.payload.transactionId === 'string' ? payload.payload.transactionId : undefined,
+    ...aviso.datosDelRegistro,
     idempotencyKey: attemptId,
     merchantAccountId: merchantAccount.id,
     paidProductsId: [],
@@ -808,7 +886,7 @@ async function confirmarPorVinculo(args: {
     ) as { id: string } & Record<string, unknown>
   } catch (error) {
     const mensaje = error instanceof Error ? error.message : String(error)
-    logger.error('🚨 [AngelPay webhook] El registrador no pudo crear el Payment del webhook — el evento queda PENDING para reintento', {
+    logger.error(`🚨 [${etiqueta} webhook] El registrador no pudo crear el Payment del webhook — el evento queda PENDING para reintento`, {
       correlationId,
       attemptId,
       requestId: request.requestId,
@@ -898,17 +976,10 @@ async function confirmarPorVinculo(args: {
   }
 
   // La misma huella del webhook que deja el camino MATCHED, fusionada sobre el JSON VIGENTE (nunca desde una lectura vieja).
+  // H3: `firstConfirmer` va dentro de la llave del procesador; `receivedAt` se calcula aquí, después del registrador.
   const huella = {
-    angelpayWebhook: {
-      receivedAt: new Date().toISOString(),
-      eventId: rawEventId,
-      transactionId: payload.payload.transactionId ?? null,
-      integratorReference: attemptId,
-      terminalSerial: payload.payload.terminalSerial ?? null,
-      timestamp: payload.payload.timestamp ?? null,
-      status: payload.payload.status ?? null,
-      firstConfirmer: primerConfirmador,
-    },
+    ...aviso.huella.extra,
+    [aviso.huella.clave]: { receivedAt: new Date().toISOString(), ...aviso.huella.datos, firstConfirmer: primerConfirmador },
   }
   await prisma.$executeRaw`
     UPDATE "Payment"
@@ -930,7 +1001,7 @@ async function confirmarPorVinculo(args: {
     },
     { attemptId, requestId: request.requestId, paymentId: resultado.id },
   )
-  await prisma.merchantAccount.update({ where: { id: merchantAccount.id }, data: { angelpayWebhookLastReceivedAt: new Date() } })
+  if (aviso.alSellar) await aviso.alSellar()
 
   if (primerConfirmador) {
     await terminalPaymentService
@@ -945,10 +1016,13 @@ async function confirmarPorVinculo(args: {
         receipt: ligaDelRecibo(resultado.digitalReceipt),
       })
       .catch(error =>
-        logger.error('⚠️ [AngelPay webhook] No se pudo avisar al POS/terminal tras confirmar (el resultado durable ya está en la fila)', {
-          requestId: request.requestId,
-          error: String(error),
-        }),
+        logger.error(
+          `⚠️ [${etiqueta} webhook] No se pudo avisar al POS/terminal tras confirmar (el resultado durable ya está en la fila)`,
+          {
+            requestId: request.requestId,
+            error: String(error),
+          },
+        ),
       )
   }
   const action: AngelPayWebhookAction = esSegundaCaptura
@@ -958,7 +1032,7 @@ async function confirmarPorVinculo(args: {
       : primerConfirmador
         ? 'CONFIRMED'
         : 'MATCHED'
-  logger.info(`✅ [AngelPay webhook] ${action} por vínculo`, {
+  logger.info(`✅ [${etiqueta} webhook] ${action} por vínculo`, {
     correlationId,
     attemptId,
     requestId: request.requestId,
@@ -1118,7 +1192,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
  * serializar, con 🚨 — perder el evento durable del banco sería peor que una decisión de tarifa no serializada (que además queda
  * visible: el snapshot del Payment y la captura del evento se pueden contrastar). Sin llave de intento no hay con quién serializar.
  */
-async function ingresarEventoDelIntento(
+export async function ingresarEventoDelIntento(
   llaveDelIntento: string | null,
   insertar: (tx: Prisma.TransactionClient, marca?: MarcaDeIngresoSinCandado) => Promise<{ id: string }>,
 ): Promise<string> {
@@ -1293,7 +1367,7 @@ function esEsperaDeCandadoVencida(error: unknown): boolean {
   return codigo === '55P03' || /55P03|lock timeout|canceling statement due to lock timeout/i.test(texto)
 }
 
-async function capturarTarifaAlIngreso(venueId: string, merchantAccountId: string): Promise<TarifaCapturadaAlIngreso> {
+export async function capturarTarifaAlIngreso(venueId: string, merchantAccountId: string): Promise<TarifaCapturadaAlIngreso> {
   const ahora = new Date()
   try {
     return await tarifaCongeladaDeLaAfiliacion(venueId, merchantAccountId, ahora)
