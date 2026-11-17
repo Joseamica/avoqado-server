@@ -403,3 +403,127 @@ describe('A1e · «sin IVA» con la regla de la póliza contable (D5 enmendada, 
     expect(r.baseAmount).toBe(200)
   })
 })
+
+/**
+ * 🔴 hz:nube0000:na966167 / hz:8024bc1c:D41 (encargo 04edc5, founder «C», 16-nov): la MISMA cortesía se guarda de dos formas
+ * según la pantalla, y la comisión por categoría y el sobrante tienen que dar lo mismo con las dos.
+ *
+ *   · Mostrador / «Cobrar» (ANDROID y TPV): renglón a precio LLENO, `discountAmount` = lo regalado y la cabecera lo INCLUYE
+ *     (subtotal 75, descuento 25.50), con su fila COMP espejo.
+ *   · Mesas (`comp-item.mobile.service.ts`): renglón en $0 con `isCortesia`, `discountAmount` = precio, y la cabecera NO lo
+ *     incluye (subtotal 55, descuento 5.50).
+ *
+ * Restar a la cabecera TODOS los descuentos de renglón (lo de antes) borraba el 10 % de cuenta en Mesas: 5.50 − 20 < 0 ⇒ 0, y
+ * se comisionaban $55 en vez de $49.50. Coca $25 + Agua $20 de cortesía + Café $30, 10 % de cuenta (sobre $55 = $5.50).
+ */
+describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (encargo 04edc5)', () => {
+  type Renglon = {
+    id: string
+    unitPrice: number
+    quantity: number
+    total: number
+    discountAmount: number
+    taxAmount: number
+    isCortesia?: boolean
+    orderPromotionId?: string | null
+    product: { categoryId: string } | null
+  }
+  const r = (id: string, unitPrice: number, total: number, discountAmount: number, categoryId: string, extra: Partial<Renglon> = {}) =>
+    ({ id, unitPrice, quantity: 1, total, discountAmount, taxAmount: 0, product: { categoryId }, ...extra }) as Renglon
+  /** El reparto que deja `sincronizarRepartos`: centavos por renglón. */
+  const fila = (renglones: Record<string, number>, espejo = false) => ({
+    reparto: { v: 1, alcance: espejo ? 'DIRIGIDO' : 'CUENTA', conPromociones: false, espejo, renglones },
+  })
+  const montar = (renglones: Renglon[], cabecera: number, filas: unknown[] = []) => {
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue(renglones)
+    orden(cabecera)
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockResolvedValue(filas)
+  }
+  // Coca y Agua en «bebidas», Café en «cafés».
+  const mesas = () => [
+    r('a-coca', 25, 25, 0, 'bebidas'),
+    r('b-agua', 20, 0, 20, 'bebidas', { isCortesia: true }),
+    r('c-cafe', 30, 30, 0, 'cafes'),
+  ]
+  const mostrador = () => [
+    r('a-coca', 25, 25, 0, 'bebidas'),
+    r('b-agua', 20, 20, 20, 'bebidas', { isCortesia: true }),
+    r('c-cafe', 30, 30, 0, 'cafes'),
+  ]
+  const DIEZ_POR_CIENTO = fila({ 'a-coca': 250, 'c-cafe': 300 })
+  const CORTESIA_ESPEJO = fila({ 'b-agua': 2000 }, true)
+
+  afterEach(() => {
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockResolvedValue([])
+  })
+
+  describe('sin repartos (orden vieja): prorrateo, pero sin perder el 10 %', () => {
+    it('🔴 Mesas: la cuenta entera comisiona $49.50 (antes $55)', async () => {
+      montar(mesas(), 5.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    })
+
+    it('Mostrador: $49.50, igual que antes', async () => {
+      montar(mostrador(), 25.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    })
+
+    it('🔴 por categoría, las dos formas dan lo mismo: bebidas $22.50 y cafés $27 (suman $49.50)', async () => {
+      for (const [renglones, cabecera] of [
+        [mesas(), 5.5],
+        [mostrador(), 25.5],
+      ] as const) {
+        montar([...renglones], cabecera)
+        expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(22.5)
+        expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+        expect(await calculateLeftoverAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(27)
+      }
+    })
+
+    it('«precio de lista» no cambia: $75 en las dos formas', async () => {
+      montar(mesas(), 5.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(75)
+      montar(mostrador(), 25.5)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(75)
+    })
+
+    it('🔴 un combo (renglón neto, su regalo fuera de la cabecera) tampoco se come el descuento de cuenta', async () => {
+      // Pieza de combo de lista $50 con $10 de su regalo (total neto $40) + Café $30; 10 % de cuenta sólo sobre lo que no es
+      // promoción ($3). La cabecera guarda $3. Antes: 3 − 10 < 0 ⇒ 0 y se comisionaban $70; lo cobrado son $67.
+      montar([r('a-combo', 50, 40, 10, 'combos', { orderPromotionId: 'promo-1' }), r('c-cafe', 30, 30, 0, 'cafes')], 3)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(67)
+    })
+  })
+
+  describe('con repartos (lo de hoy): cada renglón se lleva SU parte, como `lineRevenue`', () => {
+    it('🔴 Mesas: bebidas $22.50, cafés $27, la cuenta $49.50', async () => {
+      montar(mesas(), 5.5, [DIEZ_POR_CIENTO])
+      expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(22.5)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    })
+
+    it('Mostrador (con su espejo de la cortesía): lo mismo', async () => {
+      montar(mostrador(), 25.5, [CORTESIA_ESPEJO, DIEZ_POR_CIENTO])
+      expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(22.5)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
+    })
+
+    it('🔴 combo con 10 % de cuenta: el 10 % cae sólo en el Café, como lo cobró el POS', async () => {
+      montar([r('a-combo', 50, 40, 10, 'combos', { orderPromotionId: 'promo-1' }), r('c-cafe', 30, 30, 0, 'cafes')], 3, [
+        fila({ 'c-cafe': 300 }),
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['combos'], CONFIG_DEFAULT)).toBe(40)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
+    })
+
+    it('si los repartos no explican la cabecera (descuento viejo sin reparto), vuelve al prorrateo de siempre', async () => {
+      // $5.50 de cuenta repartidos + $10 «Descuento anterior» sin reparto: la cabecera dice $15.50.
+      montar(mesas(), 15.5, [DIEZ_POR_CIENTO, { reparto: null }])
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(39.5)
+      // Prorrateo por neto: bebidas 25/55 × 15.50 = 7.045… ⇒ 25 − 7.05 = 17.95.
+      expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(17.95)
+    })
+  })
+})
