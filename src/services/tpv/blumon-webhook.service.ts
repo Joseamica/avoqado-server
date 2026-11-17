@@ -673,10 +673,16 @@ export async function reconcileBlumonEvent(
   // Tarea 6 (hallazgo 7): un evento que entró CON contexto se recupera por el vínculo con la identidad y la tarifa del
   // INGRESO, nunca con la configuración de ahora, y no cae en el emparejamiento débil. Sin contexto guardado nunca crea: un
   // vínculo que llegó después del aviso no tiene identidad ni tarifa acreditadas (lo completa el REST).
+  // Sólo vale el contexto de SU fila: la columna `attemptId` la pone únicamente el ingreso con contexto, y tiene que ser la
+  // misma llave que el contexto y que la referencia del aviso.
   const guardado = contextoGuardado(payload)
   if (guardado) {
-    const r = await confirmarBlumonPorVinculo({ payload, eventLogId, ctx: guardado })
-    if (r) return { ...r, eventLogId }
+    const fila = await prisma.providerEventLog.findUnique({ where: { id: eventLogId }, select: { attemptId: true } })
+    const llave = llaveDeIntento(payload.reference)
+    if (fila?.attemptId && fila.attemptId === guardado.attemptId && guardado.attemptId === llave) {
+      const r = await confirmarBlumonPorVinculo({ payload, eventLogId, ctx: guardado })
+      if (r) return { ...r, eventLogId }
+    }
   }
   const correlationId = `blumon-recon-${eventLogId.slice(-8)}`
   const resolvedScope = ctx.scopeVenueIds ? null : await resolveBlumonScope(payload.serialNumber)
@@ -1262,9 +1268,11 @@ async function attemptPaymentMatch(
 /**
  * Copia del aviso sin el nombre del titular: es lo único que se guarda en `ProviderEventLog.payload`.
  * `bin` y `lastFour` sí se quedan en la base (los usan el emparejamiento y la conciliación a mano).
+ * Tampoco viaja `_avoqado`: es el sello que escribe el SERVIDOR (contexto y tarifa del ingreso, marca 55P03, afiliación
+ * receptora); uno que llegue en el aviso nunca puede hacerse pasar por él.
  */
 export function sinTitular(payload: BlumonWebhookPayload): BlumonWebhookPayload {
-  const { cardHolder: _titular, ...resto } = payload
+  const { cardHolder: _titular, _avoqado: _selloAjeno, ...resto } = payload as BlumonWebhookPayload & { _avoqado?: unknown }
   return resto as BlumonWebhookPayload
 }
 

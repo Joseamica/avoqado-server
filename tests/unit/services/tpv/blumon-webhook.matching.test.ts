@@ -406,6 +406,19 @@ describe('R6 — la base no guarda el titular', () => {
     expect(guardado.payload).toEqual(expect.objectContaining({ lastFour: '1111', bin: '411111' }))
   })
 
+  // Arreglo ronda 1 (T6): el sello `_avoqado` lo escribe sólo el SERVIDOR; uno que traiga el aviso no se guarda en ninguna rama.
+  it.each([
+    ['UNKNOWN_TERMINAL', { serialNumber: '99999999999' }],
+    ['NOT_APPROVED', { codeResponse: '05', descriptionResponse: 'DECLINADA' }],
+    ['PENDING', {}],
+  ])('ProviderEventLog.payload nunca guarda el _avoqado que trae el aviso (%s)', async (_rama, cambios) => {
+    const sello = { contextoDelIngreso: { attemptId: 'a' }, tarifaCongeladaAlIngreso: { pricing: {} }, ingresoSinCandado: { en: 'x' } }
+    await processBlumonPaymentWebhook({ ...conTitular, ...cambios, _avoqado: sello } as typeof conTitular)
+
+    const guardado = mockedEventLogCreate.mock.calls[0][0].data
+    expect(guardado.payload).not.toHaveProperty('_avoqado')
+  })
+
   it('sinTitular no toca el payload original', () => {
     const copia = sinTitular(conTitular)
     expect(copia).not.toHaveProperty('cardHolder')

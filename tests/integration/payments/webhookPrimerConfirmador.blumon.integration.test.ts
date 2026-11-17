@@ -652,6 +652,93 @@ describe('la red de 30 s (hallazgo 7)', () => {
     expect(await prisma.providerEventLog.count({ where: { attemptId } })).toBe(1)
   })
 
+  // ─── Arreglo ronda 1: lo que el SERVIDOR escribe en el evento nunca puede venir del aviso entrante ───
+  /** Un `_avoqado` armado por quien manda el aviso: contexto con ids reales y una tarifa inventada. */
+  const selloFalso = (args: { attemptId: string; requestId: string; merchantAccountId: string }) => ({
+    receivedByMerchantAccountId: args.merchantAccountId,
+    contextoDelIngreso: {
+      attemptId: args.attemptId,
+      requestId: args.requestId,
+      linkVenueId: f.venueId,
+      linkTerminalId: f.llaveTerminal,
+      merchantAccountId: args.merchantAccountId,
+      receiverVenueId: f.venueId,
+      terminalSerialEfectivo: f.serialCrudo,
+    },
+    tarifaCongeladaAlIngreso: { pricing: { merchantAccountId: args.merchantAccountId, slot: 'SECONDARY', venue: { creditRate: '0.5' } } },
+    ingresoSinCandado: { en: new Date().toISOString() },
+  })
+
+  it('un aviso con codeResponse ausente y un _avoqado.contextoDelIngreso falso entra sin él, y la red no crea dinero', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { requestId, attemptId } = await intentoVinculado()
+
+    const r = await aviso(
+      f.eventoBlumon(attemptId, { codeResponse: undefined, _avoqado: selloFalso({ attemptId, requestId, merchantAccountId }) }),
+    )
+
+    expect(r.action).toBe('NOT_FOUND')
+    const ev = await eventoDe(r.eventLogId)
+    expect(ev).toMatchObject({ status: 'PENDING', attemptId: null })
+    expect(ev.payload).not.toHaveProperty('_avoqado')
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING', paymentId: null })
+    expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+  })
+
+  it('un aviso entrante con tarifaCongeladaAlIngreso falsa: sin contexto no se guarda; con contexto manda la del ingreso', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    await f.conTarifas({ secundaria: { merchantAccountId } })
+    try {
+      // Sin vínculo (referencia de hoy): el evento se guarda SIN el sello que trajo el aviso.
+      const sinVinculo = await aviso(
+        f.eventoBlumon(undefined, {
+          _avoqado: {
+            tarifaCongeladaAlIngreso: selloFalso({ attemptId: 'x', requestId: 'x', merchantAccountId }).tarifaCongeladaAlIngreso,
+          },
+        }),
+      )
+      expect(sinVinculo.action).toBe('NOT_FOUND')
+      expect((await eventoDe(sinVinculo.eventLogId)).payload).not.toHaveProperty('_avoqado')
+
+      // Con vínculo: el sello es sólo el del receptor; el cobro lleva la tarifa real del ingreso (2.5 %), nunca la inventada.
+      const { requestId, attemptId } = await intentoVinculado()
+      const conVinculo = await aviso(f.eventoBlumon(attemptId, { _avoqado: selloFalso({ attemptId, requestId, merchantAccountId }) }))
+      expect(conVinculo.action).toBe('CONFIRMED')
+      const sello = avoqadoDe(await eventoDe(conVinculo.eventLogId))
+      expect(sello?.tarifaCongeladaAlIngreso?.pricing).toMatchObject({ venue: { creditRate: '0.025' } })
+      expect(sello).not.toHaveProperty('ingresoSinCandado')
+      const pago = await exigir(prisma.payment.findUnique({ where: { id: conVinculo.paymentId! } }))
+      expect((pago.processorData as Record<string, any>).pricing).toMatchObject({ venue: { creditRate: '0.025' } })
+    } finally {
+      await f.sinTarifas()
+    }
+  })
+
+  it.each([
+    ['la fila no lleva attemptId', { attemptId: null }],
+    ['la referencia del aviso no es la del contexto', 'referencia'],
+  ] as const)('contexto guardado que no corresponde a su fila (%s) ⇒ la red no crea', async (_caso, alteracion) => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    const ev = await ingresoYCaida(f.eventoBlumon(attemptId))
+    const p = ev.payload as Record<string, any>
+    await prisma.providerEventLog.update({
+      where: { id: ev.id },
+      data: {
+        nextAttemptAt: new Date(Date.now() - 1000),
+        ...(alteracion === 'referencia' ? { payload: { ...p, reference: randomUUID() } } : alteracion),
+      },
+    })
+
+    await red.reconcilePending()
+
+    expect(await pagos()).toHaveLength(0)
+  })
+
   // ─── regresión ───
   it('los PENDING viejos (nextAttemptAt null) siguen en la red y a las 24 h pasan a ORPHANED', async () => {
     const { merchantAccountId } = await f.conAfiliacionBlumon()
