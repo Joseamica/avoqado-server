@@ -1074,6 +1074,9 @@ async function applyOpenTable(
   const horaLocal = intent.createdAtLocal === undefined || intent.createdAtLocal === null ? NaN : new Date(intent.createdAtLocal).getTime()
   const abiertaSinRedEn = Number.isFinite(horaLocal) ? new Date(Math.min(horaLocal, Date.now())) : undefined
   const caja = typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? { cashDrawerSessionId: cajaDeLaMesa } : undefined
+  // D8 (hz:033d44ca:D8): el aparato soltó sin red esta mesa tras cobrar su cuenta y abrió otra visita por su cola. Sólo `true` cuenta;
+  // cualquier otro valor se ignora (nunca se rechaza: detrás puede haber efectivo ya cobrado). Sólo con la hora sin red (regla D51).
+  const visitaNueva = intent.payload.visitaNueva === true && !!abiertaSinRedEn
 
   // Propiedad de mesa: abrir una mesa ocupada por otro reutilizaría su orden.
   // D71 (hz:8024bc1c:D71, founder 13-nov-2026: «A, cuenta propia»): con la hora de la apertura sin red ya no se rechaza (el efectivo
@@ -1125,6 +1128,8 @@ async function applyOpenTable(
           // D75b: con él, el «Liberar mesa» de una app vieja (sólo la mesa) encuentra la cuenta aparte de ESTE aparato.
           deviceId: deviceId ?? null,
           abiertaSinRedEn: abiertaSinRedEn?.toISOString() ?? null,
+          // D8: el aparato la abrió como visita nueva tras soltar sin red la cuenta anterior.
+          ...(visitaNueva ? { visitaNueva: true } : {}),
           ...(cuentasDeOtroMesero.length ? { cuentasDeOtroMesero } : {}),
         },
       })
@@ -1142,8 +1147,9 @@ async function applyOpenTable(
         huellaYNota,
         caja,
         abiertaSinRedEn,
-        // D71: sin propiedad de mesa (o con permiso de mesas ajenas), la llamada de D51 (ocho argumentos).
-        ...(soloCuentasDe ? [soloCuentasDe] : []),
+        // D71: sin propiedad de mesa (o con permiso de mesas ajenas), la llamada de D51 (ocho argumentos). D8: la visita nueva, el
+        // décimo (con el noveno aunque no haya propiedad de mesa).
+        ...((visitaNueva ? [soloCuentasDe, true] : soloCuentasDe ? [soloCuentasDe] : []) as [string?, boolean?]),
       )
     : await tableService.assignTable(
         venueId,
