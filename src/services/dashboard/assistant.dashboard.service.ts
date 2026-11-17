@@ -724,9 +724,12 @@ ${JSON.stringify(liveData, null, 2)}`
       const thirtyDaysAgo = new Date()
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-      // Obtener productos más vendidos (por cantidad y ingresos)
-      const productosVendidos = await prisma.orderItem.groupBy({
-        by: ['productId'],
+      // Obtener productos más vendidos (por cantidad y ingresos).
+      // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es ingreso. La cortesía de Mostrador/«Cobrar» deja el renglón a precio
+      // lleno y la de Mesas en $0; agrupando también por `isCortesia` (a lo más el doble de grupos, UNA consulta) el ingreso sale
+      // sin cortesías y las piezas y las cuentas con todo, para que las dos formas den lo mismo.
+      const porProductoYCortesia = await prisma.orderItem.groupBy({
+        by: ['productId', 'isCortesia'],
         where: {
           order: {
             venueId,
@@ -743,27 +746,22 @@ ${JSON.stringify(liveData, null, 2)}`
         _count: {
           id: true,
         },
-        orderBy: {
-          _sum: {
-            quantity: 'desc',
-          },
-        },
       })
+      const juntos = new Map<string | null, { productId: string | null; quantity: number; total: number; count: number }>()
+      for (const g of porProductoYCortesia) {
+        const actual = juntos.get(g.productId) ?? { productId: g.productId, quantity: 0, total: 0, count: 0 }
+        actual.quantity += g._sum?.quantity ?? 0
+        actual.count += g._count?.id ?? 0
+        if (!g.isCortesia) actual.total += Number(g._sum?.total ?? 0)
+        juntos.set(g.productId, actual)
+      }
+      // Mismo orden de siempre: más piezas primero.
+      const productosVendidos = [...juntos.values()]
+        .sort((a, b) => b.quantity - a.quantity)
+        .map(p => ({ productId: p.productId, _sum: { quantity: p.quantity, total: p.total }, _count: { id: p.count } }))
 
       // Obtener información de los productos
       const productIds = productosVendidos.map((p: any) => p.productId)
-      // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es ingreso. La cortesía de Mostrador/«Cobrar» deja el renglón a precio
-      // lleno y la de Mesas en $0: el ingreso se suma sin cortesías para que las dos den lo mismo (las piezas sí cuentan).
-      const ingresosSinCortesias = await prisma.orderItem.groupBy({
-        by: ['productId'],
-        where: {
-          productId: { in: productIds.filter((id: string | null): id is string => id !== null) },
-          isCortesia: false,
-          order: { venueId, createdAt: { gte: thirtyDaysAgo }, paymentStatus: 'PAID' },
-        },
-        _sum: { total: true },
-      })
-      const ingresoPorProducto = new Map(ingresosSinCortesias.map(i => [i.productId, Number(i._sum?.total ?? 0)]))
       const productos = await prisma.product.findMany({
         where: {
           id: {
@@ -788,7 +786,7 @@ ${JSON.stringify(liveData, null, 2)}`
           nombre: producto?.name || 'Producto desconocido',
           tipo: producto?.type || 'FOOD',
           cantidad: venta._sum.quantity || 0,
-          ingresos: venta.productId ? (ingresoPorProducto.get(venta.productId) ?? 0) : Number(venta._sum.total || 0),
+          ingresos: Number(venta._sum.total || 0),
           precio: Number(producto?.price || 0),
           ordenesConProducto: venta._count.id,
         }

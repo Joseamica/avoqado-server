@@ -43,6 +43,26 @@ describe('top de productos de la organización: lo regalado no es ingreso (encar
     ])
     // El ingreso se pide sólo para los productos del top (acotado), sin cortesías.
     const ingresos = groupBy.mock.calls.map(c => c[0]).find(a => a.where?.isCortesia === false)
-    expect(ingresos.where.productId).toEqual({ in: ['p-agua', 'p-cafe'] })
+    expect(ingresos.where.OR).toEqual([{ productId: { in: ['p-agua', 'p-cafe'] } }])
+  })
+
+  it('🔴 Codex p2 #1: el renglón libre («Otro importe») regalado tampoco es ingreso', async () => {
+    groupBy.mockImplementation(async (args: any) =>
+      args.where?.isCortesia === false
+        ? [{ productId: null, _sum: { total: new Prisma.Decimal(0) } }]
+        : [{ productId: null, _sum: { quantity: 1, total: new Prisma.Decimal(50) } }],
+    )
+
+    const top = await getTopItems('org-1')
+
+    expect(top.map(t => [t.productId, t.quantitySold, t.totalRevenue])).toEqual([['deleted', 1, 0]])
+    const ingresos = groupBy.mock.calls.map(c => c[0]).find(a => a.where?.isCortesia === false)
+    expect(ingresos.where.OR).toEqual([{ productId: null }])
+  })
+
+  it('el servidor topa el límite a 100 (Codex p2 #5)', async () => {
+    groupBy.mockResolvedValue([])
+    await getTopItems('org-1', undefined, 100000)
+    expect(groupBy.mock.calls[0][0].take).toBe(100)
   })
 })

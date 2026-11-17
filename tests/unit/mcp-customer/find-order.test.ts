@@ -188,6 +188,26 @@ describe('find_order · la cortesía se lee igual en Mesas y en Mostrador (encar
     expect(mesas.order.items.map((i: { isCortesia: boolean }) => i.isCortesia)).toEqual([false, true, false])
   })
 
+  it('🔴 Codex p2 #4: también lleva el regalo de los combos (como los reportes)', async () => {
+    // Combo de lista $200 vendido en $99 (su regalo, $101, vive en la promoción, no en la cabecera) + cortesía de Mesas de $20.
+    mockOrderFind.mockResolvedValueOnce({
+      ...venta(0, { total: 0 }),
+      promotions: [
+        {
+          id: 'pr1',
+          snapshotJson: { name: 'Combo' },
+          grossCents: 20000,
+          discountCents: 10100,
+          netCents: 9900,
+          needsReview: false,
+          items: [],
+        },
+      ],
+    })
+    const out = parse(await call({ orderId: 'ord-1' }))
+    expect(out.order.discountsAndComps).toBe(121)
+  })
+
   it('la consulta pide si el renglón fue cortesía', async () => {
     mockOrderFind.mockResolvedValueOnce(venta(0, { total: 20 }))
     await call({ orderId: 'ord-1' })

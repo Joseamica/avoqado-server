@@ -353,8 +353,15 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
         found: true,
         order: {
           ...order,
-          // Aditivo (pesos): lo descontado y lo regalado de la venta, con las dos formas de guardar la cortesía.
-          discountsAndComps: Number((Number(order.discountAmount ?? 0) + cortesiasFueraDeLaCabecera).toFixed(2)),
+          // Aditivo (pesos): lo descontado y lo regalado de la venta, con las dos formas de guardar la cortesía y el regalo de los
+          // combos (que tampoco vive en la cabecera), como `foldGiveawaysIntoSummary` (Codex p2 #4).
+          discountsAndComps: Number(
+            (
+              Number(order.discountAmount ?? 0) +
+              cortesiasFueraDeLaCabecera +
+              promotions.reduce((suma, p) => suma + Number(p.discount ?? 0), 0)
+            ).toFixed(2),
+          ),
           promotions,
           refundState: refunds.refundState,
           refundedAmount: Number(refunds.refundedAmount),

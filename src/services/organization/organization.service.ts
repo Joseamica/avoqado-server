@@ -783,7 +783,9 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
 /**
  * Get top selling items across organization
  */
-export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit: number = 10): Promise<TopItem[]> {
+export async function getTopItems(orgId: string, filter?: DateRangeFilter, limitPedido: number = 10): Promise<TopItem[]> {
+  // El servidor pone el tope (Codex p2 #5): un top se lee de a lo más 100 productos, y nunca menos de 1.
+  const limit = Math.min(100, Math.max(1, Number.isFinite(limitPedido) ? Math.floor(limitPedido) : 10))
   // First verify organization exists
   const organization = await prisma.organization.findUnique({
     where: { id: orgId },
@@ -829,17 +831,20 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
   // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es ingreso. La cortesía de Mostrador/«Cobrar» deja el renglón a precio lleno
   // y la de Mesas en $0; el ingreso se suma sin cortesías para que las dos den lo mismo. Las piezas sí cuentan (se entregaron).
   // Sólo los productos del top (a lo más `limit`).
-  const ingresos = productIds.length
-    ? await prisma.orderItem.groupBy({
-        by: ['productId'],
-        where: {
-          productId: { in: productIds },
-          isCortesia: false,
-          order: { venueId: { in: venueIds }, createdAt: { gte: from, lte: to } },
-        },
-        _sum: { total: true },
-      })
-    : []
+  // El renglón libre («Otro importe», sin producto) también se regala: su grupo (`productId` nulo) va igual (Codex p2 #1).
+  const conLibres = orderItems.some(item => item.productId === null)
+  const ingresos =
+    productIds.length || conLibres
+      ? await prisma.orderItem.groupBy({
+          by: ['productId'],
+          where: {
+            OR: [...(productIds.length ? [{ productId: { in: productIds } }] : []), ...(conLibres ? [{ productId: null }] : [])],
+            isCortesia: false,
+            order: { venueId: { in: venueIds }, createdAt: { gte: from, lte: to } },
+          },
+          _sum: { total: true },
+        })
+      : []
   const ingresoPorProducto = new Map(ingresos.map(i => [i.productId, i._sum?.total?.toNumber() ?? 0]))
   const products = await prisma.product.findMany({
     where: { id: { in: productIds } },
@@ -859,7 +864,7 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
   return orderItems.map((item, index) => {
     const product = item.productId ? productMap.get(item.productId) : null
     const quantitySold = item._sum?.quantity || 0
-    const totalRevenue = item.productId ? (ingresoPorProducto.get(item.productId) ?? 0) : item._sum?.total?.toNumber() || 0
+    const totalRevenue = ingresoPorProducto.get(item.productId) ?? 0
 
     return {
       productId: item.productId || 'deleted',
