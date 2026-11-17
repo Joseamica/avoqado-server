@@ -6,8 +6,11 @@ import {
   clearPendingReconciliation,
   executeSeatReconciliation,
   reactivateSeatCapDeactivated,
+  reactivateSeatCapDeactivatedUpTo,
 } from '@/services/dashboard/seatReconciliation.service'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { hybridHash } from './hybridProvider'
+import { activeBasicSeatCaps, BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from './basicPlanAccess'
 import type { HybridQuoteSnapshot } from './hybridPurchase.service'
 
 const SEATS_STEP = 'SEATS'
@@ -87,12 +90,13 @@ export async function endLapsedHybridContracts(venueId: string, purchaseId: stri
   const now = new Date()
   const lapsed = await prisma.hybridContract.findMany({
     where: { purchaseId, venueId, endedAt: null, cancelAt: { lte: now } },
-    select: { id: true, planTier: true },
+    select: { id: true, planTier: true, publication: { select: { definition: true } } },
     orderBy: { id: 'asc' },
     take: 9,
   })
   if (!lapsed.length) return 0
-  if (lapsed.some(contract => contract.planTier)) await executeSeatReconciliation(venueId)
+  if (lapsed.some(contract => contract.planTier || isBasicPlanDefinition(contract.publication.definition)))
+    await executeSeatReconciliation(venueId)
   const contractIds = lapsed.map(contract => contract.id)
   await prisma.$transaction(async tx => {
     const ended = await tx.hybridContract.updateMany({ where: { id: { in: contractIds }, venueId, endedAt: null }, data: { endedAt: now } })
@@ -108,4 +112,67 @@ export async function endLapsedHybridContracts(venueId: string, purchaseId: stri
       })
   })
   return lapsed.length
+}
+
+/**
+ * A paid Plan Básico period was delivered (every invoice, not only the first): the team follows its cap again. Checks
+ * FIRST that a Básico grant covers now, so a replayed old invoice brings nobody back. The effective cap decides (a paid
+ * plan or grandfathering above the Básico stays unlimited): unlimited → everyone the cap turned off comes back; finite →
+ * trim to the cap if over it, then bring people back up to it. Both steps are idempotent.
+ *
+ * @returns the number of seats reactivated.
+ */
+export async function restoreBasicSeats(venueId: string): Promise<number> {
+  if (!(await activeBasicSeatCaps([venueId], new Date())).has(venueId)) return 0
+  const cap = await getVenueSeatCap(venueId)
+  if (cap === null) return reactivateSeatCapDeactivated(venueId)
+  await executeSeatReconciliation(venueId)
+  return reactivateSeatCapDeactivatedUpTo(venueId, cap)
+}
+
+const LAPSE_WINDOW_MS = 7 * 24 * 3600 * 1000
+const SWEEP_PAGE = 200
+const SWEEP_MAX_PAGES = 10
+
+/**
+ * Daily: a Plan Básico whose last paid period ended without a renewal (past_due / unpaid) leaves its venue on Free's cap.
+ * Reads venues with a Básico grant that ended in the last 7 days (so a few missed runs still catch them), pages of 200
+ * by venueId, at most 10 pages per run; skips any venue a Básico still covers. Idempotent: the reconciliation changes
+ * nothing once the team fits. A failing venue is logged and the rest go on.
+ */
+export async function sweepLapsedBasicSeats(now = new Date()): Promise<{ checked: number; reconciled: number; failed: number }> {
+  const totals = { checked: 0, reconciled: 0, failed: 0 }
+  let after: string | undefined
+  for (let page = 0; page < SWEEP_MAX_PAGES; page++) {
+    const rows = await retry(
+      () =>
+        prisma.capabilityGrant.groupBy({
+          by: ['venueId'],
+          where: {
+            endsAt: { lte: now, gt: new Date(now.getTime() - LAPSE_WINDOW_MS) },
+            contract: { publication: { definition: BASIC_PLAN_DEFINITION_WHERE } },
+            ...(after ? { venueId: { gt: after } } : {}),
+          },
+          orderBy: { venueId: 'asc' },
+          take: SWEEP_PAGE,
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'basic-seat-sweep.groupBy' },
+    )
+    if (rows.length === 0) break
+    const venueIds = rows.map(row => row.venueId)
+    after = venueIds[venueIds.length - 1]
+    totals.checked += venueIds.length
+    const covered = await activeBasicSeatCaps(venueIds, now)
+    for (const venueId of venueIds.filter(id => !covered.has(id))) {
+      try {
+        if ((await executeSeatReconciliation(venueId)) > 0) totals.reconciled += 1
+      } catch (error) {
+        totals.failed += 1
+        logger.error('🪑 Lapsed Plan Básico: seat reconciliation failed', { venueId, error })
+      }
+    }
+    if (rows.length < SWEEP_PAGE) break
+  }
+  if (totals.reconciled || totals.failed) logger.info('🪑 Lapsed Plan Básico seats swept', totals)
+  return totals
 }

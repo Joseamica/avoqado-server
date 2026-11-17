@@ -10,7 +10,8 @@ import type { HybridQuoteSnapshot } from './hybridPurchase.service'
 import { ensureHybridSchedule } from './hybridSchedule'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { executeSeatReconciliation } from '@/services/dashboard/seatReconciliation.service'
-import { settleSeatsAfterHybridDelivery, unsettledCheckoutSeatChoice } from './hybridSeats'
+import { restoreBasicSeats, settleSeatsAfterHybridDelivery, unsettledCheckoutSeatChoice } from './hybridSeats'
+import { isBasicPlanDefinition } from './basicPlanAccess'
 import { finDelSegundoDeLaFrontera } from './hybridPlanCatchUp'
 
 const idOf = (value: string | { id: string } | null | undefined) => (typeof value === 'string' ? value : value?.id)
@@ -61,6 +62,8 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
   )
     throw mismatch()
   const quote = purchase.quote as unknown as HybridQuoteSnapshot
+  // A Plan Básico carries its own seat cap: its team moves at the same points as a plan tier's (spec decision 3).
+  const hasBasicPlan = purchase.contracts.some(contract => isBasicPlanDefinition(contract.publication.definition))
   const [sub, invoice] = await Promise.all([
     stripe.subscriptions.retrieve(purchase.stripeSubscriptionId, {}, STRIPE_DENTRO_DEL_CANDADO),
     stripe.invoices.retrieve(invoiceId, {}, STRIPE_DENTRO_DEL_CANDADO),
@@ -103,7 +106,7 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
     // settled its team applies the owner's «who stays» choice from checkout, as the paid path does.
     if (quote.replaces.length > 0)
       await executeSeatReconciliation(venueId, { keepStaffVenueIds: await unsettledCheckoutSeatChoice(purchaseId, quote) })
-    else if (purchase.contracts.some(contract => contract.planTier)) await executeSeatReconciliation(venueId)
+    else if (hasBasicPlan || purchase.contracts.some(contract => contract.planTier)) await executeSeatReconciliation(venueId)
     return { status: 'ENDED' }
   }
   if (invoice.status !== 'paid') return { status: 'PAYMENT_PENDING' }
@@ -361,5 +364,11 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
   // The team follows the FIRST paid invoice, after the commit: the new grants must be visible to the cap (spec §4.3).
   if (delivered.status === 'ACTIVE' && invoiceId === purchase.initialInvoiceId)
     await settleSeatsAfterHybridDelivery(venueId, purchaseId, quote)
+  // A Básico follows every paid period, after the commit so the cap sees its grants: a delivered one brings the team
+  // back up to its cap (restoreBasicSeats checks a grant covers now, so a replayed old invoice brings nobody back); a
+  // reversed one (refund or dispute) revoked them, so Free's cap applies. Both idempotent; a failure propagates and the
+  // sweep retries the delivery.
+  if (hasBasicPlan && delivered.status === 'ACTIVE') await restoreBasicSeats(venueId)
+  if (hasBasicPlan && delivered.status === 'PAYMENT_REVERSED') await executeSeatReconciliation(venueId)
   return delivered
 }

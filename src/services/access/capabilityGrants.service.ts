@@ -3,11 +3,12 @@ import { FEATURE_CATALOG } from '@/config/featureCatalog'
 
 // Bounded by the supported catalog, not by the number of historical contracts.
 const codes = FEATURE_CATALOG.flatMap(entry => (entry.featureCode ? [entry.featureCode] : []))
-const activeWhere = (now = new Date()) => ({ revokedAt: null, startsAt: { lte: now }, endsAt: { gt: now } })
+/** «Este grant cubre `now`»: la única regla, también para el tope de usuarios del Plan Básico (`basicPlanAccess.ts`). */
+export const activeGrantWhere = (now = new Date()) => ({ revokedAt: null, startsAt: { lte: now }, endsAt: { gt: now } })
 
 export async function hasCapabilityGrant(venueId: string, featureCode: string): Promise<boolean> {
   const grant = await prisma.capabilityGrant.findFirst({
-    where: { venueId, featureCode, ...activeWhere() },
+    where: { venueId, featureCode, ...activeGrantWhere() },
     select: { id: true },
   })
   return grant != null
@@ -16,7 +17,7 @@ export async function hasCapabilityGrant(venueId: string, featureCode: string): 
 export async function grantedCapabilityCodes(venueId: string): Promise<string[]> {
   const grants = await prisma.capabilityGrant.groupBy({
     by: ['featureCode'],
-    where: { venueId, featureCode: { in: codes }, ...activeWhere() },
+    where: { venueId, featureCode: { in: codes }, ...activeGrantWhere() },
     orderBy: { featureCode: 'asc' },
     take: codes.length,
   })
@@ -27,7 +28,7 @@ export async function venuesWithCapabilityGrant(venueIds: string[], featureCode:
   if (venueIds.length === 0) return []
   const grants = await prisma.capabilityGrant.groupBy({
     by: ['venueId'],
-    where: { venueId: { in: venueIds }, featureCode, ...activeWhere() },
+    where: { venueId: { in: venueIds }, featureCode, ...activeGrantWhere() },
     orderBy: { venueId: 'asc' },
     take: venueIds.length,
   })

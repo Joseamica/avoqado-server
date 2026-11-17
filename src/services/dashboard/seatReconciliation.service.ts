@@ -372,6 +372,38 @@ export async function reactivateSeatCapDeactivated(venueId: string): Promise<num
 }
 
 /**
+ * Finite-cap counterpart of {@link reactivateSeatCapDeactivated} (a Plan Básico with its own `seatCap` covering again):
+ * brings back ONLY people the seat cap turned off (deactivatedBySeatCap = true), most recently deactivated first, until
+ * the active non-SUPERADMIN seats reach `cap`. Never touches people who were fired/quit. Idempotent: at or over the cap,
+ * or nobody left to bring back → 0. One venue lock so two concurrent restores cannot overshoot the cap.
+ *
+ * @returns the number of seats reactivated.
+ */
+export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: number): Promise<number> {
+  const reactivated = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`seat-cap-restore:${venueId}`}))::text`
+    const active = await tx.staffVenue.count({ where: { venueId, active: true, role: { not: StaffRole.SUPERADMIN } } })
+    const room = cap - active
+    if (room <= 0) return 0
+    const back = await tx.staffVenue.findMany({
+      where: { venueId, deactivatedBySeatCap: true },
+      orderBy: [{ endDate: 'desc' }, { id: 'asc' }],
+      take: room,
+      select: { id: true },
+    })
+    if (back.length === 0) return 0
+    const result = await tx.staffVenue.updateMany({
+      where: { venueId, deactivatedBySeatCap: true, id: { in: back.map(r => r.id) } },
+      data: { active: true, endDate: null, deactivatedBySeatCap: false },
+    })
+    return result.count
+  })
+
+  if (reactivated > 0) logger.info('🪑 Seat-cap-deactivated seats reactivated up to the plan cap', { venueId, cap, reactivated })
+  return reactivated
+}
+
+/**
  * Cancel a pending seat reconciliation (used when the owner REACTIVATES the plan before period
  * end — nobody should be deactivated). Idempotent: a no-pending venue is a no-op.
  *
@@ -430,6 +462,7 @@ export default {
   scheduleDowngradeToFree,
   executeSeatReconciliation,
   reactivateSeatCapDeactivated,
+  reactivateSeatCapDeactivatedUpTo,
   clearPendingReconciliation,
   getVenueSeatStatus,
   assertKeepSelection,
