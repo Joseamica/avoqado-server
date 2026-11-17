@@ -442,10 +442,34 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
   })
 }
 
+const publicOffersQuery = hybridCampaignListQuery
+  .omit({ status: true })
+  // Opt-in: a released dashboard parses every item strictly (places and end date required) and would reject the Básico.
+  .extend({ includeBasic: z.enum(['true', 'false'], { errorMap }).optional() })
+  .strict('Filtro no admitido')
+
+/** The Básico on sale as a public offer (pinned first), or null; a search that does not name it leaves it out. */
+async function basicOfferFor(q: string | undefined) {
+  const row = await prisma.hybridCampaign.findFirst({
+    where: { purpose: 'LIST', listProductKey: BASIC_PLAN_KEY, status: 'ACTIVE' },
+    select: { slug: true },
+  })
+  if (!row) return null
+  const offer = await getPublicHybridOffer(row.slug).catch(error => {
+    if (error instanceof NotFoundError) return null
+    throw error
+  })
+  return offer && (!q || offer.name.toLocaleLowerCase('es').includes(q.toLocaleLowerCase('es'))) ? offer : null
+}
+
 /** Public data only; private cohort identifiers and editable draft terms never leave the server. */
 export async function listPublicHybridOffers(input: unknown) {
-  const { page, pageSize, q } = parse(hybridCampaignListQuery.omit({ status: true }), input)
+  const { page, pageSize, q, includeBasic } = parse(publicOffersQuery, input)
   const now = new Date()
+  const basic = includeBasic === 'true' ? await basicOfferFor(q) : null
+  // The Básico is item 0 of the whole list: page 1 gives up one slot, later pages shift back by one, the total counts it.
+  const pinned = basic ? 1 : 0
+  const offset = (page - 1) * pageSize
   const where: Prisma.HybridCampaignWhereInput = {
     purpose: 'PROMOTION',
     status: 'ACTIVE',
@@ -459,8 +483,8 @@ export async function listPublicHybridOffers(input: unknown) {
     prisma.hybridCampaign.findMany({
       where,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: pageSize,
-      skip: (page - 1) * pageSize,
+      take: pageSize - (page === 1 ? pinned : 0),
+      skip: Math.max(0, offset - pinned),
       select: {
         code: true,
         slug: true,
@@ -514,7 +538,14 @@ export async function listPublicHybridOffers(input: unknown) {
         process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale && row.reservedCount + row.redeemedCount < row.capacity!,
     }
   })
-  return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
+  const all = total + pinned
+  return {
+    items: page === 1 && basic ? [basic, ...items] : items,
+    total: all,
+    page,
+    pageSize,
+    totalPages: Math.ceil(all / pageSize),
+  }
 }
 
 export const hybridRedemptionsQuery = hybridCampaignListQuery

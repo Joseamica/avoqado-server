@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type Stripe from 'stripe'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
@@ -18,6 +19,7 @@ import { assertHybridBalanceUsable } from './hybridFundingGraph'
 import { audienceIncludes, hybridOfferBlocker, type HybridOfferBlocker } from './hybridOfferEligibility'
 import { lockProducts, productKeyOf, promotionWindow } from './hybridProduct'
 import { assertKeepSelection } from '@/services/dashboard/seatReconciliation.service'
+import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from './basicPlanAccess'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 const codes = z
@@ -182,6 +184,76 @@ const OFFER_BLOCKED: Record<HybridOfferBlocker, () => ConflictError> = {
 }
 const offerChanged = () => new ConflictError('La oferta cambió; revisa una cotización nueva.', 'HYBRID_OFFER_UNAVAILABLE')
 
+const idOf = (value: string | { id: string } | null | undefined) => (typeof value === 'string' ? value : (value?.id ?? null))
+
+/**
+ * The card a Plan Básico purchase charges with one click (Codex r5 #1): the customer's default; failing that, the
+ * `default_payment_method` of its most recent PLAN subscription (also a trial that already ended); failing that, none —
+ * and the purchase keeps today's hosted «Pagar». A card no longer attached to this customer is none: charging it would
+ * fail at Stripe after the attempt was journaled.
+ */
+async function resolveBasicCard(customerId: string, known?: Stripe.Customer | Stripe.DeletedCustomer | null) {
+  const customer = known ?? (await stripe.customers.retrieve(customerId, {}, STRIPE_DENTRO_DEL_CANDADO))
+  if (customer.deleted) return null
+  let paymentMethodId = idOf(customer.invoice_settings?.default_payment_method)
+  if (!paymentMethodId) {
+    // Newest first; one page. ponytail: a customer with >100 subscriptions and no plan among them falls back to «Pagar».
+    const page = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, STRIPE_DENTRO_DEL_CANDADO)
+    const plan = page.data.find(sub => (PAID_PLAN_TIER_CODES as readonly string[]).includes(sub.metadata?.featureCode ?? ''))
+    paymentMethodId = idOf(plan?.default_payment_method)
+  }
+  if (!paymentMethodId) return null
+  const method = await stripe.paymentMethods.retrieve(paymentMethodId, {}, STRIPE_DENTRO_DEL_CANDADO)
+  if (method.type !== 'card' || idOf(method.customer) !== customerId) return null
+  return { id: method.id, last4: method.card?.last4 ?? null, brand: method.card?.brand ?? null }
+}
+
+export async function resolveBasicPaymentMethod(customerId: string): Promise<string | null> {
+  return (await resolveBasicCard(customerId))?.id ?? null
+}
+
+const PLAN_NAMES = { PRO: 'Pro', PREMIUM: 'Premium' } as const
+
+/**
+ * The Básico is bought from Free (Codex r4 #3, #6): never while a Pro/Premium lives (trial or paid, replacing it or not),
+ * and never twice in a venue, whatever the publications. Repeated at acceptance by the same re-observation.
+ */
+async function assertBasicPurchasable(
+  venueId: string,
+  timezone: string,
+  inventory: InventarioDeObligaciones,
+  legacyPlanRows: Array<{ stripeSubscriptionId: string | null; endDate: Date | null; feature: { code: string } }>,
+) {
+  const plans = [
+    ...inventory.vivas.flatMap(source =>
+      source.proyecciones.flatMap(p =>
+        p.tipo === 'PLAN' && (p.tier === 'PRO' || p.tier === 'PREMIUM')
+          ? [{ tier: p.tier, endsAt: inventory.detalle[source.subscriptionId]?.terminaEn ?? null }]
+          : [],
+      ),
+    ),
+    // A plan granted without a subscription (superadmin trial) is alive too.
+    ...legacyPlanRows
+      .filter(row => !row.stripeSubscriptionId)
+      .map(row => ({
+        tier: row.feature.code === 'PLAN_PREMIUM' ? ('PREMIUM' as const) : ('PRO' as const),
+        endsAt: row.endDate?.toISOString() ?? null,
+      })),
+  ]
+  if (plans.length) {
+    const [plan] = plans
+    const until = plan.endsAt
+      ? ` hasta el ${new Intl.DateTimeFormat('es-MX', { dateStyle: 'long', timeZone: timezone }).format(new Date(plan.endsAt))}. Ese día podrás contratar el Básico.`
+      : '. Cuando termine podrás contratar el Básico.'
+    throw new ConflictError(`Tu ${PLAN_NAMES[plan.tier]} sigue activo${until}`, 'HYBRID_BASIC_PLAN_ALIVE')
+  }
+  const live = await prisma.hybridContract.findFirst({
+    where: { venueId, endedAt: null, publication: { definition: BASIC_PLAN_DEFINITION_WHERE } },
+    select: { id: true },
+  })
+  if (live) throw new ConflictError('Ya tienes el Básico', 'HYBRID_BASIC_ALREADY')
+}
+
 /** Re-read at acceptance with the same effective timestamp; changes require a new human-reviewed quote. */
 export async function observeHybridQuote(venueId: string, body: z.output<typeof hybridQuoteBody>, effectiveAt: number) {
   const now = new Date()
@@ -239,6 +311,9 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   if (replaced.some(source => source.proyecciones.some(p => p.tipo === 'AJENO' || p.tipo === 'DESCONOCIDO')))
     throw new ConflictError('Una suscripción de origen requiere revisión.', 'OBLIGACION_DESCONOCIDA')
   const retained = await readRetained(prisma, venueId, inventory, body.replaceSubscriptionIds, now)
+  // «A purchase whose only line is the Básico»: only then a frozen card and one-click charge.
+  const basic = publications.length === 1 && isBasicPlanDefinition(publications[0].definition)
+  if (basic) await assertBasicPurchasable(venueId, venue.timezone, inventory, retained.legacy.filter(isPlanRow))
   const retainedCodes = [
     ...new Set([
       ...inventory.vivas
@@ -287,6 +362,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   if (customer?.deleted) throw new ConflictError('El perfil de facturación necesita actualizarse.')
   const balance = customer && !customer.deleted ? customer.balance : 0
   if (customer && !customer.deleted) await assertHybridBalanceUsable(venueId, customer.id, balance)
+  const card = basic && customer ? await resolveBasicCard(customer.id, customer) : null
   const credit = sources.reduce((sum, source) => sum.add(source.amount), new Prisma.Decimal(0))
   const net = new Prisma.Decimal(composition.total).sub(credit).add(new Prisma.Decimal(balance).div(100))
   const repriced = await repricedFunctions(
@@ -300,6 +376,9 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     // repricing keeps the hash shape it had before this field existed.
     ...(repriced.length ? { repriced } : {}),
     input: body,
+    // Codex r5 #2 / r6 #1: frozen here, hashed with the rest, read back by provisioning. Snapshot field, never `input`
+    // (acceptance re-parses `input` with the strict public schema). Absent = today's hosted «Pagar».
+    ...(card ? { paymentMethodId: card.id } : {}),
     effectiveAt,
     credit: credit.toFixed(2),
     dueNow: Prisma.Decimal.max(0, net).toFixed(2),
@@ -312,7 +391,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
       detalle: inventory.detalle,
     }),
   }
-  return { quote, venue, publications }
+  return { quote, venue, publications, card }
 }
 
 export async function createHybridQuote(venueId: string, staffId: string, input: unknown) {
@@ -325,7 +404,7 @@ export async function createHybridQuote(venueId: string, staffId: string, input:
   const quoteExpiresAt = new Date(
     Math.min(Date.now() + 5 * 60000, ...observed.publications.flatMap(p => promotionWindow(p.campaign)?.endsAt.getTime() ?? [])),
   )
-  return prisma.hybridPurchase.create({
+  const created = await prisma.hybridPurchase.create({
     data: {
       venueId,
       quotedById: staffId,
@@ -335,6 +414,8 @@ export async function createHybridQuote(venueId: string, staffId: string, input:
       status: 'QUOTED',
     },
   })
+  // The owner sees which card is charged before accepting; its ending is read now and never stored.
+  return { ...created, paymentCard: observed.card ? { last4: observed.card.last4, brand: observed.card.brand } : null }
 }
 
 const acceptanceBody = z
@@ -373,6 +454,8 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
   const saved = purchase.quote as unknown as HybridQuoteSnapshot
   if (saved.schemaVersion !== 1) throw new ConflictError('La cotización requiere una versión compatible.')
   const observed = await observeHybridQuote(venueId, hybridQuoteBody.parse(saved.input), saved.effectiveAt)
+  if (observed.quote.paymentMethodId !== saved.paymentMethodId)
+    throw new ConflictError('Cambió tu tarjeta; revisa de nuevo', 'HYBRID_QUOTE_STALE')
   if (hybridHash(observed.quote) !== quoteHash)
     throw new ConflictError('Cambió tu acceso, saldo u oferta. Revisa una cotización nueva.', 'HYBRID_QUOTE_STALE')
   const customerId =
@@ -500,8 +583,14 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
   )
 }
 
-export function hybridPurchaseView(purchase: Prisma.HybridPurchaseGetPayload<Record<string, never>>) {
+export function hybridPurchaseView(
+  purchase: Prisma.HybridPurchaseGetPayload<Record<string, never>> & {
+    paymentCard?: { last4: string | null; brand: string | null } | null
+  },
+) {
   return {
+    // Only on the quote response: which saved card the one-click Básico charges.
+    ...(purchase.paymentCard ? { paymentCard: purchase.paymentCard } : {}),
     id: purchase.id,
     status: purchase.status,
     quote: purchase.quote,

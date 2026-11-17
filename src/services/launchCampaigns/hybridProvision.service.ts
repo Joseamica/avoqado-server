@@ -42,11 +42,16 @@ export async function provisionHybridPurchase(venueId: string, purchaseId: strin
     throw new ConflictError('No pudimos verificar los precios aceptados.', 'HYBRID_PRICE_MISMATCH')
   const metadata = { kind: 'HYBRID_PURCHASE', hybridPurchaseId: purchaseId, venueId, quoteHash: purchase.quoteHash }
   const credit = toStripeAmount(new Prisma.Decimal(quote.credit))
+  // The one-click Básico (Codex r4 #2): the card frozen in the stored snapshot, never re-read from the customer, so a
+  // retry after a lost response builds the SAME request and `recordedStripeWrite` recovers the earlier charge.
+  const card = quote.lines.length === 1 ? quote.paymentMethodId : undefined
   const params: Stripe.SubscriptionCreateParams = {
     customer: purchase.stripeCustomerId,
     items: quote.lines.map(line => ({ price: publications.find(pub => pub.id === line.publicationId)!.stripePriceId!, quantity: 1 })),
     metadata,
-    payment_behavior: 'default_incomplete',
+    ...(card
+      ? { default_payment_method: card, payment_behavior: 'allow_incomplete' as const }
+      : { payment_behavior: 'default_incomplete' as const }),
     payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
     automatic_tax: { enabled: false },
     default_tax_rates: [],
