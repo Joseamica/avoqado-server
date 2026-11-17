@@ -23,7 +23,7 @@ import type { TerminalPaymentRequest as FilaDeCobroRemoto } from '@prisma/client
 import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
-import { estadoBancarioSql } from './tpv/estadoBancario'
+import { estadoBancarioSql, eventoAprobadoSql } from './tpv/estadoBancario'
 import { cobradoQueCubreEnTx } from './shared/saldoReabiertoAlReembolsar'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
 import { puertaDelDinero } from './tpv/avisosNoGuardados'
@@ -4442,7 +4442,8 @@ class TerminalPaymentService {
   /**
    * Veto de la ventana (Codex, Task 0, P3): un webhook APROBADO de cualquier intento vinculado a la solicitud —aunque el
    * registrador no haya creado el Payment (falló, importe distinto, PENDING)— ya es EVIDENCIA de cobro, no ausencia de señal.
-   * Misma clasificación bancaria que el receptor (`estadoBancarioSql`, R14-3). Se consulta con el cliente de la transacción
+   * Misma clasificación bancaria que el receptor (`eventoAprobadoSql`: el `send_transaction` de AngelPay o la VENTA de Blumon,
+   * R14-3 y fase 1 del SDK propio). Se consulta con el cliente de la transacción
    * que YA tiene el candado de esos intentos (R2, P3): la consulta y la decisión son una sola fotografía frente al ingreso.
    */
   private async aprobacionBancariaConocida(
@@ -4457,9 +4458,9 @@ class TerminalPaymentService {
     if (attemptIds.some(puertaDelDinero)) return { eventLogId: null }
     const [fila] = await db.$queryRaw<{ id: string }[]>`
       SELECT e."id" FROM "ProviderEventLog" e
-      WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId} AND e."type" = 'send_transaction'
+      WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId}
         AND e."attemptId" IN (${Prisma.join(attemptIds)})
-        AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'APROBADO'
+        AND ${eventoAprobadoSql('e')}
       ORDER BY e."createdAt" ASC, e."id" ASC
       LIMIT 1`
     return fila ? { eventLogId: fila.id } : null

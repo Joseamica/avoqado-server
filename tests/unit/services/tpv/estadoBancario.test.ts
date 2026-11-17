@@ -2,7 +2,7 @@
  * Codex R13-4: la clasificación EXPLÍCITA del estado bancario de un evento de AngelPay — aprobado legible, rechazo legible,
  * ausente (legacy) e inválido (presente pero ilegible) — en un solo sitio para el receptor y el backfill.
  */
-import { clasificarEstadoBancario, MOTIVO_ESTADO_INVALIDO } from '@/services/tpv/estadoBancario'
+import { clasificarEstadoBancario, eventoAprobadoSql, MOTIVO_ESTADO_INVALIDO } from '@/services/tpv/estadoBancario'
 
 describe('clasificarEstadoBancario (Codex R13-4)', () => {
   it.each([['approved'], ['APPROVED'], ['  Approved  ']])('«%s» es APROBADO (legible, tolerante a mayúsculas y espacios)', s => {
@@ -36,5 +36,16 @@ describe('clasificarEstadoBancario (Codex R13-4)', () => {
   })
   it('el motivo del estado inválido es INVALID_STATUS', () => {
     expect(MOTIVO_ESTADO_INVALIDO).toBe('INVALID_STATUS')
+  })
+})
+
+// Fase 1 del SDK propio (Tarea 4): el alias del evento va CRUDO en el SQL; sólo se acepta un identificador simple.
+describe('eventoAprobadoSql', () => {
+  it('eventoAprobadoSql rechaza un alias con comillas', () => expect(() => eventoAprobadoSql('e"; --')).toThrow())
+  it.each([['E'], ['1e'], [''], ['e.x']])('rechaza el alias %p', alias => expect(() => eventoAprobadoSql(alias)).toThrow())
+  it('con un alias válido nombra sus columnas y las dos ramas (AngelPay y la VENTA de Blumon)', () => {
+    const { sql } = eventoAprobadoSql('i')
+    expect(sql).toContain(`i."type" = 'send_transaction'`)
+    expect(sql).toContain(`i."type" = 'VENTA' AND i."eventId" LIKE 'blumon-tpv-%' AND i."payload"->>'codeResponse' = '00'`)
   })
 })

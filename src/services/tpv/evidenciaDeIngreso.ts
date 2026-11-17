@@ -17,7 +17,8 @@
  * inicio de una transacción que esperó.
  *
  * Pertenencia (se conserva, no se relaja): el evento tiene que ser del MISMO intento (`attemptId` canónico), del MISMO venue,
- * `send_transaction` aprobado, y recibido por la MISMA afiliación a la que se atribuye el cobro. Un evento del intento recibido por
+ * aprobado (`eventoAprobadoSql`: el `send_transaction` de AngelPay o, desde la fase 1 del SDK propio, la VENTA del aviso de
+ * Blumon), y recibido por la MISMA afiliación a la que se atribuye el cobro. Un evento del intento recibido por
  * OTRA afiliación no acredita la tarifa de ésta ni autoriza capturar la de hoy: la incertidumbre se conserva (captura fallida con
  * motivo, costo pendiente y visible). Nunca se confía en una captura enviada por el cliente: sólo la persistida.
  * Codex R15-1: si la espera del candado vence al ingresar (55P03) el evento se persiste igual —perder la evidencia del banco sería
@@ -30,7 +31,7 @@
  */
 import { Prisma } from '@prisma/client'
 import type { TarifaCongelada } from '../payments/transactionCost.service'
-import { estadoBancarioSql } from './estadoBancario'
+import { eventoAprobadoSql } from './estadoBancario'
 
 export type TarifaCapturadaAlIngreso = { slot: TarifaCongelada['slot']; pricing: TarifaCongelada | null }
 
@@ -90,17 +91,17 @@ export async function evidenciaDurableDelIngreso(
   // primer aprobado?— sobre la misma fotografía: entre dos consultas podría publicarse otro fallback fuera del candado.
   const [fila] = await db.$queryRaw<{ sinOrden: boolean; primeraId: string | null; primeraPayload: unknown }[]>`
     WITH intento AS (
-      SELECT e."id", e."payload", e."createdAt"
+      SELECT e."id", e."type", e."eventId", e."attemptId", e."payload", e."createdAt"
       FROM "ProviderEventLog" e
       WHERE e."provider" = 'PAYMENT_PROCESSOR'
         AND e."attemptId" = ${llaveDelIntento}
         AND e."venueId" = ${venueId}
-        AND e."type" = 'send_transaction'
+        AND (e."type" = 'send_transaction' OR (e."type" = 'VENTA' AND e."eventId" LIKE 'blumon-tpv-%'))
     ),
     primera AS (
-      SELECT "id", "payload" FROM intento
-      WHERE ${estadoBancarioSql(Prisma.sql`"payload"->'payload'->'status'`)} = 'APROBADO'
-      ORDER BY "createdAt" ASC, "id" ASC
+      SELECT i."id", i."payload" FROM intento i
+      WHERE ${eventoAprobadoSql('i')}
+      ORDER BY i."createdAt" ASC, i."id" ASC
       LIMIT 1
     )
     SELECT

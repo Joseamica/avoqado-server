@@ -6,7 +6,7 @@
  * lo delata. Por eso el UPDATE condicional que LIBERA una solicitud (la ventana), la DECLARA sin cobro (el cajero) o la cierra
  * con un NEGATIVO acreditado de la terminal (`closeRow`, Codex r2 P1-A) lleva estos `NOT EXISTS` sobre lo durable en ese instante:
  *
- *  · `sinAprobadoVinculadoSql`: ningún `send_transaction` APROBADO (`estadoBancarioSql`) de un intento vinculado a la solicitud —
+ *  · `sinAprobadoVinculadoSql`: ningún evento APROBADO (`eventoAprobadoSql`: AngelPay o la VENTA de Blumon) de un intento vinculado a la solicitud —
  *    por los vínculos ACTUALES (subconsulta sobre `TerminalPaymentAttemptLink`, no una lista en memoria);
  *  · `sinPagoLigadoSql`: ningún cobro con tarjeta COMPLETED (no reembolso, NULL-seguro sobre `type`) del venue ligado a la
  *    solicitud por CUALQUIERA de sus tres identidades: el puntero `terminalPaymentRequestId`, la etiqueta legacy
@@ -20,7 +20,7 @@
  */
 import { Prisma } from '@prisma/client'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
-import { estadoBancarioSql } from './estadoBancario'
+import { estadoBancarioSql, eventoAprobadoSql } from './estadoBancario'
 import { llaveDeIntento } from './candadoDeIntento'
 
 /** Una cadena como PARÁMETRO ligado (`$n`), para que las envolturas públicas sigan recibiendo `string`. */
@@ -41,9 +41,9 @@ const vinculosSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql =>
 
 const aprobadoVinculadoSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql => Prisma.sql`
       SELECT e."id", e."attemptId" FROM "ProviderEventLog" e
-      WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId} AND e."type" = 'send_transaction'
+      WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId}
         AND e."attemptId" IN (${vinculosSql(requestId, venueId)})
-        AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'APROBADO'`
+        AND ${eventoAprobadoSql('e')}`
 
 /**
  * 🔴 Ronda 3 (P2 de Codex r8): la etiqueta legacy se compara con la EXPRESIÓN DEL ÍNDICE
@@ -168,6 +168,7 @@ const eventoQueVetaSql = (attemptId: string, venueId: string, terminalId: string
         OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
           AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
         OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO'
+        OR ${eventoAprobadoSql('e')}
         -- 🔴 Codex r5-6: un evento que no se puede atribuir a nadie —sin vínculo y sin serial— y que NO es un rechazo
         -- acreditado también veta: aceptar una declaración y poder usarla tienen que decir lo mismo.
         OR (${!hayVinculo}
@@ -281,7 +282,8 @@ export function contradiccionDeProcedenciaSql(attemptIds: string[], venueId: str
         OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
         OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
           AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
-        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
+        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO'
+        OR ${eventoAprobadoSql('e')})
   )`
 }
 
