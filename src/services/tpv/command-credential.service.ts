@@ -9,6 +9,35 @@ export function newCommandCredential() {
   return { token, hash: createHash('sha256').update(token).digest('hex') }
 }
 
+/** ¿El encabezado X-TPV-Command-Token es la llave cuyo SHA-256 guardó el SERVIDOR? Nunca lanza. */
+export function llaveCoincide(hashHex: string | null | undefined, encabezado: unknown): boolean {
+  if (!hashHex || typeof encabezado !== 'string' || !/^[a-f0-9]{64}$/.test(encabezado)) return false
+  const digest = createHash('sha256').update(encabezado).digest()
+  const stored = Buffer.from(hashHex, 'hex')
+  return stored.length === digest.length && timingSafeEqual(stored, digest)
+}
+
+export type VeredictoPuerta = 'CON_LLAVE' | 'LLAVE_EQUIVOCADA' | 'SIN_LLAVE' | 'SIN_ALTA'
+
+/**
+ * D32 etapa 1 (sombra): ¿habría negado la puerta pública /config este pedido por no traer la llave del aparato?
+ * Sólo se anota en el log; NO niega nada. Una terminal sin llave guardada (SIN_ALTA) no se puede cerrar hasta la etapa 4.
+ */
+export function veredictoPuerta(hashHex: string | null | undefined, encabezado: unknown) {
+  const veredicto: VeredictoPuerta = !hashHex
+    ? 'SIN_ALTA'
+    : encabezado === undefined
+      ? 'SIN_LLAVE'
+      : llaveCoincide(hashHex, encabezado)
+        ? 'CON_LLAVE'
+        : 'LLAVE_EQUIVOCADA'
+  return {
+    veredicto,
+    habriaNegado: veredicto === 'SIN_LLAVE' || veredicto === 'LLAVE_EQUIVOCADA',
+    llaveSinAlta: veredicto === 'SIN_ALTA' && encabezado !== undefined,
+  }
+}
+
 // Only call after proving possession of an activation code or a signed TPV session.
 export async function issueCommandCredential(terminalId: string, candidate?: string): Promise<string> {
   if (candidate !== undefined && !/^[a-f0-9]{64}$/.test(candidate)) throw new BadRequestError('Credencial de terminal inválida')
@@ -44,10 +73,7 @@ export async function resolveCommandTerminal(req: Request, identifier: string, s
   })
   if (!terminal || terminal.type !== 'TPV_ANDROID') return null
   if (typeof token === 'string' && /^[a-f0-9]{64}$/.test(token) && terminal.commandTokenHash) {
-    const digest = createHash('sha256').update(token).digest()
-    const stored = Buffer.from(terminal.commandTokenHash, 'hex')
-    if (stored.length === digest.length && timingSafeEqual(stored, digest)) return terminal
-    return null
+    return llaveCoincide(terminal.commandTokenHash, token) ? terminal : null
   }
   if (!identity?.venueId || !sameTerminalSerial(identity.terminalSerialNumber, terminal.serialNumber)) return null
   if (identity.venueId === terminal.venueId) return terminal

@@ -10,6 +10,7 @@ import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.serv
 import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
+import { veredictoPuerta } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -590,6 +591,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       }
     }
 
+    // D32 etapa 1 (sombra): anota si la puerta HABRÍA negado por no traer la llave del aparato. No niega ni cambia la
+    // respuesta; nunca escribe la llave ni su hash. La versión es sólo para medir (se falsifica), nunca para decidir.
+    const headers = req.headers ?? {}
+    const puerta = veredictoPuerta(terminal.commandTokenHash, headers['x-tpv-command-token'])
     logger.info('[Terminal Config] Successfully fetched config', {
       terminalId: terminal.id,
       serialNumber: terminal.serialNumber,
@@ -597,6 +602,13 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       angelpayAuthAttached: angelpayAuth !== null,
       angelpayAccountsCount: angelpayAccounts.length,
       tpvSettings,
+      puertaVeredicto: puerta.veredicto,
+      puertaHabriaNegado: puerta.habriaNegado,
+      puertaLlaveSinAlta: puerta.llaveSinAlta,
+      appVersionCode: headers['x-app-version-code'],
+      appVersionName: headers['x-app-version-name'],
+      tpvProcessor: headers['x-tpv-processor'],
+      terminalBrand: terminal.brand,
     })
 
     res.status(200).json({
