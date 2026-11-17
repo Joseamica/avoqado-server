@@ -21,6 +21,7 @@ import logger from '@/config/logger'
 import { normalizeTerminalSerialNumber, terminalIdentityKey } from '@/utils/terminalSerial'
 import { randomUUID } from 'crypto'
 import { tipoDeEvidencia } from './segundaCaptura'
+import { IntentoConReverso, VENTANA_DEL_REVERSO_MS } from './reversoDeLaTerminal.service'
 import {
   OPCIONES_DE_TRANSACCION_DEL_INTENTO,
   candadoDeIntento,
@@ -89,6 +90,11 @@ export type AngelPayWebhookAction =
   // Codex R5 (P2): el registrador devolvió por la llave una evidencia de COLISIÓN de referencia (R4-6) — evidencia, no un
   // cobro confirmado ni un MATCHED: la solicitud sigue sin ganador y nadie la lee como «cobrado».
   | 'REFERENCE_COLLISION'
+  // SDK propio (Tarea 7): el aviso de Blumon llegó con la lápida del reverso `reversing` — retenido (PENDING) hasta que la terminal
+  // diga en qué quedó o venza la ventana del reverso; sin dinero.
+  | 'HELD_BY_REVERSAL'
+  // SDK propio (Tarea 7): la lápida dice `reversed` — la terminal ya reversó con el banco: el aviso se sella sin dinero.
+  | 'REVERSED_BY_TERMINAL'
 
 export interface AngelPayWebhookResult {
   action: AngelPayWebhookAction
@@ -132,6 +138,9 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
   POSSIBLE_SECOND_CAPTURE: 'POSSIBLE_SECOND_CAPTURE',
   // Codex R5 (P2): el intento del webhook es una evidencia de colisión de referencia (misma referencia, candidato que contradice).
   POSSIBLE_REFERENCE_COLLISION: 'POSSIBLE_REFERENCE_COLLISION',
+  // SDK propio (Tarea 7): la lápida del reverso del intento (sólo cobros de Blumon; ver `reversoDeLaTerminal.service`).
+  HELD_BY_REVERSAL: 'HELD_BY_REVERSAL',
+  REVERSED_BY_TERMINAL: 'REVERSED_BY_TERMINAL',
 } as const
 
 /**
@@ -885,6 +894,57 @@ export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): 
         : await registrador.recordFastPayment(link.venueId, paymentData as any, staffId)
     ) as { id: string } & Record<string, unknown>
   } catch (error) {
+    // SDK propio (Tarea 7): la guarda del registrador sólo lanza esto para un cobro de Blumon con lápida `reversing`/`reversed`.
+    if (error instanceof IntentoConReverso) {
+      if (error.estado === 'reversed') {
+        logger.warn(`⚠️ [${etiqueta} webhook] La terminal ya reversó este intento — el aviso se sella sin dinero`, {
+          correlationId,
+          attemptId,
+          requestId: request.requestId,
+        })
+        const escritura = await prisma.providerEventLog.updateMany({
+          where: { id: eventLogId, ...propietario },
+          data: {
+            status: EventStatus.PROCESSED,
+            errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.REVERSED_BY_TERMINAL,
+            processedAt: new Date(),
+          },
+        })
+        return desenlaceDurableSiPerdioLaPropiedad(eventLogId, escritura, {
+          action: 'REVERSED_BY_TERMINAL',
+          errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.REVERSED_BY_TERMINAL,
+          eventLogId,
+        })
+      }
+      logger.warn(`⏸️ [${etiqueta} webhook] La terminal está reversando este intento — el aviso queda retenido hasta su desenlace`, {
+        correlationId,
+        attemptId,
+        requestId: request.requestId,
+        lapidaCreadaEn: error.lapidaCreadaEn.toISOString(),
+      })
+      // Igual que el error del registrador: el banco aprobó y no nació dinero ⇒ si la solicitud ya estaba LIBERADA, se re-retiene.
+      await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+        requestId: link.requestId,
+        venueId: link.venueId,
+        attemptId,
+        eventLogId,
+        motivo: 'HELD_BY_REVERSAL',
+      })
+      // La red de 30 s lo destraba: al vencer la ventana, la lápida pasa a `reverse_unconfirmed` y el aviso crea el cobro.
+      const escritura = await prisma.providerEventLog.updateMany({
+        where: { id: eventLogId, ...propietario },
+        data: {
+          status: EventStatus.PENDING,
+          errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.HELD_BY_REVERSAL,
+          nextAttemptAt: new Date(error.lapidaCreadaEn.getTime() + VENTANA_DEL_REVERSO_MS),
+        },
+      })
+      return desenlaceDurableSiPerdioLaPropiedad(eventLogId, escritura, {
+        action: 'HELD_BY_REVERSAL',
+        errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.HELD_BY_REVERSAL,
+        eventLogId,
+      })
+    }
     const mensaje = error instanceof Error ? error.message : String(error)
     logger.error(`🚨 [${etiqueta} webhook] El registrador no pudo crear el Payment del webhook — el evento queda PENDING para reintento`, {
       correlationId,

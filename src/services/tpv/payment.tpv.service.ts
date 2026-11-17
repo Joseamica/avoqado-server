@@ -23,6 +23,7 @@ import {
   MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { esCobroDeBlumon, exigirIntentoSinReverso } from './reversoDeLaTerminal.service'
 import { avisarDineroDeRappi } from '../shared/avisoDeRappiEfectivo'
 import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
@@ -4012,6 +4013,11 @@ export async function recordOrderPayment(
           // que la consulta rápida no vio ya confirmó: si su pago existe, sale por la red de la carrera (`CobroYaRegistrado`, abajo) y
           // responde como el atajo de arriba, ANTES de cualquier regla de estado (arbitraje, cancelada, sesión de vales en conciliación).
           await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
+          // SDK propio (Tarea 7, H13): la lápida del reverso, bajo el MISMO candado que el permiso del reverso, y después del
+          // atajo idempotente (si el cobro ya existe, la verdad es «Aprobado», no un 409). Sólo para cobros de Blumon.
+          if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
+            await exigirIntentoSinReverso(tx, llaveDelIntento)
+          }
         }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
         // ya con el candado — la resolución de arriba corrió fuera de esta transacción y dos replays simultáneos veían
@@ -5733,7 +5739,13 @@ export async function recordFastPayment(
       prisma.$transaction(async tx => {
         // Codex R14-1: PRIMERA sentencia — el candado del intento (ver la ruta de orden). Orden: intento → referencia →
         // TerminalPaymentRequest → Payment → Shift.
-        if (llaveDelIntento) await candadoDeIntento(tx, llaveDelIntento)
+        if (llaveDelIntento) {
+          await candadoDeIntento(tx, llaveDelIntento)
+          // SDK propio (Tarea 7): la lápida del reverso, bajo el mismo candado que el permiso del reverso. Sólo cobros de Blumon.
+          if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
+            await exigirIntentoSinReverso(tx, llaveDelIntento)
+          }
+        }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) y vuelve a resolver ya con el candado.
         if (!paymentData.idempotencyKey && argumentosDeReferencia) {
           colisionDeReferencia = await exclusionPorReferencia(tx, argumentosDeReferencia)

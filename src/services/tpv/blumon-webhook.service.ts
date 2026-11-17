@@ -23,6 +23,7 @@ import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
 import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
 import { llaveDeIntento } from './candadoDeIntento'
+import { vencerReversoSinRespuesta } from './reversoDeLaTerminal.service'
 import {
   RECEIVER_FIRST_WINDOW_MS,
   capturarTarifaAlIngreso,
@@ -1406,6 +1407,8 @@ export async function confirmarBlumonPorVinculo(args: {
   ctx: ContextoDelIngreso
 }): Promise<WebhookProcessingResult | null> {
   const { payload, eventLogId, ctx } = args
+  // Tarea 7: una lápida `reversing` vencida (o ya `reverse_unconfirmed`) no detiene el aviso: el cobro nace marcado como incierto.
+  const incierto = await vencerReversoSinRespuesta(ctx.attemptId)
   const r = await confirmarAvisoPorVinculo({
     etiqueta: 'Blumon',
     attemptId: ctx.attemptId,
@@ -1431,13 +1434,32 @@ export async function confirmarBlumonPorVinculo(args: {
         serialNumber: payload.serialNumber ?? null,
       },
       // Codex r5: la marca que lee el auditor de cobros sin aviso (`blumon-payment-audit.job.ts`).
-      extra: { blumonWebhookReceived: true },
+      extra: { blumonWebhookReceived: true, ...(incierto ? { reversoIncierto: true } : {}) },
     },
     propietario: {},
     correlationId: `blumon-wh-${eventLogId.slice(-8)}`,
   })
   if (!r) return null
-  const pasan = ['CONFIRMED', 'SECOND_CAPTURE', 'REFERENCE_COLLISION', 'MATCHED', 'DISCREPANCY', 'ERROR'] as const
+  // H15: la alarma sale sólo si de verdad se registró (o ya estaba) el cobro; en la carrera con un REVERSADA no hay dinero.
+  if (incierto && r.paymentId && (r.action === 'CONFIRMED' || r.action === 'MATCHED' || r.action === 'SECOND_CAPTURE')) {
+    logger.error('🚨 [Blumon reverso] El banco aprobó y el reverso nunca se confirmó: se registra el cobro', {
+      attemptId: ctx.attemptId,
+      requestId: ctx.requestId,
+      paymentId: r.paymentId,
+      eventLogId,
+      action: r.action,
+    })
+  }
+  const pasan = [
+    'CONFIRMED',
+    'SECOND_CAPTURE',
+    'REFERENCE_COLLISION',
+    'MATCHED',
+    'DISCREPANCY',
+    'ERROR',
+    'HELD_BY_REVERSAL',
+    'REVERSED_BY_TERMINAL',
+  ] as const
   const action = pasan.find(a => a === r.action) ?? 'PENDING' // ORPHANED: el evento sigue PENDING
   return {
     success: action === 'CONFIRMED' || action === 'MATCHED',

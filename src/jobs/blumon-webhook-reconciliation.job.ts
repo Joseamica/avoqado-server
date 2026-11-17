@@ -11,6 +11,7 @@ import {
   REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
+import { vencerLapidasSinRespuesta } from '../services/tpv/reversoDeLaTerminal.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -40,6 +41,9 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  *    receiver's exclusive window). An event that entered WITH our attempt link
  *    is recovered by `reconcileBlumonEvent` through the shared core, with the
  *    identity and tariff saved at ingress — never the weak matching.
+ * 6. (SDK propio, Tarea 7) Before anything else, each pass expires reversal
+ *    tombstones still `reversing` past `VENTANA_DEL_REVERSO_MS` (→
+ *    `reverse_unconfirmed`), so a webhook held by one is released in the same pass.
  *
  * Pattern matches the existing `AbandonedOrdersCleanupJob` / `tpvHealthMonitorJob`
  * structure used elsewhere in the codebase. Singleton, registered in
@@ -83,10 +87,15 @@ export class BlumonWebhookReconciliationJob {
     this.isRunning = true
     const startedAt = Date.now()
     try {
-      const reconciled = await this.reconcilePending()
-      const orphaned = await this.markOrphaned()
-      if (reconciled > 0 || orphaned > 0) {
+      // Un solo «ahora» por pase (Tarea 7, pendiente de la 6): lo que `reconcilePending` deja fuera por su turno, `markOrphaned`
+      // tampoco lo vence. Primero las lápidas del reverso que vencieron: así su aviso retenido sale en este mismo pase.
+      const ahora = new Date()
+      const lapidasVencidas = await vencerLapidasSinRespuesta(ahora)
+      const reconciled = await this.reconcilePending(ahora)
+      const orphaned = await this.markOrphaned(ahora)
+      if (reconciled > 0 || orphaned > 0 || lapidasVencidas > 0) {
         logger.info('🪝 [Blumon recon] Pass complete', {
+          lapidasVencidas,
           reconciled,
           orphaned,
           elapsedMs: Date.now() - startedAt,
@@ -106,8 +115,7 @@ export class BlumonWebhookReconciliationJob {
    * Pull PENDING events and retry matching once each.
    * Returns the count of events that newly transitioned out of PENDING.
    */
-  async reconcilePending(): Promise<number> {
-    const now = new Date()
+  async reconcilePending(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const pending = await retry(
       () =>
@@ -151,7 +159,8 @@ export class BlumonWebhookReconciliationJob {
         // single terminal's venue that was cached at insert time.
         const result = await reconcileBlumonEvent(row.id, payload)
         // Con contexto, el núcleo contesta PENDING cuando el evento sigue esperando (p. ej. AMOUNT_MISMATCH): no salió.
-        if (result.action !== 'NOT_FOUND' && result.action !== 'PENDING') resolved++
+        // HELD_BY_REVERSAL: retenido por la lápida del reverso, sigue PENDING.
+        if (result.action !== 'NOT_FOUND' && result.action !== 'PENDING' && result.action !== 'HELD_BY_REVERSAL') resolved++
       } catch (err) {
         logger.error('❌ [Blumon recon] Failed to retry event', {
           eventLogId: row.id,
@@ -167,8 +176,7 @@ export class BlumonWebhookReconciliationJob {
    * Promote stale PENDING events (> TTL) to ERROR with errorReason=ORPHANED.
    * Bulk update is fine — these are not eligible for further retries.
    */
-  async markOrphaned(): Promise<number> {
-    const now = new Date()
+  async markOrphaned(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const orphanWhere = {
       provider: ProviderType.PAYMENT_PROCESSOR,

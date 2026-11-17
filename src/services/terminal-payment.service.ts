@@ -1573,6 +1573,8 @@ export type MotivoDeRetencionPorAprobacion =
   | 'PROCESSING_ERROR'
   | 'LINK_TERMINAL_MISMATCH'
   | 'POSSIBLE_REFERENCE_COLLISION'
+  // SDK propio (Tarea 7): el aviso de Blumon quedó retenido por la lápida del reverso.
+  | 'HELD_BY_REVERSAL'
 /** Ronda 2 (P1): quién intentó ligar un cobro ligado a una solicitud ya liberada y no pudo (queda en el sobre y en el asiento). */
 export type OrigenDeRetencionPorPago =
   | 'REST'
