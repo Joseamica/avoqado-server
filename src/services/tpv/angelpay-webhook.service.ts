@@ -979,7 +979,8 @@ export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): 
   // H3: `firstConfirmer` va dentro de la llave del procesador; `receivedAt` se calcula aquí, después del registrador.
   const huella = {
     ...aviso.huella.extra,
-    [aviso.huella.clave]: { receivedAt: new Date().toISOString(), ...aviso.huella.datos, firstConfirmer: primerConfirmador },
+    // `receivedAt` después de `datos`: ningún traductor lo pisa.
+    [aviso.huella.clave]: { ...aviso.huella.datos, receivedAt: new Date().toISOString(), firstConfirmer: primerConfirmador },
   }
   await prisma.$executeRaw`
     UPDATE "Payment"
@@ -1367,12 +1368,17 @@ function esEsperaDeCandadoVencida(error: unknown): boolean {
   return codigo === '55P03' || /55P03|lock timeout|canceling statement due to lock timeout/i.test(texto)
 }
 
-export async function capturarTarifaAlIngreso(venueId: string, merchantAccountId: string): Promise<TarifaCapturadaAlIngreso> {
+export async function capturarTarifaAlIngreso(
+  venueId: string,
+  merchantAccountId: string,
+  /** Sólo para el texto del log. */
+  etiqueta: 'AngelPay' | 'Blumon' = 'AngelPay',
+): Promise<TarifaCapturadaAlIngreso> {
   const ahora = new Date()
   try {
     return await tarifaCongeladaDeLaAfiliacion(venueId, merchantAccountId, ahora)
   } catch (error) {
-    logger.warn('⚠️ [AngelPay webhook] No se pudo congelar la tarifa al ingreso del evento; el costo quedará pendiente', {
+    logger.warn(`⚠️ [${etiqueta} webhook] No se pudo congelar la tarifa al ingreso del evento; el costo quedará pendiente`, {
       venueId,
       merchantAccountId,
       error: error instanceof Error ? error.message : String(error),
