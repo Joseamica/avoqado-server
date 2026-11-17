@@ -121,6 +121,14 @@ describe('tocaAvisoDePruebaSinCobro (Plan Básico: 8–9 días antes y el día a
     expect(tocaAvisoDePruebaSinCobro(null, inicio, fin, fin - 8 * DAY, tz)).toBe('PRIMERO')
     expect(tocaAvisoDePruebaSinCobro(new Date(inicio - DAY), inicio, fin, fin - 8 * DAY, tz)).toBe('PRIMERO')
   })
+  it('🔴 T6: fila reutilizada de una cortesía → su sello (la fecha anunciada) no tapa «Tu prueba termina» de la prueba nueva', () => {
+    // Cortesía que terminaba 5 días después de empezar esta prueba: su sello es esa fecha, futura o ya pasada.
+    const cortesia = new Date(inicio + 5 * DAY)
+    expect(tocaAvisoDePruebaSinCobro(cortesia, inicio, fin, inicio + 2 * DAY, tz)).toBe('PRIMERO')
+    expect(tocaAvisoDePruebaSinCobro(cortesia, inicio, fin, fin - 8 * DAY, tz)).toBe('PRIMERO')
+    // Una cortesía que terminaba DESPUÉS del fin de esta prueba tampoco.
+    expect(tocaAvisoDePruebaSinCobro(new Date(fin + 10 * DAY), inicio, fin, fin - 8 * DAY, tz)).toBe('PRIMERO')
+  })
   it('primer aviso dado, todavía no es el día anterior → nada', () => {
     expect(tocaAvisoDePruebaSinCobro(new Date(fin - 8 * DAY), inicio, fin, fin - 3 * DAY, tz)).toBeNull()
   })

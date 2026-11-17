@@ -89,7 +89,11 @@ export function tocaAvisoDePruebaSinCobro(
   nowMs: number,
   timeZone: string,
 ): 'PRIMERO' | 'ULTIMO' | null {
-  if (!sello || sello.getTime() < periodStartMs) return 'PRIMERO'
+  // T6: una fila reutilizada de una cortesía trae SU sello (la fecha que se le anunció, a veces en el futuro). Sólo cuenta
+  // un envío de ESTE periodo: este aviso sale con menos de 9 días por delante, así que su sello nunca es anterior a eso
+  // (ni al inicio del periodo) ni posterior a ahora.
+  const desde = Math.max(periodStartMs, periodEndMs - 9 * DIA_MS)
+  if (!sello || sello.getTime() < desde || sello.getTime() > nowMs) return 'PRIMERO'
   const diaAntes = diaLocal(periodEndMs - DIA_MS, timeZone)
   return diaLocal(nowMs, timeZone) >= diaAntes && diaLocal(sello.getTime(), timeZone) < diaAntes ? 'ULTIMO' : null
 }
