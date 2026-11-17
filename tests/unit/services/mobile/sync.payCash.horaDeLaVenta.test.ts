@@ -119,4 +119,31 @@ describe('PAY_CASH · hora de la venta', () => {
       jest.useRealTimers()
     }
   })
+
+  it.each([
+    ['en el futuro', 3600000],
+    ['de hace dos días', -48 * 3600000],
+    ['de hace 10 min', -600000],
+  ])('D93 (Codex r2 #1): para el reporte pasa la hora del aparato SIN recortar (%s) y la llegada del intent', async (_c, delta) => {
+    const now = new Date('2026-11-09T18:00:00Z')
+    jest.useFakeTimers().setSystemTime(now)
+    try {
+      const createdAtLocal = now.getTime() + (delta as number)
+      await processIntents(
+        baseParams([{ id: 'i-hr', type: 'PAY_CASH', createdAtLocal, payload: { orderId: 'order-1', amountCents: 10000 } }]),
+      )
+      expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+        VENUE,
+        'order-1',
+        expect.objectContaining({ horaDelAparato: createdAtLocal, llegada: now }),
+      )
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('D93 (Codex r2 #1): sin hora del aparato no se inventa una (horaDelAparato null; clampSoldAt sí pone «ahora» para la lealtad)', async () => {
+    await processIntents(baseParams([{ id: 'i-sin-hora', type: 'PAY_CASH', payload: { orderId: 'order-1', amountCents: 10000 } }]))
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-1', expect.objectContaining({ horaDelAparato: null }))
+  })
 })

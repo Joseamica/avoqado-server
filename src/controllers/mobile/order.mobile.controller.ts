@@ -554,6 +554,8 @@ export function esColaConDefectoH1(plataforma: unknown, version: unknown): boole
  * @route POST /api/v1/mobile/venues/:venueId/orders/:orderId/pay
  */
 export const payCash = async (req: Request, res: Response, next: NextFunction) => {
+  // D93: cuándo ENTRÓ la petición, antes de cualquier espera: la cota de 24 h de la hora del aparato (`Payment.clientCreatedAt`).
+  const llegada = new Date()
   try {
     const { venueId, orderId } = req.params
     const { amount, tip, staffId, idempotencyKey, method, externalSource, tenderTypeId, tenderRevision } = req.body
@@ -662,6 +664,7 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // S6: la hora en que se cobró (sólo cuenta en un replay) y la terminal del TOKEN: pago de terminal y comanda tardía.
       createdAtLocal:
         typeof req.body.createdAtLocal === 'number' || typeof req.body.createdAtLocal === 'string' ? req.body.createdAtLocal : null,
+      llegada,
       // Reloj monótono del aparato (ms desde la venta); sólo número: el servicio decide si es válido.
       edadDeLaVentaMs: typeof req.body.edadDeLaVentaMs === 'number' ? req.body.edadDeLaVentaMs : undefined,
       terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
