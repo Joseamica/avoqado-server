@@ -186,8 +186,7 @@ export class BlumonWebhookReconciliationJob {
         venueId: row.venueId,
         terminalId: row.terminalId,
         amount: p?.amount,
-        authorizationCode: p?.authorizationCode,
-        lastFour: p?.lastFour,
+        authorizationCode: p?.authorizationCode, // R6: sin lastFour en el log
         reference: p?.reference,
         operationNumber: p?.operationNumber,
         serialNumber: p?.serialNumber,

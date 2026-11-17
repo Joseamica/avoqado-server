@@ -2,6 +2,7 @@ import {
   buildBlumonEventId,
   processBlumonPaymentWebhook,
   reconcileBlumonEvent,
+  sinTitular,
   validateBlumonWebhookPayload,
 } from '@/services/tpv/blumon-webhook.service'
 import prisma from '@/utils/prismaClient'
@@ -381,5 +382,33 @@ describe('Task 5 — reversals never run sale logic and get their own event id',
         data: expect.objectContaining({ status: 'PROCESSED', errorReason: 'REVERSAL_UNMATCHED' }),
       }),
     )
+  })
+})
+
+/**
+ * R6 (hallazgo D4): ProviderEventLog.payload no guarda el nombre del titular. Va aquí y no en
+ * blumon-webhook.service.test.ts (H2): este mock sí llega a los tres `create`.
+ */
+describe('R6 — la base no guarda el titular', () => {
+  const conTitular = { ...ventaPayload, cardHolder: 'HOMER SIMPSON', bin: '411111', lastFour: '1111' }
+
+  it.each([
+    ['UNKNOWN_TERMINAL', { serialNumber: '99999999999' }],
+    ['NOT_APPROVED', { codeResponse: '05', descriptionResponse: 'DECLINADA' }],
+    ['PENDING', {}],
+  ])('ProviderEventLog.payload nunca guarda cardHolder (%s)', async (_rama, cambios) => {
+    await processBlumonPaymentWebhook({ ...conTitular, ...cambios })
+
+    const guardado = mockedEventLogCreate.mock.calls[0][0].data
+    if (_rama === 'PENDING') expect(guardado.status).toBe('PENDING')
+    else expect(guardado.errorReason).toBe(_rama)
+    expect(guardado.payload).not.toHaveProperty('cardHolder')
+    expect(guardado.payload).toEqual(expect.objectContaining({ lastFour: '1111', bin: '411111' }))
+  })
+
+  it('sinTitular no toca el payload original', () => {
+    const copia = sinTitular(conTitular)
+    expect(copia).not.toHaveProperty('cardHolder')
+    expect(conTitular.cardHolder).toBe('HOMER SIMPSON')
   })
 })

@@ -15,7 +15,12 @@
 
 import { Request, Response, NextFunction } from 'express'
 import logger from '../../config/logger'
-import { processBlumonPaymentWebhook, validateBlumonWebhookPayload, BlumonWebhookPayload } from '../../services/tpv/blumon-webhook.service'
+import {
+  processBlumonPaymentWebhook,
+  validateBlumonWebhookPayload,
+  BlumonWebhookPayload,
+  paraElLog,
+} from '../../services/tpv/blumon-webhook.service'
 
 /**
  * Handle Blumon TPV payment confirmation webhook
@@ -81,16 +86,21 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
     try {
       const rawString = req.body.toString('utf8')
       body = JSON.parse(rawString)
+      // R6: nunca titular, bin ni últimos 4 en el log (paraElLog los quita).
+      const fullPayload = paraElLog(body, req.body.length)
       logger.info('📦 Blumon webhook: Parsed Buffer body successfully', {
         correlationId,
-        parsedFields: Object.keys(body),
-        fullPayload: body, // Log full payload to understand Blumon's format
+        parsedFields: Object.keys(fullPayload),
+        fullPayload,
       })
     } catch (parseError) {
+      // R6: el mensaje del parser de V8 cita un fragmento del cuerpo (con el titular): sólo nombre, tamaño y posición.
+      const posicion = parseError instanceof Error ? /position (\d+)/.exec(parseError.message)?.[1] : undefined
       logger.error('❌ Blumon webhook: Failed to parse Buffer body', {
         correlationId,
-        error: parseError instanceof Error ? parseError.message : 'Unknown parse error',
-        rawBodyPreview: req.body.toString('utf8').substring(0, 200),
+        errorName: parseError instanceof Error ? parseError.name : 'Unknown',
+        rawBodyLength: req.body.length,
+        ...(posicion !== undefined && { jsonErrorPosition: Number(posicion) }),
       })
       res.status(400).json({
         success: false,
@@ -104,7 +114,7 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
   if (!validateBlumonWebhookPayload(body)) {
     logger.warn('⚠️ Blumon webhook: Invalid payload structure', {
       correlationId,
-      body: JSON.stringify(body).substring(0, 500), // Truncate for logging
+      body: JSON.stringify(paraElLog(body)).substring(0, 500), // Truncate for logging
     })
 
     res.status(400).json({

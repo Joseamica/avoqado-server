@@ -448,7 +448,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           provider: ProviderType.PAYMENT_PROCESSOR,
           eventId: eventIdString,
           type: payload.operationType ?? 'UNKNOWN',
-          payload: payload as unknown as Prisma.InputJsonValue,
+          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
           status: EventStatus.ERROR,
           errorReason: BLUMON_WEBHOOK_ERROR_REASONS.UNKNOWN_TERMINAL,
           processedAt: new Date(),
@@ -480,7 +480,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           provider: ProviderType.PAYMENT_PROCESSOR,
           eventId: eventIdString,
           type: payload.operationType ?? 'UNKNOWN',
-          payload: payload as unknown as Prisma.InputJsonValue,
+          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
           venueId: scopeVenueId,
           terminalId: terminal?.id ?? null,
           status: EventStatus.ERROR,
@@ -524,7 +524,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           provider: ProviderType.PAYMENT_PROCESSOR,
           eventId: eventIdString,
           type: payload.operationType ?? 'VENTA',
-          payload: payload as unknown as Prisma.InputJsonValue,
+          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
           venueId: scopeVenueId,
           terminalId: terminal?.id ?? null,
           status: EventStatus.PENDING,
@@ -1181,6 +1181,29 @@ async function attemptPaymentMatch(
       message: error instanceof Error ? error.message : 'Unknown error processing webhook',
     }
   }
+}
+
+/**
+ * Copia del aviso sin el nombre del titular: es lo único que se guarda en `ProviderEventLog.payload`.
+ * `bin` y `lastFour` sí se quedan en la base (los usan el emparejamiento y la conciliación a mano).
+ */
+export function sinTitular(payload: BlumonWebhookPayload): BlumonWebhookPayload {
+  const { cardHolder: _titular, ...resto } = payload
+  return resto as BlumonWebhookPayload
+}
+
+/**
+ * Lo que del aviso puede ir al log: sin titular, sin bin y sin últimos 4. Si la raíz no es un objeto
+ * (cadena, número, arreglo, `null`), sólo su tipo y el tamaño, nunca el valor: un JSON doblemente
+ * codificado trae la tarjeta entera dentro de la cadena.
+ */
+export function paraElLog(body: unknown, rawBodyLength?: number): Record<string, unknown> {
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const { cardHolder: _titular, bin: _bin, lastFour: _lastFour, ...resto } = body as Record<string, unknown>
+    return resto
+  }
+  const rootType = body === null ? 'null' : Array.isArray(body) ? 'array' : typeof body
+  return { rootType, rawBodyLength }
 }
 
 /**
