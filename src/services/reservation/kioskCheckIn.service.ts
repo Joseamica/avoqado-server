@@ -430,6 +430,16 @@ export async function checkInByIdentifier(args: {
 
   // Con `opId`: el recibo va primero, en la transacción de la llegada. Sin `opId` (en vivo): nada.
   const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
+    // Codex r1 #2: entre buscar y escribir, recepción pudo corregir el teléfono de ESTA reserva. Con la fila bloqueada (el mismo
+    // candado que toma el check-in, y primero, como `undoNoShow`) se vuelve a comparar; si ya no es el tecleado, no se marca.
+    if (phoneTail) {
+      const [fila] = await tx.$queryRaw<Array<{ guestPhone: string | null; customerPhone: string | null }>>`
+        SELECT r."guestPhone", c.phone AS "customerPhone" FROM "Reservation" r
+        LEFT JOIN "Customer" c ON c.id = r."customerId"
+        WHERE r.id = ${reservation.id} AND r."venueId" = ${args.venueId}
+        FOR UPDATE OF r`
+      if (!fila || !(phonesMatch(raw, fila.guestPhone) || phonesMatch(raw, fila.customerPhone))) throw notFound()
+    }
     if (args.opId) {
       const n = await tx.$executeRaw`
         INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
@@ -558,10 +568,27 @@ async function reservaDelTelefono(a: {
     where: { ...a.ventana, id: { in: ids.map(r => r.id) } },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
     take: 20,
-    select: { ...DISPLAY_SELECT, guestPhone: true, customer: { select: { firstName: true, lastName: true, phone: true } } },
+    select: {
+      ...DISPLAY_SELECT,
+      customerId: true,
+      guestPhone: true,
+      customer: { select: { firstName: true, lastName: true, phone: true } },
+    },
   })
-  return candidatas.find(r => phonesMatch(a.tecleado, r.guestPhone) || phonesMatch(a.tecleado, r.customer?.phone)) ?? null
+  const suyas = candidatas.filter(r => phonesMatch(a.tecleado, r.guestPhone) || phonesMatch(a.tecleado, r.customer?.phone))
+  // Codex r1 #1: con más de una PERSONA detrás del número en la ventana (madre e hija, teléfono compartido), el kiosco no adivina:
+  // la llegada la marca recepción. Una invitada sin ficha se reconoce por su nombre (la misma invitada en dos clases seguidas sí
+  // es una sola persona).
+  const persona = (r: (typeof suyas)[number]) => r.customerId ?? `invitada:${(r.guestName ?? '').trim().toLowerCase().replace(/\s+/g, ' ')}`
+  if (new Set(suyas.map(persona)).size > 1) {
+    throw new ConflictError('Hay más de una reservación con ese teléfono. Pide tu llegada en recepción.', CHECK_IN_PHONE_AMBIGUOUS)
+  }
+  // La misma persona con varias en la ventana: primero la que falta marcar (como el QR); si todas están, «ya estabas».
+  return suyas.find(r => r.status === 'PENDING' || r.status === 'CONFIRMED') ?? suyas.find(r => r.status === 'NO_SHOW') ?? suyas[0] ?? null
 }
+
+/** Codex r1 #1 (D4): dos personas con el mismo teléfono en la misma ventana. */
+export const CHECK_IN_PHONE_AMBIGUOUS = 'CHECK_IN_PHONE_AMBIGUOUS'
 
 const DISPLAY_SELECT = {
   id: true,

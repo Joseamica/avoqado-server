@@ -120,7 +120,10 @@ describe('OTP Auth Public Service', () => {
       await requestOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW })
 
       expect(prismaMock.$transaction).toHaveBeenCalled()
-      expect(orden[0]).toBe(`lock:otp:${VENUE_ID}:CUSTOMER_LOGIN:${PHONE_NORM}`)
+      // Codex r1 #3: el candado y la cuenta son del DESTINO, no del propósito: «Entrar» y «Cambiar mi número» comparten el tope.
+      expect(orden[0]).toBe(`lock:otp:${VENUE_ID}:${PHONE_NORM}`)
+      const cuenta = (prismaMock.otpChallenge.count as jest.Mock).mock.calls[0][0]
+      expect(cuenta.where.purpose).toEqual({ in: ['CUSTOMER_LOGIN', 'CUSTOMER_PHONE_CHANGE'] })
       expect(orden.slice(1)).toEqual(['count', 'count', 'create'])
       // El WhatsApp sale DESPUÉS de soltar el candado: no se detiene a los demás teléfonos mientras el proveedor contesta.
       expect(sendOtpWhatsApp).toHaveBeenCalledTimes(1)
@@ -189,7 +192,12 @@ describe('OTP Auth Public Service', () => {
 
       // rate-limit y la invalidación filtran por venue: el reto de A sobrevive
       for (const call of prismaMock.otpChallenge.count.mock.calls) {
-        expect(call[0].where).toMatchObject({ venueId: 'venue-B', destination: PHONE_NORM, purpose: 'CUSTOMER_LOGIN' })
+        // Codex r1 #3 (D11): el tope del destino es de «Entrar» y «Cambiar mi número» juntos; sigue siendo del venue.
+        expect(call[0].where).toMatchObject({
+          venueId: 'venue-B',
+          destination: PHONE_NORM,
+          purpose: { in: ['CUSTOMER_LOGIN', 'CUSTOMER_PHONE_CHANGE'] },
+        })
       }
       expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({

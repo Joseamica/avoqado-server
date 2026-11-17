@@ -52,12 +52,17 @@ function reserva(over: Record<string, unknown> = {}) {
 }
 
 const base = { venueId: V, terminalId: null, stationKey: 'B', identifier: '55 1234 5678', now: NOW }
+let telefonoAlBloquear: { guestPhone: string | null; customerPhone: string | null }
 
 beforeEach(() => {
   jest.clearAllMocks()
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   prismaMock.kioskCheckInAttempt.upsert.mockResolvedValue({ count: 1 } as any)
-  ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ id: 'res-1' }])
+  // El prefiltro (ids) y, dentro de la transacción, la relectura del teléfono con la fila bloqueada (Codex r1 #2).
+  telefonoAlBloquear = { guestPhone: null, customerPhone: '+525512345678' }
+  ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (sql: TemplateStringsArray) =>
+    sql.join('?').includes('FOR UPDATE') ? [telefonoAlBloquear] : [{ id: 'res-1' }],
+  )
   prismaMock.reservation.findMany.mockResolvedValue([reserva()] as any)
   prismaMock.kioskCheckInOp.findUnique.mockResolvedValue(null)
   ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
@@ -212,6 +217,50 @@ describe('Teléfono tecleado en el kiosco', () => {
     it('una app vieja que manda sólo 10 dígitos sigue encontrando un celular mexicano', async () => {
       const out = await checkInByIdentifier({ ...base, identifier: '5512345678' })
       expect(out.outcome).toBe('CHECKED_IN')
+    })
+
+    // Codex r1 #1 (regresión): madre e hija comparten teléfono en la misma clase. Antes, el formato guardado decidía por accidente;
+    // ahora las dos empatan. Con más de una PERSONA detrás del número, el kiosco no adivina: pide la llegada en recepción.
+    it('🔴 dos personas distintas con el mismo teléfono en la ventana ⇒ 409, no marca a ninguna', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ id: 'res-mama', customerId: null, customer: null, guestName: 'Ana Ruiz', guestPhone: '55 1234 5678' }),
+        reserva({ id: 'res-hija', customerId: null, customer: null, guestName: 'Sofía Ruiz', guestPhone: '5512345678' }),
+      ] as any)
+      await expect(checkInByIdentifier({ ...base, identifier: '+525512345678' })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CHECK_IN_PHONE_AMBIGUOUS',
+      })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    it('la MISMA invitada (mismo nombre, sin ficha) en dos clases seguidas no es ambigua: marca la que falta', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ id: 'res-9a', status: 'CHECKED_IN', customerId: null, customer: null, guestName: 'Ana Ruiz', guestPhone: '5512345678' }),
+        reserva({ id: 'res-9b', customerId: null, customer: null, guestName: ' ana  ruiz ', guestPhone: '55 1234 5678' }),
+      ] as any)
+      telefonoAlBloquear = { guestPhone: '55 1234 5678', customerPhone: null }
+      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
+      expect(out).toMatchObject({ outcome: 'CHECKED_IN', reservationId: 'res-9b' })
+    })
+
+    it('la MISMA clienta con dos reservas en la ventana ⇒ marca la que falta, no «ya estabas»', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        reserva({ id: 'res-1a', status: 'CHECKED_IN', customerId: 'c-ana' }),
+        reserva({ id: 'res-1b', customerId: 'c-ana' }),
+      ] as any)
+      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
+      expect(out).toMatchObject({ outcome: 'CHECKED_IN', reservationId: 'res-1b' })
+    })
+
+    // Codex r1 #2: entre buscar y escribir, recepción corrigió el teléfono de esa reserva. Dentro de la transacción, con la fila
+    // bloqueada, se vuelve a comparar: si ya no es suyo, no se marca (ni queda recibo de la cola).
+    it('🔴 el teléfono de la reserva cambió antes de escribir ⇒ 404, sin marcar ni recibo', async () => {
+      telefonoAlBloquear = { guestPhone: '+525599998888', customerPhone: null }
+      await expect(checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-x' })).rejects.toMatchObject({
+        statusCode: 404,
+      })
+      expect(checkInReservation).not.toHaveBeenCalled()
+      expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     })
 
     it('el prefiltro no encontró nada ⇒ ni siquiera se lee la reserva, 404 genérico', async () => {

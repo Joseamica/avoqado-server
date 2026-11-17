@@ -79,7 +79,10 @@ describe('pedirCambioDeTelefono', () => {
     expect(prismaMock.otpChallenge.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ venueId: VENUE, channel: 'whatsapp', destination: NUEVO, purpose: 'CUSTOMER_PHONE_CHANGE' }),
     })
-    expect(prismaMock.otpChallenge.count).toHaveBeenCalledWith({ where: expect.objectContaining({ purpose: 'CUSTOMER_PHONE_CHANGE' }) })
+    // Codex r1 #3 (D11): cuenta el tope del destino junto con «Entrar» (los dos mandan WhatsApp al mismo número).
+    expect(prismaMock.otpChallenge.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({ purpose: { in: ['CUSTOMER_LOGIN', 'CUSTOMER_PHONE_CHANGE'] } }),
+    })
   })
 
   it('una sesión SIN contactos probados (contraseña) ⇒ 401 CUSTOMER_REAUTH_REQUIRED, sin reto', async () => {

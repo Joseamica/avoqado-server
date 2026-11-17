@@ -46,6 +46,17 @@ it('🔴 dos pedidos simultáneos al mismo teléfono ⇒ sale UN código; el otr
   }
 })
 
+// Codex r1 #3: «Cambiar mi número» a X y «Entrar» con X al mismo tiempo mandaban dos WhatsApp a X.
+it('🔴 «Entrar» y «Cambiar mi número» al mismo teléfono a la vez ⇒ sale UN código', async () => {
+  const destination = '55 1234 2222'
+  const resultados = await Promise.allSettled([
+    requestOtp({ venueId: venueId!, channel: 'whatsapp', destination }),
+    requestOtp({ venueId: venueId!, channel: 'whatsapp', destination }, 'CUSTOMER_PHONE_CHANGE'),
+  ])
+  expect(resultados.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+  expect(await prisma.otpChallenge.count({ where: { venueId, destination: '+525512342222' } })).toBe(1)
+})
+
 it('regresión: otro teléfono del mismo negocio no espera al primero', async () => {
   await expect(requestOtp({ venueId: venueId!, channel: 'whatsapp', destination: '55 1234 1111' })).resolves.toEqual({ ok: true })
 })
