@@ -1272,6 +1272,32 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       expect(avisos).toHaveLength(1)
     })
 
+    it.each([
+      ['B registró el envío', false],
+      ['B mandó pero su registro falló (sólo el apartado ya no es de A)', true],
+    ])('🔴 R20: A aparta y se atora > 1 h; B toma el apartado y manda; A vuelve → A NO manda (%s)', async (_c, falla) => {
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      const t0 = Date.now()
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(t0)
+      let despierta!: () => void
+      // A se atora justo antes de mandar (lee el Básico publicado y no regresa).
+      mockBasico.mockImplementationOnce(() => new Promise(resolve => (despierta = () => resolve(BASICO))))
+      const a = avisarPlanTerminado(terminada())
+      await new Promise(r => setImmediate(r))
+      expect(estado.renewalReminderSentAt?.getTime()).toBe(t0) // A apartó
+      // Dos horas después corre B (webhook repetido o respaldo): el apartado de A ya se ve abandonado.
+      reloj.mockReturnValue(t0 + 2 * 3600_000)
+      if (falla) activityLog.create.mockRejectedValueOnce(new Error('db'))
+      await expect(avisarPlanTerminado(terminada())).resolves.toBe(true)
+      expect(endedSpy).toHaveBeenCalledTimes(1)
+      // A despierta (más de 24 h después, cuando la llave de Resend ya no frena nada).
+      reloj.mockReturnValue(t0 + 26 * 3600_000)
+      despierta()
+      await expect(a).resolves.toBe(false)
+      expect(endedSpy).toHaveBeenCalledTimes(1)
+      reloj.mockRestore()
+    })
+
     it('R19: webhook y respaldo a la vez → un solo envío', async () => {
       const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
       porConsulta({ terminadas: [filaTerminada] })

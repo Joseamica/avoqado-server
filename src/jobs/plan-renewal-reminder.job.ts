@@ -62,6 +62,7 @@ const PLAN_CODES = ['PLAN_PRO', 'PLAN_PREMIUM']
 export const TOPE_PRUEBAS = 200
 
 /** Plan Básico: días hacia atrás en que el job todavía avisa «Tu prueba terminó» si el webhook no lo hizo. */
+// A propósito 7 días (R20): unas corridas perdidas igual alcanzan; más tarde el «Tu Pro terminó» ya no sirve.
 export const DIAS_RESPALDO_TERMINADO = 7
 
 /** ¿Terminó SIN cobro (prueba o Pro pagado) en los últimos `DIAS_RESPALDO_TERMINADO` días? Lo de antes ya no se avisa. */

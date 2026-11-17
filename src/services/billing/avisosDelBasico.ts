@@ -245,6 +245,14 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
       // Apagado por el dueño: no se manda, pero queda registrado como resuelto (no hay nada que reintentar).
       if (!apagado) {
         const basico = await basicoPublicado()
+        // R20: justo antes de mandar se vuelve a comprobar. Si este proceso se atoró más de 1 h, otro pudo tomar el
+        // apartado, mandar y registrarlo: entonces éste ya no manda (y no suelta lo que ya no es suyo).
+        if (await yaSeAviso(vf.venueId, vf.id, sub.id, endedAt)) return false
+        const sigueSiendoMio = await prisma.venueFeature.updateMany({
+          where: { id: vf.id, renewalReminderSentAt: sello },
+          data: { renewalReminderSentAt: sello },
+        })
+        if (sigueSiendoMio.count !== 1) return false
         // Siempre la misma llave: Resend junta los reintentos de 24 h en una sola entrega.
         listo = await emailService.sendPlanEndedEmail(target.email, {
           locale: target.locale,
