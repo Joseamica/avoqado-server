@@ -10,7 +10,7 @@ import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { assertPriceRuleForList } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { lockProducts, priceTransaction, productKeySql, type ProductKey } from './hybridProduct'
+import { BASIC_PLAN_KEY, lockProducts, priceTransaction, productKeySql, type ProductKey } from './hybridProduct'
 
 export interface ListPriceRow {
   productKey: string
@@ -115,8 +115,19 @@ async function rowsFor(products: readonly ProductRow[]): Promise<ListPriceRow[]>
   })
 }
 
+/** The Plan Básico row: read like any list row, but it is not on the «Precios» board (PRODUCTS) and has no list-price rule. */
+const BASIC_PRODUCT: ProductRow = {
+  productKey: BASIC_PLAN_KEY,
+  featureCode: null,
+  planTier: null,
+  name: 'Plan Básico',
+  category: 'plan',
+  minimumTier: null,
+  notEditableReason: null,
+}
+
 async function rowOf(productKey: string): Promise<ListPriceRow> {
-  const product = PRODUCTS.find(p => p.productKey === productKey)
+  const product = [...PRODUCTS, BASIC_PRODUCT].find(p => p.productKey === productKey)
   if (!product) throw new NotFoundError('Producto no encontrado.', 'HYBRID_LIST_NOT_FOUND')
   return (await rowsFor([product]))[0]
 }
@@ -150,7 +161,7 @@ async function finalizeListPublication(key: ProductKey, listId: string, publicat
     }
     // Promotions activated since the save were checked against the old price: the new one must hold for them too.
     const after = priceOf((await tx.hybridOfferPublication.findUniqueOrThrow({ where: { id: publicationId } })).definition)
-    await assertPriceRuleForList(tx, key, after)
+    if (key !== BASIC_PLAN_KEY) await assertPriceRuleForList(tx, key, after)
     const before = list.currentPublicationId
       ? priceOf((await tx.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId } })).definition)
       : null
@@ -186,15 +197,16 @@ async function prepareAndFinalize(key: ProductKey, listId: string, publicationId
 }
 
 /** Steps 1–2 of spec §4.2 under the product lock: create the LIST if missing, then a publication marked pending. */
-async function saveList(product: ProductRow, definition: unknown, expectedRevision: number | null, staffId: string) {
+async function saveList(product: ProductRow, definition: unknown, expectedRevision: number | null, staffId: string, basicName?: string) {
   const key = product.productKey as ProductKey
   const compiled = compileHybridPublication(definition)
   const pending = await priceTransaction(async tx => {
     await lockProducts(tx, [key])
     const found = await tx.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: key } })
     if ((found?.revision ?? null) !== expectedRevision) changed()
-    await assertPriceRuleForList(tx, key, compiled.definition.terms.price)
-    const tail = product.featureCode ?? `PLAN_${product.planTier}`
+    // The Plan Básico is not a catalog product: no promotion is ever priced against it.
+    if (key !== BASIC_PLAN_KEY) await assertPriceRuleForList(tx, key, compiled.definition.terms.price)
+    const tail = key === BASIC_PLAN_KEY ? 'PLAN_BASICO' : (product.featureCode ?? `PLAN_${product.planTier}`)
     const list =
       found ??
       (await tx.hybridCampaign.create({
@@ -202,11 +214,11 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
           purpose: 'LIST',
           listProductKey: key,
           code: `L_${tail}`.slice(0, 32),
-          slug: `lista-${tail.toLowerCase().replace(/_/g, '-')}`,
+          slug: key === BASIC_PLAN_KEY ? 'plan-basico' : `lista-${tail.toLowerCase().replace(/_/g, '-')}`,
           // The publication (and so the Stripe Product, whose name is permanent, and the customer's quote lines and
           // contracts) takes this name: a plan list reads «Plan Pro» / «Plan Premium», never like the classic plan
           // products «Pro» / «Premium».
-          name: product.planTier ? `Plan ${product.name}` : product.name,
+          name: basicName ?? (product.planTier ? `Plan ${product.name}` : product.name),
           startsAt: new Date(),
           endsAt: null,
           capacity: null,
@@ -224,7 +236,7 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
         definition: compiled.definition as Prisma.InputJsonValue,
         campaignId: list.id,
         version: list.revision,
-        name: list.name,
+        name: basicName ?? list.name,
         createdById: staffId,
       },
     })
@@ -234,6 +246,7 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
         pendingPublicationId: publication.id,
         revision: { increment: 1 },
         draftDefinition: compiled.definition as Prisma.InputJsonValue,
+        ...(basicName ? { name: basicName } : {}),
       },
     })
     if (claimed.count !== 1) changed()
@@ -266,6 +279,53 @@ export async function saveListPrice(
   if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('. '), 'HYBRID_LIST_INVALID')
   return saveList(product, parsed.data, input.expectedRevision, staffId)
 }
+
+/**
+ * Saves and publishes the single Plan Básico (a FEATURES list marked `basicPlan`) through the list machinery: product lock,
+ * `expectedRevision` check, a new pending publication per change, Stripe, finalize. `price` arrives WITH IVA.
+ */
+export async function saveBasicPlan(
+  input: { name: string; featureCodes: string[]; price: number; seatCap: number | null; expectedRevision: number | null },
+  staffId: string,
+): Promise<ListPriceRow> {
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (name.length < 3 || name.length > 120)
+    throw new BadRequestError('El nombre debe tener entre 3 y 120 caracteres.', 'HYBRID_BASIC_INVALID')
+  const configurable = new Set(FEATURE_CATALOG.filter(e => e.offering === 'CONFIGURABLE' && e.featureCode).map(e => e.featureCode!))
+  const bad = [...new Set(input.featureCodes)].filter(code => !configurable.has(code))
+  if (bad.length)
+    throw new BadRequestError(`Estas funciones no se pueden incluir en el Plan Básico: ${bad.join(', ')}.`, 'HYBRID_BASIC_FEATURES')
+  const parsed = hybridOfferDefinition.safeParse({
+    schemaVersion: 1,
+    kind: 'FEATURES',
+    basicPlan: true,
+    featureCodes: input.featureCodes,
+    seatCap: input.seatCap,
+    terms: {
+      currency: 'MXN',
+      interval: 'MONTHLY',
+      price: input.price,
+      taxIncluded: true,
+      promotionCycles: null,
+      renewal: { kind: 'SAME_PRICE' },
+    },
+  })
+  if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('. '), 'HYBRID_BASIC_INVALID')
+  const row = await saveList(BASIC_PRODUCT, parsed.data, input.expectedRevision, staffId, name)
+  await prisma.activityLog.create({
+    data: {
+      staffId,
+      action: 'HYBRID_BASIC_PLAN_SAVED',
+      entity: 'HybridCampaign',
+      entityId: row.campaignId!,
+      data: { revision: row.revision, price: input.price, featureCodes: input.featureCodes, seatCap: input.seatCap },
+    },
+  })
+  return row
+}
+
+/** The Plan Básico row for the SUPERADMIN screen (also when nothing was saved yet: `campaignId` null). */
+export const getBasicPlanRow = () => rowOf(BASIC_PLAN_KEY)
 
 /**
  * Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged.

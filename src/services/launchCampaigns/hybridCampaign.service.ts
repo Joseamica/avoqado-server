@@ -3,12 +3,13 @@ import { Prisma, StaffRole, type LaunchCampaignStatus } from '@prisma/client'
 import { SocketEventType } from '@/communication/sockets/types'
 import logger from '@/config/logger'
 import { z } from 'zod'
+import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { compileHybridPublication, previewHybridOffer } from './hybridOffer.service'
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
 import { activePromotionOverlaps, assertPromotionBelowList } from './hybridPriceRule'
-import { lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
+import { BASIC_PLAN_KEY, lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 export const hybridCampaignBody = z
@@ -305,16 +306,18 @@ export async function loadCurrentPublication(
 
 export async function getPublicHybridOffer(slug: string) {
   const campaign = await prisma.hybridCampaign.findUnique({ where: { slug } })
-  // A LIST never has a public page; past that check, the CHECK guarantees a PROMOTION's non-null window.
+  // A LIST never has a public page, except the Plan Básico: no window and no seat cap (capacity null = unlimited).
+  const basic = campaign?.purpose === 'LIST' && campaign.listProductKey === BASIC_PLAN_KEY
+  // Past that check, the CHECK guarantees a PROMOTION's non-null window.
   if (
     !campaign ||
-    campaign.purpose === 'LIST' ||
+    (campaign.purpose === 'LIST' && !basic) ||
     campaign.status !== 'ACTIVE' ||
     campaign.startsAt > new Date() ||
-    campaign.endsAt! <= new Date()
+    (!basic && campaign.endsAt! <= new Date())
   )
     throw new NotFoundError('Esta oferta no está disponible.')
-  if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
+  if (!basic && campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
   const publication = await loadCurrentPublication(prisma, campaign)
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
@@ -335,13 +338,35 @@ export async function getPublicHybridOffer(slug: string) {
     endsAt: campaign.endsAt,
     audience: campaign.audience,
     // PROMOTION: CHECK guarantees non-null
-    placesRemaining: campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
+    placesRemaining: basic ? null : campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
     purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale,
   }
 }
 
 import { assertHybridSalesOpen } from './hybridPurchase.service'
 import { ensureHybridPublicationPrices } from './hybridPrices'
+
+/** The Plan Básico on sale (its LIST is ACTIVE with a current publication), or null: what the dashboard card and the landing read. */
+export async function getPublicBasicPlan() {
+  const campaign = await prisma.hybridCampaign.findFirst({
+    where: { purpose: 'LIST', listProductKey: BASIC_PLAN_KEY, status: 'ACTIVE' },
+  })
+  const publication = campaign ? await loadCurrentPublication(prisma, campaign) : null
+  if (!campaign || !publication) return null
+  const definition = hybridOfferDefinition.parse(publication.definition)
+  if (definition.kind !== 'FEATURES' || definition.basicPlan !== true) return null
+  const withTax = new Decimal(definition.terms.price)
+  return {
+    slug: campaign.slug,
+    name: publication.name,
+    priceWithTax: withTax.toFixed(2),
+    priceWithoutTax: withTax.div('1.16').toDecimalPlaces(2).toFixed(2),
+    featureCodes: [...definition.featureCodes],
+    seatCap: definition.seatCap ?? null,
+    trialDays: 30 as const,
+    publicationId: publication.id,
+  }
+}
 
 /** `publications` keeps its response shape (superadmin and MCP read `publications[0]`): the pointer's publication, or empty. */
 export async function getHybridCampaign(id: string) {

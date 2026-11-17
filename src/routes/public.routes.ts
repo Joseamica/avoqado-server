@@ -1,7 +1,11 @@
 import { getPosAppVersion } from '../controllers/public/posAppVersion.public.controller'
 import { publicPosAppVersionQuerySchema } from './superadmin/posAppVersions.schemas'
 import documentRequestsRoutes from './public/documentRequests.routes'
-import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
+import {
+  publicOffers as publicHybridOffers,
+  publicOffer as publicHybridOffer,
+  publicBasicPlan,
+} from '../controllers/hybridBilling.controller'
 import express, { ErrorRequestHandler, Router } from 'express'
 import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
@@ -224,6 +228,7 @@ const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: 
 router.get('/feature-catalog', offerReadLimit, validateRequest(z.object({ query: featureCatalogQuery })), getFeatureCatalog)
 router.get('/pos-app-version', posAppVersionLimit, validateRequest(publicPosAppVersionQuerySchema), getPosAppVersion)
 router.get('/hybrid-offers', offerReadLimit, publicHybridOffers)
+router.get('/basic-plan', offerReadLimit, publicBasicPlan)
 // /presentacion/precios del DASHBOARD: precios de lista vivos del SUPERADMIN (spec 2026-10-26-presentacion-de-precios).
 router.get('/price-list', offerReadLimit, getPriceList)
 router.get('/hybrid-offers/:slug', offerReadLimit, publicHybridOffer)
