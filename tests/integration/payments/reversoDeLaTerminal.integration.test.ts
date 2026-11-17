@@ -23,7 +23,10 @@ import {
   VENTANA_DEL_REVERSO_MS,
   type EstadoDelReverso,
 } from '@/services/tpv/reversoDeLaTerminal.service'
-import { crearFixture, exigir, exigirBaseDesechable, type Fixture } from './webhookCheckpoint.fixture'
+import { evidenciaDurableDelIngreso } from '@/services/tpv/evidenciaDeIngreso'
+import { contradiccionDeProcedenciaSql, hayAprobadoVinculadoSql, sinEventoQueVetaSql } from '@/services/tpv/evidenciaPositivaSql'
+import { resolveNoInstrument } from '@/services/tpv/no-instrument-resolution.service'
+import { crearBackOffice, crearFixture, exigir, exigirBaseDesechable, type Fixture } from './webhookCheckpoint.fixture'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   const sm = { getServer: jest.fn(), getBroadcastingService: jest.fn(() => null) }
@@ -51,7 +54,12 @@ beforeEach(() => {
   ;(terminalRegistry.getTerminal as jest.Mock).mockReturnValue(undefined)
 })
 afterEach(() => f.limpiar())
-afterAll(() => f.destruir())
+let duena: string | undefined
+afterAll(async () => {
+  await prisma.activityLog.deleteMany({ where: { venueId: f.venueId } })
+  await f.destruir()
+  if (duena) await prisma.staff.deleteMany({ where: { id: duena } })
+})
 
 const MIN = 60_000
 const pagos = () => prisma.payment.findMany({ where: { venueId: f.venueId } })
@@ -308,6 +316,134 @@ describe('la red de 30 s vence las lápidas sin respuesta', () => {
     await pase()
 
     expect(await estadoDe(attemptId)).toBe('reversing')
+  })
+})
+
+/**
+ * Tarea 8: los cinco lectores de evidencia (`eventoAprobadoSql`) no cuentan un aviso aprobado de Blumon cuya lápida del MISMO
+ * intento está `reversed` —en los dos órdenes—; con `reversing` (aviso retenido), `reverse_failed` o `reverse_unconfirmed`
+ * sigue contando como hoy. AngelPay no cambia.
+ */
+describe('los lectores de evidencia con lápida (Tarea 8)', () => {
+  /** El aviso aprobado de Blumon tal como lo guarda el receptor, sembrado ANTES de la lápida. */
+  const avisoGuardado = (attemptId: string, merchantAccountId: string) => {
+    const evento = f.eventoBlumon(attemptId)
+    return prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        eventId: `blumon-tpv-${evento.operationNumber}-${attemptId}`,
+        type: 'VENTA',
+        attemptId,
+        venueId: f.venueId,
+        status: 'PENDING',
+        payload: { ...evento, cardHolder: undefined, _avoqado: { receivedByMerchantAccountId: merchantAccountId } },
+      },
+    })
+  }
+  /** Lo que ve cada lector del intento: `true` = cuenta como aprobado. */
+  async function loQueVen(attemptId: string, requestId: string, merchantAccountId: string) {
+    const [sql] = await prisma.$queryRaw<{ vinculado: boolean; sinVeto: boolean; contradice: boolean }[]>`
+      SELECT ${hayAprobadoVinculadoSql(requestId, f.venueId)} AS vinculado,
+             ${sinEventoQueVetaSql(attemptId, f.venueId, f.llaveTerminal, true)} AS "sinVeto",
+             ${contradiccionDeProcedenciaSql([attemptId], f.venueId, f.llaveTerminal)} AS contradice`
+    return {
+      evidenciaDurableDelIngreso: (await evidenciaDurableDelIngreso(prisma, f.venueId, merchantAccountId, attemptId)) !== null,
+      hayAprobadoVinculadoSql: sql.vinculado,
+      sinEventoQueVetaSql: !sql.sinVeto,
+      contradiccionDeProcedenciaSql: sql.contradice,
+      aprobacionBancariaConocida:
+        (await (terminalPaymentService as any).aprobacionBancariaConocida(prisma, f.venueId, [attemptId])) !== null,
+    }
+  }
+  const todos = (v: boolean) => ({
+    evidenciaDurableDelIngreso: v,
+    hayAprobadoVinculadoSql: v,
+    sinEventoQueVetaSql: v,
+    contradiccionDeProcedenciaSql: v,
+    aprobacionBancariaConocida: v,
+  })
+
+  it.each([
+    ['aviso primero, lápida reversed después', 'aviso', 'reversed', false],
+    ['lápida reversed primero, aviso después (sellado REVERSED_BY_TERMINAL)', 'lapida', 'reversed', false],
+    ['lápida reversing (aviso retenido)', 'lapida', 'reversing', true],
+    ['lápida reverse_failed', 'aviso', 'reverse_failed', true],
+    ['lápida reverse_unconfirmed', 'aviso', 'reverse_unconfirmed', true],
+  ] as [string, 'aviso' | 'lapida', EstadoDelReverso, boolean][])('%s ⇒ ¿cuenta como aprobado? %s', async (_, primero, estado, cuenta) => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { requestId, attemptId } = await intentoVinculado()
+    if (primero === 'aviso') {
+      await avisoGuardado(attemptId, merchantAccountId)
+      await sembrarLapida(attemptId, estado)
+    } else {
+      await sembrarLapida(attemptId, estado)
+      const r = await avisoBlumon(attemptId)
+      expect(r.action).toBe(estado === 'reversed' ? 'REVERSED_BY_TERMINAL' : 'HELD_BY_REVERSAL')
+    }
+
+    expect(await loQueVen(attemptId, requestId, merchantAccountId)).toEqual(todos(cuenta))
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  /** Una solicitud que el cajero puede declarar (sin cobro, sin desenlace) con su intento vinculado. */
+  async function declarable() {
+    const solicitud = await f.solicitud({
+      status: 'TIMED_OUT',
+      failureCode: null,
+      expiresAt: new Date(Date.now() - 60_000),
+      resultJson: {
+        requestId: 'x',
+        status: 'timeout',
+        errorMessage: 'El resultado del cobro sigue pendiente de confirmar',
+        terminalResult: { status: 'failed', errorMessage: 'SDK U100: Operacion cancelada por el usuario', outcomeEvidence: null },
+      },
+    })
+    const attemptId = randomUUID()
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId, requestId: solicitud.requestId, venueId: f.venueId, terminalId: f.llaveTerminal },
+    })
+    duena ??= await crearBackOffice(f)
+    const declarar = () =>
+      resolveNoInstrument(
+        { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: duena! },
+        { requestId: solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+      )
+    return { requestId: solicitud.requestId, attemptId, declarar }
+  }
+
+  it('lápida reversing con aviso retenido ⇒ la declaración «no se presentó tarjeta» da POSITIVE_EVIDENCE_EXISTS, como cualquier aprobado sin Payment', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId, declarar } = await declarable()
+    await sembrarLapida(attemptId, 'reversing')
+    expect((await avisoBlumon(attemptId)).action).toBe('HELD_BY_REVERSAL')
+
+    await expect(declarar()).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  it('lápida reversed sin aviso ⇒ la declaración pasa', async () => {
+    const { requestId, attemptId, declarar } = await declarable()
+    await sembrarLapida(attemptId, 'reversed')
+
+    expect((await declarar()).resolution).toMatchObject({ by: 'SESSION' })
+    expect(await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+    })
+  })
+
+  it('aprobado de AngelPay con lápida reversed del mismo intento ⇒ sigue contando como aprobado', async () => {
+    const { requestId, attemptId } = await intentoVinculado()
+    await sembrarLapida(attemptId, 'reversed')
+    const r = await processAngelPayWebhook({
+      payload: f.eventoAngelPay(attemptId),
+      eventId: f.nuevoEventId(),
+      merchantAccount: { id: f.merchantId, externalMerchantId: f.merchantExternalId },
+      retryDelaysMs: [0],
+    })
+    expect(r).toMatchObject({ action: 'CONFIRMED' })
+
+    expect(await loQueVen(attemptId, requestId, f.merchantId)).toEqual(todos(true))
   })
 })
 

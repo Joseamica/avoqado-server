@@ -52,19 +52,27 @@ export function estadoBancarioSql(expr: Prisma.Sql): Prisma.Sql {
 
 /**
  * Fase 1 del SDK propio: «el banco APROBÓ este intento», sobre la fila de `ProviderEventLog` de alias `alias` (que expone
- * `type`, `eventId` y `payload`). La usan los cinco lectores de evidencia —la primera evidencia del ingreso, el aprobado
+ * `type`, `eventId`, `attemptId` y `payload`). La usan los cinco lectores de evidencia —la primera evidencia del ingreso, el aprobado
  * vinculado, el veto a la declaración del cajero, la contradicción de procedencia y la aprobación conocida de la ventana—, así
  * que el aviso de Blumon cuenta exactamente donde cuenta el de AngelPay:
  *  · AngelPay: `send_transaction` con `payload.payload.status` APROBADO (`estadoBancarioSql`, sin cambio);
  *  · Blumon: la VENTA del aviso (`eventId` `blumon-tpv-…`) con `codeResponse = '00'`. Un `codeResponse` AUSENTE no aprueba, y
- *    los reversos (`DEVOLUCION`, `CANCELACION`) quedan fuera por su tipo.
+ *    los reversos (`DEVOLUCION`, `CANCELACION`) quedan fuera por su tipo. Tampoco cuenta si la lápida del MISMO intento
+ *    (`blumon-tpv-reverso-<attemptId>`, Tarea 7) dice `reversed`: la terminal ya deshizo ese dinero. Se decide por la lápida y
+ *    no por el sello del aviso, así da lo mismo cuál llegó primero; entra por el índice único `(provider, eventId)`. Con
+ *    `reversing` (aviso retenido), `reverse_failed`, `reverse_unconfirmed` o `contradiction` el aviso sigue contando.
+ *    La rama de AngelPay no mira la lápida.
  * El alias va crudo en el SQL: sólo un identificador simple (lanza si no). Devuelve SIEMPRE `true`/`false`, nunca NULL
  * (`coalesce`): con un `codeResponse`, `type` o `eventId` nulo, un `NOT eventoAprobadoSql(…)` no puede volverse desconocido.
  */
 export function eventoAprobadoSql(alias: string): Prisma.Sql {
-  if (!/^[a-z][a-z0-9_]*$/.test(alias)) throw new Error(`Alias de tabla inválido: ${alias}`)
+  // `lapida_rv` es el alias interno de la subconsulta: con ese mismo alias afuera, `attemptId` hablaría de la lápida.
+  if (!/^[a-z][a-z0-9_]*$/.test(alias) || alias === 'lapida_rv') throw new Error(`Alias de tabla inválido: ${alias}`)
   const col = (nombre: string) => Prisma.raw(`${alias}."${nombre}"`)
   return Prisma.sql`coalesce(
     (${col('type')} = 'send_transaction' AND ${estadoBancarioSql(Prisma.sql`${col('payload')}->'payload'->'status'`)} = 'APROBADO')
-    OR (${col('type')} = 'VENTA' AND ${col('eventId')} LIKE 'blumon-tpv-%' AND ${col('payload')}->>'codeResponse' = '00'), false)`
+    OR (${col('type')} = 'VENTA' AND ${col('eventId')} LIKE 'blumon-tpv-%' AND ${col('payload')}->>'codeResponse' = '00'
+      AND NOT EXISTS (SELECT 1 FROM "ProviderEventLog" lapida_rv
+        WHERE lapida_rv."provider" = 'PAYMENT_PROCESSOR' AND lapida_rv."eventId" = 'blumon-tpv-reverso-' || ${col('attemptId')}
+          AND lapida_rv."payload"->>'estado' = 'reversed')), false)`
 }

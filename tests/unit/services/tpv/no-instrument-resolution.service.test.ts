@@ -180,7 +180,8 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(cas.values).toEqual(expect.arrayContaining(['row-1', 'TIMED_OUT']))
     // B0-1 (20-oct): el juego ÚNICO de vetos de dinero (`sinVetoDeDineroSql`) — APROBADO vinculado, Payment ligado, evidencia de
     // conciliación PENDING y contradicción de procedencia del intento —, el mismo que llevan la ventana y la declaración del cajero.
-    expect(cas.anidado.match(/NOT EXISTS/g)).toHaveLength(4)
+    // (El `NOT EXISTS` de la lápida `reversed` vive DENTRO de `eventoAprobadoSql`, fase 1 del SDK propio: no es un veto, se descuenta.)
+    expect(cas.anidado.replace(/NOT EXISTS \(SELECT 1 FROM "ProviderEventLog" lapida_rv/g, '').match(/NOT EXISTS/g)).toHaveLength(4)
     // Codex servidor r1 · F1 (21-oct): y ningún Payment con la llave de sus intentos (la regla única de la llave, cualquier estado).
     expect(cas.anidado).toMatch(/NOT \(EXISTS \(\s*SELECT p\."id" FROM "Payment" p\s*WHERE regexp_replace\(p\."idempotencyKey"/)
     expect(cas.anidado).toMatch(/"ProviderEventLog"[\s\S]*"TerminalPaymentAttemptLink"[\s\S]*= 'APROBADO'/)

@@ -101,7 +101,8 @@ describe('eventoAprobadoSql: el aprobado de Blumon cuenta igual que el de AngelP
     async (type, eventId, payload, esperado) => {
       const filas = await prisma.$queryRaw<{ aprobado: boolean }[]>`
       SELECT ${eventoAprobadoSql('e')} AS aprobado
-      FROM (SELECT ${type}::text AS "type", ${eventId}::text AS "eventId", ${JSON.stringify(payload)}::jsonb AS "payload") e`
+      FROM (SELECT ${type}::text AS "type", ${eventId}::text AS "eventId", ${randomUUID()}::text AS "attemptId",
+        ${JSON.stringify(payload)}::jsonb AS "payload") e`
       expect(filas).toEqual([{ aprobado: esperado }])
     },
   )
