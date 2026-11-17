@@ -25,7 +25,11 @@ import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
 import { crearFixture, exigirBaseDesechable, type Fixture } from './webhookCheckpoint.fixture'
-import { resolveNoInstrument, NO_INSTRUMENT_PERMISSION } from '@/services/tpv/no-instrument-resolution.service'
+import {
+  resolveNoInstrument,
+  NO_INSTRUMENT_PERMISSION,
+  CHECKED_UNCHARGED_PERMISSION,
+} from '@/services/tpv/no-instrument-resolution.service'
 import { hayDineroConEstaLlaveSql, sinDineroConEstaLlaveSql } from '@/services/tpv/evidenciaPositivaSql'
 import { PATRON_SQL_TRIM_COMO_JS } from '@/utils/terminalSerial'
 import { readFile } from 'fs/promises'
@@ -1707,5 +1711,80 @@ describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras
     const B = randomUUID()
     await declarar(B)
     await expect(automatica(B)).rejects.toMatchObject({ code: 'RESOLUTION_CONFLICT' })
+  })
+})
+
+// ── D22 · A1 (founder, 17-nov): «Ya revisé la terminal: no se cobró» de un Pago rápido llega a Avoqado ────────────────────
+// La clase nueva (`UNCHARGED_VERIFIED`) del camino LOCAL: el permiso del CAJERO, el monto según la terminal, la bitácora que
+// el DASHBOARD ya traduce y el MISMO veto de dinero. Contra Postgres de verdad: el índice único, el JSON y la consulta S6.
+describe('D22 · la declaración revisada del cajero en un Pago rápido', () => {
+  /** El rol de la fixture con SÓLO el permiso del cajero (sin el de gerencia «no presentó tarjeta»). */
+  async function soloPermisoDelCajero() {
+    const sv = await prisma.staffVenue.findFirst({ where: { venueId: f.venueId, staffId: f.staffId } })
+    await prisma.venueRolePermission.upsert({
+      where: { venueId_role: { venueId: f.venueId, role: sv!.role } },
+      create: {
+        venueId: f.venueId,
+        role: sv!.role,
+        permissions: [CHECKED_UNCHARGED_PERMISSION],
+        deniedPermissions: [NO_INSTRUMENT_PERMISSION],
+        modifiedBy: f.staffId,
+      },
+      update: { permissions: [CHECKED_UNCHARGED_PERMISSION], deniedPermissions: [NO_INSTRUMENT_PERMISSION] },
+    })
+  }
+  const revisar = (attemptId: string, over: Record<string, unknown> = {}) =>
+    resolveNoInstrument(
+      { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: f.staffId },
+      { resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, amountCents: 1000, tipCents: 0, ...over },
+    )
+
+  it('se acepta con el permiso del cajero: testimonio con monto, bitácora «Cajero declaró» y S6 lo publica', async () => {
+    await soloPermisoDelCajero()
+    const A = randomUUID()
+    const r = await revisar(A, { amountCents: 1250, tipCents: 100 })
+    expect((r as { resolution?: { by?: string } }).resolution?.by).toBe('SESSION')
+
+    const fila = await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })
+    expect(fila!.resolution).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: f.staffId, amountCents: 1250, tipCents: 100 })
+    const asiento = await prisma.activityLog.findFirst({ where: { action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: A } })
+    expect(asiento).toMatchObject({ venueId: f.venueId, staffId: f.staffId, entity: 'TerminalAttemptResolution' })
+    expect(asiento!.data).toMatchObject({ amountPesos: 12.5, tipPesos: 1, sinSolicitud: true, sessionStaffId: f.staffId })
+
+    const visto = await consultar(A)
+    expect((visto!.attempt as { resolution?: unknown }).resolution).toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('el mismo cuerpo dos veces es UN testimonio y UN asiento; otro monto es conflicto', async () => {
+    await soloPermisoDelCajero()
+    const A = randomUUID()
+    const resolutionId = randomUUID()
+    await revisar(A, { resolutionId })
+    await revisar(A, { resolutionId })
+    expect(await prisma.terminalAttemptResolution.count({ where: { attemptId: A } })).toBe(1)
+    expect(await prisma.activityLog.count({ where: { action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: A } })).toBe(1)
+    await expect(revisar(A, { resolutionId, amountCents: 999 })).rejects.toMatchObject({ code: 'RESOLUTION_CONFLICT' })
+  })
+
+  it('VETO · con un Payment de ese intento, NO se declara', async () => {
+    await soloPermisoDelCajero()
+    const A = randomUUID()
+    await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+    await expect(revisar(A)).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
+  })
+
+  it('sin el permiso del cajero → 403 y nada escrito; sin monto → 409', async () => {
+    await cajeroSinPermiso()
+    const sv = await prisma.staffVenue.findFirst({ where: { venueId: f.venueId, staffId: f.staffId } })
+    await prisma.venueRolePermission.update({
+      where: { venueId_role: { venueId: f.venueId, role: sv!.role } },
+      data: { deniedPermissions: [NO_INSTRUMENT_PERMISSION, CHECKED_UNCHARGED_PERMISSION] },
+    })
+    const A = randomUUID()
+    await expect(revisar(A)).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED', statusCode: 403 })
+    await soloPermisoDelCajero()
+    await expect(revisar(A, { amountCents: undefined })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
   })
 })

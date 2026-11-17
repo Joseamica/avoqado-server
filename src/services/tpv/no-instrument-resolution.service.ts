@@ -48,6 +48,20 @@ export const NO_INSTRUMENT_PERMISSION = 'payments:resolve-no-instrument'
  */
 const NO_BANK_TRACE = 'NO_BANK_TRACE_AFTER_WINDOW' as const
 
+/**
+ * 🔴 D22 · A1 (founder, 17-nov: «Sí, A1»): el CAJERO de un **Pago rápido** declara «ya revisé la terminal: no se cobró» — lo
+ * que una persona MIRÓ, no «no presentó tarjeta». Hasta hoy sólo vivía en la libreta de la terminal (se poda a ~7 días y
+ * el dueño nunca la veía). El mismo nombre que la declaración del cajero en el POS (`uncharged-reconciliation.service`),
+ * porque afirma lo mismo. Sólo en el camino LOCAL: un cobro del POS tiene su propia ruta. Pide el permiso del cajero
+ * ([CHECKED_UNCHARGED_PERMISSION]), el MISMO veto de dinero, y trae el monto SEGÚN LA TERMINAL (el servidor no tiene el
+ * cobro para comprobarlo: es un dato del testimonio, no del dinero).
+ */
+const CHECKED = 'UNCHARGED_VERIFIED' as const
+/** El permiso del cajero para «revisé y no se cobró» (el mismo que pide su declaración desde el POS). */
+export const CHECKED_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
+/** Tope del monto del testimonio (centavos): sólo para que un número absurdo no entre a la bitácora. */
+const MAX_CENTAVOS = 100_000_000_000
+
 /** Estricto: la identidad NUNCA viene en el cuerpo (un `staffId`/`role` extra es un 409, no un dato). */
 const schema = z
   .object({
@@ -58,7 +72,7 @@ const schema = z
     resolutionId: z.string().uuid(),
     // Dos testimonios posibles (ronda 20, founder 23-sep): el del CAJERO («no se presentó tarjeta») y el de la TERMINAL
     // («sin rastro del banco tras la ventana»), que sólo vale en un Pago rápido y donde el aviso del banco está comprobado.
-    statement: z.enum(['NO_INSTRUMENT_PRESENTED', NO_BANK_TRACE]),
+    statement: z.enum(['NO_INSTRUMENT_PRESENTED', NO_BANK_TRACE, CHECKED]),
     statementVersion: z.literal(1),
     // La MISMA regla de PIN del resto del repo (4-10 dígitos): un PIN legítimo de 9 dígitos no puede rebotar como cuerpo inválido.
     // `nullish`, no `optional`: el DTO de la terminal es `String?` y un serializador con nulls mandaría `"supervisorPin": null` en
@@ -67,6 +81,10 @@ const schema = z
     // Ronda 21 (Codex r19 P1-3): el comercio con el que se hizo ESE cobro. La automática lo exige —se mide el aviso de ese
     // comercio, no el de lo que la terminal tenga asignado hoy—; la del cajero no lo usa.
     merchantAccountId: z.string().min(1).optional(),
+    // D22: OBLIGATORIOS con `UNCHARGED_VERIFIED` y prohibidos con los otros dos. El monto del cobro según la libreta de la
+    // terminal: viaja igual en cada reintento, así que el replay idempotente (mismo `bodyHash`) sigue funcionando.
+    amountCents: z.number().int().nonnegative().max(MAX_CENTAVOS).optional(),
+    tipCents: z.number().int().nonnegative().max(MAX_CENTAVOS).optional(),
   })
   .strict()
 
@@ -89,7 +107,7 @@ export class NoInstrumentResolutionError extends Error {
 
 export type OperatorResolution = {
   id: string
-  kind: 'NO_INSTRUMENT_PRESENTED' | typeof NO_BANK_TRACE
+  kind: 'NO_INSTRUMENT_PRESENTED' | typeof NO_BANK_TRACE | typeof CHECKED
   acceptedAt: string
   bodyHash: string
   staffId: string
@@ -102,12 +120,16 @@ export type OperatorResolution = {
    * así que no hay estado previo que congelar — inventarle uno sería escribir un dato falso en un testimonio.
    */
   previousRequest?: { status: string; failureCode: string | null }
+  /** D22: sólo `UNCHARGED_VERIFIED` — el monto del cobro SEGÚN LA TERMINAL, en centavos. El servidor no lo comprueba. */
+  amountCents?: number
+  tipCents?: number
 }
 
 export function readOperatorResolution(value: unknown): OperatorResolution | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const r = value as OperatorResolution
-  return (r.kind === 'NO_INSTRUMENT_PRESENTED' || r.kind === NO_BANK_TRACE) && typeof r.id === 'string' ? r : null
+  // D22: sin la clase nueva aquí, el reintento con el MISMO cuerpo leería «no hay testimonio» y respondería RESOLUTION_CONFLICT.
+  return (r.kind === 'NO_INSTRUMENT_PRESENTED' || r.kind === NO_BANK_TRACE || r.kind === CHECKED) && typeof r.id === 'string' ? r : null
 }
 
 /**
@@ -120,6 +142,8 @@ async function miembroDelVenue(
   tx: Prisma.TransactionClient,
   venueId: string,
   staffId: string,
+  // D22: el permiso depende de QUÉ se afirma: «no presentó tarjeta» es de gerencia; «revisé y no se cobró», del cajero.
+  permiso: string = NO_INSTRUMENT_PERMISSION,
 ): Promise<{ id: string; staffId: string; permitido: boolean } | null> {
   const sv = await tx.staffVenue.findFirst({
     where: { venueId, staffId, active: true, staff: { active: true } },
@@ -128,13 +152,13 @@ async function miembroDelVenue(
   if (!sv) return null
   let permitido: boolean
   if (sv.permissionSetId && sv.permissionSet) {
-    permitido = evaluatePermissionList(sv.permissionSet.permissions, NO_INSTRUMENT_PERMISSION)
+    permitido = evaluatePermissionList(sv.permissionSet.permissions, permiso)
   } else {
     const custom = await tx.venueRolePermission.findUnique({
       where: { venueId_role: { venueId, role: sv.role } },
       select: { permissions: true, deniedPermissions: true },
     })
-    permitido = hasPermission(sv.role, custom?.permissions ?? null, NO_INSTRUMENT_PERMISSION, custom?.deniedPermissions ?? null)
+    permitido = hasPermission(sv.role, custom?.permissions ?? null, permiso, custom?.deniedPermissions ?? null)
   }
   return { id: sv.id, staffId: sv.staffId, permitido }
 }
@@ -204,8 +228,9 @@ async function autorizarDeclaracion(
   tx: Prisma.TransactionClient,
   identity: { venueId: string; actorStaffId: string | null },
   supervisorPin: string | undefined,
+  permiso: string = NO_INSTRUMENT_PERMISSION,
 ): Promise<{ actor: { id: string; staffId: string }; by: OperatorResolution['by'] }> {
-  const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId) : null
+  const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId, permiso) : null
   if (!sesion) throw new NoInstrumentResolutionError('SESSION_NOT_IN_VENUE', 403)
   if (sesion.permitido) return { actor: sesion, by: 'SESSION' }
   if (!supervisorPin) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
@@ -213,7 +238,7 @@ async function autorizarDeclaracion(
     where: { venueId: identity.venueId, pin: supervisorPin, active: true, staff: { active: true } },
     select: { staffId: true },
   })
-  const supervisor = porPin ? await miembroDelVenue(tx, identity.venueId, porPin.staffId) : null
+  const supervisor = porPin ? await miembroDelVenue(tx, identity.venueId, porPin.staffId, permiso) : null
   if (!supervisor?.permitido) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
   return { actor: supervisor, by: 'SUPERVISOR_PIN' }
 }
@@ -245,6 +270,12 @@ export async function resolveNoInstrument(
   if (automatica && supervisorPin) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
   // Sin el comercio del cobro no hay aviso que medir (ronda 21, Codex r19 P1-3).
   if (automatica && !declaration.merchantAccountId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+  // D22: el monto acompaña SÓLO a «revisé y no se cobró», y ahí es obligatorio (la Bitácora del dueño lo muestra). En las
+  // otras dos clases un monto es un cuerpo que no corresponde: rechazarlo deja su `bodyHash` exactamente como era.
+  const revisada = declaration.statement === CHECKED
+  const traeMonto = declaration.amountCents !== undefined || declaration.tipCents !== undefined
+  if (revisada ? declaration.amountCents === undefined || declaration.tipCents === undefined : traeMonto)
+    throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
   const bodyHash = createHash('sha256').update(JSON.stringify(declaration)).digest('hex')
   const terminalId = normalizeTerminalId(identity.terminalSerial)
   // La MISMA normalización de la llave que el registrador y la publicación del vínculo (recortada, ≤ 64): el candado, la lectura
@@ -268,7 +299,9 @@ export async function resolveNoInstrument(
       throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
     const requestId = vinculo?.requestId ?? declaration.requestId ?? null
     // Ronda 20: con solicitud del POS, la liberación sin evidencia es de la VENTANA del servidor, no de la terminal.
-    if (automatica && requestId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+    // D22: y «revisé y no se cobró» de un cobro del POS va por SU ruta (`uncharged-declaration`), que libera la solicitud;
+    // este camino sólo sabe escribir «no presentó tarjeta» sobre ella.
+    if ((automatica || revisada) && requestId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
 
     // 🔴 Codex r4-1 (22-sep): el arreglo anterior cerró el vínculo PREEXISTENTE, pero no el que aparece DESPUÉS de una
     // declaración local — secuencia perfectamente serial: se declara sin vínculo, el POS manda su cobro, se vincula ese
@@ -307,7 +340,9 @@ export async function resolveNoInstrument(
         return { resolution: existente, requestId: null }
       }
 
-      const actorLocal = automatica ? await actorDeLaTerminal(tx, identity) : await autorizarDeclaracion(tx, identity, supervisorPin)
+      const actorLocal = automatica
+        ? await actorDeLaTerminal(tx, identity)
+        : await autorizarDeclaracion(tx, identity, supervisorPin, revisada ? CHECKED_UNCHARGED_PERMISSION : NO_INSTRUMENT_PERMISSION)
 
       // 🔴 Codex P1-1: el veto por dinero es GLOBAL y tolerante a la llave sin recortar. Dos huecos medidos: un
       // `Payment` cuya `idempotencyKey` se guardó CON espacios (el registro de la terminal los admite) no casaba con la
@@ -336,6 +371,7 @@ export async function resolveNoInstrument(
         staffVenueId: actorLocal.actor.id,
         by: actorLocal.by,
         statementVersion: declaration.statementVersion,
+        ...(revisada ? { amountCents: declaration.amountCents, tipCents: declaration.tipCents } : {}),
       }
       // La INMUTABILIDAD la da el índice único sobre `attemptId`, no un trigger: una carrera pierde con P2002, que es
       // «ya declarado» — se relee y se resuelve como replay o conflicto, nunca se sobrescribe un testimonio.
@@ -364,7 +400,13 @@ export async function resolveNoInstrument(
         throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
       await tx.activityLog.create({
         data: {
-          action: automatica ? 'TERMINAL_PAYMENT_AUTO_RELEASED_NO_BANK_TRACE' : 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED',
+          // D22: «revisé y no se cobró» reusa la acción de la declaración del cajero en el POS: el DASHBOARD ya la traduce
+          // («Cajero declaró «no se cobró»») y no cambia.
+          action: automatica
+            ? 'TERMINAL_PAYMENT_AUTO_RELEASED_NO_BANK_TRACE'
+            : revisada
+              ? 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED'
+              : 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED',
           entity: 'TerminalAttemptResolution',
           entityId: attemptId,
           venueId: identity.venueId,
@@ -380,6 +422,8 @@ export async function resolveNoInstrument(
             sessionStaffId: identity.actorStaffId,
             resolutionId: savedLocal.id,
             ...(automatica ? { merchantAccountId: declaration.merchantAccountId } : {}),
+            // D22: en pesos y con las llaves que la Bitácora ya etiqueta («Monto (MXN)», «Propina (MXN)»). Según la terminal.
+            ...(revisada ? { amountPesos: declaration.amountCents! / 100, tipPesos: declaration.tipCents! / 100 } : {}),
           },
         },
       })
