@@ -182,15 +182,19 @@ export function registerHybridBillingTools(server: McpServer, scope: McpScope) {
       write(id)
       if (!approved) {
         const { quote } = await getHybridPurchaseStatus(id, purchase)
-        // Only the one-click Básico freezes a card in its quote: that purchase charges now instead of opening the payment link.
-        const cardId = (quote as { paymentMethodId?: string } | null)?.paymentMethodId
-        const card = cardId ? await getQuotedPaymentCard(cardId) : null
+        // Mirrors provisioning: one line + a frozen card = the one-click Básico, which charges now. The stored quote decides
+        // the wording, never the Stripe lookup (it only adds the last digits).
+        const stored = quote as unknown as { paymentMethodId?: string; lines?: unknown[]; dueNow: string }
+        const chargesNow = Boolean(stored.paymentMethodId) && stored.lines?.length === 1
+        const card = chargesNow ? await getQuotedPaymentCard(stored.paymentMethodId!) : null
         return text({
           ok: false,
           requiresConfirmation: true,
           preview: quote,
-          mensaje: card
-            ? `Se cobrarán $${(quote as unknown as { dueNow: string }).dueNow} ahora con la tarjeta terminación ${card.last4 ?? '····'} y se renueva cada mes. Confirma para cobrar.`
+          mensaje: chargesNow
+            ? card?.last4
+              ? `Se cobrarán $${stored.dueNow} ahora con la tarjeta terminación ${card.last4} y se renueva cada mes. Confirma para cobrar.`
+              : `Se cobrarán $${stored.dueNow} ahora con la tarjeta guardada (terminación ····) y se renueva cada mes. Confirma para cobrar.`
             : 'Revisa el importe, las funciones que dejas y la renovación. Confirma para reservar y abrir el pago.',
         })
       }

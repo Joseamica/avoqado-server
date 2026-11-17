@@ -154,7 +154,7 @@ describe('hybrid customer MCP money and permission boundaries', () => {
     expect(JSON.stringify(result)).not.toContain('Cents')
   })
   it('says the Básico charges now with the saved card, in pesos, and keeps the confirm gate', async () => {
-    getStatus.mockResolvedValue({ id: 'p', quote: { dueNow: '578.84', total: '578.84', paymentMethodId: 'pm_1' } })
+    getStatus.mockResolvedValue({ id: 'p', quote: { dueNow: '578.84', total: '578.84', paymentMethodId: 'pm_1', lines: [{}] } })
     quotedCard.mockResolvedValue({ last4: '4242', brand: 'visa' })
     const preview = read(
       await toolsFor().get('accept_hybrid_purchase')!({ venueId: 'venue', purchaseId: 'p', quoteHash: 'h', clientKey: 'k' }),
@@ -162,6 +162,16 @@ describe('hybrid customer MCP money and permission boundaries', () => {
     expect(preview.requiresConfirmation).toBe(true)
     expect(preview.mensaje).toBe('Se cobrarán $578.84 ahora con la tarjeta terminación 4242 y se renueva cada mes. Confirma para cobrar.')
     expect(acceptQuote).not.toHaveBeenCalled()
+  })
+  it('still says it charges now when the card lookup fails but the quote froze a card', async () => {
+    getStatus.mockResolvedValue({ id: 'p', quote: { dueNow: '578.84', paymentMethodId: 'pm_1', lines: [{}] } })
+    quotedCard.mockResolvedValue(null)
+    const preview = read(
+      await toolsFor().get('accept_hybrid_purchase')!({ venueId: 'venue', purchaseId: 'p', quoteHash: 'h', clientKey: 'k' }),
+    )
+    expect(preview.mensaje).toBe(
+      'Se cobrarán $578.84 ahora con la tarjeta guardada (terminación ····) y se renueva cada mes. Confirma para cobrar.',
+    )
   })
   it('keeps the payment-link text for a quote without a saved card', async () => {
     const preview = read(
