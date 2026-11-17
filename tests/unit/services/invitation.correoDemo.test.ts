@@ -76,6 +76,7 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 }))
 jest.mock('../../../src/services/access/seatCap.service', () => ({
   assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
+  lockSeatCap: jest.fn().mockResolvedValue(undefined),
 }))
 
 import { acceptInvitation } from '../../../src/services/invitation.service'

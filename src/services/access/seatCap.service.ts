@@ -1,4 +1,4 @@
-import { InvitationStatus, StaffRole } from '@prisma/client'
+import { InvitationStatus, StaffRole, type Prisma } from '@prisma/client'
 import { ventanaDeAccesoWhere } from './ventanaDeAcceso'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
@@ -64,6 +64,16 @@ export async function getVenueSeatCap(venueId: string): Promise<number | null> {
   if (tier === 'PRO' || tier === 'PREMIUM') return null
   const basic = (await activeBasicSeatCaps([venueId], new Date())).get(venueId)
   return basic === undefined ? FREE_TIER_SEAT_CAP : basic
+}
+
+/**
+ * The ONE per-venue lock of the seat cap (final review #8): restoring seats, creating an invitation and accepting one
+ * take it before counting, so two of them never both see the last free seat. Transaction-scoped (released at commit);
+ * one round trip for any number of venues, in a fixed (sorted) order so two holders never wait on each other.
+ */
+export async function lockSeatCap(tx: Prisma.TransactionClient, venueIds: string[]): Promise<void> {
+  const keys = [...new Set(venueIds)].sort().map(id => `seat-cap:${id}`)
+  if (keys.length) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(k))::text FROM unnest(${keys}::text[]) AS k`
 }
 
 /**

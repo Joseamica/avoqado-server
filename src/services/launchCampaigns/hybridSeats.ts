@@ -129,7 +129,7 @@ export async function restoreBasicSeats(venueId: string): Promise<number> {
   // review #4): a late Pro webhook must not apply it over the Básico's cap.
   await clearPendingReconciliation(venueId)
   const cap = await getVenueSeatCap(venueId)
-  if (cap === null) return reactivateSeatCapDeactivated(venueId)
+  if (cap === null) return reactivateSeatCapDeactivated(venueId, { reason: 'BASIC_PLAN' })
   await executeSeatReconciliation(venueId)
   return reactivateSeatCapDeactivatedUpTo(venueId, cap)
 }

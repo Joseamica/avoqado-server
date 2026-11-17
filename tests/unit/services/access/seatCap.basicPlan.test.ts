@@ -11,11 +11,18 @@ jest.mock('@/services/access/basePlan.service', () => ({
   getVenueBaseTier: jest.fn().mockResolvedValue(null), // sin plan Pro/Premium: el Básico o Gratis deciden
 }))
 
-import { assertCanAddSeat, assertCanAddSeatsBulk, getVenueSeatCap, SEAT_CAP_REACHED_CODE } from '@/services/access/seatCap.service'
+import {
+  assertCanAddSeat,
+  assertCanAddSeatsBulk,
+  getVenueSeatCap,
+  lockSeatCap,
+  SEAT_CAP_REACHED_CODE,
+} from '@/services/access/seatCap.service'
 import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 import { executeSeatReconciliation, reactivateSeatCapDeactivatedUpTo } from '@/services/dashboard/seatReconciliation.service'
 import { endLapsedHybridContracts, restoreBasicSeats, sweepLapsedBasicSeats, SWEEP_MAX_PAGES } from '@/services/launchCampaigns/hybridSeats'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const VENUE = 'venue_basico'
 const DAY = 24 * 3600 * 1000
@@ -123,6 +130,11 @@ beforeEach(() => {
     const hit = seats.filter(s => matches(s, a.where))
     hit.forEach(s => Object.assign(s, a.data))
     return { count: hit.length }
+  })
+  prismaMock.staffVenue.updateManyAndReturn.mockImplementation(async (a: any) => {
+    const hit = seats.filter(s => matches(s, a.where))
+    hit.forEach(s => Object.assign(s, a.data))
+    return hit.map(s => ({ id: s.id }))
   })
   prismaMock.staffVenue.groupBy.mockImplementation(async (a: any) => {
     const n = seats.filter(s => matches(s, { ...a.where, venueId: VENUE }) && a.where.venueId.in.includes(VENUE)).length
@@ -377,6 +389,38 @@ describe('volver a cubrir', () => {
     })
   })
 
+  it('🔴 regresar usuarios deja su ActivityLog SEAT_CAP_RESTORED con quiénes, el tope y la razón (revisión final #9)', async () => {
+    team(2, 7)
+    grants = [covering(5)]
+    await restoreBasicSeats(VENUE)
+    expect(logAction).toHaveBeenCalledWith({
+      venueId: VENUE,
+      action: 'SEAT_CAP_RESTORED',
+      entity: 'Venue',
+      entityId: VENUE,
+      data: { restored: ['sv_06', 'sv_07', 'sv_08'], cap: 5, reason: 'BASIC_PLAN' },
+    })
+    // Un Básico sin tope también lo deja.
+    ;(logAction as jest.Mock).mockClear()
+    team(2, 2)
+    grants = [covering(null)]
+    await restoreBasicSeats(VENUE)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'SEAT_CAP_RESTORED', data: { restored: ['sv_02', 'sv_03'], cap: null, reason: 'BASIC_PLAN' } }),
+    )
+  })
+
+  it('sin nadie que regresar no escribe auditoría; si la auditoría falla, la restauración ya quedó', async () => {
+    team(5)
+    grants = [covering(5)]
+    await restoreBasicSeats(VENUE)
+    expect(logAction).not.toHaveBeenCalled()
+    team(2, 3)
+    ;(logAction as jest.Mock).mockRejectedValueOnce(new Error('audit down'))
+    await expect(reactivateSeatCapDeactivatedUpTo(VENUE, 5)).resolves.toBe(3)
+    expect(activeCount()).toBe(5) // committed before the audit, and the audit never fails the restore
+  })
+
   it('repetir la notificación de una factura vieja sin grant vigente no regresa a nadie', async () => {
     team(2, 3)
     grants = [lapsed(5)]
@@ -414,6 +458,17 @@ describe('volver a cubrir', () => {
     expect(await reactivateSeatCapDeactivatedUpTo(VENUE, 5)).toBe(2) // 5 − 2 activos − 1 pendiente (soporte no cuenta)
     const locks = prismaMock.$queryRaw.mock.calls.map((c: any[]) => c[0].join('?'))
     expect(locks.some((sql: string) => sql.includes('FROM "Invitation"') && sql.includes('FOR UPDATE'))).toBe(true)
+    // 🔴 Revisión final #8: el MISMO candado por negocio que crear y aceptar invitaciones (`lockSeatCap`).
+    const advisory = prismaMock.$queryRaw.mock.calls.find((c: any[]) => c[0].join('?').includes('pg_advisory_xact_lock'))
+    expect(advisory?.slice(1)).toEqual([[`seat-cap:${VENUE}`]])
+  })
+
+  it('lockSeatCap: una sola consulta para todas las sucursales, en orden fijo y sin repetir', async () => {
+    await lockSeatCap(prismaMock, ['v_b', 'v_a', 'v_b'])
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([['seat-cap:v_a', 'seat-cap:v_b']])
+    await lockSeatCap(prismaMock, [])
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
   })
 
   it('reactivateSeatCapDeactivatedUpTo no pasa del tope ni toca a quien no apagó el tope', async () => {

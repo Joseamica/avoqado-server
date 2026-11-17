@@ -28,10 +28,17 @@ import { InvitationStatus, StaffRole, type Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount, getPendingInvitationCount } from '@/services/access/seatCap.service'
+import {
+  FREE_TIER_SEAT_CAP,
+  getVenueSeatCap,
+  getActiveSeatCount,
+  getPendingInvitationCount,
+  lockSeatCap,
+} from '@/services/access/seatCap.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { cancelPlan, type CancelPlanInput, type PlanState } from './planState.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
+import { logAction } from './activity-log.service'
 import { retrievePlanSubscription } from '../stripe.service'
 import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 
@@ -359,11 +366,20 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
  *
  * @returns the number of seats reactivated.
  */
-export async function reactivateSeatCapDeactivated(venueId: string): Promise<number> {
-  const result = await prisma.staffVenue.updateMany({
-    where: { venueId, deactivatedBySeatCap: true },
-    data: { active: true, endDate: null, deactivatedBySeatCap: false },
-  })
+export async function reactivateSeatCapDeactivated(venueId: string, audit?: { reason: 'BASIC_PLAN' }): Promise<number> {
+  const where = { venueId, deactivatedBySeatCap: true }
+  const data = { active: true, endDate: null, deactivatedBySeatCap: false }
+  // With `audit` (the Plan Básico path), who came back is read in the same statement and audited.
+  const result = audit
+    ? await prisma.staffVenue.updateManyAndReturn({ where, data, select: { id: true } }).then(rows => ({ count: rows.length, rows }))
+    : await prisma.staffVenue.updateMany({ where, data })
+  if (audit && 'rows' in result)
+    await auditSeatsRestored(
+      venueId,
+      result.rows.map(row => row.id),
+      null,
+      audit.reason,
+    )
 
   if (result.count > 0) {
     logger.info('🪑 Seat-cap-deactivated seats reactivated on re-upgrade to paid plan', {
@@ -387,10 +403,11 @@ export async function reactivateSeatCapDeactivated(venueId: string): Promise<num
 export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: number): Promise<number> {
   const reactivated = await prisma.$transaction(async tx => {
     // Same lock as executeSeatReconciliation: a concurrent accept either committed before this point (its seat is counted
-    // below) or waits and finds its invitation counted as pending. The advisory key also serializes two restores when the
-    // venue has no pending invitation to lock.
+    // below) or waits and finds its invitation counted as pending. Then the venue's seat-cap lock, shared with creating
+    // and accepting invitations (final review #8): two restores, or a restore and a new invitation, never both take the
+    // last seat.
     await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "venueId" = ${venueId} AND "status" = 'PENDING' FOR UPDATE`
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`seat-cap-restore:${venueId}`}))::text`
+    await lockSeatCap(tx, [venueId])
     // Seats = active + outstanding invitations, the same count canAddSeat enforces (getPendingInvitationCount's predicate):
     // bringing someone back must never strand an invite the owner already sent.
     const [active, pending] = await Promise.all([
@@ -400,23 +417,40 @@ export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: num
       }),
     ])
     const room = cap - active - pending
-    if (room <= 0) return 0
+    if (room <= 0) return []
     const back = await tx.staffVenue.findMany({
       where: { venueId, deactivatedBySeatCap: true },
       orderBy: [{ endDate: 'desc' }, { id: 'asc' }],
       take: room,
       select: { id: true },
     })
-    if (back.length === 0) return 0
-    const result = await tx.staffVenue.updateMany({
+    if (back.length === 0) return []
+    const restored = await tx.staffVenue.updateManyAndReturn({
       where: { venueId, deactivatedBySeatCap: true, id: { in: back.map(r => r.id) } },
       data: { active: true, endDate: null, deactivatedBySeatCap: false },
+      select: { id: true },
     })
-    return result.count
+    return restored.map(row => row.id)
   })
 
-  if (reactivated > 0) logger.info('🪑 Seat-cap-deactivated seats reactivated up to the plan cap', { venueId, cap, reactivated })
-  return reactivated
+  // Only the Plan Básico restores up to a finite cap: audited after the commit, never failing the delivery.
+  await auditSeatsRestored(venueId, reactivated, cap, 'BASIC_PLAN')
+  if (reactivated.length > 0)
+    logger.info('🪑 Seat-cap-deactivated seats reactivated up to the plan cap', { venueId, cap, reactivated: reactivated.length })
+  return reactivated.length
+}
+
+/**
+ * Final review #9: bringing people back changes who can enter the venue, so it leaves its ActivityLog. Outside the
+ * transaction and best-effort (`logAction` never throws): a failed audit never undoes nor fails the restore.
+ */
+async function auditSeatsRestored(venueId: string, restored: string[], cap: number | null, reason: 'BASIC_PLAN') {
+  if (restored.length === 0) return
+  try {
+    await logAction({ venueId, action: 'SEAT_CAP_RESTORED', entity: 'Venue', entityId: venueId, data: { restored, cap, reason } })
+  } catch (error) {
+    logger.warn('🪑 SEAT_CAP_RESTORED audit failed; the restore stands', { venueId, error })
+  }
 }
 
 /**
