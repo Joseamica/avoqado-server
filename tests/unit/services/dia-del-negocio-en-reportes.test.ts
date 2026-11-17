@@ -261,11 +261,30 @@ describe('centro de mando (PlayTelecom): tendencia de ventas con días elegidos 
   })
 
   it('si el reloj cruza la medianoche a media llamada, los 7 días y su comparación son los del momento de la consulta', async () => {
-    fijarReloj('2026-11-16T05:59:59.000Z') // domingo 15-nov, 23:59:59 CDMX
     zonaDelNegocio(CDMX)
     sinVentas()
-    cruzarMedianocheAlConsultar(prismaMock.$queryRaw, '2026-11-16T06:00:01.000Z', [])
-    const r = await commandCenterService.getStockVsSales('v1', { days: 7 })
+    // Codex r3 #2: el reloj cruza la medianoche JUSTO DESPUÉS de la primera lectura. Mover el reloj dentro de una consulta llega
+    // tarde (los bordes ya están calculados) y no atrapa una segunda lectura; aquí cualquier segunda lectura ya es el lunes 16.
+    const RealDate = Date
+    let lecturas = 0
+    const lectura = () => (lecturas++ === 0 ? '2026-11-16T05:59:59.999Z' : '2026-11-16T06:00:00.001Z') // 15-nov 23:59:59.999 CDMX, luego el 16
+    class RelojQueCruza extends RealDate {
+      constructor(...args: any[]) {
+        if (args.length === 0) super(lectura())
+        else super(...(args as [any]))
+      }
+      static now() {
+        return new RealDate(lectura()).getTime()
+      }
+    }
+    global.Date = RelojQueCruza as unknown as DateConstructor
+    let r
+    try {
+      r = await commandCenterService.getStockVsSales('v1', { days: 7 })
+    } finally {
+      global.Date = RealDate
+    }
+    expect(lecturas).toBe(1) // una sola lectura del reloj por petición
     expect(r.trend).toHaveLength(7)
     expect(r.trend[6].date).toBe(new Date('2026-11-15T18:00:00Z').toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }))
     expect(periodoAnterior()).toEqual(['2026-11-02T06:00:00.000Z', '2026-11-09T05:59:59.999Z'])
