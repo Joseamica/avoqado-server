@@ -711,20 +711,28 @@ export async function getDiscountStats(venueId: string): Promise<DiscountStatsRe
   const vivas = {
     order: { venueId, status: { notIn: ['CANCELLED', 'DELETED'] as OrderStatus[] } },
   } satisfies Prisma.OrderDiscountWhereInput
-  const [totalDiscounts, activeDiscounts, automaticDiscounts, totales, top] = await Promise.all([
-    prisma.discount.count({ where: { venueId } }),
-    prisma.discount.count({ where: { venueId, active: true } }),
-    prisma.discount.count({ where: { venueId, isAutomatic: true, active: true } }),
-    prisma.orderDiscount.aggregate({ where: vivas, _count: { _all: true }, _sum: { amount: true } }),
-    prisma.orderDiscount.groupBy({
-      by: ['discountId'],
-      where: { ...vivas, discountId: { not: null } },
-      _count: { _all: true },
-      _sum: { amount: true },
-      orderBy: [{ _count: { discountId: 'desc' } }, { discountId: 'asc' }],
-      take: 5,
-    }),
-  ])
+  // 🔴 Encargo 04edc5 (founder «C»): la cortesía de Mesas deja el renglón en $0 SIN fila (la de Mostrador/«Cobrar» sí tiene su
+  // fila COMP y ya cuenta). Mismo regalo, dos cifras: se suman aquí lo regalado y las cuentas que la traen (una por cuenta, como
+  // la fila COMP de una venta). En la base, sin traer filas.
+  const cortesiaEnCero = { isCortesia: true, total: 0, discountAmount: { gt: 0 } } satisfies Prisma.OrderItemWhereInput
+  const [totalDiscounts, activeDiscounts, automaticDiscounts, totales, top, regaladoEnMesas, cuentasConCortesiaEnMesas] = await Promise.all(
+    [
+      prisma.discount.count({ where: { venueId } }),
+      prisma.discount.count({ where: { venueId, active: true } }),
+      prisma.discount.count({ where: { venueId, isAutomatic: true, active: true } }),
+      prisma.orderDiscount.aggregate({ where: vivas, _count: { _all: true }, _sum: { amount: true } }),
+      prisma.orderDiscount.groupBy({
+        by: ['discountId'],
+        where: { ...vivas, discountId: { not: null } },
+        _count: { _all: true },
+        _sum: { amount: true },
+        orderBy: [{ _count: { discountId: 'desc' } }, { discountId: 'asc' }],
+        take: 5,
+      }),
+      prisma.orderItem.aggregate({ where: { ...cortesiaEnCero, order: vivas.order }, _sum: { discountAmount: true } }),
+      prisma.order.count({ where: { ...vivas.order, items: { some: cortesiaEnCero } } }),
+    ],
+  )
 
   const ids = top.map(t => t.discountId).filter((id): id is string => id !== null)
   const catalogo = ids.length
@@ -739,8 +747,8 @@ export async function getDiscountStats(venueId: string): Promise<DiscountStatsRe
     const d = t.discountId ? porId.get(t.discountId) : undefined
     return d ? [{ id: d.id, name: d.name, type: d.type, redemptions: t._count._all, totalSaved: Number(t._sum.amount ?? 0) }] : []
   })
-  const totalRedemptions = totales._count._all
-  const totalSaved = Number(totales._sum.amount ?? 0)
+  const totalRedemptions = totales._count._all + (cuentasConCortesiaEnMesas ?? 0)
+  const totalSaved = Number((Number(totales._sum.amount ?? 0) + Number(regaladoEnMesas?._sum?.discountAmount ?? 0)).toFixed(2))
 
   return {
     totalDiscounts,

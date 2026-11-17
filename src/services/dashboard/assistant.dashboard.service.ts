@@ -752,6 +752,18 @@ ${JSON.stringify(liveData, null, 2)}`
 
       // Obtener información de los productos
       const productIds = productosVendidos.map((p: any) => p.productId)
+      // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es ingreso. La cortesía de Mostrador/«Cobrar» deja el renglón a precio
+      // lleno y la de Mesas en $0: el ingreso se suma sin cortesías para que las dos den lo mismo (las piezas sí cuentan).
+      const ingresosSinCortesias = await prisma.orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          productId: { in: productIds.filter((id: string | null): id is string => id !== null) },
+          isCortesia: false,
+          order: { venueId, createdAt: { gte: thirtyDaysAgo }, paymentStatus: 'PAID' },
+        },
+        _sum: { total: true },
+      })
+      const ingresoPorProducto = new Map(ingresosSinCortesias.map(i => [i.productId, Number(i._sum?.total ?? 0)]))
       const productos = await prisma.product.findMany({
         where: {
           id: {
@@ -776,7 +788,7 @@ ${JSON.stringify(liveData, null, 2)}`
           nombre: producto?.name || 'Producto desconocido',
           tipo: producto?.type || 'FOOD',
           cantidad: venta._sum.quantity || 0,
-          ingresos: Number(venta._sum.total || 0),
+          ingresos: venta.productId ? (ingresoPorProducto.get(venta.productId) ?? 0) : Number(venta._sum.total || 0),
           precio: Number(producto?.price || 0),
           ordenesConProducto: venta._count.id,
         }

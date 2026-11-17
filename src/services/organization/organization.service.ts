@@ -826,6 +826,21 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
 
   // Get product details for top items (filter out null productIds from deleted products)
   const productIds = orderItems.map(item => item.productId).filter((id): id is string => id !== null)
+  // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es ingreso. La cortesía de Mostrador/«Cobrar» deja el renglón a precio lleno
+  // y la de Mesas en $0; el ingreso se suma sin cortesías para que las dos den lo mismo. Las piezas sí cuentan (se entregaron).
+  // Sólo los productos del top (a lo más `limit`).
+  const ingresos = productIds.length
+    ? await prisma.orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          productId: { in: productIds },
+          isCortesia: false,
+          order: { venueId: { in: venueIds }, createdAt: { gte: from, lte: to } },
+        },
+        _sum: { total: true },
+      })
+    : []
+  const ingresoPorProducto = new Map(ingresos.map(i => [i.productId, i._sum?.total?.toNumber() ?? 0]))
   const products = await prisma.product.findMany({
     where: { id: { in: productIds } },
     select: {
@@ -844,7 +859,7 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
   return orderItems.map((item, index) => {
     const product = item.productId ? productMap.get(item.productId) : null
     const quantitySold = item._sum?.quantity || 0
-    const totalRevenue = item._sum?.total?.toNumber() || 0
+    const totalRevenue = item.productId ? (ingresoPorProducto.get(item.productId) ?? 0) : item._sum?.total?.toNumber() || 0
 
     return {
       productId: item.productId || 'deleted',

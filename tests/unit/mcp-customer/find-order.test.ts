@@ -155,3 +155,42 @@ describe('find_order — identificación inequívoca por sucursal', () => {
     })
   })
 })
+
+/**
+ * 🔴 Encargo 04edc5 (hz:8024bc1c:D41, founder «C»): la MISMA cortesía se guarda de dos formas según la pantalla. Mostrador /
+ * «Cobrar»: renglón a precio lleno y la cabecera trae la cortesía (descuento $25.50); Mesas: renglón en $0 y la cabecera NO la
+ * trae ($5.50). Quien lee la venta por el MCP veía dos descuentos distintos para lo mismo. `discountsAndComps` (aditivo) es la
+ * cifra de los reportes («Descuentos y cortesías», como Square): igual en las dos. Cada renglón dice si fue cortesía.
+ */
+describe('find_order · la cortesía se lee igual en Mesas y en Mostrador (encargo 04edc5)', () => {
+  const venta = (discountAmount: number, agua: { total: number }) => ({
+    id: 'ord-1',
+    orderNumber: 'ORD-1',
+    status: 'COMPLETED',
+    discountAmount,
+    venue: { name: 'Café' },
+    items: [
+      { id: 'i1', productName: 'Coca', quantity: 1, unitPrice: 25, total: 25, discountAmount: 0, isCortesia: false },
+      { id: 'i2', productName: 'Agua', quantity: 1, unitPrice: 20, total: agua.total, discountAmount: 20, isCortesia: true },
+      { id: 'i3', productName: 'Café', quantity: 1, unitPrice: 30, total: 30, discountAmount: 0, isCortesia: false },
+    ],
+    payments: [],
+  })
+
+  it('🔴 descuentos y cortesías = $25.50 en las dos formas; el descuento guardado se devuelve tal cual', async () => {
+    mockOrderFind.mockResolvedValueOnce(venta(25.5, { total: 20 }))
+    const mostrador = parse(await call({ orderId: 'ord-1' }))
+    mockOrderFind.mockResolvedValueOnce(venta(5.5, { total: 0 }))
+    const mesas = parse(await call({ orderId: 'ord-1' }))
+
+    expect([mostrador.order.discountsAndComps, mesas.order.discountsAndComps]).toEqual([25.5, 25.5])
+    expect([mostrador.order.discountAmount, mesas.order.discountAmount]).toEqual([25.5, 5.5])
+    expect(mesas.order.items.map((i: { isCortesia: boolean }) => i.isCortesia)).toEqual([false, true, false])
+  })
+
+  it('la consulta pide si el renglón fue cortesía', async () => {
+    mockOrderFind.mockResolvedValueOnce(venta(0, { total: 20 }))
+    await call({ orderId: 'ord-1' })
+    expect(mockOrderFind.mock.calls[0][0].select.items.select.isCortesia).toBe(true)
+  })
+})
