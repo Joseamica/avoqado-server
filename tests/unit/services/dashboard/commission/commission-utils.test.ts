@@ -508,6 +508,16 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(55)
     })
 
+    it('🔴 Codex r5: un renglón con el precio cambiado a media cuenta (total ≠ precio × cantidad) usa la regla de antes', async () => {
+      // Dos productos de $45 reenviados a $50 (total nuevo, `unitPrice` viejo) + Agua $20 de cortesía en Mesas, 10 % de cuenta
+      // ($10, sobre los totales). Antes daba $45 a cada categoría; con la fila sobre la base de $45 caía a $40.
+      montar([r('a-uno', 45, 50, 0, 'uno'), r('b-agua', 20, 0, 20, 'otros', { isCortesia: true }), r('c-dos', 45, 50, 0, 'dos')], 10, [
+        fila(10, { 'a-uno': 500, 'c-dos': 500 }),
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['uno'], CONFIG_DEFAULT)).toBe(45)
+      expect(await calculateCategoryFilteredAmount('o', ['dos'], CONFIG_DEFAULT)).toBe(45)
+    })
+
     it('🔴 Codex r2: con más filas que el tope (no se ven todas) se usa la regla de antes', async () => {
       // 600 espejos de $1 sobre renglones brutos de $10 + Café $100: se cobraron 600 × 9 + 100 = $5,500.
       const renglones = Array.from({ length: 600 }, (_, i) => r(`a-${String(i).padStart(3, '0')}`, 10, 10, 1, 'bebidas'))

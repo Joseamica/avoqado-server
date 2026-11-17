@@ -893,6 +893,21 @@ export async function findActiveCommissionConfigs(
   return orgConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
 }
 
+/**
+ * ¿El importe de lista del renglón (`importeDelRenglon`: precio × cantidad + extras) es el que guardó su `total`? (Codex r5)
+ * Vale cualquiera de las formas reales, al centavo: bruto (Mostrador), sin extras (los escritores que no los suman al `total`),
+ * neto de su descuento (cortesía de Mesas en $0, pieza de combo) o neto y sin extras.
+ */
+function renglonCuadraConSuTotal(it: Parameters<typeof importeDelRenglon>[0]): boolean {
+  if (it.total == null) return false
+  const c = (n: number) => Math.round(n * 100)
+  const bruto = c(importeDelRenglon(it))
+  const extras = c((it.modifiers ?? []).reduce((s, m) => s + Number(m.price) * m.quantity, 0) * it.quantity)
+  const descuento = c(Number(it.discountAmount ?? 0))
+  const total = c(Number(it.total))
+  return [bruto, bruto - extras, bruto - descuento, bruto - extras - descuento].some(v => Math.abs(v - total) <= 1)
+}
+
 /** Cuántas filas de descuento de una orden lee la base por categoría (ver `descuentoDeOrdenDeLaVenta`). */
 const TOPE_DE_FILAS = 500
 
@@ -961,7 +976,9 @@ async function loadOrderCommissionLines(
     orderLevelDiscount: descuentoDeOrdenDeLaVenta(
       decimalToNumber(order?.discountAmount),
       lines.map(line => line.lineDiscount),
-      filas.length <= TOPE_DE_FILAS ? filas : null,
+      // Codex r5: las filas reparten sobre los `total` guardados y esta base parte del precio × cantidad. Si algún renglón no cuadra
+      // (p. ej. precio cambiado a media cuenta: `total` nuevo, `unitPrice` viejo), la regla de siempre.
+      filas.length <= TOPE_DE_FILAS && orderItems.every(renglonCuadraConSuTotal) ? filas : null,
     ),
     // A1e: IVA_INCLUIDO, o DESCONOCIDO sin IVA registrado ⇒ los renglones traen el IVA y «sin IVA» lo separa por tasa; aparte
     // (o DESCONOCIDO con IVA registrado, la regla P12) los renglones ya vienen sin IVA.
