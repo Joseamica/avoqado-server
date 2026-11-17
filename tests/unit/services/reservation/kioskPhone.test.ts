@@ -233,23 +233,38 @@ describe('Teléfono tecleado en el kiosco', () => {
       expect(checkInReservation).not.toHaveBeenCalled()
     })
 
-    it('la MISMA invitada (mismo nombre, sin ficha) en dos clases seguidas no es ambigua: marca la que falta', async () => {
+    it('la MISMA invitada (mismo nombre, sin ficha) en dos clases seguidas no es ambigua: la primera, como siempre', async () => {
       prismaMock.reservation.findMany.mockResolvedValue([
         reserva({ id: 'res-9a', status: 'CHECKED_IN', customerId: null, customer: null, guestName: 'Ana Ruiz', guestPhone: '5512345678' }),
         reserva({ id: 'res-9b', customerId: null, customer: null, guestName: ' ana  ruiz ', guestPhone: '55 1234 5678' }),
       ] as any)
       telefonoAlBloquear = { guestPhone: '55 1234 5678', customerPhone: null }
       const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
-      expect(out).toMatchObject({ outcome: 'CHECKED_IN', reservationId: 'res-9b' })
+      expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-9a' })
     })
 
-    it('la MISMA clienta con dos reservas en la ventana ⇒ marca la que falta, no «ya estabas»', async () => {
+    // Codex r2 #1: la respuesta de la primera se perdió y una app vieja reintenta SIN opId: no marca su siguiente clase.
+    it('🔴 la MISMA clienta con dos reservas en la ventana ⇒ la primera, como siempre (un reintento no marca la siguiente)', async () => {
       prismaMock.reservation.findMany.mockResolvedValue([
         reserva({ id: 'res-1a', status: 'CHECKED_IN', customerId: 'c-ana' }),
         reserva({ id: 'res-1b', customerId: 'c-ana' }),
       ] as any)
       const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
-      expect(out).toMatchObject({ outcome: 'CHECKED_IN', reservationId: 'res-1b' })
+      expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-1a' })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    // Codex r2 #2: con el tope lleno no se sabe si hay otra persona fuera de las 20: no se adivina.
+    it('🔴 más de 20 reservas con ese número en la ventana ⇒ 409, sin leerlas ni marcar', async () => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (sql: TemplateStringsArray) =>
+        sql.join('?').includes('FOR UPDATE') ? [telefonoAlBloquear] : Array.from({ length: 21 }, (_, i) => ({ id: `res-${i}` })),
+      )
+      await expect(checkInByIdentifier({ ...base, identifier: '+525512345678' })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CHECK_IN_PHONE_AMBIGUOUS',
+      })
+      expect(prismaMock.reservation.findMany).not.toHaveBeenCalled()
+      expect(checkInReservation).not.toHaveBeenCalled()
     })
 
     // Codex r1 #2: entre buscar y escribir, recepción corrigió el teléfono de esa reserva. Dentro de la transacción, con la fila

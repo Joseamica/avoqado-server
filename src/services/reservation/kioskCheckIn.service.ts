@@ -552,7 +552,7 @@ async function reservaDelTelefono(a: {
   statuses: ReservationStatus[]
   ventana: Prisma.ReservationWhereInput
 }) {
-  // ponytail: tope de 20 con los mismos 10 dígitos en la ventana de una clase (la misma persona o un teléfono compartido).
+  // ponytail: tope de 20 con los mismos 10 dígitos en la ventana de una clase; si se llena, se manda a recepción (r2 #2).
   const ids = await prisma.$queryRaw<{ id: string }[]>`
     SELECT r.id FROM "Reservation" r
     LEFT JOIN "Customer" c ON c.id = r."customerId"
@@ -562,12 +562,14 @@ async function reservaDelTelefono(a: {
       AND (regexp_replace(COALESCE(r."guestPhone", ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail}
         OR regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail})
     ORDER BY r."startsAt" ASC, r.id ASC
-    LIMIT 20`
+    LIMIT ${TOPE_CANDIDATAS + 1}`
   if (ids.length === 0) return null
+  // Codex r2 #2: con más de 20 reservas de ese número en la ventana no se puede saber cuántas personas hay: no se adivina.
+  if (ids.length > TOPE_CANDIDATAS) throw telefonoAmbiguo()
   const candidatas = await prisma.reservation.findMany({
     where: { ...a.ventana, id: { in: ids.map(r => r.id) } },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-    take: 20,
+    take: TOPE_CANDIDATAS,
     select: {
       ...DISPLAY_SELECT,
       customerId: true,
@@ -580,12 +582,15 @@ async function reservaDelTelefono(a: {
   // la llegada la marca recepción. Una invitada sin ficha se reconoce por su nombre (la misma invitada en dos clases seguidas sí
   // es una sola persona).
   const persona = (r: (typeof suyas)[number]) => r.customerId ?? `invitada:${(r.guestName ?? '').trim().toLowerCase().replace(/\s+/g, ' ')}`
-  if (new Set(suyas.map(persona)).size > 1) {
-    throw new ConflictError('Hay más de una reservación con ese teléfono. Pide tu llegada en recepción.', CHECK_IN_PHONE_AMBIGUOUS)
-  }
-  // La misma persona con varias en la ventana: primero la que falta marcar (como el QR); si todas están, «ya estabas».
-  return suyas.find(r => r.status === 'PENDING' || r.status === 'CONFIRMED') ?? suyas.find(r => r.status === 'NO_SHOW') ?? suyas[0] ?? null
+  if (new Set(suyas.map(persona)).size > 1) throw telefonoAmbiguo()
+  // La misma persona con varias en la ventana: la primera, como siempre. Codex r2 #1: «primero la que falta marcar» hacía que un
+  // reintento sin `opId` (app vieja, respuesta perdida) marcara también su SIGUIENTE clase.
+  return suyas[0] ?? null
 }
+
+const TOPE_CANDIDATAS = 20
+const telefonoAmbiguo = () =>
+  new ConflictError('Hay más de una reservación con ese teléfono. Pide tu llegada en recepción.', CHECK_IN_PHONE_AMBIGUOUS)
 
 /** Codex r1 #1 (D4): dos personas con el mismo teléfono en la misma ventana. */
 export const CHECK_IN_PHONE_AMBIGUOUS = 'CHECK_IN_PHONE_AMBIGUOUS'
