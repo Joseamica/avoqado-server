@@ -118,12 +118,16 @@ export async function endLapsedHybridContracts(venueId: string, purchaseId: stri
  * A paid Plan Básico period was delivered (every invoice, not only the first): the team follows its cap again. Checks
  * FIRST that a Básico grant covers now, so a replayed old invoice brings nobody back. The effective cap decides (a paid
  * plan or grandfathering above the Básico stays unlimited): unlimited → everyone the cap turned off comes back; finite →
- * trim to the cap if over it, then bring people back up to it. Both steps are idempotent.
+ * trim to the cap if over it, then bring people back up to it. A pending downgrade selection is dropped first. All steps
+ * are idempotent.
  *
  * @returns the number of seats reactivated.
  */
 export async function restoreBasicSeats(venueId: string): Promise<number> {
   if (!(await activeBasicSeatCaps([venueId], new Date())).has(venueId)) return 0
+  // The «who stays» choice of an earlier Pro→Free downgrade belongs to THAT downgrade, not to this paid Básico (final
+  // review #4): a late Pro webhook must not apply it over the Básico's cap.
+  await clearPendingReconciliation(venueId)
   const cap = await getVenueSeatCap(venueId)
   if (cap === null) return reactivateSeatCapDeactivated(venueId)
   await executeSeatReconciliation(venueId)

@@ -297,6 +297,55 @@ describe('volver a cubrir', () => {
     expect(seats.filter(s => s.deactivatedBySeatCap)).toHaveLength(4)
   })
 
+  describe('🔴 la selección vieja de una baja de Pro no apaga a los del Básico pagado (revisión final #4)', () => {
+    let pending: { keepStaffVenueIds: string[] } | null
+    beforeEach(() => {
+      // El Pro terminó con «se quedan el dueño y sv_01» guardado; su webhook todavía no llega.
+      pending = { keepStaffVenueIds: ['sv_00', 'sv_01'] }
+      prismaMock.venue.findUnique.mockImplementation(async (a: any) =>
+        a.where.id === VENUE ? { seatCapExempt: false, organization: { seatCapExempt: false }, pendingSeatReconciliation: pending } : null,
+      )
+      prismaMock.venue.update.mockImplementation(async (a: any) => {
+        if ('pendingSeatReconciliation' in a.data) pending = a.data.pendingSeatReconciliation
+        return {}
+      })
+    })
+
+    it('entregar el Básico (tope 3) borra la selección y la baja tardía del Pro deja 3, no 2', async () => {
+      team(4)
+      grants = [covering(3)]
+      await restoreBasicSeats(VENUE)
+      expect(pending).toBeNull()
+      // El tope del Básico recorta por actividad reciente (sv_01 es el menos reciente), no por la selección de la baja.
+      expect(seats.filter(s => s.active).map(s => s.id)).toEqual(['sv_00', 'sv_02', 'sv_03'])
+      // Llega tarde customer.subscription.deleted del Pro → runSeatReconciliation.
+      await executeSeatReconciliation(VENUE)
+      expect(seats.filter(s => s.active).map(s => s.id)).toEqual(['sv_00', 'sv_02', 'sv_03'])
+    })
+
+    it('un Básico sin tope también borra la selección vieja al entregarse (no queda esperando al siguiente paso a Gratis)', async () => {
+      team(2, 2)
+      grants = [covering(null)]
+      await restoreBasicSeats(VENUE)
+      expect(pending).toBeNull()
+      expect(activeCount()).toBe(4)
+    })
+
+    it('si la selección sigue ahí cuando llega la baja del Pro, con un Básico vigente se usa su tope y no la selección', async () => {
+      team(4)
+      grants = [covering(3)]
+      await executeSeatReconciliation(VENUE)
+      expect(activeCount()).toBe(3)
+      expect(pending).toBeNull() // se limpia igual: ya se atendió
+    })
+
+    it('sin Básico vigente, la selección del dueño sigue mandando (el paso a Gratis de hoy)', async () => {
+      team(4)
+      await executeSeatReconciliation(VENUE)
+      expect(seats.filter(s => s.active).map(s => s.id)).toEqual(['sv_00', 'sv_01'])
+    })
+  })
+
   it('repetir la notificación de una factura vieja sin grant vigente no regresa a nadie', async () => {
     team(2, 3)
     grants = [lapsed(5)]

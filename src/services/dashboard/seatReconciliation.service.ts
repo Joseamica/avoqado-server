@@ -33,6 +33,7 @@ import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/gran
 import { cancelPlan, type CancelPlanInput, type PlanState } from './planState.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { retrievePlanSubscription } from '../stripe.service'
+import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 
 /** Persisted shape of Venue.pendingSeatReconciliation. */
 export interface PendingSeatReconciliation {
@@ -255,6 +256,9 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
   // alone: a late webhook of an OLDER subscription must not wipe the owner's choice for a later downgrade.
   const cap = await getVenueSeatCap(venueId)
   if (cap === null) return 0
+  // A paid Plan Básico covers the venue (final review #4): a late Pro→Free webhook trims to the Básico's cap, and the
+  // selection the owner made for THAT downgrade (fewer people) no longer applies. It is still cleared below.
+  const basicCovers = (await activeBasicSeatCaps([venueId], new Date())).has(venueId)
 
   // All or nothing, audit row included: separate writes used to leave people deactivated with no audit row, and the
   // retry then had nothing left to record. A failure propagates, so the webhook event stays FAILED and the cron replays it.
@@ -270,7 +274,7 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
     // An explicit choice (the one a hybrid checkout carried) wins over the pending one; empty means "none given".
     const keep = options.keepStaffVenueIds?.length
       ? options.keepStaffVenueIds
-      : Array.isArray(pending?.keepStaffVenueIds)
+      : !basicCovers && Array.isArray(pending?.keepStaffVenueIds)
         ? pending.keepStaffVenueIds
         : []
     const owners = rows.filter(r => r.role === StaffRole.OWNER)
