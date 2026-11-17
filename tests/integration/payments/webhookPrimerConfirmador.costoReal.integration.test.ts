@@ -3487,6 +3487,33 @@ describe('D3 (10-nov-2026) · la tarifa internacional la decide el PAÍS de la t
     expect((await exigir(prisma.transactionCost.findUnique({ where: { paymentId: devolucion.id } }))).transactionType).toBe('DEBIT')
   })
 
+  it('D5 · el cambio de método de la devolución deja UN asiento en la bitácora, y repetir el registro no lo duplica', async () => {
+    const { nacido, A, R, requestId } = await nacidoDelWebhook()
+    const devolucion = await devolverAntesDeAcreditar(nacido)
+    const asientos = () =>
+      prisma.activityLog.findMany({
+        where: { venueId: f.venueId, entity: 'Payment', entityId: devolucion.id, action: 'REFUND_METHOD_ACCREDITED_BY_TERMINAL' },
+        take: 10,
+      })
+
+    const registro = restDeNexgo(A, '0484', { method: 'DEBIT_CARD' }, requestId, R)
+    await recordFastPayment(f.venueId, registro, f.staffId)
+    const [asiento, ...otros] = await asientos()
+    expect(otros).toHaveLength(0)
+    expect(asiento.data).toEqual({
+      metodoAnterior: 'CREDIT_CARD',
+      metodoNuevo: 'DEBIT_CARD',
+      originalPaymentId: nacido.id,
+      acreditadoPor: 'REGISTRO_DE_LA_TERMINAL',
+      hallazgo: 'D5',
+    })
+
+    // El mismo registro otra vez: el método ya no es provisional, nada cambia y no nace otro asiento.
+    await recordFastPayment(f.venueId, registro, f.staffId)
+    expect(await asientos()).toHaveLength(1)
+    expect((await pago(devolucion.id)).method).toBe('DEBIT_CARD')
+  })
+
   it('D5 · una devolución que volvió por OTRO medio (efectivo) conserva su medio cuando el cobro pasa a débito', async () => {
     const { nacido, A, R, requestId } = await nacidoDelWebhook()
     const devolucion = await devolverAntesDeAcreditar(nacido)
