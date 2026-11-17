@@ -4366,7 +4366,15 @@ model Order {
 
   loyaltyPromotionUses LoyaltyPromotionUse[]
 
+  /// D7 (hz:033d44ca:D7, 16-nov-2026): cuenta aparte de una RONDA TARDÍA. Una ronda que un aparato mandó sin red llegó cuando
+  /// otra caja ya había cobrado la cuenta: cae en una cuenta nueva de la misma mesa. Aquí queda de qué cuenta (ya cobrada) salió y
+  /// qué aparato la mandó; lo siguiente de ese aparato para esa cuenta (otra ronda, su cobro sin red) la encuentra por esta pareja.
+  /// Si esta también se cobra antes de otra ronda tardía, la siguiente nace de ÉSTA (una cadena). Sin FK a propósito: es una llave.
+  rondaTardiaDeId    String?
+  rondaTardiaAparato String?
+
   @@unique([venueId, externalId])
+  @@unique([rondaTardiaDeId, rondaTardiaAparato])
   @@unique([venueId, areaTicketCode])
   @@unique([venueId, areaDeliveryCode])
   @@index([venueId])
@@ -19636,6 +19644,7 @@ model OrderPromotion {
 
   @@unique([orderId, instanceId])
   @@index([promotionId])
+  @@index([instanceId]) // D7: ¿esta ronda (con combos) ya se guardó en alguna cuenta del negocio?
 }
 
 /// Fase 5 del kiosco — el reto de check-in.

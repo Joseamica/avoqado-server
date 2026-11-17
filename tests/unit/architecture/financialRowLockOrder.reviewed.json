@@ -1007,6 +1007,11 @@
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
     },
+    "src/services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D7: la misma captura de topología de assignTable (mismo candado consultivo de la mesa antes); todas las Orders de la mesa en una sentencia canónica antes de crear la cuenta aparte y escribir la mesa."
+    },
     "src/services/tpv/table.tpv.service.ts#clearTableInTransaction#lockTableOrderScope": {
       "count": 1,
       "loops": 0,

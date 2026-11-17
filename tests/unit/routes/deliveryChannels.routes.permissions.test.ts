@@ -287,6 +287,45 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
   })
 
+  // ── D1 (16-nov-2026): poner o quitar UN producto en varios canales («Vender en» del producto y el MCP) ──
+  describe('PUT .../products/:productId/channels (D1)', () => {
+    const url = `/delivery-channels/venues/${VENUE_ID}/products/prod-1/channels`
+
+    it('sin delivery-channels:manage da 403, sin llegar al feature-gate', async () => {
+      const res = await request(server)
+        .put(url)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
+        .send({ canales: { [LINK_ID]: true } })
+
+      expect(res.status).toBe(403)
+      expect(mockCheckPermission).toHaveBeenCalledWith('delivery-channels:manage')
+      expect(mockCheckFeature).not.toHaveBeenCalled()
+    })
+
+    it('con delivery-channels:manage pasa el feature-gate DESPUÉS del permiso y llega a setProductChannels', async () => {
+      const res = await request(server)
+        .put(url)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
+        .send({ canales: { [LINK_ID]: false, 'link-2': true } })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ handler: 'setProductChannels' })
+      expect(mockCheckPermission.mock.invocationCallOrder[0]).toBeLessThan(mockCheckFeature.mock.invocationCallOrder[0])
+    })
+
+    it('cuerpo inválido (sin canales, vacío, más de 20, no booleano o un campo de más) da 400 antes del permiso', async () => {
+      const veinteYUno = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`l${i}`, true]))
+      for (const body of [{}, { canales: {} }, { canales: veinteYUno }, { canales: { l1: 'sí' } }, { canales: { l1: true }, otro: 1 }]) {
+        const res = await request(server)
+          .put(url)
+          .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
+          .send(body)
+        expect(res.status).toBe(400)
+      }
+      expect(mockCheckPermission).not.toHaveBeenCalled()
+    })
+  })
+
   // ── Fix §10.4: permiso/membresía ANTES que feature (no fuga de estado de plan) ──
   describe('Fix §10.4: permiso antes que feature (no fuga de plan a no-miembros)', () => {
     it('permiso DENEGADO → 403 y checkFeatureAccess NUNCA corre (no revela el plan del venue)', async () => {

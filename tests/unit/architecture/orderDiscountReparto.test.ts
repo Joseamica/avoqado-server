@@ -306,6 +306,10 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'pedido en línea: la cuenta nace sin descuento; desde S10 sus beneficios entran después por aplicarBeneficiosEnTx',
   },
   'src/services/tpv/table.tpv.service.ts#assignTable': { origen: 'CERO', nota: 'la cuenta de la mesa nace vacía, sin descuento' },
+  'src/services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia': {
+    origen: 'CERO',
+    nota: 'D7: la cuenta aparte de una ronda tardía nace vacía, sin descuento',
+  },
   // Tarjetas de regalo (spec 2026-10-14 § 5.1, R11): la cuenta de tarjetas nace en 0 y sus guardias rechazan todo descuento.
   'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
     origen: 'CERO',

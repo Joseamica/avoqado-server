@@ -94,6 +94,42 @@ describe('los limitadores del código viven en un solo módulo', () => {
     }
   })
 
+  // Founder, 16-nov («A: subir a 30»): alumnas SIN sesión llegan juntas por el WiFi del estudio (una IP). Pedir el código iba en
+  // `writeLimit` (5/min por IP) y verificarlo + crear la ficha en `authLimit` (10/min por IP, compartido con Google).
+  it('entrar con código lleva topes propios por IP: 30 códigos por minuto, y 60 para verificar y crear la ficha', () => {
+    const rutas = fuente('routes/public.routes.ts')
+    expect(rutas).toMatch(/const otpRequestLimit = rateLimit\(\{ windowMs: 60_000, max: 30, keyGenerator: porVisitante,/)
+    expect(rutas).toMatch(/const otpAccessLimit = rateLimit\(\{ windowMs: 60_000, max: 60, keyGenerator: porVisitante,/)
+    const cadena = (ruta: string) => {
+      const bloque = rutas.slice(rutas.indexOf(`router.post(\n  '${ruta}'`))
+      return bloque.slice(0, bloque.indexOf(')\n'))
+    }
+    expect(cadena('/venues/:venueSlug/auth/otp/request')).toMatch(
+      /'\/venues\/:venueSlug\/auth\/otp\/request',\s*otpRequestLimit,\s*validateRequest/,
+    )
+    expect(cadena('/venues/:venueSlug/auth/otp/verify')).toMatch(
+      /'\/venues\/:venueSlug\/auth\/otp\/verify',\s*otpAccessLimit,\s*validateRequest/,
+    )
+    expect(cadena('/venues/:venueSlug/auth/session/nueva-ficha')).toMatch(/nueva-ficha',\s*otpAccessLimit,\s*validateRequest/)
+    // «Cambiar mi número» también manda un código: conserva su writeLimit y además gasta del MISMO cupo de 30 (Codex r13 #1).
+    expect(cadena('/venues/:venueSlug/customer/phone/request')).toMatch(
+      /phone\/request',\s*writeLimit,\s*otpRequestLimit,\s*resolveVenueBySlug/,
+    )
+    // Google no cambia: sigue en el tope compartido.
+    expect(cadena('/venues/:venueSlug/auth/google')).toMatch(/auth\/google',\s*authLimit,\s*validateRequest/)
+  })
+
+  it('30 códigos pedidos en un minuto desde la misma IP pasan; el 31 recibe 429', async () => {
+    const tope = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: req => ipDelCliente(req) || 'desconocida' })
+    const app = appCon(tope)
+    for (let i = 0; i < 30; i++) {
+      const res = await request(app).post('/contact').set('X-Forwarded-For', IP_DEL_PROXY).send({})
+      expect(res.status).toBe(200)
+    }
+    const siguiente = await request(app).post('/contact').set('X-Forwarded-For', IP_DEL_PROXY).send({})
+    expect(siguiente.status).toBe(429)
+  })
+
   it('una clase de 12 que llega en el mismo minuto por la misma IP pasa completa con el techo de llegadas', async () => {
     const techo = rateLimit({ windowMs: 60_000, max: 120, keyGenerator: req => ipDelCliente(req) || 'desconocida' })
     const app = appCon(techo)

@@ -224,6 +224,69 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     expect(result.amount_left).toBe(25)
   })
 
+  // D14 (hz:72be07e6:D14): la N86 dijo «Total $35 · Ya pagado −$35 · Restante $10» contra un SERVIDOR local sin D4
+  // (fórmula vieja `total − Σ amount`). Se fijan aquí los dos casos de la tarjeta, por el endpoint real.
+  const cuentaD14 = (overrides: Record<string, any>) =>
+    buildOrderFixture({
+      originSystem: 'AVOQADO',
+      source: 'TPV',
+      externalId: null,
+      status: 'COMPLETED',
+      contratoDePrecio: 'IVA_INCLUIDO',
+      discountAmount: new Decimal('0.00'),
+      serviceChargeAmount: new Decimal('0.00'),
+      taxAmount: new Decimal('0.00'),
+      thirdPartyCashDue: null,
+      cashTipDue: null,
+      orderDiscounts: [],
+      serviceCharges: [],
+      ...overrides,
+    })
+  const pagoD14 = (amount: string, tipAmount: string, splitType: string) => ({
+    id: `pay-${amount}`,
+    amount: new Decimal(amount),
+    tipAmount: new Decimal(tipAmount),
+    status: 'COMPLETED',
+    type: 'REGULAR',
+    reopenedAmount: null,
+    reopenedTipAmount: null,
+    splitType,
+    createdAt: new Date(),
+  })
+
+  it('D14: cuenta de $25 pagada completa con $10 de propina (ORD-1794866186857, total 35) → amount_left = 0 (antes 10)', async () => {
+    findUniqueMock.mockResolvedValue(
+      cuentaD14({
+        paymentStatus: 'PAID',
+        subtotal: new Decimal('25.00'),
+        tipAmount: new Decimal('10.00'),
+        total: new Decimal('35.00'),
+        payments: [pagoD14('25.00', '10.00', 'FULLPAYMENT')],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(0)
+  })
+
+  it('D14: cuenta de $200 con un abono de $50 + $10 de propina (total 210) → amount_left = 150 (antes 160)', async () => {
+    findUniqueMock.mockResolvedValue(
+      cuentaD14({
+        status: 'CONFIRMED',
+        paymentStatus: 'PARTIAL',
+        subtotal: new Decimal('200.00'),
+        tipAmount: new Decimal('10.00'),
+        total: new Decimal('210.00'),
+        payments: [pagoD14('50.00', '10.00', 'CUSTOMAMOUNT')],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.amount_left).toBe(150)
+  })
+
   it('still throws NotFoundError when the order does not exist', async () => {
     findUniqueMock.mockResolvedValue(null)
 

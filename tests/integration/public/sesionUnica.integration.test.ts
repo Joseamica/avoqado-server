@@ -319,13 +319,16 @@ it.each([
       'customerPortalController.updateProfile',
     ],
   ],
-  ['post', '/venues/:venueSlug/auth/session/nueva-ficha', ['authLimit', 'validateRequest', 'otpAuthController.crearFichaNueva']],
+  ['post', '/venues/:venueSlug/auth/otp/request', ['otpRequestLimit', 'validateRequest', 'otpAuthController.requestOtp']],
+  ['post', '/venues/:venueSlug/auth/otp/verify', ['otpAccessLimit', 'validateRequest', 'otpAuthController.verifyOtp']],
+  ['post', '/venues/:venueSlug/auth/session/nueva-ficha', ['otpAccessLimit', 'validateRequest', 'otpAuthController.crearFichaNueva']],
   ['post', '/venues/:venueSlug/auth/google', ['authLimit', 'validateRequest', 'otpAuthController.entrarConGoogle']],
   [
     'post',
     '/venues/:venueSlug/customer/phone/request',
     [
       'writeLimit',
+      'otpRequestLimit',
       'resolveVenueBySlug',
       'authenticateCustomerParaCambioDeNumero',
       'validateRequest',

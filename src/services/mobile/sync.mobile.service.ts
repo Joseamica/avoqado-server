@@ -29,7 +29,7 @@ import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
-import AppError from '../../errors/AppError'
+import AppError, { ConflictError } from '../../errors/AppError'
 import { esErrorTransitorio } from '../shared/erroresTransitorios'
 import { hayDineroQueSeGuarda } from '../shared/orderBalance'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
@@ -832,6 +832,26 @@ async function ackDesdeHuella(
       },
     }
   }
+  // D7: la ronda o el cobro cayó en una cuenta aparte; se contesta como la primera vez: la cuenta que el aparato pidió, y la aparte.
+  const cuentaOriginal = typeof huella.cuentaOriginal === 'string' ? huella.cuentaOriginal : null
+  if (cuentaOriginal) {
+    const pedida = await prisma.order.findFirst({ where: { id: cuentaOriginal, venueId }, select: { version: true, total: true } })
+    return {
+      id: intent.id,
+      status: 'ACKED',
+      result: {
+        orderId: cuentaOriginal,
+        version: pedida?.version ?? undefined,
+        total: Number(pedida?.total ?? 0),
+        cuentaAparte: {
+          orderId,
+          orderNumber: orden?.orderNumber ?? null,
+          version: orden?.version ?? undefined,
+          total: Number(orden?.total ?? 0),
+        },
+      },
+    }
+  }
   return { id: intent.id, status: 'ACKED', result: { orderId, version: orden?.version ?? undefined, total: Number(orden?.total ?? 0) } }
 }
 
@@ -861,7 +881,7 @@ async function applyIntent(ctx: {
       case 'OPEN_TABLE':
         return await applyOpenTable(venueId, staffId, intent, localRefMap, dejarHuella, ctx.deviceId)
       case 'ADD_ITEMS':
-        return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella, ctx.deviceId)
       case 'PAY_CASH':
         return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella, ctx.terminalSerialNumber, ctx.deviceId)
       case 'APPLY_DISCOUNT':
@@ -884,6 +904,7 @@ async function applyIntent(ctx: {
         return await applyKdsTicketMark(venueId, intent)
       case 'KDS_ITEM_PROGRESS': {
         let orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+        if (orderId) orderId = (await cuentaAparteDeLaComanda(venueId, orderId, intent.payload)) ?? orderId
         if (!orderId && typeof intent.payload.sourceKey === 'string') {
           const ticket = await prisma.kdsOrder.findFirst({
             where: { venueId, sourceKey: intent.payload.sourceKey },
@@ -1266,6 +1287,7 @@ async function applyAddItems(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  deviceId?: string,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
@@ -1289,7 +1311,10 @@ async function applyAddItems(
   }
   await assertOwnership(venueId, staffId, orderId)
 
-  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, status: true, total: true } })
+  const current = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { version: true, status: true, total: true, paymentStatus: true, tableId: true, covers: true },
+  })
   if (!current) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'ORDER_NOT_FOUND', message: 'La orden ya no existe' }
   }
@@ -1333,6 +1358,25 @@ async function applyAddItems(
       status: 'ACKED',
       result: { orderId, version: ahora?.version ?? current.version, total: Number(ahora?.total ?? current.total ?? 0) },
     }
+  }
+
+  // D7 (hz:033d44ca:D7, founder 16-nov-2026: «A, cuenta aparte»): la cuenta de MESA ya está cobrada (otra caja la cobró mientras este
+  // aparato no tenía red). Antes se rechazaba («Cannot add items to a paid order») y lo servido nunca se cobraba. Ahora la ronda cae
+  // en una cuenta aparte de la misma mesa, por cobrar y con nota; la cobrada no se toca. Si la caja cobra ENTRE esta lectura y la
+  // transacción de la ronda, la versión ya cambió: VERSION_CONFLICT → RETRY, y el reintento llega aquí.
+  if (current.paymentStatus === 'PAID' && current.tableId) {
+    return await aplicarRondaTardia({
+      venueId,
+      staffId,
+      deviceId,
+      intent,
+      original: { id: orderId, version: current.version, total: current.total, tableId: current.tableId, covers: current.covers },
+      conPromocion,
+      itemsWithKey,
+      combos,
+      soldAt,
+      dejarHuella,
+    })
   }
 
   // 🔴 hz:5bda0b30:D3 (Codex r4 F1–F4 de cocina-avisos-perdidos): la ronda ENTERA —combos y productos— es UNA transacción, la misma
@@ -1383,6 +1427,199 @@ async function rondaYaGuardada(orderId: string, conPromocion: any[], normales: a
   ])
   const presentes = new Set(guardadas.map(r => r.externalId))
   return combos === unicas.length && llaves.every(llave => presentes.has(llave))
+}
+
+// ─── D7: la ronda que llega después de que otra caja cobró la mesa ─────────────────────────────────────────────────────────────
+// El vínculo «cuenta cobrada → su cuenta aparte de este aparato» vive en la cuenta aparte (`rondaTardiaDeId`, `rondaTardiaAparato`,
+// llave única), no en la bitácora: no caduca y tiene índice (Codex r1 #2 y #7). La nota de la bitácora queda para el registro y para
+// el «Liberar mesa» de las apps viejas (D75b).
+
+/** Nota de la bitácora de cada cuenta aparte abierta para una ronda tardía. */
+const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
+
+/**
+ * D7: ¿esta ronda ya está guardada en ALGUNA cuenta del negocio? Puede estar en la cobrada (entró antes del cobro y su respuesta se
+ * perdió) o en una cuenta que salió de ella (otra caja la separó o la movió, Codex r0 #1 y r1 #1). Con UNA de sus llaves basta: la
+ * ronda se guarda entera en una sola transacción, y sus llaves (`sync:<intent>:<i>` o las del aparato; la instancia de cada combo) no
+ * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
+ */
+async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
+  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
+  if (llaves.length) {
+    const renglon = await prisma.orderItem.findFirst({
+      where: { externalId: { in: llaves }, order: { venueId } },
+      select: { orderId: true },
+    })
+    if (renglon) return renglon.orderId
+  }
+  const instancias = [
+    ...new Set(
+      conPromocion
+        .map(it => it.promotionRef?.promotionInstanceId)
+        .filter((k: unknown): k is string => typeof k === 'string' && k.length > 0),
+    ),
+  ]
+  if (instancias.length) {
+    const combo = await prisma.orderPromotion.findFirst({
+      where: { instanceId: { in: instancias }, order: { venueId } },
+      select: { orderId: true },
+    })
+    if (combo) return combo.orderId
+  }
+  return null
+}
+
+/** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */
+const aparatoDeLaRonda = (deviceId: string | undefined, staffId: string) => deviceId || `staff:${staffId}`
+
+/**
+ * D7: la ronda va a la cuenta aparte de este aparato para la cuenta cobrada (la que todavía debe, o una nueva). Si la ronda ya está
+ * en alguna cuenta, se reconoce sin escribir: nunca se duplica. El ACK nombra la cuenta que el aparato conoce (las apps viejas
+ * confirman su sesión y releen el servidor) y, aparte, la cuenta nueva.
+ */
+async function aplicarRondaTardia(p: {
+  venueId: string
+  staffId: string
+  deviceId?: string
+  intent: SyncIntentInput
+  original: { id: string; version: number; total: unknown; tableId: string; covers: number | null }
+  conPromocion: any[]
+  itemsWithKey: any[]
+  combos: any[]
+  soldAt: Date
+  dejarHuella?: DejarHuella
+}): Promise<SyncIntentAck> {
+  const { venueId, staffId, intent, original } = p
+  const pedida = { orderId: original.id, version: original.version, total: Number(original.total ?? 0) }
+  const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
+  if (yaEn) {
+    return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
+  }
+  const aparte = await tableService.cuentaAparteParaRondaTardia({
+    venueId,
+    tableId: original.tableId,
+    staffId,
+    covers: original.covers && original.covers > 0 ? original.covers : 1,
+    cuentaPedida: original.id,
+    aparato: aparatoDeLaRonda(p.deviceId, staffId),
+    dentroDeLaTx: (tx, nueva) =>
+      writeLegacyActivityAuditTx(tx, {
+        staffId,
+        venueId,
+        action: NOTA_RONDA_TARDIA,
+        entity: 'Order',
+        entityId: nueva.orderId,
+        data: {
+          tableId: original.tableId,
+          cuentaOriginal: original.id,
+          deviceId: aparatoDeLaRonda(p.deviceId, staffId),
+          intentId: intent.id,
+          // Siempre, aunque vacío: el «Liberar mesa» de una app vieja (sólo la mesa) la reconoce como en D75b (Codex r0 #7).
+          otrasCuentas: nueva.otrasCuentas,
+        },
+      }),
+  })
+  // Propiedad de mesa sobre la cuenta donde SÍ se escribe (Codex r0 #4): si un encargado le pasó la cuenta aparte a otro mesero, es
+  // suya. Misma regla (y mismo momento, antes de la escritura) que la ronda de todos los días.
+  if (!aparte.isNewOrder) await assertOwnership(venueId, staffId, aparte.orderId)
+  logger.info(
+    `🪑 [POS SYNC] ADD_ITEMS ${intent.id}: la cuenta ${original.id} ya estaba cobrada; la ronda va a la cuenta aparte ${aparte.orderId}`,
+  )
+  const updated = await orderTpvService.addItemsToOrder(
+    venueId,
+    aparte.orderId,
+    [...p.combos, ...p.itemsWithKey],
+    aparte.version,
+    true,
+    p.dejarHuella ? (tx, ronda) => p.dejarHuella!(tx, { ...ronda, cuentaOriginal: original.id }) : undefined,
+    ...(p.combos.length > 0 ? [p.soldAt] : []),
+  )
+  return {
+    id: intent.id,
+    status: 'ACKED',
+    result: {
+      ...pedida,
+      cuentaAparte: {
+        orderId: aparte.orderId,
+        orderNumber: (updated as any).orderNumber ?? null,
+        version: (updated as any).version ?? aparte.version + 1,
+        total: Number((updated as any).total ?? 0),
+      },
+    },
+  }
+}
+
+/**
+ * D7: el cobro sin red de ESTE aparato a una cuenta que otra caja ya cobró, cuando una ronda suya ya cayó en una cuenta aparte: va a
+ * la ÚLTIMA de su cadena (lo que la mesera cobró incluye esa ronda; si ya quedó saldada, lo de más se marca como sobrepago ahí, nunca
+ * vuelve a la cobrada). Si el cobro de esta llave ya está en una cuenta de la cadena (reintento), ésa: el destino no depende de lo que
+ * pasó después (Codex r0 #2, r1 #2). Sin cadena, o de otro aparato, null: el cobro de hoy (S1).
+ * Si mientras viajaba la caja reorganizó la cuenta aparte con internet (la separó o la juntó), el cobro se comporta como el de
+ * cualquier cuenta hoy: cae en la cuenta que nombra (Codex r3: misma familia que una cuenta normal; ver la promesa).
+ */
+async function cuentaAparteDelCobroTardio(venueId: string, orderId: string, aparato: string, intentId: string): Promise<string | null> {
+  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+  if (cuenta?.paymentStatus !== 'PAID') return null
+  const cadena = await tableService.cadenaDeRondaTardia(prisma, venueId, orderId, aparato)
+  if (!cadena.length) return null
+  const pagoDeLaLlave = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: intentId } },
+    select: { orderId: true },
+  })
+  if (pagoDeLaLlave && cadena.some(c => c.id === pagoDeLaLlave.orderId)) return pagoDeLaLlave.orderId
+  // Aunque esté anulada (Codex r3 #1: la caja la juntó con otra cuenta que ya traía su propio vínculo): es lo que hoy pasa con el
+  // cobro sin red de CUALQUIER cuenta que la caja anuló o juntó mientras viajaba (`reabrirSiRecibeDinero`, founder 3-oct, «como Square
+  // y Toast»): el dinero queda en la cuenta que el aparato cobró, con su aviso. Nunca vuelve a la cobrada.
+  return cadena.at(-1)?.id ?? null
+}
+
+/**
+ * D7 (Codex r0 #6, r1 #6, r2 #2): una marca de cocina sobre una ronda que cayó en una cuenta aparte llega con la cuenta cobrada; sus
+ * productos viven en la comanda de la aparte y la acción esperaba para siempre (`PREPARATION_DEPENDENCY_PENDING`). La marca puede
+ * venir de OTRO aparato (la pantalla de cocina que recibió la ronda por el WiFi del local), así que no se busca por aparato: cada
+ * `sourceKey` es UNA comanda del negocio (llave única). Si todas las comandas de la acción son de una sola cuenta que desciende de la
+ * cobrada por rondas tardías, la acción va a ella. Si junta productos de la cobrada y de la aparte, se rechaza con su razón (nunca un
+ * reintento eterno que frena la fila de cocina del aparato). Si la comanda todavía no llega (la ronda no ha subido), como hoy.
+ */
+async function cuentaAparteDeLaComanda(venueId: string, orderId: string, payload: Record<string, unknown>): Promise<string | null> {
+  const items = Array.isArray(payload.items) ? (payload.items as any[]).slice(0, 101) : []
+  const llaves = [
+    ...new Set(
+      [payload.sourceKey, ...items.map(it => it?.sourceKey)].filter((k: unknown): k is string => typeof k === 'string' && k.length > 0),
+    ),
+  ]
+  if (!llaves.length) return null
+  const cuenta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+  if (cuenta?.paymentStatus !== 'PAID') return null
+  const comandas = await prisma.kdsOrder.findMany({
+    where: { venueId, sourceKey: { in: llaves } },
+    select: { orderId: true },
+    take: llaves.length,
+  })
+  const cuentas = [...new Set(comandas.map(c => c.orderId))]
+  const ajena = cuentas.find(c => c !== orderId)
+  if (!ajena || !(await desciendePorRondaTardia(venueId, ajena, orderId))) return null
+  if (cuentas.length > 1) {
+    throw new ConflictError(
+      'Esta marca de cocina junta productos de dos cuentas (una ronda llegó después de que se cobró la mesa). Márcalos por separado.',
+      'PREPARATION_ITEMS_CHANGED',
+    )
+  }
+  return ajena
+}
+
+/** ¿`cuenta` nació, por rondas tardías (de cualquier aparato), de `origen`? Sube la cadena por `rondaTardiaDeId`. */
+async function desciendePorRondaTardia(venueId: string, cuenta: string, origen: string): Promise<boolean> {
+  let actual: string | null = cuenta
+  for (let i = 0; actual && i < tableService.ESLABONES_MAX; i++) {
+    const fila: { rondaTardiaDeId: string | null } | null = await prisma.order.findFirst({
+      where: { id: actual, venueId },
+      select: { rondaTardiaDeId: true },
+    })
+    if (fila?.rondaTardiaDeId === origen) return true
+    actual = fila?.rondaTardiaDeId ?? null
+  }
+  return false
 }
 
 /**
@@ -1441,7 +1678,12 @@ async function applyPayCash(
       }
     shiftIdDeLaVenta = shift.id
   }
-  const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+  const cuentaPedida = await resolveOrderId(venueId, intent.payload, localRefMap)
+  // D7: si una ronda tardía de este aparato ya cayó en una cuenta aparte de esta cuenta cobrada, su cobro va con ella.
+  const cuentaAparte = cuentaPedida
+    ? await cuentaAparteDelCobroTardio(venueId, cuentaPedida, aparatoDeLaRonda(deviceId, staffId), intent.id)
+    : null
+  const orderId = cuentaAparte ?? cuentaPedida
   const amountCents = Number(intent.payload.amountCents ?? NaN)
   const tipCents = Number(intent.payload.tipCents ?? 0)
   const method = intent.payload.method as PayCashMethod | undefined
@@ -1584,14 +1826,19 @@ async function applyPayCash(
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
     ...(dejarHuella
-      ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) }
+      ? {
+          dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) =>
+            dejarHuella(tx, cuentaAparte ? { ...cobro, cuentaOriginal: cuentaPedida } : cobro),
+        }
       : {}),
   })
   return {
     id: intent.id,
     status: 'ACKED',
     result: {
-      orderId,
+      // D7: el aparato conoce la cuenta que pidió; la aparte va nombrada y el saldo de abajo es el de ella.
+      orderId: cuentaAparte ? cuentaPedida : orderId,
+      ...(cuentaAparte ? { cuentaAparte: { orderId: cuentaAparte } } : {}),
       paymentId: payment.paymentId,
       orderNumber: payment.orderNumber,
       digitalReceipt: payment.digitalReceipt ?? null,
@@ -1868,7 +2115,8 @@ async function cuentaAparteDelAparatoSaldada(venueId: string, tableId: string, d
   const nota = await prisma.activityLog.findFirst({
     where: {
       venueId,
-      action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
+      // D7 (Codex r0 #7): también la cuenta aparte de una ronda tardía (su nota trae `otrasCuentas` y `deviceId` igual).
+      action: { in: ['MESA_SIN_RED_EN_CUENTA_APARTE', NOTA_RONDA_TARDIA] },
       entity: 'Order',
       createdAt: { gte: new Date(Date.now() - NOTA_VIGENTE_MS) },
       AND: [{ data: { path: ['tableId'], equals: tableId } }, { data: { path: ['deviceId'], equals: deviceId } }],

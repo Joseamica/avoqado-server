@@ -23,6 +23,11 @@ export interface MenuSnapshotProduct {
   price: number
   imageUrl: string | null
   modifierGroups: MenuSnapshotModifierGroup[]
+  /**
+   * El id del producto. Sólo para que la lista del canal (por id, D1) se filtre sobre ESTA copia (`aplicarSeleccion`), que lo
+   * quita antes de publicar: no viaja al proveedor ni entra en la huella del menú.
+   */
+  productId?: string
 }
 
 export interface MenuSnapshotCategory {
@@ -78,6 +83,7 @@ export async function buildMenuSnapshot(venueId: string): Promise<MenuSnapshot> 
             maxSelections: pmg.group.maxSelections,
             modifiers: pmg.group.modifiers.map(m => ({ plu: `MOD-${m.id}`, name: m.name, price: Number(m.price) })),
           })),
+          productId: p.id,
         })),
       })),
   }
