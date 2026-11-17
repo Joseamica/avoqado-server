@@ -5,7 +5,7 @@
  * Since Blumon doesn't provide signature verification (like Stripe),
  * we use IP whitelisting as the primary security mechanism.
  *
- * To add new IPs: Update BLUMON_ALLOWED_IPS array below
+ * Lista de IPs: `BLUMON_ALLOWED_IPS` abajo (una IP nueva sólo con confirmación escrita de Blumon).
  *
  * 🔴 La IP se lee del PORTERO (`ipDelCliente`: `CF-Connecting-IP`, que Cloudflare no deja inventar, o `req.ip`), nunca
  * del primer eslabón de `X-Forwarded-For`: ése lo escribe quien llama, y Cloudflare y el proxy de Render sólo AGREGAN
@@ -19,13 +19,13 @@ import logger from '../config/logger'
 import { ipDelCliente } from '../utils/clientIp'
 
 /**
- * Known Blumon webhook source IPs
- * - Sandbox: 3.132.184.158 (AWS us-east-2, Ohio)
- * - Production: TBD (ask Edgardo)
+ * IPs de origen de los avisos de Blumon TPV, para producción y sandbox (medido 22–29-oct y 17-nov-2026: los avisos de
+ * producción llegan desde la misma IP que los de sandbox y el portero no rechazó ninguno). Medición:
+ * `docs/audit/2026-11-09-sdk-propio-diseno/ips-del-aviso.md` del workspace.
+ * Una IP nueva entra sólo con confirmación escrita de Blumon; sin comodines ni rangos.
  */
 const BLUMON_ALLOWED_IPS = [
-  '3.132.184.158', // Sandbox (AWS us-east-2)
-  // Add production IPs here when provided by Blumon
+  '3.132.184.158', // Producción y sandbox (AWS us-east-2, Ohio)
 ]
 
 /**
