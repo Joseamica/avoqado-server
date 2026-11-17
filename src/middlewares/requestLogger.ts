@@ -86,102 +86,105 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   // La app que llama (`importePorPeso.ts`); un encabezado repetido llega como arreglo y se ignora.
   const corto = (v: unknown) => (typeof v === 'string' ? v.slice(0, 32) : undefined)
   const cliente = { plataforma: corto(req.headers['x-device-platform']), version: corto(req.headers['x-app-version']) }
-  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, fullUrl), cliente }, () => {
-    const start = process.hrtime()
-    const { method, ip } = req
-    // 🔴 NUNCA la URL cruda: el query string carga credenciales. El callback de OAuth recibe
-    // `?code=…&state=…`, y ese código canjea un token si alguien lo lee del log antes de que
-    // expire. Hallado por auditoría externa el 2026-08-20.
-    const url = redactUrlSecrets(fullUrl)
+  runWithContext(
+    { correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, fullUrl), cliente, llegadaAt: Date.now() },
+    () => {
+      const start = process.hrtime()
+      const { method, ip } = req
+      // 🔴 NUNCA la URL cruda: el query string carga credenciales. El callback de OAuth recibe
+      // `?code=…&state=…`, y ese código canjea un token si alguien lo lee del log antes de que
+      // expire. Hallado por auditoría externa el 2026-08-20.
+      const url = redactUrlSecrets(fullUrl)
 
-    // Skip logging health checks and heartbeats to reduce log noise (in all environments)
-    const isHealthCheck = url === '/health'
-    const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
-    const shouldSkipLogging = isHealthCheck || isHeartbeat
+      // Skip logging health checks and heartbeats to reduce log noise (in all environments)
+      const isHealthCheck = url === '/health'
+      const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
+      const shouldSkipLogging = isHealthCheck || isHeartbeat
 
-    const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
+      const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
 
-    if (shouldLogStart) {
-      logger.info(`Request Start: ${method} ${url}`, {
-        correlationId,
-        method,
-        url,
-        ip,
-        userAgent: req.headers['user-agent'],
-      })
-    }
-
-    res.on('finish', () => {
-      const diff = process.hrtime(start)
-      const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
-      const { statusCode } = res
-
-      // Un 404 que NINGÚN router atendió (`req.route` vacío) es un escáner de internet o una URL vieja (`/.env`, `wp-admin`,
-      // `/graphql`: ~920 líneas en 3 días de producción, 30-sep-2026), no un aviso del sistema: info. Un 404 que sí atendió un
-      // handler («el recurso no existe») y cualquier otro 4xx siguen en warn. Límite conocido: un 404 que contestara un
-      // middleware montado con `use()` (sin ruta) también bajaría a info; hoy ninguno lo hace (los que contestan 404 —
-      // resolveVenueBySlug, bindTpv*Target— van dentro de la ruta, y `checkPublicVenueFeature` deja pasar al controlador).
-      const sinRuta = statusCode === 404 && !req.route
-      // Un handler puede declarar que su respuesta es un desenlace ESPERADO (`res.locals.requestEndLevel`): la espera de un cobro
-      // que el cajero canceló cierra con 504 a propósito y no es una falla (3-oct-2026: los 9 «Error 504» de un día eran eso).
-      // Sólo se aceptan info/warn; cualquier otro valor se ignora y decide el status.
-      const declarado = res.locals?.requestEndLevel
-      const level =
-        declarado === 'info' || declarado === 'warn'
-          ? declarado
-          : statusCode >= 500
-            ? 'error'
-            : statusCode >= 400 && !sinRuta
-              ? 'warn'
-              : 'info'
-
-      if (!shouldSkipLogging) {
-        // Enrich logs with auth context (available after auth middleware runs)
-        const authContext = (req as any).authContext
-        const authFields: Record<string, any> = {}
-        if (authContext) {
-          authFields.userId = authContext.userId
-          // 🔴 El venue de la OPERACIÓN (el que `checkPermission` publicó al contexto: URL → `x-venue-id` → token), no el del token:
-          // un campo explícito gana al ambiental (`logContext.ts`), y escribir aquí `authContext.venueId` pisaba esa corrección y la
-          // línea salía con el venueId del token junto al venueName del venue operado. El token queda de respaldo para una
-          // autenticación que no estampó el contexto.
-          authFields.venueId = getContext()?.venueId ?? authContext.venueId
-          authFields.role = authContext.role
-          if (authContext.terminalSerialNumber) {
-            authFields.terminal = authContext.terminalSerialNumber
-          }
-        }
-
-        logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
+      if (shouldLogStart) {
+        logger.info(`Request Start: ${method} ${url}`, {
           correlationId,
           method,
           url,
-          statusCode,
-          durationMs: parseFloat(duration),
-          ip,
-          ...authFields,
-        })
-      }
-    })
-
-    res.on('close', () => {
-      // Este evento se dispara si la conexión se cierra prematuramente (cliente se desconecta)
-      // 'finish' podría no dispararse en este caso.
-      if (!res.writableEnded && !shouldSkipLogging) {
-        // writableEnded es true si finish se disparó
-        const diff = process.hrtime(start)
-        const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3)
-        logger.warn(`Request Closed Prematurely: ${method} ${url} [after ${duration}ms]`, {
-          correlationId,
-          method,
-          url,
-          durationMs: parseFloat(duration),
           ip,
           userAgent: req.headers['user-agent'],
         })
       }
-    })
 
-    next()
-  })
+      res.on('finish', () => {
+        const diff = process.hrtime(start)
+        const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
+        const { statusCode } = res
+
+        // Un 404 que NINGÚN router atendió (`req.route` vacío) es un escáner de internet o una URL vieja (`/.env`, `wp-admin`,
+        // `/graphql`: ~920 líneas en 3 días de producción, 30-sep-2026), no un aviso del sistema: info. Un 404 que sí atendió un
+        // handler («el recurso no existe») y cualquier otro 4xx siguen en warn. Límite conocido: un 404 que contestara un
+        // middleware montado con `use()` (sin ruta) también bajaría a info; hoy ninguno lo hace (los que contestan 404 —
+        // resolveVenueBySlug, bindTpv*Target— van dentro de la ruta, y `checkPublicVenueFeature` deja pasar al controlador).
+        const sinRuta = statusCode === 404 && !req.route
+        // Un handler puede declarar que su respuesta es un desenlace ESPERADO (`res.locals.requestEndLevel`): la espera de un cobro
+        // que el cajero canceló cierra con 504 a propósito y no es una falla (3-oct-2026: los 9 «Error 504» de un día eran eso).
+        // Sólo se aceptan info/warn; cualquier otro valor se ignora y decide el status.
+        const declarado = res.locals?.requestEndLevel
+        const level =
+          declarado === 'info' || declarado === 'warn'
+            ? declarado
+            : statusCode >= 500
+              ? 'error'
+              : statusCode >= 400 && !sinRuta
+                ? 'warn'
+                : 'info'
+
+        if (!shouldSkipLogging) {
+          // Enrich logs with auth context (available after auth middleware runs)
+          const authContext = (req as any).authContext
+          const authFields: Record<string, any> = {}
+          if (authContext) {
+            authFields.userId = authContext.userId
+            // 🔴 El venue de la OPERACIÓN (el que `checkPermission` publicó al contexto: URL → `x-venue-id` → token), no el del token:
+            // un campo explícito gana al ambiental (`logContext.ts`), y escribir aquí `authContext.venueId` pisaba esa corrección y la
+            // línea salía con el venueId del token junto al venueName del venue operado. El token queda de respaldo para una
+            // autenticación que no estampó el contexto.
+            authFields.venueId = getContext()?.venueId ?? authContext.venueId
+            authFields.role = authContext.role
+            if (authContext.terminalSerialNumber) {
+              authFields.terminal = authContext.terminalSerialNumber
+            }
+          }
+
+          logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
+            correlationId,
+            method,
+            url,
+            statusCode,
+            durationMs: parseFloat(duration),
+            ip,
+            ...authFields,
+          })
+        }
+      })
+
+      res.on('close', () => {
+        // Este evento se dispara si la conexión se cierra prematuramente (cliente se desconecta)
+        // 'finish' podría no dispararse en este caso.
+        if (!res.writableEnded && !shouldSkipLogging) {
+          // writableEnded es true si finish se disparó
+          const diff = process.hrtime(start)
+          const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3)
+          logger.warn(`Request Closed Prematurely: ${method} ${url} [after ${duration}ms]`, {
+            correlationId,
+            method,
+            url,
+            durationMs: parseFloat(duration),
+            ip,
+            userAgent: req.headers['user-agent'],
+          })
+        }
+      })
+
+      next()
+    },
+  )
 }

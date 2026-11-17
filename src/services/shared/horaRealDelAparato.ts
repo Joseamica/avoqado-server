@@ -13,6 +13,7 @@
  */
 import { Prisma } from '@prisma/client'
 import { utcTs } from '@/utils/sqlDates'
+import { getContext } from '@/observability/executionContext'
 
 /** Hasta cuánto antes de su llegada se acepta la hora del aparato (Square también da 24 h para subir un cobro sin red). */
 export const VENTANA_HORA_DEL_APARATO_MS = 24 * 60 * 60 * 1000
@@ -56,6 +57,16 @@ export function horaRealDelAparato(input: { isOfflineReplay?: boolean | null; cr
   if (!(t < l)) return null
   if (!(t > l - VENTANA_HORA_DEL_APARATO_MS)) return null
   return hora
+}
+
+/**
+ * La LLEGADA de la petición: cuando entró al servidor (la estampa `requestLogger` en el contexto, antes de middlewares, candados o
+ * colas). Todos los escritores la usan, para que la ventana de 24 h no dependa de cuánto tardó el procesamiento (Codex D93 r2 #2 y
+ * r3: la pasada exhaustiva de esa familia). Fuera de una petición (un job, una prueba), la que dé quien llama, o ahora.
+ */
+export function llegadaDeLaPeticion(siNoHay?: Date): Date {
+  const t = getContext()?.llegadaAt
+  return typeof t === 'number' && Number.isFinite(t) ? new Date(t) : (siNoHay ?? new Date())
 }
 
 /** `{ clientCreatedAt }` para un `create`, o `{}` (la llamada queda idéntica a la de hoy). */

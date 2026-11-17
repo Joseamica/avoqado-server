@@ -178,3 +178,17 @@ describe('🔴 requestLoggerMiddleware — concurrent requests never cross', () 
     expect(results.filter(r => r.correlation !== r.expectedCorrelation)).toEqual([])
   })
 })
+
+describe('requestLoggerMiddleware — la llegada de la petición (D93)', () => {
+  it('estampa en el contexto la hora en que ENTRÓ la petición, antes de llamar a next', () => {
+    const antes = Date.now()
+    let vista: number | undefined
+    const next = jest.fn(() => {
+      vista = getContext()?.llegadaAt
+    }) as unknown as NextFunction
+    requestLoggerMiddleware(buildReq(), buildRes().res, next)
+    expect(typeof vista).toBe('number')
+    expect(vista!).toBeGreaterThanOrEqual(antes)
+    expect(vista!).toBeLessThanOrEqual(Date.now())
+  })
+})

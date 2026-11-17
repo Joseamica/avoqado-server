@@ -8,6 +8,8 @@ import {
   sqlHoraReal,
   sqlRangoHoraReal,
 } from '@/services/shared/horaRealDelAparato'
+import { llegadaDeLaPeticion } from '@/services/shared/horaRealDelAparato'
+import { runWithContext } from '@/observability/executionContext'
 
 const llegada = new Date('2026-11-12T06:10:00.000Z') // 00:10 del 12 en CDMX
 const vendida = new Date('2026-11-12T05:50:00.000Z') // 23:50 del 11 en CDMX
@@ -119,5 +121,31 @@ describe('SQL de la hora real', () => {
       `o."createdAt" >= ($2) - INTERVAL '1 hours' AND o."createdAt" <= ($3) + INTERVAL '25 hours'` +
         ` AND COALESCE(o."clientCreatedAt", o."createdAt") >= $2 AND COALESCE(o."clientCreatedAt", o."createdAt") <= $3`,
     )
+  })
+})
+
+describe('llegadaDeLaPeticion — la llegada es cuando ENTRÓ la petición (Codex D93 r2 #2 y r3)', () => {
+  const ctx = (llegadaAt?: number) => ({ correlationId: 'c', source: 'http' as const, entrypoint: 'POST /x', llegadaAt })
+
+  it('dentro de una petición, la hora que estampó el logger (aunque quien llama traiga otra más tarde)', () => {
+    const entro = new Date('2026-11-12T06:10:00.000Z')
+    const r = runWithContext(ctx(entro.getTime()), () => llegadaDeLaPeticion(new Date(entro.getTime() + 5_000)))
+    expect(r).toEqual(entro)
+  })
+
+  it('una hora de 23 h 59 min 59.95 s al ENTRAR se guarda aunque el proceso tarde (la cota no se mide al escribir)', () => {
+    const entro = new Date('2026-11-12T06:10:00.000Z')
+    const casiUnDia = entro.getTime() - VENTANA_HORA_DEL_APARATO_MS + 50
+    const r = runWithContext(ctx(entro.getTime()), () =>
+      horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: casiUnDia }, llegadaDeLaPeticion()),
+    )
+    expect(r).toEqual(new Date(casiUnDia))
+  })
+
+  it('fuera de una petición (job, prueba): la de quien llama, o ahora', () => {
+    const otra = new Date('2026-01-01T00:00:00.000Z')
+    expect(llegadaDeLaPeticion(otra)).toEqual(otra)
+    expect(Math.abs(llegadaDeLaPeticion().getTime() - Date.now())).toBeLessThan(1000)
+    expect(runWithContext(ctx(undefined), () => llegadaDeLaPeticion(otra))).toEqual(otra)
   })
 })

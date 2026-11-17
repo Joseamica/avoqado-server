@@ -202,7 +202,7 @@ import {
   ventanaDeLaLinea,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
-import { conHoraRealDelAparato } from '../shared/horaRealDelAparato'
+import { conHoraRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 /**
  * «Cobrar sin red» (S6): una venta de la cola de una TERMINAL que sube más de estos minutos después de cobrarse no manda comanda a
@@ -2108,7 +2108,7 @@ export async function crearVentaDeMostradorEnTx(
       version: 1,
       // D93 («B», como Square): la hora del aparato de la venta de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
       // En línea (`llegada` sólo viene de la cola) no se escribe: la llamada queda como hoy.
-      ...(precioMostrado.llegada ? conHoraRealDelAparato(input, precioMostrado.llegada) : {}),
+      ...(precioMostrado.llegada ? conHoraRealDelAparato(input, llegadaDeLaPeticion(precioMostrado.llegada)) : {}),
       orderCustomers: normalizedCustomerId
         ? {
             create: [
@@ -3325,7 +3325,7 @@ async function vincularAlDuenoDelFiado(
  * contada desde ahora: la hija nace hoy y los lectores la buscan por su `createdAt` ensanchado, así que una hora más vieja se pierde.
  */
 function horaRealHeredada(horaDelOrigen: Date | null | undefined): { clientCreatedAt?: Date } {
-  return horaDelOrigen ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: horaDelOrigen }, new Date()) : {}
+  return horaDelOrigen ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: horaDelOrigen }, llegadaDeLaPeticion()) : {}
 }
 
 export async function splitOrderItemsInTransaction(
@@ -5125,7 +5125,7 @@ export async function registrarAbonoEnTx(
               isOfflineReplay: entrada.isOfflineReplay,
               createdAtLocal: entrada.horaDelAparato !== undefined ? entrada.horaDelAparato : entrada.createdAtLocal,
             },
-            entrada.llegada ?? new Date(),
+            llegadaDeLaPeticion(entrada.llegada),
           )),
       processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
