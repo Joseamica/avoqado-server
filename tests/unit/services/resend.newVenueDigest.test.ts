@@ -164,6 +164,18 @@ describe('sendNewVenueOnboardingDigest', () => {
       expect(text).toContain('Prueba gratis con tarjeta. Primer cobro: $1,158.84 el 27 de noviembre de 2026.')
       expect(text).toContain('Oferta: Sin oferta')
     })
+
+    it('🔴 Plan Básico (ENDS_FREE): «Prueba de Pro sin cobro (eligió el Básico)», sin primer cobro (revisión final #6)', async () => {
+      process.env.RESEND_API_KEY = 're_test_key'
+      mockSend.mockResolvedValue({ data: { id: 'resend-basico' }, error: null })
+      const mod = await import('../../../src/services/resend.service')
+
+      await mod.sendPlanActivatedNotice({ ...aviso, payNow: false, firstChargeCents: 0, campaignCode: null, trialEndsFree: true })
+      const bodies = `${mockSend.mock.calls[0][0].html}\n${mockSend.mock.calls[0][0].text}`
+      expect(bodies).toContain('Prueba de Pro sin cobro (eligió el Básico)')
+      expect(bodies).not.toContain('Primer cobro')
+      expect(bodies).not.toContain('$')
+    })
   })
 
   // -------------------------------------------------------------------------

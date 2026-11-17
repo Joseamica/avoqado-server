@@ -1401,6 +1401,7 @@ export async function activatePlan(
       firstChargeCents,
       nextChargeAt,
       campaign: null,
+      terminaSinCobro,
     })
     void resolvePlanNotificationTarget(venue.id)
       .then(target =>
@@ -1470,6 +1471,7 @@ export async function activatePlan(
     firstChargeCents,
     nextChargeAt,
     campaign,
+    terminaSinCobro,
   })
 
   await terminarElAlta()
@@ -1610,12 +1612,16 @@ function avisarActivacion(a: {
   firstChargeCents: number
   nextChargeAt: string
   campaign: LaunchCampaignRow | null
+  /** Plan Básico (`ENDS_FREE`): la prueba termina sin cobrar, así que no hay «primer cobro» que calcular ni anunciar. */
+  terminaSinCobro?: boolean
 }): void {
-  const primerCobro = a.payNow
-    ? a.firstChargeCents
-    : a.campaign
-      ? (a.campaign.listPriceCentsSnapshot as number)
-      : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
+  const primerCobro = a.terminaSinCobro
+    ? 0
+    : a.payNow
+      ? a.firstChargeCents
+      : a.campaign
+        ? (a.campaign.listPriceCentsSnapshot as number)
+        : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
   void resolvePlanNotificationTarget(a.venueId)
     .then(target =>
       resendService.sendPlanActivatedNotice({
@@ -1627,6 +1633,7 @@ function avisarActivacion(a: {
         firstChargeCents: primerCobro,
         nextChargeAt: a.nextChargeAt,
         campaignCode: a.campaign?.code ?? null,
+        ...(a.terminaSinCobro ? { trialEndsFree: true } : {}),
       }),
     )
     .catch(error =>

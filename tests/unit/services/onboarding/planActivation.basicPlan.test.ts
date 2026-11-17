@@ -70,6 +70,7 @@ import { parseV2Plan } from '@/services/onboarding/onboardingProgress.service'
 import { createPlanSubscription } from '@/services/stripe.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import emailService from '@/services/email.service'
+import { sendPlanActivatedNotice } from '@/services/resend.service'
 
 const FIN_DE_PRUEBA = Math.floor(new Date('2026-12-17T18:00:00Z').getTime() / 1000)
 const BASE = {
@@ -232,6 +233,12 @@ describe('alta corta (activate-plan) con Básico', () => {
       expect.objectContaining({ payNow: false, trialEndsFree: true, basicPlanPriceWithoutTaxCents: 49900 }),
     )
   })
+
+  it('🔴 el aviso interno al equipo dice «prueba sin cobro» y no calcula un primer cobro de Pro (revisión final #6)', async () => {
+    await activatePlan({ ...BASE, basicPlan: true })
+    await vaciar()
+    expect(sendPlanActivatedNotice).toHaveBeenCalledWith(expect.objectContaining({ trialEndsFree: true, firstChargeCents: 0 }))
+  })
 })
 
 describe('alta de Pro normal: igual que hoy', () => {
@@ -250,6 +257,9 @@ describe('alta de Pro normal: igual que hoy', () => {
     const [, datos] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
     expect(datos.trialEndsFree).toBeFalsy()
     expect(datos.firstChargeAmountCents).toBe(115884)
+    const [aviso] = (sendPlanActivatedNotice as jest.Mock).mock.calls[0]
+    expect(aviso).not.toHaveProperty('trialEndsFree')
+    expect(aviso.firstChargeCents).toBe(115884)
   })
 
   it('pagando hoy no hay prueba: sin trialModality', async () => {
