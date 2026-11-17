@@ -577,7 +577,9 @@ export async function inviteTeamMember(
     // member to add OTHER venues). The accept-time check (invitation.service / TPV path) stays as
     // defense in depth. Checked and inserted under the venue's seat-cap lock, shared with restoring
     // seats and accepting invitations (final review #8): neither can take the seat this one counted.
-    if (addsNewSeatAtThisVenue) {
+    // A TPV-only add is a brand-new person here too: its (PENDING) invitation row reserves the seat, so it is counted
+    // and inserted under the same lock (r2 #8); a full venue is refused before any row is left behind.
+    if (addsNewSeatAtThisVenue || isTPVOnly) {
       await lockSeatCap(tx, [venueId])
       await assertCanAddSeat(venueId)
     }
@@ -697,7 +699,8 @@ export async function inviteTeamMember(
       const staffVenue = await prisma.$transaction(async tx => {
         if (!alreadyAssigned) {
           await lockSeatCap(tx, [v.id])
-          await assertCanAddSeat(v.id)
+          // This add's own PENDING invitation already reserves the seat it is about to fill: never count it twice.
+          await assertCanAddSeat(v.id, { excludeInvitationId: invitation.id })
         }
         return tx.staffVenue.upsert({
           where: {

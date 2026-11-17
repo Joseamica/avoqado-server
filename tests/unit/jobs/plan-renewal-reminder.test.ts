@@ -1133,10 +1133,27 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
         renewalReminderSentAt: estado.renewalReminderSentAt,
         venue: { slug: 'bar', status: 'ACTIVE' },
       }))
-      mockPrisma.venueFeature.updateMany.mockImplementation(async (args: { data: { renewalReminderSentAt?: Date } }) => {
-        if (args.data.renewalReminderSentAt) estado.renewalReminderSentAt = args.data.renewalReminderSentAt
-        return { count: 1 }
-      })
+      // CAS fiel: «null o anterior al fin» para apartar; igual al sello propio para soltar.
+      mockPrisma.venueFeature.updateMany.mockImplementation(
+        async (args: { where: Record<string, any>; data: { renewalReminderSentAt?: Date | null } }) => {
+          const cur = estado.renewalReminderSentAt
+          const w = args.where
+          const ok = w.OR
+            ? w.OR.some((c: any) =>
+                c.renewalReminderSentAt === null
+                  ? cur === null
+                  : c.renewalReminderSentAt?.lt
+                    ? cur !== null && cur < c.renewalReminderSentAt.lt
+                    : true,
+              )
+            : 'renewalReminderSentAt' in w
+              ? cur?.getTime() === w.renewalReminderSentAt?.getTime()
+              : true
+          if (!ok) return { count: 0 }
+          if ('renewalReminderSentAt' in args.data) estado.renewalReminderSentAt = args.data.renewalReminderSentAt ?? null
+          return { count: 1 }
+        },
+      )
     })
 
     it('lee planes Pro apagados cuya prueba terminó, o que se apagaron, en los últimos días; con tope y por llave', async () => {
@@ -1180,6 +1197,40 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       await new PlanRenewalReminderJob().runNow()
       expect(endedSpy).toHaveBeenCalledTimes(2)
       expect(endedSpy.mock.calls[1][1]).toMatchObject({ kind: 'PRO', idempotencyKey: 'plan-termino:sub_t' })
+    })
+
+    it('🔴 r2: entregó y falló guardar después (o murió el proceso) → el respaldo NO lo vuelve a mandar días después', async () => {
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      porConsulta({ terminadas: [{ ...filaTerminada, trialEndDate: new Date((FIN_S - 60 * 86400) * 1000) }] })
+      mockRetrieve.mockResolvedValue(proTerminado())
+      // El sello se apartó ANTES de entregar; lo que falle después (sin soltar) no reabre el aviso.
+      endedSpy.mockImplementationOnce(async () => {
+        expect(estado.renewalReminderSentAt).not.toBeNull()
+        return true
+      })
+      await expect(avisarPlanTerminado(proTerminado())).resolves.toBe(true)
+      for (let dia = 0; dia < 3; dia++) await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('r2: el ENVÍO falla (o lanza) → se suelta el sello y el respaldo lo reintenta, una sola entrega', async () => {
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      porConsulta({ terminadas: [filaTerminada] })
+      mockRetrieve.mockResolvedValue(terminada())
+      endedSpy.mockRejectedValueOnce(new Error('resend caído'))
+      await expect(avisarPlanTerminado(terminada())).resolves.toBe(false)
+      expect(estado.renewalReminderSentAt).toBeNull()
+      await new PlanRenewalReminderJob().runNow()
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).toHaveBeenCalledTimes(2) // el que falló + la entrega del respaldo
+      expect(estado.renewalReminderSentAt).not.toBeNull()
+    })
+
+    it('r2: dos a la vez (webhook y job) → sólo el que apartó el sello manda', async () => {
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      const [a, b] = await Promise.all([avisarPlanTerminado(terminada()), avisarPlanTerminado(terminada())])
+      expect([a, b].filter(Boolean)).toHaveLength(1)
+      expect(endedSpy).toHaveBeenCalledTimes(1)
     })
 
     it('🔴 el webhook nunca llegó (la fila sigue activa) → el job decide con Stripe y avisa una vez (prueba y Pro)', async () => {

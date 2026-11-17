@@ -1317,8 +1317,9 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         renewalReminderSentAt: sello,
         venue: { slug: 'test-venue', status: 'ACTIVE' },
       }))
-      ;(prisma.venueFeature.updateMany as jest.Mock).mockImplementation(async (args: { data: { renewalReminderSentAt?: Date } }) => {
-        if (args.data.renewalReminderSentAt) sello = args.data.renewalReminderSentAt
+      // El sello se aparta antes de mandar y se suelta (vuelve al valor anterior) si el envío falla.
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockImplementation(async (args: { data: { renewalReminderSentAt?: Date | null } }) => {
+        if ('renewalReminderSentAt' in args.data) sello = args.data.renewalReminderSentAt ?? null
         return { count: 1 }
       })
       ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({

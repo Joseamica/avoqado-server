@@ -158,8 +158,9 @@ export function comoTermino(sub: Stripe.Subscription): 'TRIAL' | 'PRO' | null {
 
 /**
  * «Tu prueba terminó» / «Tu Pro terminó», UNA vez por suscripción, aunque lleguen el webhook, sus repeticiones y el job.
- * Sello: `renewalReminderSentAt` ≥ `ended_at` (ver la cabecera), escrito con CAS sólo si nadie lo puso antes; la misma
- * clave de Resend cubre a dos que manden a la vez. Sin entregar → sin sello (el job lo reintenta). Nunca lanza.
+ * Sello: `renewalReminderSentAt` ≥ `ended_at` (ver la cabecera), APARTADO con CAS antes de mandar (sólo uno lo
+ * consigue); si el envío falla se suelta y el job lo reintenta. Un sello que no se pudo soltar deja el aviso sin
+ * mandar (nunca dos). Nunca lanza.
  */
 export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boolean> {
   const kind = comoTermino(sub)
@@ -198,25 +199,40 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
       logger.warn('avisosDelBasico: plan terminado sin destinatario; sin aviso', { venueId: vf.venueId, subscriptionId: sub.id })
       return false
     }
-    // Apagado por el dueño: no se manda, pero se sella (no hay nada que reintentar).
+    // 🔴 r2: el sello se APARTA antes de mandar (CAS, a lo más una vez). Sellar después dejaba un hueco: si el sello
+    // fallaba o el proceso moría tras entregar, el respaldo volvía a mandar días después, cuando la llave de Resend
+    // (24 h) ya no lo frena. Nunca antes del fin: un reloj atrasado dejaría un sello que el job lee como «falta avisar».
+    const sello = new Date(Math.max(Date.now(), endedAt.getTime()))
+    const apartado = await prisma.venueFeature.updateMany({
+      where: { id: vf.id, OR: [{ renewalReminderSentAt: null }, { renewalReminderSentAt: { lt: endedAt } }] },
+      data: { renewalReminderSentAt: sello },
+    })
+    if (apartado.count !== 1) return false // otro (webhook o job) ya lo apartó
+    // Sólo si el ENVÍO falla se suelta (CAS sobre el sello propio): el respaldo lo reintenta.
+    const soltar = () =>
+      prisma.venueFeature.updateMany({
+        where: { id: vf.id, renewalReminderSentAt: sello },
+        data: { renewalReminderSentAt: vf.renewalReminderSentAt },
+      })
+    // Apagado por el dueño: no se manda y queda sellado (no hay nada que reintentar).
     if (!(await avisoDelPlanApagado(target.staffId, vf.venueId))) {
       const basico = await basicoPublicado()
-      const sent = await emailService.sendPlanEndedEmail(target.email, {
-        locale: target.locale,
-        venueName: target.venueName,
-        kind,
-        billingUrl: billingPageUrl(vf.venue.slug),
-        ...(basico ? { basicPlanPriceWithoutTaxCents: precioSinIvaCents(basico) } : {}),
-        unsubscribe: bajaDelAviso(target.staffId, vf.venueId, vf.venue.slug),
-        idempotencyKey: `plan-termino:${sub.id}`,
-      })
+      let sent = false
+      try {
+        sent = await emailService.sendPlanEndedEmail(target.email, {
+          locale: target.locale,
+          venueName: target.venueName,
+          kind,
+          billingUrl: billingPageUrl(vf.venue.slug),
+          ...(basico ? { basicPlanPriceWithoutTaxCents: precioSinIvaCents(basico) } : {}),
+          unsubscribe: bajaDelAviso(target.staffId, vf.venueId, vf.venue.slug),
+          idempotencyKey: `plan-termino:${sub.id}`,
+        })
+      } finally {
+        if (!sent) await soltar()
+      }
       if (!sent) return false
     }
-    await prisma.venueFeature.updateMany({
-      where: { id: vf.id, OR: [{ renewalReminderSentAt: null }, { renewalReminderSentAt: { lt: endedAt } }] },
-      // Nunca antes del fin: un reloj de este servidor atrasado dejaría un sello que el job lee como «falta avisar».
-      data: { renewalReminderSentAt: new Date(Math.max(Date.now(), endedAt.getTime())) },
-    })
     return true
   } catch (error) {
     logger.error('avisosDelBasico: falló el aviso de plan terminado', {
