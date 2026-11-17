@@ -784,8 +784,8 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
  * Get top selling items across organization
  */
 export async function getTopItems(orgId: string, filter?: DateRangeFilter, limitPedido: number = 10): Promise<TopItem[]> {
-  // El servidor pone el tope (Codex p2 #5): un top se lee de a lo más 100 productos, y nunca menos de 1.
-  const limit = Math.min(100, Math.max(1, Number.isFinite(limitPedido) ? Math.floor(limitPedido) : 10))
+  // El servidor pone el tope (Codex p2 #5): un top se lee de a lo más 100 productos (0 = vacío, como antes).
+  const limit = Math.min(100, Math.max(0, Number.isFinite(limitPedido) ? Math.floor(limitPedido) : 10))
   // First verify organization exists
   const organization = await prisma.organization.findUnique({
     where: { id: orgId },
