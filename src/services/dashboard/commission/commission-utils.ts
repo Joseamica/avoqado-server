@@ -23,7 +23,7 @@ import { isDeadlockError } from '../../../utils/serializableRetry'
 import {
   baseSinIvaPorTasa,
   commissionableAmount,
-  orderLevelDiscountOf,
+  descuentoDeOrdenDeLaVenta,
   precioTraeIva,
   resolveCommissionBase,
   selectCommissionableLines,
@@ -35,6 +35,7 @@ import { grossByRateFromOrder, ordenParaIvaSelect, tasaDelRenglon, type OrdenPar
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 import { validarTasa } from './tasasDelEsquema'
 import { importePorPesoCents, importePorPesoViejoCents } from '../../shared/importePorPeso'
+import { isItemLevelDiscount, lineOrderDiscount } from '../lineRevenue'
 
 // ============================================
 // Type Definitions
@@ -894,6 +895,30 @@ export async function findActiveCommissionConfigs(
 }
 
 /**
+ * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»). La regla de los reportes:
+ *
+ * - la cortesía de Mesas (`isCortesia` con total $0, `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`) ⇒ NO;
+ * - un renglón ya neto de su descuento (`isItemLevelDiscount` de `lineRevenue.ts`: un combo, una promoción) ⇒ NO;
+ * - lo demás (Mostrador, «Cobrar», un descuento de catálogo por renglón: renglón bruto) ⇒ SÍ, como siempre.
+ *
+ * Sin `total` en la lectura no se sabe: SÍ, lo de siempre.
+ */
+function descuentoDelRenglonEnLaCabecera(item: {
+  total?: Decimal | number | null
+  isCortesia?: boolean | null
+  quantity: number
+  unitPrice: Decimal | number
+  discountAmount?: Decimal | number | null
+  orderPromotionId?: string | null
+  weightQuantity?: Decimal | number | null
+  modifiers?: Array<{ price: Decimal | number; quantity: number }>
+}): boolean {
+  if (item.total == null) return true
+  if (item.isCortesia === true && Number(item.total) === 0) return false
+  return !isItemLevelDiscount({ ...item, total: item.total })
+}
+
+/**
  * Lee la orden COMPLETA una sola vez y la normaliza a las líneas que consume la
  * base única, con el descuento de ORDEN ya separado del de renglón.
  *
@@ -912,8 +937,8 @@ export async function findActiveCommissionConfigs(
 async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
-): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; ivaIncluidoEnPrecio: boolean }> {
-  const [orderItems, order] = await Promise.all([
+): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; porRenglon: boolean; ivaIncluidoEnPrecio: boolean }> {
+  const [orderItems, order, filas] = await Promise.all([
     db.orderItem.findMany({
       where: { orderId },
       // A1e: en orden de `id`, para que el residuo de centavos de `baseSinIvaPorTasa` no dependa del orden de la consulta.
@@ -926,6 +951,10 @@ async function loadOrderCommissionLines(
         total: true,
         taxAmount: true,
         discountAmount: true,
+        // Encargo 04edc5: ¿la cabecera trae el descuento de este renglón? (`descuentoDelRenglonEnLaCabecera`) y su parte de los repartos.
+        id: true,
+        isCortesia: true,
+        orderPromotionId: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
@@ -933,6 +962,9 @@ async function loadOrderCommissionLines(
       },
     }),
     db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
+    // Las filas de descuento de UNA orden (unas cuantas). El tope sólo protege: si cortara, sus partes ya no cuadran con la
+    // cabecera y `descuentoDeOrdenDeLaVenta` vuelve al prorrateo.
+    db.orderDiscount.findMany({ where: { orderId }, select: { reparto: true }, orderBy: { id: 'asc' }, take: 500 }),
   ])
 
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
@@ -942,14 +974,15 @@ async function loadOrderCommissionLines(
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
     taxRate: tasaDelRenglon(item),
+    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item),
+    parteDeLasFilas: lineOrderDiscount(item, filas),
   }))
 
+  const { orderLevelDiscount, porRenglon } = descuentoDeOrdenDeLaVenta(decimalToNumber(order?.discountAmount), lines)
   return {
     lines,
-    orderLevelDiscount: orderLevelDiscountOf(
-      decimalToNumber(order?.discountAmount),
-      lines.map(line => line.lineDiscount),
-    ),
+    orderLevelDiscount,
+    porRenglon,
     // A1e: IVA_INCLUIDO, o DESCONOCIDO sin IVA registrado ⇒ los renglones traen el IVA y «sin IVA» lo separa por tasa; aparte
     // (o DESCONOCIDO con IVA registrado, la regla P12) los renglones ya vienen sin IVA.
     ivaIncluidoEnPrecio: precioTraeIva(order ?? {}),
@@ -975,11 +1008,12 @@ export async function calculateCategoryFilteredAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, porRenglon, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
     orderLevelDiscount,
+    porRenglon,
     include: line => line.categoryId !== null && categoryIds.includes(line.categoryId),
   })
 
@@ -1003,11 +1037,12 @@ export async function calculateLeftoverAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, porRenglon, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
     orderLevelDiscount,
+    porRenglon,
     include: line => line.categoryId === null || !claimedCategoryIds.includes(line.categoryId),
   })
 

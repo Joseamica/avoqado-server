@@ -184,6 +184,14 @@ export interface OrderLineForCommission {
   categoryId: string | null
   /** La tasa del renglón como la lee la póliza (`tasaDelRenglon`, final-fix I1): sello > tratamiento del producto > 16 %. */
   taxRate?: number | null
+  /**
+   * ¿`Order.discountAmount` YA incluye el `lineDiscount` de este renglón? Ausente = sí (lo de siempre). No lo incluye la
+   * cortesía de Mesas (renglón en $0, `comp-item.mobile.service.ts`) ni la pieza de un combo (renglón neto): lo dice
+   * `descuentoDelRenglonEnLaCabecera` (commission-utils), con la regla de los reportes (`lineRevenue`, `salesGiveaways`).
+   */
+  descuentoEnLaCabecera?: boolean
+  /** Su parte, en pesos, de los descuentos de cuenta de la orden según sus repartos (`lineOrderDiscount`). Ausente = 0. */
+  parteDeLasFilas?: number
 }
 
 /**
@@ -204,6 +212,33 @@ export function orderLevelDiscountOf(orderDiscountTotal: number, lineDiscounts: 
 }
 
 /**
+ * El descuento de ORDEN de una venta y si sus repartos lo explican al centavo (encargo 04edc5, founder «C», 16-nov).
+ *
+ * 🔴 La MISMA cortesía se guarda de dos formas según la pantalla: en Mostrador/«Cobrar» el renglón queda a precio lleno y la
+ * cabecera la incluye; en Mesas el renglón queda en $0 y la cabecera NO la incluye. Restarle a la cabecera TODOS los descuentos
+ * de renglón borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y en los combos, y la comisión pagaba de más. Aquí sólo
+ * se restan los que la cabecera sí trae (`descuentoEnLaCabecera`).
+ *
+ * `porRenglon`: si la suma de las partes de los repartos (`parteDeLasFilas`) es EXACTAMENTE ese descuento, cada renglón se lleva
+ * la suya, como en los reportes (`lineRevenue`): un % de cuenta que no tocó un combo no se le reparte al combo. Si no cuadra
+ * (orden anterior a los repartos, un «Descuento anterior» sin reparto, delivery, importada), el prorrateo de siempre.
+ */
+export function descuentoDeOrdenDeLaVenta(
+  orderDiscountTotal: number,
+  lines: OrderLineForCommission[],
+): { orderLevelDiscount: number; porRenglon: boolean } {
+  const orderLevelDiscount = orderLevelDiscountOf(
+    orderDiscountTotal,
+    lines.filter(line => line.descuentoEnLaCabecera !== false).map(line => line.lineDiscount),
+  )
+  const centavosDeLasFilas = lines.reduce((sum, line) => sum + Math.round((line.parteDeLasFilas ?? 0) * 100), 0)
+  return {
+    orderLevelDiscount,
+    porRenglon: centavosDeLasFilas > 0 && centavosDeLasFilas === Math.round(orderLevelDiscount * 100),
+  }
+}
+
+/**
  * Devuelve las líneas que ESTE esquema comisiona, con el descuento de orden ya
  * repartido entre ellas.
  *
@@ -218,6 +253,8 @@ export function selectCommissionableLines(input: {
   orderLines: OrderLineForCommission[]
   orderLevelDiscount: number
   include: (line: OrderLineForCommission) => boolean
+  /** `descuentoDeOrdenDeLaVenta(...).porRenglon`: cada renglón se lleva su `parteDeLasFilas` en vez del prorrateo. */
+  porRenglon?: boolean
 }): CommissionableLine[] {
   const netOf = (line: OrderLineForCommission) => Math.max(0, line.gross - line.lineDiscount)
   const orderNet = input.orderLines.reduce((sum, line) => sum + netOf(line), 0)
@@ -225,7 +262,11 @@ export function selectCommissionableLines(input: {
   return input.orderLines.filter(input.include).map(line => ({
     gross: line.gross,
     lineDiscount: line.lineDiscount,
-    orderDiscountShare: orderNet > 0 ? (input.orderLevelDiscount * netOf(line)) / orderNet : 0,
+    orderDiscountShare: input.porRenglon
+      ? (line.parteDeLasFilas ?? 0)
+      : orderNet > 0
+        ? (input.orderLevelDiscount * netOf(line)) / orderNet
+        : 0,
     tax: line.tax,
     taxRate: line.taxRate,
   }))
