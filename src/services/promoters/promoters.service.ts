@@ -9,16 +9,13 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getVenueTimezone } from '../dashboard/commission/commission-utils'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { zonaValida } from '../../utils/datetime'
-import { venueCivilDate, venueDayKey } from '../../utils/venueDateKeys'
+import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
 
 /**
- * D19: the venue's calendar day `offset` days from today (0 = today), as `YYYY-MM-DD`, and its midnight. Calendar math on
- * the civil date (no hours), so neither the process zone (UTC in production) nor its DST can move it.
+ * D19: the venue's calendar day `offset` days from `now`'s day (0 = today), as `YYYY-MM-DD`, and its midnight. Calendar
+ * math on the civil date (no hours), so neither the process zone (UTC in production) nor its DST can move it.
  */
-function venueDayKeyFromToday(timezone: string, offset: number, now: Date): string {
-  const { year, month, day } = venueCivilDate(now, timezone)
-  return new Date(Date.UTC(year, month - 1, day + offset)).toISOString().slice(0, 10)
-}
+const venueDayKeyFromToday = (timezone: string, offset: number, now: Date) => addCivilDays(venueDayKey(now, timezone), offset)
 const venueMidnight = (timezone: string, offset: number, now: Date) =>
   fromZonedTime(`${venueDayKeyFromToday(timezone, offset, now)}T00:00:00.000`, timezone)
 
@@ -283,9 +280,8 @@ class PromotersService {
     const commission = todaySales * 0.03 // TODO: Make configurable
 
     // Get performance goal for this month
-    const monthStart = new Date()
-    monthStart.setDate(1)
-    monthStart.setHours(0, 0, 0, 0)
+    // The goal's key: midnight of the 1st in the venue, the same key getManagerDashboard reads (D19; was the process's).
+    const monthStart = fromZonedTime(`${venueDayKey(now, timezone).slice(0, 7)}-01T00:00:00.000`, timezone)
 
     const goal = await prisma.performanceGoal.findUnique({
       where: {

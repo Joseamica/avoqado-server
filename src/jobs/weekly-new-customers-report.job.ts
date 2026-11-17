@@ -26,7 +26,7 @@ import emailService from '../services/email.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { env } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
-import { venueCivilDate } from '../utils/venueDateKeys'
+import { addCivilDays, venueDayKey } from '../utils/venueDateKeys'
 
 const TIMEZONE = 'America/Mexico_City'
 const PAID_TIERS: PlanTier[] = [PlanTier.PRO, PlanTier.PREMIUM, PlanTier.ENTERPRISE]
@@ -159,13 +159,10 @@ export class WeeklyNewCustomersReportJob {
  * date (UTC calendar, no hours), so no process zone can move it.
  */
 function getLastCompleteWeek(at: Date): { weekStart: Date; weekEnd: Date } {
-  const { year, month, day } = venueCivilDate(at, TIMEZONE)
-  const daysSinceMonday = (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7 // Mon=0..Sun=6
+  const today = venueDayKey(at, TIMEZONE)
+  const daysSinceMonday = (new Date(`${today}T00:00:00.000Z`).getUTCDay() + 6) % 7 // Mon=0..Sun=6, of the civil date
   const mondayMidnight = (weeksBack: number) =>
-    fromZonedTime(
-      `${new Date(Date.UTC(year, month - 1, day - daysSinceMonday - 7 * weeksBack)).toISOString().slice(0, 10)}T00:00:00.000`,
-      TIMEZONE,
-    )
+    fromZonedTime(`${addCivilDays(today, -daysSinceMonday - 7 * weeksBack)}T00:00:00.000`, TIMEZONE)
 
   return {
     weekStart: mondayMidnight(1),

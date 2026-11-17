@@ -50,6 +50,12 @@ function fijarReloj(now: string) {
 }
 
 const zonaDelNegocio = (timezone: string) => prismaMock.venue.findUnique.mockResolvedValue({ timezone })
+/** Mueve el reloj a `momento` cuando el servicio hace esa consulta: la petición cruza la medianoche a media llamada (Codex r2). */
+const cruzarMedianocheAlConsultar = (consulta: jest.Mock, momento: string, respuesta: unknown) =>
+  consulta.mockImplementation(async () => {
+    jest.setSystemTime(new Date(momento))
+    return respuesta
+  })
 const iso = (d: Date) => d.toISOString()
 
 beforeEach(() => {
@@ -69,6 +75,13 @@ describe('correo semanal de clientes nuevos (weekly-new-customers-report)', () =
     expect(iso(gte)).toBe('2026-11-09T06:00:00.000Z') // lunes 9, 00:00 CDMX
     expect(iso(lte)).toBe('2026-11-16T05:59:59.999Z') // domingo 15, 23:59:59.999 CDMX
     expect([iso(r.weekStart), iso(r.weekEnd)]).toEqual([iso(gte), iso(lte)])
+  })
+
+  it('si el reloj cruza al lunes a media llamada, la semana sigue siendo la del momento de la consulta', async () => {
+    fijarReloj('2026-11-16T05:59:59.000Z') // domingo 15-nov, 23:59:59 CDMX
+    cruzarMedianocheAlConsultar(prismaMock.venue.findMany, '2026-11-16T06:00:01.000Z', [])
+    const r = await weeklyNewCustomersReportJob.runNow({ previewOnly: true })
+    expect([iso(r.weekStart), iso(r.weekEnd)]).toEqual(['2026-11-02T06:00:00.000Z', '2026-11-09T05:59:59.999Z'])
   })
 
   it('consultado el domingo 8-mar (en Havana esa medianoche no existe): semana del 23-feb al 1-mar', async () => {
@@ -131,6 +144,8 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
     expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findFirst.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findMany.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-10-17T06:00:00.000Z')
+    // La llave de la meta del mes: la medianoche del día 1 en el negocio, la misma que lee getManagerDashboard.
+    expect(iso(prismaMock.performanceGoal.findUnique.mock.calls[0][0].where.staffId_venueId_month.month)).toBe('2026-11-01T06:00:00.000Z')
 
     const dias = d!.attendance.days
     expect(dias).toHaveLength(30)
@@ -177,6 +192,29 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     // $7,000 en 7 días → $1,000 diarios × día 15 = $15,000 de la meta de $50,000 = 30 % (el 16 de UTC daba 32 %).
     expect(r!.stores[0].goalProgress).toBe(30)
+    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z') // hoy
+    expect(iso(prismaMock.order.groupBy.mock.calls[1][0].where.createdAt.gte)).toBe('2026-11-08T06:00:00.000Z') // 7 días
+  })
+
+  it('gerente de tiendas: si el reloj cruza la medianoche a media llamada, el día del mes es el de la consulta', async () => {
+    fijarReloj('2026-11-16T05:59:59.000Z') // domingo 15-nov, 23:59:59 CDMX
+    cruzarMedianocheAlConsultar(prismaMock.staff.findFirst, '2026-11-16T06:00:01.000Z', {
+      id: 'm1',
+      firstName: 'Mara',
+      lastName: 'G',
+      email: null,
+      phone: null,
+    })
+    prismaMock.staffVenue.findMany.mockResolvedValue([{ venueId: 'v1', venue: { id: 'v1', name: 'Tienda', slug: 'tienda' } }])
+    prismaMock.order.groupBy.mockResolvedValueOnce([]).mockResolvedValueOnce([{ venueId: 'v1', _sum: { total: 7000 } }])
+    prismaMock.staffVenue.groupBy.mockResolvedValue([])
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.performanceGoal.findMany.mockResolvedValue([])
+
+    const r = await organizationDashboardService.getManagerDashboard('org1', 'm1', CDMX)
+
+    expect(r!.stores[0].goalProgress).toBe(30) // día 15, no 16
+    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z')
   })
 })
 
@@ -194,6 +232,50 @@ describe('centro de mando (PlayTelecom): tendencia de ventas con días elegidos 
     expect([iso(anterior.gte), iso(anterior.lte)]).toEqual(['2026-11-14T06:00:00.000Z', '2026-11-15T05:59:59.999Z'])
     expect(r.trend).toHaveLength(1)
     expect(r.trend[0].date).toBe(new Date('2026-11-15T18:00:00Z').toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }))
+  })
+
+  function sinVentas() {
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.order.aggregate.mockResolvedValue({ _sum: { total: null }, _count: 0 })
+    prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: null } })
+  }
+  const periodoAnterior = () => {
+    const w = prismaMock.order.aggregate.mock.calls[0][0].where.createdAt
+    return [iso(w.gte), iso(w.lte)]
+  }
+
+  it('el periodo anterior empieza en la medianoche del negocio aunque la del proceso no exista (Havana, 8-mar; Codex r2 #2)', async () => {
+    zonaDelNegocio(CDMX)
+    sinVentas()
+    await commandCenterService.getStockVsSales('v1', { startDate: '2026-03-09', endDate: '2026-03-09' })
+    expect(periodoAnterior()).toEqual(['2026-03-08T06:00:00.000Z', '2026-03-09T05:59:59.999Z'])
+  })
+
+  it('el día de 25 h de Tijuana sigue siendo UN día: se compara sólo contra el anterior (Codex r1 #4)', async () => {
+    fijarReloj('2026-11-01T20:00:00Z') // 1-nov, 12:00 en Tijuana (ese día dura 25 h)
+    zonaDelNegocio(TIJUANA)
+    sinVentas()
+    const r = await commandCenterService.getStockVsSales('v1', { days: 1 })
+    expect(r.trend).toHaveLength(1)
+    expect(periodoAnterior()).toEqual(['2026-10-31T07:00:00.000Z', '2026-11-01T06:59:59.999Z'])
+  })
+
+  it('si el reloj cruza la medianoche a media llamada, los 7 días y su comparación son los del momento de la consulta', async () => {
+    fijarReloj('2026-11-16T05:59:59.000Z') // domingo 15-nov, 23:59:59 CDMX
+    zonaDelNegocio(CDMX)
+    sinVentas()
+    cruzarMedianocheAlConsultar(prismaMock.$queryRaw, '2026-11-16T06:00:01.000Z', [])
+    const r = await commandCenterService.getStockVsSales('v1', { days: 7 })
+    expect(r.trend).toHaveLength(7)
+    expect(r.trend[6].date).toBe(new Date('2026-11-15T18:00:00Z').toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }))
+    expect(periodoAnterior()).toEqual(['2026-11-02T06:00:00.000Z', '2026-11-09T05:59:59.999Z'])
+  })
+
+  it('una zona inválida guardada en el negocio cae a CDMX en vez de tronar (Codex r2 #3)', async () => {
+    zonaDelNegocio('No/Existe')
+    sinVentas()
+    await commandCenterService.getStockVsSales('v1', { startDate: '2026-11-15', endDate: '2026-11-15' })
+    expect(periodoAnterior()).toEqual(['2026-11-14T06:00:00.000Z', '2026-11-15T05:59:59.999Z'])
   })
 })
 
@@ -216,6 +298,26 @@ describe('referidos: «este mes» y «el mes anterior» del negocio', () => {
     expect(iso(calificados.qualifiedAt.gte)).toBe(mes)
     expect(iso(pendientes.createdAt.gte)).toBe(mes)
     expect(iso(prismaMock.discount.count.mock.calls[0][0].where.createdAt.gte)).toBe(mes)
+  })
+})
+
+describe('referidos: el reloj cruza al mes siguiente a media llamada', () => {
+  it('«este mes» y «el mes anterior» salen de una sola lectura del reloj', async () => {
+    fijarReloj('2026-11-01T05:59:59.000Z') // 31-oct, 23:59:59 CDMX
+    zonaDelNegocio(CDMX)
+    cruzarMedianocheAlConsultar(prismaMock.referral.count, '2026-11-01T06:00:01.000Z', 0)
+    prismaMock.discount.count.mockResolvedValue(0)
+    prismaMock.customer.findFirst.mockResolvedValue(null)
+
+    await getReferralSummary('v1')
+
+    const [esteMes, anterior] = prismaMock.referral.count.mock.calls.map((c: any[]) => c[0].where)
+    expect([iso(esteMes.createdAt.gte), iso(anterior.createdAt.gte), iso(anterior.createdAt.lt)]).toEqual([
+      '2026-10-01T06:00:00.000Z',
+      '2026-09-01T06:00:00.000Z',
+      '2026-10-01T06:00:00.000Z',
+    ])
+    expect(iso(prismaMock.discount.count.mock.calls[0][0].where.createdAt.gte)).toBe('2026-10-01T06:00:00.000Z')
   })
 })
 
@@ -261,6 +363,16 @@ describe('TPV: «Mis ventas» del mes (PlayTelecom)', () => {
     fijarReloj('2026-11-01T03:00:00Z') // 31-oct, 21:00 CDMX
     zonaDelNegocio(CDMX)
     expect(await pedir({})).toEqual({ gte: '2026-10-01T06:00:00.000Z', lt: '2026-11-01T06:00:00.000Z', month: '2026-10' })
+  })
+
+  it('sin mes, si el reloj cruza al mes siguiente a media llamada: el mes y sus bordes salen de una sola lectura', async () => {
+    fijarReloj('2026-11-01T05:59:59.000Z') // 31-oct, 23:59:59 CDMX
+    zonaDelNegocio(CDMX)
+    prismaMock.venue.findUnique.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-11-01T06:00:01.000Z'))
+      return { timezone: CDMX }
+    })
+    expect(await pedir({})).toEqual({ gte: '2026-11-01T06:00:00.000Z', lt: '2026-12-01T06:00:00.000Z', month: '2026-11' })
   })
 
   it('con mes: ese mes en la zona del negocio (Tijuana)', async () => {
