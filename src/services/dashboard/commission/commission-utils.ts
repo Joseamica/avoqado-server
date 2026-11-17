@@ -35,7 +35,6 @@ import { grossByRateFromOrder, ordenParaIvaSelect, tasaDelRenglon, type OrdenPar
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 import { validarTasa } from './tasasDelEsquema'
 import { importePorPesoCents, importePorPesoViejoCents } from '../../shared/importePorPeso'
-import { lineOrderDiscount } from '../lineRevenue'
 
 // ============================================
 // Type Definitions
@@ -894,29 +893,7 @@ export async function findActiveCommissionConfigs(
   return orgConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
 }
 
-/**
- * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»; Codex r1–r3).
- *
- * SÍ, salvo UNA excepción comprobada en todos sus escritores: la cortesía en $0 (`isCortesia` con total 0 y descuento > 0,
- * `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`). La escriben `compOrderItem`/`compWholeOrder` de Mesas
- * (`comp-item.mobile.service.ts`) y la cortesía al agregar productos a una cuenta abierta (`order.tpv.service.ts`, TPV y móvil),
- * y ninguna la suma a la cabecera (que es la suma de las filas, o la de antes). Las demás formas de la cortesía (Mostrador,
- * «Cobrar», `compItems` de la TPV) dejan el renglón bruto y la cabecera SÍ la trae.
- *
- * 🔴 Por qué no se adivina más (Codex r1–r3): clasificar por la forma del renglón o por sus filas espejo se equivocaba en casos
- * raros (combo regalado por `compItems`, más filas que el tope, espejo viejo cuyo descuento se borró del catálogo) y entonces
- * restaba DOS veces: pagaba de menos. Equivocarse hacia «sí» es lo de antes; hacia «no», un error nuevo. Sólo «no» con prueba.
- */
-function descuentoDelRenglonEnLaCabecera(item: {
-  total?: Decimal | number | null
-  isCortesia?: boolean | null
-  discountAmount?: Decimal | number | null
-}): boolean {
-  const cortesiaEnCero = item.isCortesia === true && item.total != null && Number(item.total) === 0 && Number(item.discountAmount ?? 0) > 0
-  return !cortesiaEnCero
-}
-
-/** Cuántas filas de descuento de una orden se leen para la base por categoría (ver `loadOrderCommissionLines`). */
+/** Cuántas filas de descuento de una orden lee la base por categoría (ver `descuentoDeOrdenDeLaVenta`). */
 const TOPE_DE_FILAS = 500
 
 /**
@@ -938,8 +915,16 @@ const TOPE_DE_FILAS = 500
 async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
-): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; porRenglon: boolean; ivaIncluidoEnPrecio: boolean }> {
-  const [orderItems, order, filas] = await Promise.all([
+): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; ivaIncluidoEnPrecio: boolean }> {
+  const [filas, orderItems, order] = await Promise.all([
+    // Encargo 04edc5: las filas de descuento de UNA orden (unas cuantas). Una de más que el tope para saber si se cortó.
+    // Va PRIMERO: el `take` de esta consulta no debe caer en la ventana del guardia de `orderItem.findMany` (que no lo lleva).
+    db.orderDiscount.findMany({
+      where: { orderId },
+      select: { amount: true, reparto: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_FILAS + 1,
+    }),
     db.orderItem.findMany({
       where: { orderId },
       // A1e: en orden de `id`, para que el residuo de centavos de `baseSinIvaPorTasa` no dependa del orden de la consulta.
@@ -952,9 +937,6 @@ async function loadOrderCommissionLines(
         total: true,
         taxAmount: true,
         discountAmount: true,
-        // Encargo 04edc5: ¿la cabecera trae el descuento de este renglón? (`descuentoDelRenglonEnLaCabecera`) y su parte de los repartos.
-        id: true,
-        isCortesia: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
@@ -962,17 +944,8 @@ async function loadOrderCommissionLines(
       },
     }),
     db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
-    // Las filas de descuento de UNA orden (unas cuantas). Se pide una de más que el tope para saber si se cortó (Codex r2).
-    db.orderDiscount.findMany({
-      where: { orderId },
-      select: { reparto: true },
-      orderBy: { id: 'asc' },
-      take: TOPE_DE_FILAS + 1,
-    }),
   ])
 
-  // 🔴 Codex r2: con más filas que el tope no se ven todas sus partes; esa orden (cientos de descuentos) se prorratea como siempre.
-  const filasCompletas = filas.length <= TOPE_DE_FILAS
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
     // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
     gross: importeDelRenglon(item),
@@ -980,15 +953,16 @@ async function loadOrderCommissionLines(
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
     taxRate: tasaDelRenglon(item),
-    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item),
-    ...(filasCompletas ? { parteDeLasFilas: lineOrderDiscount(item, filas) } : {}),
   }))
 
-  const { orderLevelDiscount, porRenglon } = descuentoDeOrdenDeLaVenta(decimalToNumber(order?.discountAmount), lines)
   return {
     lines,
-    orderLevelDiscount,
-    porRenglon,
+    // Encargo 04edc5: con filas que explican la cabecera, las que no son espejo; si no (o cortadas), la regla de siempre.
+    orderLevelDiscount: descuentoDeOrdenDeLaVenta(
+      decimalToNumber(order?.discountAmount),
+      lines.map(line => line.lineDiscount),
+      filas.length <= TOPE_DE_FILAS ? filas : null,
+    ),
     // A1e: IVA_INCLUIDO, o DESCONOCIDO sin IVA registrado ⇒ los renglones traen el IVA y «sin IVA» lo separa por tasa; aparte
     // (o DESCONOCIDO con IVA registrado, la regla P12) los renglones ya vienen sin IVA.
     ivaIncluidoEnPrecio: precioTraeIva(order ?? {}),
@@ -1014,12 +988,11 @@ export async function calculateCategoryFilteredAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount, porRenglon, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
     orderLevelDiscount,
-    porRenglon,
     include: line => line.categoryId !== null && categoryIds.includes(line.categoryId),
   })
 
@@ -1043,12 +1016,11 @@ export async function calculateLeftoverAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount, porRenglon, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
     orderLevelDiscount,
-    porRenglon,
     include: line => line.categoryId === null || !claimedCategoryIds.includes(line.categoryId),
   })
 

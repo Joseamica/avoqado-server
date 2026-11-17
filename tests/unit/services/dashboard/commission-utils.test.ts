@@ -325,9 +325,6 @@ describe('calculateCategoryFilteredAmount', () => {
         total: true,
         taxAmount: true,
         discountAmount: true,
-        // Encargo 04edc5: ¿la cabecera trae el descuento del renglón? (la cortesía en $0 no) y su parte de los repartos.
-        id: true,
-        isCortesia: true,
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
         product: { select: { categoryId: true, taxRate: true, ivaTratamiento: true } },

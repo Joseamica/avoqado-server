@@ -35,6 +35,7 @@
  */
 import { Prisma } from '@prisma/client'
 import { splitIvaByRate } from '../../fiscal/ivaMath'
+import { aCentavos, leerReparto } from '../../shared/repartoDescuento'
 import { redondearRepartido } from './repartoPorCobro'
 
 // ============================================
@@ -184,13 +185,6 @@ export interface OrderLineForCommission {
   categoryId: string | null
   /** La tasa del renglón como la lee la póliza (`tasaDelRenglon`, final-fix I1): sello > tratamiento del producto > 16 %. */
   taxRate?: number | null
-  /**
-   * ¿`Order.discountAmount` YA incluye el `lineDiscount` de este renglón? Ausente = sí (lo de siempre). No lo incluye la
-   * cortesía en $0 de Mesas (`comp-item.mobile.service.ts`): lo dice `descuentoDelRenglonEnLaCabecera` (commission-utils).
-   */
-  descuentoEnLaCabecera?: boolean
-  /** Su parte, en pesos, de los descuentos de cuenta de la orden según sus repartos (`lineOrderDiscount`). Ausente = 0. */
-  parteDeLasFilas?: number
 }
 
 /**
@@ -210,31 +204,45 @@ export function orderLevelDiscountOf(orderDiscountTotal: number, lineDiscounts: 
   return Math.max(0, roundPesos(orderDiscountTotal - lineTotal))
 }
 
+/** Una fila de descuento de la orden (`OrderDiscount`) como la lee la comisión: su importe y su reparto. */
+export interface FilaDeDescuentoDeLaOrden {
+  amount: Prisma.Decimal | number | string | null
+  reparto: unknown
+}
+
 /**
- * El descuento de ORDEN de una venta y si sus repartos lo explican al centavo (encargo 04edc5, founder «C», 16-nov).
+ * El descuento de ORDEN de una venta (encargo 04edc5, founder «C»; rediseño tras Codex r1–r4).
  *
- * 🔴 La MISMA cortesía se guarda de dos formas según la pantalla: en Mostrador/«Cobrar» el renglón queda a precio lleno y la
- * cabecera la incluye; en Mesas el renglón queda en $0 y la cabecera NO la incluye. Restarle a la cabecera TODOS los descuentos
- * de renglón borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y la comisión pagaba de más. Aquí sólo se restan los que
- * la cabecera sí trae (`descuentoEnLaCabecera`).
+ * 🔴 La MISMA cortesía se guarda de dos formas según la pantalla: en Mostrador/«Cobrar» el renglón queda bruto, la cabecera la
+ * incluye y una fila ESPEJO la duplica; en Mesas el renglón queda en $0 y ni la cabecera ni ninguna fila la traen. Restarle a la
+ * cabecera TODOS los descuentos de renglón (`orderLevelDiscountOf`) borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y la
+ * comisión por categoría pagaba de más ($55 en vez de $49.50).
  *
- * `porRenglon`: si la suma de las partes de los repartos (`parteDeLasFilas`) es EXACTAMENTE ese descuento, cada renglón se lleva
- * la suya, como en los reportes (`lineRevenue`): un % de cuenta que no tocó un combo no se le reparte al combo. Si no cuadra
- * (orden anterior a los repartos, un «Descuento anterior» sin reparto, delivery, importada), el prorrateo de siempre.
+ * Desde B2 la cabecera es la suma de sus filas, y cada fila dice si es espejo de un descuento de renglón (`reparto.espejo`). Así
+ * que, cuando las filas la explican AL CENTAVO y todas tienen reparto legible, el descuento de orden es la suma de las filas que
+ * NO son espejo: no hace falta adivinar qué renglón está en la cabecera. Adivinarlo (por la forma del renglón o por sus espejos)
+ * se equivocó en casos raros y restaba dos veces (Codex r1–r4). Si las filas no la explican (orden anterior a B2, «Descuento
+ * anterior» sin reparto, delivery, importada, más filas que el tope), la regla de siempre.
  */
 export function descuentoDeOrdenDeLaVenta(
   orderDiscountTotal: number,
-  lines: OrderLineForCommission[],
-): { orderLevelDiscount: number; porRenglon: boolean } {
-  const orderLevelDiscount = orderLevelDiscountOf(
-    orderDiscountTotal,
-    lines.filter(line => line.descuentoEnLaCabecera !== false).map(line => line.lineDiscount),
-  )
-  const centavosDeLasFilas = lines.reduce((sum, line) => sum + Math.round((line.parteDeLasFilas ?? 0) * 100), 0)
-  return {
-    orderLevelDiscount,
-    porRenglon: centavosDeLasFilas > 0 && centavosDeLasFilas === Math.round(orderLevelDiscount * 100),
+  lineDiscounts: number[],
+  filas: FilaDeDescuentoDeLaOrden[] | null,
+): number {
+  const deSiempre = orderLevelDiscountOf(orderDiscountTotal, lineDiscounts)
+  if (!filas || filas.length === 0) return deSiempre
+  let todas = 0
+  let deCuenta = 0
+  for (const fila of filas) {
+    const reparto = leerReparto(fila.reparto)
+    if (!reparto) return deSiempre
+    const centavos = aCentavos(fila.amount)
+    if (centavos < 0) return deSiempre
+    todas += centavos
+    if (!reparto.espejo) deCuenta += centavos
   }
+  if (todas !== aCentavos(orderDiscountTotal)) return deSiempre
+  return deCuenta / 100
 }
 
 /**
@@ -252,8 +260,6 @@ export function selectCommissionableLines(input: {
   orderLines: OrderLineForCommission[]
   orderLevelDiscount: number
   include: (line: OrderLineForCommission) => boolean
-  /** `descuentoDeOrdenDeLaVenta(...).porRenglon`: cada renglón se lleva su `parteDeLasFilas` en vez del prorrateo. */
-  porRenglon?: boolean
 }): CommissionableLine[] {
   const netOf = (line: OrderLineForCommission) => Math.max(0, line.gross - line.lineDiscount)
   const orderNet = input.orderLines.reduce((sum, line) => sum + netOf(line), 0)
@@ -261,11 +267,7 @@ export function selectCommissionableLines(input: {
   return input.orderLines.filter(input.include).map(line => ({
     gross: line.gross,
     lineDiscount: line.lineDiscount,
-    orderDiscountShare: input.porRenglon
-      ? (line.parteDeLasFilas ?? 0)
-      : orderNet > 0
-        ? (input.orderLevelDiscount * netOf(line)) / orderNet
-        : 0,
+    orderDiscountShare: orderNet > 0 ? (input.orderLevelDiscount * netOf(line)) / orderNet : 0,
     tax: line.tax,
     taxRate: line.taxRate,
   }))
