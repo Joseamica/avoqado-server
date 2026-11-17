@@ -415,17 +415,32 @@ export async function checkInByIdentifier(args: {
     : ['PENDING', 'CONFIRMED', 'CHECKED_IN']
   const ventana = { venueId: args.venueId, startsAt: { gte: windowFrom, lte: windowTo }, status: { in: statuses } }
 
-  const reservation = phoneTail
-    ? await reservaDelTelefono({ venueId: args.venueId, tecleado: raw, phoneTail, windowFrom, windowTo, statuses, ventana })
-    : await prisma.reservation.findFirst({
-        where: { ...ventana, confirmationCode: code },
-        orderBy: { startsAt: 'asc' },
-        select: DISPLAY_SELECT,
-      })
+  // Codex r3 #3: el recibo de la cola SIEMPRE gana. Si otra entrega del mismo `opId` registró la llegada mientras ésta buscaba,
+  // se contesta «ya registrada» con SU reserva, nunca un 404/409 que la cola de ANDROID mandaría a cuarentena.
+  const reciboOError = async (err: unknown): Promise<ConsumeChallengeResult> => {
+    if (args.opId) {
+      const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { venueId: true, reservationId: true } })
+      if (previa && previa.venueId === args.venueId) return yaRegistrada(args.venueId, previa.reservationId)
+    }
+    throw err
+  }
+
+  let reservation: ReservaConDisplay | null
+  try {
+    reservation = phoneTail
+      ? await reservaDelTelefono({ venueId: args.venueId, tecleado: raw, phoneTail, windowFrom, windowTo, statuses, ventana })
+      : await prisma.reservation.findFirst({
+          where: { ...ventana, confirmationCode: code },
+          orderBy: { startsAt: 'asc' },
+          select: DISPLAY_SELECT,
+        })
+  } catch (err) {
+    return reciboOError(err)
+  }
 
   // Respuesta genérica: no revela si el código existe.
   const notFound = () => new NotFoundError('No encontramos esa reservación lista para check-in', CHECK_IN_NOT_FOUND)
-  if (!reservation) throw notFound()
+  if (!reservation) return reciboOError(notFound())
   const display = displayDe(reservation)
 
   // Con `opId`: el recibo va primero, en la transacción de la llegada. Sin `opId` (en vivo): nada.
@@ -450,7 +465,7 @@ export async function checkInByIdentifier(args: {
     return fn()
   }
   const yaPorOtra = async (err: unknown) => {
-    if (!(err instanceof OpYaRegistrada) || !args.opId) throw err
+    if (!(err instanceof OpYaRegistrada) || !args.opId) return reciboOError(err)
     const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { reservationId: true } })
     return yaRegistrada(args.venueId, previa?.reservationId ?? reservation.id)
   }
@@ -468,7 +483,7 @@ export async function checkInByIdentifier(args: {
   }
 
   if (!evaluateKioskWindow({ startsAt: reservation.startsAt, now: at, noShowGraceMin: graceMin })) {
-    throw notFound()
+    return reciboOError(notFound())
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
@@ -502,7 +517,7 @@ export async function checkInByIdentifier(args: {
     return { outcome: 'CHECKED_IN', reservationId: reservation.id, display }
   }
   if (reservation.status === 'NO_SHOW') return corregirNoAsistio()
-  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) throw notFound()
+  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) return reciboOError(notFound())
 
   let result
   try {
@@ -523,9 +538,9 @@ export async function checkInByIdentifier(args: {
     if (err instanceof OpYaRegistrada) return yaPorOtra(err)
     // Codex r2 #4: el «No asistió» automático ganó entre la lectura y el check-in. Desde la cola (hora real) se corrige
     // (la transacción se deshizo entera, recibo incluido); en vivo, el 409 de siempre.
-    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
+    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) return reciboOError(err)
     const ahora = await prisma.reservation.findFirst({ where: { id: reservation.id, venueId: args.venueId }, select: { status: true } })
-    if (ahora?.status !== 'NO_SHOW') throw err
+    if (ahora?.status !== 'NO_SHOW') return reciboOError(err)
     return corregirNoAsistio()
   }
 
@@ -572,19 +587,15 @@ async function reservaDelTelefono(a: {
     take: TOPE_CANDIDATAS,
     select: {
       ...DISPLAY_SELECT,
-      customerId: true,
       guestPhone: true,
       customer: { select: { firstName: true, lastName: true, phone: true } },
     },
   })
   const suyas = candidatas.filter(r => phonesMatch(a.tecleado, r.guestPhone) || phonesMatch(a.tecleado, r.customer?.phone))
-  // Codex r1 #1: con más de una PERSONA detrás del número en la ventana (madre e hija, teléfono compartido), el kiosco no adivina:
-  // la llegada la marca recepción. Una invitada sin ficha se reconoce por su nombre (la misma invitada en dos clases seguidas sí
-  // es una sola persona).
-  const persona = (r: (typeof suyas)[number]) => r.customerId ?? `invitada:${(r.guestName ?? '').trim().toLowerCase().replace(/\s+/g, ' ')}`
-  if (new Set(suyas.map(persona)).size > 1) throw telefonoAmbiguo()
-  // La misma persona con varias en la ventana: la primera, como siempre. Codex r2 #1: «primero la que falta marcar» hacía que un
-  // reintento sin `opId` (app vieja, respuesta perdida) marcara también su SIGUIENTE clase.
+  // Rediseño tras la regla de parada (Codex r1–r3: adivinar «qué persona es» por ficha o por nombre siempre dejaba otro caso): UN
+  // teléfono = UNA reserva en la ventana. Con más de una (dos personas con el mismo número, o la misma persona en dos clases
+  // seguidas), el kiosco no adivina: la llegada la marca recepción.
+  if (suyas.length > 1) throw telefonoAmbiguo()
   return suyas[0] ?? null
 }
 

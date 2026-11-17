@@ -233,24 +233,40 @@ describe('Teléfono tecleado en el kiosco', () => {
       expect(checkInReservation).not.toHaveBeenCalled()
     })
 
-    it('la MISMA invitada (mismo nombre, sin ficha) en dos clases seguidas no es ambigua: la primera, como siempre', async () => {
+    // Rediseño (regla de parada tras r1–r3): un teléfono = una reserva en la ventana. Con dos, aunque parezcan de la misma
+    // persona (dos invitadas «Ana Ruiz» pueden ser dos personas, r3 #1), se manda a recepción.
+    it('🔴 dos reservas con el mismo número y el mismo nombre ⇒ 409 (pueden ser dos personas homónimas)', async () => {
       prismaMock.reservation.findMany.mockResolvedValue([
         reserva({ id: 'res-9a', status: 'CHECKED_IN', customerId: null, customer: null, guestName: 'Ana Ruiz', guestPhone: '5512345678' }),
         reserva({ id: 'res-9b', customerId: null, customer: null, guestName: ' ana  ruiz ', guestPhone: '55 1234 5678' }),
       ] as any)
-      telefonoAlBloquear = { guestPhone: '55 1234 5678', customerPhone: null }
-      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
-      expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-9a' })
+      await expect(checkInByIdentifier({ ...base, identifier: '+525512345678' })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CHECK_IN_PHONE_AMBIGUOUS',
+      })
     })
 
     // Codex r2 #1: la respuesta de la primera se perdió y una app vieja reintenta SIN opId: no marca su siguiente clase.
-    it('🔴 la MISMA clienta con dos reservas en la ventana ⇒ la primera, como siempre (un reintento no marca la siguiente)', async () => {
+    // r2 #1 y r3 #2: la misma ficha con dos clases seguidas también va a recepción (un reintento sin opId nunca marca la siguiente).
+    it('🔴 la MISMA clienta con dos reservas en la ventana ⇒ 409, no marca ninguna', async () => {
       prismaMock.reservation.findMany.mockResolvedValue([
         reserva({ id: 'res-1a', status: 'CHECKED_IN', customerId: 'c-ana' }),
         reserva({ id: 'res-1b', customerId: 'c-ana' }),
       ] as any)
-      const out = await checkInByIdentifier({ ...base, identifier: '+525512345678' })
-      expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-1a' })
+      await expect(checkInByIdentifier({ ...base, identifier: '+525512345678' })).rejects.toMatchObject({ statusCode: 409 })
+      expect(checkInReservation).not.toHaveBeenCalled()
+    })
+
+    // r3 #3: dos entregas del mismo opId; la primera registró mientras ésta buscaba y después recepción agregó a otra persona con
+    // ese número. Antes de rechazar, el recibo gana: «ya registrada» con SU reserva, no un 409 que la cola mandaría a cuarentena.
+    it('🔴 el recibo del mismo opId apareció durante la búsqueda ⇒ «ya registrada», aunque ahora haya dos reservas', async () => {
+      prismaMock.kioskCheckInOp.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ venueId: V, reservationId: 'res-primera' } as any)
+      prismaMock.reservation.findMany.mockResolvedValue([reserva({ id: 'res-a' }), reserva({ id: 'res-b' })] as any)
+      prismaMock.reservation.findFirst.mockResolvedValue(reserva({ id: 'res-primera', status: 'CHECKED_IN' }) as any)
+      const out = await checkInByIdentifier({ ...base, occurredAt: new Date('2026-11-16T17:59:00Z'), opId: 'fila-doble' })
+      expect(out).toMatchObject({ outcome: 'ALREADY_CHECKED_IN', reservationId: 'res-primera' })
       expect(checkInReservation).not.toHaveBeenCalled()
     })
 

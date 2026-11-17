@@ -66,9 +66,10 @@ describe('Recibo idempotente de la cola del teléfono', () => {
   it('🔴 la primera clase se completó y el reintento ya no la encuentra ⇒ NO marca la siguiente clase', async () => {
     await prisma.reservation.deleteMany({ where: { venueId: m.venueId } })
     const primera = await reserva(2)
-    const segunda = await reserva(15)
     await llegada(`${m.key}-op-2`)
     await prisma.reservation.update({ where: { id: primera.id }, data: { status: 'COMPLETED' } })
+    // La siguiente clase aparece en la ventana después (D4: con dos reservas del número a la vez, el kiosco manda a recepción).
+    const segunda = await reserva(15)
     const reintento = await llegada(`${m.key}-op-2`)
     expect(reintento.reservationId).toBe(primera.id)
     expect((await prisma.reservation.findUniqueOrThrow({ where: { id: segunda.id } })).status).toBe('CONFIRMED')
@@ -80,6 +81,16 @@ describe('Recibo idempotente de la cola del teléfono', () => {
     await prisma.reservation.update({ where: { id: r.id }, data: { status: 'CHECKED_IN', checkInMethod: 'QR' } })
     expect((await llegada(`${m.key}-op-3`)).outcome).toBe('ALREADY_CHECKED_IN')
     expect(await prisma.kioskCheckInOp.findUnique({ where: { opId: `${m.key}-op-3` } })).toMatchObject({ reservationId: r.id })
+  })
+
+  // D4 rediseño (regla de parada): dos reservas con el mismo número en la ventana ⇒ 409 y no se marca ninguna.
+  it('D4 · dos reservas con el mismo número en la ventana ⇒ 409, ninguna marcada', async () => {
+    await prisma.reservation.deleteMany({ where: { venueId: m.venueId } })
+    const a = await reserva(3)
+    const b = await reserva(12, '55 1111 2222')
+    await expect(llegada(`${m.key}-op-amb`)).rejects.toMatchObject({ statusCode: 409, code: 'CHECK_IN_PHONE_AMBIGUOUS' })
+    const estados = await prisma.reservation.findMany({ where: { id: { in: [a.id, b.id] } }, select: { status: true }, take: 2 })
+    expect(estados.map(e => e.status)).toEqual(['CONFIRMED', 'CONFIRMED'])
   })
 
   // D4: contra Postgres de verdad, porque el prefiltro es SQL (los dígitos sin espacios) y `phonesMatch` confirma la lada.
