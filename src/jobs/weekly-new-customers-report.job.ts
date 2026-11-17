@@ -19,13 +19,14 @@
 
 import { CronJob } from 'cron'
 import { PlanTier, VenueStatus } from '@prisma/client'
-import { formatInTimeZone, toZonedTime } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { env } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
+import { addCivilDays, venueDayKey } from '../utils/venueDateKeys'
 
 const TIMEZONE = 'America/Mexico_City'
 const PAID_TIERS: PlanTier[] = [PlanTier.PRO, PlanTier.PREMIUM, PlanTier.ENTERPRISE]
@@ -150,23 +151,23 @@ export class WeeklyNewCustomersReportJob {
   }
 }
 
-/** Monday 00:00:00 through Sunday 23:59:59 (Mexico City) of the week before `at`'s week. */
+/**
+ * Monday 00:00:00 through Sunday 23:59:59.999 (Mexico City) of the week before `at`'s week, as real instants.
+ *
+ * D19: the old code did `setHours`/`setDate` on Mexico City wall-clock fields and never converted back, so the process
+ * zone (UTC in production) ran the week from Sunday 18:00 to Sunday 17:59 in Mexico City. The math is now on the civil
+ * date (UTC calendar, no hours), so no process zone can move it.
+ */
 function getLastCompleteWeek(at: Date): { weekStart: Date; weekEnd: Date } {
-  const zoned = toZonedTime(at, TIMEZONE)
-  const dayOfWeek = zoned.getDay() // 0=Sun..6=Sat
-  const daysSinceMonday = (dayOfWeek + 6) % 7 // Mon=0..Sun=6
+  const today = venueDayKey(at, TIMEZONE)
+  const daysSinceMonday = (new Date(`${today}T00:00:00.000Z`).getUTCDay() + 6) % 7 // Mon=0..Sun=6, of the civil date
+  const mondayMidnight = (weeksBack: number) =>
+    fromZonedTime(`${addCivilDays(today, -daysSinceMonday - 7 * weeksBack)}T00:00:00.000`, TIMEZONE)
 
-  const thisMonday = new Date(zoned)
-  thisMonday.setHours(0, 0, 0, 0)
-  thisMonday.setDate(thisMonday.getDate() - daysSinceMonday)
-
-  const weekStart = new Date(thisMonday)
-  weekStart.setDate(weekStart.getDate() - 7)
-
-  const weekEnd = new Date(thisMonday)
-  weekEnd.setMilliseconds(weekEnd.getMilliseconds() - 1) // one week later, minus 1ms = prior Sunday 23:59:59.999
-
-  return { weekStart, weekEnd }
+  return {
+    weekStart: mondayMidnight(1),
+    weekEnd: new Date(mondayMidnight(0).getTime() - 1), // prior Sunday 23:59:59.999
+  }
 }
 
 function buildReportHtml(customers: NewCustomerRow[], weekStart: Date, weekEnd: Date): string {
