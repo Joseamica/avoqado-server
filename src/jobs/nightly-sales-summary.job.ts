@@ -21,7 +21,7 @@ import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard
 import emailService from '../services/email.service'
 import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
-import { lineRevenueSql } from '../services/dashboard/lineRevenue'
+import { lineModifiersSql, lineRevenueAsChargedSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
@@ -72,12 +72,8 @@ interface VenueSalesSummaryData {
     avgOrder: number
     transactionCount: number
   }
-  // Category breakdown
-  categoryBreakdown: Array<{
-    name: string
-    itemsSold: number
-    netSales: number
-  }>
+  // Category breakdown (D21: Σ rows = metrics.netSales; rows that are not a category carry itemsSold null)
+  categoryBreakdown: CategoryRow[]
   // Order source breakdown
   orderSources: Array<{
     source: string
@@ -295,8 +291,13 @@ export class NightlySalesSummaryJob {
             timezone,
           })
 
-          // Get category breakdown
-          const categoryBreakdown = await getCategoryBreakdown(venue.id, reportDay.start, reportDay.end)
+          // Get category breakdown (D21: adds up to the headline net sales)
+          const categoryBreakdown = reconcileCategoryBreakdown(
+            await getCategoryBreakdown(venue.id, reportDay.start, reportDay.end),
+            todaySummary.summary.netSales ?? 0,
+            todaySummary.summary.refunds,
+            venue.id,
+          )
 
           // Get order sources breakdown
           const orderSources = await getOrderSourcesBreakdown(venue.id, reportDay.start, reportDay.end)
@@ -482,41 +483,136 @@ function firstInstantOfDay(dayKey: string, tz: string): number {
   return from
 }
 
+export type CategoryRow = { name: string; itemsSold: number | null; netSales: number }
+
+const CATEGORY_ROWS = 10
+
 /**
- * Get sales breakdown by category
+ * D21 (16-nov-2026): the email's «Desglose de ventas» adds up to the same email's net sales, to the cent.
+ *
+ * The categories are built from the order LINES, so a sale with no lines never reached them: the TPV quick charge
+ * (FAST-…, free amount) and a manual entry from the dashboard. Measured on av-db-25: 160 orders, $28,757.69 (Avoqado Full
+ * 27-oct: categories $446.00 against net sales $472.99, the 3 FAST orders). Square does the same with a custom amount:
+ * it lands in its «Uncategorized» bucket. Here it gets its own row, because «Sin categorizar» already means «product with
+ * no category».
+ *
+ * The rows: the top 10 categories, the rest folded into «Otras categorías» (the old LIMIT 10 dropped them), the day's
+ * refunds as a negative row (the headline subtracts them; they have no category), and what is left of the headline after
+ * all that as «Ventas sin producto». The categories already carry each order's whole net (see `getCategoryBreakdown`), so
+ * the remainder is, measured, the orders with no lines (and Mindform's legacy QR payments, which the headline adds and carry
+ * no lines here either). A remainder below zero can only come from a sale that changed between the email's queries
+ * (Codex r1 #3, the same race the headline's own queries have): no negative row is invented, it is logged.
+ */
+export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: number, refunds: number, venueId?: string): CategoryRow[] {
+  const cents = (n: number) => Math.round(n * 100)
+  const rows: CategoryRow[] = categories.slice(0, CATEGORY_ROWS).map(c => ({ ...c, netSales: cents(c.netSales) / 100 }))
+  const rest = categories.slice(CATEGORY_ROWS)
+  if (rest.length > 0) {
+    rows.push({
+      name: 'Otras categorías',
+      itemsSold: rest.reduce((s, c) => s + (c.itemsSold ?? 0), 0),
+      netSales: rest.reduce((s, c) => s + cents(c.netSales), 0) / 100,
+    })
+  }
+  if (cents(refunds) > 0) rows.push({ name: 'Devoluciones', itemsSold: null, netSales: -cents(refunds) / 100 })
+  const remainder = cents(netSales) - rows.reduce((s, r) => s + cents(r.netSales), 0)
+  if (remainder > 0) rows.push({ name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: remainder / 100 })
+  else if (remainder < 0) {
+    logger.warn('⚠️ Desglose por categoría mayor que las ventas netas: una venta cambió mientras se armaba el correo', {
+      venueId,
+      netSales,
+      excessCents: -remainder,
+    })
+  }
+  return rows
+}
+
+/** Items sold on a line: 0 once the delivery provider removed it. */
+const lineUnitsCountSql = `(CASE WHEN oi."removedAt" IS NULL THEN oi.quantity ELSE 0 END)`
+/** Price × units sold + modifiers, before any discount (removed or not): the fallback weight. */
+const lineListValueSql = `(oi."unitPrice" * COALESCE(oi."weightQuantity", oi.quantity) + ${lineModifiersSql()})`
+
+/**
+ * Get sales breakdown by category — every category, net desc (`reconcileCategoryBreakdown` folds the tail). Bounded by
+ * the venue's own categories (one row each).
+ *
+ * D21 (Codex r1 #1, #2): each ORDER's net — the same one the headline sums, subtotal − LEAST(discount, subtotal) + the IVA
+ * charged on top — is shared out to its categories in proportion to what each line earned (`lineRevenueAsChargedSql`). The lines
+ * alone do not add up to the order when the discount lives only on the order (a Rappi/Uber promotion the venue pays, an
+ * account discount from before the per-line split) or when a weighed line was rounded when charged (2 × 0.333 kg at
+ * $199.99 charged $133.20, the lines say $133.19). Square shares order discounts the same way. Cents are rounded so the
+ * categories add up exactly to the orders' net (largest remainder).
+ *
+ * A line the delivery provider removed sold no ITEMS, but it keeps its weight: the order's subtotal still has it and its
+ * refund takes it back out in «Devoluciones», like the headline. Without it, its value would land on the other lines.
+ * A cortesía weighs 0. When the lines earned nothing between them but the order charged something, the order is shared by
+ * list value instead; an order whose every line is a cortesía cannot be shared and is left out, like an order with no lines.
  */
 export async function getCategoryBreakdown(
   venueId: string,
   startDate: Date,
   endDate: Date,
 ): Promise<Array<{ name: string; itemsSold: number; netSales: number }>> {
-  const result = await prisma.$queryRaw<Array<{ name: string; items_sold: number; net_sales: number }>>`
+  const result = await prisma.$queryRaw<Array<{ name: string; items_sold: unknown; net_sales: unknown }>>`
+    WITH lines AS (
+      SELECT
+        oi."orderId" AS order_id,
+        COALESCE(c.name, 'Sin categorizar') AS name,
+        ${Prisma.raw(lineUnitsCountSql)} AS quantity,
+        -- A cortesía earned nothing (Codex r2 #1: a comped combo piece reads $101 in the line formula): weight 0.
+        CASE WHEN oi."isCortesia" THEN 0 ELSE ${Prisma.raw(lineRevenueAsChargedSql())} END AS revenue,
+        CASE WHEN oi."isCortesia" THEN 0 ELSE ${Prisma.raw(lineListValueSql)} END AS list_value,
+        o.subtotal - LEAST(o."discountAmount", o.subtotal) + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))} AS order_net
+      FROM "OrderItem" oi
+      JOIN "Order" o ON oi."orderId" = o.id
+      LEFT JOIN "Product" p ON oi."productId" = p.id
+      LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
+      WHERE o."venueId" = ${venueId}
+        AND o."createdAt" >= ${utcTs(startDate)}
+        AND o."createdAt" <= ${utcTs(endDate)}
+        -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
+        -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
+        AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+        AND o."paymentStatus" NOT IN ('REFUNDED')
+        AND ${sqlOrdenSinTarjetas('o.id')}
+    ),
+    shared AS (
+      SELECT
+        name, quantity, revenue, list_value, order_net,
+        SUM(revenue) OVER (PARTITION BY order_id) AS order_revenue,
+        SUM(list_value) OVER (PARTITION BY order_id) AS order_list_value
+      FROM lines
+    )
     SELECT
-      COALESCE(c.name, 'Sin categorizar') as name,
-      COALESCE(SUM(oi.quantity), 0) as items_sold,
-      -- This column, its SQL alias and the TS return type all say NET, but it
-      -- used to sum unitPrice * quantity — the LIST price — so a category with
-      -- a combo was overstated in the owner's nightly email.
-      COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as net_sales
-    FROM "OrderItem" oi
-    JOIN "Order" o ON oi."orderId" = o.id
-    LEFT JOIN "Product" p ON oi."productId" = p.id
-    LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
-    WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
-      AND o.status NOT IN ('CANCELLED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
-      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
-    GROUP BY c.name
+      name,
+      COALESCE(SUM(quantity), 0) AS items_sold,
+      COALESCE(SUM(CASE
+        WHEN order_revenue > 0 THEN order_net * revenue / order_revenue
+        -- Codex r2 #2: lines that earned ~0 between them (weighed lines rounded when charged, a discount of almost all)
+        -- still sold what the order charged: share it by list value.
+        WHEN order_list_value > 0 THEN order_net * list_value / order_list_value
+        ELSE 0
+      END), 0) AS net_sales
+    FROM shared
+    GROUP BY name
     ORDER BY net_sales DESC
-    LIMIT 10
   `
 
-  return result.map(r => ({
+  // Largest remainder: round each category down to the cent, then hand the missing cents to the biggest fractions, so
+  // Σ categories = the orders' net to the cent (rounding each one on its own could leave a cent over or short).
+  const exact = result.map(r => Number(r.net_sales) * 100)
+  const floors = exact.map(Math.floor)
+  let missing = Math.round(exact.reduce((s, v) => s + v, 0)) - floors.reduce((s, v) => s + v, 0)
+  for (const i of exact.map((_, i) => i).sort((a, b) => exact[b] - floors[b] - (exact[a] - floors[a]))) {
+    if (missing <= 0) break
+    floors[i] += 1
+    missing -= 1
+  }
+
+  return result.map((r, i) => ({
     name: r.name,
     itemsSold: Number(r.items_sold),
-    netSales: Number(r.net_sales),
+    netSales: floors[i] / 100,
   }))
 }
 
