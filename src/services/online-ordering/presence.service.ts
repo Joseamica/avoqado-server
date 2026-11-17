@@ -4,6 +4,7 @@ import {
   FOLIO_LAST_CALL_MINUTES,
   MAX_PENDING_PER_VENUE,
   PRESENCE_WINDOW_MS,
+  FOLIO_PRESENCE_WINDOW_MS,
   PRESENCE_WRITE_DEBOUNCE_MS,
   awaitingAcceptanceWhere,
   liveCardDraftsWhere,
@@ -87,7 +88,9 @@ export async function getAcceptingStatus(
   }
   // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», a la Bandeja abierta.
   const latido = config.requiresAcceptance === false ? lastToPayPollAt : lastInboxPollAt
-  if (!latido || now.getTime() - latido.getTime() > PRESENCE_WINDOW_MS) return done('OFFLINE', 'NO_DEVICE')
+  // D659: la caja que cobra folios duerme con la pantalla apagada y late cada 3–5 min; la Bandeja abierta, cada ~10 s.
+  const ventana = config.requiresAcceptance === false ? FOLIO_PRESENCE_WINDOW_MS : PRESENCE_WINDOW_MS
+  if (!latido || now.getTime() - latido.getTime() > ventana) return done('OFFLINE', 'NO_DEVICE')
 
   // Fase 2: los borradores de tarjeta vigentes también ocupan lugar (el tope de admisión los cuenta igual).
   const pending =
