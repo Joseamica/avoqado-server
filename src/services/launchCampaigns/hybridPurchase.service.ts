@@ -208,6 +208,12 @@ async function resolveBasicCard(customerId: string, known?: Stripe.Customer | St
   return { id: method.id, last4: method.card?.last4 ?? null, brand: method.card?.brand ?? null }
 }
 
+/** Last digits of the card a stored Básico quote froze (never stored itself), for the confirmation preview; null if unreadable. */
+export async function getQuotedPaymentCard(paymentMethodId: string) {
+  const method = await stripe.paymentMethods.retrieve(paymentMethodId, {}, STRIPE_DENTRO_DEL_CANDADO).catch(() => null)
+  return method?.type === 'card' ? { last4: method.card?.last4 ?? null, brand: method.card?.brand ?? null } : null
+}
+
 export async function resolveBasicPaymentMethod(customerId: string): Promise<string | null> {
   return (await resolveBasicCard(customerId))?.id ?? null
 }
