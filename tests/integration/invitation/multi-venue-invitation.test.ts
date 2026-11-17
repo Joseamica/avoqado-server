@@ -111,6 +111,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 // the Free-tier cap is covered by seatCap.service.test.ts + team.seatCap.test.ts.
 jest.mock('../../../src/services/access/seatCap.service', () => ({
   assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
+  lockSeatCap: jest.fn().mockResolvedValue(undefined),
 }))
 
 // Import after mocks
