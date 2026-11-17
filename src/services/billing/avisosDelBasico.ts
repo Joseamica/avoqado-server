@@ -3,9 +3,9 @@
  * Stripe. Ninguna anuncia un cobro: el de un cobro sigue siendo `sendPlanRenewalReminderEmail` con el monto de la vista
  * previa (`montoDelSiguienteCobro`); aquí sólo se decide la ALTERNATIVA del Básico y los avisos SIN cobro.
  *
- * - «Tu prueba terminó» / «Tu Pro terminó» (`avisarPlanTerminado`): una sola vez por suscripción. El sello es
- *   `VenueFeature.renewalReminderSentAt` ≥ el fin real (`ended_at`): el recordatorio de cobro sólo sella ANTES del fin del
- *   periodo (manda mientras faltan días), así que un sello en o después del fin sólo lo pone este aviso. Sin migración.
+ * - «Tu prueba terminó» / «Tu Pro terminó» (`avisarPlanTerminado`): una sola vez por suscripción. Lo que dice «ya salió»
+ *   es el `ActivityLog` `PLAN_ENDED_NOTICE_SENT` (R19); `VenueFeature.renewalReminderSentAt` ≥ el fin real (`ended_at`)
+ *   es sólo el apartado entre dos que corren a la vez (el recordatorio de cobro sella ANTES del fin). Sin migración.
  * - Los avisos SIN cobro se pueden apagar (categoría `PLAN` → `TIPO_AVISOS_SIN_COBRO`, preferencia del dueño) y llevan
  *   baja en un clic. El aviso de un cobro no se apaga.
  */
@@ -156,11 +156,31 @@ export function comoTermino(sub: Stripe.Subscription): 'TRIAL' | 'PRO' | null {
   return fin && cerca(fin.getTime() / 1000) ? 'PRO' : null
 }
 
+/** El registro durable de «el aviso final ya salió» (R19): uno por suscripción y fin. */
+export const AVISO_ENVIADO = 'PLAN_ENDED_NOTICE_SENT'
+/** Un apartado sin registro de envío más viejo que esto es de un proceso que murió entre apartar y mandar. */
+const APARTADO_ABANDONADO_MS = 3600_000
+
+/** ¿Ya hay registro del aviso final de esta suscripción y este fin? Una lectura acotada (findFirst por la fila). */
+async function yaSeAviso(venueId: string, venueFeatureId: string, subscriptionId: string, endedAt: Date): Promise<boolean> {
+  const hit = await prisma.activityLog.findFirst({
+    where: {
+      venueId,
+      action: AVISO_ENVIADO,
+      entity: 'VenueFeature',
+      entityId: venueFeatureId,
+      AND: [{ data: { path: ['subscriptionId'], equals: subscriptionId } }, { data: { path: ['endedAt'], equals: endedAt.toISOString() } }],
+    },
+    select: { id: true },
+  })
+  return !!hit
+}
+
 /**
  * «Tu prueba terminó» / «Tu Pro terminó», UNA vez por suscripción, aunque lleguen el webhook, sus repeticiones y el job.
- * Sello: `renewalReminderSentAt` ≥ `ended_at` (ver la cabecera), APARTADO con CAS antes de mandar (sólo uno lo
- * consigue); si el envío falla se suelta y el job lo reintenta. Un sello que no se pudo soltar deja el aviso sin
- * mandar (nunca dos). Nunca lanza.
+ * R19: «ya salió» = el `ActivityLog` `PLAN_ENDED_NOTICE_SENT` de esta suscripción y fin, escrito tras entregar. El
+ * sello `renewalReminderSentAt` sólo aparta entre dos que corren a la vez; cualquier falla antes de entregar lo suelta,
+ * y uno abandonado (> 1 h, sin registro) se reintenta, siempre con la misma llave de Resend. Nunca lanza.
  */
 export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boolean> {
   const kind = comoTermino(sub)
@@ -171,8 +191,9 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
       where: { stripeSubscriptionId: sub.id, feature: { code: 'PLAN_PRO' } },
       select: { id: true, venueId: true, renewalReminderSentAt: true, venue: { select: { slug: true, status: true } } },
     })
-    if (!vf || (vf.renewalReminderSentAt && vf.renewalReminderSentAt.getTime() >= endedAt.getTime())) return false
-    if (!OPERATIONAL_VENUE_STATUSES.includes(vf.venue.status)) return false
+    if (!vf || !OPERATIONAL_VENUE_STATUSES.includes(vf.venue.status)) return false
+    // R19: «¿ya salió?» lo dice SÓLO el registro durable del envío, nunca el sello (que es apenas el apartado).
+    if (await yaSeAviso(vf.venueId, vf.id, sub.id, endedAt)) return false
     // «Quedaste en Gratis» sólo si es verdad: si otro plan (fila de plan vigente, contrato de campaña con plan o el Básico)
     // ya cubre al negocio —p. ej. una compra que reemplazó a esta suscripción al fin de su periodo—, no se dice nada.
     const [otraFila, otroContrato] = await Promise.all([
@@ -199,27 +220,33 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
       logger.warn('avisosDelBasico: plan terminado sin destinatario; sin aviso', { venueId: vf.venueId, subscriptionId: sub.id })
       return false
     }
-    // 🔴 r2: el sello se APARTA antes de mandar (CAS, a lo más una vez). Sellar después dejaba un hueco: si el sello
-    // fallaba o el proceso moría tras entregar, el respaldo volvía a mandar días después, cuando la llave de Resend
-    // (24 h) ya no lo frena. Nunca antes del fin: un reloj atrasado dejaría un sello que el job lee como «falta avisar».
-    const sello = new Date(Math.max(Date.now(), endedAt.getTime()))
+    // Antes del apartado: si esta lectura falla, no queda nada apartado.
+    const apagado = await avisoDelPlanApagado(target.staffId, vf.venueId)
+
+    // El sello es sólo el APARTADO entre dos que corren a la vez (webhook y respaldo). Se aparta si está libre, si es
+    // de antes del fin (el recordatorio de cobro), o si quedó abandonado (más de 1 h sin registro de envío: el proceso
+    // murió entre apartar y mandar). Nunca antes del fin: un reloj atrasado lo dejaría como «de antes del fin».
+    const ahora = Date.now()
+    const sello = new Date(Math.max(ahora, endedAt.getTime()))
     const apartado = await prisma.venueFeature.updateMany({
-      where: { id: vf.id, OR: [{ renewalReminderSentAt: null }, { renewalReminderSentAt: { lt: endedAt } }] },
+      where: {
+        id: vf.id,
+        OR: [
+          { renewalReminderSentAt: null },
+          { renewalReminderSentAt: { lt: endedAt } },
+          { renewalReminderSentAt: { lt: new Date(ahora - APARTADO_ABANDONADO_MS) } },
+        ],
+      },
       data: { renewalReminderSentAt: sello },
     })
-    if (apartado.count !== 1) return false // otro (webhook o job) ya lo apartó
-    // Sólo si el ENVÍO falla se suelta (CAS sobre el sello propio): el respaldo lo reintenta.
-    const soltar = () =>
-      prisma.venueFeature.updateMany({
-        where: { id: vf.id, renewalReminderSentAt: sello },
-        data: { renewalReminderSentAt: vf.renewalReminderSentAt },
-      })
-    // Apagado por el dueño: no se manda y queda sellado (no hay nada que reintentar).
-    if (!(await avisoDelPlanApagado(target.staffId, vf.venueId))) {
-      const basico = await basicoPublicado()
-      let sent = false
-      try {
-        sent = await emailService.sendPlanEndedEmail(target.email, {
+    if (apartado.count !== 1) return false // otro lo apartó hace menos de 1 h
+    let listo = false
+    try {
+      // Apagado por el dueño: no se manda, pero queda registrado como resuelto (no hay nada que reintentar).
+      if (!apagado) {
+        const basico = await basicoPublicado()
+        // Siempre la misma llave: Resend junta los reintentos de 24 h en una sola entrega.
+        listo = await emailService.sendPlanEndedEmail(target.email, {
           locale: target.locale,
           venueName: target.venueName,
           kind,
@@ -228,10 +255,33 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
           unsubscribe: bajaDelAviso(target.staffId, vf.venueId, vf.venue.slug),
           idempotencyKey: `plan-termino:${sub.id}`,
         })
-      } finally {
-        if (!sent) await soltar()
-      }
-      if (!sent) return false
+      } else listo = true
+    } finally {
+      // Cualquier falla antes o durante el envío suelta el apartado (CAS sobre el sello propio): el respaldo reintenta.
+      if (!listo)
+        await prisma.venueFeature.updateMany({
+          where: { id: vf.id, renewalReminderSentAt: sello },
+          data: { renewalReminderSentAt: vf.renewalReminderSentAt },
+        })
+    }
+    if (!listo) return false
+    // ponytail: si el correo salió y ESTE registro falla, el apartado queda y a la hora se toma por abandonado; un
+    // reintento dentro de 24 h lo junta la llave de Resend, uno después de 24 h manda UN duplicado. Aceptado (R19).
+    try {
+      await prisma.activityLog.create({
+        data: {
+          venueId: vf.venueId,
+          action: AVISO_ENVIADO,
+          entity: 'VenueFeature',
+          entityId: vf.id,
+          data: { subscriptionId: sub.id, kind, endedAt: endedAt.toISOString(), ...(apagado ? { muted: true } : {}) },
+        },
+      })
+    } catch (error) {
+      logger.error('avisosDelBasico: el aviso salió pero no se registró; un reintento tardío podría repetirlo', {
+        subscriptionId: sub.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
     return true
   } catch (error) {

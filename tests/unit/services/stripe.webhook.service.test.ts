@@ -112,6 +112,7 @@ jest.mock('@/utils/prismaClient', () => ({
       updateMany: jest.fn(),
     },
     hybridContract: { count: jest.fn().mockResolvedValue(0) },
+    activityLog: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
     notificationPreference: { findUnique: jest.fn().mockResolvedValue(null) },
     staffVenue: {
       findMany: jest.fn(),
@@ -1304,6 +1305,13 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
     beforeEach(() => {
       sello = null
+      // R19: el registro durable de «ya salió» (ActivityLog PLAN_ENDED_NOTICE_SENT), compartido entre llamadas.
+      const avisos: Array<{ entityId: string }> = []
+      const { activityLog } = prisma as unknown as { activityLog: { findFirst: jest.Mock; create: jest.Mock } }
+      activityLog.findFirst.mockImplementation(
+        async (a: { where: { entityId: string } }) => avisos.find(r => r.entityId === a.where.entityId) ?? null,
+      )
+      activityLog.create.mockImplementation(async (a: { data: { entityId: string } }) => (avisos.push(a.data), a.data))
       // Cada prueba arranca sin preferencias: una implementación por tipo no se filtra a la siguiente.
       const prefs = (prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference
       prefs.findUnique.mockReset().mockResolvedValue(null)

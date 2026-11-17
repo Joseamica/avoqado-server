@@ -1125,8 +1125,17 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
     // La fila del plan tal como la leen el webhook y el job (estado compartido: el sello la cambia).
     let estado: { renewalReminderSentAt: Date | null }
 
+    // R19: el registro durable de «ya salió» (ActivityLog PLAN_ENDED_NOTICE_SENT).
+    let avisos: Array<{ entityId: string; data: Record<string, unknown> }>
+    const activityLog = (prisma as unknown as { activityLog: { findFirst: jest.Mock; create: jest.Mock } }).activityLog
+
     beforeEach(() => {
       estado = { renewalReminderSentAt: null }
+      avisos = []
+      activityLog.findFirst.mockImplementation(
+        async (a: { where: { entityId: string } }) => avisos.find(r => r.entityId === a.where.entityId) ?? null,
+      )
+      activityLog.create.mockImplementation(async (a: { data: any }) => (avisos.push(a.data), a.data))
       ;(mockPrisma.venueFeature as unknown as { findFirst: jest.Mock }).findFirst = jest.fn(async () => ({
         id: 'vf_t',
         venueId: 'v1',
@@ -1199,37 +1208,75 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       expect(endedSpy.mock.calls[1][1]).toMatchObject({ kind: 'PRO', idempotencyKey: 'plan-termino:sub_t' })
     })
 
-    it('🔴 r2: entregó y falló guardar después (o murió el proceso) → el respaldo NO lo vuelve a mandar días después', async () => {
+    it('🔴 R19: entregó → queda PLAN_ENDED_NOTICE_SENT y tres corridas del respaldo no lo mandan otra vez', async () => {
       const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
       porConsulta({ terminadas: [{ ...filaTerminada, trialEndDate: new Date((FIN_S - 60 * 86400) * 1000) }] })
       mockRetrieve.mockResolvedValue(proTerminado())
-      // El sello se apartó ANTES de entregar; lo que falle después (sin soltar) no reabre el aviso.
-      endedSpy.mockImplementationOnce(async () => {
-        expect(estado.renewalReminderSentAt).not.toBeNull()
-        return true
-      })
       await expect(avisarPlanTerminado(proTerminado())).resolves.toBe(true)
+      expect(avisos).toEqual([
+        expect.objectContaining({
+          action: 'PLAN_ENDED_NOTICE_SENT',
+          entity: 'VenueFeature',
+          entityId: 'vf_t',
+          venueId: 'v1',
+          data: { subscriptionId: 'sub_t', kind: 'PRO', endedAt: new Date(FIN_S * 1000).toISOString() },
+        }),
+      ])
+      // Aunque el apartado ya caducó (más de 1 h), el registro manda.
+      estado.renewalReminderSentAt = new Date(Date.now() - 2 * 3600_000)
       for (let dia = 0; dia < 3; dia++) await new PlanRenewalReminderJob().runNow()
       expect(endedSpy).toHaveBeenCalledTimes(1)
     })
 
-    it('r2: el ENVÍO falla (o lanza) → se suelta el sello y el respaldo lo reintenta, una sola entrega', async () => {
+    it('🔴 R19: el proceso murió entre apartar y mandar → el respaldo lo entrega una vez, con la misma llave', async () => {
+      porConsulta({ terminadas: [filaTerminada] })
+      mockRetrieve.mockResolvedValue(terminada())
+      // Apartado de hace 2 h sin registro de envío: abandonado.
+      estado.renewalReminderSentAt = new Date(Date.now() - 2 * 3600_000)
+      await new PlanRenewalReminderJob().runNow()
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).toHaveBeenCalledTimes(1)
+      expect(endedSpy.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'plan-termino:sub_t' })
+    })
+
+    it('R19: un apartado reciente (< 1 h, otro proceso mandando) no se pisa', async () => {
+      porConsulta({ terminadas: [filaTerminada] })
+      mockRetrieve.mockResolvedValue(terminada())
+      estado.renewalReminderSentAt = new Date(Date.now() - 60_000)
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).not.toHaveBeenCalled()
+    })
+
+    it('🔴 R19: falla la lectura de preferencias → nada queda apartado y el respaldo lo reintenta', async () => {
+      const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
+      porConsulta({ terminadas: [filaTerminada] })
+      mockRetrieve.mockResolvedValue(terminada())
+      prefs.findUnique.mockRejectedValueOnce(new Error('db'))
+      await expect(avisarPlanTerminado(terminada())).resolves.toBe(false)
+      expect(estado.renewalReminderSentAt).toBeNull()
+      await new PlanRenewalReminderJob().runNow()
+      expect(endedSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('R19: el ENVÍO falla (o lanza) → se suelta el apartado y el respaldo lo reintenta, una sola entrega', async () => {
       const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
       porConsulta({ terminadas: [filaTerminada] })
       mockRetrieve.mockResolvedValue(terminada())
       endedSpy.mockRejectedValueOnce(new Error('resend caído'))
       await expect(avisarPlanTerminado(terminada())).resolves.toBe(false)
       expect(estado.renewalReminderSentAt).toBeNull()
+      expect(avisos).toEqual([])
       await new PlanRenewalReminderJob().runNow()
       await new PlanRenewalReminderJob().runNow()
       expect(endedSpy).toHaveBeenCalledTimes(2) // el que falló + la entrega del respaldo
-      expect(estado.renewalReminderSentAt).not.toBeNull()
+      expect(avisos).toHaveLength(1)
     })
 
-    it('r2: dos a la vez (webhook y job) → sólo el que apartó el sello manda', async () => {
+    it('R19: webhook y respaldo a la vez → un solo envío', async () => {
       const { avisarPlanTerminado } = jest.requireActual('@/services/billing/avisosDelBasico')
-      const [a, b] = await Promise.all([avisarPlanTerminado(terminada()), avisarPlanTerminado(terminada())])
-      expect([a, b].filter(Boolean)).toHaveLength(1)
+      porConsulta({ terminadas: [filaTerminada] })
+      mockRetrieve.mockResolvedValue(terminada())
+      await Promise.all([avisarPlanTerminado(terminada()), new PlanRenewalReminderJob().runNow()])
       expect(endedSpy).toHaveBeenCalledTimes(1)
     })
 
@@ -1237,6 +1284,7 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       for (const sub of [terminada(), proTerminado()]) {
         endedSpy.mockClear()
         estado.renewalReminderSentAt = null
+        avisos = [] // dos casos independientes (misma suscripción de juguete)
         porConsulta({ cobros: [row({ stripeSubscriptionId: 'sub_t' })] })
         mockRetrieve.mockResolvedValue(sub)
         await new PlanRenewalReminderJob().runNow()
