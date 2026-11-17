@@ -6,7 +6,7 @@
  * - «Tu prueba terminó» / «Tu Pro terminó» (`avisarPlanTerminado`): una sola vez por suscripción. El sello es
  *   `VenueFeature.renewalReminderSentAt` ≥ el fin real (`ended_at`): el recordatorio de cobro sólo sella ANTES del fin del
  *   periodo (manda mientras faltan días), así que un sello en o después del fin sólo lo pone este aviso. Sin migración.
- * - Los avisos SIN cobro se pueden apagar (categoría `PLAN` → `SUBSCRIPTION_TRIAL_ENDING`, preferencia del dueño) y llevan
+ * - Los avisos SIN cobro se pueden apagar (categoría `PLAN` → `TIPO_AVISOS_SIN_COBRO`, preferencia del dueño) y llevan
  *   baja en un clic. El aviso de un cobro no se apaga.
  */
 import type Stripe from 'stripe'
@@ -46,11 +46,20 @@ export function precioSinIvaCents(basico: { priceWithoutTax: string }): number {
   return Math.round(Number(basico.priceWithoutTax) * 100)
 }
 
-/** `true` si el dueño apagó los avisos del fin de su prueba por correo (fila apagada o sin EMAIL; sin fila = prendido). */
+/**
+ * La preferencia que apaga los avisos SIN cobro. 🔴 NO es `SUBSCRIPTION_TRIAL_ENDING`: `createNotification` de ese tipo (el
+ * `trial_will_end` de planes y de funciones) crea sola una fila `[IN_APP]` para cada OWNER/ADMIN, y se leía como «lo apagó»
+ * (revisión de Task 6, hallazgo 1). `SUBSCRIPTION_CANCELLED` no lo usa ningún aviso del producto, así que una fila suya sólo
+ * la escribe una decisión explícita: la baja en un clic (categoría `PLAN`) o su interruptor. Un guardia de pruebas falla si
+ * alguien empieza a mandar avisos con este tipo. Sin migración.
+ */
+export const TIPO_AVISOS_SIN_COBRO = NotificationType.SUBSCRIPTION_CANCELLED
+
+/** `true` si el dueño apagó estos avisos por correo (fila apagada o sin EMAIL de `TIPO_AVISOS_SIN_COBRO`; sin fila = prendido). */
 export async function avisoDelPlanApagado(staffId: string | null | undefined, venueId: string): Promise<boolean> {
   if (!staffId) return false
   const pref = await prisma.notificationPreference.findUnique({
-    where: { staffId_venueId_type: { staffId, venueId, type: NotificationType.SUBSCRIPTION_TRIAL_ENDING } },
+    where: { staffId_venueId_type: { staffId, venueId, type: TIPO_AVISOS_SIN_COBRO } },
     select: { enabled: true, channels: true },
   })
   return !!pref && (pref.enabled === false || !pref.channels.includes(NotificationChannel.EMAIL))
@@ -83,7 +92,19 @@ export async function leerDescuento(stripe: Stripe, sub: Stripe.Subscription): P
     const expandida = await stripe.subscriptions.retrieve(sub.id, { expand: ['discounts.source.coupon.applies_to'] })
     const product = expandida.items?.data?.[0]?.price?.product as string | { id?: string } | null | undefined
     const productId = typeof product === 'string' ? product : (product?.id ?? null)
-    return { descuento: descuentoDelPlan(expandida as never, productId), currentPeriodEnd: subscriptionPeriod(expandida).end }
+    const currentPeriodEndExpandida = subscriptionPeriod(expandida).end
+    const leida = expandida as unknown as { discounts?: unknown[]; discount?: unknown }
+    if (!(Array.isArray(leida.discounts) && leida.discounts.length > 0) && !leida.discount) {
+      return { descuento: null, currentPeriodEnd: currentPeriodEndExpandida } // se quitó entre las dos lecturas
+    }
+    // 🔴 Hay descuento pero no se entiende (dos apilados, `amount_off` en otra moneda, otra forma): DESCONOCIDO, nunca «sin
+    // descuento» (revisión de Task 6, hallazgo 2) — si no, se ofrecería terminar Pro con meses baratos por delante.
+    const descuento = descuentoDelPlan(expandida as never, productId)
+    if (!descuento) {
+      logger.warn('avisosDelBasico: descuento que no se entiende; sin el bloque del Básico', { subscriptionId: sub.id })
+      return null
+    }
+    return { descuento, currentPeriodEnd: currentPeriodEndExpandida }
   } catch (error) {
     logger.warn('avisosDelBasico: no se pudo leer el descuento; sin el bloque del Básico', {
       subscriptionId: sub.id,

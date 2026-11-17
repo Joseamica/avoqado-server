@@ -275,6 +275,28 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.html).toContain('Contratar Pro')
       expect(arg.html).not.toContain('Contratar Básico')
     })
+
+    it('🔴 revisión #3: «Tu Pro terminó» NO dice «no se te cobró nada» a quien pagó (es y en)', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      const [es, en] = [spy.mock.calls[0][0], spy.mock.calls[1][0]]
+      expect(es.html).toContain('Tu plan Pro terminó.')
+      expect(`${es.html}${es.text}`).not.toMatch(/no se te cobró|sin cobro/)
+      expect(`${en.html}${en.text}`).not.toMatch(/didn.t charge/)
+      expect(en.html).toContain('Your Pro plan ended.')
+    })
   })
 
   // 🔴 Real defect (2026-09-27): without Stripe's period end the caller passed the win-back deadline as the access

@@ -956,8 +956,36 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
       expect(trialFreeSpy).toHaveBeenCalledTimes(1)
     })
 
+    // La preferencia de cada tipo: `porTipo({ SUBSCRIPTION_CANCELLED: fila })`.
+    const porTipo = (filas: Record<string, unknown>) =>
+      prefs.findUnique.mockImplementation(
+        async (args: { where: { staffId_venueId_type: { type: string } } }) => filas[args.where.staffId_venueId_type.type] ?? null,
+      )
+
+    it('🔴 revisión #1: la fila [IN_APP] que `createNotification` crea sola para SUBSCRIPTION_TRIAL_ENDING NO apaga el aviso', async () => {
+      porTipo({ SUBSCRIPTION_TRIAL_ENDING: { enabled: true, channels: ['IN_APP'] } })
+      porConsulta({ cobros: [row()] })
+      mockRetrieve.mockResolvedValue(pruebaSinCobro(8))
+      await new PlanRenewalReminderJob().runNow()
+      expect(trialFreeSpy).toHaveBeenCalledTimes(1)
+      // Se pregunta por el tipo propio de estos avisos.
+      expect(prefs.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { staffId_venueId_type: { staffId: 'staff_owner', venueId: 'v1', type: 'SUBSCRIPTION_CANCELLED' } },
+        }),
+      )
+    })
+
+    it('apagado con `enabled: false` → no sale', async () => {
+      porTipo({ SUBSCRIPTION_CANCELLED: { enabled: false, channels: ['IN_APP', 'EMAIL'] } })
+      porConsulta({ cobros: [row()] })
+      mockRetrieve.mockResolvedValue(pruebaSinCobro(8))
+      await new PlanRenewalReminderJob().runNow()
+      expect(trialFreeSpy).not.toHaveBeenCalled()
+    })
+
     it('el dueño apagó estos avisos por correo → no sale, y queda sellado', async () => {
-      prefs.findUnique.mockResolvedValue({ channels: ['IN_APP'] })
+      porTipo({ SUBSCRIPTION_CANCELLED: { enabled: true, channels: ['IN_APP'] } })
       porConsulta({ cobros: [row()] })
       mockRetrieve.mockResolvedValue(pruebaSinCobro(8))
       await new PlanRenewalReminderJob().runNow()
@@ -1027,6 +1055,23 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
     ])('%s → sin bloque', async (_c, fila, sub) => {
       porConsulta({ cobros: [row(fila)] })
       conDescuento(8, 5, sub)
+      await new PlanRenewalReminderJob().runNow()
+      expect(renewalSpy).toHaveBeenCalledTimes(1)
+      expect(renewalSpy.mock.calls[0][1].basicOffer).toBeUndefined()
+    })
+
+    it('🔴 revisión #2: descuento presente que no se entiende (dos apilados) → DESCONOCIDO: sin bloque', async () => {
+      porConsulta({ cobros: [row()] })
+      const base = stripeSub(8, { id: 'sub_1', discounts: ['di_1', 'di_2'] })
+      const fin = Math.floor((Date.now() + 5 * DAY) / 1000)
+      const expandida = {
+        ...base,
+        discounts: [
+          { coupon: { percent_off: 30, duration: 'repeating' }, end: fin },
+          { coupon: { percent_off: 10, duration: 'forever' }, end: null },
+        ],
+      }
+      mockRetrieve.mockImplementation((_id: string, opts?: { expand?: string[] }) => Promise.resolve(opts?.expand ? expandida : base))
       await new PlanRenewalReminderJob().runNow()
       expect(renewalSpy).toHaveBeenCalledTimes(1)
       expect(renewalSpy.mock.calls[0][1].basicOffer).toBeUndefined()

@@ -999,6 +999,24 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       )
     })
 
+    it('🔴 revisión #2: prueba con un descuento que no se entiende (dos apilados) → sin bloque del Básico', async () => {
+      // Con Básico publicado (si no, la prueba no probaría nada); se regresa a «sin Básico» al final.
+      mockBasico.mockResolvedValue({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      const fin = TRIAL_END_S + 60 * 86400
+      await trialWillEnd(
+        buildSub({
+          discounts: [
+            { coupon: { percent_off: 30, duration: 'repeating' }, end: fin },
+            { coupon: { percent_off: 10, duration: 'forever' }, end: null },
+          ],
+        }),
+      )
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
+      expect(emailService.sendPlanRenewalReminderEmail.mock.calls[0][1].basicOffer).toBeUndefined()
+      mockBasico.mockResolvedValue(null)
+    })
+
     it('Básico: Premium, anual o sin Básico publicado → el aviso de siempre, sin bloque', async () => {
       mockBasico.mockResolvedValue({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
       givenFeature('PLAN_PREMIUM', 'Avoqado Premium')
@@ -1286,6 +1304,9 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
     beforeEach(() => {
       sello = null
+      // Cada prueba arranca sin preferencias: una implementación por tipo no se filtra a la siguiente.
+      const prefs = (prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference
+      prefs.findUnique.mockReset().mockResolvedValue(null)
       mockBasico.mockResolvedValue({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
       ;(prisma.venueFeature as unknown as { findMany: jest.Mock }).findMany.mockResolvedValue([
         { venueId: 'venue_1', feature: { code: 'PLAN_PRO' } },
@@ -1341,6 +1362,16 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     ])('%s → sin aviso', async (_c, over) => {
       await handleSubscriptionDeleted(borrada(over))
       expect(emailService.sendPlanEndedEmail).not.toHaveBeenCalled()
+    })
+
+    it('🔴 revisión #1: un Pro pagado que pasó por una prueba (fila [IN_APP] creada sola para SUBSCRIPTION_TRIAL_ENDING) SÍ recibe «Tu Pro terminó»', async () => {
+      ;(prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference.findUnique.mockImplementation(
+        async (args: { where: { staffId_venueId_type: { type: string } } }) =>
+          args.where.staffId_venueId_type.type === 'SUBSCRIPTION_TRIAL_ENDING' ? { enabled: true, channels: ['IN_APP'] } : null,
+      )
+      const finPeriodo = FIN_S + 30 * 86400
+      await handleSubscriptionDeleted(borrada({ ended_at: finPeriodo, cancel_at: finPeriodo, current_period_end: finPeriodo }))
+      expect(emailService.sendPlanEndedEmail).toHaveBeenCalledWith('negocio@test.com', expect.objectContaining({ kind: 'PRO' }))
     })
 
     it('el dueño apagó estos avisos → no sale (y no se reintenta)', async () => {

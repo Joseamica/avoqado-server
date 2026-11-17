@@ -155,6 +155,11 @@ describe('getPlanState — basicOffer', () => {
     expect((await getPlanState('v1')).basicOffer).toMatchObject({ canEndProNow: false, discountEndsAt: fin.toISOString() })
   })
 
+  it('🔴 revisión #2: descuento vigente que no se entiende (hasActiveDiscount sin descuento) → canEndProNow false', async () => {
+    mockRetrieve.mockResolvedValue(resumen({ hasActiveDiscount: true, descuento: null }))
+    expect((await getPlanState('v1')).basicOffer).toMatchObject({ canEndProNow: false, discountEndsAt: null })
+  })
+
   it('Pro en su ÚLTIMO periodo con descuento → canEndProNow true', async () => {
     mockRetrieve.mockResolvedValue(resumen({ hasActiveDiscount: true, descuento: repetido(new Date('2026-12-01T00:00:00Z')) }))
     expect((await getPlanState('v1')).basicOffer).toMatchObject({ canEndProNow: true })

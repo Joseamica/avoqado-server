@@ -322,7 +322,10 @@ async function basicOfferOf(
   return {
     availableAt: stripeSub.currentPeriodEnd ? stripeSub.currentPeriodEnd.toISOString() : null,
     price,
-    canEndProNow: !stripeSub.cancelAtPeriodEnd && isLastDiscountedPeriod(stripeSub, now),
+    // 🔴 Un descuento vigente que no se entiende (`hasActiveDiscount` sin `descuento`) es DESCONOCIDO: no se deja terminar
+    // Pro (revisión de Task 6, hallazgo 2); `isLastDiscountedPeriod` lo leería como «sin descuento».
+    canEndProNow:
+      !stripeSub.cancelAtPeriodEnd && !(stripeSub.hasActiveDiscount && !stripeSub.descuento) && isLastDiscountedPeriod(stripeSub, now),
     discountEndsAt: stripeSub.descuento?.endsAt ? stripeSub.descuento.endsAt.toISOString() : null,
   }
 }

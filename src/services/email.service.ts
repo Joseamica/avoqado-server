@@ -5383,13 +5383,14 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       : en
         ? 'Your Avoqado Pro plan has ended'
         : 'Tu plan Avoqado Pro terminó'
+    // «No se te cobró nada» sólo es verdad de la PRUEBA: a quien pagó su Pro no se le dice (revisión de Task 6, hallazgo 3).
     const parrafos = en
       ? [
-          `${prueba ? 'Your Pro trial ended' : 'Your Pro plan ended'} and we didn't charge you anything. Your business keeps working on the Free plan and your data stays as it is.`,
+          `${prueba ? "Your Pro trial ended and we didn't charge you anything." : 'Your Pro plan ended.'} Your business keeps working on the Free plan and your data stays as it is.`,
           precio ? `You can get Básico (${precio} + VAT) with one click, or go back to Pro.` : 'You can go back to Pro whenever you want.',
         ]
       : [
-          `${prueba ? 'Tu prueba de Pro terminó' : 'Tu plan Pro terminó'} y no se te cobró nada. Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
+          `${prueba ? 'Tu prueba de Pro terminó y no se te cobró nada.' : 'Tu plan Pro terminó.'} Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
           precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a Pro.` : 'Puedes volver a Pro cuando quieras.',
         ]
     const greeting = en ? 'Hi,' : 'Hola,'
