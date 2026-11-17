@@ -3790,6 +3790,8 @@ export async function mergeOrdersInTransaction(
       posRawData: true,
       taxAmount: true,
       kitchenPendingAt: true,
+      rondaTardiaDeId: true,
+      rondaTardiaAparato: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
       serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
@@ -3813,6 +3815,7 @@ export async function mergeOrdersInTransaction(
       originSystem: true,
       source: true,
       posRawData: true,
+      rondaTardiaDeId: true,
     },
   })
   if (!freshSource || !freshTarget) {
@@ -3963,6 +3966,17 @@ export async function mergeOrdersInTransaction(
           .map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
       ],
       skipDuplicates: true,
+    })
+  }
+
+  // D7 (hz:033d44ca:D7, Codex r2 #1): el origen es la cuenta aparte de una ronda tardía. Lo que su aparato todavía mande para la
+  // cuenta cobrada (su cobro sin red, otra ronda) debe seguir a sus productos: el vínculo pasa al destino, si éste no trae uno propio.
+  // Primero se suelta del origen (la pareja es única). El origen todavía debe, así que nada cuelga de él en la cadena.
+  if (freshSource.rondaTardiaDeId && !freshTarget.rondaTardiaDeId) {
+    await tx.order.update({ where: { id: source.id }, data: { rondaTardiaDeId: null, rondaTardiaAparato: null } })
+    await tx.order.update({
+      where: { id: target.id },
+      data: { rondaTardiaDeId: freshSource.rondaTardiaDeId, rondaTardiaAparato: freshSource.rondaTardiaAparato },
     })
   }
 

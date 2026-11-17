@@ -1,5 +1,9 @@
 import prisma from '@/utils/prismaClient'
 import { ReferralStatus, ReferralTier } from '@prisma/client'
+import { fromZonedTime } from 'date-fns-tz'
+import { getVenueTimezone } from '@/services/dashboard/commission/commission-utils'
+import { zonaValida } from '@/utils/datetime'
+import { venueCivilDate } from '@/utils/venueDateKeys'
 
 export interface ListReferralsInput {
   venueId: string
@@ -125,11 +129,14 @@ export async function listReferrals(input: ListReferralsInput) {
 }
 
 export async function getReferralSummary(venueId: string) {
-  const startOfMonth = new Date()
-  startOfMonth.setDate(1)
-  startOfMonth.setHours(0, 0, 0, 0)
-  const startOfPrevMonth = new Date(startOfMonth)
-  startOfPrevMonth.setMonth(startOfPrevMonth.getMonth() - 1)
+  // D19: «este mes» empieza el día 1 a la medianoche del NEGOCIO. `setDate(1)` + `setHours(0)` daban la del proceso (UTC
+  // en producción): en CDMX el mes empezaba a las 18:00 del último día del mes anterior.
+  const timezone = zonaValida(await getVenueTimezone(venueId))
+  const { year, month } = venueCivilDate(new Date(), timezone)
+  const monthStart = (offset: number) =>
+    fromZonedTime(`${new Date(Date.UTC(year, month - 1 + offset, 1)).toISOString().slice(0, 10)}T00:00:00.000`, timezone)
+  const startOfMonth = monthStart(0)
+  const startOfPrevMonth = monthStart(-1)
 
   const [thisMonth, prevMonth, qualifiedThisMonth, pendingThisMonth] = await Promise.all([
     prisma.referral.count({ where: { venueId, createdAt: { gte: startOfMonth } } }),

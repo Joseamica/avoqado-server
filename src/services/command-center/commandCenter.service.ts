@@ -4,8 +4,9 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
-import { venueStartOfDay, venueEndOfDay, venueStartOfMonth, venueStartOfDayOffset, DEFAULT_TIMEZONE } from '../../utils/datetime'
-import { toZonedTime } from 'date-fns-tz'
+import { venueStartOfDay, venueStartOfMonth, venueStartOfDayOffset, parseDbDateRange, zonaValida } from '../../utils/datetime'
+import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
@@ -16,7 +17,7 @@ async function getVenueTimezone(venueId: string): Promise<string> {
     where: { id: venueId },
     select: { timezone: true },
   })
-  return venue?.timezone || DEFAULT_TIMEZONE
+  return zonaValida(venue?.timezone) // D19: an invalid zone falls back to Mexico City instead of breaking the report
 }
 
 // Types for the service responses - aligned with frontend expectations
@@ -553,26 +554,29 @@ class CommandCenterService {
     const { days = 7, startDate, endDate } = options
     const timezone = await getVenueTimezone(venueId)
 
-    let currentPeriodStart: Date
-    let currentPeriodEnd: Date
-
-    // Determine date range using venue timezone
+    // D19: every bound and every day of the chart comes from venue CIVIL dates (`YYYY-MM-DD`) and one clock read, so neither
+    // the process zone (UTC in production) nor a DST day (25 h in Tijuana) moves them. The DASHBOARD sends bare `YYYY-MM-DD`
+    // venue days: `new Date('2026-11-15')` was UTC midnight (18:00 of the 14th in Mexico City) and the chart showed the day
+    // before. parseDbDateRange validates the input and reads a bare day in the venue's zone; only its civil day is kept.
+    let startKey: string
+    let endKey: string
     if (startDate && endDate) {
-      currentPeriodStart = venueStartOfDay(timezone, new Date(startDate))
-      currentPeriodEnd = venueEndOfDay(timezone, new Date(endDate))
+      const range = parseDbDateRange(startDate, endDate, timezone)
+      startKey = venueDayKey(range.from, timezone)
+      endKey = venueDayKey(range.to, timezone)
     } else {
-      currentPeriodEnd = venueEndOfDay(timezone)
-      currentPeriodStart = venueStartOfDayOffset(timezone, -(days - 1))
+      endKey = venueDayKey(new Date(), timezone)
+      startKey = addCivilDays(endKey, -(days - 1))
     }
+    const dayKeys: string[] = []
+    for (let key = startKey; key <= endKey; key = addCivilDays(key, 1)) dayKeys.push(key)
 
-    // Calculate previous period (same duration, immediately before)
-    const periodDuration = Math.ceil((currentPeriodEnd.getTime() - currentPeriodStart.getTime()) / (1000 * 60 * 60 * 24))
-    // Previous period ends the day before current period starts
-    const dayBeforeStart = new Date(currentPeriodStart.getTime() - 1) // 1ms before currentPeriodStart
-    const previousPeriodEnd = venueEndOfDay(timezone, dayBeforeStart)
-    // Previous period starts periodDuration days before previousPeriodEnd
-    const prevStartRef = new Date(previousPeriodEnd.getTime() - (periodDuration - 1) * 24 * 60 * 60 * 1000)
-    const previousPeriodStart = venueStartOfDay(timezone, prevStartRef)
+    const midnight = (key: string) => fromZonedTime(`${key}T00:00:00.000`, timezone)
+    const currentPeriodStart = midnight(startKey)
+    const currentPeriodEnd = new Date(midnight(addCivilDays(endKey, 1)).getTime() - 1)
+    // Previous period: the same number of calendar days, immediately before.
+    const previousPeriodStart = midnight(addCivilDays(startKey, -dayKeys.length))
+    const previousPeriodEnd = new Date(currentPeriodStart.getTime() - 1)
 
     // Aggregate current period per day in SQL (avoids loading all orders+items into memory)
     const [dailyData, prevAgg, prevUnitsAgg] = await Promise.all([
@@ -627,25 +631,16 @@ class CommandCenterService {
     }
 
     // Build trend data for all days in range (including days with zero)
-    // Convert UTC period boundaries to venue-local dates for iteration
-    const trendMap = new Map<string, SalesTrendPoint>()
-    const venueStart = toZonedTime(currentPeriodStart, timezone)
-    const venueEnd = toZonedTime(currentPeriodEnd, timezone)
-    const iterDate = new Date(venueStart)
-    while (iterDate <= venueEnd) {
-      const dateKey = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}-${String(iterDate.getDate()).padStart(2, '0')}`
-      const displayDate = iterDate.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })
+    const trend: SalesTrendPoint[] = dayKeys.map(dateKey => {
       const dayData = dailyMap.get(dateKey) || { sales: 0, units: 0, transactions: 0 }
-      trendMap.set(dateKey, {
-        date: displayDate,
+      return {
+        // Noon UTC of the civil date, printed in UTC: the label is that date in any process zone.
+        date: new Date(`${dateKey}T12:00:00.000Z`).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', timeZone: 'UTC' }),
         sales: Math.round(dayData.sales * 100) / 100,
         units: dayData.units,
         transactions: dayData.transactions,
-      })
-      iterDate.setDate(iterDate.getDate() + 1)
-    }
-
-    const trend = Array.from(trendMap.values())
+      }
+    })
 
     // Calculate totals from daily aggregates (no in-memory order iteration)
     let currentTotalSales = 0

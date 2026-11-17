@@ -114,3 +114,13 @@ export function venueIsoWeekKey(date: Date, timezone: string): string {
   const { isoYear, week } = venueIsoWeek(date, timezone)
   return `${isoYear}-W${String(week).padStart(2, '0')}`
 }
+
+/**
+ * «YYYY-MM-DD» `days` días de calendario después (o antes, si es negativo) de otro «YYYY-MM-DD». Aritmética sobre la fecha
+ * civil en UTC puro, sin horas: no la mueve la zona del proceso ni un cambio de horario (D19). La medianoche de ese día en el
+ * negocio es `fromZonedTime(\`${llave}T00:00:00.000\`, zona)`.
+ */
+export function addCivilDays(dayKey: string, days: number): string {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10)
+}

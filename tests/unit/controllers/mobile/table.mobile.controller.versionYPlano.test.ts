@@ -53,7 +53,18 @@ describe('GET /tables — campos nuevos y orden', () => {
       viewer: { staffId: 's1', canManageAllTables: true },
       tablesVersion: 'mesas-v1',
       floorPlanVersion: 'plano-v1',
+      capabilities: { openTableNewVisit: true },
     })
+  })
+
+  it('D8: anuncia que entiende OPEN_TABLE.visitaNueva, también sin versión (ANDROID sólo suelta la mesa sin red si lo ve)', async () => {
+    montar([], async () => {
+      throw new Error('base lenta')
+    })
+    const { getTables } = await import('@/controllers/mobile/table.mobile.controller')
+    const { res, json } = respuesta()
+    await getTables({ params: { venueId: 'venue-1' }, authContext: { userId: 's1' } } as any, res)
+    expect(json.mock.calls[0][0]).toMatchObject({ capabilities: { openTableNewVisit: true } })
   })
 
   it('la versión se calcula ANTES de leer las mesas', async () => {

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { StaffRole } from '@prisma/client'
 import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
+import { esFechaHoraValida, esHoraSinZona, fechaHoraDelNegocio } from '@/utils/fechaHoraDelNegocio'
 
 // ==========================================
 // RESERVATION SCHEMAS — Zod validation (Spanish messages)
@@ -373,18 +374,33 @@ export const updateReservationBodySchema = z
 
 export const rescheduleNotificationChannelSchema = z.enum(['push', 'whatsapp', 'email', 'sms', 'none'])
 
+// La hora llega tal cual (texto o Date): una hora SIN zona es hora del negocio y sólo el servicio,
+// que conoce la zona del venue, la convierte. `z.coerce.date` la leía en la zona del proceso (UTC en
+// Render) y la cita quedaba 6 h antes en México (encargo e781ce).
+const fechaHoraDeReagendar = (requerido: string) =>
+  z
+    .union([z.date(), z.string()], { required_error: requerido, invalid_type_error: requerido })
+    .refine(esFechaHoraValida, { message: 'La fecha u hora no es válida' })
+
 export const rescheduleBodySchema = z
   .object({
-    startsAt: z.coerce.date({ required_error: 'La nueva fecha de inicio es requerida' }),
-    endsAt: z.coerce.date({ required_error: 'La nueva fecha de fin es requerida' }),
+    startsAt: fechaHoraDeReagendar('La nueva fecha de inicio es requerida'),
+    endsAt: fechaHoraDeReagendar('La nueva fecha de fin es requerida'),
     notificationChannel: rescheduleNotificationChannelSchema.optional(),
     customMessage: z.string().max(500).optional(),
     allowOverCapacity: z.boolean({ invalid_type_error: 'allowOverCapacity debe ser true o false' }).optional(),
   })
-  .refine(data => data.endsAt > data.startsAt, {
-    message: 'La fecha de fin debe ser posterior a la fecha de inicio',
-    path: ['endsAt'],
-  })
+  // Sólo se comparan dos horas del mismo tipo (las dos sin zona, o las dos con zona): mezcladas, el
+  // orden depende de la zona del negocio y lo revisa el servicio.
+  .refine(
+    data =>
+      esHoraSinZona(data.startsAt) !== esHoraSinZona(data.endsAt) ||
+      fechaHoraDelNegocio(data.endsAt, 'UTC') > fechaHoraDelNegocio(data.startsAt, 'UTC'),
+    {
+      message: 'La fecha de fin debe ser posterior a la fecha de inicio',
+      path: ['endsAt'],
+    },
+  )
 
 export const cancelBodySchema = z.object({
   reason: z.string().max(1000).optional(),

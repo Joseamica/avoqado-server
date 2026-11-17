@@ -264,6 +264,13 @@ export async function assignTable(
    * el reducer la rechazaba (TABLE_OWNED_BY_OTHER) y el efectivo ya cobrado sin red quedaba en cuarentena. Sin él, como D51.
    */
   soloCuentasDe?: string,
+  /**
+   * D8 (hz:033d44ca:D8, 16-nov-2026): sólo el reducer `OPEN_TABLE`, con `abiertaSinRedEn`. El aparato soltó sin red esta mesa tras cobrar
+   * su cuenta y abrió OTRA visita, POR SU COLA (nunca intentó abrirla en línea: no hay una apertura perdida que unir). No se adopta
+   * NINGUNA cuenta viva de la mesa (la anterior que quedó debiendo, una separada de ella, la de otra caja): la nueva nace junto a ellas,
+   * sin soltarlas ni moverles el puntero, con la nota de D51. Sin él, como D51/D71.
+   */
+  visitaNueva?: boolean,
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -321,8 +328,10 @@ export async function assignTable(
     // D71: con la propiedad de mesa, además, sólo lo de ESTE mesero. Una cuenta sin mesero tampoco (Codex r2 #1): su apertura en línea
     // perdida nació a su nombre (`servedById: staffId`, abajo), así que una sin mesero no es suya y absorbería su venta.
     const delMesero = (o: { servedById: string | null }) => !soloCuentasDe || o.servedById === soloCuentasDe
+    // D8: una visita nueva declarada (sólo con la hora sin red) no adopta nada.
+    const sinAdoptar = !!visitaNueva && !!adoptarHasta
     const adoptable = (o: { createdAt: Date; servedById: string | null }) =>
-      delMesero(o) && (!adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime()))
+      !sinAdoptar && delMesero(o) && (!adoptarHasta || (mesaQuieta && o.createdAt.getTime() <= adoptarHasta.getTime()))
 
     // If table already has an active order, return it
     const punteroVivo =
@@ -344,13 +353,14 @@ export async function assignTable(
     }
 
     let vivas: typeof scope.orders = []
-    if (table.status === 'OCCUPIED') {
+    // D8: la visita nueva tampoco suelta de la mesa una cuenta viva aunque la mesa no diga OCUPADA: queda junto a ella.
+    if (table.status === 'OCCUPIED' || sinAdoptar) {
       vivas = scope.orders
         .filter(o => o.tableId === table.id && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(o.status) && o.paymentStatus !== 'PAID')
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       const candidate = vivas[0]
       const sibling =
-        candidate && mesaQuieta
+        candidate && mesaQuieta && !sinAdoptar
           ? await tx.order.findFirst({
               where: {
                 // D51: con la hora, la más antigua que se PUEDE adoptar (la misma regla que `adoptable`).
@@ -510,6 +520,155 @@ export async function assignTable(
     order: newOrder,
     isNewOrder: true,
   }
+}
+
+/** Una cuenta de la cadena de rondas tardías (D7). */
+export type CuentaDeRondaTardia = {
+  id: string
+  version: number
+  status: string
+  paymentStatus: string
+  servedById: string | null
+  tableId: string | null
+}
+const SELECT_CUENTA_DE_RONDA_TARDIA = {
+  id: true,
+  version: true,
+  status: true,
+  paymentStatus: true,
+  servedById: true,
+  tableId: true,
+} as const
+/**
+ * Tope de la cadena, el MISMO para leerla y para crecerla (Codex r2 #3): cada eslabón exige que el anterior ya se haya cobrado antes
+ * de otra ronda tardía. Llegado el tope, otra ronda tardía se rechaza (queda por revisar) en vez de nacer donde nadie la encuentra.
+ */
+export const ESLABONES_MAX = 50
+
+/**
+ * D7 (hz:033d44ca:D7): las cuentas aparte que las rondas tardías de UN aparato abrieron a partir de `cuentaPedida`, en orden. Cada una
+ * nace de la anterior cuando ésta ya se cobró antes de la siguiente ronda tardía. Se recorre por la llave única
+ * (`rondaTardiaDeId`, `rondaTardiaAparato`): sin ventana de tiempo y con índice. Es por aparato y no por mesero: lo que una tablet
+ * guardó sin red es una sola visita, la que ella veía.
+ */
+export async function cadenaDeRondaTardia(
+  db: Prisma.TransactionClient,
+  venueId: string,
+  cuentaPedida: string,
+  aparato: string,
+): Promise<CuentaDeRondaTardia[]> {
+  const cadena: CuentaDeRondaTardia[] = []
+  let padre = cuentaPedida
+  for (let i = 0; i < ESLABONES_MAX; i++) {
+    const hija = await db.order.findFirst({
+      where: { venueId, rondaTardiaDeId: padre, rondaTardiaAparato: aparato },
+      select: SELECT_CUENTA_DE_RONDA_TARDIA,
+    })
+    if (!hija) break
+    cadena.push(hija)
+    padre = hija.id
+  }
+  return cadena
+}
+
+/** La cuenta todavía debe: viva (no cerrada ni anulada) y sin pagar. */
+export function cuentaQueDebe(c: { status: string; paymentStatus: string }): boolean {
+  return !(ESTADOS_FUERA_DE_LA_MESA as readonly string[]).includes(c.status) && c.paymentStatus !== 'PAID'
+}
+
+/**
+ * D7 (hz:033d44ca:D7, founder 16-nov-2026: «A, cuenta aparte»): la cuenta donde cae una ronda que el aparato mandó SIN red a una cuenta
+ * de mesa que otra caja ya cobró. Sólo la usa la cola sin red (`ADD_ITEMS`). Nunca adopta una cuenta viva de la mesa (puede ser otra
+ * visita). Bajo el MISMO candado que `assignTable`: si la última cuenta aparte de este aparato para esa cuenta todavía debe, es ésa
+ * (un reintento, una retoma u otra ronda no abren otra); si no hay o ya se cobró, nace una nueva, a nombre del mesero, colgada de la
+ * última (la llave única la protege también de dos peticiones a la vez).
+ * - Mesa sin cuentas vivas (y no reservada): la cuenta aparte la ocupa, para que la caja la vea en el plano con su saldo.
+ * - Mesa con otra visita viva: nace junto a ella, sin soltarla ni moverle el puntero (como D51).
+ * - Mesa reservada: nace junto, sin tocar la mesa.
+ * La versión se lee DENTRO de la transacción (Codex r1 #4): si alguien la cobra antes de que entre la ronda, la versión ya no
+ * coincide y la ronda se reintenta (VERSION_CONFLICT → RETRY), en vez de chocar con «ya está pagada».
+ * `dentroDeLaTx` escribe la nota en la misma transacción que la cuenta nueva.
+ */
+export async function cuentaAparteParaRondaTardia(p: {
+  venueId: string
+  tableId: string
+  staffId: string
+  covers: number
+  cuentaPedida: string
+  aparato: string
+  dentroDeLaTx: (tx: Prisma.TransactionClient, nueva: { orderId: string; otrasCuentas: string[] }) => Promise<void>
+}): Promise<{ orderId: string; version: number; isNewOrder: boolean }> {
+  const { venueId, tableId, staffId } = p
+  const result = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${7_310_115}::int, hashtext(${JSON.stringify([venueId, tableId])}))::text`
+    const scope = await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [tableId] })
+    const cadena = await cadenaDeRondaTardia(tx, venueId, p.cuentaPedida, p.aparato)
+    const ultima = cadena.at(-1)
+    if (ultima && cuentaQueDebe(ultima)) return { orderId: ultima.id, version: ultima.version, isNewOrder: false as const }
+    if (cadena.length >= ESLABONES_MAX) {
+      throw new BadRequestError(
+        `Esta cuenta ya tiene ${ESLABONES_MAX} cuentas aparte de rondas tardías de este aparato. Revísala con la caja.`,
+      )
+    }
+
+    const table = await tx.table.findFirst({ where: { id: tableId, venueId }, select: { id: true, number: true, status: true } })
+    if (!table) throw new NotFoundError('Table not found or does not belong to this venue')
+    await assertVenueSalesEnabled(venueId, tx)
+
+    const otrasCuentas = scope.orders.filter(o => o.tableId === table.id && cuentaQueDebe(o)).map(o => o.id)
+    const turnoVivo = await turnoAbiertoDelNegocio(tx, venueId)
+    const nueva = await tx.order.create({
+      data: {
+        venueId,
+        shiftId: turnoVivo?.id ?? null,
+        tableId: table.id,
+        covers: p.covers,
+        orderNumber: `ORD-${Date.now()}`,
+        servedById: staffId,
+        terminalId: null,
+        status: 'PENDING',
+        paymentStatus: PaymentStatus.PENDING,
+        kitchenStatus: 'PENDING',
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; la ronda que entra después trae IVA incluido (plan 2)
+        version: 1,
+        rondaTardiaDeId: ultima?.id ?? p.cuentaPedida,
+        rondaTardiaAparato: p.aparato,
+      },
+      select: { id: true, orderNumber: true, version: true },
+    })
+    const tomaLaMesa = otrasCuentas.length === 0 && table.status !== TableStatus.RESERVED
+    if (tomaLaMesa) await tx.table.update({ where: { id: table.id }, data: { status: 'OCCUPIED', currentOrderId: nueva.id } })
+    await p.dentroDeLaTx(tx, { orderId: nueva.id, otrasCuentas })
+    const staff = tomaLaMesa ? await tx.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } }) : null
+    return {
+      orderId: nueva.id,
+      version: nueva.version,
+      isNewOrder: true as const,
+      tomaLaMesa,
+      table,
+      orderNumber: nueva.orderNumber,
+      staff,
+    }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (!result.isNewOrder) return { orderId: result.orderId, version: result.version, isNewOrder: false }
+  logger.info(`🪑 [TABLE SERVICE] Ronda tardía: cuenta aparte ${result.orderNumber} en la mesa ${result.table.number}`)
+  if (result.tomaLaMesa) {
+    socketManager.getBroadcastingService()?.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+      tableId: result.table.id,
+      tableNumber: result.table.number,
+      status: 'OCCUPIED',
+      orderId: result.orderId,
+      orderNumber: result.orderNumber,
+      covers: p.covers,
+      waiter: { id: staffId, name: result.staff ? `${result.staff.firstName} ${result.staff.lastName}`.trim() : '' },
+    })
+  }
+  return { orderId: result.orderId, version: result.version, isNewOrder: true }
 }
 
 /**

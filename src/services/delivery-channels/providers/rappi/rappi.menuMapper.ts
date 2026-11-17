@@ -87,7 +87,7 @@ export interface PreciosDeCanal {
  * El margen se aplica en DECIMAL exacto (regla del repo: dinero nunca en `number`): `10 × 1.1` en punto flotante da
  * `11.000000000000002`, y eso se reportaría como un redondeo que no existe.
  */
-function precioPublicado(sku: string, precioMostrador: number, p: PreciosDeCanal | undefined, problemas: ProblemaMenu[]): number {
+export function precioPublicado(sku: string, precioMostrador: number, p: PreciosDeCanal | undefined, problemas: ProblemaMenu[]): number {
   const fijo = p?.overrides?.[sku]
   if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return enUnidadesDeRappi(sku, new Prisma.Decimal(fijo), problemas)
   const pct = p?.markupPercent

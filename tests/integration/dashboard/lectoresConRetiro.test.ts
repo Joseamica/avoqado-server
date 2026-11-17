@@ -213,7 +213,9 @@ describe('lectores con un renglón retirado por el proveedor', () => {
   })
 
   it('correo nocturno (categorias): el retirado no suma articulos', async () => {
-    expect(await getCategoryBreakdown(venueId, desde, hasta)).toEqual([{ name: 'Test Menu', itemsSold: 1, netSales: 150 }])
+    // D21: las categorías del correo llevan la cuenta COMO SE COBRÓ ($200, el subtotal conserva el renglón retirado) y su
+    // devolución sale en «Devoluciones» (−$50), igual que la cifra de ventas netas; así el desglose suma lo vendido.
+    expect(await getCategoryBreakdown(venueId, desde, hasta)).toEqual([{ name: 'Test Menu', itemsSold: 1, netSales: 200 }])
   })
 
   it('top de productos (shared-query): el retirado no aparece', async () => {

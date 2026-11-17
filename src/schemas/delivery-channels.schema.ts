@@ -36,6 +36,10 @@ export const updateChannelSchema = z.object({
       orderAcceptanceMode: z.enum(ORDER_ACCEPTANCE_MODE_VALUES, { message: 'Modo de aceptación inválido' }).optional(),
       autoSyncMenu: z.boolean({ message: 'El auto-sync de menú debe ser verdadero o falso' }).optional(),
       config: z.record(z.any()).nullable().optional(),
+      // D1: la huella de la selección que tenía la pantalla al abrir (`seleccionHuella` del listado) → 409 si alguien la cambió.
+      seleccionEsperada: z.string().min(1).optional(),
+      // D1: ids de productos que la persona vio y dejó fuera; se suman a `productosRevisados`.
+      marcarRevisados: z.array(z.string().min(1)).max(10000).optional(),
     })
     .strict()
     .refine(body => Object.keys(body).length > 0, { message: 'Envía al menos un campo para actualizar' }),
@@ -80,6 +84,26 @@ export const disconnectChannelSchema = z.object({
     .object({
       venueId: z.string().min(1, 'El venue es requerido'),
       linkId: z.string().min(1, 'El canal es requerido'),
+    })
+    .passthrough(),
+  query: z.object({}).passthrough().optional(),
+})
+
+/** PUT /venues/:venueId/products/:productId/channels — pone (`true`) o quita (`false`) UN producto en 1 a 20 canales (D1). */
+export const productoEnCanalesSchema = z.object({
+  body: z
+    .object({
+      canales: z
+        .record(z.boolean({ message: 'Cada canal va con verdadero (vender ahí) o falso (no vender ahí)' }), {
+          message: 'Envía los canales como { id del canal: verdadero o falso }',
+        })
+        .refine(c => Object.keys(c).length >= 1 && Object.keys(c).length <= 20, { message: 'Envía de 1 a 20 canales' }),
+    })
+    .strict(),
+  params: z
+    .object({
+      venueId: z.string().min(1, 'El venue es requerido'),
+      productId: z.string().min(1, 'El producto es requerido'),
     })
     .passthrough(),
   query: z.object({}).passthrough().optional(),

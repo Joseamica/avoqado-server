@@ -23,6 +23,7 @@ import {
   kioskCheckInReservation,
 } from '@/services/reservation/kioskCheckIn.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { consumeKioskQr, issueKioskQrKey } from '@/services/reservation/kioskQr.service'
 import { createKioskPackCheckout, getAvailablePacks, getKioskPackCheckoutStatus } from '@/services/dashboard/creditPack.public.service'
 import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 
@@ -92,6 +93,15 @@ export async function getChallenge(req: Request, res: Response, next: NextFuncti
   }
 }
 
+// Los dos juntos o ninguno: vacío = tecleado en vivo; con ellos = guardado sin red y mandado después.
+const queuedPhoneBody = z
+  .object({
+    occurredAt: z.string({ invalid_type_error: 'Hora inválida' }).datetime({ message: 'Hora inválida' }),
+    opId: z.string({ invalid_type_error: 'Operación inválida' }).min(8, 'Operación inválida').max(64, 'Operación inválida'),
+  })
+  .partial()
+  .refine(b => !b.occurredAt === !b.opId, 'Manda occurredAt y opId juntos')
+
 /**
  * POST /api/v1/tpv/kiosk/check-in-by-code  (D9)
  *
@@ -107,6 +117,9 @@ export async function checkInByCode(req: Request, res: Response, next: NextFunct
     // cliente ya lo manda así — quitar un campo de una API rompe versiones viejas.
     const identifier = String(req.body?.identifier ?? req.body?.code ?? '').trim()
     if (!identifier) throw new BadRequestError('identifier es requerido')
+    // Asistencia verificada (D-D): la cola sin red del kiosco manda la hora en que se tecleó y el id de su fila.
+    const cola = queuedPhoneBody.safeParse(req.body ?? {})
+    if (!cola.success) throw new BadRequestError(cola.error.issues[0]?.message ?? 'Solicitud incorrecta')
 
     const out = await checkInByIdentifier({
       venueId,
@@ -115,6 +128,8 @@ export async function checkInByCode(req: Request, res: Response, next: NextFunct
       identifier,
       now: new Date(),
       ip: req.ip,
+      ...(cola.data.occurredAt ? { occurredAt: new Date(cola.data.occurredAt) } : {}),
+      ...(cola.data.opId ? { opId: cola.data.opId } : {}),
     })
     res.json(out)
   } catch (error) {
@@ -173,6 +188,7 @@ export async function kioskReservationCheckIn(req: Request, res: Response, next:
       reservationId: req.params.reservationId,
       now: new Date(),
       tapped: closesAt && msBeforeClose ? { closesAt: new Date(closesAt), msBeforeClose } : undefined,
+      byStaffId: req.authContext?.userId ?? null,
     })
     res.json(out)
   } catch (error) {
@@ -207,6 +223,7 @@ export async function consumeChallenge(req: Request, res: Response, next: NextFu
       challengeId: req.params.challengeId,
       secret,
       customerId: auth.customerId,
+      sesion: { tipo: (auth as any).tipo, contactos: (auth as any).contactos ?? [] },
       now: new Date(),
       ip: req.ip,
     })
@@ -296,6 +313,78 @@ export async function kioskPackCheckoutStatus(req: Request, res: Response, next:
     if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new BadRequestError('Pago no encontrado')
 
     res.json({ status: await getKioskPackCheckoutStatus({ venueId, sessionId }) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+const qrKeyBody = z.object({
+  deviceKey: z.string({ required_error: 'Falta el aparato' }).trim().min(8, 'Aparato inválido').max(128, 'Aparato inválido'),
+})
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kiosk/qr-key · body `{ deviceKey }` → `{ keyId, secret, rotateSeconds }`
+ *
+ * Asistencia verificada: la llave con la que el kiosco firma su QR, una por aparato. El aparato la pide una vez con red
+ * y la guarda; con ella pinta el QR aunque se caiga el internet. Pedir otra revoca la anterior del mismo aparato.
+ */
+export async function kioskQrKey(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    const parsed = qrKeyBody.safeParse(req.body ?? {})
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Solicitud incorrecta')
+    const out = await issueKioskQrKey({
+      venueId,
+      deviceKey: parsed.data.deviceKey,
+      staffId: req.authContext?.userId ?? null,
+      now: new Date(),
+    })
+    res.status(201).json(out)
+  } catch (error) {
+    next(error)
+  }
+}
+
+const qrCheckInBody = z.object({
+  keyId: z.string({ required_error: 'Código incompleto' }).min(1, 'Código incompleto').max(40, 'Código inválido'),
+  ts: z
+    .number({ required_error: 'Código incompleto', invalid_type_error: 'Código inválido' })
+    .int('Código inválido')
+    .positive('Código inválido'),
+  sig: z.string({ required_error: 'Código incompleto' }).min(1, 'Código incompleto').max(100, 'Código inválido'),
+})
+
+/**
+ * POST /api/v1/public/venues/:venueSlug/customer/checkin-qr · body `{ keyId, ts, sig }`
+ *
+ * Asistencia verificada: la alumna, desde SU celular y con SU sesión, presenta el QR que pinta el kiosco. Lo que va en
+ * el QR viaja en el FRAGMENTO de la liga y aquí en el body, nunca en la ruta (logs, historial).
+ */
+export async function consumeQr(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const auth = (req as any).customerAuth as { customerId: string; venueId: string; tipo: string; contactos?: any[] } | null
+    const venue = (req as any).publicVenue as { id: string } | undefined
+    if (!auth) throw new UnauthorizedError('Inicia sesión para hacer tu check-in', 'CUSTOMER_AUTH_REQUIRED')
+    if (!venue) throw new BadRequestError('Local no resuelto')
+    if (auth.venueId !== venue.id) throw new UnauthorizedError('Tu sesión es de otro local', 'CUSTOMER_TOKEN_VENUE_MISMATCH')
+
+    const parsed = qrCheckInBody.safeParse(req.body ?? {})
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Código inválido')
+
+    res.json(
+      await consumeKioskQr({
+        venueId: venue.id,
+        keyId: parsed.data.keyId,
+        ts: parsed.data.ts,
+        sig: parsed.data.sig,
+        customerId: auth.customerId,
+        sesion: { tipo: auth.tipo, contactos: auth.contactos ?? [] },
+        now: new Date(),
+        ip: req.ip,
+      }),
+    )
   } catch (error) {
     next(error)
   }

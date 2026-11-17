@@ -2,6 +2,10 @@ import { PaymentStatus, StaffRole } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import express, { NextFunction, Request, Response } from 'express'
 import logger from '../config/logger'
+import { fromZonedTime } from 'date-fns-tz'
+import { getVenueTimezone } from '../services/dashboard/commission/commission-utils'
+import { zonaValida } from '../utils/datetime'
+import { venueMonthKey } from '../utils/venueDateKeys'
 import rateLimit from 'express-rate-limit'
 import * as activationController from '../controllers/tpv/activation.controller'
 import { acceptSims, listMySims, rejectSim } from '../controllers/tpv/simCustody.tpv.controller'
@@ -7340,8 +7344,10 @@ router.get(
       const { venueId, userId: staffId } = (req as any).authContext
 
       // Parse query params
-      const now = new Date()
-      const monthParam = (req.query.month as string) || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+      // D19: the month is the VENUE's calendar month. The process clock (UTC in production) moved both the default month and
+      // its bounds 6 h in Mexico City: the month ran from 18:00 of the previous month's last day to 18:00 of its own.
+      const timezone = zonaValida(await getVenueTimezone(venueId))
+      const monthParam = (req.query.month as string) || venueMonthKey(new Date(), timezone)
       const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 100, 1), 500)
       const offset = Math.max(parseInt(req.query.offset as string) || 0, 0)
 
@@ -7351,8 +7357,10 @@ router.get(
       }
 
       const [year, month] = monthParam.split('-').map(Number)
-      const startOfMonth = new Date(Date.UTC(year, month - 1, 1))
-      const endOfMonth = new Date(Date.UTC(year, month, 1)) // first day of next month
+      const monthMidnight = (m: number) =>
+        fromZonedTime(`${new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 10)}T00:00:00.000`, timezone)
+      const startOfMonth = monthMidnight(month - 1)
+      const endOfMonth = monthMidnight(month) // first day of next month
 
       logger.info(`📊 [SERIALIZED INV] My sales query`, {
         venueId,

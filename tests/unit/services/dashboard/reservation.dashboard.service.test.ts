@@ -3096,6 +3096,278 @@ describe('Reservation Dashboard Service', () => {
   })
 
   // ==========================================
+  // RESCHEDULE: hora del negocio y aviso al cliente (encargo e781ce)
+  // ==========================================
+
+  describe('rescheduleReservation — hora del negocio y aviso al cliente', () => {
+    function prepararReagendar(overrides: Record<string, any> = {}) {
+      const existing = createMockReservation({
+        status: 'CONFIRMED',
+        venue: { name: 'Estética Luna', timezone: 'America/Mexico_City' },
+        ...overrides,
+      })
+      jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue({
+        id: existing.id,
+        venueId: existing.venueId,
+        startsAt: existing.startsAt,
+        endsAt: existing.endsAt,
+        blockedEndsAt: existing.endsAt,
+        duration: existing.duration,
+        productId: existing.productId,
+        productIds: existing.productIds,
+        tableId: existing.tableId,
+        assignedStaffId: existing.assignedStaffId,
+        partySize: existing.partySize,
+        classSessionId: null,
+        status: existing.status,
+      })
+      prismaMock.reservation.findFirst.mockResolvedValue(existing)
+      prismaMock.$queryRaw.mockResolvedValue([])
+      prismaMock.reservation.update.mockImplementation(async (args: any) => ({ ...existing, ...args.data }))
+      prismaMock.reservation.findUniqueOrThrow.mockImplementation(async () => existing)
+      jest.spyOn(whatsappService, 'sendReservationRescheduleWhatsApp').mockResolvedValue(true)
+      jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(true)
+      return existing
+    }
+
+    it('una hora SIN zona del DASHBOARD se lee en la zona del negocio (15:00 CDMX = 21:00Z), no en la del proceso', async () => {
+      prepararReagendar()
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T15:00', endsAt: '2026-11-12T16:00', notificationChannel: 'none' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            startsAt: new Date('2026-11-12T21:00:00.000Z'),
+            endsAt: new Date('2026-11-12T22:00:00.000Z'),
+            duration: 60,
+          }),
+        }),
+      )
+    })
+
+    it('una hora con Z (ANDROID e iOS) se respeta tal cual', async () => {
+      prepararReagendar()
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'none' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ startsAt: new Date('2026-11-12T21:00:00.000Z') }),
+        }),
+      )
+    })
+
+    it('el WhatsApp sale con la hora que se escogió (15:00), no corrida', async () => {
+      prepararReagendar()
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T15:00', endsAt: '2026-11-12T16:00', notificationChannel: 'whatsapp' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledWith(
+        '+525551234567',
+        expect.objectContaining({ time: '15:00', date: '12 de noviembre de 2026' }),
+      )
+    })
+
+    it('«push» (lo que traen marcado ANDROID e iOS) avisa por WhatsApp si hay teléfono', async () => {
+      prepararReagendar()
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'RESERVATION_RESCHEDULED',
+          data: expect.objectContaining({ notificationChannel: 'push', notificationSentVia: 'whatsapp' }),
+        }),
+      )
+    })
+
+    it('«push» sin teléfono avisa por correo', async () => {
+      prepararReagendar({ guestPhone: null, guestEmail: 'juan@example.com' })
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).toHaveBeenCalledWith(
+        'juan@example.com',
+        expect.objectContaining({ newDateTime: '12 de noviembre de 2026, 15:00' }),
+      )
+    })
+
+    it('«push» con WhatsApp caído cae al correo', async () => {
+      prepararReagendar({ guestEmail: 'juan@example.com' })
+      jest.spyOn(whatsappService, 'sendReservationRescheduleWhatsApp').mockRejectedValue(new Error('template not approved'))
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(emailService.sendReservationRescheduledEmail).toHaveBeenCalledTimes(1)
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ notificationSentVia: 'email' }) }),
+      )
+    })
+
+    it('«WhatsApp» elegido a mano NO cae al correo si falla (se respeta lo que escogió)', async () => {
+      prepararReagendar({ guestEmail: 'juan@example.com' })
+      jest.spyOn(whatsappService, 'sendReservationRescheduleWhatsApp').mockRejectedValue(new Error('caído'))
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'whatsapp' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ notificationSentVia: null }) }),
+      )
+    })
+
+    it('el correo que Resend rechaza (false) no se anota como enviado', async () => {
+      prepararReagendar({ guestPhone: null, guestEmail: 'juan@example.com' })
+      jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(false)
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'push' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ notificationSentVia: null }) }),
+      )
+    })
+
+    // Reenvío de la cola sin red: la cita YA está a las 21:00Z y el último reagendar de ESTE movimiento ya avisó.
+    const yaMovidaA21 = { startsAt: new Date('2026-11-12T21:00:00.000Z'), endsAt: new Date('2026-11-12T22:00:00.000Z') }
+    const avisoPrevio = (data: Record<string, unknown>) =>
+      prismaMock.activityLog.findFirst.mockResolvedValue({
+        data: { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', ...data },
+      } as any)
+    const reagendarA21 = (endsAt = '2026-11-12T22:00:00.000Z', notificationChannel: any = 'push') =>
+      rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt, notificationChannel },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+    it('repetir el mismo reagendar que YA avisó (cola sin red que reenvía) no vuelve a avisar', async () => {
+      prepararReagendar({ ...yaMovidaA21, guestEmail: 'juan@example.com' })
+      avisoPrevio({ notificationSentVia: 'whatsapp' })
+
+      await reagendarA21()
+
+      expect(prismaMock.activityLog.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: VENUE_ID, entityId: 'res-1', action: 'RESERVATION_RESCHEDULED' }),
+        }),
+      )
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+      expect(activityLogService.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ notificationSentVia: null, notificationSkipped: 'ALREADY_NOTIFIED' }),
+        }),
+      )
+    })
+
+    it('el 3.er reenvío idéntico tampoco avisa (el 2.º, que se saltó el aviso, conserva la evidencia)', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: null, notificationSkipped: 'ALREADY_NOTIFIED' })
+
+      await reagendarA21()
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+    })
+
+    it('mismo inicio pero OTRO fin sí avisa (es un cambio real)', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: 'whatsapp' })
+
+      await reagendarA21('2026-11-12T23:00:00.000Z')
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    })
+
+    it('mismo movimiento cuyo aviso anterior NO salió (o fue «Sin notificación») sí avisa ahora', async () => {
+      prepararReagendar(yaMovidaA21)
+      avisoPrevio({ notificationSentVia: null })
+
+      await reagendarA21()
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    })
+
+    it('si la cita se movió de verdad, no consulta el historial', async () => {
+      prepararReagendar()
+
+      await reagendarA21()
+
+      expect(prismaMock.activityLog.findFirst).not.toHaveBeenCalled()
+      expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    })
+
+    it('«Sin notificación» no avisa a nadie', async () => {
+      prepararReagendar({ guestEmail: 'juan@example.com' })
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-12T21:00:00.000Z', endsAt: '2026-11-12T22:00:00.000Z', notificationChannel: 'none' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(whatsappService.sendReservationRescheduleWhatsApp).not.toHaveBeenCalled()
+      expect(emailService.sendReservationRescheduledEmail).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================
   // RESCHEDULE CLASS RESERVATION (public-facing)
   // ==========================================
 

@@ -24,6 +24,8 @@ import {
   SNOOZE_MINUTOS_VALIDOS,
 } from '../../../../src/services/delivery-channels/core/deliveryChannelLink.service'
 import { PLAZO_SIN_VEREDICTO_MS, revisionDeMenuOf } from '../../../../src/services/delivery-channels/core/menuSync.service'
+import { huellaDeSeleccion } from '../../../../src/services/delivery-channels/core/productosDelCanal'
+import { updateChannelSchema } from '../../../../src/schemas/delivery-channels.schema'
 
 jest.mock('../../../../src/services/delivery-channels/core/adapterRegistry', () => ({
   hasAdapter: jest.fn(() => false),
@@ -83,6 +85,17 @@ describe('deliveryChannelLink.service', () => {
   // listChannelLinks — NUNCA devuelve webhookSecret
   // ============================================================
   describe('listChannelLinks', () => {
+    it('D1: cada canal trae seleccionHuella = la huella de su selección', async () => {
+      const config = { productoIds: ['p1'], productos: ['LATTE'], precios: { markupPercent: 10 } }
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+        { id: 'link1', venueId: 'venue1', provider: DeliveryProvider.DELIVERECT, status: DeliveryChannelStatus.ACTIVE, config },
+      ])
+
+      const [canal] = await listChannelLinks('venue1')
+
+      expect((canal as unknown as { seleccionHuella: string }).seleccionHuella).toBe(huellaDeSeleccion(config))
+    })
+
     it('lista los canales del venue sin exponer webhookSecret (select explícito)', async () => {
       ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
         { id: 'link1', venueId: 'venue1', provider: DeliveryProvider.DELIVERECT, status: DeliveryChannelStatus.ACTIVE },
@@ -515,7 +528,9 @@ describe('deliveryChannelLink.service', () => {
       it('estación de otro venue (no regresa del findMany) → ValidationError y no escribe', async () => {
         ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([])
         await expect(updateChannelLink('venue1', 'link1', { config: { impresion: IMPRESION } })).rejects.toThrow(ValidationError)
-        expect(prisma.printStation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue1', id: { in: ['cA'] } } }))
+        expect(prisma.printStation.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { venueId: 'venue1', id: { in: ['cA'] } } }),
+        )
         expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
       })
 
@@ -701,6 +716,14 @@ describe('deliveryChannelLink.service', () => {
       expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
     })
 
+    it('D1: el PATCH con `productoIds: []` contesta que el canal necesita un producto y que se pause, y no escribe', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { productoIds: ['p1'], productos: ['LATTE'] } }])
+      const p = updateChannelLink('venue1', 'link1', { config: { productoIds: [] } })
+      await expect(p).rejects.toThrow(ValidationError)
+      await expect(p).rejects.toThrow(/^Un canal necesita al menos un producto; pausa el canal si no quieres vender ahí$/)
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
     it('`agotarPorInventario` acepta sí/no (o null = como siempre) y rechaza otra cosa', async () => {
       ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
       await expect(updateChannelLink('venue1', 'link1', { config: { agotarPorInventario: 'no' } })).rejects.toThrow(ValidationError)
@@ -711,13 +734,174 @@ describe('deliveryChannelLink.service', () => {
       ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ id: 'link1' })
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'p1', sku: 'LATTE' }])
 
       await updateChannelLink('venue1', 'link1', { config: { productos: ['LATTE'] } })
       await updateChannelLink('venue1', 'link1', { config: { productos: null } })
 
+      // D1 (16-nov): la lista por código se guarda por PRODUCTO (id), con la copia por código para la API vieja.
       const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config)
-      expect(escritos[0]).toEqual({ precios: { markupPercent: 30 }, productos: ['LATTE'] })
-      expect(escritos[1]).toEqual({ precios: { markupPercent: 30 }, productos: null })
+      expect(escritos[0]).toEqual({ precios: { markupPercent: 30 }, productoIds: ['p1'], productos: ['LATTE'] })
+      expect(escritos[1]).toEqual({ precios: { markupPercent: 30 }, productoIds: null, productos: null })
+    })
+
+    // ── D1 (16-nov-2026): la selección por producto, el choque entre dos guardados y los revisados ─────────────────
+    describe('D1: compara-y-cambia (409) y productos revisados', () => {
+      const ACTUAL = {
+        productoIds: ['p1'],
+        productos: ['LATTE'],
+        precios: { porProducto: { p1: 60 }, overrides: { LATTE: 60 }, markupPercent: 10 },
+        deliveryHours: HORARIO_OK,
+        productosRevisados: ['p9'],
+      }
+      beforeEach(() => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: ACTUAL }])
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+        ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+          { id: 'p1', sku: 'LATTE' },
+          { id: 'pA', sku: 'A' },
+        ])
+      })
+      const escrito = () => (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+
+      it('🔴 una huella vieja con otro cambio ⇒ 409 CHANNEL_CHANGED, y no escribe', async () => {
+        const p = updateChannelLink('venue1', 'link1', {
+          seleccionEsperada: huellaDeSeleccion({}),
+          config: { precios: { markupPercent: 30 } },
+        })
+        await expect(p).rejects.toThrow(ConflictError)
+        await expect(p).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'CHANNEL_CHANGED',
+          message: 'Alguien cambió este canal mientras lo editabas. Recarga y vuelve a guardar.',
+        })
+        expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+      })
+
+      it('🔴 el MISMO guardado repetido (la base ya tiene lo pedido, `precios` en otro orden) no es choque', async () => {
+        await updateChannelLink('venue1', 'link1', {
+          seleccionEsperada: huellaDeSeleccion({}),
+          config: { deliveryHours: HORARIO_OK, productoIds: ['p1'], precios: { markupPercent: 10, porProducto: { p1: 60 } } },
+        })
+        expect(huellaDeSeleccion(escrito())).toBe(huellaDeSeleccion(ACTUAL))
+      })
+
+      it('la huella correcta ⇒ escribe', async () => {
+        await updateChannelLink('venue1', 'link1', {
+          seleccionEsperada: huellaDeSeleccion(ACTUAL),
+          config: { precios: { markupPercent: 30 } },
+        })
+        expect(escrito().precios).toEqual({ markupPercent: 30, porProducto: { p1: 60 }, overrides: { LATTE: 60 } })
+      })
+
+      it('`precios: { markupPercent }` conserva porProducto y overrides (sin consultar productos)', async () => {
+        await updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 25 } } })
+        expect(escrito().precios).toEqual({ markupPercent: 25, porProducto: { p1: 60 }, overrides: { LATTE: 60 } })
+        expect(prisma.product.findMany).not.toHaveBeenCalled()
+      })
+
+      it('🔴 Codex r4 #1: un `overrides` enviado reemplaza los precios del canal ya convertido', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+          { config: { productoIds: ['pA'], productos: ['A'], precios: { porProducto: { pA: 79 }, overrides: { A: 79 } } } },
+        ])
+        await updateChannelLink('venue1', 'link1', { config: { precios: { overrides: { A: 90 } } } })
+        expect(escrito().precios).toEqual({ porProducto: { pA: 90 }, overrides: { A: 90 } })
+      })
+
+      it('🔴 Codex impl r2 #3: reenviar los precios que devolvió la API (copia vieja `A`) se acepta y rehace la copia', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+          { config: { productoIds: ['p1'], productos: ['A'], precios: { porProducto: { p1: 79 }, overrides: { A: 79 } } } },
+        ])
+        // p1 cambió de código: ahora es Z.
+        ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'p1', sku: 'Z' }])
+        await updateChannelLink('venue1', 'link1', {
+          config: { precios: { markupPercent: 10, porProducto: { p1: 79 }, overrides: { A: 79 } } },
+        })
+        expect(escrito().precios).toEqual({ markupPercent: 10, porProducto: { p1: 79 }, overrides: { Z: 79 } })
+      })
+
+      it('`precios` sin `porExtra` conserva los precios de extras guardados (el margen y el `porProducto` del DASHBOARD)', async () => {
+        const precios = { ...ACTUAL.precios, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } }
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { ...ACTUAL, precios } }])
+        await updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 25 } } })
+        await updateChannelLink('venue1', 'link1', { config: { precios: { porProducto: { p1: 65 } } } })
+        const escritos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.config.precios)
+        expect(escritos[0]).toEqual({
+          markupPercent: 25,
+          porProducto: { p1: 60 },
+          porExtra: { m1: 7 },
+          overrides: { LATTE: 60, 'MOD-m1': 7 },
+        })
+        expect(escritos[1]).toEqual({ porProducto: { p1: 65 }, porExtra: { m1: 7 }, overrides: { LATTE: 65, 'MOD-m1': 7 } })
+      })
+
+      it('🔴 un canal convertido por el D1 anterior (`MOD-m1: 7` en la copia, sin porExtra) lo pasa a porExtra al guardar', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+          { config: { ...ACTUAL, precios: { porProducto: { p1: 60 }, overrides: { LATTE: 60, 'MOD-m1': 7 } } } },
+        ])
+        ;(prisma.modifier.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'm1' }])
+        await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } })
+        expect(escrito().precios).toEqual({ porProducto: { p1: 60 }, porExtra: { m1: 7 }, overrides: { LATTE: 60, 'MOD-m1': 7 } })
+        expect(prisma.modifier.findMany).toHaveBeenCalledWith({
+          where: { id: { in: ['m1'] }, group: { venueId: 'venue1' } },
+          select: { id: true },
+          take: 1,
+        })
+      })
+
+      /** Los productos de `venue1` que contesta la base, filtrando por los ids pedidos. */
+      const productosDelNegocio = (...ids: string[]) =>
+        (prisma.product.findMany as jest.Mock).mockImplementation(async ({ where }: any) =>
+          where.venueId === 'venue1' ? ids.filter(id => where.id?.in?.includes(id)).map(id => ({ id })) : [],
+        )
+
+      it('marcarRevisados suma a productosRevisados (sin los de la lista); el resto de config queda', async () => {
+        productosDelNegocio('p1', 'p3')
+        await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'p1'] })
+        expect(escrito()).toEqual({ ...ACTUAL, productosRevisados: ['p9', 'p3'] })
+        // La bitácora guarda cuántos, no los ids (pueden ser 10,000).
+        expect((logAction as jest.Mock).mock.calls[0][0].data).toEqual({ marcarRevisados: 2 })
+      })
+
+      it('🔴 marcarRevisados sólo guarda ids de productos de ESTE negocio; los demás se descartan sin error', async () => {
+        productosDelNegocio('p1', 'p3')
+        await updateChannelLink('venue1', 'link1', { marcarRevisados: ['p3', 'pOtroNegocio', 'inventado'] })
+        expect(escrito().productosRevisados).toEqual(['p9', 'p3'])
+        // UNA consulta, del negocio, por id y con tope, dentro de la transacción.
+        expect(prisma.product.findMany).toHaveBeenCalledWith({
+          where: { venueId: 'venue1', id: { in: ['p3', 'pOtroNegocio', 'inventado'] } },
+          select: { id: true },
+          take: 3,
+        })
+      })
+
+      it('`config.productosRevisados` mandado por el panel se ignora', async () => {
+        await updateChannelLink('venue1', 'link1', { config: { productosRevisados: [], deliveryHours: HORARIO_OK } })
+        expect(escrito().productosRevisados).toEqual(['p9'])
+      })
+
+      it('un canal de otro negocio ⇒ 404, sin choque ni escritura', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+        await expect(
+          updateChannelLink('venue-otro', 'link1', { seleccionEsperada: 'x', config: { precios: { markupPercent: 30 } } }),
+        ).rejects.toThrow(NotFoundError)
+        expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('esquema del PATCH (D1)', () => {
+      const cuerpo = (body: unknown) => updateChannelSchema.safeParse({ body, params: { venueId: 'v', linkId: 'l' } }).success
+
+      it('acepta seleccionEsperada y marcarRevisados', () => {
+        expect(cuerpo({ seleccionEsperada: 'x', config: {} })).toBe(true)
+        expect(cuerpo({ marcarRevisados: ['p1'] })).toBe(true)
+      })
+
+      it('rechaza una huella vacía y revisados que no son lista', () => {
+        expect(cuerpo({ seleccionEsperada: '' })).toBe(false)
+        expect(cuerpo({ marcarRevisados: 'p1' })).toBe(false)
+      })
     })
 
     it('rechaza un override de precio negativo (regalaría el producto)', async () => {
