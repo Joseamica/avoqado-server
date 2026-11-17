@@ -325,7 +325,24 @@ export async function saveBasicPlan(
 }
 
 /** The Plan Básico row for the SUPERADMIN screen (also when nothing was saved yet: `campaignId` null). */
-export const getBasicPlanRow = () => rowOf(BASIC_PLAN_KEY)
+export type BasicPlanRow = ListPriceRow & { featureCodes?: string[]; seatCap?: number | null; campaignName?: string }
+export async function getBasicPlanRow(): Promise<BasicPlanRow> {
+  const row = await rowOf(BASIC_PLAN_KEY)
+  if (!row.campaignId) return row
+  // Optional extras for the editor: read from the CURRENT publication (the draft may differ while a price is pending).
+  const list = await prisma.hybridCampaign.findUnique({ where: { id: row.campaignId }, select: { currentPublicationId: true } })
+  const publication = list?.currentPublicationId
+    ? await prisma.hybridOfferPublication.findUnique({ where: { id: list.currentPublicationId }, select: { name: true, definition: true } })
+    : null
+  const definition = publication
+    ? (hybridOfferDefinition.parse(publication.definition) as { featureCodes?: string[]; seatCap?: number | null })
+    : null
+  return {
+    ...row,
+    campaignName: publication?.name,
+    ...(definition ? { featureCodes: definition.featureCodes ?? [], seatCap: definition.seatCap ?? null } : {}),
+  }
+}
 
 /**
  * Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged.

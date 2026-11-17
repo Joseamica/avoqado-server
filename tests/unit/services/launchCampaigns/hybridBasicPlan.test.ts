@@ -1,6 +1,6 @@
 jest.mock('@/services/launchCampaigns/hybridPrices', () => ({ ensureHybridPublicationPrices: jest.fn(async () => undefined) }))
 import prisma from '@/utils/prismaClient'
-import { saveBasicPlan } from '@/services/launchCampaigns/hybridListPrice.service'
+import { saveBasicPlan, getBasicPlanRow } from '@/services/launchCampaigns/hybridListPrice.service'
 import { getPublicBasicPlan, getPublicHybridOffer } from '@/services/launchCampaigns/hybridCampaign.service'
 import { BASIC_PLAN_KEY } from '@/services/launchCampaigns/hybridProduct'
 
@@ -155,5 +155,39 @@ describe('saveBasicPlan', () => {
       entity: 'HybridCampaign',
       data: { price: 578.84, featureCodes: ['CFDI'], seatCap: null },
     })
+  })
+})
+
+describe('getBasicPlanRow', () => {
+  it('returns featureCodes, seatCap and name from the CURRENT publication (not the draft)', async () => {
+    db.hybridCampaign = {
+      findMany: jest.fn(async () => [basicList({ pendingPublicationId: null })]),
+      findUnique: jest.fn(async () => ({ currentPublicationId: 'pub1' })),
+    }
+    db.hybridOfferPublication = {
+      findMany: jest.fn(async () => [{ id: 'pub1', definition: definition({ price: 578.84 }) }]),
+      findUnique: jest.fn(async () => ({
+        name: 'Plan Básico',
+        definition: { ...definition(), featureCodes: ['CFDI', 'LOYALTY_PROGRAM'], seatCap: 5 },
+      })),
+    }
+    db.$queryRaw = jest.fn(async () => [])
+    const row = await getBasicPlanRow()
+    expect(row).toMatchObject({
+      campaignId: 'list1',
+      price: 578.84,
+      featureCodes: ['CFDI', 'LOYALTY_PROGRAM'],
+      seatCap: 5,
+      campaignName: 'Plan Básico',
+    })
+    expect(db.hybridOfferPublication.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'pub1' } }))
+  })
+  it('without a saved Básico the row has no extras', async () => {
+    db.hybridCampaign = { findMany: jest.fn(async () => []) }
+    db.hybridOfferPublication = { findMany: jest.fn(async () => []) }
+    db.$queryRaw = jest.fn(async () => [])
+    const row = await getBasicPlanRow()
+    expect(row.campaignId).toBeNull()
+    expect(row.featureCodes).toBeUndefined()
   })
 })
