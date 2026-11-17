@@ -13,6 +13,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment, turnoDeLaOrdenQueNace, ventaDeLaColaEnTx } from '../shared/paymentShiftClaim'
 import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
+import { conHoraRealDelAparato } from '../shared/horaRealDelAparato'
 
 /**
  * D51: margen sobre la hora de la apertura sin red. La apertura EN LÍNEA perdida de ese mismo aparato pudo nacer un poco DESPUÉS (el
@@ -441,6 +442,9 @@ export async function assignTable(
     const newOrder = await tx.order.create({
       data: {
         venueId,
+        // D93 («B», como Square): la cuenta que NACE de una mesa abierta sin red lleva la hora del aparato, SÓLO para reportes
+        // (`createdAt` sigue siendo la llegada). Sin la hora (en línea), nada: la llamada queda como hoy.
+        ...(abiertaSinRedEn ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: abiertaSinRedEn }, new Date()) : {}),
         shiftId: currentShift?.id ?? null,
         tableId: table.id,
         covers,
@@ -597,6 +601,8 @@ export async function cuentaAparteParaRondaTardia(p: {
   cuentaPedida: string
   aparato: string
   dentroDeLaTx: (tx: Prisma.TransactionClient, nueva: { orderId: string; otrasCuentas: string[] }) => Promise<void>
+  /** D93: la hora en que el aparato pidió la ronda sin red (`createdAtLocal` del intent), sólo para reportes. Sin ella, como hoy. */
+  horaDelAparato?: number | string | null
 }): Promise<{ orderId: string; version: number; isNewOrder: boolean }> {
   const { venueId, tableId, staffId } = p
   const result = await prisma.$transaction(async tx => {
@@ -620,6 +626,8 @@ export async function cuentaAparteParaRondaTardia(p: {
     const nueva = await tx.order.create({
       data: {
         venueId,
+        // D93 («B»): la cuenta aparte nace de una ronda pedida sin red; lleva su hora del aparato, sólo para reportes.
+        ...(p.horaDelAparato != null ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: p.horaDelAparato }, new Date()) : {}),
         shiftId: turnoVivo?.id ?? null,
         tableId: table.id,
         covers: p.covers,

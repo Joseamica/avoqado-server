@@ -4212,6 +4212,9 @@ model Order {
   loyaltyEligibleAt   DateTime?
   /// La hora en que se cobró en el aparato; la escribe la misma escritura que loyaltyEligibleAt. Null = loyaltyEligibleAt.
   loyaltySaleAt       DateTime?
+  /// La hora en que el APARATO hizo la venta/el cobro sin internet (cola), acotada a (llegada − 24 h, llegada). SÓLO para reportes
+  /// («hora real ?? createdAt»). `createdAt` sigue siendo la llegada, que leen las reglas de dinero. Null = sin red no aplica (D93).
+  clientCreatedAt     DateTime?
   loyaltyProcessingAt DateTime?
   loyaltyProcessedAt  DateTime?
   loyaltyAttempts     Int       @default(0)
@@ -4924,6 +4927,9 @@ model Payment {
   // Rate correction entries for retroactive economics recomputation
   rateCorrectionEntries RateCorrectionEntry[]
 
+  /// La hora en que el APARATO hizo este cobro sin internet (cola), acotada a (llegada − 24 h, llegada). SÓLO para reportes
+  /// («hora real ?? createdAt»), como `client_created_at` de Square. `createdAt` sigue siendo la llegada (dinero). Null = en línea (D93).
+  clientCreatedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

@@ -202,6 +202,7 @@ import {
   ventanaDeLaLinea,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
+import { conHoraRealDelAparato } from '../shared/horaRealDelAparato'
 
 /**
  * «Cobrar sin red» (S6): una venta de la cola de una TERMINAL que sube más de estos minutos después de cobrarse no manda comanda a
@@ -2105,6 +2106,9 @@ export async function crearVentaDeMostradorEnTx(
       customerPhone: resolvedCustomerPhone,
       specialRequests: input.note || input.specialRequests || null,
       version: 1,
+      // D93 («B», como Square): la hora del aparato de la venta de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
+      // En línea (`llegada` sólo viene de la cola) no se escribe: la llamada queda como hoy.
+      ...(precioMostrado.llegada ? conHoraRealDelAparato(input, precioMostrado.llegada) : {}),
       orderCustomers: normalizedCustomerId
         ? {
             create: [
@@ -3315,6 +3319,15 @@ async function vincularAlDuenoDelFiado(
  * rest; both orders' money is recomputed from their items. The table stays
  * OCCUPIED; currentOrderId keeps pointing at the source.
  */
+/**
+ * D93 («B», como Square): la cuenta hija de separar o dividir por asiento es la MISMA comida que su origen, como el turno: si el
+ * origen nació sin red con la hora del aparato, la hija la hereda (sólo para reportes; Codex r1 #2). Con la misma ventana de 24 h
+ * contada desde ahora: la hija nace hoy y los lectores la buscan por su `createdAt` ensanchado, así que una hora más vieja se pierde.
+ */
+function horaRealHeredada(horaDelOrigen: Date | null | undefined): { clientCreatedAt?: Date } {
+  return horaDelOrigen ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: horaDelOrigen }, new Date()) : {}
+}
+
 export async function splitOrderItemsInTransaction(
   tx: TxConReintento,
   venueId: string,
@@ -3346,6 +3359,7 @@ export async function splitOrderItemsInTransaction(
     select: {
       id: true,
       orderNumber: true,
+      clientCreatedAt: true,
       status: true,
       paymentStatus: true,
       tableId: true,
@@ -3431,6 +3445,7 @@ export async function splitOrderItemsInTransaction(
   const created = await tx.order.create({
     data: {
       venueId,
+      ...horaRealHeredada(source.clientCreatedAt),
       // 🔴 El cheque separado HEREDA el turno de su origen, no «el turno abierto ahora»:
       // es la MISMA comida, y separar la cuenta a caballo de un cambio de turno la partiría
       // entre dos cortes. Heredar es un hecho copiado; resolver sería una suposición.
@@ -3550,6 +3565,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     select: {
       id: true,
       orderNumber: true,
+      clientCreatedAt: true,
       status: true,
       paymentStatus: true,
       tableId: true,
@@ -3620,6 +3636,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     const newOrder = await tx.order.create({
       data: {
         venueId,
+        ...horaRealHeredada(source.clientCreatedAt),
         // 🔴 Mismo criterio que separar cheque: el turno se HEREDA del origen (es la misma
         // comida), nunca se resuelve «el turno abierto ahora» — dividir por puesto a caballo
         // de un cambio de turno partiría una sola mesa entre dos cortes.
@@ -5088,6 +5105,9 @@ export async function registrarAbonoEnTx(
       venueId,
       orderId,
       createdAt: entrada.createdAt,
+      // D93 («B», como Square): la hora del aparato del cobro de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
+      // Con una fecha contable explícita (operación compuesta, nunca de la cola) no se escribe: su `createdAt` ya es la que vale.
+      ...(entrada.createdAt ? {} : conHoraRealDelAparato(entrada, new Date())),
       processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
       tipAmount: tipDecimal,

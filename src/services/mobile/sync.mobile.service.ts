@@ -1503,6 +1503,8 @@ async function aplicarRondaTardia(p: {
     covers: original.covers && original.covers > 0 ? original.covers : 1,
     cuentaPedida: original.id,
     aparato: aparatoDeLaRonda(p.deviceId, staffId),
+    // D93: la hora del aparato de la ronda (sólo reportes); sin ella, la llamada de hoy.
+    ...(intent.createdAtLocal != null ? { horaDelAparato: intent.createdAtLocal } : {}),
     dentroDeLaTx: (tx, nueva) =>
       writeLegacyActivityAuditTx(tx, {
         staffId,

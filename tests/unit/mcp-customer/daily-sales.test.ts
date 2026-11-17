@@ -4,6 +4,7 @@
  * The all-venues roll-up must build one UTC range per venue timezone, because there is no single
  * UTC interval representing the same local calendar day everywhere. Verified under TZ=UTC.
  */
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import { registerSalesTools } from '../../../src/mcp/tools/sales'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -74,9 +75,11 @@ describe('daily_sales — day window in the VENUE timezone', () => {
     expect(out.window.timezone).toBe('America/Cancun')
     expect(out.window.start).toBe('2026-06-15T05:00:00.000Z')
     expect(out.window.end).toBe('2026-06-16T04:59:59.999Z')
-    // and the query used those same boundaries
-    const arg = mockGroupBy.mock.calls[0][0] as { where: { createdAt: { gte: Date; lte: Date } } }
-    expect(arg.where.createdAt.gte.toISOString()).toBe('2026-06-15T05:00:00.000Z')
+    // and the query used those same boundaries — by the REAL time of each payment (D93, «B»: device time of an offline sale)
+    const where = mockGroupBy.mock.calls[0][0].where
+    expect(where.AND[0].AND[1]).toEqual(
+      dondeHoraRealEntre({ venueId: 'v1' }, new Date('2026-06-15T05:00:00.000Z'), new Date('2026-06-16T04:59:59.999Z')),
+    )
   })
 
   it('single venue with no timezone set: falls back to Mexico City (UTC-6)', async () => {
@@ -100,15 +103,9 @@ describe('daily_sales — day window in the VENUE timezone', () => {
       take: 2,
     })
     const where = mockGroupBy.mock.calls[0][0].where
-    expect(where.OR).toEqual([
-      {
-        venueId: 'v1',
-        createdAt: { gte: new Date('2026-06-15T05:00:00.000Z'), lte: new Date('2026-06-16T04:59:59.999Z') },
-      },
-      {
-        venueId: 'v2',
-        createdAt: { gte: new Date('2026-06-15T07:00:00.000Z'), lte: new Date('2026-06-16T06:59:59.999Z') },
-      },
+    expect(where.AND[0].AND[1].OR).toEqual([
+      dondeHoraRealEntre({ venueId: 'v1' }, new Date('2026-06-15T05:00:00.000Z'), new Date('2026-06-16T04:59:59.999Z')),
+      dondeHoraRealEntre({ venueId: 'v2' }, new Date('2026-06-15T07:00:00.000Z'), new Date('2026-06-16T06:59:59.999Z')),
     ])
     expect(out.window).toMatchObject({ date: '2026-06-15', timezone: 'PER_VENUE' })
     expect(out.window.byVenue).toHaveLength(2)
@@ -129,7 +126,7 @@ it('agrega cien mil pagos en DB sin cargarlos en memoria y conserva la cantidad 
   ])
   const out = parse(await call({ venueId: 'v1', date: '2026-06-15' }))
   expect(mockFindMany).not.toHaveBeenCalled()
-  expect(mockGroupBy).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: 'COMPLETED' }) }))
+  expect(mockGroupBy.mock.calls[0][0].where.AND[1]).toMatchObject({ status: 'COMPLETED' })
   expect(out).toMatchObject({
     completedCount: 100002,
     gross: 2000100,
@@ -146,7 +143,7 @@ it('explica la cobertura parcial cuando falta permiso en otro venue, sin sumar s
   try {
     const out = parse(await call({ date: '2026-06-15' }))
     expect(out.coverage).toMatchObject({ requestedVenueCount: 2, includedVenueCount: 1, excludedVenueCount: 1, complete: false })
-    expect(mockGroupBy.mock.calls[0][0].where.venueId.in).toEqual(['v1'])
+    expect(mockGroupBy.mock.calls[0][0].where.AND[0].AND[0].venueId.in).toEqual(['v1'])
   } finally {
     scope.perVenueAccess.set('v2', access)
   }
