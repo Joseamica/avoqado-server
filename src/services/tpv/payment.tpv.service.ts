@@ -451,7 +451,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 import { horaDeLaVenta } from '../mobile/precioQueVioElCliente'
-import { conHoraRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
+import { conHoraRealDelAparato, horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -4256,7 +4256,8 @@ export async function recordOrderPayment(
             venueId,
             orderId: activeOrder.id,
             // D93 («B», como Square): la hora del aparato del cobro de la cola de la terminal, SÓLO para reportes. En línea: nada.
-            ...conHoraRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)),
+            // (propiedad escrita, no `...`: la gramática cerrada del cobro, paymentShiftClaim.callers.guard)
+            clientCreatedAt: horaRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)),
             amount: totalAmount,
             tipAmount,
             method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum
@@ -5934,7 +5935,7 @@ export async function recordFastPayment(
           data: {
             venueId,
             orderId: order.id, // Fast payment - no order association
-            ...conHoraRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)), // D93: la misma hora del aparato que su orden, sólo para reportes
+            clientCreatedAt: horaRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)), // D93: la misma hora del aparato que su orden, sólo para reportes
             amount: totalAmount,
             tipAmount,
             method: effectiveMethod,

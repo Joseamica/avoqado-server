@@ -249,12 +249,12 @@ describe('recordFastPayment — la hora del aparato de la venta rápida sin red,
       LLEGADA,
     )
     expect(prismaMock.order.create.mock.calls[0][0].data).not.toHaveProperty('clientCreatedAt')
-    expect(prismaMock.payment.create.mock.calls[0][0].data).not.toHaveProperty('clientCreatedAt')
+    expect(prismaMock.payment.create.mock.calls[0][0].data.clientCreatedAt ?? null).toBeNull()
   })
 
   it('regresión: en línea (aunque mande la hora) queda como hoy', async () => {
     await recordFastPayment(VENUE, cobroRapido({ createdAtLocal: VEINTITRES_50.getTime() }), 'staff-1', 'org-1', {}, LLEGADA)
     expect(prismaMock.order.create.mock.calls[0][0].data).not.toHaveProperty('clientCreatedAt')
-    expect(prismaMock.payment.create.mock.calls[0][0].data).not.toHaveProperty('clientCreatedAt')
+    expect(prismaMock.payment.create.mock.calls[0][0].data.clientCreatedAt ?? null).toBeNull()
   })
 })

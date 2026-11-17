@@ -129,17 +129,17 @@ describe('payCashOrder — la hora del aparato del cobro sin red, sólo para rep
   it('P1 reloj del aparato tres días atrás, o adelantado: no se guarda', async () => {
     installFakeStore()
     await cobrar({ isOfflineReplay: true, createdAtLocal: LLEGADA.getTime() - 3 * 86_400_000 })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
     jest.clearAllMocks()
     installFakeStore()
     await cobrar({ isOfflineReplay: true, createdAtLocal: LLEGADA.getTime() + 3_600_000 })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
   })
 
   it('P1 la hora que el intent PAY_CASH recortó al piso de 24 h (clampSoldAt) no se guarda como si fuera real', async () => {
     installFakeStore()
     await cobrar({ isOfflineReplay: true, createdAtLocal: LLEGADA.getTime() - 86_400_000 })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
   })
 
   it('D93 (Codex r2 #2): las 24 h se miden contra la LLEGADA, no contra el momento de escribir', async () => {
@@ -159,11 +159,11 @@ describe('payCashOrder — la hora del aparato del cobro sin red, sólo para rep
       horaDelAparato: LLEGADA.getTime() + 60_000,
       llegada: LLEGADA,
     })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
     jest.clearAllMocks()
     installFakeStore()
     await cobrar({ isOfflineReplay: true, createdAtLocal: LLEGADA.getTime() - 1, horaDelAparato: null, llegada: LLEGADA })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
     jest.clearAllMocks()
     installFakeStore()
     await cobrar({ isOfflineReplay: true, createdAtLocal: LLEGADA.getTime() - 1, horaDelAparato: VEINTE_03.getTime(), llegada: LLEGADA })
@@ -173,7 +173,7 @@ describe('payCashOrder — la hora del aparato del cobro sin red, sólo para rep
   it('regresión: en línea no se guarda (aunque venga createdAtLocal), ni cambia la hora del cajón', async () => {
     installFakeStore()
     await cobrar({ createdAtLocal: VEINTE_03.getTime() })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
     expect(datosDelCobro().createdAt).toBeUndefined()
     expect((postCashSaleToDrawer as jest.Mock).mock.calls[0][0].createdAt).toBeUndefined()
   })
@@ -181,6 +181,6 @@ describe('payCashOrder — la hora del aparato del cobro sin red, sólo para rep
   it('regresión: de la cola sin hora legible, como hoy', async () => {
     installFakeStore()
     await cobrar({ isOfflineReplay: true })
-    expect(datosDelCobro()).not.toHaveProperty('clientCreatedAt')
+    expect(datosDelCobro().clientCreatedAt ?? null).toBeNull() // null = sin hora del aparato (la llegada)
   })
 })

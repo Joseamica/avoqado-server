@@ -113,7 +113,9 @@ describe('D93 · lo vendido sin internet sale en los reportes a su hora real', (
 
   it('las barras por hora la ponen a las 23 del 11 y suman la cabecera', async () => {
     const r = await getSalesSummary(venueId, { startDate: DIA_11.desde, endDate: DIA_11.hasta, timezone: TZ, reportType: 'hourlySum' })
-    const porHora = new Map((r.byPeriod ?? []).map(p => [Number(p.period), p.metrics]))
+    // El periodo de `hourlySum` llega como «23:00» (formatPeriod): `Number('23:00')` es NaN y no encontraba ninguna barra.
+    const porHora = new Map((r.byPeriod ?? []).map(p => [parseInt(String(p.period), 10), p.metrics]))
+    expect(porHora.size).toBe(24)
     expect(porHora.get(23)?.grossSales ?? 0).toBeCloseTo(50, 2)
     expect(porHora.get(18)?.grossSales ?? 0).toBeCloseTo(100, 2)
     expect(porHora.get(0)?.grossSales ?? 0).toBeCloseTo(0, 2)

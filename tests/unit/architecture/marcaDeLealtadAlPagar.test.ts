@@ -281,6 +281,34 @@ function escritores(
         )
         return []
       }
+      // D93 (hz:8024bc1c:D93): la hora del aparato, sólo para reportes. Los dos ayudantes devuelven `{ clientCreatedAt }` o `{}`:
+      // nunca un estado de pago. Su cuerpo y el import quedan fijados; si cambian, el inventario vuelve a fallar cerrado.
+      const D93_SPREADS: Record<string, string[]> = {
+        'services/mobile/order.mobile.service.ts': [
+          'conHoraRealDelAparato(input, llegadaDeLaPeticion(precioMostrado.llegada))',
+          'horaRealHeredada(source.clientCreatedAt)',
+        ],
+        'services/tpv/payment.tpv.service.ts': ['conHoraRealDelAparato(paymentData, llegadaDeLaPeticion(llegada))'],
+      }
+      if (D93_SPREADS[ruta]?.includes(fragmento)) {
+        contrato(
+          'services/shared/horaRealDelAparato.ts',
+          n => ts.isFunctionDeclaration(n) && n.name?.text === 'conHoraRealDelAparato',
+          '265b934a89633d15fb2c432653a03d9d23b49abe853735335b18d56be0cb9964',
+        )
+        contrato(
+          ruta,
+          n => ts.isImportDeclaration(n) && n.moduleSpecifier.getText() === "'../shared/horaRealDelAparato'",
+          '12274f51e5e6606662131b386032a70f6a9529e874a9d1f9fec20d6a93ef0a37',
+        )
+        if (fragmento.startsWith('horaRealHeredada('))
+          contrato(
+            ruta,
+            n => ts.isFunctionDeclaration(n) && n.name?.text === 'horaRealHeredada',
+            '5087ea93d04ac802f48c129621d3cd4b42bed7b73acd1c8456e985c234003641',
+          )
+        return []
+      }
       if (ruta === 'services/online-ordering/transitions.service.ts' && fragmento === 'a.orderExtra?.(now) ?? {}') {
         comprobarExtras()
         return []
@@ -483,9 +511,20 @@ describe('probe del escáner REAL de escritores', () => {
   it('un cambio al cuerpo REAL de un fragmento revisado vuelve a fallar cerrado', () => {
     const file = path.join(SRC, 'services/mobile/order.mobile.service.ts')
     const original = fs.readFileSync(file, 'utf8')
-    expect(() => escritores([{ file, source: original }])).not.toThrow()
+    // D93: los ayudantes de la hora del aparato viven en otro archivo; su contrato lo lee de ahí.
+    const hora = path.join(SRC, 'services/shared/horaRealDelAparato.ts')
+    const ayudante = { file: hora, source: fs.readFileSync(hora, 'utf8') }
+    expect(() => escritores([{ file, source: original }, ayudante])).not.toThrow()
     const source = original.replace('customerId: cliente.dueno,', "paymentStatus: 'PAID',")
-    expect(() => escritores([{ file, source }])).toThrow(/contrato opaco cambiado/)
+    expect(() => escritores([{ file, source }, ayudante])).toThrow(/contrato opaco cambiado/)
+    const ayudanteCambiado = {
+      ...ayudante,
+      source: ayudante.source.replace('{ clientCreatedAt: hora }', "{ clientCreatedAt: hora, paymentStatus: 'PAID' }"),
+    }
+    expect(ayudanteCambiado.source).not.toBe(ayudante.source)
+    expect(() => escritores([{ file, source: original }, ayudanteCambiado])).toThrow(
+      /contrato opaco cambiado services\/shared\/horaRealDelAparato/,
+    )
   })
   it('orderExtra comprueba los cuatro cuerpos y no admite un caller opaco nuevo', () => {
     const fuentes = [

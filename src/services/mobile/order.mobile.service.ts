@@ -202,7 +202,7 @@ import {
   ventanaDeLaLinea,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
-import { conHoraRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
+import { conHoraRealDelAparato, horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 /**
  * «Cobrar sin red» (S6): una venta de la cola de una TERMINAL que sube más de estos minutos después de cobrarse no manda comanda a
@@ -5118,15 +5118,16 @@ export async function registrarAbonoEnTx(
       // D93 («B», como Square): la hora del aparato del cobro de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
       // Con una fecha contable explícita (operación compuesta, nunca de la cola) no se escribe: su `createdAt` ya es la que vale.
       // La cota de 24 h se mide contra la LLEGADA de la petición (Codex D93 r2 #2), no contra el momento de escribir.
-      ...(entrada.createdAt
-        ? {}
-        : conHoraRealDelAparato(
+      // (propiedad escrita, no `...`: la gramática cerrada del cobro, paymentShiftClaim.callers.guard)
+      clientCreatedAt: entrada.createdAt
+        ? null
+        : horaRealDelAparato(
             {
               isOfflineReplay: entrada.isOfflineReplay,
               createdAtLocal: entrada.horaDelAparato !== undefined ? entrada.horaDelAparato : entrada.createdAtLocal,
             },
             llegadaDeLaPeticion(entrada.llegada),
-          )),
+          ),
       processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
       tipAmount: tipDecimal,
