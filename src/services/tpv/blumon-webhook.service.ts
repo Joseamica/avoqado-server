@@ -18,9 +18,17 @@
 
 import { parcharProcessorData } from '../shared/parcheDeProcessorData'
 import prisma from '../../utils/prismaClient'
-import { Prisma, ProviderType, EventStatus } from '@prisma/client'
+import { Prisma, ProviderType, EventStatus, TerminalType } from '@prisma/client'
 import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
+import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
+import { llaveDeIntento } from './candadoDeIntento'
+import {
+  RECEIVER_FIRST_WINDOW_MS,
+  capturarTarifaAlIngreso,
+  confirmarAvisoPorVinculo,
+  ingresarEventoDelIntento,
+} from './angelpay-webhook.service'
 
 /**
  * Helper function for async delay
@@ -333,6 +341,12 @@ export interface WebhookProcessingResult {
     | 'AMBIGUOUS' // 2+ Payment candidates matched — quarantined, NEVER auto-linked
     | 'NO_AUTO_MATCH' // only weak-key candidates (partial reference) — human attribution required
     | 'ERROR' // Internal exception
+    // El aviso con nuestro intento vinculado (`confirmarBlumonPorVinculo`), con la misma regla que AngelPay:
+    | 'CONFIRMED' // fue el PRIMER confirmador: creó el Payment por el registrador
+    | 'SECOND_CAPTURE' // la solicitud ya tenía ganador: evidencia de posible segunda captura
+    | 'REFERENCE_COLLISION' // evidencia de colisión de referencia, no un cobro
+    | 'HELD_BY_REVERSAL'
+    | 'REVERSED_BY_TERMINAL'
   /** ProviderEventLog row that was created/found for this webhook (always set when persisted). */
   eventLogId?: string
   /**
@@ -516,21 +530,57 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
       }
     }
 
-    // ───────────── 4. Insert PENDING event row before any Payment lookup ─────────────
-    let event
+    // ───────────── 4. ¿Trae nuestro intento vinculado? Se decide UNA vez, al ingreso, y viaja en el evento ─────────────
+    const ctx = await contextoDelIntento(payload)
+
+    // ───────────── 5. Insert PENDING event row before any Payment lookup ─────────────
+    let event: { id: string }
     try {
-      event = await prisma.providerEventLog.create({
-        data: {
-          provider: ProviderType.PAYMENT_PROCESSOR,
-          eventId: eventIdString,
-          type: payload.operationType ?? 'VENTA',
-          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
-          venueId: scopeVenueId,
-          terminalId: terminal?.id ?? null,
-          status: EventStatus.PENDING,
-        },
-        select: { id: true },
-      })
+      if (ctx) {
+        // La misma regla que AngelPay: la tarifa se congela al INGRESO (sólo con el venue del vínculo acreditado) y el
+        // evento entra serializado bajo el candado del intento; un ingreso por el fallback (55P03) lleva su marca.
+        const tarifaCongeladaAlIngreso = ctx.receiverVenueId
+          ? await capturarTarifaAlIngreso(ctx.linkVenueId, ctx.merchantAccountId, 'Blumon')
+          : null
+        const id = await ingresarEventoDelIntento(ctx.attemptId, (tx, marca) =>
+          tx.providerEventLog.create({
+            data: {
+              provider: ProviderType.PAYMENT_PROCESSOR,
+              eventId: eventIdString,
+              type: payload.operationType ?? 'VENTA',
+              payload: {
+                ...sinTitular(payload),
+                _avoqado: {
+                  receivedByMerchantAccountId: ctx.merchantAccountId,
+                  contextoDelIngreso: ctx,
+                  ...(tarifaCongeladaAlIngreso ? { tarifaCongeladaAlIngreso } : {}),
+                  ...(marca ?? {}),
+                },
+              } as unknown as Prisma.InputJsonValue,
+              venueId: ctx.receiverVenueId ?? terminal?.venueId ?? null,
+              terminalId: terminal?.id ?? null,
+              status: EventStatus.PENDING,
+              attemptId: ctx.attemptId,
+              nextAttemptAt: new Date(Date.now() + RECEIVER_FIRST_WINDOW_MS),
+            },
+            select: { id: true },
+          }),
+        )
+        event = { id }
+      } else {
+        event = await prisma.providerEventLog.create({
+          data: {
+            provider: ProviderType.PAYMENT_PROCESSOR,
+            eventId: eventIdString,
+            type: payload.operationType ?? 'VENTA',
+            payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
+            venueId: scopeVenueId,
+            terminalId: terminal?.id ?? null,
+            status: EventStatus.PENDING,
+          },
+          select: { id: true },
+        })
+      }
     } catch (err) {
       // Race with idempotency check (someone else just inserted) — re-fetch and
       // return DUPLICATE. P2002 = unique constraint violation in Prisma.
@@ -553,10 +603,34 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
       throw err
     }
 
-    // ───────────── 5. Inline reconciliation (5s retry, scoped to merchant's venues) ─────────────
+    // ───────────── 6. Con nuestro intento: el núcleo compartido decide (y sella el evento); el débil ya no corre ─────────────
+    if (ctx) {
+      try {
+        const r = await confirmarBlumonPorVinculo({ payload, eventLogId: event.id, ctx })
+        if (r) return { ...r, eventLogId: event.id }
+      } catch (error) {
+        // El aviso YA está guardado (PENDING, con su contexto): no se lanza, o el controlador contestaría «no se guardó».
+        logger.error('❌ [Blumon webhook] La confirmación por vínculo falló DESPUÉS del ingreso durable — el evento queda PENDING', {
+          correlationId,
+          eventLogId: event.id,
+          attemptId: ctx.attemptId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return {
+          success: false,
+          action: 'ERROR',
+          errorReason: BLUMON_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR,
+          eventLogId: event.id,
+          message: 'Confirmation by attempt link failed after durable ingress',
+          details: { blumonAmount },
+        }
+      }
+    }
+
+    // ───────────── 7. Inline reconciliation (5s retry, scoped to merchant's venues) ─────────────
     const matchResult = await attemptPaymentMatch(payload, { scopeVenueIds, merchantAccountId, correlationId })
 
-    // ───────────── 6. Persist final state into the event row ─────────────
+    // ───────────── 8. Persist final state into the event row ─────────────
     await updateEventLogFromMatchResult(event.id, matchResult)
 
     return { ...matchResult, eventLogId: event.id }
@@ -930,13 +1004,6 @@ async function attemptPaymentMatch(
      * proves nothing — rejecting those would strand real charges as orphans,
      * which is the failure mode this whole path exists to prevent.
      */
-    const normalizeBrand = (b: unknown): string | null => {
-      const s = String(b ?? '')
-        .trim()
-        .toUpperCase()
-      if (!s || s === 'UNKNOWN' || s === 'OTHER') return null
-      return s === 'AMEX' ? 'AMERICAN_EXPRESS' : s
-    }
     const payloadBrand = normalizeBrand(payload.brand)
     const brandMatches = (p: { cardBrand?: unknown }): boolean => {
       if (!payloadBrand) return true
@@ -1204,6 +1271,166 @@ export function paraElLog(body: unknown, rawBodyLength?: number): Record<string,
   }
   const rootType = body === null ? 'null' : Array.isArray(body) ? 'array' : typeof body
   return { rootType, rawBodyLength }
+}
+
+/** Marca de la tarjeta como la guarda la base (`AMEX` ⇒ `AMERICAN_EXPRESS`); vacía, `UNKNOWN` u `OTHER` ⇒ `null`. */
+export function normalizeBrand(b: unknown): string | null {
+  const s = String(b ?? '')
+    .trim()
+    .toUpperCase()
+  if (!s || s === 'UNKNOWN' || s === 'OTHER') return null
+  return s === 'AMEX' ? 'AMERICAN_EXPRESS' : s
+}
+
+/** El importe del aviso en centavos EXACTOS: sólo una cadena `123` o `123.4` o `123.45`; lo demás (número, comas, 3 decimales) ⇒ `null`. */
+export function centavosExactos(amount: unknown): number | null {
+  if (typeof amount !== 'string') return null
+  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(amount)
+  if (!m) return null
+  const centavos = Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0'))
+  return Number.isSafeInteger(centavos) ? centavos : null
+}
+
+/**
+ * Lo que el aviso de Blumon acredita al INGRESO cuando trae nuestro intento vinculado. Se calcula una vez y viaja en el
+ * evento (`_avoqado.contextoDelIngreso`): la recuperación nunca lo recalcula con la configuración de horas después.
+ */
+export type ContextoDelIngreso = {
+  attemptId: string
+  requestId: string
+  linkVenueId: string
+  linkTerminalId: string
+  merchantAccountId: string
+  /** El venue del vínculo, sólo si la afiliación está en SU configuración de pago; si no, `null` (⇒ LINK_VENUE_MISMATCH). */
+  receiverVenueId: string | null
+  /** El serial con el que el núcleo compara contra la terminal del vínculo. */
+  terminalSerialEfectivo: string
+}
+
+/**
+ * `null` = el aviso no crea dinero por vínculo (sigue el emparejamiento de hoy). Exige todo a la vez: `VENTA` y `'00'`
+ * EXACTOS (ausentes no aprueban), `reference` = llave de un intento con vínculo S1, y UNA sola afiliación con ese serial.
+ */
+export async function contextoDelIntento(payload: BlumonWebhookPayload): Promise<ContextoDelIngreso | null> {
+  if (payload.operationType !== 'VENTA' || payload.codeResponse !== '00') return null
+  const attemptId = llaveDeIntento(payload.reference)
+  const serial = typeof payload.serialNumber === 'string' ? payload.serialNumber : ''
+  if (!attemptId || !serial.trim()) return null
+  const { terminalPaymentService } = await import('../terminal-payment.service')
+  const link = await terminalPaymentService.findAttemptLink(attemptId)
+  if (!link) return null
+  // H7: la MISMA normalización que `resolveBlumonScope`; búsqueda exacta (seriales virtuales).
+  const afiliaciones = await prisma.merchantAccount.findMany({
+    where: { blumonSerialNumber: serial.trim().replace(/^AVQD-/, '') },
+    select: { id: true },
+    take: 2,
+  })
+  if (afiliaciones.length !== 1) return null
+  const merchantAccountId = afiliaciones[0].id
+
+  const [config, terminalDelAviso] = await Promise.all([
+    prisma.venuePaymentConfig.findUnique({
+      where: { venueId: link.venueId },
+      select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+    }),
+    prisma.terminal.findUnique({ where: { serialNumber: canonicalizeBlumonSerial(serial) }, select: { id: true } }),
+  ])
+  const enLaConfiguracion =
+    !!config && [config.primaryAccountId, config.secondaryAccountId, config.tertiaryAccountId].includes(merchantAccountId)
+
+  // Un serial con su propia `Terminal` la identifica: si no es la del vínculo, el núcleo lo contradice (la afiliación
+  // compartida no lo tapa). Uno virtual (sin `Terminal`) vale por la del vínculo sólo si esa terminal tiene la afiliación.
+  let terminalSerialEfectivo = serial
+  if (!terminalDelAviso) {
+    const delVinculo = await prisma.terminal.findUnique({
+      where: { serialNumber: normalizeTerminalSerialNumber(link.terminalId, TerminalType.TPV_ANDROID) },
+      select: { assignedMerchantIds: true },
+    })
+    if (delVinculo?.assignedMerchantIds.includes(merchantAccountId)) terminalSerialEfectivo = link.terminalId
+  }
+
+  return {
+    attemptId,
+    requestId: link.requestId,
+    linkVenueId: link.venueId,
+    linkTerminalId: link.terminalId,
+    merchantAccountId,
+    receiverVenueId: enLaConfiguracion ? link.venueId : null,
+    terminalSerialEfectivo,
+  }
+}
+
+/** El contexto que el ingreso guardó en el evento, con su forma exacta; cualquier otra cosa ⇒ `null`. */
+export function contextoGuardado(payload: unknown): ContextoDelIngreso | null {
+  const c = (payload as { _avoqado?: { contextoDelIngreso?: Record<string, unknown> } } | null)?._avoqado?.contextoDelIngreso
+  if (!c || typeof c !== 'object') return null
+  const texto = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+  const { attemptId, requestId, linkVenueId, linkTerminalId, merchantAccountId, receiverVenueId, terminalSerialEfectivo } = c
+  if (![attemptId, requestId, linkVenueId, linkTerminalId, merchantAccountId, terminalSerialEfectivo].every(texto)) return null
+  if (receiverVenueId !== null && !texto(receiverVenueId)) return null
+  return {
+    attemptId,
+    requestId,
+    linkVenueId,
+    linkTerminalId,
+    merchantAccountId,
+    receiverVenueId,
+    terminalSerialEfectivo,
+  } as ContextoDelIngreso
+}
+
+/**
+ * El traductor de Blumon al núcleo compartido (`confirmarAvisoPorVinculo`): afiliación, venue y serial salen del CONTEXTO
+ * del ingreso, nunca recalculados. `null` = no aplica (el llamador sigue con el emparejamiento de hoy).
+ */
+export async function confirmarBlumonPorVinculo(args: {
+  payload: BlumonWebhookPayload
+  eventLogId: string
+  ctx: ContextoDelIngreso
+}): Promise<WebhookProcessingResult | null> {
+  const { payload, eventLogId, ctx } = args
+  const r = await confirmarAvisoPorVinculo({
+    etiqueta: 'Blumon',
+    attemptId: ctx.attemptId,
+    eventLogId,
+    receiverVenueId: ctx.receiverVenueId,
+    merchantAccountId: ctx.merchantAccountId,
+    terminalSerial: ctx.terminalSerialEfectivo,
+    importeCentavos: centavosExactos(payload.amount),
+    // Sin `maskedPan`/`last4`: los pone el REST (así no hay contradicción de formato).
+    datosDelRegistro: {
+      referenceNumber: payload.reference,
+      authorizationNumber: payload.authorizationCode,
+      cardBrand: normalizeBrand(payload.brand) ?? undefined,
+      blumonOperationNumber: payload.operationNumber,
+      blumonSerialNumber: payload.serialNumber,
+    },
+    huella: {
+      clave: 'blumonWebhook',
+      datos: {
+        eventId: buildBlumonEventId(payload),
+        operationNumber: payload.operationNumber ?? null,
+        reference: payload.reference ?? null,
+        serialNumber: payload.serialNumber ?? null,
+      },
+      // Codex r5: la marca que lee el auditor de cobros sin aviso (`blumon-payment-audit.job.ts`).
+      extra: { blumonWebhookReceived: true },
+    },
+    propietario: {},
+    correlationId: `blumon-wh-${eventLogId.slice(-8)}`,
+  })
+  if (!r) return null
+  const pasan = ['CONFIRMED', 'SECOND_CAPTURE', 'REFERENCE_COLLISION', 'MATCHED', 'DISCREPANCY', 'ERROR'] as const
+  const action = pasan.find(a => a === r.action) ?? 'PENDING' // ORPHANED: el evento sigue PENDING
+  return {
+    success: action === 'CONFIRMED' || action === 'MATCHED',
+    action,
+    ...(r.errorReason ? { errorReason: r.errorReason } : {}),
+    ...(r.paymentId ? { paymentId: r.paymentId } : {}),
+    eventLogId,
+    message: r.message ?? `Blumon webhook ${action} by attempt link`,
+    details: { blumonAmount: parseFloat(payload.amount) },
+  }
 }
 
 /**

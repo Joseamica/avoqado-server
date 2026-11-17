@@ -173,6 +173,18 @@ describe('eventoAprobadoSql: el aprobado de Blumon cuenta igual que el de AngelP
       })
     })
 
+    it('una VENTA de Blumon con `_avoqado.ingresoSinCandado` (55P03) da ORDEN_NO_ACREDITADO', async () => {
+      const attemptId = randomUUID()
+      await avisoBlumon(attemptId, {
+        avoqado: {
+          receivedByMerchantAccountId: f.merchantId,
+          tarifaCongeladaAlIngreso: { slot: 'PRIMARY', pricing: { slot: 'PRIMARY', creditRate: 0.025 } },
+          ingresoSinCandado: { en: new Date().toISOString() },
+        },
+      })
+      expect(await evidenciaDurableDelIngreso(prisma, f.venueId, f.merchantId, attemptId)).toEqual({ tipo: 'ORDEN_NO_ACREDITADO' })
+    })
+
     it('hayAprobadoVinculadoSql ve un aprobado de Blumon del intento vinculado', async () => {
       const { requestId, attemptId } = await solicitudVinculada()
       const hay = async () =>

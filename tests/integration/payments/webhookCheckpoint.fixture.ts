@@ -50,10 +50,14 @@ async function purgarFixturesHuerfanos(prefijo: string): Promise<void> {
     const venueId = id
     const logins = await prisma.angelPayUserAccount.findMany({ where: { venueId }, select: { id: true } })
     const merchants = await prisma.merchantAccount.findMany({
-      where: { angelpayUserAccountId: { in: logins.map(l => l.id) } },
+      where: { OR: [{ angelpayUserAccountId: { in: logins.map(l => l.id) } }, { externalMerchantId: { startsWith: `${id}-blumon` } }] },
       select: { id: true },
     })
     await prisma.providerEventLog.deleteMany({ where: { eventId: { startsWith: `angelpay-${id}` } } })
+    const terminales = await prisma.terminal.findMany({ where: { venueId }, select: { id: true } })
+    await prisma.providerEventLog.deleteMany({
+      where: { eventId: { startsWith: 'blumon-tpv-' }, OR: [{ venueId }, { terminalId: { in: terminales.map(t => t.id) } }] },
+    })
     const sesionesDeVales = await prisma.areaTicketCheckoutSession.findMany({ where: { venueId }, select: { id: true } })
     if (sesionesDeVales.length > 0) {
       await prisma.areaTicketPaymentAttempt.deleteMany({ where: { checkoutSessionId: { in: sesionesDeVales.map(s => s.id) } } })
@@ -66,6 +70,7 @@ async function purgarFixturesHuerfanos(prefijo: string): Promise<void> {
     await prisma.venuePricingStructure.deleteMany({ where: { venueId } })
     await prisma.venuePaymentConfig.deleteMany({ where: { venueId } })
     await prisma.providerCostStructure.deleteMany({ where: { merchantAccountId: { in: merchants.map(m => m.id) } } })
+    await prisma.settlementConfiguration.deleteMany({ where: { merchantAccountId: { in: merchants.map(m => m.id) } } })
     await prisma.merchantAccount.deleteMany({ where: { id: { in: merchants.map(m => m.id) } } })
     await prisma.angelPayUserAccount.deleteMany({ where: { venueId } })
     await prisma.staffVenue.deleteMany({ where: { venueId } })
@@ -224,6 +229,112 @@ export async function crearFixture(prefijo: string) {
   })
 
   const nuevoEventId = () => `${fixture}-ev-${++eventos}`
+
+  // ─── Blumon (SDK propio, fase 1): afiliación con serial, terminales y el aviso con la forma de producción ───
+  /**
+   * H10: el `operationNumber` y la `reference` sin vínculo salen de una SEMILLA de este fixture (6 dígitos + contador), así el
+   * `eventId` (`blumon-tpv-{op}-{ref}`) nunca choca con una corrida anterior y la limpieza lo encuentra aunque no tenga venue.
+   */
+  const semillaBlumon = String(100000 + (parseInt(randomUUID().replace(/-/g, '').slice(0, 8), 16) % 900000))
+  const blumones: string[] = []
+  const blumonProvider = () =>
+    prisma.paymentProvider.upsert({
+      where: { code: 'BLUMON' },
+      update: {},
+      create: { code: 'BLUMON', name: 'Blumon', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+    })
+  /**
+   * Una afiliación de Blumon con su serial (por defecto, el de la terminal del fixture), en la configuración del venue como
+   * SECUNDARIA (`enConfiguracion: false` la deja fuera) y asignada a la terminal del fixture o a las dadas (serials de `Terminal`).
+   */
+  const conAfiliacionBlumon = async (opciones: { serial?: string; enConfiguracion?: boolean; asignadaA?: string[] } = {}) => {
+    const provider = await blumonProvider()
+    const serialBlumon = opciones.serial ?? serialCrudo
+    const ma = await prisma.merchantAccount.create({
+      data: {
+        providerId: provider.id,
+        externalMerchantId: `${fixture}-blumon-${blumones.length}`,
+        alias: 'Blumon de prueba',
+        credentialsEncrypted: {},
+        blumonSerialNumber: serialBlumon,
+      },
+    })
+    blumones.push(ma.id)
+    if (opciones.enConfiguracion !== false) {
+      await prisma.venuePaymentConfig.upsert({
+        where: { venueId },
+        update: { secondaryAccountId: ma.id },
+        create: { venueId, primaryAccountId: merchant.id, secondaryAccountId: ma.id },
+      })
+    }
+    for (const s of opciones.asignadaA ?? [serial]) {
+      await prisma.terminal.update({ where: { serialNumber: s }, data: { assignedMerchantIds: { push: ma.id } } })
+    }
+    return { merchantAccountId: ma.id, serialBlumon }
+  }
+  /** Otra terminal física del mismo venue (forma de producción: `AVQD-` + serial crudo). */
+  const otraTerminal = async (opciones: { brand?: string | null } = {}) => {
+    const crudo = `PX${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`
+    const s = `AVQD-${crudo}`
+    await prisma.terminal.create({
+      data: { venueId, name: 'Otra de prueba', serialNumber: s, type: 'TPV_ANDROID', brand: opciones.brand ?? null },
+    })
+    return { serial: s, serialCrudo: crudo, llave: terminalIdentityKey(s) }
+  }
+  /** El aviso de Blumon aprobado por $100.00, con titular, bin y últimos 4 (lo que el servidor no debe guardar ni loguear). */
+  const eventoBlumon = (attemptId: string | undefined, over: Record<string, unknown> = {}) => {
+    const n = String(++eventos).padStart(4, '0')
+    return {
+      operationType: 'VENTA',
+      codeResponse: '00',
+      descriptionResponse: 'APROBADA',
+      amount: '100.00',
+      reference: attemptId ?? `${semillaBlumon}${n.padStart(8, '0')}`,
+      operationNumber: Number(`${semillaBlumon}${n}`),
+      serialNumber: serialCrudo,
+      authorizationCode: `A${semillaBlumon}${n}`.slice(-6),
+      brand: 'VISA',
+      cardType: 'CREDITO',
+      bank: 'BANCO DE PRUEBA',
+      lastFour: '1111',
+      bin: '411111',
+      cardHolder: 'TITULAR DE PRUEBA',
+      ...over,
+    }
+  }
+  /** Los avisos de Blumon de este fixture: del venue, de sus terminales o con su semilla (los que no tienen venue). */
+  const borrarAvisosBlumon = async () => {
+    const terminales = await prisma.terminal.findMany({ where: { venueId }, select: { id: true } })
+    await prisma.providerEventLog.deleteMany({
+      where: {
+        eventId: { startsWith: 'blumon-tpv-' },
+        OR: [
+          { venueId },
+          { terminalId: { in: terminales.map(t => t.id) } },
+          { eventId: { startsWith: `blumon-tpv-${semillaBlumon}` } },
+          ...['devolucion', 'cancelacion'].map(t => ({ eventId: { startsWith: `blumon-tpv-reversal-${t}-${semillaBlumon}` } })),
+        ],
+      },
+    })
+  }
+  /** Las afiliaciones de Blumon de la prueba se van con ella: cada prueba arma la suya (un serial ⇒ UNA afiliación). */
+  const quitarAfiliacionesBlumon = async () => {
+    if (blumones.length === 0) return
+    const ids = blumones.splice(0)
+    await prisma.providerCostStructure.deleteMany({ where: { merchantAccountId: { in: ids } } })
+    await prisma.settlementConfiguration.deleteMany({ where: { merchantAccountId: { in: ids } } })
+    await prisma.venuePaymentConfig.updateMany({ where: { venueId, secondaryAccountId: { in: ids } }, data: { secondaryAccountId: null } })
+    await prisma.venuePaymentConfig.updateMany({ where: { venueId, tertiaryAccountId: { in: ids } }, data: { tertiaryAccountId: null } })
+    for (const t of await prisma.terminal.findMany({ where: { venueId }, select: { id: true, assignedMerchantIds: true } })) {
+      if (t.assignedMerchantIds.some(id => ids.includes(id))) {
+        await prisma.terminal.update({
+          where: { id: t.id },
+          data: { assignedMerchantIds: t.assignedMerchantIds.filter(id => !ids.includes(id)) },
+        })
+      }
+    }
+    await prisma.merchantAccount.deleteMany({ where: { id: { in: ids } } })
+  }
 
   /**
    * A8 (21-oct): la VENTANA de 30 s sólo escribe «no se cobró» (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) donde el aviso del banco de
@@ -402,6 +513,7 @@ export async function crearFixture(prefijo: string) {
   /** Entre pruebas: todo lo que nace de un cobro. Los vínculos caen con la solicitud (cascade). */
   const limpiar = async () => {
     await prisma.providerEventLog.deleteMany({ where: { eventId: { startsWith: `angelpay-${fixture}` } } })
+    await borrarAvisosBlumon()
     const sesionesDeVales = await prisma.areaTicketCheckoutSession.findMany({ where: { venueId }, select: { id: true } })
     if (sesionesDeVales.length > 0) {
       await prisma.areaTicketPaymentAttempt.deleteMany({ where: { checkoutSessionId: { in: sesionesDeVales.map(s => s.id) } } })
@@ -411,6 +523,7 @@ export async function crearFixture(prefijo: string) {
     await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
     await prisma.shift.deleteMany({ where: { venueId } })
     await prisma.order.deleteMany({ where: { venueId } })
+    await quitarAfiliacionesBlumon()
   }
 
   const destruir = async () => {
@@ -440,6 +553,10 @@ export async function crearFixture(prefijo: string) {
     registroDeLaTerminal,
     eventoAngelPay,
     nuevoEventId,
+    semillaBlumon,
+    conAfiliacionBlumon,
+    otraTerminal,
+    eventoBlumon,
     conAvisoDelBancoComprobado,
     limpiar,
     destruir,
