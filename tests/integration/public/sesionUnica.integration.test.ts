@@ -257,7 +257,7 @@ it.each([
     'get',
     '/venues/:venueSlug/credit-packs/balance',
     [
-      'readLimit',
+      'portalReadLimit',
       'resolveVenueBySlug',
       'authenticateCustomer',
       'activarReservasSiFalta',
@@ -305,7 +305,7 @@ it.each([
   [
     'get',
     '/venues/:venueSlug/customer/portal',
-    ['readLimit', 'resolveVenueBySlug', 'authenticateCustomer', 'activarReservasSiFalta', 'customerPortalController.getPortal'],
+    ['portalReadLimit', 'resolveVenueBySlug', 'authenticateCustomer', 'activarReservasSiFalta', 'customerPortalController.getPortal'],
   ],
   [
     'patch',

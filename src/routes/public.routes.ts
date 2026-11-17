@@ -191,6 +191,9 @@ router.use(
 // por la IP REAL del visitante. Detalle y el límite declarado: `utils/clientIp`.
 const porVisitante = (req: Parameters<typeof ipDelCliente>[0]) => ipDelCliente(req) || 'desconocida'
 const readLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// D10 (founder 16-nov, «~100 por minuto»): las lecturas del portal de la clienta (el negocio, su cuenta, sus paquetes y listas)
+// tienen su propio tope. Al abrir, cada persona hace 3; con `readLimit` (60) cabían ~20 alumnas por minuto en el WiFi del estudio.
+const portalReadLimit = rateLimit({ windowMs: 60_000, max: 300, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 // Asistencia verificada (hallado en la D3, 16-nov): toda la clase llega por el WiFi del estudio, o sea por UNA IP. Con
@@ -274,7 +277,7 @@ const requireReservationsPlan = checkPublicVenueFeature(
 
 router.get(
   '/venues/:venueSlug/info',
-  readLimit,
+  portalReadLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema })),
   reservationPublicController.getVenueInfo,
 )
@@ -376,7 +379,7 @@ router.post(
 
 router.get(
   '/venues/:venueSlug/credit-packs',
-  readLimit,
+  portalReadLimit,
   validateRequest(publicPacksParamsSchema),
   creditPackPublicController.getAvailablePacks,
 )
@@ -385,7 +388,7 @@ router.get(
 // token). Sin plan gate: es lectura manage-existing (regla de oro de arriba).
 router.get(
   '/venues/:venueSlug/credit-packs/balance',
-  readLimit,
+  portalReadLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   activarReservasSiFalta,
@@ -448,7 +451,7 @@ router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(cust
 // Fase 0.B: el slug manda. Antes el portal usaba sólo el venue del JWT e ignoraba la URL.
 router.get(
   '/venues/:venueSlug/customer/portal',
-  readLimit,
+  portalReadLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   activarReservasSiFalta,
@@ -488,7 +491,7 @@ router.post(
 // S13 (P2-6): «Mi cuenta» por páginas (el portal trae la primera de cada una) y «Guardar en mi cuenta». El slug manda, como el portal.
 router.get(
   '/venues/:venueSlug/customer/orders',
-  readLimit,
+  portalReadLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   validateRequest(customerMyListSchema),
@@ -496,7 +499,7 @@ router.get(
 )
 router.get(
   '/venues/:venueSlug/customer/gift-cards',
-  readLimit,
+  portalReadLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   validateRequest(customerMyListSchema),
@@ -504,7 +507,7 @@ router.get(
 )
 router.get(
   '/venues/:venueSlug/customer/discounts',
-  readLimit,
+  portalReadLimit,
   resolveVenueBySlug,
   authenticateCustomer,
   validateRequest(customerMyListSchema),

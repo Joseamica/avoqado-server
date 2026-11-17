@@ -880,6 +880,30 @@ function shortStaffName(first: string, last: string): string {
   return l ? `${f} ${l[0].toUpperCase()}.` : f
 }
 
+/**
+ * D6 (16-nov): el historial dice QUIÉN, no su id. Cada entrada de una persona lleva `byName` («Ana P.»); `by` no cambia (lo leen
+ * las apps). «service:…» (kiosco, procesos) y un id que ya no existe se quedan sin nombre: el panel los rotula o los omite.
+ * Una sola lectura acotada (el historial de UNA reserva).
+ */
+async function conNombresEnElHistorial<T extends { statusLog: Prisma.JsonValue }>(r: T): Promise<T> {
+  const log = Array.isArray(r.statusLog) ? r.statusLog : []
+  const autorDe = (e: Prisma.JsonValue) =>
+    e && typeof e === 'object' && !Array.isArray(e) && typeof e.by === 'string' && !e.by.startsWith('service:') ? e.by : null
+  const ids = [...new Set(log.map(autorDe).filter((x): x is string => x !== null))].slice(0, 50)
+  if (ids.length === 0) return r
+  const personas = await prisma.staff.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, firstName: true, lastName: true },
+    take: 50,
+  })
+  const nombre = new Map(personas.map(p => [p.id, shortStaffName(p.firstName, p.lastName)]))
+  const statusLog = log.map(e => {
+    const id = autorDe(e)
+    return id && nombre.has(id) ? { ...(e as Prisma.JsonObject), byName: nombre.get(id)! } : e
+  })
+  return { ...r, statusLog }
+}
+
 export async function getReservationById(venueId: string, reservationId: string) {
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
@@ -890,7 +914,7 @@ export async function getReservationById(venueId: string, reservationId: string)
     },
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')
-  const withServices = await attachServices(reservation)
+  const withServices = await conNombresEnElHistorial(await attachServices(reservation))
   if (!withServices.noShowCorrection) return { ...withServices, noShowCorrection: null }
   // La corrección no tiene relación con Staff: UNA lectura acotada (el detalle es de una sola reserva). El kiosco no tiene autor.
   const { actorStaffId, ...correction } = withServices.noShowCorrection

@@ -23,15 +23,15 @@ import {
   filasDelRecibo,
   RenglonRecibo,
   slug,
-  textoDeLlegadas,
+  textoDeLlegadasDelTotal,
   totalesPorTipoDelRecibo,
 } from './recibos.formato'
 import type { LlegadasDePersona } from './valoracion'
 
 /** El total de llegadas del recibo, en una línea del resumen del PDF y el Excel (sólo si hay clases de «sólo quien llegó»). */
 const lineaDeLlegadas = (l: LlegadasDePersona | null): string[] => {
-  const texto = l ? textoDeLlegadas(l as unknown as Prisma.JsonValue) : null
-  return texto ? [`Llegadas: ${texto}`] : []
+  const texto = textoDeLlegadasDelTotal(l as unknown as Prisma.JsonValue)
+  return texto ? [texto] : []
 }
 
 export type { FilaRecibo, RenglonRecibo } from './recibos.formato'
@@ -480,8 +480,12 @@ async function totalDelRecibo(
     porTipo[x.tipo] = t.toFixed(2)
   }
   // Las llegadas de las clases con desglose (sólo «sólo quien llegó» lo trae), sumadas en la base sobre la MISMA fuente.
-  const [l] = await db.$queryRaw<Array<{ clases: number } & Record<'qr' | 'phone' | 'staff' | 'list' | 'pass' | 'sinMetodo', number>>>`
+  const [l] = await db.$queryRaw<
+    Array<{ clases: number } & Record<'qr' | 'phone' | 'staff' | 'list' | 'pass' | 'sinMetodo' | 'corregidas', number>>
+  >`
     SELECT COUNT(*)::int AS clases,
+           -- D8: cuántas de sus clases tuvieron «Corregir conteo» (el pago usa ese número, no las registradas).
+           (COUNT(*) FILTER (WHERE r.llegadas->>'corregidoA' IS NOT NULL))::int AS corregidas,
            COALESCE(SUM((r.llegadas->>'qr')::int), 0)::int AS qr,
            COALESCE(SUM((r.llegadas->>'phone')::int), 0)::int AS phone,
            COALESCE(SUM((r.llegadas->>'staff')::int), 0)::int AS staff,
@@ -491,7 +495,9 @@ async function totalDelRecibo(
     FROM (${f.sql}) r
     WHERE r.tipo = 'CLASE' AND r.llegadas IS NOT NULL`
   const llegadas =
-    l && l.clases > 0 ? { qr: l.qr, phone: l.phone, staff: l.staff, list: l.list, pass: l.pass, sinMetodo: l.sinMetodo } : null
+    l && l.clases > 0
+      ? { qr: l.qr, phone: l.phone, staff: l.staff, list: l.list, pass: l.pass, sinMetodo: l.sinMetodo, corregidas: l.corregidas }
+      : null
   return { total, cantidad, porTipo, llegadas }
 }
 
@@ -623,7 +629,7 @@ export async function exportarRecibo(input: {
       total: total.toFixed(2),
       parcial: f.parcial,
       // El PDF lo dice en su línea de resumen; el Excel, en la fila del total (no tiene resumen).
-      llegadasEnTotal: input.format === 'xlsx' && llegadas ? textoDeLlegadas(llegadas as unknown as Prisma.JsonValue) : null,
+      llegadasEnTotal: input.format === 'xlsx' ? textoDeLlegadasDelTotal(llegadas as unknown as Prisma.JsonValue) : null,
     }),
     title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
     sheetName: `Recibo de ${f.persona}`,

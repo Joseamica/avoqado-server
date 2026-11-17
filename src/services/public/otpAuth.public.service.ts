@@ -33,6 +33,8 @@ const TTL_MS = 10 * 60 * 1000
 const PROPOSITO = 'CUSTOMER_LOGIN'
 /** S8: el cambio de número usa su propio reto (mismas reglas de tiempo e intentos): no consume ni invalida el de entrar. */
 export type PropositoDeReto = typeof PROPOSITO | 'CUSTOMER_PHONE_CHANGE'
+/** D11 (Codex r1 #3): los propósitos que mandan código al teléfono del cliente comparten el tope de ese destino. */
+const PROPOSITOS_DEL_DESTINO: readonly PropositoDeReto[] = [PROPOSITO, 'CUSTOMER_PHONE_CHANGE']
 
 // 🔴 Los dos pasos del reto usan ESTA función: si pedir y verificar normalizaran distinto, el reto no se encontraría.
 // Sin dígitos no hay teléfono: con '' `resolveIdentity` caería al camino del correo con `email: undefined`, y Prisma ignora un
@@ -71,31 +73,35 @@ export async function pedirCodigo(args: PedirCodigo, proposito: PropositoDeReto 
   // Fase 0.B: todo se acota al venue. Un mismo teléfono puede tener retos vivos en dos
   // estudios distintos sin que uno invalide o rate-limite al otro.
   const venueId = args.venueId
-  const last30s = await prisma.otpChallenge.count({
-    where: { venueId, destination, purpose: proposito, createdAt: { gt: new Date(now - 30_000) } },
-  })
-  if (last30s > 0) throw new BadRequestError('Espera un momento antes de pedir otro código.')
-  const lastHour = await prisma.otpChallenge.count({
-    where: { venueId, destination, purpose: proposito, createdAt: { gt: new Date(now - 3_600_000) } },
-  })
-  if (lastHour >= 5) throw new BadRequestError('Demasiados códigos solicitados. Intenta más tarde.')
-
-  await prisma.otpChallenge.updateMany({
-    where: { venueId, destination, channel: args.channel, purpose: proposito, consumedAt: null },
-    data: { consumedAt: new Date() },
-  })
-
   const code = generateOtpCode()
-  const reto = await prisma.otpChallenge.create({
-    data: {
-      venueId,
-      channel: args.channel,
-      destination,
-      codeHash: hashOtpCode(code),
-      expiresAt: new Date(now + TTL_MS),
-      ip: args.ip ?? null,
-      ...(proposito !== PROPOSITO ? { purpose: proposito } : {}),
-    },
+  // D11 (16-nov, Codex r13 #3): contar y crear eran dos pasos sueltos; dos pedidos simultáneos al mismo teléfono leían la misma
+  // cuenta y los dos mandaban. Ahora van en UNA transacción, detrás de un candado por negocio + propósito + teléfono (sin Redis).
+  // El envío queda FUERA: el candado no espera al proveedor.
+  // Codex r1 #3: «Entrar» y «Cambiar mi número» mandan WhatsApp al MISMO destino, así que el candado y el tope son del destino
+  // (los dos propósitos juntos). La invalidación de abajo sigue siendo por propósito (S8: un reto no invalida el del otro).
+  const reto = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`otp:${venueId}:${destination}`}, 0))::text`
+    const delDestino = { venueId, destination, purpose: { in: [...PROPOSITOS_DEL_DESTINO] } }
+    const last30s = await tx.otpChallenge.count({ where: { ...delDestino, createdAt: { gt: new Date(now - 30_000) } } })
+    if (last30s > 0) throw new BadRequestError('Espera un momento antes de pedir otro código.')
+    const lastHour = await tx.otpChallenge.count({ where: { ...delDestino, createdAt: { gt: new Date(now - 3_600_000) } } })
+    if (lastHour >= 5) throw new BadRequestError('Demasiados códigos solicitados. Intenta más tarde.')
+
+    await tx.otpChallenge.updateMany({
+      where: { venueId, destination, channel: args.channel, purpose: proposito, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+    return tx.otpChallenge.create({
+      data: {
+        venueId,
+        channel: args.channel,
+        destination,
+        codeHash: hashOtpCode(code),
+        expiresAt: new Date(now + TTL_MS),
+        ip: args.ip ?? null,
+        ...(proposito !== PROPOSITO ? { purpose: proposito } : {}),
+      },
+    })
   })
 
   let salio: boolean

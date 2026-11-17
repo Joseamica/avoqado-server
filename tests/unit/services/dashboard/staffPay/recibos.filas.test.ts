@@ -2,7 +2,7 @@ import PDFDocument from 'pdfkit'
 import { encodeExport } from '@/services/dashboard/export.helpers'
 import { Prisma } from '@prisma/client'
 import { columnasDelRecibo, filasDelRecibo, RenglonRecibo, totalesPorTipoDelRecibo } from '@/services/dashboard/staffPay/recibos.service'
-import { conceptoDe, FilaRecibo } from '@/services/dashboard/staffPay/recibos.formato'
+import { conceptoDe, FilaRecibo, textoDeLlegadasDelTotal } from '@/services/dashboard/staffPay/recibos.formato'
 
 const r = (tipo: RenglonRecibo['tipo'], concepto: string, monto: string): RenglonRecibo => ({
   tipo,
@@ -227,5 +227,35 @@ describe('conceptoDe — asistencia verificada: la clase dice cómo llegaron (16
   })
   it('sin desglose (quien reservó, o una foto de antes) queda como siempre', () => {
     expect(conceptoDe(clase(null))).toBe('Reformer')
+  })
+})
+
+// D8 (16-nov, full-testing de asistencia verificada): el TOTAL de una coach decía «Llegadas: 5 con celular, 4 con teléfono, 1 a mano»
+// (10) junto a un pago de 8 lugares, sin decir que una clase se corrigió a mano. Ahora son «registradas» y lo dice.
+describe('textoDeLlegadasDelTotal — el total de la persona (recibo, PDF y Excel)', () => {
+  const l = (x: Record<string, number>) => ({ qr: 0, phone: 0, staff: 0, list: 0, pass: 0, sinMetodo: 0, ...x })
+  it.each([
+    [
+      l({ qr: 5, phone: 4, staff: 1, corregidas: 1 }),
+      'Llegadas registradas: 5 con celular, 4 con teléfono, 1 a mano · 1 clase con pago corregido a mano',
+    ],
+    [
+      l({ qr: 5, phone: 4, staff: 1, corregidas: 2 }),
+      'Llegadas registradas: 5 con celular, 4 con teléfono, 1 a mano · 2 clases con pago corregido a mano',
+    ],
+    [l({ qr: 5, corregidas: 0 }), 'Llegadas registradas: 5 con celular'],
+    // Un cliente que todavía no manda `corregidas` (o una foto de antes): igual, sin la cola.
+    [l({ qr: 5 }), 'Llegadas registradas: 5 con celular'],
+    [l({ corregidas: 1 }), 'Llegadas registradas: ninguna · 1 clase con pago corregido a mano'],
+  ])('%o ⇒ %s', (x, esperado) => {
+    expect(textoDeLlegadasDelTotal(x)).toBe(esperado)
+  })
+  it('sin clases de «sólo quien llegó» no hay renglón', () => {
+    expect(textoDeLlegadasDelTotal(null)).toBeNull()
+    expect(textoDeLlegadasDelTotal(l({}))).toBeNull()
+  })
+  it('el Excel lo pone en la fila del total tal cual', () => {
+    const filas = filasDelRecibo({ renglones: [], total: '400.00', parcial: false, llegadasEnTotal: 'Llegadas registradas: 5 con celular' })
+    expect(filas.at(-1)?.concepto).toBe('Total · Llegadas registradas: 5 con celular')
   })
 })

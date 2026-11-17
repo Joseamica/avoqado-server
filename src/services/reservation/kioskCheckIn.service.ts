@@ -15,10 +15,12 @@
  */
 
 import { createHash, randomBytes } from 'crypto'
-import { NotificationType, Prisma } from '@prisma/client'
+import { NotificationType, Prisma, ReservationStatus } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { utcTs } from '@/utils/sqlDates'
+import { phonesMatch } from '@/utils/phone'
 import { formatInTimeZone } from 'date-fns-tz'
 import { ConflictError, GoneError, NotFoundError, TooManyRequestsError, ValidationError } from '@/errors/AppError'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
@@ -370,8 +372,8 @@ export async function checkInByIdentifier(args: {
   }
   const raw = args.identifier.trim()
   const code = raw.toUpperCase().slice(0, 32)
-  // Un identificador de puros dígitos es un teléfono. Se comparan los ÚLTIMOS 10 para
-  // que dé igual si lo teclea con lada, con +52 o sin nada.
+  // Un identificador con 10 dígitos o más es un teléfono: la base prefiltra por los ÚLTIMOS 10 y después se confirma el
+  // número completo con su lada (D4, `reservaDelTelefono`).
   const digits = raw.replace(/\D/g, '')
   const phoneTail = digits.length >= 10 ? digits.slice(-10) : null
 
@@ -406,31 +408,63 @@ export async function checkInByIdentifier(args: {
   const windowFrom = new Date(at.getTime() - graceMin * 60_000)
   const windowTo = new Date(at.getTime() + KIOSK_EARLY_CHECK_IN_MIN * 60_000)
 
-  const reservation = await prisma.reservation.findFirst({
-    where: {
-      venueId: args.venueId,
-      startsAt: { gte: windowFrom, lte: windowTo },
-      // Sólo las que pueden contestar algo: una cancelada no tapa a la buena del mismo teléfono. «No asistió» sólo cuenta
-      // si la llegada viene de la cola sin red (su hora real cae antes de que corriera el «No asistió»).
-      status: { in: args.occurredAt ? ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW'] : ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
-      ...(phoneTail
-        ? {
-            OR: [{ guestPhone: { endsWith: phoneTail } }, { customer: { phone: { endsWith: phoneTail } } }],
-          }
-        : { confirmationCode: code }),
-    },
-    orderBy: { startsAt: 'asc' },
-    select: DISPLAY_SELECT,
-  })
+  // Sólo las que pueden contestar algo: una cancelada no tapa a la buena del mismo teléfono. «No asistió» sólo cuenta
+  // si la llegada viene de la cola sin red (su hora real cae antes de que corriera el «No asistió»).
+  const statuses: ReservationStatus[] = args.occurredAt
+    ? ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW']
+    : ['PENDING', 'CONFIRMED', 'CHECKED_IN']
+  const ventana = { venueId: args.venueId, startsAt: { gte: windowFrom, lte: windowTo }, status: { in: statuses } }
+
+  // Codex r3 #3: el recibo de la cola SIEMPRE gana. Si otra entrega del mismo `opId` registró la llegada mientras ésta buscaba,
+  // se contesta «ya registrada» con SU reserva, nunca un 404/409 que la cola de ANDROID mandaría a cuarentena.
+  // Codex r4 #1: con el candado de la operación (`candadoDeLaOperacion`), esta lectura ESPERA a que otra entrega del mismo `opId`
+  // que está guardando su recibo termine; sin él, un recibo aún sin confirmar no se ve y se contestaba 409 antes de tiempo.
+  const reciboOError = async (err: unknown): Promise<ConsumeChallengeResult> => {
+    if (args.opId) {
+      const opId = args.opId
+      const previa = await prisma.$transaction(async tx => {
+        await candadoDeLaOperacion(tx, opId)
+        return tx.kioskCheckInOp.findUnique({ where: { opId }, select: { venueId: true, reservationId: true } })
+      })
+      if (previa && previa.venueId === args.venueId) return yaRegistrada(args.venueId, previa.reservationId)
+    }
+    throw err
+  }
+
+  let reservation: ReservaConDisplay | null
+  try {
+    reservation = phoneTail
+      ? await reservaDelTelefono({ venueId: args.venueId, tecleado: raw, phoneTail, windowFrom, windowTo, statuses, ventana })
+      : await prisma.reservation.findFirst({
+          where: { ...ventana, confirmationCode: code },
+          orderBy: { startsAt: 'asc' },
+          select: DISPLAY_SELECT,
+        })
+  } catch (err) {
+    return reciboOError(err)
+  }
 
   // Respuesta genérica: no revela si el código existe.
   const notFound = () => new NotFoundError('No encontramos esa reservación lista para check-in', CHECK_IN_NOT_FOUND)
-  if (!reservation) throw notFound()
+  if (!reservation) return reciboOError(notFound())
   const display = displayDe(reservation)
 
   // Con `opId`: el recibo va primero, en la transacción de la llegada. Sin `opId` (en vivo): nada.
   const conRecibo = async <T>(tx: Prisma.TransactionClient, fn: () => Promise<T>): Promise<T> => {
+    // Codex r1 #2: entre buscar y escribir, recepción pudo corregir el teléfono de ESTA reserva. Con la fila bloqueada (el mismo
+    // candado que toma el check-in, y primero, como `undoNoShow`) se vuelve a comparar; si ya no es el tecleado, no se marca.
+    if (phoneTail) {
+      const [fila] = await tx.$queryRaw<Array<{ guestPhone: string | null; customerPhone: string | null }>>`
+        SELECT r."guestPhone", c.phone AS "customerPhone" FROM "Reservation" r
+        LEFT JOIN "Customer" c ON c.id = r."customerId"
+        WHERE r.id = ${reservation.id} AND r."venueId" = ${args.venueId}
+        FOR UPDATE OF r`
+      if (!fila || !(phonesMatch(raw, fila.guestPhone) || phonesMatch(raw, fila.customerPhone))) throw notFound()
+    }
     if (args.opId) {
+      // Codex r4 #1: el candado de la operación se queda hasta confirmar; otra entrega del mismo `opId` que vaya a rechazar,
+      // espera aquí y ve el recibo (`reciboOError`).
+      await candadoDeLaOperacion(tx, args.opId)
       const n = await tx.$executeRaw`
         INSERT INTO "KioskCheckInOp" ("opId", "venueId", "reservationId")
         VALUES (${args.opId}, ${args.venueId}, ${reservation.id})
@@ -440,7 +474,7 @@ export async function checkInByIdentifier(args: {
     return fn()
   }
   const yaPorOtra = async (err: unknown) => {
-    if (!(err instanceof OpYaRegistrada) || !args.opId) throw err
+    if (!(err instanceof OpYaRegistrada) || !args.opId) return reciboOError(err)
     const previa = await prisma.kioskCheckInOp.findUnique({ where: { opId: args.opId }, select: { reservationId: true } })
     return yaRegistrada(args.venueId, previa?.reservationId ?? reservation.id)
   }
@@ -458,7 +492,7 @@ export async function checkInByIdentifier(args: {
   }
 
   if (!evaluateKioskWindow({ startsAt: reservation.startsAt, now: at, noShowGraceMin: graceMin })) {
-    throw notFound()
+    return reciboOError(notFound())
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
@@ -492,7 +526,7 @@ export async function checkInByIdentifier(args: {
     return { outcome: 'CHECKED_IN', reservationId: reservation.id, display }
   }
   if (reservation.status === 'NO_SHOW') return corregirNoAsistio()
-  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) throw notFound()
+  if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) return reciboOError(notFound())
 
   let result
   try {
@@ -513,9 +547,9 @@ export async function checkInByIdentifier(args: {
     if (err instanceof OpYaRegistrada) return yaPorOtra(err)
     // Codex r2 #4: el «No asistió» automático ganó entre la lectura y el check-in. Desde la cola (hora real) se corrige
     // (la transacción se deshizo entera, recibo incluido); en vivo, el 409 de siempre.
-    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
+    if (!args.occurredAt || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) return reciboOError(err)
     const ahora = await prisma.reservation.findFirst({ where: { id: reservation.id, venueId: args.venueId }, select: { status: true } })
-    if (ahora?.status !== 'NO_SHOW') throw err
+    if (ahora?.status !== 'NO_SHOW') return reciboOError(err)
     return corregirNoAsistio()
   }
 
@@ -525,6 +559,65 @@ export async function checkInByIdentifier(args: {
 
 /** Otra petición con el mismo `opId` ya dejó su recibo: ésta no escribe nada. */
 class OpYaRegistrada extends Error {}
+
+/** Codex r4 #1: un candado por operación de la cola (sin Redis): dura hasta que su transacción confirma o se deshace. */
+const candadoDeLaOperacion = (tx: Prisma.TransactionClient, opId: string) =>
+  tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kiosk-op:${opId}`}, 0))::text`
+
+/**
+ * D4 (16-nov, full-testing de asistencia verificada): la reserva del teléfono tecleado, comparando el número COMPLETO con su lada.
+ * Antes era un `endsWith` de los últimos 10 dígitos sobre el texto guardado: una invitada guardada «55 1234 5678» no se
+ * encontraba, y un +1 551 234 5678 marcaba la llegada de un +52 55 1234 5678 (cuenta para el pago a la coach).
+ * 1. La base prefiltra por los últimos 10 dígitos SIN espacios ni guiones (índice `venueId, startsAt`: es la ventana de una clase).
+ * 2. `phonesMatch` confirma el número completo (otra lada ⇒ no empata; si no se entiende ⇒ no empata), como el resto del servidor.
+ */
+async function reservaDelTelefono(a: {
+  venueId: string
+  tecleado: string
+  phoneTail: string
+  windowFrom: Date
+  windowTo: Date
+  statuses: ReservationStatus[]
+  ventana: Prisma.ReservationWhereInput
+}) {
+  // ponytail: tope de 20 con los mismos 10 dígitos en la ventana de una clase; si se llena, se manda a recepción (r2 #2).
+  const ids = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT r.id FROM "Reservation" r
+    LEFT JOIN "Customer" c ON c.id = r."customerId"
+    WHERE r."venueId" = ${a.venueId}
+      AND r."startsAt" >= ${utcTs(a.windowFrom)} AND r."startsAt" <= ${utcTs(a.windowTo)}
+      AND r.status::text IN (${Prisma.join(a.statuses)})
+      AND (regexp_replace(COALESCE(r."guestPhone", ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail}
+        OR regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ${'%' + a.phoneTail})
+    ORDER BY r."startsAt" ASC, r.id ASC
+    LIMIT ${TOPE_CANDIDATAS + 1}`
+  if (ids.length === 0) return null
+  // Codex r2 #2: con más de 20 reservas de ese número en la ventana no se puede saber cuántas personas hay: no se adivina.
+  if (ids.length > TOPE_CANDIDATAS) throw telefonoAmbiguo()
+  const candidatas = await prisma.reservation.findMany({
+    where: { ...a.ventana, id: { in: ids.map(r => r.id) } },
+    orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+    take: TOPE_CANDIDATAS,
+    select: {
+      ...DISPLAY_SELECT,
+      guestPhone: true,
+      customer: { select: { firstName: true, lastName: true, phone: true } },
+    },
+  })
+  const suyas = candidatas.filter(r => phonesMatch(a.tecleado, r.guestPhone) || phonesMatch(a.tecleado, r.customer?.phone))
+  // Rediseño tras la regla de parada (Codex r1–r3: adivinar «qué persona es» por ficha o por nombre siempre dejaba otro caso): UN
+  // teléfono = UNA reserva en la ventana. Con más de una (dos personas con el mismo número, o la misma persona en dos clases
+  // seguidas), el kiosco no adivina: la llegada la marca recepción.
+  if (suyas.length > 1) throw telefonoAmbiguo()
+  return suyas[0] ?? null
+}
+
+const TOPE_CANDIDATAS = 20
+const telefonoAmbiguo = () =>
+  new ConflictError('Hay más de una reservación con ese teléfono. Pide tu llegada en recepción.', CHECK_IN_PHONE_AMBIGUOUS)
+
+/** Codex r1 #1 (D4): dos personas con el mismo teléfono en la misma ventana. */
+export const CHECK_IN_PHONE_AMBIGUOUS = 'CHECK_IN_PHONE_AMBIGUOUS'
 
 const DISPLAY_SELECT = {
   id: true,
