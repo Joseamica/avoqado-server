@@ -1,6 +1,5 @@
 import type { Prisma } from '@prisma/client'
-import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
-import { canonicalPhoneE164 } from '@/utils/phone'
+import { canonicalPhoneE164, phoneLast10, phonesMatch } from '@/utils/phone'
 
 /** «Ána  Ruiz» → «ana»: el primer nombre, sin acentos ni mayúsculas. */
 const primerNombre = (s: string | null | undefined) =>
@@ -22,14 +21,24 @@ export async function fichaDeLaInvitada(
   invitada: { guestName: string | null | undefined; guestPhone: string | null | undefined },
 ): Promise<{ customerId: string; creada: boolean } | null> {
   const telefono = invitada.guestPhone ? canonicalPhoneE164(invitada.guestPhone) : null
-  if (!telefono) return null
+  // Codex r3 #6: un número válido de menos de 10 dígitos (+298 …) no se puede volver a encontrar con la búsqueda compartida: no se crea.
+  const ultimos10 = telefono ? phoneLast10(telefono) : null
+  if (!telefono || !ultimos10) return null
   const nombre = (invitada.guestName ?? '').trim()
 
-  const existente = await findCustomerIdByPhone(tx, venueId, telefono)
-  if (existente) {
-    const ficha = await tx.customer.findFirst({ where: { id: existente, venueId }, select: { firstName: true } })
-    const suNombre = primerNombre(ficha?.firstName)
-    return !suNombre || suNombre === primerNombre(nombre) ? { customerId: existente, creada: false } : null
+  // La búsqueda de la página pública (los dígitos sin formato + el número completo), con el nombre en la misma lectura.
+  const candidatas = await tx.$queryRaw<Array<{ id: string; phone: string | null; firstName: string | null }>>`
+    SELECT "id", "phone", "firstName" FROM "Customer"
+    WHERE "venueId" = ${venueId} AND "phone" IS NOT NULL
+      AND right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${ultimos10}
+    ORDER BY "createdAt" ASC, "id" ASC
+    LIMIT ${TOPE + 1}`
+  // Codex r3 #6: con el tope lleno no se sabe si su ficha está más abajo: ni se liga ni se crea (no se duplica una que ya existe).
+  if (candidatas.length > TOPE) return null
+  const suya = candidatas.find(c => phonesMatch(c.phone, telefono))
+  if (suya) {
+    const suNombre = primerNombre(suya.firstName)
+    return !suNombre || suNombre === primerNombre(nombre) ? { customerId: suya.id, creada: false } : null
   }
   if (!nombre) return null
 
@@ -39,6 +48,9 @@ export async function fichaDeLaInvitada(
     data: [{ venueId, phone: telefono, firstName, lastName: resto.join(' ') || null }],
     skipDuplicates: true,
   })
-  const id = await findCustomerIdByPhone(tx, venueId, telefono)
-  return id ? { customerId: id, creada: r.count === 1 } : null
+  // Codex r3 #6: se recupera por el teléfono EXACTO que se guardó (no por la búsqueda topada).
+  const creada = await tx.customer.findFirst({ where: { venueId, phone: telefono }, select: { id: true } })
+  return creada ? { customerId: creada.id, creada: r.count === 1 } : null
 }
+
+const TOPE = 20

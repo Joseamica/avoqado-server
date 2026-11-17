@@ -8,6 +8,7 @@
  */
 
 import { storeCreditDeClientes, type StoreCreditDeCliente } from '../storeCredit/customerStoreCreditBalance'
+import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
 import { fromZonedTime } from 'date-fns-tz'
@@ -437,12 +438,12 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
   }
 
   if (phone) {
-    const existingByPhone = await prisma.customer.findFirst({
-      where: {
-        venueId,
-        phone,
-      },
-    })
+    // D7 (Codex r3 #5): el mismo número con otro formato («55 1234 5678» y «+525512345678», p. ej. la ficha que creó una reserva
+    // de invitada) es la MISMA clienta: comparar letra por letra le creaba una segunda ficha.
+    // La comparación exacta de siempre queda de respaldo (un número que no se entiende no pasa por la normalizada).
+    const existingByPhone =
+      (await findCustomerIdByPhone(prisma, venueId, phone)) ??
+      (await prisma.customer.findFirst({ where: { venueId, phone }, select: { id: true } }))?.id
 
     if (existingByPhone) {
       throw new BadRequestError(`Ya existe un cliente con el teléfono ${phone} en este negocio`)

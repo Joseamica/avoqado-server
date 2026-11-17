@@ -407,6 +407,11 @@ describe('Customer Dashboard Service', () => {
   })
 
   describe('createCustomer', () => {
+    // D7 (Codex r3 #5): el duplicado por teléfono se busca normalizado (la misma búsqueda de la página pública, por SQL).
+    beforeEach(() => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    })
+
     it('should create customer with email and return with customerGroup', async () => {
       const mockCustomer = {
         ...createMockCustomer(),
@@ -477,9 +482,18 @@ describe('Customer Dashboard Service', () => {
       ).rejects.toThrow('Ya existe un cliente con el correo test@example.com en este negocio')
     })
 
+    // D7 (Codex r3 #5): la ficha que creó una reserva de invitada guarda «+525512345678»; darla de alta con espacios no la duplica.
+    it('🔴 el mismo número con otro formato ya existe ⇒ «Ya existe un cliente con el teléfono…», no crea otra ficha', async () => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ id: 'c-d7', phone: '+525512345678' }])
+      await expect(createCustomer('venue-123', { phone: '55 1234 5678', firstName: 'Ana' })).rejects.toThrow(
+        'Ya existe un cliente con el teléfono 55 1234 5678 en este negocio',
+      )
+      expect(prismaMock.customer.create).not.toHaveBeenCalled()
+    })
+
     it('should throw BadRequestError if phone already exists in venue', async () => {
-      // Only phone provided (no email), so only 1 findFirst call for phone duplicate check
-      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ phone: '+1234567890' }) as any)
+      // D7 (Codex r3 #5): el mismo número, guardado con otro formato, también es duplicado.
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ id: 'customer-1', phone: '+1 234 567 890' }])
 
       await expect(
         createCustomer('venue-123', {
@@ -540,11 +554,15 @@ describe('Customer Dashboard Service', () => {
   describe('D15 · correo o teléfono vacío ("") — el panel viejo y las apps', () => {
     it('🔴 alta con correo "" y teléfono: no se guarda "" (chocaría con el único por negocio) ni se busca duplicado de ""', async () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
       prismaMock.customer.create.mockResolvedValue(createMockCustomer({ email: null }) as any)
 
       await createCustomer('venue-123', { email: '', phone: '+525544102263', firstName: 'Rosa' })
 
-      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1) // sólo el teléfono
+      // Sólo el teléfono: normalizado (SQL) y su respaldo exacto; nunca un duplicado de "".
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1)
+      expect((prismaMock.customer.findFirst.mock.calls[0][0] as any).where).toEqual({ venueId: 'venue-123', phone: '+525544102263' })
       const data = prismaMock.customer.create.mock.calls[0][0].data as any
       expect(data.email).toBeUndefined()
       expect(data.phone).toBe('+525544102263')
