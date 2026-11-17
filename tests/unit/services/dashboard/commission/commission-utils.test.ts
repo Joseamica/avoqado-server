@@ -489,13 +489,6 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       montar(mostrador(), 25.5)
       expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(75)
     })
-
-    it('🔴 un combo (renglón neto, su regalo fuera de la cabecera) tampoco se come el descuento de cuenta', async () => {
-      // Pieza de combo de lista $50 con $10 de su regalo (total neto $40) + Café $30; 10 % de cuenta sólo sobre lo que no es
-      // promoción ($3). La cabecera guarda $3. Antes: 3 − 10 < 0 ⇒ 0 y se comisionaban $70; lo cobrado son $67.
-      montar([r('a-combo', 50, 40, 10, 'combos', { orderPromotionId: 'promo-1' }), r('c-cafe', 30, 30, 0, 'cafes')], 3)
-      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(67)
-    })
   })
 
   describe('con repartos (lo de hoy): cada renglón se lleva SU parte, como `lineRevenue`', () => {
@@ -511,14 +504,6 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(22.5)
       expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
       expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(49.5)
-    })
-
-    it('🔴 combo con 10 % de cuenta: el 10 % cae sólo en el Café, como lo cobró el POS', async () => {
-      montar([r('a-combo', 50, 40, 10, 'combos', { orderPromotionId: 'promo-1' }), r('c-cafe', 30, 30, 0, 'cafes')], 3, [
-        fila({ 'c-cafe': 300 }),
-      ])
-      expect(await calculateCategoryFilteredAmount('o', ['combos'], CONFIG_DEFAULT)).toBe(40)
-      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(27)
     })
 
     describe('🔴 Codex r1: un combo regalado por `compItems` de la TPV sí está en la cabecera (tiene su espejo)', () => {
@@ -565,6 +550,16 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       montar([...renglones, r('z-cafe', 100, 100, 0, 'cafes')], 600, espejos)
       expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
       expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(5500)
+    })
+
+    it('🔴 Codex r3: el espejo viejo cuyo descuento se BORRÓ del catálogo no se resta dos veces', async () => {
+      // Orden anterior a B2: producto de $1,000 con $900 de descuento (renglón bruto, sin liga: el catálogo se borró, SetNull) +
+      // Café $100. La cabecera trae los $900; se cobraron $200. Base correcta: $100 y $100.
+      montar([r('a-rebajado', 1000, 1000, 900, 'otros'), r('c-cafe', 100, 100, 0, 'cafes')], 900, [
+        { type: 'FIXED_AMOUNT', isComp: false, discountId: null, appliedToItemIds: ['a-rebajado'], reparto: null },
+      ])
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+      expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(200)
     })
 
     it('una fila espejo de la forma VIEJA (sin reparto: descuento de catálogo ligado al renglón) también cuenta', async () => {

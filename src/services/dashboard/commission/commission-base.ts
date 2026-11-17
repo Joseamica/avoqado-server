@@ -186,8 +186,7 @@ export interface OrderLineForCommission {
   taxRate?: number | null
   /**
    * ¿`Order.discountAmount` YA incluye el `lineDiscount` de este renglón? Ausente = sí (lo de siempre). No lo incluye la
-   * cortesía de Mesas (renglón en $0, `comp-item.mobile.service.ts`) ni la pieza de un combo (renglón neto): lo dice
-   * `descuentoDelRenglonEnLaCabecera` (commission-utils), con la regla de los reportes (`lineRevenue`, `salesGiveaways`).
+   * cortesía en $0 de Mesas (`comp-item.mobile.service.ts`): lo dice `descuentoDelRenglonEnLaCabecera` (commission-utils).
    */
   descuentoEnLaCabecera?: boolean
   /** Su parte, en pesos, de los descuentos de cuenta de la orden según sus repartos (`lineOrderDiscount`). Ausente = 0. */
@@ -216,8 +215,8 @@ export function orderLevelDiscountOf(orderDiscountTotal: number, lineDiscounts: 
  *
  * 🔴 La MISMA cortesía se guarda de dos formas según la pantalla: en Mostrador/«Cobrar» el renglón queda a precio lleno y la
  * cabecera la incluye; en Mesas el renglón queda en $0 y la cabecera NO la incluye. Restarle a la cabecera TODOS los descuentos
- * de renglón borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y en los combos, y la comisión pagaba de más. Aquí sólo
- * se restan los que la cabecera sí trae (`descuentoEnLaCabecera`).
+ * de renglón borraba el descuento de cuenta en Mesas (5.50 − 20 ⇒ 0) y la comisión pagaba de más. Aquí sólo se restan los que
+ * la cabecera sí trae (`descuentoEnLaCabecera`).
  *
  * `porRenglon`: si la suma de las partes de los repartos (`parteDeLasFilas`) es EXACTAMENTE ese descuento, cada renglón se lleva
  * la suya, como en los reportes (`lineRevenue`): un % de cuenta que no tocó un combo no se le reparte al combo. Si no cuadra

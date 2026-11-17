@@ -17,7 +17,6 @@ import {
   recorteDeFila,
   reduccionDeImpuestoCobrado,
   reduccionesQueNoVuelven,
-  renglonesConEspejo,
   repartosDeLaOrden,
   type FilaParaReparto,
   type RenglonParaReparto,
@@ -178,6 +177,25 @@ export async function conservarDescuentoHistorico(
   await tx.orderDiscount.create({
     data: { orderId, type: 'FIXED_AMOUNT', name: 'Descuento anterior', value: monto, amount: monto, taxReduction: 0, isManual: true },
   })
+}
+
+/** Los renglones cuyo descuento ya duplica una fila espejo: con reparto, la marca; sin él, las dos formas viejas de revertir. */
+function renglonesConEspejo(
+  filas: Array<{ type: string; isComp: boolean; discountId: string | null; appliedToItemIds: string[]; reparto: unknown }>,
+  renglones: Array<{ id: string; appliedDiscountId: string | null; isCortesia: boolean }>,
+): Set<string> {
+  const porId = new Map(renglones.map(r => [r.id, r] as const))
+  const con = new Set<string>()
+  for (const f of filas) {
+    const reparto = leerReparto(f.reparto)
+    const ids = f.appliedToItemIds ?? []
+    if (reparto) {
+      if (reparto.espejo) Object.keys(reparto.renglones).forEach(id => con.add(id))
+    } else if (ids.length === 1 && f.discountId && porId.get(ids[0])?.appliedDiscountId === f.discountId) con.add(ids[0])
+    else if (f.isComp && f.type === 'COMP' && !f.discountId && ids.length > 0 && ids.every(id => porId.get(id)?.isCortesia))
+      ids.forEach(id => con.add(id))
+  }
+  return con
 }
 
 /**

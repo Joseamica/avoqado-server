@@ -35,8 +35,7 @@ import { grossByRateFromOrder, ordenParaIvaSelect, tasaDelRenglon, type OrdenPar
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 import { validarTasa } from './tasasDelEsquema'
 import { importePorPesoCents, importePorPesoViejoCents } from '../../shared/importePorPeso'
-import { isItemLevelDiscount, lineOrderDiscount } from '../lineRevenue'
-import { renglonesConEspejo } from '../../shared/repartoDescuento'
+import { lineOrderDiscount } from '../lineRevenue'
 
 // ============================================
 // Type Definitions
@@ -896,36 +895,29 @@ export async function findActiveCommissionConfigs(
 }
 
 /**
- * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»; Codex r1).
+ * ¿`Order.discountAmount` ya trae el descuento de ESTE renglón? (encargo 04edc5, founder «C»; Codex r1–r3).
  *
- * - **La orden tiene filas de descuento** (todo lo de B2 en adelante): la cabecera es la suma de sus filas, así que la trae sólo
- *   si una fila la DUPLICA (espejo; `renglonesConEspejo`, la misma pregunta que `conservarDescuentoHistorico`). La cortesía de
- *   Mostrador/«Cobrar» y la de `compItems` de la TPV tienen su espejo; la de Mesas (renglón en $0) y el regalo de un combo no.
- *   Por la forma del renglón no se puede: un combo regalado por `compItems` (2 × $100 en 2×1, total $100, descuento $100) parece
- *   «ya neto» y sí está en la cabecera (Codex r1).
- * - **Sin filas** (orden anterior a B2, delivery, importada): por la forma del renglón, con la regla de los reportes —la cortesía
- *   de Mesas (`isCortesia` con total $0, `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`) y un renglón ya neto
- *   (`isItemLevelDiscount` de `lineRevenue.ts`) NO; lo demás, renglón bruto, SÍ—. Sin `total` en la lectura: SÍ, lo de siempre.
+ * SÍ, salvo UNA excepción comprobada en todos sus escritores: la cortesía en $0 (`isCortesia` con total 0 y descuento > 0,
+ * `HIDDEN_COMP_LINE_WHERE` de `salesGiveaways.ts`). La escriben `compOrderItem`/`compWholeOrder` de Mesas
+ * (`comp-item.mobile.service.ts`) y la cortesía al agregar productos a una cuenta abierta (`order.tpv.service.ts`, TPV y móvil),
+ * y ninguna la suma a la cabecera (que es la suma de las filas, o la de antes). Las demás formas de la cortesía (Mostrador,
+ * «Cobrar», `compItems` de la TPV) dejan el renglón bruto y la cabecera SÍ la trae.
+ *
+ * 🔴 Por qué no se adivina más (Codex r1–r3): clasificar por la forma del renglón o por sus filas espejo se equivocaba en casos
+ * raros (combo regalado por `compItems`, más filas que el tope, espejo viejo cuyo descuento se borró del catálogo) y entonces
+ * restaba DOS veces: pagaba de menos. Equivocarse hacia «sí» es lo de antes; hacia «no», un error nuevo. Sólo «no» con prueba.
  */
-function descuentoDelRenglonEnLaCabecera(
-  item: {
-    id: string
-    total?: Decimal | number | null
-    isCortesia?: boolean | null
-    quantity: number
-    unitPrice: Decimal | number
-    discountAmount?: Decimal | number | null
-    orderPromotionId?: string | null
-    weightQuantity?: Decimal | number | null
-    modifiers?: Array<{ price: Decimal | number; quantity: number }>
-  },
-  filas: { hay: boolean; conEspejo: Set<string> },
-): boolean {
-  if (filas.hay) return filas.conEspejo.has(item.id)
-  if (item.total == null) return true
-  if (item.isCortesia === true && Number(item.total) === 0) return false
-  return !isItemLevelDiscount({ ...item, total: item.total })
+function descuentoDelRenglonEnLaCabecera(item: {
+  total?: Decimal | number | null
+  isCortesia?: boolean | null
+  discountAmount?: Decimal | number | null
+}): boolean {
+  const cortesiaEnCero = item.isCortesia === true && item.total != null && Number(item.total) === 0 && Number(item.discountAmount ?? 0) > 0
+  return !cortesiaEnCero
 }
+
+/** Cuántas filas de descuento de una orden se leen para la base por categoría (ver `loadOrderCommissionLines`). */
+const TOPE_DE_FILAS = 500
 
 /**
  * Lee la orden COMPLETA una sola vez y la normaliza a las líneas que consume la
@@ -943,9 +935,6 @@ function descuentoDelRenglonEnLaCabecera(
  *    configuración por categoría. La selección ahora se hace en memoria, donde
  *    "sin categoría" es un caso explícito y no un accidente del filtro.
  */
-/** Cuántas filas de descuento de una orden se leen para la base por categoría (ver `loadOrderCommissionLines`). */
-const TOPE_DE_FILAS = 500
-
 async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
@@ -966,8 +955,6 @@ async function loadOrderCommissionLines(
         // Encargo 04edc5: ¿la cabecera trae el descuento de este renglón? (`descuentoDelRenglonEnLaCabecera`) y su parte de los repartos.
         id: true,
         isCortesia: true,
-        orderPromotionId: true,
-        appliedDiscountId: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
@@ -978,16 +965,14 @@ async function loadOrderCommissionLines(
     // Las filas de descuento de UNA orden (unas cuantas). Se pide una de más que el tope para saber si se cortó (Codex r2).
     db.orderDiscount.findMany({
       where: { orderId },
-      select: { type: true, isComp: true, discountId: true, appliedToItemIds: true, reparto: true },
+      select: { reparto: true },
       orderBy: { id: 'asc' },
       take: TOPE_DE_FILAS + 1,
     }),
   ])
 
-  // 🔴 Codex r2: con más filas que el tope no se ven todos los espejos; clasificar con una parte restaría dos veces lo que no se
-  // vio. Esa orden (cientos de descuentos) se lee con la regla de antes: todos los descuentos de renglón están en la cabecera.
+  // 🔴 Codex r2: con más filas que el tope no se ven todas sus partes; esa orden (cientos de descuentos) se prorratea como siempre.
   const filasCompletas = filas.length <= TOPE_DE_FILAS
-  const espejos = { hay: filas.length > 0, conEspejo: renglonesConEspejo(filas, orderItems) }
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
     // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
     gross: importeDelRenglon(item),
@@ -995,9 +980,8 @@ async function loadOrderCommissionLines(
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
     taxRate: tasaDelRenglon(item),
-    ...(filasCompletas
-      ? { descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item, espejos), parteDeLasFilas: lineOrderDiscount(item, filas) }
-      : {}),
+    descuentoEnLaCabecera: descuentoDelRenglonEnLaCabecera(item),
+    ...(filasCompletas ? { parteDeLasFilas: lineOrderDiscount(item, filas) } : {}),
   }))
 
   const { orderLevelDiscount, porRenglon } = descuentoDeOrdenDeLaVenta(decimalToNumber(order?.discountAmount), lines)
