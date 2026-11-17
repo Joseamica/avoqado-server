@@ -641,6 +641,79 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
       expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
     })
 
+    it('🍟 Codex r2 #5 (encargo 27771e): el extra ligado descuenta el platillo de la FOTO del vale, no el que tiene ahora', async () => {
+      const extra = (linkedProductId: string | null) => ({
+        quantity: 1,
+        modifier: {
+          id: 'mod-papas',
+          name: 'Papas',
+          groupId: 'g1',
+          rawMaterialId: null,
+          quantityPerUnit: null,
+          unit: null,
+          inventoryMode: 'ADDITION',
+          linkedProductId,
+        },
+      })
+      const order = makeOrder({ items: [{ ...makeOrder().items[0], modifiers: [extra('p-ahora')] }] })
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+      ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'line-1', effectKey: 'item-1' }])
+      ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
+      ;(prisma.inventoryPosting.findUnique as jest.Mock).mockResolvedValueOnce({
+        payloadSnapshot: { items: [{ id: 'item-1', modifiers: [extra('p-al-cobrar')] }] },
+      })
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      const mods = (productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls[0][5]
+      expect(mods[0].modifier.linkedProductId).toBe('p-al-cobrar')
+    })
+
+    it('🍟 Codex r3 #2: si después de cobrar el extra pasó de platillo a INSUMO, descuenta sólo lo de la foto (el platillo), no los dos', async () => {
+      const vivo = {
+        quantity: 1,
+        modifier: {
+          id: 'mod-papas',
+          name: 'Papas',
+          groupId: 'g1',
+          rawMaterialId: 'rm-aceite',
+          quantityPerUnit: new Decimal(10),
+          unit: 'MILLILITER',
+          inventoryMode: 'ADDITION',
+          linkedProductId: null,
+        },
+      }
+      const foto = {
+        quantity: 1,
+        modifier: {
+          id: 'mod-papas',
+          name: 'Papas',
+          groupId: 'g1',
+          rawMaterialId: null,
+          quantityPerUnit: null,
+          unit: null,
+          inventoryMode: 'ADDITION',
+          linkedProductId: 'p-papas',
+        },
+      }
+      const order = makeOrder({ items: [{ ...makeOrder().items[0], modifiers: [vivo] }] })
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+      ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'line-1', effectKey: 'item-1' }])
+      ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
+      ;(prisma.inventoryPosting.findUnique as jest.Mock).mockResolvedValueOnce({
+        payloadSnapshot: { items: [{ id: 'item-1', modifiers: [foto] }] },
+      })
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      const [mod] = (productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls[0][5]
+      expect(mod.modifier).toMatchObject({ linkedProductId: 'p-papas', rawMaterialId: null, quantityPerUnit: null })
+    })
+
     it('el primer saldado de una orden normal SIGUE deduciendo (regresión)', async () => {
       const order = makeOrder() // sin pagos previos
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)

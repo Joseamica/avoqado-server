@@ -1,4 +1,5 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
+import { inventarioDelExtra, type InventarioDelExtra } from '@/services/inventory/inventarioDelExtra'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
@@ -1123,6 +1124,8 @@ export async function buildOrderItemsData(
   itemDiscountTotal: number
   discounts: Array<{ id: string; [key: string]: any }>
   modifierSkus: Record<string, string | null>
+  /** Vales por área: qué descuenta cada extra AL EMITIR (la foto de `modifiersSnapshot.inventario`, encargo 27771e). */
+  modifierInventory: Record<string, InventarioDelExtra>
   cambiosDePrecio: CambioDePrecio[]
   preciosRespetados: PrecioRespetado[]
   /** D12: los renglones con «Ajuste de precio» (su `id` ya viaja en `itemsData`) y los pesos que cada uno descuenta. */
@@ -1502,7 +1505,20 @@ export async function buildOrderItemsData(
   // Caja externa: el SKU de cada extra, para que el vale lo congele SIN meterlo en
   // `modifiers.create` (OrderItemModifier no tiene esa columna y Prisma rechazaría la orden).
   const modifierSkus: Record<string, string | null> = Object.fromEntries(modifiers.map(modifier => [modifier.id, modifier.sku ?? null]))
-  return { itemsData, subtotal, itemDiscountTotal, discounts, modifierSkus, cambiosDePrecio, preciosRespetados, ajustesDePrecio }
+  const modifierInventory: Record<string, InventarioDelExtra> = Object.fromEntries(
+    modifiers.map(modifier => [modifier.id, inventarioDelExtra(modifier)]),
+  )
+  return {
+    itemsData,
+    subtotal,
+    itemDiscountTotal,
+    discounts,
+    modifierSkus,
+    modifierInventory,
+    cambiosDePrecio,
+    preciosRespetados,
+    ajustesDePrecio,
+  }
 }
 
 function roundPesos(value: number): number {

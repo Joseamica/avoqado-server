@@ -356,7 +356,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/master-catalog/masterCatalogControlPlane.service.ts': 2,
   'src/services/mcp/mcpAudit.service.ts': 1,
   'src/services/mobile/areaTicket.mobile.service.ts': 3,
-  'src/services/mobile/areaTicketV7.mobile.service.ts': 10,
+  'src/services/mobile/areaTicketV7.mobile.service.ts': 9,
   'src/services/mobile/auth.mobile.service.ts': 4,
   'src/services/mobile/cash-drawer.mobile.service.ts': 1,
   'src/services/mobile/comp-item.mobile.service.ts': 4,

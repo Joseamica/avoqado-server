@@ -2076,6 +2076,8 @@ model Product {
   paymentLinkItems      PaymentLinkItem[]
   paymentLinkStockHolds PaymentLinkStockHold[]
   modifierGroups        ProductModifierGroup[]
+  /// Extras que, al venderse, descuentan el inventario de ESTE platillo (Modifier.linkedProductId).
+  linkedFromModifiers   Modifier[]             @relation("ModifierLinkedProduct")
   recipe                Recipe? // ✅ NEW: Recipe composition
   pricingPolicy         PricingPolicy? // ✅ NEW: Pricing strategy
 
@@ -4663,6 +4665,13 @@ model Modifier {
   inventoryMode   ModifierInventoryMode @default(ADDITION) // ADDITION (extra) or SUBSTITUTION (replace)
   cost            Decimal?              @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
 
+  /// Extra que ES un platillo del menú (como Fudo «opcionales = productos» y Toast «New Modifier from Existing Item»; founder,
+  /// 16-nov-2026, encargo 27771e): al venderse descuenta 1 porción de ese platillo por selección (sus piezas o su receta completa,
+  /// por el mismo vale de inventario del cobro) y NO cuenta como venta de ese platillo. Excluye a `rawMaterialId`: un extra descuenta
+  /// un insumo o un platillo, no los dos. Premium (INVENTORY_TRACKING) al ponerlo; quitarlo siempre se puede.
+  linkedProductId String?
+  linkedProduct   Product?              @relation("ModifierLinkedProduct", fields: [linkedProductId], references: [id], onDelete: SetNull)
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -4677,6 +4686,7 @@ model Modifier {
   priceHistory     ModifierPriceHistory[]
 
   @@index([rawMaterialId])
+  @@index([linkedProductId])
   // Postgres no indexa sola la llave foránea: sin esto cada lectura de las opciones de un grupo (menú del POS, carta de
   // pedidos en línea, panel) y el borrado en cascada de un grupo recorrían la tabla entera (26-oct, pizarrón hz:12c781a4:D2).
   @@index([groupId])

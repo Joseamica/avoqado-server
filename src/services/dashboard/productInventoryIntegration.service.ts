@@ -185,6 +185,7 @@ export async function deductInventoryForProduct(
         options?.postingLineId,
         options?.fence,
       )
+      await deductLinkedProductsForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options)
     }
     return {
       inventoryMethod: null,
@@ -206,6 +207,7 @@ export async function deductInventoryForProduct(
           options?.postingLineId,
           options?.fence,
         )
+        await deductLinkedProductsForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options)
       }
       return result
     }
@@ -233,12 +235,84 @@ export async function deductInventoryForProduct(
           options?.postingLineId,
           options?.fence,
         )
+        await deductLinkedProductsForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options)
       }
       return result
     }
 
     default:
       throw new AppError(`Unknown inventory method: ${inventoryMethod}`, 500)
+  }
+}
+
+/**
+ * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo «opcionales = productos» y Toast «New Modifier
+ * from Existing Item»). Por cada extra con `linkedProductId`, descuenta 1 porción de ese platillo por selección × la escala del renglón
+ * (las piezas del renglón, o 1 en una línea pesada: igual que los extras de insumo). Va por `deductInventoryForProduct` del platillo
+ * ligado —sus piezas o su receta completa— con la MISMA línea del vale y la misma cerca, y SIN extras: nunca hay recursión, tampoco si
+ * el extra está ligado al mismo platillo que lo lleva.
+ *
+ * El platillo ligado NO es un renglón de la venta: no suma a las ventas por producto (eso sale de `OrderItem`), sólo mueve inventario.
+ *
+ * Se salta (con aviso en el log, sin error) un ligado que ya no existe en este negocio o que hoy se vende por kilo: descontar «1» sería
+ * adivinar 1 kg. Un ligado sin inventario no descuenta nada (`deductInventoryForProduct` lo resuelve solo).
+ */
+async function deductLinkedProductsForModifiers(
+  venueId: string,
+  modifierScaleQuantity: number,
+  orderModifiers: OrderModifierForInventory[],
+  orderId: string,
+  staffId: string | undefined,
+  options: { postingLineId?: string; fence?: PostingFence } | undefined,
+) {
+  // Porciones por platillo ligado: dos extras del renglón ligados al mismo platillo se descuentan en UNA pasada (Codex r2 #6).
+  const portionsByProduct = new Map<string, { portions: Decimal; modifierIds: string[] }>()
+  for (const orderModifier of orderModifiers) {
+    const linkedProductId = orderModifier.modifier.linkedProductId
+    if (!linkedProductId) continue
+    const portions = new Decimal(modifierScaleQuantity).mul(orderModifier.quantity)
+    if (portions.lessThanOrEqualTo(0)) continue
+    const current = portionsByProduct.get(linkedProductId)
+    if (current) {
+      current.portions = current.portions.add(portions)
+      current.modifierIds.push(orderModifier.modifier.id)
+    } else portionsByProduct.set(linkedProductId, { portions, modifierIds: [orderModifier.modifier.id] })
+  }
+  if (portionsByProduct.size === 0) return
+
+  // UNA lectura para todos los ligados del renglón, y SIEMPRE con su negocio: el ligado viene del snapshot del vale y nunca se confía
+  // en un id sin su negocio.
+  const ids = [...portionsByProduct.keys()]
+  const linkedProducts = await prisma.product.findMany({
+    where: { id: { in: ids }, venueId },
+    select: { id: true, name: true, soldByWeight: true },
+    take: ids.length,
+  })
+  const byId = new Map(linkedProducts.map(p => [p.id, p]))
+
+  for (const [linkedProductId, { portions, modifierIds }] of portionsByProduct) {
+    const linked = byId.get(linkedProductId)
+    if (!linked) {
+      logger.warn('⚠️ [Inventario] Extra ligado a un platillo que ya no existe en este negocio — no se descuenta', {
+        venueId,
+        orderId,
+        modifierIds,
+        linkedProductId,
+      })
+      continue
+    }
+    if (linked.soldByWeight) {
+      logger.warn('⚠️ [Inventario] Extra ligado a un platillo que se vende por kilo — no se descuenta (sería adivinar 1 kg)', {
+        venueId,
+        orderId,
+        modifierIds,
+        linkedProductId,
+        linkedProductName: linked.name,
+      })
+      continue
+    }
+
+    await deductInventoryForProduct(venueId, linkedProductId, portions.toNumber(), orderId, staffId, undefined, options)
   }
 }
 

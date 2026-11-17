@@ -99,6 +99,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_launch_campaign: 'write',
   create_loyalty_promotion: 'write',
   create_modifier_group: 'write',
+  link_modifier_to_menu_item: 'write',
   create_payment_link: 'write',
   create_customer_payment_link: 'write',
   add_customer_to_payment_link: 'write',
@@ -633,6 +634,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedCurrentCount',
             'expectedResultingDifference',
             'expectedCorrectionCount',
+            // Extra ligado a un platillo (`link_modifier_to_menu_item`, encargo 27771e): se confirma sobre el extra que se VIO.
+            'resolvedModifierId',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

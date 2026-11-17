@@ -1027,6 +1027,8 @@ export interface OrderModifierForInventory {
     quantityPerUnit: Decimal | null
     unit: Unit | null
     inventoryMode: ModifierInventoryMode
+    /** Extra ligado a un platillo del menú (encargo 27771e): lo descuenta `deductInventoryForProduct`, no esta función. */
+    linkedProductId?: string | null
   }
 }
 

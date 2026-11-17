@@ -208,6 +208,7 @@ import {
   GetMenuParamsSchema,
   GetModifierGroupParamsSchema,
   GetModifierParamsSchema,
+  SearchLinkableProductsSchema,
   GetProductParamsSchema,
   MenuQuerySchema,
   ModifierGroupQuerySchema,
@@ -7342,6 +7343,28 @@ router.delete(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-linkable-products:
+ *   get:
+ *     tags: [Menu - Modifiers]
+ *     summary: Buscar el platillo que un extra «es» (página acotada)
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: search, in: query, schema: { type: string } }
+ *       - { name: cursor, in: query, schema: { type: string } }
+ *       - { name: limit, in: query, schema: { type: integer, maximum: 50 } }
+ *     responses:
+ *       200: { description: '{ data, total, hasMore, nextCursor }' }
+ */
+router.get(
+  '/venues/:venueId/modifier-linkable-products',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(SearchLinkableProductsSchema),
+  menuController.searchLinkableProductsHandler,
+)
+
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
   authenticateTokenMiddleware,

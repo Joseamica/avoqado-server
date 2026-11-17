@@ -536,3 +536,83 @@ describe('getModifierUsageStats — páginas de 500 con cursor', () => {
     expect(enOrden.map(x => x.modifierId)).toEqual(['mod-a', 'mod-z']) // empate a 1 uso → desempata el id
   })
 })
+
+describe('🍟 Extra ligado a un platillo del menú en el reporte de extras (encargo 27771e)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const usoLigado = (linkedProduct: any, orderItemQty = 2, qty = 1) => ({
+    id: `oim-${Math.random()}`,
+    modifier: {
+      id: 'mod-papas',
+      name: 'Papas',
+      group: { id: 'g1', name: 'Acompañantes' },
+      rawMaterial: null,
+      linkedProduct,
+      quantityPerUnit: null,
+      inventoryMode: 'ADDITION' as ModifierInventoryMode,
+    },
+    orderItem: { quantity: orderItemQty },
+    quantity: qty,
+  })
+
+  it('el extra ligado sale con su platillo y el costo por porción × porciones (piezas: costo del producto)', async () => {
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([
+      usoLigado(
+        { id: 'p-papas', name: 'Papas a la francesa', inventoryMethod: 'QUANTITY', cost: new Decimal('12.50'), recipe: null },
+        2,
+        1,
+      ),
+    ])
+    const [stat] = await getModifierUsageStats('venue-123')
+    expect(stat.linkedProduct).toEqual({ id: 'p-papas', name: 'Papas a la francesa', costPerPortion: 12.5 })
+    expect(stat.totalQuantityUsed).toBe(2)
+    expect(stat.totalCostImpact).toBeCloseTo(25)
+    const include = (prisma.orderItemModifier.findMany as jest.Mock).mock.calls[0][0].include
+    expect(include.modifier.include.linkedProduct.select).toMatchObject({ id: true, name: true, cost: true })
+  })
+
+  it('por receta, el costo por porción es el de su receta', async () => {
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([
+      usoLigado(
+        { id: 'p-aros', name: 'Aros', inventoryMethod: 'RECIPE', cost: new Decimal('99'), recipe: { totalCost: new Decimal('8.25') } },
+        1,
+        2,
+      ),
+    ])
+    const [stat] = await getModifierUsageStats('venue-123')
+    expect(stat.linkedProduct?.costPerPortion).toBeCloseTo(8.25)
+    expect(stat.totalCostImpact).toBeCloseTo(16.5)
+  })
+
+  it('el conteo de «extras con inventario» incluye los ligados a un platillo', async () => {
+    ;(prisma.modifier.count as jest.Mock).mockResolvedValue(3)
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([])
+    await getModifierInventorySummary('venue-123')
+    expect((prisma.modifier.count as jest.Mock).mock.calls[0][0].where).toEqual({
+      group: { venueId: 'venue-123' },
+      OR: [{ rawMaterialId: { not: null } }, { linkedProductId: { not: null } }],
+    })
+  })
+
+  it('la lista de configuración dice qué platillo descuenta cada extra', async () => {
+    ;(prisma.modifier.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'mod-papas',
+        name: 'Papas',
+        group: { id: 'g1', name: 'Acompañantes' },
+        rawMaterialId: null,
+        rawMaterial: null,
+        linkedProductId: 'p-papas',
+        linkedProduct: { id: 'p-papas', name: 'Papas a la francesa' },
+        quantityPerUnit: null,
+        unit: null,
+        inventoryMode: 'ADDITION',
+        cost: new Decimal('12.5'),
+        active: true,
+      },
+    ])
+    const [row] = await getModifiersWithInventory('venue-123')
+    expect(row).toMatchObject({ linkedProductId: 'p-papas', linkedProductName: 'Papas a la francesa', cost: 12.5 })
+  })
+})

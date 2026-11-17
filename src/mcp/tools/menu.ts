@@ -5,9 +5,10 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
-import { createMenuCategory, createModifierGroup } from '@/services/dashboard/menu.dashboard.service'
+import { createMenuCategory, createModifierGroup, updateModifier } from '@/services/dashboard/menu.dashboard.service'
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
+import { planGateMessage } from '../planGate'
 import { ProductType, type IvaTratamiento } from '@prisma/client'
 import { operationHash } from '@/utils/operationHash'
 import AppError from '@/errors/AppError'
@@ -419,7 +420,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
                   allowMultiple: true,
                   minSelections: true,
                   maxSelections: true,
-                  modifiers: { where: { active: true }, select: { name: true, price: true, sku: true }, orderBy: { name: 'asc' } },
+                  modifiers: {
+                    where: { active: true },
+                    select: { name: true, price: true, sku: true, linkedProduct: { select: { name: true } } },
+                    orderBy: { name: 'asc' },
+                  },
                 },
               },
             },
@@ -495,7 +500,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             allowMultiple: mg.group.allowMultiple,
             min: mg.group.minSelections,
             max: mg.group.maxSelections,
-            options: mg.group.modifiers.map(m => ({ name: m.name, extraPrice: Number(m.price), ...(m.sku ? { sku: m.sku } : {}) })),
+            options: mg.group.modifiers.map(m => ({
+              name: m.name,
+              extraPrice: Number(m.price),
+              ...(m.sku ? { sku: m.sku } : {}),
+              // Extra ligado a un platillo del menú (encargo 27771e): al venderse descuenta el inventario de ese platillo.
+              ...(m.linkedProduct ? { deductsMenuItem: m.linkedProduct.name } : {}),
+            })),
           })),
         },
       })
@@ -712,6 +723,135 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           data: { name, options: options.length },
         })
         return text({ ok: true, modifierGroup: { id: group.id, name: group.name, options: options.length } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'link_modifier_to_menu_item',
+    'Link a modifier / option (e.g. the "Papas" extra) to an EXISTING menu item (e.g. "Papas a la francesa") so that, every time the extra is sold, the stock or the full recipe of that menu item goes down — like Fudo "opcionales" and Toast "modifier from item". The linked item does NOT count as a sale of that item; the extra keeps its own price. Use unlink:true to remove the link. Linking needs the Premium plan (inventory) and a menu item that tracks inventory (by pieces or by recipe) and is not sold by weight; unlinking is always allowed. It changes how inventory moves, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. This WRITES — requires menu:update. Ambiguous names return the candidates.',
+    {
+      venueId: z.string().describe('Venue that owns the extra (must be in your scope)'),
+      modifierName: z.string().min(1).describe('Name of the extra / option, or part of it, e.g. "Papas"'),
+      groupName: z.string().min(1).optional().describe('Name of its option group, to disambiguate, e.g. "Acompañantes"'),
+      menuItemName: z.string().min(1).optional().describe('Menu item the extra IS, e.g. "Papas a la francesa" (omit when unlink:true)'),
+      unlink: z.boolean().optional().describe("true = remove the link (the extra stops moving that item's inventory)"),
+      resolvedModifierId: z.string().optional().describe('Exact id returned by the preview'),
+      resolvedProductId: z.string().optional().describe('Exact id returned by the preview'),
+      expectedSourceFingerprint: z.string().optional().describe('Exact fingerprint returned by the preview'),
+      confirm: z.boolean().optional().describe('Must be true to apply; without it you get a preview'),
+    },
+    async ({
+      venueId,
+      modifierName,
+      groupName,
+      menuItemName,
+      unlink,
+      resolvedModifierId,
+      resolvedProductId,
+      expectedSourceFingerprint,
+      confirm,
+    }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('menu:update', venueId) // write gate (per-venue role)
+      if (!unlink && !menuItemName)
+        return text({ ok: false, needsInput: true, question: '¿A qué platillo del menú quieres ligar este extra?' })
+      if (!unlink) {
+        const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'Ligar un extra a un platillo del menú')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+
+      const modifiers = await prisma.modifier.findMany({
+        where: {
+          active: true,
+          group: { venueId, active: true, ...(groupName ? { name: { contains: groupName, mode: 'insensitive' as const } } : {}) },
+          ...(confirm && resolvedModifierId
+            ? { id: resolvedModifierId }
+            : { name: { contains: modifierName, mode: 'insensitive' as const } }),
+        },
+        select: {
+          id: true,
+          name: true,
+          groupId: true,
+          rawMaterialId: true,
+          linkedProductId: true,
+          group: { select: { name: true } },
+          linkedProduct: { select: { name: true } },
+        },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: 10,
+      })
+      if (modifiers.length === 0) return text({ ok: false, error: `No hay un extra activo que se llame "${modifierName}" en ese negocio.` })
+      if (modifiers.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${modifierName}" coincide con varios extras: dime el grupo o el nombre exacto.`,
+          matches: modifiers.map(m => `${m.group.name} › ${m.name}`),
+        })
+      const modifier = modifiers[0]
+
+      let product: { id: string; name: string } | null = null
+      if (!unlink) {
+        const products = await matchProductsByName({ venueId: { in: [venueId] } }, menuItemName!, confirm ? resolvedProductId : undefined)
+        if (products.length === 0) return text({ ok: false, error: `No hay un platillo que se llame "${menuItemName}" en ese negocio.` })
+        if (products.length > 1)
+          return text({
+            ok: false,
+            ambiguous: true,
+            error: `"${menuItemName}" coincide con varios platillos: sé más específico.`,
+            matches: products.map(p => p.name),
+          })
+        product = { id: products[0].id, name: products[0].name }
+      }
+
+      const fingerprint = operationHash({
+        modifierId: modifier.id,
+        linkedProductId: modifier.linkedProductId,
+        rawMaterialId: modifier.rawMaterialId,
+        target: product?.id ?? null,
+      })
+      if (
+        confirm &&
+        (resolvedModifierId !== modifier.id || (product && resolvedProductId !== product.id) || expectedSourceFingerprint !== fingerprint)
+      ) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El extra cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      }
+      const from = modifier.linkedProduct
+        ? `descuenta «${modifier.linkedProduct.name}»`
+        : modifier.rawMaterialId
+          ? 'descuenta un insumo'
+          : 'no descuenta inventario'
+      const to = product ? `descuenta «${product.name}»` : 'no descuenta inventario'
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          resolvedModifierId: modifier.id,
+          ...(product ? { resolvedProductId: product.id } : {}),
+          expectedSourceFingerprint: fingerprint,
+          change: { item: `${modifier.group.name} › ${modifier.name}`, label: 'Inventario del extra', from, to },
+          message: product
+            ? `Cada vez que se venda «${modifier.name}» bajará 1 porción de «${product.name}» (sus piezas o su receta). No contará como venta de «${product.name}». Confirma con el operador y vuelve a llamar con confirm:true.`
+            : `«${modifier.name}» dejará de descontar el inventario de ${modifier.linkedProduct ? `«${modifier.linkedProduct.name}»` : 'su platillo'}. Confirma con el operador y vuelve a llamar con confirm:true.`,
+        })
+      }
+      try {
+        await updateModifier(venueId, modifier.groupId, modifier.id, { linkedProductId: product?.id ?? null })
+        await auditMcpWrite(scope, {
+          action: 'MODIFIER_LINKED_PRODUCT_SET',
+          entity: 'Modifier',
+          entityId: modifier.id,
+          venueId,
+          data: { modifier: modifier.name, from: modifier.linkedProductId, to: product?.id ?? null },
+        })
+        return text({ ok: true, extra: modifier.name, deductsMenuItem: product?.name ?? null })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
