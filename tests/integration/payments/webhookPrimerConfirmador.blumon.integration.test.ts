@@ -350,6 +350,20 @@ describe('el aviso de Blumon crea el cobro por vínculo', () => {
     expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
   })
 
+  it('serial virtual (sin Terminal) asignado sólo a OTRA terminal del venue ⇒ LINK_TERMINAL_MISMATCH sin Payment', async () => {
+    const otra = await f.otraTerminal()
+    const virtual = `${otra.serialCrudo}2`
+    await f.conAfiliacionBlumon({ serial: virtual, asignadaA: [otra.serial] })
+    const { requestId, attemptId } = await intentoVinculado()
+
+    const r = await aviso(f.eventoBlumon(attemptId, { serialNumber: virtual }))
+
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'LINK_TERMINAL_MISMATCH' })
+    expect(await pagos()).toHaveLength(0)
+    expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'LINK_TERMINAL_MISMATCH', attemptId })
+    expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+  })
+
   it('afiliación fuera de la configuración del venue del vínculo ⇒ LINK_VENUE_MISMATCH sin Payment', async () => {
     await f.conAfiliacionBlumon({ enConfiguracion: false })
     const { attemptId } = await intentoVinculado()
