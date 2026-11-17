@@ -952,7 +952,7 @@ describe('PlanRenewalReminderJob — avisos del Plan Básico', () => {
     })
 
     it('el día anterior sale el segundo aviso (otra clave), y después ya no', async () => {
-      const vf = row({ freeTrialNoticeFor: new Date(Date.now() - 7 * DAY) })
+      const vf: ReturnType<typeof row> & { freeTrialNoticeFor?: Date } = row({ freeTrialNoticeFor: new Date(Date.now() - 7 * DAY) })
       porConsulta({ cobros: [vf] })
       mockRetrieve.mockResolvedValue(pruebaSinCobro(0.5))
       await new PlanRenewalReminderJob().runNow()

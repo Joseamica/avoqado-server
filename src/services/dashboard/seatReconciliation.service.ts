@@ -370,25 +370,28 @@ export async function reactivateSeatCapDeactivated(venueId: string, audit?: { re
   const where = { venueId, deactivatedBySeatCap: true }
   const data = { active: true, endDate: null, deactivatedBySeatCap: false }
   // With `audit` (the Plan Básico path), who came back is read in the same statement and audited.
-  const result = audit
-    ? await prisma.staffVenue.updateManyAndReturn({ where, data, select: { id: true } }).then(rows => ({ count: rows.length, rows }))
-    : await prisma.staffVenue.updateMany({ where, data })
-  if (audit && 'rows' in result)
+  let count: number
+  if (audit) {
+    const rows = await prisma.staffVenue.updateManyAndReturn({ where, data, select: { id: true } })
+    count = rows.length
     await auditSeatsRestored(
       venueId,
-      result.rows.map(row => row.id),
+      rows.map(row => row.id),
       null,
       audit.reason,
     )
+  } else {
+    count = (await prisma.staffVenue.updateMany({ where, data })).count
+  }
 
-  if (result.count > 0) {
+  if (count > 0) {
     logger.info('🪑 Seat-cap-deactivated seats reactivated on re-upgrade to paid plan', {
       venueId,
-      reactivated: result.count,
+      reactivated: count,
     })
   }
 
-  return result.count
+  return count
 }
 
 /**
