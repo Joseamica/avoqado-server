@@ -14,7 +14,8 @@ jest.mock('@/services/access/basePlan.service', () => ({
 import { assertCanAddSeat, assertCanAddSeatsBulk, getVenueSeatCap, SEAT_CAP_REACHED_CODE } from '@/services/access/seatCap.service'
 import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 import { executeSeatReconciliation, reactivateSeatCapDeactivatedUpTo } from '@/services/dashboard/seatReconciliation.service'
-import { endLapsedHybridContracts, restoreBasicSeats, sweepLapsedBasicSeats } from '@/services/launchCampaigns/hybridSeats'
+import { endLapsedHybridContracts, restoreBasicSeats, sweepLapsedBasicSeats, SWEEP_MAX_PAGES } from '@/services/launchCampaigns/hybridSeats'
+import logger from '@/config/logger'
 
 const VENUE = 'venue_basico'
 const DAY = 24 * 3600 * 1000
@@ -283,6 +284,36 @@ describe('el Básico deja de cubrir → vuelve el tope de Gratis', () => {
     expect(prismaMock.capabilityGrant.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({ by: ['venueId'], orderBy: { venueId: 'asc' }, take: 200 }),
     )
+  })
+})
+
+describe('🔴 el barrido recorre TODAS las páginas en la misma corrida (revisión final #7)', () => {
+  // Muchas sucursales con un Básico vencido en la ventana; todas «cubiertas» para no conciliar 20 mil equipos de juguete.
+  const sintetico = (total: number) => {
+    const ids = Array.from({ length: total }, (_, i) => `v_${String(i).padStart(6, '0')}`)
+    prismaMock.capabilityGrant.groupBy.mockImplementation(async (a: any) =>
+      ids
+        .filter(id => !a.where.venueId || id > a.where.venueId.gt)
+        .slice(0, a.take)
+        .map(venueId => ({ venueId })),
+    )
+    prismaMock.hybridContract.findMany.mockImplementation(async (a: any) =>
+      a.where.venueId.in.map((venueId: string) => ({ venueId, publication: { definition: { basicPlan: true, seatCap: 3 } } })),
+    )
+  }
+
+  it('con 2,400 candidatas revisa las 2,400 (antes paraba en 2,000 y la siguiente corrida volvía a empezar)', async () => {
+    sintetico(2400)
+    const warn = jest.spyOn(logger, 'warn')
+    expect(await sweepLapsedBasicSeats(now())).toMatchObject({ checked: 2400 })
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('safety cap'), expect.anything())
+  })
+
+  it('si llega al tope de seguridad lo dice con cuántas quedaron (nada se trunca en silencio)', async () => {
+    sintetico(200 * SWEEP_MAX_PAGES + 37)
+    const warn = jest.spyOn(logger, 'warn')
+    expect(await sweepLapsedBasicSeats(now())).toMatchObject({ checked: 200 * SWEEP_MAX_PAGES })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('safety cap'), expect.objectContaining({ remainingVenues: 37 }))
   })
 })
 

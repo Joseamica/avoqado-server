@@ -136,32 +136,45 @@ export async function restoreBasicSeats(venueId: string): Promise<number> {
 
 const LAPSE_WINDOW_MS = 7 * 24 * 3600 * 1000
 const SWEEP_PAGE = 200
-const SWEEP_MAX_PAGES = 10
+/** Safety cap (20,000 venues per run): reaching it is logged with how many are left, never truncated in silence. */
+export const SWEEP_MAX_PAGES = 100
 
 /**
  * Daily: a Plan Básico whose last paid period ended without a renewal (past_due / unpaid) leaves its venue on Free's cap.
- * Reads venues with a Básico grant that ended in the last 7 days (so a few missed runs still catch them), pages of 200
- * by venueId, at most 10 pages per run; skips any venue a Básico still covers. Idempotent: the reconciliation changes
- * nothing once the team fits. A failing venue is logged and the rest go on.
+ * Reads venues with a Básico grant that ended in the last 7 days (so a few missed runs still catch them), every page of
+ * 200 by venueId in the same run (final review #7: restarting from the first page each run starved the rest), up to
+ * `SWEEP_MAX_PAGES`; skips any venue a Básico still covers. Idempotent: the reconciliation changes nothing once the team
+ * fits. A failing venue is logged and the rest go on.
  */
 export async function sweepLapsedBasicSeats(now = new Date()): Promise<{ checked: number; reconciled: number; failed: number }> {
   const totals = { checked: 0, reconciled: 0, failed: 0 }
   let after: string | undefined
-  for (let page = 0; page < SWEEP_MAX_PAGES; page++) {
-    const rows = await retry(
+  const venuesAfter = (from: string | undefined, take: number) =>
+    retry(
       () =>
         prisma.capabilityGrant.groupBy({
           by: ['venueId'],
           where: {
             endsAt: { lte: now, gt: new Date(now.getTime() - LAPSE_WINDOW_MS) },
             contract: { publication: { definition: BASIC_PLAN_DEFINITION_WHERE } },
-            ...(after ? { venueId: { gt: after } } : {}),
+            ...(from ? { venueId: { gt: from } } : {}),
           },
           orderBy: { venueId: 'asc' },
-          take: SWEEP_PAGE,
+          take,
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'basic-seat-sweep.groupBy' },
     )
+  for (let page = 0; ; page++) {
+    if (page === SWEEP_MAX_PAGES) {
+      const left = (await venuesAfter(after, SWEEP_PAGE * SWEEP_MAX_PAGES + 1)).length
+      if (left)
+        logger.warn('🪑 Lapsed Plan Básico sweep hit its safety cap; the rest go in the next run', {
+          ...totals,
+          remainingVenues: left > SWEEP_PAGE * SWEEP_MAX_PAGES ? `>${SWEEP_PAGE * SWEEP_MAX_PAGES}` : left,
+        })
+      break
+    }
+    const rows = await venuesAfter(after, SWEEP_PAGE)
     if (rows.length === 0) break
     const venueIds = rows.map(row => row.venueId)
     after = venueIds[venueIds.length - 1]
