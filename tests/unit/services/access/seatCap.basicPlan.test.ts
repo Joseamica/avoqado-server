@@ -36,6 +36,8 @@ type Grant = { venueId: string; startsAt: Date; endsAt: Date; revokedAt: Date | 
 let seats: Seat[]
 let grants: Grant[]
 let exempt: { venue: boolean; org: boolean }
+type Invite = { id: string; venueId: string; role: StaffRole; status: string; createdAt: Date }
+let invites: Invite[]
 
 function team(active: number, off = 0) {
   seats = []
@@ -125,10 +127,24 @@ beforeEach(() => {
     const n = seats.filter(s => matches(s, { ...a.where, venueId: VENUE }) && a.where.venueId.in.includes(VENUE)).length
     return n ? [{ venueId: VENUE, _count: { _all: n } }] : []
   })
-  prismaMock.invitation.count.mockResolvedValue(0)
-  prismaMock.invitation.groupBy.mockResolvedValue([])
-  prismaMock.invitation.findMany.mockResolvedValue([])
-  prismaMock.invitation.updateMany.mockResolvedValue({ count: 0 })
+  invites = []
+  // Las invitaciones de juguete honran status, role {not}, id {not}/{notIn} (expiresAt: todas vigentes).
+  prismaMock.invitation.count.mockImplementation(async (a: any) => invites.filter(i => matches(i, a.where)).length)
+  prismaMock.invitation.groupBy.mockImplementation(async (a: any) => {
+    const n = invites.filter(i => matches(i, { ...a.where, venueId: VENUE }) && a.where.venueId.in.includes(VENUE)).length
+    return n ? [{ venueId: VENUE, _count: { _all: n } }] : []
+  })
+  prismaMock.invitation.findMany.mockImplementation(async (a: any) =>
+    sortBy(
+      invites.filter(i => matches(i, a.where)),
+      a.orderBy,
+    ).slice(0, a.take ?? Infinity),
+  )
+  prismaMock.invitation.updateMany.mockImplementation(async (a: any) => {
+    const hit = invites.filter(i => matches(i, a.where))
+    hit.forEach(i => Object.assign(i, a.data))
+    return { count: hit.length }
+  })
   prismaMock.activityLog.create.mockResolvedValue({})
   prismaMock.hybridContract.findMany.mockImplementation(async (a: any) => {
     const w = a.where.grants?.some
@@ -287,6 +303,37 @@ describe('volver a cubrir', () => {
     expect(await restoreBasicSeats(VENUE)).toBe(0)
     expect(activeCount()).toBe(2)
     expect(prismaMock.staffVenue.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 las invitaciones pendientes ocupan lugar: la renovación no regresa a nadie encima de las invitaciones del dueño', async () => {
+    team(2, 7)
+    grants = [covering(5)]
+    await restoreBasicSeats(VENUE) // 5 activos + 4 apagados
+    expect(activeCount()).toBe(5)
+    // El dueño da de baja a 2 (bajas reales, no del tope) e invita a 2: 3 activos + 2 pendientes = 5.
+    for (const id of ['sv_07', 'sv_08']) Object.assign(seats.find(s => s.id === id)!, { active: false, deactivatedBySeatCap: false })
+    for (const id of ['inv_1', 'inv_2']) {
+      await assertCanAddSeat(VENUE)
+      invites.push({ id, venueId: VENUE, role: StaffRole.WAITER, status: 'PENDING', createdAt: new Date() })
+    }
+    await expect(assertCanAddSeat(VENUE)).rejects.toMatchObject({ code: SEAT_CAP_REACHED_CODE })
+
+    // Renovación: nadie regresa y nadie pierde su invitación.
+    expect(await restoreBasicSeats(VENUE)).toBe(0)
+    expect(activeCount()).toBe(3)
+    expect(invites.filter(i => i.status === 'PENDING')).toHaveLength(2)
+    // Los dos invitados pueden aceptar (el que acepta no se cuenta dos veces).
+    await expect(assertCanAddSeat(VENUE, { excludeInvitationId: 'inv_1' })).resolves.toBeUndefined()
+    await expect(assertCanAddSeatsBulk([VENUE], { primaryVenueId: VENUE, excludeInvitationId: 'inv_2' })).resolves.toBeUndefined()
+  })
+
+  it('reactivateSeatCapDeactivatedUpTo cuenta las invitaciones pendientes y toma el mismo candado de invitaciones', async () => {
+    team(2, 3)
+    invites.push({ id: 'inv_1', venueId: VENUE, role: StaffRole.WAITER, status: 'PENDING', createdAt: new Date() })
+    invites.push({ id: 'inv_sa', venueId: VENUE, role: StaffRole.SUPERADMIN, status: 'PENDING', createdAt: new Date() })
+    expect(await reactivateSeatCapDeactivatedUpTo(VENUE, 5)).toBe(2) // 5 − 2 activos − 1 pendiente (soporte no cuenta)
+    const locks = prismaMock.$queryRaw.mock.calls.map((c: any[]) => c[0].join('?'))
+    expect(locks.some((sql: string) => sql.includes('FROM "Invitation"') && sql.includes('FOR UPDATE'))).toBe(true)
   })
 
   it('reactivateSeatCapDeactivatedUpTo no pasa del tope ni toca a quien no apagó el tope', async () => {

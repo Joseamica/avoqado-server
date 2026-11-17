@@ -374,16 +374,28 @@ export async function reactivateSeatCapDeactivated(venueId: string): Promise<num
 /**
  * Finite-cap counterpart of {@link reactivateSeatCapDeactivated} (a Plan Básico with its own `seatCap` covering again):
  * brings back ONLY people the seat cap turned off (deactivatedBySeatCap = true), most recently deactivated first, until
- * the active non-SUPERADMIN seats reach `cap`. Never touches people who were fired/quit. Idempotent: at or over the cap,
- * or nobody left to bring back → 0. One venue lock so two concurrent restores cannot overshoot the cap.
+ * active non-SUPERADMIN seats PLUS outstanding invitations reach `cap` (the count every seat gate uses). Never touches
+ * people who were fired/quit. Idempotent: at or over the cap, or nobody left to bring back → 0. Locks the venue's pending
+ * invitations like executeSeatReconciliation, plus a venue key so two concurrent restores cannot overshoot the cap.
  *
  * @returns the number of seats reactivated.
  */
 export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: number): Promise<number> {
   const reactivated = await prisma.$transaction(async tx => {
+    // Same lock as executeSeatReconciliation: a concurrent accept either committed before this point (its seat is counted
+    // below) or waits and finds its invitation counted as pending. The advisory key also serializes two restores when the
+    // venue has no pending invitation to lock.
+    await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "venueId" = ${venueId} AND "status" = 'PENDING' FOR UPDATE`
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`seat-cap-restore:${venueId}`}))::text`
-    const active = await tx.staffVenue.count({ where: { venueId, active: true, role: { not: StaffRole.SUPERADMIN } } })
-    const room = cap - active
+    // Seats = active + outstanding invitations, the same count canAddSeat enforces (getPendingInvitationCount's predicate):
+    // bringing someone back must never strand an invite the owner already sent.
+    const [active, pending] = await Promise.all([
+      tx.staffVenue.count({ where: { venueId, active: true, role: { not: StaffRole.SUPERADMIN } } }),
+      tx.invitation.count({
+        where: { venueId, status: InvitationStatus.PENDING, expiresAt: { gt: new Date() }, role: { not: StaffRole.SUPERADMIN } },
+      }),
+    ])
+    const room = cap - active - pending
     if (room <= 0) return 0
     const back = await tx.staffVenue.findMany({
       where: { venueId, deactivatedBySeatCap: true },
