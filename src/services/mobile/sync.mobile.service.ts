@@ -50,7 +50,7 @@ import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
-import { horaRealDelAparato } from '../shared/horaRealDelAparato'
+import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -1048,7 +1048,7 @@ async function applyOpenTable(
 ): Promise<SyncIntentAck> {
   // D93: la hora del aparato al abrir la mesa, SIN el recorte al futuro de `abiertaSinRedEn` (Codex r2 #1), acotada a 24 h antes de
   // ahora. Sólo para reportes: la cuenta que NACE la guarda en la misma transacción (`huellaYNota`).
-  const horaRealDeLaMesa = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, new Date())
+  const horaRealDeLaMesa = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   await assertTableService(venueId)
   const tableId = String(intent.payload.tableId ?? '')
   const covers = Number(intent.payload.covers ?? 1)
@@ -1491,7 +1491,7 @@ async function aplicarRondaTardia(p: {
   dejarHuella?: DejarHuella
 }): Promise<SyncIntentAck> {
   const { venueId, staffId, intent, original } = p
-  const horaRealDeLaRonda = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, new Date())
+  const horaRealDeLaRonda = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   const pedida = { orderId: original.id, version: original.version, total: Number(original.total ?? 0) }
   const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
@@ -1656,8 +1656,8 @@ async function applyPayCash(
   terminalSerialNumber?: string,
   deviceId?: string,
 ): Promise<SyncIntentAck> {
-  // D93: cuándo empezó a aplicarse este intent (la cota de 24 h de la hora del aparato del cobro, sólo reportes).
-  const llegada = new Date()
+  // D93: cuándo ENTRÓ la petición del lote (la cota de 24 h de la hora del aparato del cobro, sólo reportes).
+  const llegada = llegadaDeLaPeticion()
   let shiftIdDeLaVenta: string | undefined
   const declaredShift = intent.payload.shiftIdDeLaVenta
   // Old POS payloads keep their prior treatment; only an authenticated terminal opts into this reference.
