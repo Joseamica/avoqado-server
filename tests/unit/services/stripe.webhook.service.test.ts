@@ -77,13 +77,27 @@ import {
   handleCustomerDeleted,
   handleSubscriptionUpdated,
   handleSubscriptionTrialWillEnd,
+  handleSubscriptionDeleted,
 } from '@/services/stripe.webhook.service'
+
+// Plan Básico (Task 6): el Básico publicado. Por defecto ninguno: los avisos de siempre no cambian.
+const mockBasico = jest.fn().mockResolvedValue(null)
+jest.mock('@/services/launchCampaigns/hybridCampaign.service', () => ({
+  __esModule: true,
+  getPublicBasicPlan: (...a: unknown[]) => mockBasico(...a),
+}))
+// La baja de la seat-cap no es lo que se prueba aquí.
+jest.mock('@/services/dashboard/seatReconciliation.service', () => ({
+  executeSeatReconciliation: jest.fn().mockResolvedValue(undefined),
+  reactivateSeatCapDeactivated: jest.fn().mockResolvedValue(undefined),
+}))
 
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     hybridPurchase: { findUnique: jest.fn().mockResolvedValue(null) },
+    hybridBillingOperation: { findFirst: jest.fn().mockResolvedValue(null) },
     billingObligationConflict: { findUnique: jest.fn() },
     webhookEvent: {
       findUnique: jest.fn(),
@@ -92,9 +106,13 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     venueFeature: {
       findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       update: jest.fn(),
       updateMany: jest.fn(),
     },
+    hybridContract: { count: jest.fn().mockResolvedValue(0) },
+    notificationPreference: { findUnique: jest.fn().mockResolvedValue(null) },
     staffVenue: {
       findMany: jest.fn(),
     },
@@ -127,6 +145,7 @@ jest.mock('@/services/email.service', () => ({
   default: {
     sendTrialEndingEmail: jest.fn(),
     sendPlanRenewalReminderEmail: jest.fn(),
+    sendPlanEndedEmail: jest.fn(),
   },
 }))
 
@@ -963,6 +982,37 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       expect(call.channels).toEqual(['IN_APP'])
     })
 
+    // Plan Básico (Codex r3 #12): el fin de prueba de un Pro normal también ofrece el Básico.
+    it('🔴 Básico: el fin de prueba de un Pro normal lleva el bloque del Básico, sin tocar el monto real', async () => {
+      mockBasico.mockResolvedValueOnce({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+
+      await trialWillEnd(buildSub())
+
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledWith(
+        'negocio@test.com',
+        expect.objectContaining({
+          amountCents: 115884,
+          isTrialEnd: true,
+          basicOffer: { priceWithoutTaxCents: 49900, reason: 'TRIAL_ENDS' },
+        }),
+      )
+    })
+
+    it('Básico: Premium, anual o sin Básico publicado → el aviso de siempre, sin bloque', async () => {
+      mockBasico.mockResolvedValue({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
+      givenFeature('PLAN_PREMIUM', 'Avoqado Premium')
+      await trialWillEnd(buildSub())
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      await trialWillEnd(buildSub({ items: { data: [{ price: { recurring: { interval: 'year' } } }] } }))
+      mockBasico.mockResolvedValue(null)
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      await trialWillEnd(buildSub())
+
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(3)
+      for (const [, data] of emailService.sendPlanRenewalReminderEmail.mock.calls) expect(data.basicOffer).toBeUndefined()
+    })
+
     it('PLAN_PREMIUM y plan anual: nombre y periodo del correo', async () => {
       givenFeature('PLAN_PREMIUM', 'Avoqado Premium')
 
@@ -1214,6 +1264,125 @@ describe('Stripe Webhook Service - Critical Tests', () => {
   // webhook with `Foreign key constraint violated: WebhookEvent_venueId_fkey` because the
   // venueId enrichment wrote an untrusted metadata.venueId (pointing to a non-existent
   // venue) BEFORE the event switch, and the controller returns 200 to Stripe (no retry).
+  describe('🔔 TEST 6c: Plan Básico — «Tu prueba terminó» al borrarse la suscripción', () => {
+    const emailService = jest.requireMock('@/services/email.service').default as { sendPlanEndedEmail: jest.Mock }
+    const FIN_S = Date.UTC(2026, 11, 17, 18, 0, 0) / 1000
+    const borrada = (over: Record<string, unknown> = {}) =>
+      ({
+        id: 'sub_basico',
+        object: 'subscription',
+        status: 'canceled',
+        trial_end: FIN_S,
+        ended_at: FIN_S,
+        cancel_at_period_end: true,
+        cancel_at: FIN_S,
+        cancellation_details: { reason: 'cancellation_requested' },
+        // Sin `basicPlanChosen`: «Prefiero el Básico» desde «Tu plan» también cuenta (Codex r10 #3).
+        metadata: {},
+        items: { data: [{ price: { recurring: { interval: 'month' } } }] },
+        ...over,
+      }) as unknown as Stripe.Subscription
+    let sello: Date | null
+
+    beforeEach(() => {
+      sello = null
+      mockBasico.mockResolvedValue({ priceWithTax: '578.84', priceWithoutTax: '499.00' })
+      ;(prisma.venueFeature as unknown as { findMany: jest.Mock }).findMany.mockResolvedValue([
+        { venueId: 'venue_1', feature: { code: 'PLAN_PRO' } },
+      ])
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockImplementation(async () => ({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        renewalReminderSentAt: sello,
+        venue: { slug: 'test-venue', status: 'ACTIVE' },
+      }))
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockImplementation(async (args: { data: { renewalReminderSentAt?: Date } }) => {
+        if (args.data.renewalReminderSentAt) sello = args.data.renewalReminderSentAt
+        return { count: 1 }
+      })
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({
+        name: 'Test Venue',
+        email: 'negocio@test.com',
+        language: 'es',
+        organization: null,
+        staff: [{ role: 'OWNER', staff: { id: 'staff_owner', email: 'o@test.com', firstName: 'A', lastName: 'B' } }],
+      })
+      emailService.sendPlanEndedEmail.mockResolvedValue(true)
+    })
+
+    it('🔴 la prueba terminó sin cobro → un solo correo aunque el evento se repita', async () => {
+      await handleSubscriptionDeleted(borrada())
+      await handleSubscriptionDeleted(borrada())
+
+      expect(emailService.sendPlanEndedEmail).toHaveBeenCalledTimes(1)
+      expect(emailService.sendPlanEndedEmail).toHaveBeenCalledWith(
+        'negocio@test.com',
+        expect.objectContaining({
+          kind: 'TRIAL',
+          basicPlanPriceWithoutTaxCents: 49900,
+          billingUrl: expect.stringContaining('/venues/test-venue/settings/billing/subscriptions'),
+          idempotencyKey: 'plan-termino:sub_basico',
+          unsubscribe: expect.objectContaining({ url: expect.stringContaining('/api/v1/public/unsubscribe?token=') }),
+        }),
+      )
+      expect(sello!.getTime()).toBeGreaterThanOrEqual(FIN_S * 1000)
+    })
+
+    it('un Pro pagado que terminó al fin de su periodo → «Tu Pro terminó»', async () => {
+      const finPeriodo = FIN_S + 30 * 86400
+      await handleSubscriptionDeleted(borrada({ ended_at: finPeriodo, cancel_at: finPeriodo, current_period_end: finPeriodo }))
+      expect(emailService.sendPlanEndedEmail).toHaveBeenCalledWith('negocio@test.com', expect.objectContaining({ kind: 'PRO' }))
+    })
+
+    it.each([
+      ['cancelada de golpe (sin cancelación programada)', { cancel_at_period_end: false, cancel_at: null }],
+      ['cancelada por falta de pago', { cancellation_details: { reason: 'payment_failed' } }],
+      ['terminó a media prueba, no en su fin', { ended_at: FIN_S - 5 * 86400, cancel_at: null }],
+    ])('%s → sin aviso', async (_c, over) => {
+      await handleSubscriptionDeleted(borrada(over))
+      expect(emailService.sendPlanEndedEmail).not.toHaveBeenCalled()
+    })
+
+    it('el dueño apagó estos avisos → no sale (y no se reintenta)', async () => {
+      ;(prisma as unknown as { notificationPreference: { findUnique: jest.Mock } }).notificationPreference.findUnique.mockResolvedValueOnce(
+        {
+          channels: ['IN_APP'],
+        },
+      )
+      await handleSubscriptionDeleted(borrada())
+      expect(emailService.sendPlanEndedEmail).not.toHaveBeenCalled()
+      expect(sello).not.toBeNull()
+    })
+
+    it('el correo falla → el webhook no truena y no se sella (el job lo reintenta)', async () => {
+      emailService.sendPlanEndedEmail.mockRejectedValueOnce(new Error('resend'))
+      await expect(handleSubscriptionDeleted(borrada())).resolves.toBeUndefined()
+      expect(sello).toBeNull()
+    })
+
+    it('🔴 otro plan ya cubre al negocio (p. ej. una compra que reemplazó esta suscripción) → no dice «quedaste en Gratis»', async () => {
+      const { hybridContract } = prisma as unknown as { hybridContract: { count: jest.Mock } }
+      hybridContract.count.mockResolvedValueOnce(1)
+      await handleSubscriptionDeleted(borrada())
+      expect(emailService.sendPlanEndedEmail).not.toHaveBeenCalled()
+      expect(hybridContract.count).toHaveBeenCalledWith({
+        where: {
+          venueId: 'venue_1',
+          endedAt: null,
+          OR: [{ planTier: { not: null } }, { publication: { definition: { path: ['basicPlan'], equals: true } } }],
+        },
+      })
+    })
+
+    it('regresión: la fila se desactiva igual que siempre', async () => {
+      await handleSubscriptionDeleted(borrada())
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: { stripeSubscriptionId: 'sub_basico' },
+        data: { active: false },
+      })
+    })
+  })
+
   describe('🛡️ TEST 7: venueId enrichment must never block event processing (FK guard)', () => {
     const buildPaymentIntentEvent = (venueId: string): Stripe.Event =>
       ({

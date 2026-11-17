@@ -44,12 +44,49 @@ import { zonaValida } from '@/utils/datetime'
 import { scheduleJob } from '../observability/jobContext'
 import { getPlanState } from '@/services/dashboard/planState.service'
 import { MARGEN_OFERTA_MS } from '@/services/billing/cobroDiferido'
+import { modalidadDePrueba } from '@/services/billing/modalidadDePrueba'
+import {
+  avisarPlanTerminado,
+  avisoDelPlanApagado,
+  bajaDelAviso,
+  basicoPublicado,
+  comoTermino,
+  ofertaDelBasico,
+  precioSinIvaCents,
+} from '@/services/billing/avisosDelBasico'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 const DIA_MS = 86400000
 const PLAN_CODES = ['PLAN_PRO', 'PLAN_PREMIUM']
 /** Página de la lectura de pruebas regaladas; se recorren TODAS las páginas de la ventana (hoy hay 1 prueba). */
 export const TOPE_PRUEBAS = 200
+
+/** Plan Básico: días hacia atrás en que el job todavía avisa «Tu prueba terminó» si el webhook no lo hizo. */
+export const DIAS_RESPALDO_TERMINADO = 7
+
+/** La fecha de calendario (YYYY-MM-DD) de un instante en la zona del negocio. */
+function diaLocal(ms: number, timeZone: string): string {
+  return new Date(ms).toLocaleDateString('en-CA', { timeZone })
+}
+
+/**
+ * Plan Básico: ¿toca hoy «Tu prueba termina» (prueba que termina SIN cobrar)? Dos avisos por prueba: el primero en la
+ * ventana de siempre (normalmente 8–9 días antes) y otro el día anterior al fin, en el calendario del negocio. `sello` =
+ * `VenueFeature.freeTrialNoticeFor`, cuándo salió el último (en una fila con Stripe esa columna no la usa nadie más: la
+ * prueba regalada sólo lee filas sin suscripción). Nunca `renewalReminderSentAt`: si el dueño elige «Quedarme en Pro», el
+ * aviso del cobro de Pro tiene que salir.
+ */
+export function tocaAvisoDePruebaSinCobro(
+  sello: Date | null | undefined,
+  periodStartMs: number,
+  periodEndMs: number,
+  nowMs: number,
+  timeZone: string,
+): 'PRIMERO' | 'ULTIMO' | null {
+  if (!sello || sello.getTime() < periodStartMs) return 'PRIMERO'
+  const diaAntes = diaLocal(periodEndMs - DIA_MS, timeZone)
+  return diaLocal(nowMs, timeZone) >= diaAntes && diaLocal(sello.getTime(), timeZone) < diaAntes ? 'ULTIMO' : null
+}
 
 /** `true` while the charge at `periodEndMs` is less than 9 days (and still in the future) away. */
 export function diasParaAvisar(periodEndMs: number, nowMs: number): boolean {
@@ -93,6 +130,131 @@ export class PlanRenewalReminderJob {
     } catch (e) {
       logger.error('❌ plan-renewal-reminder (pruebas sin tarjeta) failed', e)
     }
+    try {
+      await this.avisarPlanesTerminados()
+    } catch (e) {
+      logger.error('❌ plan-renewal-reminder (planes terminados) failed', e)
+    }
+  }
+
+  /**
+   * Plan Básico: respaldo de «Tu prueba terminó» cuando el webhook `customer.subscription.deleted` no lo mandó. Filas de
+   * `PLAN_PRO` ya inactivas cuya prueba terminó en los últimos `DIAS_RESPALDO_TERMINADO` días y sin el sello (≥ el fin);
+   * la suscripción REAL decide si terminó sin cobro. Si el negocio ya contrató algo (Básico o un plan), no se le dice.
+   */
+  private async avisarPlanesTerminados(): Promise<void> {
+    const now = Date.now()
+    const pagina = (despues: { trialEndDate: Date; id: string } | null) =>
+      retry(
+        () =>
+          prisma.venueFeature.findMany({
+            take: TOPE_PRUEBAS,
+            orderBy: [{ trialEndDate: 'asc' }, { id: 'asc' }],
+            where: {
+              active: false,
+              stripeSubscriptionId: { not: null },
+              feature: { code: 'PLAN_PRO' },
+              trialEndDate: { gte: new Date(now - DIAS_RESPALDO_TERMINADO * DIA_MS), lte: new Date(now) },
+              AND: [
+                {
+                  OR: [{ renewalReminderSentAt: null }, { renewalReminderSentAt: { lt: prisma.venueFeature.fields.trialEndDate } }],
+                },
+                ...(despues
+                  ? [
+                      {
+                        OR: [
+                          { trialEndDate: { gt: despues.trialEndDate } },
+                          { trialEndDate: despues.trialEndDate, id: { gt: despues.id } },
+                        ],
+                      },
+                    ]
+                  : []),
+              ],
+            },
+            select: { id: true, venueId: true, stripeSubscriptionId: true, trialEndDate: true },
+          }),
+        {
+          retries: 2,
+          initialDelay: 1500,
+          shouldRetry: shouldRetryDbConnectionError,
+          context: 'plan-renewal-reminder.planesTerminados.findMany',
+        },
+      )
+
+    let enviados = 0
+    let despues: { trialEndDate: Date; id: string } | null = null
+    for (;;) {
+      const filas = await pagina(despues)
+      for (const vf of filas) {
+        try {
+          if (!vf.stripeSubscriptionId || !vf.trialEndDate) continue
+          const sub = await stripe.subscriptions.retrieve(vf.stripeSubscriptionId)
+          if (comoTermino(sub) !== 'TRIAL') continue
+          const plan = await getPlanState(vf.venueId)
+          if (plan.basicPlan?.active || (plan.origin && plan.origin.kind !== 'NONE')) continue
+          if (await avisarPlanTerminado(sub)) enviados++
+        } catch (err) {
+          logger.error(`❌ ended-plan notice failed for venueFeature ${vf.id}`, {
+            error: err instanceof Error ? err.message : 'Unknown error',
+            venueFeatureId: vf.id,
+          })
+        }
+      }
+      const ultima = filas[filas.length - 1]
+      if (filas.length < TOPE_PRUEBAS || !ultima?.trialEndDate) break
+      despues = { trialEndDate: ultima.trialEndDate, id: ultima.id }
+    }
+    logger.info('✅ Ended-plan notice backup complete', { sent: enviados })
+  }
+
+  /**
+   * Plan Básico: «Tu prueba termina» de una prueba de Pro que termina SIN cobrar. `true` si salió (o el dueño lo apagó y
+   * quedó sellado). Nunca anuncia un cobro ni lee la vista previa.
+   */
+  private async avisarPruebaSinCobro(
+    vf: {
+      id: string
+      venueId: string
+      stripeSubscriptionId: string | null
+      freeTrialNoticeFor?: Date | null
+      venue?: { slug: string; timezone: string } | null
+    },
+    subId: string,
+    periodStartMs: number,
+    periodEndMs: number,
+    now: number,
+  ): Promise<boolean> {
+    const timeZone = zonaValida(vf.venue?.timezone)
+    const cual = tocaAvisoDePruebaSinCobro(vf.freeTrialNoticeFor, periodStartMs, periodEndMs, now, timeZone)
+    if (!cual) return false
+    const target = await resolvePlanNotificationTarget(vf.venueId)
+    if (!target.email) {
+      logger.warn(`trial-ends-free notice: no recipient for venue ${vf.venueId}; skipping`)
+      return false
+    }
+    if (!(await avisoDelPlanApagado(target.staffId, vf.venueId))) {
+      const basico = await basicoPublicado()
+      const sent = await emailService.sendPlanTrialEndsFreeEmail(target.email, {
+        locale: target.locale,
+        venueName: target.venueName,
+        trialEndsAt: new Date(periodEndMs),
+        timeZone,
+        billingUrl: billingPageUrl(vf.venue?.slug),
+        ...(basico ? { basicPlanPriceWithoutTaxCents: precioSinIvaCents(basico) } : {}),
+        unsubscribe: bajaDelAviso(target.staffId, vf.venueId, vf.venue?.slug),
+        idempotencyKey: `prueba-termina:${subId}:${cual}`,
+      })
+      if (!sent) return false
+    }
+    await retry(
+      () =>
+        prisma.venueFeature.updateMany({
+          where: { id: vf.id, stripeSubscriptionId: vf.stripeSubscriptionId },
+          data: { freeTrialNoticeFor: new Date(now) },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'plan-renewal-reminder.pruebaSinCobro.stamp' },
+    )
+    return true
   }
 
   private async avisarPruebasSinTarjeta(): Promise<void> {
@@ -230,6 +392,7 @@ export class PlanRenewalReminderJob {
             venueId: true,
             stripeSubscriptionId: true,
             renewalReminderSentAt: true,
+            freeTrialNoticeFor: true,
             feature: { select: { code: true } },
             venue: { select: { slug: true, timezone: true } },
           },
@@ -268,6 +431,16 @@ export class PlanRenewalReminderJob {
 
         if (!diasParaAvisar(periodEndMs, now)) continue
 
+        // Plan Básico: la prueba de Pro que termina SIN cobrar (la modalidad la dice la suscripción real, no la metadata)
+        // tiene su propio aviso y su propio sello; nunca el del cobro.
+        if (vf.feature?.code === 'PLAN_PRO' && modalidadDePrueba(sub).trialModality === 'ENDS_FREE') {
+          if (await this.avisarPruebaSinCobro(vf, sub.id ?? vf.stripeSubscriptionId!, periodStartMs, periodEndMs, now)) {
+            avisadas.add(vf.stripeSubscriptionId!)
+            sentCount++
+          }
+          continue
+        }
+
         // Dedup: already reminded this billing period?
         if (vf.renewalReminderSentAt && vf.renewalReminderSentAt.getTime() > periodStartMs) continue
 
@@ -288,6 +461,8 @@ export class PlanRenewalReminderJob {
         }
 
         const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
+        // Plan Básico «Tu Pro sube»: sólo en el último periodo con descuento (misma regla que `canEndProNow`).
+        const basicOffer = await ofertaDelBasico(stripe, sub, vf.feature?.code, 'DISCOUNT_ENDS', new Date(now))
 
         const sent = await emailService.sendPlanRenewalReminderEmail(target.email, {
           locale: target.locale,
@@ -300,6 +475,7 @@ export class PlanRenewalReminderJob {
           isTrialEnd: sub.status === 'trialing',
           // An empty or non-IANA zone ("GMT-6") makes toLocaleDateString throw: fall back to CDMX instead of never sending.
           timeZone: zonaValida(vf.venue?.timezone),
+          ...(basicOffer ? { basicOffer } : {}),
         })
         // Not delivered → no stamp, so the next daily run retries.
         if (!sent) {

@@ -31,6 +31,9 @@ import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.sc
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { MARGEN_OFERTA_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
 import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
+import { isLastDiscountedPeriod } from '../billing/ultimoPeriodoConDescuento'
+import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from '@/services/launchCampaigns/basicPlanAccess'
+import { activeGrantWhere } from '@/services/access/capabilityGrants.service'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -132,6 +135,23 @@ export interface PlanState {
    * La fecha es `trialEndsAt` (de arriba, sin cambiar).
    */
   trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE' | null
+  /**
+   * Plan Básico (17-nov): el contrato del Básico del negocio (no terminado), para que «Tu plan» diga «Básico» y no «Gratis».
+   * `active` = alguna de sus funciones cubre hoy. `price` = el de su oferta (con IVA en `gross`). `null` sin contrato.
+   */
+  basicPlan?: { active: boolean; name: string; price: { base: number; gross: number; currency: 'MXN' } | null } | null
+  /**
+   * Plan Básico: si se le ofrece el Básico publicado y desde cuándo. `availableAt` null = ya (Gratis); con un Pro vivo, el
+   * fin de su periodo (o de su prueba). `canEndProNow` = Pro mensual sin la cancelación programada y en su último periodo con
+   * descuento (o sin descuento): la MISMA regla del aviso «Tu Pro sube» (`isLastDiscountedPeriod`). `null` sin Básico
+   * publicado, con el Básico ya contratado, con Premium, anual, contrato de campaña o grandfathered.
+   */
+  basicOffer?: {
+    availableAt: string | null
+    price: { base: number; gross: number; currency: 'MXN' }
+    canEndProNow: boolean
+    discountEndsAt: string | null
+  } | null
 }
 
 /** Where "Tu plan" comes from: ONE obligation, with its own tier, price and dates (spec §4.2). */
@@ -254,6 +274,59 @@ async function planContractOrigin(venueId: string): Promise<PlanOrigin> {
   }
 }
 
+/** Plan Básico: el contrato del Básico del negocio (el más reciente sin terminar), o `null`. */
+async function basicPlanOf(venueId: string, now: Date): Promise<PlanState['basicPlan']> {
+  const contract = await prisma.hybridContract.findFirst({
+    where: { venueId, endedAt: null, publication: { definition: BASIC_PLAN_DEFINITION_WHERE } },
+    select: {
+      publication: { select: { name: true, definition: true } },
+      grants: { where: activeGrantWhere(now), select: { id: true }, take: 1 },
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  })
+  if (!contract || !isBasicPlanDefinition(contract.publication?.definition)) return null
+  // La definición de la publicación es inmutable y se validó al publicar: aquí sólo se lee su precio (con IVA).
+  const precio = Number((contract.publication.definition as { terms?: { price?: unknown } }).terms?.price)
+  const gross = Number.isFinite(precio) && precio > 0 ? round2(precio) : null
+  return {
+    active: (contract.grants?.length ?? 0) > 0,
+    name: contract.publication.name,
+    price: gross === null ? null : { base: round2(gross / (1 + IVA_RATE)), gross, currency: 'MXN' },
+  }
+}
+
+/** Plan Básico: la oferta del Básico publicado para este negocio (ver `PlanState.basicOffer`). Tolerante: nunca lanza. */
+async function basicOfferOf(
+  basicPlan: PlanState['basicPlan'],
+  grandfathered: boolean,
+  origin: PlanOrigin,
+  stripeSub: Awaited<ReturnType<typeof retrievePlanSubscription>> | null,
+  now: Date,
+): Promise<PlanState['basicOffer']> {
+  if (grandfathered || basicPlan) return null
+  let basico: { priceWithTax: string; priceWithoutTax: string } | null = null
+  try {
+    // Import diferido: el catálogo híbrido no se carga en cada lectura de «Tu plan» que no lo necesita.
+    const { getPublicBasicPlan } = await import('@/services/launchCampaigns/hybridCampaign.service')
+    basico = await getPublicBasicPlan()
+  } catch (error) {
+    logger.warn('getPlanState: no se pudo leer el Plan Básico publicado; sin oferta', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+  if (!basico) return null
+  const price = { base: Number(basico.priceWithoutTax), gross: Number(basico.priceWithTax), currency: 'MXN' as const }
+  if (origin.kind === 'NONE') return { availableAt: null, price, canEndProNow: false, discountEndsAt: null }
+  if (origin.kind === 'COMP') return { availableAt: origin.currentPeriodEnd, price, canEndProNow: false, discountEndsAt: null }
+  if (origin.kind !== 'CLASSIC' || origin.tier !== 'PRO' || !stripeSub || stripeSub.interval !== 'month') return null
+  return {
+    availableAt: stripeSub.currentPeriodEnd ? stripeSub.currentPeriodEnd.toISOString() : null,
+    price,
+    canEndProNow: !stripeSub.cancelAtPeriodEnd && isLastDiscountedPeriod(stripeSub, now),
+    discountEndsAt: stripeSub.descuento?.endsAt ? stripeSub.descuento.endsAt.toISOString() : null,
+  }
+}
+
 /**
  * Minimum subscription tenure before the retention DISCOUNT offer unlocks. THE key anti-farm
  * rule: a brand-new subscriber can't buy → cancel → farm the discount within the first cycle.
@@ -316,6 +389,8 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
 
   // No PLAN_PRO row → "none" shell.
   if (!vf) {
+    const origin = await planContractOrigin(venueId)
+    const basicPlan = await basicPlanOf(venueId, new Date())
     return {
       hasPlan: false,
       state: 'none',
@@ -332,8 +407,10 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       stripeSubscriptionId: null,
       grandfathered,
       retentionOfferEligible: false,
-      origin: await planContractOrigin(venueId),
+      origin,
       pauseOfferEligible: false,
+      basicPlan,
+      basicOffer: await basicOfferOf(basicPlan, grandfathered, origin, null, new Date()),
     }
   }
 
@@ -401,6 +478,8 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       (await getVenueBaseTier(venueId)) !== null &&
       (await pauseBlocker(venueId, stripeSub)) === null,
   )
+  const basicPlan = await basicPlanOf(venueId, now)
+  const basicOffer = await basicOfferOf(basicPlan, grandfathered, origin, stripeSub, now)
 
   return {
     hasPlan,
@@ -422,6 +501,8 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
     pauseOfferEligible,
     trialModality:
       modalidadDePrueba({ status: stripeSub?.status, cancel_at_period_end: stripeSub?.cancelAtPeriodEnd }).trialModality ?? null,
+    basicPlan,
+    basicOffer,
   }
 }
 

@@ -29,6 +29,7 @@ import {
   type FulfillPlanCheckoutResult,
 } from './stripe.service'
 import { montoDelSiguienteCobro, noHabraCobro } from './billing/siguienteCobro'
+import { avisarPlanTerminado, ofertaDelBasico } from './billing/avisosDelBasico'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
@@ -513,6 +514,10 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
   for (const venueId of baseplanVenueIds) {
     await runSeatReconciliation(venueId, subscriptionId)
   }
+
+  // Plan Básico (17-nov): «Tu prueba terminó» / «Tu Pro terminó» si terminó SIN cobro. Después de lo de arriba (si la
+  // reconciliación lanza, el evento se repite y entonces avisa); una sola vez por el sello; nunca lanza.
+  if (baseplanVenueIds.size > 0) await avisarPlanTerminado(subscription)
 }
 
 /**
@@ -1165,6 +1170,8 @@ async function sendPlanTrialEndingNotifications(
       logger.warn('⚠️ Plan trial ending: no email recipient resolved; email skipped', { venueId, subscriptionId: subscription.id })
       return
     }
+    // Plan Básico (Codex r3 #12): el fin de prueba de un Pro normal también ofrece el Básico (no con meses de descuento pendientes).
+    const basicOffer = await ofertaDelBasico(stripe, subscription, venueFeature.feature.code, 'TRIAL_ENDS', new Date())
     const emailSent = await emailService.sendPlanRenewalReminderEmail(target.email, {
       locale: target.locale,
       venueName: venue.name,
@@ -1175,6 +1182,7 @@ async function sendPlanTrialEndingNotifications(
       planName,
       isTrialEnd: true,
       timeZone,
+      ...(basicOffer ? { basicOffer } : {}),
     })
     if (!emailSent) logger.warn('⚠️ Plan trial ending email failed to send', { venueId, subscriptionId: subscription.id })
   } catch (error) {

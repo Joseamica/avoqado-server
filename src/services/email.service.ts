@@ -258,6 +258,52 @@ export interface PlanRenewalReminderEmailData {
   isTrialEnd?: boolean
   /** Zona en la que se escribe `renewalDate` (la del negocio). Por defecto `'America/Mexico_City'`. */
   timeZone?: string
+  /**
+   * Plan Básico (17-nov): bloque «¿Prefieres el Básico a $499 + IVA?». `DISCOUNT_ENDS` = «Tu Pro sube» (el próximo cobro es
+   * el primero sin descuento); `TRIAL_ENDS` = fin de la prueba de un Pro normal (`trial_will_end`). Sin él, el correo de hoy.
+   */
+  basicOffer?: { priceWithoutTaxCents: number; reason: 'DISCOUNT_ENDS' | 'TRIAL_ENDS' }
+}
+
+/** Baja en un clic de un aviso del plan que se puede apagar (categoría `PLAN` de `unsubscribeToken`). */
+export interface PlanNoticeUnsubscribe {
+  url: string
+  preferencesUrl: string
+}
+
+/** Plan Básico: «Tu prueba termina» — la prueba de Pro que termina SIN cobrar (`cancel_at_period_end`). */
+export interface PlanTrialEndsFreeEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  trialEndsAt: Date
+  timeZone?: string
+  /** «Tu plan» del negocio: los dos botones llevan ahí. */
+  billingUrl: string
+  /** Precio del Básico vigente sin IVA, en centavos sólo para escribirlo. Sin él (no hay Básico publicado), sin el bloque. */
+  basicPlanPriceWithoutTaxCents?: number
+  unsubscribe?: PlanNoticeUnsubscribe
+  idempotencyKey?: string
+}
+
+/** Plan Básico: «Tu prueba terminó» (`TRIAL`) / «Tu Pro terminó» (`PRO`), sin cobro, con «Contratar Básico» y «Contratar Pro». */
+export interface PlanEndedEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  kind: 'TRIAL' | 'PRO'
+  billingUrl: string
+  basicPlanPriceWithoutTaxCents?: number
+  unsubscribe?: PlanNoticeUnsubscribe
+  idempotencyKey?: string
+}
+
+/** RFC 8058: encabezados de baja en un clic. */
+function encabezadosDeBaja(unsubscribe?: PlanNoticeUnsubscribe): Record<string, string> | undefined {
+  return unsubscribe ? { 'List-Unsubscribe': `<${unsubscribe.url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : undefined
+}
+
+/** «$499» / «$499.50»: el precio del Básico sin IVA para escribir «+ IVA». */
+function precioSinIva(cents: number): string {
+  return formatMoney(cents).replace(/\.00$/, '')
 }
 
 /** Prueba REGALADA del plan (SUPERADMIN «Dar días de prueba», sin tarjeta): se acaba y no se cobra nada. */
@@ -4804,6 +4850,10 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     bodyHtml: string // inner content blocks (already localized + escaped where needed)
     ctaLabel: string
     ctaUrl: string
+    /** Plan Básico (17-nov): segundo botón, con borde, debajo del principal. */
+    secondaryCta?: { label: string; url: string }
+    /** Baja en un clic (avisos que se pueden apagar): pie con «Dejar de recibir estos avisos» y la liga a preferencias. */
+    unsubscribe?: { url: string; preferencesUrl: string }
   }): string {
     const logoUrl = 'https://avoqado.io/isotipo.svg'
     const footer =
@@ -4849,7 +4899,16 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     <div style="padding: 32px 0; text-align: center;">
       <a href="${opts.ctaUrl}" style="background-color: #000000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px; display: inline-block;">
         ${opts.ctaLabel}
-      </a>
+      </a>${
+        opts.secondaryCta
+          ? `
+      <div style="margin-top: 12px;">
+        <a href="${opts.secondaryCta.url}" style="background-color: #ffffff; color: #000; padding: 13px 31px; text-decoration: none; border: 1px solid #000; border-radius: 6px; font-weight: 600; font-size: 14px; display: inline-block;">
+          ${opts.secondaryCta.label}
+        </a>
+      </div>`
+          : ''
+      }
     </div>
 
     <!-- Footer -->
@@ -4868,7 +4927,14 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
         <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${footer.privacy}</a>
-      </p>
+      </p>${
+        opts.unsubscribe
+          ? `
+      <p style="margin: 16px 0 0 0; font-size: 12px; color: #666;">
+        <a href="${opts.unsubscribe.url}" style="color: #666; text-decoration: underline;">${opts.locale === 'en' ? 'Stop receiving these notices by email' : 'Dejar de recibir estos avisos por correo'}</a> · <a href="${opts.unsubscribe.preferencesUrl}" style="color: #666; text-decoration: underline;">${opts.locale === 'en' ? 'Manage your notification preferences' : 'Administra tus preferencias de notificaciones'}</a>
+      </p>`
+          : ''
+      }
     </div>
 
   </div>
@@ -5156,7 +5222,11 @@ Equipo de Avoqado`
       const cuerpo = data.isTrialEnd
         ? `Your Avoqado ${planName} trial ends on <strong>${dateFormatted}</strong>. On that day we'll charge <strong>${amount}</strong> to your card. If you don't want to continue, cancel before then from Billing.`
         : `Your Avoqado ${planName} plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.`
-      subject = data.isTrialEnd ? `Your Avoqado ${planName} trial ends on ${dateFormatted}` : 'Your plan renews soon'
+      subject = data.isTrialEnd
+        ? `Your Avoqado ${planName} trial ends on ${dateFormatted}`
+        : data.basicOffer?.reason === 'DISCOUNT_ENDS'
+          ? `Your ${planName} discount ends on ${dateFormatted}`
+          : 'Your plan renews soon'
       ctaLabel = data.isTrialEnd ? 'View billing' : 'Manage plan'
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
@@ -5175,7 +5245,11 @@ Avoqado Team`
       const cuerpo = data.isTrialEnd
         ? `Tu prueba de Avoqado ${planName} termina el <strong>${dateFormatted}</strong>. Ese día cobraremos <strong>${amount}</strong> a tu tarjeta. Si no quieres continuar, cancela antes desde Facturación.`
         : `Tu plan Avoqado ${planName} se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.`
-      subject = data.isTrialEnd ? `Tu prueba de Avoqado ${planName} termina el ${dateFormatted}` : 'Tu plan se renueva pronto'
+      subject = data.isTrialEnd
+        ? `Tu prueba de Avoqado ${planName} termina el ${dateFormatted}`
+        : data.basicOffer?.reason === 'DISCOUNT_ENDS'
+          ? `Tu descuento de ${planName} termina el ${dateFormatted}`
+          : 'Tu plan se renueva pronto'
       ctaLabel = data.isTrialEnd ? 'Ver facturación' : 'Administrar plan'
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
@@ -5191,6 +5265,40 @@ ${ctaLabel}: ${data.billingPortalUrl}
 Equipo de Avoqado`
     }
 
+    // Plan Básico (17-nov): la alternativa, sin tocar lo que el correo dice del cobro (monto real de la vista previa).
+    if (data.basicOffer) {
+      const en = data.locale === 'en'
+      const precio = precioSinIva(data.basicOffer.priceWithoutTaxCents)
+      const pregunta = en ? `Would you rather have Básico for ${precio} + VAT?` : `¿Prefieres el Básico a ${precio} + IVA?`
+      const detalle =
+        data.basicOffer.reason === 'DISCOUNT_ENDS'
+          ? en
+            ? 'Your discount ends with this period. In «Your plan» you can end your Pro when the discount is over and, that day, get Básico with one click.'
+            : 'Tu descuento termina con este periodo. En «Tu plan» puedes terminar tu Pro al acabar el descuento y, ese día, contratar el Básico con un clic.'
+          : en
+            ? `In «Your plan» you can end your trial without being charged for ${planName} and, that day, get Básico with one click.`
+            : `En «Tu plan» puedes terminar tu prueba sin que se te cobre ${planName} y, ese día, contratar el Básico con un clic.`
+      const boton =
+        data.basicOffer.reason === 'DISCOUNT_ENDS'
+          ? en
+            ? 'End my Pro when the discount is over'
+            : 'Terminar mi Pro al acabar el descuento'
+          : en
+            ? 'View my plan'
+            : 'Ver mi plan'
+      bodyHtml += `
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+        <p style="font-size: 16px; margin: 0 0 8px 0; color: #000;"><strong>${pregunta}</strong></p>
+        <p style="font-size: 14px; margin: 0 0 16px 0; color: #000;">${detalle}</p>
+        <a href="${data.billingPortalUrl}" style="color: #000; font-weight: 600; font-size: 14px;">${boton}</a>
+      </div>`
+      text += `
+
+${pregunta}
+${detalle}
+${boton}: ${data.billingPortalUrl}`
+    }
+
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
       title: subject,
@@ -5201,6 +5309,120 @@ Equipo de Avoqado`
     })
 
     return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * Plan Básico (17-nov): «Tu prueba termina» — la prueba de Pro termina SIN cobrar (la suscripción real trae
+   * `cancel_at_period_end`). Nunca anuncia un cobro ni un monto. Lo manda el job `plan-renewal-reminder` 8–9 días antes y
+   * otra vez el día anterior. Se puede apagar (categoría `PLAN`).
+   */
+  async sendPlanTrialEndsFreeEmail(email: string, data: PlanTrialEndsFreeEmailData): Promise<boolean> {
+    const en = data.locale === 'en'
+    const fecha = data.trialEndsAt.toLocaleDateString(en ? 'en-US' : 'es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: zonaValida(data.timeZone),
+    })
+    const precio = data.basicPlanPriceWithoutTaxCents != null ? precioSinIva(data.basicPlanPriceWithoutTaxCents) : null
+    const subject = en ? `Your Avoqado Pro trial ends on ${fecha}` : `Tu prueba de Avoqado Pro termina el ${fecha}`
+    const frase = precio
+      ? en
+        ? `Your Pro trial ends on <strong>${fecha}</strong> and you won't be charged anything. That day you can get Básico (${precio} + VAT) with one click, or stay on Pro starting today.`
+        : `Tu prueba de Pro termina el <strong>${fecha}</strong> y no se te cobrará nada. Ese día podrás contratar el Básico (${precio} + IVA) con un clic, o quedarte en Pro desde hoy.`
+      : en
+        ? `Your Pro trial ends on <strong>${fecha}</strong> and you won't be charged anything. If you want to stay on Pro, you can do it from «Your plan».`
+        : `Tu prueba de Pro termina el <strong>${fecha}</strong> y no se te cobrará nada. Si quieres quedarte en Pro, puedes hacerlo desde «Tu plan».`
+    const greeting = en ? 'Hi,' : 'Hola,'
+    const ctaLabel = en ? 'View my plan' : 'Ver mi plan'
+    const quedarme = en ? 'Stay on Pro' : 'Quedarme en Pro'
+    const bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">${frase}</p>`
+    const text = `${greeting}
+
+${frase.replace(/<\/?strong>/g, '')}
+
+${ctaLabel}: ${data.billingUrl}
+${quedarme}: ${data.billingUrl}
+${data.unsubscribe ? `\n${en ? 'Stop receiving these notices' : 'Dejar de recibir estos avisos'}: ${data.unsubscribe.url}\n` : ''}
+${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: escapeHtml(data.venueName),
+      bodyHtml,
+      ctaLabel,
+      ctaUrl: data.billingUrl,
+      secondaryCta: { label: quedarme, url: data.billingUrl },
+      unsubscribe: data.unsubscribe,
+    })
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      idempotencyKey: data.idempotencyKey,
+      ...(data.unsubscribe ? { headers: encabezadosDeBaja(data.unsubscribe) } : {}),
+    })
+  }
+
+  /**
+   * Plan Básico (17-nov): «Tu prueba terminó» / «Tu Pro terminó» — el plan terminó sin cobrar y el negocio quedó en Gratis.
+   * Botones «Contratar Básico» (si hay Básico publicado) y «Contratar Pro», a «Tu plan». Lo manda el webhook
+   * `customer.subscription.deleted` y, de respaldo, el job diario: una sola vez (sello en la fila del plan). Se puede apagar.
+   */
+  async sendPlanEndedEmail(email: string, data: PlanEndedEmailData): Promise<boolean> {
+    const en = data.locale === 'en'
+    const precio = data.basicPlanPriceWithoutTaxCents != null ? precioSinIva(data.basicPlanPriceWithoutTaxCents) : null
+    const prueba = data.kind === 'TRIAL'
+    const subject = prueba
+      ? en
+        ? 'Your Avoqado Pro trial has ended'
+        : 'Tu prueba de Avoqado Pro terminó'
+      : en
+        ? 'Your Avoqado Pro plan has ended'
+        : 'Tu plan Avoqado Pro terminó'
+    const parrafos = en
+      ? [
+          `${prueba ? 'Your Pro trial ended' : 'Your Pro plan ended'} and we didn't charge you anything. Your business keeps working on the Free plan and your data stays as it is.`,
+          precio ? `You can get Básico (${precio} + VAT) with one click, or go back to Pro.` : 'You can go back to Pro whenever you want.',
+        ]
+      : [
+          `${prueba ? 'Tu prueba de Pro terminó' : 'Tu plan Pro terminó'} y no se te cobró nada. Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
+          precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a Pro.` : 'Puedes volver a Pro cuando quieras.',
+        ]
+    const greeting = en ? 'Hi,' : 'Hola,'
+    const contratarBasico = en ? 'Get Básico' : 'Contratar Básico'
+    const contratarPro = en ? 'Get Pro' : 'Contratar Pro'
+    const bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      ${parrafos.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
+    const text = `${greeting}
+
+${parrafos.join('\n\n')}
+
+${precio ? `${contratarBasico}: ${data.billingUrl}\n` : ''}${contratarPro}: ${data.billingUrl}
+${data.unsubscribe ? `\n${en ? 'Stop receiving these notices' : 'Dejar de recibir estos avisos'}: ${data.unsubscribe.url}\n` : ''}
+${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: escapeHtml(data.venueName),
+      bodyHtml,
+      ...(precio
+        ? { ctaLabel: contratarBasico, ctaUrl: data.billingUrl, secondaryCta: { label: contratarPro, url: data.billingUrl } }
+        : { ctaLabel: contratarPro, ctaUrl: data.billingUrl }),
+      unsubscribe: data.unsubscribe,
+    })
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      idempotencyKey: data.idempotencyKey,
+      ...(data.unsubscribe ? { headers: encabezadosDeBaja(data.unsubscribe) } : {}),
+    })
   }
 
   /**

@@ -8,6 +8,11 @@ describe('unsubscribeToken', () => {
     expect(verifyUnsubscribeToken(signUnsubscribeToken(d))).toEqual(d)
   })
 
+  it('Plan Básico: verifyUnsubscribeToken acepta la categoría PLAN (avisos del fin de la prueba)', () => {
+    const d = { ...DATA, category: 'PLAN' as const }
+    expect(verifyUnsubscribeToken(signUnsubscribeToken(d))).toEqual(d)
+  })
+
   it('round-trips a signed token back to the same data', () => {
     const token = signUnsubscribeToken(DATA)
     expect(verifyUnsubscribeToken(token)).toEqual(DATA)
