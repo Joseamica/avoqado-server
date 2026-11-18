@@ -1,6 +1,7 @@
 /**
  * `AlmacenPorVentana` (tarjeta `hz:nube0000:na526456`, 17-nov-2026): el almacén del tope de PIN que sabe a qué ventana pertenece cada
- * intento, para que devolver lo que salió bien nunca borre un fallo de otra ventana (Codex r2 #1 y r3 #1).
+ * intento, para que devolver lo que salió bien nunca borre un fallo de otra ventana (Codex r2 #1 y r3 #1). La identidad de la
+ * ventana es su REGISTRO, no su hora: cada intento recibe su ficha (`resetTime`) atada al registro donde se contó (Codex r5 #1 y #2).
  */
 import { AlmacenPorVentana } from '../../../src/middlewares/almacenPorVentana'
 
@@ -30,10 +31,10 @@ describe('AlmacenPorVentana', () => {
     const vieja = a.increment('k') // A: último milisegundo de la ventana vieja
     ahora = inicio + VENTANA
     const nueva = a.increment('k') // B: reinicia (fallo de la ventana nueva)
-    expect(vieja.resetTime!.getTime()).toBe(inicio + VENTANA) // la copia de A no cambió con el reinicio
+    expect(vieja.resetTime!.getTime()).toBe(inicio + VENTANA) // la ficha de A no cambió con el reinicio
     expect(nueva.resetTime!.getTime()).toBe(inicio + 2 * VENTANA)
 
-    a.devolverEnVentana('k', vieja.resetTime!.getTime()) // A termina bien
+    a.devolverEnVentana('k', vieja.resetTime) // A termina bien
 
     expect(a.get('k')?.totalHits).toBe(1) // el fallo de B sigue contado
   })
@@ -43,61 +44,116 @@ describe('AlmacenPorVentana', () => {
     const r = a.increment('k')
     a.increment('k')
 
-    a.devolverEnVentana('k', r.resetTime!.getTime())
+    a.devolverEnVentana('k', r.resetTime)
 
     expect(a.get('k')?.totalHits).toBe(1)
   })
 
-  it('con la ventana ya vencida (sin reinicio todavía) no resta nada', () => {
+  it('🔴 Codex r5 #1: dos llaves que abren ventana en el mismo milisegundo vencen las dos a los 60 s exactos, como la librería', () => {
+    const a = almacen()
+    const ip = a.increment('ip')
+    const negocio = a.increment('negocio')
+
+    expect(ip.resetTime!.getTime()).toBe(inicio + VENTANA)
+    expect(negocio.resetTime!.getTime()).toBe(inicio + VENTANA) // antes: + 1 ms, heredado de la otra llave
+    ahora = inicio + VENTANA
+    expect(a.get('negocio')).toBeUndefined() // a los 60 s exactos ya no bloquea
+    expect(a.increment('negocio').totalHits).toBe(1)
+  })
+
+  it('🔴 Codex r5 #1: si el reloj brinca para atrás, una llave nueva vence a sus propios 60 s, sin heredar el salto', () => {
+    const a = almacen()
+    ahora = inicio + 3_600_000 // el reloj adelantado una hora
+    a.increment('otra')
+    ahora = inicio // vuelve a la hora buena
+
+    expect(a.increment('k').resetTime!.getTime()).toBe(inicio + VENTANA)
+  })
+
+  it('🔴 Codex r5 #2: un acierto que termina con el reloj adelantado se devuelve igual; si el reloj vuelve, la ventana sólo tiene sus fallos', () => {
+    const a = almacen()
+    for (let i = 0; i < 9; i++) a.increment('k') // 9 fallos
+    const acierto = a.increment('k') // una checada correcta, en vuelo
+    expect(a.get('k')?.totalHits).toBe(10)
+
+    ahora = inicio + VENTANA + 5 // el reloj brinca más allá del vencimiento justo cuando termina la checada
+    a.devolverEnVentana('k', acierto.resetTime)
+    ahora = inicio + 10 // y vuelve atrás antes de que nadie reemplace o barra el registro
+
+    expect(a.get('k')?.totalHits).toBe(9) // antes: 10 ⇒ el siguiente empleado recibía 429 con 9 fallos
+  })
+
+  it('con la ventana ya vencida y reemplazada, devolver no toca la ventana nueva', () => {
     const a = almacen()
     const r = a.increment('k')
     ahora = inicio + VENTANA + 5
+    a.increment('k') // ventana nueva, con su fallo
 
-    a.devolverEnVentana('k', r.resetTime!.getTime())
-
-    expect(a.get('k')).toBeUndefined()
-    expect(a.increment('k').totalHits).toBe(1)
-  })
-
-  it('la ventana que devuelve es una COPIA: cambiarla no toca el almacén', () => {
-    const a = almacen()
-    const r = a.increment('k')
-    r.resetTime!.setTime(0)
-
-    expect(a.get('k')?.resetTime?.getTime()).toBe(inicio + VENTANA)
-  })
-
-  it('nunca baja de cero ni resta en una llave que no existe, y no lanza', () => {
-    const a = almacen()
-    expect(() => a.devolverEnVentana('nadie', inicio + VENTANA)).not.toThrow()
-    const r = a.increment('k')
-    a.devolverEnVentana('k', r.resetTime!.getTime())
-    a.devolverEnVentana('k', r.resetTime!.getTime())
-
-    expect(a.get('k')?.totalHits).toBe(0)
-  })
-
-  it('Codex r4 #4: tras borrar la llave en el mismo milisegundo, la ventana nueva tiene OTRO número y la devolución vieja no la toca', () => {
-    const a = almacen()
-    const vieja = a.increment('k')
-    a.resetKey('k')
-    a.increment('k') // mismo milisegundo
-    a.devolverEnVentana('k', vieja.resetTime!.getTime())
+    a.devolverEnVentana('k', r.resetTime)
 
     expect(a.get('k')?.totalHits).toBe(1)
   })
 
-  it('si el reloj del servidor brinca para atrás, la ventana nueva sigue sin repetir número', () => {
+  it('la ficha es un `Date` propio: cambiarlo no toca el almacén, y sigue devolviendo en su ventana', () => {
+    const a = almacen()
+    const r = a.increment('k')
+    a.increment('k')
+    r.resetTime!.setTime(0)
+
+    expect(a.get('k')?.resetTime?.getTime()).toBe(inicio + VENTANA)
+    a.devolverEnVentana('k', r.resetTime)
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('nunca baja de cero, no resta con una ficha ajena, sin ficha ni en una llave que no existe, y no lanza', () => {
+    const a = almacen()
+    expect(() => a.devolverEnVentana('nadie', new Date(inicio + VENTANA))).not.toThrow()
+    expect(() => a.devolverEnVentana('nadie', undefined)).not.toThrow()
+    const r = a.increment('k')
+    a.increment('k')
+    a.devolverEnVentana('k', new Date(inicio + VENTANA)) // misma hora, pero no es su ficha
+    a.devolverEnVentana('k', undefined)
+    expect(a.get('k')?.totalHits).toBe(2)
+
+    a.devolverEnVentana('k', r.resetTime)
+    a.devolverEnVentana('k', r.resetTime)
+    a.devolverEnVentana('k', r.resetTime)
+    expect(a.get('k')?.totalHits).toBe(0)
+  })
+
+  it('una ficha de una llave no resta en otra llave', () => {
+    const a = almacen()
+    const deIp = a.increment('ip')
+    a.increment('negocio')
+
+    a.devolverEnVentana('negocio', deIp.resetTime)
+
+    expect(a.get('negocio')?.totalHits).toBe(1)
+  })
+
+  it('Codex r4 #4: tras borrar la llave y reabrirla en el mismo milisegundo (misma hora), la ficha vieja no toca la ventana nueva', () => {
+    const a = almacen()
+    const vieja = a.increment('k')
+    a.resetKey('k')
+    const nueva = a.increment('k') // mismo milisegundo: misma hora de vencimiento
+    expect(nueva.resetTime!.getTime()).toBe(vieja.resetTime!.getTime())
+
+    a.devolverEnVentana('k', vieja.resetTime)
+
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('Codex r4 #4: lo mismo tras `resetAll` con el reloj de vuelta atrás', () => {
     const a = almacen()
     const primera = a.increment('k')
-    ahora = inicio + VENTANA + 1 // vence la primera
-    a.increment('otra') // cualquier llave
+    ahora = inicio + VENTANA + 1
+    a.increment('otra')
     ahora = inicio // el reloj vuelve atrás
     a.resetAll()
-    const segunda = a.increment('k')
+    a.increment('k')
 
-    expect(segunda.resetTime!.getTime()).not.toBe(primera.resetTime!.getTime())
-    a.devolverEnVentana('k', primera.resetTime!.getTime())
+    a.devolverEnVentana('k', primera.resetTime)
+
     expect(a.get('k')?.totalHits).toBe(1)
   })
 

@@ -77,13 +77,13 @@ const almacenPorIp = new AlmacenPorVentana()
 const almacenPorNegocio = new AlmacenPorVentana()
 
 /**
- * Resta la petición que salió bien, en la MISMA ventana en la que se contó. La ventana es la copia que devolvió el almacén al contarla
- * (`resetTime`, un `Date` propio de esta petición); al terminar, `devolverEnVentana` la compara con la vigente y resta en el mismo tramo
- * síncrono. No hay promesa que pueda quedarse sin manejar (Codex r3 #3).
+ * Resta la petición que salió bien, en la MISMA ventana en la que se contó. La ficha es el `Date` propio que devolvió el almacén al
+ * contarla (`resetTime`, atado a su registro); al terminar, `devolverEnVentana` resta sólo en ese registro, en el mismo tramo síncrono.
+ * No hay promesa que pueda quedarse sin manejar (Codex r3 #3).
  */
 function devolverSiSalioBien(almacen: AlmacenPorVentana, llave: (req: Request) => string, propiedad: string): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
-    const ventana = ((req as unknown as Record<string, RateLimitInfo | undefined>)[propiedad]?.resetTime as Date | undefined)?.getTime()
+    const ventana = (req as unknown as Record<string, RateLimitInfo | undefined>)[propiedad]?.resetTime as Date | undefined
     if (ventana === undefined) return next() // el limitador se saltó (sin negocio en la ruta): no contó nada
     const clave = llave(req)
     res.once('finish', () => {

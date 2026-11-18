@@ -205,6 +205,54 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
     }
   })
 
+  it('Codex r5 #3: por NEGOCIO, una checada correcta que termina tras el reinicio no borra un fallo de los 200 de la ventana nueva', async () => {
+    const real = Date.now()
+    let adelanto = 0
+    const reloj = jest.spyOn(Date, 'now').mockImplementation(() => real + adelanto)
+    try {
+      let soltar!: () => void
+      const pausa = new Promise<void>(listo => (soltar = listo))
+      let avisarLlegada!: () => void
+      const llegada = new Promise<void>(listo => (avisarLlegada = listo))
+      const a = express()
+      a.set('trust proxy', 1)
+      a.use(express.json())
+      a.post('/venues/:venueId/time-clock/identify', ...pinLoginRateLimiter, async (req, res) => {
+        if (req.body?.lenta) {
+          avisarLlegada()
+          await pausa
+        }
+        if (req.body?.pin === PIN_BUENO) return res.status(200).json({ success: true })
+        return res.status(401).json({ success: false })
+      })
+      const servidor = a.listen(0, '127.0.0.1')
+      servidores.push(servidor)
+      await new Promise<void>(listo => servidor.once('listening', () => listo()))
+
+      const lenta = request(servidor)
+        .post('/venues/venue-ventana-negocio/time-clock/identify')
+        .set('X-Forwarded-For', ipDePrueba(33))
+        .send({ pin: PIN_BUENO, lenta: true })
+      const respuestaLenta = lenta.then(r => r)
+      await llegada
+
+      // Pasa la ventana y 200 PIN equivocados, desde dos IPs (100 cada una), llenan la ventana NUEVA del negocio.
+      adelanto = 61_000
+      for (const ip of [ipDePrueba(30), ipDePrueba(31)]) {
+        for (let i = 0; i < 100; i++) expect((await checar(servidor, 'venue-ventana-negocio', '0000', ip)).status).toBe(401)
+      }
+
+      soltar()
+      expect((await respuestaLenta).status).toBe(200)
+      await new Promise(listo => setImmediate(listo))
+
+      // Desde una IP limpia: el negocio ya tiene sus 200 fallos ⇒ 429 (si la correcta restara en la ventana nueva, pasaría).
+      expect((await checar(servidor, 'venue-ventana-negocio', '0000', ipDePrueba(32))).status).toBe(429)
+    } finally {
+      reloj.mockRestore()
+    }
+  })
+
   it('el código maestro tiene su propia cubeta y cuenta TODO, como antes: 100 aciertos ⇒ el 101.º es 429', async () => {
     const a = express()
     a.set('trust proxy', 1)
@@ -247,5 +295,60 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
       429,
     )
     expect((await checar(a, 'venue-separadas-2', '0000', ipMaestro)).status).toBe(401)
+  })
+
+  it('Codex r5 #3: por NEGOCIO, las checadas no gastan el cupo del maestro, ni el maestro el de las checadas', async () => {
+    const a = await app()
+    const b = express()
+    b.set('trust proxy', 1)
+    b.post('/venues/:venueId/auth/master', ...pinMasterRateLimiter, (_req, res) => res.status(401).json({ ok: false }))
+    const maestro = b.listen(0, '127.0.0.1')
+    servidores.push(maestro)
+    await new Promise<void>(listo => maestro.once('listening', () => listo()))
+    const intentoMaestro = (venueId: string, ip: string) =>
+      request(maestro).post(`/venues/${venueId}/auth/master`).set('X-Forwarded-For', ip).send({})
+
+    // 200 checadas equivocadas desde dos IPs llenan el negocio: la 201.ª, desde otra IP, es 429 del negocio…
+    for (const ip of [ipDePrueba(40), ipDePrueba(41)]) {
+      for (let i = 0; i < 100; i++) expect((await checar(a, 'venue-separadas-negocio', '0000', ip)).status).toBe(401)
+    }
+    expect((await checar(a, 'venue-separadas-negocio', '0000', ipDePrueba(42))).status).toBe(429)
+    // …y el maestro de ese negocio, desde una IP limpia, sigue con su cupo.
+    expect((await intentoMaestro('venue-separadas-negocio', ipDePrueba(43))).status).toBe(401)
+
+    // Al revés: 200 intentos del maestro desde dos IPs llenan SU cupo del negocio (la 201.ª es 429)…
+    for (const ip of [ipDePrueba(44), ipDePrueba(45)]) {
+      for (let i = 0; i < 100; i++) expect((await intentoMaestro('venue-separadas-negocio-2', ip)).status).toBe(401)
+    }
+    expect((await intentoMaestro('venue-separadas-negocio-2', ipDePrueba(46))).status).toBe(429)
+    // …y el checador de ese negocio, desde una IP limpia, no recibe 429.
+    expect((await checar(a, 'venue-separadas-negocio-2', '0000', ipDePrueba(47))).status).toBe(401)
+  })
+})
+
+describe('na526456 · el montaje REAL de los limitadores (Codex r5 #3)', () => {
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+  const leer = (archivo: string) => fs.readFileSync(path.join(__dirname, '../../../src/routes', archivo), 'utf8')
+  const lineaDe = (fuente: string, ruta: string) => {
+    const lineas = fuente.split('\n').filter(l => l.includes(`router.post('${ruta}'`))
+    expect(lineas).toHaveLength(1)
+    return lineas[0]
+  }
+
+  it('el código maestro de la TPV usa SU cubeta, no la del checador', () => {
+    const linea = lineaDe(leer('tpv.routes.ts'), '/venues/:venueId/auth/master')
+    expect(linea).toContain('pinMasterRateLimiter')
+    expect(linea).not.toContain('pinLoginRateLimiter')
+  })
+
+  it('el login por PIN de la TPV y las 5 rutas del checador usan la cubeta que sólo cuenta fallos', () => {
+    expect(lineaDe(leer('tpv.routes.ts'), '/venues/:venueId/auth')).toContain('pinLoginRateLimiter')
+    const movil = leer('mobile.routes.ts')
+    for (const ruta of ['identify', 'clock-in', 'clock-out', 'break/start', 'break/end']) {
+      const linea = lineaDe(movil, `/venues/:venueId/time-clock/${ruta}`)
+      expect(linea).toContain('pinLoginRateLimiter')
+      expect(linea).not.toContain('pinMasterRateLimiter')
+    }
   })
 })
