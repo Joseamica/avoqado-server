@@ -3834,9 +3834,12 @@ class OrganizationDashboardService {
     })
 
     // 5. Push to all terminals in the org (cascade: orgDefaults + per-terminal overrides)
+    // 🔴 Por id (tarjeta na86c206, 18-nov-2026): el mismo orden en que toman las terminales los demás (guardar los ajustes
+    // de un negocio, copiar el diseño, la limpieza de demos). En otro orden, dos escritores se cruzan (`deadlock detected`).
     const terminals = await prisma.terminal.findMany({
       where: { venue: { organizationId: orgId } },
       select: { id: true, config: true, configOverrides: true },
+      orderBy: { id: 'asc' },
     })
 
     let terminalsUpdated = 0
