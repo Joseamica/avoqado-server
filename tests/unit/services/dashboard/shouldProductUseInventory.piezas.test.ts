@@ -66,6 +66,15 @@ describe('shouldProductUseInventory — contar piezas en todos los planes', () =
     expect(tienePremium).toHaveBeenCalledWith('venue-1', 'INVENTORY_TRACKING')
   })
 
+  it('quien pregunta es superadmin de verdad: contesta con Premium, como lo deja pasar el candado (Codex r3 #5)', async () => {
+    tienePremium.mockResolvedValue(false)
+
+    const r = await shouldProductUseInventory('venue-1', { quienPreguntaEsSuperadmin: true })
+
+    expect(r.hasInventoryFeature).toBe(true)
+    expect(opcion(r, 'RECIPE')?.enabled).toBe(true)
+  })
+
   it('negocio que no existe ⇒ 404', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(null)
 

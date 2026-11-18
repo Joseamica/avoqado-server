@@ -35,13 +35,11 @@ jest.mock('@/config/logger', () => ({
 
 // Permission gate is not under test — passthrough, but KEEP the real resolveRequestVenueId.
 // Cada permiso que pide una ruta queda anotado (al importar el router): así se comprueba la forma de la ruta sin probar el permiso.
-const permisosPedidos: string[] = []
+// Cada middleware de permiso lleva el nombre del permiso: así se lee qué pide CADA ruta del router real.
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   ...jest.requireActual('@/middlewares/checkPermission.middleware'),
-  checkPermission: (permiso: string) => {
-    permisosPedidos.push(permiso)
-    return (_req: any, _res: any, next: any) => next()
-  },
+  checkPermission: (permiso: string) =>
+    Object.defineProperty((_req: any, _res: any, next: any) => next(), 'name', { value: `permiso:${permiso}` }),
 }))
 
 // Body/param validation is not under test — passthrough.
@@ -335,8 +333,10 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
     expect(res.status).toBe(200)
   })
 
-  it('el alta por el asistente pide también el permiso del alta normal (`menu:create`), además de `inventory:update`', () => {
-    expect(permisosPedidos).toEqual(expect.arrayContaining(['inventory:update', 'menu:create']))
+  it('el alta por el asistente pide el permiso de siempre (`inventory:update`) y nada más: no le quita el alta a nadie (Codex r3 #4)', () => {
+    const capa = (inventoryRoutes as any).stack.find((l: any) => l.route?.path === '/wizard/complete' && l.route.methods.post)
+    const permisos = capa.route.stack.map((h: any) => h.name).filter((n: string) => n.startsWith('permiso:'))
+    expect(permisos).toEqual(['permiso:inventory:update'])
   })
 
   // REGRESSION TESTS — editar y ajustar piezas de un producto existente sigue siendo Premium

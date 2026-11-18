@@ -131,10 +131,9 @@ const candadoSiPidePremium: RequestHandler = (req, res, next) =>
  */
 router.post(
   '/wizard/complete',
+  // El permiso de siempre (`inventory:update`). Pedir además `menu:create` le quitaba el alta desde Recetas a roles personalizados que
+  // hoy la tienen (Codex r3 #4); la diferencia con el alta normal ya existía y queda anotada como deuda (Codex r1 #3).
   checkPermission('inventory:update'),
-  // Es un ALTA de producto: pide también el permiso del alta normal (`POST /products`, `menu:create`), como el botón «Nuevo producto»
-  // del DASHBOARD (Codex r1 #3 de na1d52b5). Los roles de fábrica que tienen `inventory:update` también tienen `menu:create`.
-  checkPermission('menu:create'),
   validateRequest(CreateProductWithInventorySchema),
   candadoSiPidePremium,
   productWizardController.createProductWithInventory,

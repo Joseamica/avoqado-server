@@ -86,7 +86,16 @@ export interface WizardStep3RecipeData {
  * Step 1: Create basic product
  * Returns productId for subsequent steps
  */
-export async function createProductStep1(venueId: string, data: WizardStep1Data, actor: CatalogActor) {
+export async function createProductStep1(
+  venueId: string,
+  data: WizardStep1Data,
+  actor: CatalogActor,
+  /**
+   * `nacerOculto`: el alta todo-en-uno con inventario crea el producto INACTIVO y lo publica hasta que sus piezas quedan guardadas
+   * (na1d52b5, Codex r2 #3 y r3 #1): el POS sólo lista productos activos, así que nadie puede venderlo antes de tener su saldo.
+   */
+  opciones: { nacerOculto?: boolean } = {},
+) {
   // Validate category belongs to venue
   const category = await prisma.menuCategory.findFirst({
     where: {
@@ -138,7 +147,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
           description: data.description,
           price: new Decimal(data.price),
           imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
-          active: true,
+          active: !opciones.nacerOculto,
           ...(data.type && { type: data.type as any }),
           ...(data.duration && { duration: data.duration }),
           ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
@@ -484,8 +493,16 @@ export async function createProductWithInventory(
   },
   actor: CatalogActor,
 ) {
+  // na1d52b5 (17-nov-2026): con inventario, el producto nace OCULTO y se publica al final, ya con su saldo (Codex r2 #3 y r3 #1). Y un
+  // tipo que no lleva inventario (clase, cita, servicio…) no puede nacer con él, aunque falte el saldo inicial (Codex r3 #3): la misma
+  // regla que la edición normal (`isNonInventoriable`).
+  const llevaInventario = productoLlevaInventario(data.inventory)
+  if (llevaInventario && isNonInventoriable(data.product.type, true)) {
+    throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+  }
+
   // Step 1: Create product
-  const step1Result = await createProductStep1(venueId, data.product, actor)
+  const step1Result = await createProductStep1(venueId, data.product, actor, { nacerOculto: llevaInventario })
   const productId = step1Result.productId
 
   try {
@@ -498,6 +515,11 @@ export async function createProductWithInventory(
       step3Result = await setupSimpleStockStep3(venueId, productId, data.simpleStock)
     } else if (step2Result.inventoryMethod === 'RECIPE' && data.recipe) {
       step3Result = await setupRecipeStep3(venueId, productId, data.recipe)
+    }
+
+    // Ya con su inventario configurado: se publica. Si esto falla, el `catch` borra el producto como cualquier otro paso.
+    if (llevaInventario) {
+      await prisma.product.update({ where: { id: productId, venueId }, data: { active: true } })
     }
 
     logAction({
