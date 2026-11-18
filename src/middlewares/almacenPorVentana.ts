@@ -17,7 +17,8 @@ import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
  *    a los reinicios por vencimiento), así que dos intentos en vuelo reciben siempre la misma respuesta que antes (Codex r8 #1 y r9 #1).
  * 2. Cada intento recibe su FICHA: un `Date` propio (`resetTime`) atado en un `WeakMap` al registro donde se contó. `devolverEnVentana`
  *    resta sólo si ese registro sigue siendo el de la llave (aunque el reloj haya brincado: Codex r5 #2), una sola vez por ficha (r6 #3),
- *    en un tramo síncrono y sin lanzar (r3 #3).
+ *    en un tramo síncrono y sin lanzar (r3 #3). La HORA de la ficha sí es la vigente del linaje, como el `Date` de la librería, para que
+ *    el Retry-After de un 429 leído tarde sea el mismo (auditoría de apps viejas #3, 18-nov).
  *
  * Una sola instancia del servidor (sin Redis): la memoria del proceso es la fuente, como con el `MemoryStore`.
  */
@@ -31,6 +32,55 @@ interface Registro {
 interface Linaje {
   /** La ventana vigente de este cliente (la librería la reescribe en el mismo objeto; aquí apunta al registro nuevo). */
   registro: Registro
+}
+
+/**
+ * La ficha de UN intento. Su IDENTIDAD es la del intento (la devolución la busca en `fichas`), pero su HORA es siempre la de la ventana
+ * vigente de su linaje, como el único `Date` que la librería reescribe con `setTime` al reiniciar (`resetClient`). Así, un 429 leído
+ * tarde, ya con la ventana nueva, dice la espera de la nueva y no «0 s» (auditoría de apps viejas #3, 18-nov-2026).
+ *
+ * La hora se pone al día al leerla. express-rate-limit sólo llama `getTime()` (Retry-After y los encabezados `RateLimit-*`); también
+ * se ponen al día `valueOf` (la resta de fechas) y los textos (`toISOString`, `toJSON`, `toString` y `toUTCString`).
+ */
+class FichaDeIntento extends Date {
+  constructor(private readonly suLinaje: Linaje) {
+    super(suLinaje.registro.vence)
+  }
+
+  private alDia(): void {
+    const vence = this.suLinaje.registro.vence
+    if (super.getTime() !== vence) super.setTime(vence)
+  }
+
+  getTime(): number {
+    this.alDia()
+    return super.getTime()
+  }
+
+  valueOf(): number {
+    this.alDia()
+    return super.valueOf()
+  }
+
+  toISOString(): string {
+    this.alDia()
+    return super.toISOString()
+  }
+
+  toJSON(llave?: unknown): string {
+    this.alDia()
+    return super.toJSON(llave)
+  }
+
+  toString(): string {
+    this.alDia()
+    return super.toString()
+  }
+
+  toUTCString(): string {
+    this.alDia()
+    return super.toUTCString()
+  }
 }
 
 export class AlmacenPorVentana implements Store {
@@ -68,11 +118,12 @@ export class AlmacenPorVentana implements Store {
       r = nuevo
     }
     r.intentos++
-    const ficha = new Date(r.vence)
-    this.fichas.set(ficha, r)
-    // `totalHits` EN VIVO y por linaje, como el objeto de la librería que express lee después del `await`: dos intentos en vuelo,
-    // también a ambos lados del vencimiento, ven el mismo total que antes (Codex r8 #1 y r9 #1). La ventana (`resetTime`) es la ficha fija.
     const linaje = r.linaje
+    const ficha = new FichaDeIntento(linaje)
+    this.fichas.set(ficha, r)
+    // `totalHits` y la hora de `resetTime` EN VIVO y por linaje, como el objeto de la librería que express lee después del `await`:
+    // dos intentos en vuelo, también a ambos lados del vencimiento, ven el mismo total y la misma espera (Codex r8 #1, r9 #1 y
+    // auditoría de apps viejas #3). La IDENTIDAD de la ficha sigue atada al registro donde se contó (la devolución).
     return {
       get totalHits() {
         return linaje.registro.intentos
