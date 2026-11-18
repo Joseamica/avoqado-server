@@ -10,16 +10,18 @@ CREATE FUNCTION order_number_next() RETURNS TEXT LANGUAGE SQL VOLATILE AS $$
   SELECT 'ORD-0' || lpad(nextval('order_number_seq')::text, 12, '0')
 $$;
 
--- Arranque, medido aquí mismo (r3 #8: no hace falta medir producción a mano): por encima del mayor `ORD-0<12 cifras>` que ya
--- exista, también con sufijo (`ORD-0…-S2`). Sin margen (menos de mil millones de folios libres) la migración FALLA y no se
--- aplica nada: nunca da la vuelta ni arranca a punto de agotarse.
+-- Arranque, medido aquí mismo (r3 #8: no hace falta medir producción a mano): por encima del mayor folio que D30 puede emitir y
+-- ya exista. Sólo sus dos formas: el completo `ORD-0<12 cifras>` y el de dividir por asiento `ORD-0<12 cifras>-S<n>`. Cualquier
+-- otra referencia (p. ej. `ORD-0999999999999A` de un POS externo) no choca con lo que emite la secuencia y no cuenta (Codex r1).
+-- Sin margen (menos de mil millones de folios libres) la migración FALLA y no se aplica nada: nunca da la vuelta ni arranca a
+-- punto de agotarse.
 DO $$
 DECLARE
   mayor BIGINT;
 BEGIN
   SELECT max(substring("orderNumber" FROM 6 FOR 12)::BIGINT) INTO mayor
   FROM "Order"
-  WHERE "orderNumber" ~ '^ORD-0[0-9]{12}([^0-9]|$)';
+  WHERE "orderNumber" ~ '^ORD-0[0-9]{12}$' OR "orderNumber" ~ '^ORD-0[0-9]{12}-S[0-9]+$';
   IF mayor IS NOT NULL AND 999999999999 - mayor < 1000000000 THEN
     RAISE EXCEPTION 'D30: ya existe el folio ORD-0% y quedan menos de mil millones de folios libres: la secuencia no tiene margen. Usa otro prefijo propio antes de migrar.', lpad(mayor::text, 12, '0');
   END IF;
