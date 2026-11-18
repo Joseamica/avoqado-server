@@ -550,7 +550,7 @@ export async function deleteVenueDataTx(tx: TxConReintento, venueId: string): Pr
   await borrar(tx.posCommand.deleteMany({ where: { venueId } }))
   // 🔴 Las terminales, por id (tarjeta na86c206): el borrado las toma en el orden en que Postgres las encuentra, y guardar
   // los ajustes de terminal las toma ordenadas por id. Con dos terminales cada uno podía quedarse con una y esperar la otra.
-  await tx.$queryRaw`SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR UPDATE`
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR UPDATE`)
   await borrar(tx.terminal.deleteMany({ where: { venueId } }))
 
   // 11.7 🔴 Los ajustes del negocio, DESPUÉS de las terminales (tarjeta na86c206, 18-nov-2026). Guardar los ajustes de

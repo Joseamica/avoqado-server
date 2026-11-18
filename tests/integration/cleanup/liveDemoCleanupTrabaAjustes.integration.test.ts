@@ -79,19 +79,22 @@ async function quedoBorrada(demo: Demo): Promise<void> {
 }
 
 /**
- * Espera, con tope, a que el guardado esté detenido en SU candado de terminales: una sesión de esta base esperando un
- * candado con la sentencia del guardado (`… FOR NO KEY UPDATE`). Ninguna otra sesión de la prueba la usa.
+ * Espera, con tope, a que el guardado esté detenido detrás de la limpieza de ESTA prueba: una sesión bloqueada por otra
+ * que, a su vez, está bloqueada por la retención (`pidRetencion`). Esa cadena sólo existe aquí, aunque la base sea
+ * compartida (Codex r3).
  */
-async function esperarAlGuardadoEnSuCandado(venueId: string): Promise<void> {
+async function esperarAlGuardadoDetrasDeLaLimpieza(pidRetencion: number): Promise<void> {
   for (let i = 0; i < 400; i++) {
     const [{ esperando }] = await prisma.$queryRaw<{ esperando: number }[]>`
-      SELECT count(*)::int AS esperando FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'
-        AND query ILIKE '%FROM "Terminal"%FOR NO KEY UPDATE%' AND pid <> pg_backend_pid()`
+      SELECT count(*)::int AS esperando FROM pg_stat_activity a
+      WHERE EXISTS (
+        SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS limpieza(pid)
+        WHERE ${pidRetencion}::int = ANY(pg_blocking_pids(limpieza.pid))
+      )`
     if (esperando >= 1) return
     await new Promise(r => setTimeout(r, 25))
   }
-  throw new Error(`El guardado de ${venueId} no llegó a esperar su candado de terminales en 10 s`)
+  throw new Error('El guardado no llegó a esperar detrás de la limpieza en 10 s')
 }
 
 /** Página y renglón físicos de una fila (`ctid`): el orden en que la encuentra un recorrido de la tabla o del índice. */
@@ -190,7 +193,7 @@ describe('na86c206 · la limpieza de una demo y guardar los ajustes de terminal 
 
     // El guardado de verdad, como lo llama el DASHBOARD, llega a media limpieza.
     const finGuardado = desenlace(updateVenueTpvSettings(demo.venue, { trackPromoterLocation: true }))
-    await esperarAlGuardadoEnSuCandado(demo.venue)
+    await esperarAlGuardadoDetrasDeLaLimpieza(retencion.pid)
 
     retencion.soltar()
     await retencion.transaccion
