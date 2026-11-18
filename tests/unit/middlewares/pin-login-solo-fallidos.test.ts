@@ -326,6 +326,23 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
   })
 })
 
+describe('na526456 · el maestro por negocio (Codex r6 #2)', () => {
+  it('el maestro también cobra sus ACIERTOS por negocio: 200 correctos desde dos IPs ⇒ el 201.º, desde otra IP, es 429', async () => {
+    const b = express()
+    b.set('trust proxy', 1)
+    b.post('/venues/:venueId/auth/master', ...pinMasterRateLimiter, (_req, res) => res.status(200).json({ ok: true }))
+    const maestro = b.listen(0, '127.0.0.1')
+    servidores.push(maestro)
+    await new Promise<void>(listo => maestro.once('listening', () => listo()))
+    const intento = (ip: string) => request(maestro).post('/venues/venue-maestro-negocio/auth/master').set('X-Forwarded-For', ip).send({})
+
+    for (const ip of [ipDePrueba(50), ipDePrueba(51)]) {
+      for (let i = 0; i < 100; i++) expect((await intento(ip)).status).toBe(200)
+    }
+    expect((await intento(ipDePrueba(52))).status).toBe(429)
+  })
+})
+
 describe('na526456 · el montaje REAL de los limitadores (Codex r5 #3)', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')

@@ -18,6 +18,8 @@ import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 interface Registro {
   intentos: number
   vence: number
+  /** La limpieza anterior ya lo vio vencido (se borra hasta la siguiente, si lo sigue viendo así: Codex r6 #1). */
+  vencidoEnLaLimpiezaAnterior?: boolean
 }
 
 export class AlmacenPorVentana implements Store {
@@ -36,7 +38,7 @@ export class AlmacenPorVentana implements Store {
   init(options: Options): void {
     this.ventanaMs = options.windowMs
     if (this.limpieza) clearInterval(this.limpieza)
-    // Sólo quita registros ya vencidos: un registro vigente nunca se borra (borrarlo regalaría intentos).
+    // Sólo quita registros vistos vencidos en dos limpiezas seguidas: uno vigente nunca se borra (borrarlo regalaría intentos).
     this.limpieza = setInterval(() => this.quitarVencidos(Date.now()), this.ventanaMs)
     this.limpieza.unref?.()
   }
@@ -70,11 +72,16 @@ export class AlmacenPorVentana implements Store {
     if (r && r.intentos > 0) r.intentos--
   }
 
-  /** Resta uno sólo si el registro de esa ficha sigue siendo el de la llave (la misma ventana). Síncrono y sin lanzar. */
+  /**
+   * Resta uno sólo si el registro de esa ficha sigue siendo el de la llave (la misma ventana). Cada ficha devuelve UNA vez: después se
+   * olvida (Codex r6 #3). Síncrono y sin lanzar.
+   */
   devolverEnVentana(llave: string, ficha: Date | undefined): void {
     const suyo = ficha ? this.fichas.get(ficha) : undefined
+    if (!suyo) return
+    this.fichas.delete(ficha!)
     const r = this.registros.get(llave)
-    if (suyo && r === suyo && r.intentos > 0) r.intentos--
+    if (r === suyo && r.intentos > 0) r.intentos--
   }
 
   resetKey(llave: string): void {
@@ -90,7 +97,22 @@ export class AlmacenPorVentana implements Store {
     this.registros.clear()
   }
 
+  /**
+   * Borra un registro sólo si lo ve vencido en DOS limpiezas seguidas (una ventana entera de por medio, medida por el temporizador y no
+   * por el reloj de pared). Un brinco del reloj hacia adelante en UNA limpieza ya no borra los fallos de una ventana vigente: si el reloj
+   * vuelve, la siguiente limpieza la ve vigente y la conserva (Codex r6 #1). Es lo que hace la librería: su `MemoryStore` olvida por
+   * rotación de mapas, nunca por una sola lectura del reloj. Un registro vencido de verdad dura, a lo más, una ventana de más en memoria.
+   */
   private quitarVencidos(ahora: number): void {
-    for (const [llave, r] of this.registros) if (r.vence <= ahora) this.registros.delete(llave)
+    for (const [llave, r] of this.registros) {
+      if (r.vence > ahora) r.vencidoEnLaLimpiezaAnterior = false
+      else if (r.vencidoEnLaLimpiezaAnterior) this.registros.delete(llave)
+      else r.vencidoEnLaLimpiezaAnterior = true
+    }
+  }
+
+  /** Sólo para pruebas: corre una limpieza como la del temporizador. */
+  limpiarAhora(): void {
+    this.quitarVencidos(Date.now())
   }
 }

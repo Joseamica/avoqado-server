@@ -105,20 +105,52 @@ describe('AlmacenPorVentana', () => {
     expect(a.get('k')?.totalHits).toBe(1)
   })
 
-  it('nunca baja de cero, no resta con una ficha ajena, sin ficha ni en una llave que no existe, y no lanza', () => {
+  it('no resta con una ficha ajena, sin ficha ni en una llave que no existe, y no lanza', () => {
     const a = almacen()
     expect(() => a.devolverEnVentana('nadie', new Date(inicio + VENTANA))).not.toThrow()
     expect(() => a.devolverEnVentana('nadie', undefined)).not.toThrow()
-    const r = a.increment('k')
+    a.increment('k')
     a.increment('k')
     a.devolverEnVentana('k', new Date(inicio + VENTANA)) // misma hora, pero no es su ficha
     a.devolverEnVentana('k', undefined)
     expect(a.get('k')?.totalHits).toBe(2)
+  })
+
+  it('Codex r6 #3: cada ficha devuelve UNA sola vez, aunque la llamen de nuevo', () => {
+    const a = almacen()
+    const r = a.increment('k')
+    a.increment('k')
 
     a.devolverEnVentana('k', r.resetTime)
     a.devolverEnVentana('k', r.resetTime)
     a.devolverEnVentana('k', r.resetTime)
-    expect(a.get('k')?.totalHits).toBe(0)
+
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('🔴 Codex r6 #1: un brinco del reloj durante UNA limpieza no borra los fallos de una ventana vigente', () => {
+    const a = almacen()
+    for (let i = 0; i < 10; i++) a.increment('k') // 10 fallos
+    ahora = inicio + VENTANA + 5 // el reloj se adelanta justo cuando pasa la limpieza…
+    a.limpiarAhora()
+    ahora = inicio + 10 // …y vuelve antes del vencimiento de verdad
+
+    expect(a.get('k')?.totalHits).toBe(10) // antes: el registro se borraba y el siguiente intento contaba 1
+    expect(a.increment('k').totalHits).toBe(11)
+    a.limpiarAhora() // la siguiente limpieza la ve vigente y la conserva
+    expect(a.get('k')?.totalHits).toBe(11)
+  })
+
+  it('la limpieza sí quita lo vencido de verdad: a la segunda vez que lo ve vencido', () => {
+    const a = almacen()
+    a.increment('k')
+    const tamano = () => (a as unknown as { registros: Map<string, unknown> }).registros.size
+    ahora = inicio + VENTANA + 1
+    a.limpiarAhora()
+    expect(tamano()).toBe(1) // primera vez: sólo lo marca
+    ahora = inicio + 2 * VENTANA + 1
+    a.limpiarAhora()
+    expect(tamano()).toBe(0)
   })
 
   it('una ficha de una llave no resta en otra llave', () => {
