@@ -12,7 +12,7 @@
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
-import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
+import { clearTableDeLaCuenta, moveOrderToTable } from '@/services/tpv/table.tpv.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
 jest.setTimeout(60_000)
@@ -147,6 +147,17 @@ describe('naf9f31c · «Liberar mesa» con la mesa vieja de una cuenta que otro 
     expect(ack).toMatchObject({ status: 'ACKED', result: { tableId: m8, mesaSinCambios: true } })
     expect(await laMesa(m8)).toEqual({ status: 'RESERVED', currentOrderId: null })
     expect(await laMesa(m9)).toEqual({ status: 'OCCUPIED', currentOrderId: cuenta })
+    expect(await liberacionesDe(libre.venueId, m8)).toBe(0)
+  })
+
+  it('Codex r1 #1 · bajo el candado: si la cuenta ya dejó la mesa, liberar con su cuenta no toca la mesa', async () => {
+    // El caso de carrera (la cuenta se mueve entre la revisión y la liberación) llega a la liberación con la cuenta ya fuera:
+    // la comprobación que cuenta es la que se hace con la mesa y la cuenta bajo el candado.
+    const { m8, cuenta } = await cuentaMovida(libre)
+
+    expect(await clearTableDeLaCuenta(libre.venueId, m8, cuenta)).toBe(false)
+
+    expect(await laMesa(m8)).toEqual({ status: 'RESERVED', currentOrderId: null })
     expect(await liberacionesDe(libre.venueId, m8)).toBe(0)
   })
 

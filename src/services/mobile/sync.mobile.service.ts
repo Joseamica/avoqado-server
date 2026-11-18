@@ -2032,6 +2032,15 @@ async function applyClearTable(
   if (!tableId) return invalid(intent, 'CLEAR_TABLE requiere tableId')
 
   const suCuenta = await cuentaQueQuisoSoltar(venueId, intent.payload, localRefMap)
+  // naf9f31c: ¿la cuenta que nombra es de la sucursal? Si sí, sólo se libera la mesa si sigue en ella (se vuelve a comprobar
+  // bajo el candado al liberar, Codex r1 #1). Si no es de nadie, como hoy.
+  const cuentaConocida = suCuenta ? await cuentaDeLaSucursal(venueId, suCuenta) : null
+  if (cuentaConocida && cuentaConocida.tableId !== tableId) {
+    logger.info(
+      `🪑 [POS SYNC] CLEAR_TABLE ${intent.id}: la cuenta ${suCuenta} ya no está en la mesa ${tableId} (otro aparato la movió) — sin cambios`,
+    )
+    return { id: intent.id, status: 'ACKED', result: { tableId, mesaSinCambios: true } }
+  }
   if (suCuenta && (await nadaSuyoQueLiberar(venueId, tableId, suCuenta))) {
     logger.info(
       `🪑 [POS SYNC] CLEAR_TABLE ${intent.id}: la cuenta ${suCuenta} ya no debe y la mesa ${tableId} sigue con otra — sin cambios`,
@@ -2067,7 +2076,16 @@ async function applyClearTable(
     }
   }
 
-  await tableService.clearTable(venueId, tableId)
+  if (cuentaConocida) {
+    if (!(await tableService.clearTableDeLaCuenta(venueId, tableId, cuentaConocida.id))) {
+      logger.info(
+        `🪑 [POS SYNC] CLEAR_TABLE ${intent.id}: la cuenta ${cuentaConocida.id} dejó la mesa ${tableId} mientras se liberaba — sin cambios`,
+      )
+      return { id: intent.id, status: 'ACKED', result: { tableId, mesaSinCambios: true } }
+    }
+  } else {
+    await tableService.clearTable(venueId, tableId)
+  }
   return { id: intent.id, status: 'ACKED', result: { tableId } }
 }
 
@@ -2085,6 +2103,16 @@ async function cuentaQueQuisoSoltar(
   if (!id || typeof payload.localOrderId === 'string') return id
   if (await prisma.order.findFirst({ where: { id, venueId }, select: { id: true } })) return id
   return resolveOrderId(venueId, { localOrderId: id }, localRefMap)
+}
+
+/**
+ * naf9f31c (encargo 64000e): la cuenta que nombra el `CLEAR_TABLE` existe en la sucursal pero hoy está en OTRA mesa (o en
+ * ninguna): otro aparato la movió mientras el plano de quien la cobró iba atrasado. No hay nada suyo que liberar en `tableId`:
+ * liberarla le borraba el estado a la mesa vieja (una reservación) y dejaba un `TABLE_CLEARED` falso. La mesa nueva la suelta
+ * el cobro (`releaseTableIfSettled`). Sólo decide el ACK sin cambios, que no escribe nada.
+ */
+async function cuentaDeLaSucursal(venueId: string, orderId: string): Promise<{ id: string; tableId: string | null } | null> {
+  return prisma.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, tableId: true } })
 }
 
 /**

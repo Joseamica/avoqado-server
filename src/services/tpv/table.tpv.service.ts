@@ -762,6 +762,24 @@ export async function clearTable(venueId: string, tableId: string, performedBy?:
 }
 
 /**
+ * naf9f31c (encargo 64000e): el «Liberar mesa» sin red que nombra una cuenta libera la mesa SÓLO si esa cuenta sigue en ella,
+ * comprobado bajo el MISMO candado que la liberación (Codex r1 #1): sin eso, otro aparato podía mover la cuenta y reservar la
+ * mesa entre la revisión y la escritura, y la liberación le borraba la reservación. La cuenta va como candidata opcional: si
+ * desaparece mientras se espera el candado, tampoco se libera nada.
+ * @returns `false` = la cuenta ya no está en la mesa; no se escribió nada.
+ */
+export async function clearTableDeLaCuenta(venueId: string, tableId: string, orderId: string): Promise<boolean> {
+  const result = await prisma.$transaction(async tx => {
+    const scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], optionalOrderId: orderId, tableIds: [tableId] })
+    if (scope.orders.find(order => order.id === orderId)?.tableId !== tableId) return null
+    return clearTableInTransaction(tx, venueId, tableId)
+  }, ORDER_LOCK_WAIT_BUDGET)
+  if (!result) return false
+  await publishClearedTable(venueId, result)
+  return true
+}
+
+/**
  * TABLE_SERVICE — libera la mesa cuando su ÚLTIMA cuenta abierta queda saldada.
  *
  * 🔴 Por qué existe (mesa M9, 2026-08-03): liberar la mesa después de cobrar era
