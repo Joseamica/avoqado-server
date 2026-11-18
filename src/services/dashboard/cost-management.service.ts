@@ -1,7 +1,12 @@
 import prisma from '../../utils/prismaClient'
-import { TransactionCardType, ProfitStatus } from '@prisma/client'
+import { Prisma, TransactionCardType, ProfitStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { subDays } from 'date-fns'
+import { fromZonedTime } from 'date-fns-tz'
+import { BadRequestError, ConflictError } from '../../errors/AppError'
+import { logAction } from './activity-log.service'
+import { getEffectivePricingForSlot } from '../organization-payment-config.service'
+import { findActiveProviderCostStructure } from '../payments/transactionCost.service'
 
 // ===== INTERFACES =====
 
@@ -600,4 +605,208 @@ async function generateMonthlySummaries(startDate: string, endDate: string, venu
     // This would aggregate transaction costs by venue and month
     logger.info('Generating monthly summary', { year, month, venueId })
   }
+}
+
+// ===== GUARDAR TARIFA O COSTO DESDE LAS TARJETAS DEL PANEL (hz:nube0000:naeba3d5) =====
+
+export const TEXTO_VIGENCIA_FUTURA =
+  'Esta pantalla aplica el cambio desde hoy: deja «Vigente desde» vacío o pon una fecha que ya pasó. Para programar una fecha futura usa la pantalla de tarifas.'
+export const TEXTO_VERSION_QUE_YA_RIGIO =
+  'Ya hay una versión que empezó ese día y ya rigió; no se cambió nada. Para cambiarla desde hoy deja «Vigente desde» vacío.'
+
+/** Lo que se usa de `tx.venuePricingStructure` / `tx.providerCostStructure` (los dos tienen la misma forma de vigencia). */
+type DelegadoDeVersiones = {
+  findFirst(args: any): Promise<any>
+  updateMany(args: any): Promise<unknown>
+  update(args: any): Promise<any>
+  create(args: any): Promise<any>
+}
+
+/** Hoy en México como lo manda el panel ('YYYY-MM-DD'), leído como lo lee esta ruta (medianoche UTC). */
+function hoyDelPanel(ahora: Date): Date {
+  return new Date(ahora.toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }))
+}
+
+/** El instante en que empezó hoy en México. */
+function inicioDeHoyEnMexico(ahora: Date): Date {
+  return fromZonedTime(`${ahora.toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })}T00:00:00.000`, 'America/Mexico_City')
+}
+
+/**
+ * Una versión de la tarifa del negocio (o del costo de la cuenta) guardada desde las tarjetas del panel del superadmin.
+ *
+ * Antes se apagaba la vigente y DESPUÉS se creaba la nueva, sin transacción: si la nueva fallaba (la misma fecha que enseña
+ * la tarjeta ⇒ llave única; el costo, siempre, por un campo inexistente en su `include`), la posición se quedaba SIN tarifa;
+ * y una fecha futura la dejaba sin tarifa hasta ese día. Ahora, en UNA transacción y en fila (candado por alcance):
+ * - fecha futura ⇒ 400 y no se apaga nada (para programar está la pantalla de tarifas; Codex r1 #5 y #8: sin dos vigentes);
+ * - la misma fecha que una versión de HOY ⇒ se corrige esa versión; de un día que ya pasó ⇒ 409: no se reescribe lo que ya
+ *   rigió (Codex r1 #7);
+ * - si no ⇒ se apagan las demás vigentes (como siempre) y se crea la nueva.
+ * 'YYYY-MM-DD' se sigue leyendo como medianoche UTC (como siempre): «hoy en México» siempre rige al instante. «Futura» se
+ * mide por CALENDARIO de México (Codex r2 #2: a las 20:00 del 17 la fecha 18 ya empezó en UTC, pero es mañana).
+ * El IVA (`includesTax`/`taxRate`) que no venga se hereda de la tarifa (o costo) que el COBRO usa hoy, con el mismo lector
+ * (Codex r1 #9 y r2 #4: también la heredada de la organización; nunca una vencida).
+ * Con fecha de fin ⇒ 400 (Codex r2 #3, r4 #4, r5 #3): la nueva apagaría la vigente y dejaría la posición sin tarifa al vencer.
+ * ponytail: el candado pone en fila los guardados de ESTAS tarjetas; las pantallas de tarifas y de costos tienen sus propios
+ * escritores (ver la deuda del 17-nov).
+ */
+async function guardarVersionDelPanel(
+  tx: Prisma.TransactionClient,
+  delegado: DelegadoDeVersiones,
+  v: {
+    alcance: Record<string, string>
+    /** Candado de la fila padre (negocio o cuenta) en el MISMO orden que la limpieza del demo: padre y luego versiones. */
+    padre: Prisma.Sql
+    candado: string
+    datos: Record<string, any>
+    include: Record<string, unknown>
+    /** La versión que el COBRO usa a esa hora (para heredar su IVA). */
+    leerVigente: (ahora: Date) => Promise<{ includesTax: boolean | null; taxRate: unknown } | null>
+  },
+  ahoraFijo?: Date,
+) {
+  // Codex r3 #4: primero el padre (la limpieza del demo toma negocio/cuenta antes que sus versiones; al revés se trababan).
+  await tx.$queryRaw(v.padre)
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${v.candado}, 0))::text`
+  // Codex r3 #3: la hora se toma YA en fila (una espera larga no deja validar con un reloj viejo).
+  const ahora = ahoraFijo ?? new Date()
+
+  const { effectiveFrom, effectiveTo, includesTax, taxRate, ...resto } = v.datos
+  const desde = new Date(effectiveFrom)
+  if (Number.isNaN(desde.getTime())) throw new BadRequestError('La fecha de inicio de vigencia no es válida')
+  const soloFecha = typeof effectiveFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)
+  if (desde > (soloFecha ? hoyDelPanel(ahora) : ahora)) throw new BadRequestError(TEXTO_VIGENCIA_FUTURA, 'VIGENCIA_FUTURA')
+  // Codex r2 #3, r4 #4 y r5 #3: con fecha de fin, la versión nueva apaga la vigente y deja la posición SIN tarifa cuando vence (o
+  // ya nace vencida). Las tarjetas nunca la mandan; para una vigencia con fin está la pantalla de tarifas.
+  if (effectiveTo) {
+    throw new BadRequestError('Esta pantalla no pone fecha de fin: guarda sin ella o usa la pantalla de tarifas.', 'VIGENCIA_CON_FIN')
+  }
+
+  // Misma fecha EXACTA (Codex r5 #1 y #2: buscar por día UTC reactivaba versiones apagadas o reescribía la que rigió ayer en
+  // México). Una versión guardada con hora (alta de AngelPay) no choca: se crea otra desde esa medianoche (ver la deuda).
+  // Se corrige en su lugar sólo la versión que empieza hoy Y se guardó hoy en México: la de medianoche UTC guardada ayer en la
+  // noche ya rigió desde las 18:00 de ayer (Codex r6).
+  const misma = await delegado.findFirst({ where: { ...v.alcance, effectiveFrom: desde }, select: { id: true, createdAt: true } })
+  const esLaDeHoy = misma && desde.getTime() === hoyDelPanel(ahora).getTime() && misma.createdAt >= inicioDeHoyEnMexico(ahora)
+  if (misma && !esLaDeHoy) throw new ConflictError(TEXTO_VERSION_QUE_YA_RIGIO, 'VERSION_QUE_YA_RIGIO')
+
+  const vigente = await v.leerVigente(ahora)
+  await delegado.updateMany({
+    where: { ...v.alcance, active: true, ...(misma ? { id: { not: misma.id } } : {}) },
+    data: { active: false, effectiveTo: ahora },
+  })
+  const fila = {
+    // Codex r3 #2: lo que la tarjeta no manda (un cargo que borró) queda vacío también al corregir en su lugar, como al crear.
+    ...Object.fromEntries(Object.entries(resto).map(([campo, valor]) => [campo, valor === undefined ? null : valor])),
+    includesTax: includesTax !== undefined ? includesTax : (vigente?.includesTax ?? null),
+    ...(taxRate !== undefined ? { taxRate } : vigente?.taxRate != null ? { taxRate: vigente.taxRate } : {}),
+    effectiveTo: null,
+    active: true,
+  }
+  return misma
+    ? delegado.update({ where: { id: misma.id }, data: fila, include: v.include })
+    : delegado.create({ data: { ...v.alcance, ...fila, effectiveFrom: desde }, include: v.include })
+}
+
+/** `POST /dashboard/superadmin/pricing-structures/venue` (tarjeta de tarifa del panel). */
+export async function guardarTarifaDelNegocio(d: Record<string, any>, staffId?: string | null, ahora?: Date) {
+  const fila = await prisma.$transaction(tx =>
+    guardarVersionDelPanel(
+      tx,
+      tx.venuePricingStructure,
+      {
+        alcance: { venueId: d.venueId, accountType: d.accountType },
+        padre: Prisma.sql`SELECT 1 FROM "Venue" WHERE id = ${d.venueId} FOR KEY SHARE`,
+        candado: `version-de-tarifa:${d.venueId}:${d.accountType}`,
+        datos: {
+          debitRate: d.debitRate,
+          creditRate: d.creditRate,
+          amexRate: d.amexRate,
+          internationalRate: d.internationalRate,
+          includesTax: d.includesTax,
+          taxRate: d.taxRate,
+          fixedFeePerTransaction: d.fixedFeePerTransaction,
+          monthlyServiceFee: d.monthlyServiceFee,
+          minimumMonthlyVolume: d.minimumMonthlyVolume,
+          volumePenalty: d.volumePenalty,
+          effectiveFrom: d.effectiveFrom,
+          effectiveTo: d.effectiveTo,
+          contractReference: d.contractReference,
+          notes: d.notes,
+        },
+        include: { venue: { select: { id: true, name: true, slug: true } } },
+        leerVigente: async en => (await getEffectivePricingForSlot(d.venueId, d.accountType, en, tx))?.pricing[0] ?? null,
+      },
+      ahora,
+    ),
+  )
+  await logAction({
+    staffId: staffId ?? null,
+    venueId: d.venueId,
+    action: 'VENUE_PRICING_SAVED',
+    entity: 'VenuePricingStructure',
+    entityId: fila.id,
+    data: {
+      accountType: d.accountType,
+      effectiveFrom: fila.effectiveFrom,
+      debitRate: d.debitRate,
+      creditRate: d.creditRate,
+      amexRate: d.amexRate,
+      internationalRate: d.internationalRate,
+      includesTax: fila.includesTax,
+    },
+  })
+  return fila
+}
+
+/** `POST /dashboard/superadmin/cost-structures/provider` (tarjeta de costo del panel). */
+export async function guardarCostoDeLaCuenta(d: Record<string, any>, staffId?: string | null, ahora?: Date) {
+  const fila = await prisma.$transaction(tx =>
+    guardarVersionDelPanel(
+      tx,
+      tx.providerCostStructure,
+      {
+        alcance: { merchantAccountId: d.merchantAccountId },
+        padre: Prisma.sql`SELECT 1 FROM "MerchantAccount" WHERE id = ${d.merchantAccountId} FOR KEY SHARE`,
+        candado: `version-de-costo:${d.merchantAccountId}`,
+        datos: {
+          providerId: d.providerId,
+          debitRate: d.debitRate,
+          creditRate: d.creditRate,
+          amexRate: d.amexRate,
+          internationalRate: d.internationalRate,
+          includesTax: d.includesTax,
+          taxRate: d.taxRate,
+          fixedCostPerTransaction: d.fixedCostPerTransaction,
+          monthlyFee: d.monthlyFee,
+          minimumVolume: d.minimumVolume,
+          volumeDiscount: d.volumeDiscount,
+          effectiveFrom: d.effectiveFrom,
+          effectiveTo: d.effectiveTo,
+          proposalReference: d.proposalReference,
+          notes: d.notes,
+        },
+        // Sin `merchantAccount.ecommerceMerchantId`: la cuenta no tiene ese campo y Prisma rechazaba el guardado SIEMPRE.
+        include: { provider: { select: { id: true, name: true, code: true } }, merchantAccount: { select: { id: true, alias: true } } },
+        leerVigente: en => findActiveProviderCostStructure(d.merchantAccountId, en, tx),
+      },
+      ahora,
+    ),
+  )
+  await logAction({
+    staffId: staffId ?? null,
+    action: 'PROVIDER_COST_SAVED',
+    entity: 'ProviderCostStructure',
+    entityId: fila.id,
+    data: {
+      merchantAccountId: d.merchantAccountId,
+      effectiveFrom: fila.effectiveFrom,
+      debitRate: d.debitRate,
+      creditRate: d.creditRate,
+      amexRate: d.amexRate,
+      internationalRate: d.internationalRate,
+      includesTax: fila.includesTax,
+    },
+  })
+  return fila
 }

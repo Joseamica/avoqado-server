@@ -30,7 +30,7 @@ import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
 import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
+import { Venue, AccountType, EntityType, StaffRole, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
@@ -764,12 +764,44 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 
 /**
  * Enhanced venue creation with payment processing and pricing configuration
+ *
+ * hz:nube0000:na5adb84 (Codex r1 #1 y #2): `quien` es lo que revisó `checkPermission('venues:manage')`: el negocio donde se
+ * revisó el permiso (`resolveRequestVenueId`) y el rol que tiene ahí (`req.resolvedRole`). El negocio nuevo nace en la
+ * organización de ESE negocio (antes: la del token, que con `x-venue-id` puede ser otra) y quien lo crea queda con ESE mismo
+ * rol. No se sube a OWNER: una fila OWNER en una sucursal ya cuenta como «dueño de la organización» para las cuentas viejas
+ * (`esDuenoDeLaOrganizacion`), y un ADMIN se volvería dueño de toda la cadena. El dueño de la organización resuelve OWNER,
+ * como en el registro. Un superadmin no queda como personal (como al duplicar una tienda): entra a cualquier negocio.
  */
-export async function createEnhancedVenue(orgId: string, userId: string, venueData: EnhancedCreateVenueBody) {
-  logger.info('Creating enhanced venue', { orgId, userId, venueName: venueData.name })
+export async function createEnhancedVenue(
+  quien: { userId: string; venueDelPermisoId: string; rol: StaffRole },
+  venueData: EnhancedCreateVenueBody,
+) {
+  const { userId } = quien
+  const esSuperadmin = quien.rol === StaffRole.SUPERADMIN
+  logger.info('Creating enhanced venue', { venueDelPermisoId: quien.venueDelPermisoId, userId, venueName: venueData.name })
 
   // Start a transaction to ensure data consistency
   return await prisma.$transaction(async tx => {
+    // `FOR SHARE`: un traslado de ese negocio a otra organización (que lo toma `FOR UPDATE`) espera a que terminemos.
+    const [delPermiso] = await tx.$queryRaw<Array<{ organizationId: string }>>`
+      SELECT "organizationId" FROM "Venue" WHERE id = ${quien.venueDelPermisoId} FOR SHARE`
+    if (!delPermiso) throw new NotFoundError('No encontramos el negocio desde donde creas el nuevo. Recarga la página.')
+    const orgId = delPermiso.organizationId
+    // Codex r2 #1: el guardia resolvió OWNER antes de este candado. Si lo resolvió por ser dueño de la organización y el negocio
+    // se trasladó entre tanto, aquí ya no lo es: sin esto quedaría OWNER en la organización de destino.
+    if (quien.rol === StaffRole.OWNER) {
+      const sigueSiendoDueno =
+        (await tx.staffVenue.findFirst({
+          where: { staffId: userId, venueId: quien.venueDelPermisoId, role: StaffRole.OWNER, active: true },
+          select: { id: true },
+        })) ??
+        (await tx.staffOrganization.findFirst({
+          where: { staffId: userId, organizationId: orgId, role: 'OWNER', isActive: true },
+          select: { id: true },
+        }))
+      if (!sigueSiendoDueno) throw new ConflictError('Tu acceso a este negocio cambió. Recarga la página e inténtalo otra vez.')
+    }
+
     // 1. Generate slug if not provided
     let slugToUse = generateSlug(venueData.name)
 
@@ -825,7 +857,7 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
 
     // 4. Setup payment processing if enabled
     if (venueData.enablePaymentProcessing) {
-      await setupPaymentProcessing(tx, newVenue.id, venueData)
+      await setupPaymentProcessing(tx, newVenue.id, venueData, { organizationId: orgId, esSuperadmin })
     }
 
     // 5. Setup pricing structure if enabled
@@ -833,15 +865,11 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
       await setupPricingStructure(tx, newVenue.id, venueData)
     }
 
-    // 6. Create default staff member (venue owner)
-    // await tx.staffVenue.create({
-    //   data: {
-    //     userId: userId,
-    //     venueId: newVenue.id,
-    //     role: 'OWNER', // Highest role
-    //     active: true,
-    //   },
-    // })
+    // 6. Quien lo crea queda como su personal, con el rol que tiene donde se revisó su permiso (ver arriba). Sin esta fila el
+    // negocio nacía sin nadie y su creador recibía 403 al abrirlo (activar cobros, KYC).
+    if (!esSuperadmin) {
+      await tx.staffVenue.create({ data: { staffId: userId, venueId: newVenue.id, role: quien.rol, active: true } })
+    }
 
     logger.info('Enhanced venue creation completed', {
       venueId: newVenue.id,
@@ -855,7 +883,7 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
       action: 'VENUE_CREATED',
       entity: 'Venue',
       entityId: newVenue.id,
-      data: { name: newVenue.name, slug: newVenue.slug },
+      data: { name: newVenue.name, slug: newVenue.slug, rolDelCreador: esSuperadmin ? null : quien.rol },
     })
 
     return {
@@ -870,7 +898,12 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
 /**
  * Setup payment processing configuration for venue
  */
-async function setupPaymentProcessing(tx: any, venueId: string, venueData: EnhancedCreateVenueBody) {
+async function setupPaymentProcessing(
+  tx: any,
+  venueId: string,
+  venueData: EnhancedCreateVenueBody,
+  quien: { organizationId: string; esSuperadmin: boolean },
+) {
   logger.info('Setting up payment processing', { venueId })
 
   // Default routing rules if not provided
@@ -887,7 +920,8 @@ async function setupPaymentProcessing(tx: any, venueId: string, venueData: Enhan
   const routingRules = venueData.routingRules || defaultRoutingRules
 
   // D25: una cuenta de cobro que no existe es un 400 en español, no la llave foránea tronando como 500.
-  await asegurarCuentasDeCobroDelAlta(tx, venueData)
+  // na5adb84 (1b): y una cuenta de otra organización es 403 (salvo superadmin).
+  await asegurarCuentasDeCobroDelAlta(tx, venueData, quien)
 
   // Create venue payment configuration
   const paymentConfig = await tx.venuePaymentConfig.create({
@@ -1008,7 +1042,7 @@ export async function convertDemoVenue(
     paymentMethodId?: string
   },
   options?: { skipOrgCheck?: boolean },
-): Promise<Venue> {
+): Promise<Venue & { canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] }> {
   logger.info('Converting demo venue to real', { orgId, venueId })
 
   // Verify that the venue belongs to the organization (unless SUPERADMIN)
@@ -1036,9 +1070,16 @@ export async function convertDemoVenue(
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
   // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
+  // na4b2c82: los canales en línea de ESTE negocio que ESTA limpieza dejó sin tarifa o costo (los de otros negocios sólo van a
+  // la bitácora de su negocio: Codex r1 #10). Límite aceptado (Codex r2 #8, r3 #5 y #6): si la conversión falla DESPUÉS de la
+  // limpieza (Stripe), el reintento ya no los trae; la bitácora (escrita en la transacción de la limpieza) sí.
+  let canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] = []
   try {
     const cleanupResult = await cleanDemoData(venueId, staffId)
     logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
+    canalesEnLineaSinTarifa = cleanupResult.canalesEnLineaSinTarifa
+      .filter(c => c.venueId === venueId)
+      .map(({ id, channelName, perdio }) => ({ id, channelName, perdio }))
   } catch (cleanupError) {
     logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)
     // Don't block conversion if cleanup fails - venue can still operate
@@ -1201,8 +1242,12 @@ export async function convertDemoVenue(
     }
   }
 
-  return updatedVenue
+  // na4b2c82: campo nuevo y opcional para los clientes; el resto de la respuesta no cambia.
+  return { ...updatedVenue, canalesEnLineaSinTarifa }
 }
+
+/** na4b2c82: un canal en línea de este negocio que la limpieza del demo dejó sin su tarifa o su costo. */
+type CanalSinTarifaEnLaRespuesta = { id: string; channelName: string; perdio: Array<'tarifa' | 'costo'> }
 
 // ==========================================
 // VENUE STATUS MANAGEMENT (Mexican Regulatory Compliance)

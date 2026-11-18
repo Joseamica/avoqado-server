@@ -8,6 +8,7 @@
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
+import { Prisma } from '@prisma/client'
 
 const VENUE_ID = 'venue-1'
 
@@ -54,6 +55,8 @@ describe('cleanDemoData (trial→real conversion)', () => {
     }
     // El candado de posiciones (fe2b91) lee la organización del negocio antes de formarse.
     ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
+    // Los candados en SQL (posiciones, negocio, y los de tarifas/costos y canales de na4b2c82): sin filas por default.
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
   })
 
   // ==========================================
@@ -299,6 +302,109 @@ describe('cleanDemoData (trial→real conversion)', () => {
           }),
         }),
       )
+    })
+
+    // hz:nube0000:na4b2c82: al borrar la tarifa o el costo demo, la llave pone en null el enlace de un canal en línea real
+    // (FK SET NULL). Se sigue borrando (Codex r2 #1 de fe2b91), pero ANTES se bloquean las estructuras que se van y los canales
+    // ligados (Codex r1 #11), y cada canal queda en la bitácora DENTRO de la transacción (Codex r1 #12) y en el resultado.
+    const conSql = (responder: (sql: string, valores: unknown[]) => unknown[]) =>
+      (prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const q = Prisma.sql(strings, ...(values as any[]))
+        return responder(q.text, q.values) // `text`: con $1, $2 como los ve Postgres
+      })
+    const filasDeBitacora = () =>
+      (prismaMock.activityLog.create as jest.Mock).mock.calls
+        .map(([a]: any) => a.data)
+        .filter((d: any) => d.action === 'DEMO_CLEANUP_ECOMMERCE_CHANNEL_UNLINKED')
+
+    it('🔴 canal en línea ligado a la tarifa de una posición demo: se bloquea y se detecta ANTES de borrar, sale en el resultado y en la bitácora', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
+      sonDemo(['demo-1'])
+      const orden: string[] = []
+      const consultas: Array<{ sql: string; valores: unknown[] }> = []
+      conSql((sql, valores) => {
+        consultas.push({ sql, valores })
+        if (sql.includes('FROM "VenuePricingStructure"')) return orden.push('candado-tarifas'), [{ id: 'tarifa-sec' }]
+        if (sql.includes('FROM "EcommerceMerchant"') && sql.includes('"pricingStructureId"')) {
+          orden.push('canales')
+          return [{ id: 'canal-1', venueId: VENUE_ID, channelName: 'Web Principal', estructura: 'tarifa-sec' }]
+        }
+        return []
+      })
+      ;(prismaMock.venuePricingStructure.deleteMany as jest.Mock).mockImplementation(async () => (orden.push('borrar'), { count: 1 }))
+
+      const r = await cleanDemoData(VENUE_ID, 'staff-1')
+
+      expect(orden).toEqual(['candado-tarifas', 'canales', 'borrar'])
+      const candado = consultas.find(c => c.sql.includes('FROM "VenuePricingStructure"'))!
+      expect(candado.sql).toMatch(/"venueId" = \$1 AND "accountType"::text = ANY\(\$2\) FOR UPDATE/)
+      expect(candado.valores).toEqual([VENUE_ID, ['SECONDARY']])
+      expect(consultas.find(c => c.sql.includes('FROM "EcommerceMerchant"'))!.sql).toMatch(/FOR UPDATE/)
+      expect(r.canalesEnLineaSinTarifa).toEqual([
+        { id: 'canal-1', venueId: VENUE_ID, channelName: 'Web Principal', perdio: ['tarifa'], pricingStructureId: 'tarifa-sec' },
+      ])
+      expect(filasDeBitacora()).toEqual([
+        expect.objectContaining({
+          staffId: null, // Codex r2 #9 y #10: sin actor (la llave no tumba la limpieza; el otro negocio no ve quién)
+          venueId: VENUE_ID,
+          entity: 'EcommerceMerchant',
+          entityId: 'canal-1',
+          data: expect.objectContaining({ channelName: 'Web Principal', perdio: ['tarifa'], pricingStructureId: 'tarifa-sec' }),
+        }),
+      ])
+    })
+
+    it('🔴 principal demo: todas las tarifas del negocio y el costo de la cuenta demo; un canal de OTRO negocio va a SU bitácora', async () => {
+      conConfig({ primaryAccountId: 'demo-1' })
+      sonDemo(['demo-1'])
+      const consultasHechas: string[] = []
+      conSql(sql => {
+        consultasHechas.push(sql)
+        if (sql.includes('FROM "VenuePricingStructure"')) return [{ id: 't1' }]
+        if (sql.includes('FROM "ProviderCostStructure"')) return [{ id: 'c1' }]
+        if (sql.includes('FROM "EcommerceMerchant"') && sql.includes('"pricingStructureId"'))
+          return [{ id: 'canal-1', venueId: VENUE_ID, channelName: 'Web Principal', estructura: 't1' }]
+        if (sql.includes('FROM "EcommerceMerchant"') && sql.includes('"costStructureId"'))
+          return [
+            { id: 'canal-1', venueId: VENUE_ID, channelName: 'Web Principal', estructura: 'c1' },
+            { id: 'canal-2', venueId: 'otro-negocio', channelName: 'App', estructura: 'c1' },
+          ]
+        return []
+      })
+
+      const r = await cleanDemoData(VENUE_ID, 'staff-1')
+
+      // Codex r2 #7: la cuenta demo se toma `FOR UPDATE` antes de listar sus costos (un costo nuevo no se cuela).
+      expect(consultasHechas.some(q => /FROM "MerchantAccount" WHERE id = ANY\(\$1\) FOR UPDATE/.test(q))).toBe(true)
+      expect(r.canalesEnLineaSinTarifa).toEqual([
+        {
+          id: 'canal-1',
+          venueId: VENUE_ID,
+          channelName: 'Web Principal',
+          perdio: ['tarifa', 'costo'],
+          pricingStructureId: 't1',
+          costStructureId: 'c1',
+        },
+        { id: 'canal-2', venueId: 'otro-negocio', channelName: 'App', perdio: ['costo'], costStructureId: 'c1' },
+      ])
+      expect(filasDeBitacora()).toEqual([
+        expect.objectContaining({ entityId: 'canal-1', venueId: VENUE_ID }),
+        expect.objectContaining({
+          entityId: 'canal-2',
+          venueId: 'otro-negocio',
+          data: expect.not.objectContaining({ negocioConvertido: expect.anything() }),
+        }),
+      ])
+    })
+
+    it('sin canales ligados: resultado vacío y ninguna fila de canal en la bitácora', async () => {
+      conConfig({ primaryAccountId: 'real-1', secondaryAccountId: 'demo-1' })
+      sonDemo(['demo-1'])
+
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(r.canalesEnLineaSinTarifa).toEqual([])
+      expect(filasDeBitacora()).toEqual([])
     })
 
     it('regresión · todas reales: no toca la configuración ni las tarifas', async () => {

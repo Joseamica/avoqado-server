@@ -34,6 +34,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await prisma.activityLog.deleteMany({ where: { action: 'DEMO_CLEANUP_ECOMMERCE_CHANNEL_UNLINKED', venueId: { in: negocios } } })
   await prisma.ecommerceMerchant.deleteMany({ where: { venueId: { in: negocios } } })
   await prisma.organizationPaymentConfig.deleteMany({ where: { organization: { name: { startsWith: llave } } } })
   for (const venueId of negocios) {
@@ -100,6 +101,13 @@ async function tarifa(venueId: string, accountType: AccountType) {
     },
   })
 }
+
+const bitacoraDelCanal = (canalId: string) =>
+  prisma.activityLog.findMany({
+    where: { action: 'DEMO_CLEANUP_ECOMMERCE_CHANNEL_UNLINKED', entityId: canalId },
+    select: { venueId: true, entity: true, data: true },
+    take: 5,
+  })
 
 const tiposDeTarifa = async (venueId: string) =>
   (await prisma.venuePricingStructure.findMany({ where: { venueId }, select: { accountType: true }, take: 10 }))
@@ -226,11 +234,64 @@ describe('cleanDemoData × cuentas de cobro reales', () => {
       },
     })
 
-    await cleanDemoData(venueId, null)
+    const r = await cleanDemoData(venueId, null)
 
     expect((await prisma.venuePaymentConfig.findUnique({ where: { venueId } }))!.secondaryAccountId).toBeNull()
     expect(await tiposDeTarifa(venueId)).toEqual(['PRIMARY'])
     expect((await prisma.ecommerceMerchant.findUnique({ where: { id: canal.id } }))!.pricingStructureId).toBeNull()
+    // hz:nube0000:na4b2c82: ya no es en silencio. El canal que perdió su tarifa sale en el resultado y en la bitácora.
+    expect(r.canalesEnLineaSinTarifa).toEqual([
+      { id: canal.id, venueId, channelName: 'Web Principal', perdio: ['tarifa'], pricingStructureId: secundaria.id },
+    ])
+    // La fila va DENTRO de la transacción de la limpieza (no por `logAction`): se busca en la base.
+    expect(await bitacoraDelCanal(canal.id)).toEqual([
+      expect.objectContaining({
+        venueId,
+        entity: 'EcommerceMerchant',
+        data: expect.objectContaining({ perdio: ['tarifa'], pricingStructureId: secundaria.id }),
+      }),
+    ])
+  })
+
+  it('hz:nube0000:na4b2c82: el canal ligado al COSTO de la cuenta demo que se borra también queda en el resultado y la bitácora', async () => {
+    const venueId = await negocioTrial('canal-costo')
+    const demo = await cuenta('demo', 'k1')
+    await prisma.venuePaymentConfig.create({ data: { venueId, primaryAccountId: demo } })
+    const tarifaDemo = await tarifa(venueId, 'PRIMARY')
+    const costo = await prisma.providerCostStructure.findFirstOrThrow({ where: { merchantAccountId: demo } })
+    const canal = await prisma.ecommerceMerchant.create({
+      data: {
+        venueId,
+        channelName: 'App',
+        businessName: 'Canal con costo demo',
+        contactEmail: `${llave}-canal-costo@example.test`,
+        publicKey: `pk_test_${llave}_costo`,
+        secretKeyHash: `hash-${llave}-costo`,
+        providerId,
+        providerCredentials: {},
+        pricingStructureId: tarifaDemo.id,
+        costStructureId: costo.id,
+      },
+    })
+
+    const r = await cleanDemoData(venueId, null)
+
+    const despues = await prisma.ecommerceMerchant.findUniqueOrThrow({ where: { id: canal.id } })
+    expect(despues.pricingStructureId).toBeNull()
+    expect(despues.costStructureId).toBeNull()
+    expect(r.canalesEnLineaSinTarifa).toEqual([
+      {
+        id: canal.id,
+        venueId,
+        channelName: 'App',
+        perdio: ['tarifa', 'costo'],
+        pricingStructureId: tarifaDemo.id,
+        costStructureId: costo.id,
+      },
+    ])
+    expect(await bitacoraDelCanal(canal.id)).toEqual([
+      expect.objectContaining({ venueId, data: expect.objectContaining({ perdio: ['tarifa', 'costo'], costStructureId: costo.id }) }),
+    ])
   })
 
   it('Codex r1/r2 #2: una cuenta demo que también usa la organización no se borra y la limpieza NO se cae', async () => {
