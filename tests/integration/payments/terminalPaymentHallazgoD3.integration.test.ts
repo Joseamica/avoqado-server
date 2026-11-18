@@ -240,17 +240,46 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
     await angelpay.recuperarAvisosAprobadosSinReferencias()
     spy.mockRestore()
     expect(selectors).toHaveLength(2)
+    const nodes = (value: any): any[] => (value && typeof value === 'object' ? [value, ...Object.values(value).flatMap(nodes)] : [])
+    const explicar = (selector: Prisma.Sql, ajustes: string[]) =>
+      prisma.$transaction(async tx => {
+        for (const ajuste of ajustes) await tx.$executeRawUnsafe(`SET LOCAL ${ajuste} = off`)
+        return tx.$queryRaw(Prisma.sql`EXPLAIN (FORMAT JSON) ${selector}`)
+      })
+    // Acceso a ProviderEventLog acotado por un índice SUYO, en cualquiera de las dos formas que el planeador elige según sus
+    // estadísticas: «Index Scan»/«Index Only Scan» sobre la tabla, o «Bitmap Heap Scan» sobre la tabla alimentado por un
+    // «Bitmap Index Scan» de uno de sus índices. El nodo «Bitmap Index Scan» no trae «Relation Name», sólo «Index Name»: el
+    // criterio viejo (nodo con la tabla Y «Index» en el tipo) daba rojo cuando el CI elegía bitmap (corrida 43831430453, 16-nov).
+    const indices = new Set(
+      (
+        await prisma.$queryRaw<{ indexname: string }[]>`
+          SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'ProviderEventLog'`
+      ).map(r => r.indexname),
+    )
+    expect(indices.size).toBeGreaterThan(0)
+    const accesosPorIndice = (plan: unknown) =>
+      nodes(plan).filter(n => {
+        if (n['Relation Name'] !== 'ProviderEventLog') return false
+        if (n['Node Type'] === 'Index Scan' || n['Node Type'] === 'Index Only Scan') return indices.has(n['Index Name'])
+        if (n['Node Type'] === 'Bitmap Heap Scan')
+          return nodes(n.Plans).some(h => h['Node Type'] === 'Bitmap Index Scan' && indices.has(h['Index Name']))
+        return false
+      })
     for (const selector of selectors) {
       const plan = await prisma.$queryRaw(Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${selector}`)
       console.log('[D3 selector default EXPLAIN]', JSON.stringify(plan))
-      const indexed = await prisma.$transaction(async tx => {
-        await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
-        return tx.$queryRaw(Prisma.sql`EXPLAIN (FORMAT JSON) ${selector}`)
-      })
-      const nodes = (value: any): any[] => (value && typeof value === 'object' ? [value, ...Object.values(value).flatMap(nodes)] : [])
-      expect(nodes(indexed).filter(n => n['Relation Name'] === 'ProviderEventLog')).toEqual(
-        expect.arrayContaining([expect.objectContaining({ 'Node Type': expect.stringContaining('Index') })]),
-      )
+      // Lo que se protege: sin lectura completa, la consulta SÍ puede llegar por índice.
+      expect(accesosPorIndice(await explicar(selector, ['enable_seqscan']))).not.toHaveLength(0)
+      // Las dos formas, forzadas, para que ninguna dependa de lo que el planeador elija ese día.
+      const bitmap = await explicar(selector, ['enable_seqscan', 'enable_indexscan', 'enable_indexonlyscan'])
+      expect(nodes(bitmap).some(n => n['Node Type'] === 'Bitmap Heap Scan' && n['Relation Name'] === 'ProviderEventLog')).toBe(true)
+      expect(accesosPorIndice(bitmap)).not.toHaveLength(0)
+      const directo = await explicar(selector, ['enable_seqscan', 'enable_bitmapscan'])
+      expect(accesosPorIndice(directo)).not.toHaveLength(0)
+      // Control: el criterio NO acepta una lectura completa de la tabla.
+      const completo = await explicar(selector, ['enable_indexscan', 'enable_indexonlyscan', 'enable_bitmapscan'])
+      expect(nodes(completo).some(n => n['Node Type'] === 'Seq Scan' && n['Relation Name'] === 'ProviderEventLog')).toBe(true)
+      expect(accesosPorIndice(completo)).toHaveLength(0)
     }
   })
 
