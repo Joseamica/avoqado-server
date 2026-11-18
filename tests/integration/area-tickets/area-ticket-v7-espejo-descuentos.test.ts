@@ -224,8 +224,8 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(d10Vale.type).toBe('PERCENTAGE')
     expect(papas).toMatchObject({ discountId: d10Id, reason: 'Cliente frecuente', authorizedById: null })
     expect(d10Vale).toMatchObject({ discountId: d10Id, reason: null, authorizedById: null })
-    // Quién aprobó en el área no se congela al emitir: la fila no lo inventa (lo dio el emisor, `appliedById`).
-    expect(gerente).toMatchObject({ discountId: dGerenteId, reason: null, authorizedById: null })
+    // D4 (18-nov): quién aprobó en el área se congela al emitir (la sesión con permiso propio) y la fila lo copia.
+    expect(gerente).toMatchObject({ discountId: dGerenteId, reason: null, authorizedById: staffVenueId })
 
     // Usos como antes del arreglo: el cobro de vales no sube el contador.
     const usos = await prisma.discount.findMany({ where: { venueId }, select: { currentUses: true }, take: 10 })
@@ -273,5 +273,153 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(
       (await prisma.discount.findMany({ where: { venueId }, select: { currentUses: true }, take: 10 })).map(u => u.currentUses),
     ).toEqual([0, 0])
+  })
+
+  // D4 (tarjeta hz:e82938e1:D4, 18-nov): el motivo y quién aprobó llegan desde la tablet. El renglón del vale los congela al emitir y la
+  // fila espejo los copia al cobrar, agrupando también por ellos; un renglón sin motivo sale como antes («Sin motivo»).
+  it('D4: el motivo, su comentario y quien aprobó se congelan en el vale y llegan a «Descuentos»', async () => {
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      aprobacionDelDescuento: {},
+      lines: [
+        {
+          clientLineId: `d4-a-${suffix}`,
+          productId: jamonId,
+          quantity: '1',
+          discountId: d10Id,
+          discountReason: '  Cliente   frecuente ',
+          discountReasonComment: 'Viene diario',
+        },
+        { clientLineId: `d4-b-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-c-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId, discountReason: 'Producto dañado' },
+        { clientLineId: `d4-d-${suffix}`, productId: papasId, quantity: '1', discountReason: 'Sin descuento no se guarda' },
+      ] as any,
+    })
+    const lineas = await prisma.areaTicketLine.findMany({
+      where: { areaTicket: { code: vale.code, venueId } },
+      select: { clientLineId: true, discountReason: true, discountReasonComment: true, discountAuthorizedById: true },
+      take: 10,
+    })
+    const linea = (id: string) => lineas.find(l => l.clientLineId === `${id}-${suffix}`)!
+    expect(linea('d4-a')).toMatchObject({
+      discountReason: 'Cliente frecuente',
+      discountReasonComment: 'Viene diario',
+      discountAuthorizedById: null,
+    })
+    expect(linea('d4-b')).toMatchObject({ discountReason: null, discountReasonComment: null, discountAuthorizedById: null })
+    expect(linea('d4-c')).toMatchObject({ discountReason: 'Producto dañado', discountAuthorizedById: staffVenueId })
+    expect(linea('d4-d')).toMatchObject({ discountReason: null, discountReasonComment: null, discountAuthorizedById: null })
+
+    // La misma llave otra vez: el mismo vale, sin renglones nuevos.
+    const otraVez = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      aprobacionDelDescuento: {},
+      lines: [
+        { clientLineId: `d4-a-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-b-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-c-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId },
+        { clientLineId: `d4-d-${suffix}`, productId: papasId, quantity: '1' },
+      ],
+    })
+    expect(otraVez.code).toBe(vale.code)
+    expect(await prisma.areaTicketLine.count({ where: { areaTicket: { code: vale.code, venueId } } })).toBe(4)
+
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `d4-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, { idempotencyKey: `d4-claim-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d4-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+      normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id, discountReason: 'Cliente frecuente' }],
+    })
+    const orderId = materializada.order!.id
+
+    const filas = await prisma.orderDiscount.findMany({
+      where: { orderId },
+      select: {
+        discountId: true,
+        amount: true,
+        reason: true,
+        reasonComment: true,
+        authorizedById: true,
+        appliedById: true,
+        appliedToItemIds: true,
+      },
+      orderBy: [{ amount: 'asc' }, { id: 'asc' }],
+      take: 10,
+    })
+    // Vale: 10 % con motivo y comentario · 10 % sin motivo · 20 % aprobado con motivo. Más el suelto con motivo.
+    expect(filas).toHaveLength(4)
+    expect(filas.reduce((s, f) => s.add(f.amount), new Prisma.Decimal(0)).toFixed(2)).toBe('45.00')
+    const conComentario = filas.find(f => f.reasonComment === 'Viene diario')!
+    expect(conComentario).toMatchObject({ discountId: d10Id, reason: 'Cliente frecuente', authorizedById: null, appliedById: staffVenueId })
+    expect(conComentario.appliedToItemIds).toHaveLength(1)
+    const sinMotivo = filas.filter(f => f.reason === null)
+    expect(sinMotivo).toHaveLength(1)
+    expect(sinMotivo[0]).toMatchObject({ discountId: d10Id, authorizedById: null })
+    expect(filas.find(f => f.discountId === dGerenteId)).toMatchObject({
+      reason: 'Producto dañado',
+      reasonComment: null,
+      authorizedById: staffVenueId,
+      appliedById: staffVenueId,
+    })
+    expect(filas.filter(f => f.reason === 'Cliente frecuente' && f.reasonComment === null)).toHaveLength(1) // el suelto
+
+    // «Descuentos» del DASHBOARD (y el MCP) agrupa por el motivo que llegó desde la tablet.
+    const reporte = await listarDescuentosAplicados(venueId)
+    const motivos = Object.fromEntries(reporte.porMotivo.map(g => [g.reason ?? 'SIN_MOTIVO', g.amount]))
+    expect(motivos).toMatchObject({ 'Cliente frecuente': 15, 'Producto dañado': 20, SIN_MOTIVO: 10 })
+  })
+
+  // D4 (Codex r1-r4): quien aprobó es una foto del id de su membresía, sin llave foránea. Si la borran para siempre entre emitir y
+  // cobrar, el cobro sigue y la fila va sin aprobador (como `OrderDiscount`, que la deja en NULL), dada por el emisor del vale.
+  it('D4: si borran la membresía de quien aprobó antes de cobrar, el cobro sigue y la fila va sin aprobador', async () => {
+    const otra = await prisma.staff.create({
+      data: { email: `vales-espejo-gerente-${suffix}@example.com`, firstName: 'Gerente', lastName: 'Temporal' },
+    })
+    const membresia = await prisma.staffVenue.create({ data: { staffId: otra.id, venueId, role: StaffRole.MANAGER } })
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-borrada-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: otra.id,
+      aprobacionDelDescuento: {},
+      lines: [{ clientLineId: `d4-borrada-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId }],
+    })
+    expect(
+      (await prisma.areaTicketLine.findFirstOrThrow({ where: { areaTicket: { code: vale.code, venueId } } })).discountAuthorizedById,
+    ).toBe(membresia.id)
+    await prisma.staffVenue.delete({ where: { id: membresia.id } })
+
+    const caja = await createAreaTicketCheckout(venueId, {
+      idempotencyKey: `d4-borrada-caja-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    await addTicketToCheckout(venueId, caja.id, vale.code, {
+      idempotencyKey: `d4-borrada-claim-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d4-borrada-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+    })
+    const filas = await prisma.orderDiscount.findMany({ where: { orderId: materializada.order!.id }, take: 5 })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ discountId: dGerenteId, authorizedById: null, appliedById: staffVenueId })
+    expect(filas[0].amount.toFixed(2)).toBe('20.00')
+    await prisma.staff.delete({ where: { id: otra.id } })
   })
 })

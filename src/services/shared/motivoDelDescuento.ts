@@ -10,9 +10,12 @@ export const MAX_MOTIVO = 60
 export const MAX_COMENTARIO = 200
 export const MAX_MOTIVOS = 30
 
+/** D4 (Codex r3 #2, r4 #1): el nulo y los demás de control (C0, DEL y C1). PostgreSQL rechaza un texto con nulo: tumbaba la escritura. */
+const CONTROLES = /[\u0000-\u001F\u007F-\u009F]/g // eslint-disable-line no-control-regex
+
 function limpiar(raw: unknown, tope: number): string | null {
   if (typeof raw !== 'string') return null
-  const texto = raw.replace(/\s+/g, ' ').trim()
+  const texto = raw.replace(CONTROLES, ' ').replace(/\s+/g, ' ').trim()
   if (!texto) return null
   return texto.slice(0, tope).trim()
 }
