@@ -156,7 +156,7 @@ describe('na526456 · el tope de PIN sólo gasta intentos con las peticiones que
   })
 })
 
-describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
+describe('na526456 · la ventana y el código maestro (Codex r2 y r3)', () => {
   it('una checada correcta que termina DESPUÉS de que la ventana se reinició no borra un fallo de la ventana nueva', async () => {
     const real = Date.now()
     let adelanto = 0
@@ -205,7 +205,7 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
     }
   })
 
-  it('el código maestro tiene su propia cubeta y cuenta TODO, como antes: 100 aciertos ⇒ el 101.º es 429', async () => {
+  it('el código maestro cuenta TODO, como antes: 100 aciertos ⇒ el 101.º es 429', async () => {
     const a = express()
     a.set('trust proxy', 1)
     a.use(express.json())
@@ -221,31 +221,42 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
     expect((await request(servidor).post('/venues/venue-maestro/auth/master').set('X-Forwarded-For', ip).send({})).status).toBe(429)
   })
 
-  it('las checadas no gastan el cupo del maestro, ni el maestro el de las checadas (cubetas distintas)', async () => {
-    const a = await app()
-    const ip = ipDePrueba(22)
-    for (let i = 0; i < 100; i++) expect((await checar(a, 'venue-separadas', '0000', ip)).status).toBe(401)
-    expect((await checar(a, 'venue-separadas', '0000', ip)).status).toBe(429)
-
-    const b = express()
-    b.set('trust proxy', 1)
-    b.post('/venues/:venueId/auth/master', ...pinMasterRateLimiter, (_req, res) => res.status(401).json({ ok: false }))
-    const servidor = b.listen(0, '127.0.0.1')
+  it('el maestro conserva su tope de ANTES: las checadas correctas le gastan cupo (como la cubeta compartida) pero ellas siguen pasando', async () => {
+    const a = express()
+    a.set('trust proxy', 1)
+    a.use(express.json())
+    a.post('/venues/:venueId/time-clock/identify', ...pinLoginRateLimiter, (_req, res) => res.status(200).json({ success: true }))
+    a.post('/venues/:venueId/auth/master', ...pinMasterRateLimiter, (_req, res) => res.status(401).json({ ok: false }))
+    const servidor = a.listen(0, '127.0.0.1')
     servidores.push(servidor)
     await new Promise<void>(listo => servidor.once('listening', () => listo()))
-    // Misma IP, mismo negocio: el maestro todavía tiene su cupo completo.
-    expect((await request(servidor).post('/venues/venue-separadas/auth/master').set('X-Forwarded-For', ip).send({})).status).toBe(401)
+    const ip = ipDePrueba(22)
+    const checarAqui = () =>
+      request(servidor).post('/venues/venue-maestro-2/time-clock/identify').set('X-Forwarded-For', ip).send({ pin: PIN_BUENO })
 
-    // Y al revés: 100 fallos del maestro desde otra IP no le gastan el cupo al checador de esa IP (Codex r3: probar las dos direcciones).
-    const ipMaestro = ipDePrueba(23)
+    for (let i = 0; i < 100; i++) expect((await checarAqui()).status).toBe(200)
+    // Antes: la cubeta compartida ya iba en 100 ⇒ el maestro de esa IP, 429. Igual ahora.
+    expect((await request(servidor).post('/venues/venue-maestro-2/auth/master').set('X-Forwarded-For', ip).send({})).status).toBe(429)
+    // Y las checadas correctas siguen pasando (antes, la 101.ª ya era 429).
+    expect((await checarAqui()).status).toBe(200)
+  })
+
+  it('los fallos del maestro gastan el cupo de fallos del checador, como antes', async () => {
+    const a = express()
+    a.set('trust proxy', 1)
+    a.use(express.json())
+    a.post('/venues/:venueId/time-clock/identify', ...pinLoginRateLimiter, (_req, res) => res.status(401).json({ success: false }))
+    a.post('/venues/:venueId/auth/master', ...pinMasterRateLimiter, (_req, res) => res.status(401).json({ ok: false }))
+    const servidor = a.listen(0, '127.0.0.1')
+    servidores.push(servidor)
+    await new Promise<void>(listo => servidor.once('listening', () => listo()))
+    const ip = ipDePrueba(23)
+
     for (let i = 0; i < 100; i++) {
-      expect(
-        (await request(servidor).post('/venues/venue-separadas-2/auth/master').set('X-Forwarded-For', ipMaestro).send({})).status,
-      ).toBe(401)
+      expect((await request(servidor).post('/venues/venue-maestro-3/auth/master').set('X-Forwarded-For', ip).send({})).status).toBe(401)
     }
-    expect((await request(servidor).post('/venues/venue-separadas-2/auth/master').set('X-Forwarded-For', ipMaestro).send({})).status).toBe(
-      429,
-    )
-    expect((await checar(a, 'venue-separadas-2', '0000', ipMaestro)).status).toBe(401)
+    expect(
+      (await request(servidor).post('/venues/venue-maestro-3/time-clock/identify').set('X-Forwarded-For', ip).send({ pin: '0000' })).status,
+    ).toBe(429)
   })
 })
