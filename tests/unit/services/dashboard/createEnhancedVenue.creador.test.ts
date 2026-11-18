@@ -77,6 +77,10 @@ describe('createEnhancedVenue · sólo superadmin, con el dueño que dice la pet
     const dueno = consultas.find(c => c.sql.includes('FROM "StaffOrganization"'))!
     expect(dueno.sql).toMatch(/so\.role = 'OWNER'[\s\S]*so\."isActive" AND s\.active[\s\S]*FOR SHARE OF so/)
     expect(dueno.valores).toEqual([DUENO, ORG])
+    // Codex r9 #4: primero la persona y luego su membresía (el orden del borrado de personal: sin trabas).
+    const persona = consultas.findIndex(c => /FROM "Staff" WHERE id = \? FOR SHARE/.test(c.sql))
+    expect(persona).toBeGreaterThan(-1)
+    expect(persona).toBeLessThan(consultas.findIndex(c => c.sql.includes('FROM "StaffOrganization"')))
     expect(prismaMock.venue.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ organizationId: ORG }) }),
     )

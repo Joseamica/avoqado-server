@@ -788,8 +788,9 @@ export async function createEnhancedVenue(quien: { userId: string; venueDelPermi
     if (venueData.ownerStaffId === userId) {
       throw new BadRequestError('Elige como dueño a alguien de la organización, no a ti mismo.', 'DUENO_ES_QUIEN_CREA')
     }
-    // `FOR SHARE` de su membresía: una baja de la organización a la vez (que primero la actualiza) espera a que el alta termine
-    // y después ya ve el negocio nuevo y le apaga la fila (Codex r8 #1).
+    // `FOR SHARE` de la persona y luego de su membresía, en ese orden (el mismo del borrado de personal: Codex r9 #4). Una baja de
+    // la organización o de la cuenta a la vez espera a que el alta termine y después ya ve el negocio nuevo (Codex r8 #1, r9 #2).
+    await tx.$queryRaw`SELECT id FROM "Staff" WHERE id = ${venueData.ownerStaffId} FOR SHARE`
     const [dueno] = await tx.$queryRaw<Array<{ staffId: string }>>`
       SELECT so."staffId" FROM "StaffOrganization" so JOIN "Staff" s ON s.id = so."staffId"
       WHERE so."staffId" = ${venueData.ownerStaffId} AND so."organizationId" = ${orgId} AND so.role = 'OWNER'
