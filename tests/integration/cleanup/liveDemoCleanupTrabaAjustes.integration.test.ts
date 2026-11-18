@@ -41,7 +41,9 @@ async function sembrarDemo(sufijo: string, idsDeTerminal: string[]): Promise<Dem
   demos.push(demo)
   await prisma.organization.create({ data: { id: demo.org, name: demo.org, email: `${demo.org}@example.test`, phone: '5500000000' } })
   await prisma.staff.create({ data: { id: demo.staff, email: `${demo.staff}@example.test`, firstName: 'Demo', lastName: 'Traba' } })
-  await prisma.venue.create({ data: { id: demo.venue, organizationId: demo.org, name: 'Demo traba', slug: demo.venue, status: 'LIVE_DEMO' } })
+  await prisma.venue.create({
+    data: { id: demo.venue, organizationId: demo.org, name: 'Demo traba', slug: demo.venue, status: 'LIVE_DEMO' },
+  })
   await prisma.venueSettings.create({ data: { venueId: demo.venue } })
   for (const [i, id] of idsDeTerminal.entries()) {
     await prisma.terminal.create({ data: { id, venueId: demo.venue, name: `Caja ${i + 1}`, type: 'POS_ANDROID' } })
@@ -76,16 +78,27 @@ async function quedoBorrada(demo: Demo): Promise<void> {
   expect(await prisma.venueSettings.count({ where: { venueId: demo.venue } })).toBe(0)
 }
 
-/** Espera, con tope, a que `n` sesiones de ESTA base estén esperando un candado. */
-async function esperarEsperando(n: number): Promise<void> {
+/**
+ * Espera, con tope, a que el guardado esté detenido en SU candado de terminales: una sesión de esta base esperando un
+ * candado con la sentencia del guardado (`… FOR NO KEY UPDATE`). Ninguna otra sesión de la prueba la usa.
+ */
+async function esperarAlGuardadoEnSuCandado(venueId: string): Promise<void> {
   for (let i = 0; i < 400; i++) {
     const [{ esperando }] = await prisma.$queryRaw<{ esperando: number }[]>`
       SELECT count(*)::int AS esperando FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'`
-    if (esperando >= n) return
+      WHERE datname = current_database() AND wait_event_type = 'Lock'
+        AND query ILIKE '%FROM "Terminal"%FOR NO KEY UPDATE%' AND pid <> pg_backend_pid()`
+    if (esperando >= 1) return
     await new Promise(r => setTimeout(r, 25))
   }
-  throw new Error(`No hubo ${n} sesiones esperando un candado en 10 s`)
+  throw new Error(`El guardado de ${venueId} no llegó a esperar su candado de terminales en 10 s`)
+}
+
+/** Página y renglón físicos de una fila (`ctid`): el orden en que la encuentra un recorrido de la tabla o del índice. */
+async function posicionFisica(terminalId: string): Promise<[number, number]> {
+  const [{ ctid }] = await prisma.$queryRaw<{ ctid: string }[]>`SELECT ctid::text AS ctid FROM "Terminal" WHERE id = ${terminalId}`
+  const [pagina, renglon] = ctid.replace(/[()]/g, '').split(',').map(Number)
+  return [pagina, renglon]
 }
 
 beforeAll(() => {
@@ -110,7 +123,9 @@ describe('na86c206 · la limpieza de una demo y guardar los ajustes de terminal 
     const demo = await sembrarDemo('uno', [`${llave}-uno-t1`])
 
     // El guardado toma las terminales del negocio, como `updateVenueTpvSettings`.
-    const guardado = await retener(tx => tx.$queryRaw`SELECT id FROM "Terminal" WHERE "venueId" = ${demo.venue} ORDER BY id FOR NO KEY UPDATE`)
+    const guardado = await retener(
+      tx => tx.$queryRaw`SELECT id FROM "Terminal" WHERE "venueId" = ${demo.venue} ORDER BY id FOR NO KEY UPDATE`,
+    )
     const limpieza = limpiar(demo)
     const finLimpieza = desenlace(limpieza)
     expect(await esperarBloqueado(guardado.pid, limpieza)).toBe('bloqueada')
@@ -136,6 +151,10 @@ describe('na86c206 · la limpieza de una demo y guardar los ajustes de terminal 
     const mayor = `${llave}-dos-tb`
     const menor = `${llave}-dos-ta`
     const demo = await sembrarDemo('dos', [mayor, menor])
+    // Precondición (Codex r2): sin esto la prueba podría pasar en falso. El borrado, por tabla o por el índice de
+    // `venueId`, recorre las filas en su orden físico; la de id MAYOR tiene que ir antes para que exista el cruce.
+    const [pMayor, pMenor] = [await posicionFisica(mayor), await posicionFisica(menor)]
+    expect(pMayor[0] < pMenor[0] || (pMayor[0] === pMenor[0] && pMayor[1] < pMenor[1])).toBe(true)
 
     // El guardado ya tomó la de id menor (su SELECT ordenado por id va en camino a la otra).
     const guardado = await retener(tx => tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${menor} FOR NO KEY UPDATE`)
@@ -171,7 +190,7 @@ describe('na86c206 · la limpieza de una demo y guardar los ajustes de terminal 
 
     // El guardado de verdad, como lo llama el DASHBOARD, llega a media limpieza.
     const finGuardado = desenlace(updateVenueTpvSettings(demo.venue, { trackPromoterLocation: true }))
-    await esperarEsperando(2)
+    await esperarAlGuardadoEnSuCandado(demo.venue)
 
     retencion.soltar()
     await retencion.transaccion
