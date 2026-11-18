@@ -12,7 +12,7 @@ import {
   REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
-import { soltarRetencionesDeReversados, vencerLapidasSinRespuesta } from '../services/tpv/reversoDeLaTerminal.service'
+import { sdkPropioEncendido, soltarRetencionesDeReversados, vencerLapidasSinRespuesta } from '../services/tpv/reversoDeLaTerminal.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -38,19 +38,19 @@ function esFallaTransitoria(r: { errorReason?: string; message?: string }): bool
  *
  * Strategy
  * --------
- * 1. Every 30s pull up to 100 PENDING events, oldest first — but an event whose
- *    retry failed (it threw, or the core answered PROCESSING_ERROR/HOLD_DEFERRED)
- *    goes behind the ones that have not failed (R3-6, `attempts` counts those
- *    failures on Blumon TPV rows), so N broken events never starve a healthy one.
+ * 1. Every 30s pull up to 100 PENDING events, oldest first: those WITHOUT saved
+ *    context (`nextAttemptAt` null — today's traffic) only while younger than 24h,
+ *    exactly as `develop`; those WITH context (only born with the SDK-propio switch
+ *    on) once their turn arrived, also past 24h (they get a last retry, F5).
  * 2. Try the same matching logic again — but with `skipRetries=true` since
  *    we're already on a periodic schedule.
  * 3. Update each event row inline (status=PROCESSED on match,
  *    status=ERROR + errorReason=AMOUNT_MISMATCH on discrepancy, stays PENDING
  *    if still no match).
  * 4. Once per pass, sweep events older than 24h still PENDING → ERROR with
- *    errorReason=ORPHANED — only those THIS pass retried with an outcome (with or
- *    without saved context, R3-5): an event past 24h still gets its last retry
- *    first. Ops dashboards filter on that.
+ *    errorReason=ORPHANED. Without context, all of them (as `develop`); with
+ *    context, only those THIS pass retried with an outcome (F5 / family D).
+ *    Ops dashboards filter on that.
  * 5. (SDK propio, Tarea 6) Nothing is touched before its `nextAttemptAt` (the
  *    receiver's exclusive window). An event that entered WITH our attempt link
  *    is recovered by `reconcileBlumonEvent` through the shared core, with the
@@ -58,6 +58,7 @@ function esFallaTransitoria(r: { errorReason?: string; message?: string }): bool
  * 6. (SDK propio, Tarea 7) Before anything else, each pass expires reversal
  *    tombstones still `reversing` past `VENTANA_DEL_REVERSO_MS` (→
  *    `reverse_unconfirmed`), so a webhook held by one is released in the same pass.
+ *    Only with the SDK-propio switch on (`sdkPropioEncendido`, redesign v2).
  *
  * Pattern matches the existing `AbandonedOrdersCleanupJob` / `tpvHealthMonitorJob`
  * structure used elsewhere in the codebase. Singleton, registered in
@@ -104,26 +105,29 @@ export class BlumonWebhookReconciliationJob {
       // Un solo «ahora» por pase (Tarea 7, pendiente de la 6): lo que `reconcilePending` deja fuera por su turno, `markOrphaned`
       // tampoco lo vence. Primero las lápidas del reverso que vencieron: así su aviso retenido sale en este mismo pase.
       const ahora = new Date()
-      // F8: una falla del barrido de lápidas (p. ej. P1001) no tumba el pase: los avisos pendientes se recuperan igual.
       let lapidasVencidas = 0
-      try {
-        lapidasVencidas = await vencerLapidasSinRespuesta(ahora)
-      } catch (err) {
-        logger.error('❌ [Blumon recon] El barrido de lápidas del reverso falló — el pase sigue con los avisos pendientes', {
-          error: err instanceof Error ? err.message : err,
-          stack: err instanceof Error ? err.stack : undefined,
-        })
+      // Rediseño v2: con el candado del SDK propio apagado no hay lápidas que barrer (sus rutas no existen): el pase es el de develop.
+      if (sdkPropioEncendido()) {
+        // F8: una falla del barrido de lápidas (p. ej. P1001) no tumba el pase: los avisos pendientes se recuperan igual.
+        try {
+          lapidasVencidas = await vencerLapidasSinRespuesta(ahora)
+        } catch (err) {
+          logger.error('❌ [Blumon recon] El barrido de lápidas del reverso falló — el pase sigue con los avisos pendientes', {
+            error: err instanceof Error ? err.message : err,
+            stack: err instanceof Error ? err.stack : undefined,
+          })
+        }
+        // Familia C: las solicitudes que la ventana retuvo por un aviso que la terminal ya reversó y que nadie soltó.
+        try {
+          await soltarRetencionesDeReversados(ahora)
+        } catch (err) {
+          logger.error('❌ [Blumon recon] El barrido de retenciones de avisos reversados falló — el pase sigue', {
+            error: err instanceof Error ? err.message : err,
+            stack: err instanceof Error ? err.stack : undefined,
+          })
+        }
       }
-      // Familia C: las solicitudes que la ventana retuvo por un aviso que la terminal ya reversó y que nadie soltó.
-      try {
-        await soltarRetencionesDeReversados(ahora)
-      } catch (err) {
-        logger.error('❌ [Blumon recon] El barrido de retenciones de avisos reversados falló — el pase sigue', {
-          error: err instanceof Error ? err.message : err,
-          stack: err instanceof Error ? err.stack : undefined,
-        })
-      }
-      // F5: los avisos que este pase intentó; `markOrphaned` no vence uno con contexto que no se intentó (quedó fuera del lote).
+      // F5: los avisos CON contexto que este pase intentó; `markOrphaned` no vence uno que no se intentó (quedó fuera del lote).
       const intentados = new Set<string>()
       const reconciled = await this.reconcilePending(ahora, intentados)
       const orphaned = await this.markOrphaned(ahora, intentados)
@@ -150,6 +154,7 @@ export class BlumonWebhookReconciliationJob {
    * Returns the count of events that newly transitioned out of PENDING.
    */
   async reconcilePending(now: Date = new Date(), intentados?: Set<string>): Promise<number> {
+    const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const pending = await retry(
       () =>
         prisma.providerEventLog.findMany({
@@ -166,15 +171,20 @@ export class BlumonWebhookReconciliationJob {
               // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
               // keep being reconciled.
               { OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }] },
-              // Tarea 6: la exclusiva del receptor (y de quien programe el siguiente turno): nada antes de su `nextAttemptAt`.
-              // Los PENDING de antes (`nextAttemptAt` null) siguen como hoy.
-              { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
-              // Sin ventana de 24 h en la selección (R3-5): el que la cruzó —con o sin contexto— recibe su último intento aquí y,
-              // si sigue PENDING con desenlace, `markOrphaned` lo vence justo después en el mismo pase.
+              {
+                OR: [
+                  // Rediseño v2 (Codex r4 #3–#5): sin contexto (`nextAttemptAt` null, el tráfico de hoy), la selección de develop:
+                  // sólo dentro de la ventana de 24 h. Uno vencido nunca vuelve a la búsqueda automática (un código de
+                  // autorización reciclado lo casaría con otro cobro): `markOrphaned` lo manda a conciliación manual.
+                  { nextAttemptAt: null, createdAt: { gte: cutoff } },
+                  // Tarea 6: con contexto (sólo con el candado prendido), nada antes de su turno; pasadas las 24 h también, para
+                  // que reciba su último intento antes del vencimiento (F5).
+                  { nextAttemptAt: { lte: now } },
+                ],
+              },
             ],
           },
-          // R3-6: los que fallaron van detrás (`attempts` cuenta sus fallas); entre iguales, el más viejo primero.
-          orderBy: [{ attempts: 'asc' }, { createdAt: 'asc' }],
+          orderBy: { createdAt: 'asc' },
           select: { id: true, payload: true },
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'blumon-webhook-reconciliation.findPending' },
@@ -191,11 +201,10 @@ export class BlumonWebhookReconciliationJob {
         // MerchantAccount (one merchant → N venues) doesn't get pinned to the
         // single terminal's venue that was cached at insert time.
         const result = await reconcileBlumonEvent(row.id, payload)
-        // Familia D: sólo cuenta como intentado (y `markOrphaned` puede vencerlo) el aviso cuyo intento terminó con un desenlace.
-        // Una excepción (la lectura de recuperación, la base) o una falla transitoria que el núcleo contesta sin lanzar —el
-        // registrador cayó (su candado, la base) o la re-retención se difirió— lo deja PENDING para el siguiente pase.
-        if (esFallaTransitoria(result)) await this.alFinalDeLaFila(row.id)
-        else intentados?.add(row.id)
+        // Familia D (filas con contexto): sólo cuenta como intentado (y `markOrphaned` puede vencerlo) el aviso cuyo intento terminó
+        // con un desenlace. Una excepción (la lectura de recuperación, la base) o una falla transitoria que el núcleo contesta sin
+        // lanzar —el registrador cayó (su candado, la base) o la re-retención se difirió— lo deja PENDING para el siguiente pase.
+        if (!esFallaTransitoria(result)) intentados?.add(row.id)
         // Con contexto, el núcleo contesta PENDING cuando el evento sigue esperando (p. ej. AMOUNT_MISMATCH): no salió.
         // HELD_BY_REVERSAL: retenido por la lápida del reverso, sigue PENDING.
         if (result.action !== 'NOT_FOUND' && result.action !== 'PENDING' && result.action !== 'HELD_BY_REVERSAL') resolved++
@@ -204,7 +213,6 @@ export class BlumonWebhookReconciliationJob {
           eventLogId: row.id,
           error: err instanceof Error ? err.message : err,
         })
-        await this.alFinalDeLaFila(row.id)
       }
     }
 
@@ -212,22 +220,11 @@ export class BlumonWebhookReconciliationJob {
   }
 
   /**
-   * R3-6: un aviso cuyo intento falló en este pase va al final de la fila del siguiente: se le suma una falla en `attempts` (en los
-   * avisos de Blumon TPV nadie más usa esa columna; el worker de AngelPay sólo reclama `angelpay-%`). Sigue PENDING: no es desenlace.
-   */
-  private async alFinalDeLaFila(id: string): Promise<void> {
-    await prisma.providerEventLog
-      .updateMany({ where: { id, status: EventStatus.PENDING }, data: { attempts: { increment: 1 } } })
-      .catch(err =>
-        logger.error('❌ [Blumon recon] No se pudo mandar el aviso al final de la fila', { eventLogId: id, error: err?.message }),
-      )
-  }
-
-  /**
    * Promote stale PENDING events (> TTL) to ERROR with errorReason=ORPHANED.
    * Bulk update is fine — these are not eligible for further retries.
-   * F5 + R3-5: un evento —con contexto o sin él (`nextAttemptAt` null, el brazo legado)— sólo se vence si ESTE pase lo intentó con
-   * un desenlace (`intentados`); uno que quedó fuera del lote o cuyo intento falló espera al siguiente pase.
+   * Sin contexto (`nextAttemptAt` null, el tráfico de hoy): todos los de más de 24 h, como en develop (rediseño v2). Con contexto
+   * (F5): sólo si ESTE pase lo intentó con un desenlace (`intentados`) y ya era su turno; uno que quedó fuera del lote o cuyo
+   * intento falló espera al siguiente pase.
    */
   async markOrphaned(now: Date = new Date(), intentados: ReadonlySet<string> = new Set()): Promise<number> {
     const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
@@ -241,10 +238,14 @@ export class BlumonWebhookReconciliationJob {
         // Avoqado payment" would be a false alarm. Same NULL-tolerant exclusion
         // as the pending sweep above.
         { OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }] },
-        // Tarea 6: nunca se vence un evento antes de su turno: su recuperación por el vínculo todavía va a correr.
-        { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
-        // F5 + R3-5: sólo si este pase ya le dio su último intento con desenlace (también el brazo legado, sin turno).
-        { id: { in: [...intentados] } },
+        {
+          OR: [
+            { nextAttemptAt: null },
+            // Tarea 6 + F5: nunca antes de su turno (su recuperación por el vínculo todavía va a correr), y sólo si este pase ya le
+            // dio su último intento con desenlace.
+            { nextAttemptAt: { lte: now }, id: { in: [...intentados] } },
+          ],
+        },
       ],
     } satisfies Prisma.ProviderEventLogWhereInput
 

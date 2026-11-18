@@ -60,6 +60,7 @@ import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middlewa
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { intencionDeReversoSchema, resultadoDeReversoSchema } from '../schemas/tpv/reverso.schema'
+import { sdkPropioEncendido } from '../services/tpv/reversoDeLaTerminal.service'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
 import { recordPromoterPing } from '../services/promoters/promoterLocation.service'
@@ -3805,8 +3806,15 @@ router.post(
  *       401:
  *         description: Unauthorized
  */
+/**
+ * Rediseño v2 (Codex r4 #1): con el candado general del SDK propio apagado (el default), las dos rutas del reverso no existen:
+ * `next('router')` sale de este router antes de autenticar, así que contestan el mismo 404 que una ruta desconocida y no escriben nada.
+ */
+const soloConElSdkPropio = (_req: Request, _res: Response, next: NextFunction) => (sdkPropioEncendido() ? next() : next('router'))
+
 router.post(
   '/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/intencion',
+  soloConElSdkPropio,
   authenticateTokenMiddleware,
   validateVenueAccess,
   validateRequest(intencionDeReversoSchema),
@@ -3889,6 +3897,7 @@ router.post(
  */
 router.post(
   '/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/resultado',
+  soloConElSdkPropio,
   authenticateTokenMiddleware,
   validateVenueAccess,
   validateRequest(resultadoDeReversoSchema),

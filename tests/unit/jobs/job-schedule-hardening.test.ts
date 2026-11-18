@@ -25,7 +25,10 @@ jest.mock('@/services/terminal-payment.service', () => ({
 }))
 
 // SDK propio (Tarea 7): la red de Blumon vence las lápidas del reverso antes de `reconcilePending`; aquí no toca la base.
-jest.mock('@/services/tpv/reversoDeLaTerminal.service', () => ({ vencerLapidasSinRespuesta: jest.fn().mockResolvedValue(0) }))
+jest.mock('@/services/tpv/reversoDeLaTerminal.service', () => ({
+  sdkPropioEncendido: () => false,
+  vencerLapidasSinRespuesta: jest.fn().mockResolvedValue(0),
+}))
 jest.mock('@/services/tpv/tpv-health.service', () => ({
   tpvHealthService: {
     checkOfflineTerminals: (...args: unknown[]) => mockCheckOfflineTerminals(...args),

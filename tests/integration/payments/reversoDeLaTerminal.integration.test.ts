@@ -53,7 +53,11 @@ jest.setTimeout(60_000)
 let f: Fixture
 let terminalDelFixture: string
 
+// Rediseño v2: el ciclo del reverso vive detrás del candado general del SDK propio (apagado por default). Esta suite lo prende y
+// lo deja como estaba; la parte «candado apagado» lo apaga sólo para sus pruebas.
+const candadoAntes = process.env.BLUMON_SDK_PROPIO_ENABLED
 beforeAll(async () => {
+  process.env.BLUMON_SDK_PROPIO_ENABLED = 'true'
   exigirBaseDesechable()
   f = await crearFixture('rv7')
   terminalDelFixture = (await exigir(prisma.terminal.findUnique({ where: { serialNumber: f.serial }, select: { id: true } }))).id
@@ -66,6 +70,8 @@ beforeEach(() => {
 afterEach(() => f.limpiar())
 let duena: string | undefined
 afterAll(async () => {
+  if (candadoAntes === undefined) delete process.env.BLUMON_SDK_PROPIO_ENABLED
+  else process.env.BLUMON_SDK_PROPIO_ENABLED = candadoAntes
   await prisma.activityLog.deleteMany({ where: { venueId: f.venueId } })
   await f.destruir()
   if (duena) await prisma.staff.deleteMany({ where: { id: duena } })
@@ -1224,7 +1230,11 @@ describe('el resultado del reverso (Tarea 10)', () => {
     expect(todos[0]).toMatchObject({ status: 'COMPLETED', idempotencyKey: attemptId, terminalPaymentRequestId: requestId })
     expect(todos[0].processorData).not.toHaveProperty('reversoIncierto')
     expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
-    expect((await lapidaDe(attemptId)).payload).toMatchObject({ estado: 'reverse_failed', resultado: { codigo } })
+    // Rediseño v2: el código se guarda normalizado (y sólo con forma de código corto).
+    expect((await lapidaDe(attemptId)).payload).toMatchObject({
+      estado: 'reverse_failed',
+      resultado: { codigo: codigo.trim().toUpperCase() },
+    })
     expect(await bitacora(attemptId)).toHaveLength(0)
     expect(alarmas()).toHaveLength(0)
   })
@@ -1906,5 +1916,102 @@ describe('el resultado del reverso (Tarea 10)', () => {
       expect(todos[0].processorData).not.toHaveProperty('reversoIncierto')
       expect(alarmas()).toHaveLength(0)
     })
+  })
+})
+
+/**
+ * Rediseño v2 (Codex r4 #1): con el candado general APAGADO —el default— el ciclo del reverso no existe. Una Nexgo de hoy ya
+ * anuncia su intento (S1, UUID) y su sesión alcanza estas rutas: contestan el mismo 404 que una ruta desconocida y no escriben
+ * nada; la red no barre lápidas.
+ */
+describe('rediseño v2 · candado apagado', () => {
+  beforeEach(() => {
+    delete process.env.BLUMON_SDK_PROPIO_ENABLED
+  })
+  afterEach(() => {
+    process.env.BLUMON_SDK_PROPIO_ENABLED = 'true'
+  })
+  const post = (attemptId: string, final: string, cuerpo: object) =>
+    request(app)
+      .post(ruta(attemptId, final))
+      .set('Authorization', `Bearer ${tokenDe(f.serial)}`)
+      .send(cuerpo)
+
+  it.each([undefined, 'false', 'TRUE', '1', ' true'])(
+    'BLUMON_SDK_PROPIO_ENABLED=%p · vínculo S1 de una Nexgo sin aviso de AngelPay ⇒ permiso y resultado 404 como una ruta desconocida, sin lápida',
+    async valor => {
+      if (valor !== undefined) process.env.BLUMON_SDK_PROPIO_ENABLED = valor
+      const { attemptId } = await intentoVinculado()
+      const desconocida = await post(attemptId, 'reverso/no-existe', {})
+      expect(desconocida.status).toBe(404)
+
+      const permiso = await post(attemptId, 'reverso/intencion', {})
+      const resultado = await post(attemptId, 'reverso/resultado', { descripcion: 'REVERSADA', reversadoEn: new Date().toISOString() })
+
+      for (const r of [permiso, resultado]) {
+        expect(r.status).toBe(404)
+        expect(r.text.replace(/reverso\/[\w-]+/, '')).toBe(desconocida.text.replace(/reverso\/[\w-]+/, ''))
+      }
+      expect(await lapidasDel(attemptId)).toBe(0)
+      expect(await prisma.providerEventLog.count({ where: { venueId: f.venueId, type: TIPO_REVERSO } })).toBe(0)
+      expect(await prisma.activityLog.count({ where: { venueId: f.venueId, data: { path: ['attemptId'], equals: attemptId } } })).toBe(0)
+    },
+  )
+
+  it('la red no corre el barrido de lápidas: una reversing de hace 6 min sigue reversing', async () => {
+    const { attemptId } = await intentoVinculado()
+    await sembrarLapida(attemptId, 'reversing', 6 * MIN)
+
+    await pase()
+
+    expect(await estadoDe(attemptId)).toBe('reversing')
+  })
+})
+
+/**
+ * Rediseño v2 (Codex r4 #6): el resultado del reverso guarda `descripcion` con el mismo saneador del texto libre del aviso y
+ * `codigo` sólo con forma de código corto; un PAN no llega ni a la lápida, ni a la bitácora, ni al log. La clasificación sigue
+ * con el valor normalizado.
+ */
+describe('rediseño v2 · datos de tarjeta en el resultado del reverso', () => {
+  const PAN = '4111111111111111'
+  const loLogueado = () =>
+    JSON.stringify((['info', 'warn', 'error'] as const).flatMap(n => ((logger[n] as unknown as jest.Mock).mock?.calls ?? []) as unknown[]))
+  beforeEach(() => {
+    jest.spyOn(logger, 'info')
+    jest.spyOn(logger, 'warn')
+  })
+  afterEach(() => {
+    ;(logger.info as jest.Mock).mockRestore?.()
+    ;(logger.warn as jest.Mock).mockRestore?.()
+  })
+  const resultado = (attemptId: string, cuerpo: object) =>
+    request(app)
+      .post(ruta(attemptId, 'reverso/resultado'))
+      .set('Authorization', `Bearer ${tokenDe(f.serial)}`)
+      .send(cuerpo)
+      .then(r => r)
+
+  it.each([
+    ['confirmado', { descripcion: `REVERSADA ${PAN}`, codigo: 'TX_014' }, 'reversed'],
+    ['no concluyente con el PAN en el código', { descripcion: `ERROR 4111.1111.1111.1111`, codigo: PAN }, 'reversing'],
+    ['rechazado', { descripcion: `RECHAZADA 4111/1111/1111/1111`, codigo: 'tx_007' }, 'reverse_failed'],
+  ] as const)('%s ⇒ ni la descripción ni el código con el PAN quedan en la lápida, la bitácora o el log', async (_caso, cuerpo, estado) => {
+    const { attemptId } = await intentoVinculado()
+    expect((await intencion(attemptId)).body).toMatchObject({ estado: 'reversing' })
+
+    const r = await resultado(attemptId, { ...cuerpo, operationNumber: 4321, reversadoEn: new Date().toISOString() })
+
+    expect(r.status).toBe(200)
+    expect(r.body.estado).toBe(estado)
+    const lapida = await lapidaDe(attemptId)
+    const bitacora = await prisma.activityLog.findMany({ where: { venueId: f.venueId, data: { path: ['attemptId'], equals: attemptId } } })
+    for (const visto of [JSON.stringify(lapida.payload), JSON.stringify(bitacora), loLogueado()]) {
+      for (const trozo of [PAN, '4111.1111', '1111.1111', '4111/1111', '1111/1111']) expect(visto).not.toContain(trozo)
+    }
+    const guardado = (lapida.payload as Record<string, any>).resultado ?? (lapida.payload as Record<string, any>).ultimoNoConcluyente
+    expect(guardado.descripcion).not.toMatch(/\d/)
+    if (cuerpo.codigo === PAN) expect(guardado).not.toHaveProperty('codigo')
+    else expect(guardado.codigo).toBe(cuerpo.codigo.toUpperCase())
   })
 })

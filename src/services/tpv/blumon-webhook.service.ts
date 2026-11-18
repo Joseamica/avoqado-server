@@ -23,7 +23,7 @@ import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
 import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
 import { llaveDeIntento } from './candadoDeIntento'
-import { vencerReversoSinRespuesta } from './reversoDeLaTerminal.service'
+import { sdkPropioEncendido, vencerReversoSinRespuesta } from './reversoDeLaTerminal.service'
 import {
   RECEIVER_FIRST_WINDOW_MS,
   capturarTarifaAlIngreso,
@@ -1293,7 +1293,7 @@ async function attemptPaymentMatch(
  * Familia E: los campos del aviso que se COPIAN, por lista BLANCA (antes se quitaban por lista negra y un campo EMV nuevo o un
  * objeto anidado se colaba). Son los del tipo `BlumonWebhookPayload` que leen el emparejamiento, la red de 30 s, la conciliación
  * a mano, el auditor de cobros sin aviso y los lectores SQL (`codeResponse`, `serialNumber`). Ninguno es un objeto: sólo se copia
- * un valor primitivo. `cardHolder` y `arqc` nunca están (R6, F6); `bin` y `lastFour` sólo en la base, nunca en el log.
+ * un valor primitivo. `cardHolder`, `arqc` y `aid` nunca están (R6, F6, rediseño v2); `bin` y `lastFour` sólo en la base, nunca en el log.
  */
 const CAMPOS_DEL_AVISO = [
   'business',
@@ -1314,55 +1314,62 @@ const CAMPOS_DEL_AVISO = [
   'membership',
   'provideResponse',
   'codeResponse',
-  'aid',
   'serialNumber',
   'realCounter',
 ] as const
 const SOLO_EN_LA_BASE = new Set(['bin', 'lastFour'])
-/** Lo que se quita a propósito y en silencio: no es «nuevo» (`_avoqado` lo escribe sólo el SERVIDOR). */
-const CAMPOS_QUE_NUNCA_SE_COPIAN = new Set(['cardHolder', 'arqc', '_avoqado'])
+/**
+ * Lo que se quita a propósito y en silencio: no es «nuevo» (`_avoqado` lo escribe sólo el SERVIDOR). Rediseño v2: `aid` también —
+ * nada lo lee para emparejar ni conciliar, y su forma hexadecimal admite un criptograma del chip.
+ */
+const CAMPOS_QUE_NUNCA_SE_COPIAN = new Set(['cardHolder', 'arqc', 'aid', '_avoqado'])
 /** Cuántos nombres de campos desconocidos se guardan: basta para saber que Blumon agregó algo. */
 const TOPE_DE_CAMPOS_NO_RECONOCIDOS = 20
 /**
- * R3-7: un nombre desconocido sólo se guarda si tiene forma de identificador y ninguna racha de dígitos de tarjeta; los demás
+ * R3-7: un nombre desconocido sólo se guarda si tiene forma de identificador y menos de 12 dígitos (con o sin separadores); los demás
  * sólo se cuentan (`camposNoReconocidosSinNombre`): una llave también puede traer el PAN.
  */
 const NOMBRE_GUARDABLE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 /**
  * R3-7: los campos con forma FIJA se validan por valor; uno que no la cumple no se copia y su nombre va a `camposNoReconocidos`.
- * `aid` (EMV) empieza con la letra del RID: un PAN (sólo dígitos) nunca pasa por él.
+ * Rediseño v2: la fecha y el RFC también (con forma fija no son texto libre: su enmascarado los volvería ilegibles).
  */
 const FORMA_FIJA = new Map<string, RegExp>([
   ['lastFour', /^\d{4}$/],
   ['bin', /^\d{6,8}$/],
-  ['aid', /^[A-Fa-f][0-9A-Fa-f]{9,31}$/],
+  ['dateTransaction', /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/],
+  ['businessRfc', /^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$/i],
 ])
 /**
- * R3-7: el texto LIBRE (lo que Blumon describe, no las llaves del emparejamiento) lleva tope de largo y toda racha de 12+ dígitos
- * —también separados por un espacio o un guion— enmascarada, antes de ir al log o a la base. Las llaves (`amount`, `reference`,
- * `operationNumber`, `authorizationCode`, `codeResponse`, `serialNumber`, `membership`, `realCounter`) se copian tal cual: el
- * emparejamiento y los lectores SQL comparan su valor exacto (`reference` es un timestamp de 14 dígitos).
+ * R3-7 + rediseño v2 (Codex r4 #6): el texto LIBRE (lo que Blumon describe, no las llaves del emparejamiento) va con TODO dígito
+ * enmascarado —así ningún separador deja pasar un PAN— y toda racha de 12+ hexadecimales también (un criptograma), con tope de
+ * largo, antes de ir al log o a la base. Nada lee dígitos de estos campos (la marca, el tipo de operación y el tipo de tarjeta
+ * son palabras). Las llaves (`amount`, `reference`, `operationNumber`, `authorizationCode`, `codeResponse`, `serialNumber`,
+ * `membership`, `realCounter`) se copian tal cual: el emparejamiento y los lectores SQL comparan su valor exacto (`reference` es
+ * un timestamp de 14 dígitos).
  */
 const TEXTO_LIBRE = new Set([
   'business',
-  'businessRfc',
   'cardType',
   'brand',
   'bank',
   'operationType',
   'descriptionResponse',
-  'dateTransaction',
   'authentication',
   'provideResponse',
 ])
-const LARGO_DEL_TEXTO = 120
-const RACHA_DE_DIGITOS = /\d(?:[ -]?\d){11,}/g
-const MASCARA = '[enmascarado]'
 
-function enmascarar(valor: unknown): unknown {
+/**
+ * El saneador del texto libre que viene del banco (el aviso de Blumon y el resultado del reverso): `null` sigue `null`; un valor
+ * que no cambia conserva su tipo.
+ */
+export function enmascararTextoLibre(valor: unknown): unknown {
   if (valor === null) return valor
   const texto = String(valor)
-  const limpio = texto.replace(RACHA_DE_DIGITOS, MASCARA).slice(0, LARGO_DEL_TEXTO)
+  const limpio = texto
+    .replace(/[0-9A-Fa-f]{12,}/g, '[enmascarado]')
+    .replace(/\d/g, '#')
+    .slice(0, 120)
   return limpio === texto ? valor : limpio
 }
 
@@ -1376,8 +1383,8 @@ function copiaPorListaBlanca(aviso: Record<string, unknown>, destino: 'base' | '
     const primitivo = valor === null || ['string', 'number', 'boolean'].includes(typeof valor)
     const conForma = FORMA_FIJA.get(campo)?.test(String(valor)) ?? true
     if (permitidos.has(campo) && primitivo && conForma) {
-      if (destino === 'base' || !SOLO_EN_LA_BASE.has(campo)) copia[campo] = TEXTO_LIBRE.has(campo) ? enmascarar(valor) : valor
-    } else if (!NOMBRE_GUARDABLE.test(campo) || new RegExp(RACHA_DE_DIGITOS.source).test(campo)) {
+      if (destino === 'base' || !SOLO_EN_LA_BASE.has(campo)) copia[campo] = TEXTO_LIBRE.has(campo) ? enmascararTextoLibre(valor) : valor
+    } else if (!NOMBRE_GUARDABLE.test(campo) || (campo.match(/\d/g)?.length ?? 0) >= 12) {
       sinNombre++
     } else if (noReconocidos.length < TOPE_DE_CAMPOS_NO_RECONOCIDOS) {
       noReconocidos.push(campo)
@@ -1459,6 +1466,8 @@ export type ContextoDelIngreso = {
  * EXACTOS (ausentes no aprueban), `reference` = llave de un intento con vínculo S1, y UNA sola afiliación con ese serial.
  */
 export async function contextoDelIntento(payload: BlumonWebhookPayload): Promise<ContextoDelIngreso | null> {
+  // Rediseño v2: con el candado general apagado (el default), ningún aviso entra por vínculo ni nace con contexto.
+  if (!sdkPropioEncendido()) return null
   if (payload.operationType !== 'VENTA' || payload.codeResponse !== '00') return null
   const attemptId = llaveDeIntento(payload.reference)
   const serial = typeof payload.serialNumber === 'string' ? payload.serialNumber : ''

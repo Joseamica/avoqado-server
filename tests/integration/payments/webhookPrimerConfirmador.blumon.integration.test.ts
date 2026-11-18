@@ -42,9 +42,17 @@ jest.setTimeout(60_000)
 
 let f: Fixture
 
+// Rediseño v2: el camino por vínculo vive detrás del candado general del SDK propio (apagado por default). Esta suite lo prende
+// y lo deja como estaba; la parte «candado apagado» lo apaga sólo para sus pruebas.
+const candadoAntes = process.env.BLUMON_SDK_PROPIO_ENABLED
 beforeAll(async () => {
+  process.env.BLUMON_SDK_PROPIO_ENABLED = 'true'
   exigirBaseDesechable()
   f = await crearFixture('bl5')
+})
+afterAll(() => {
+  if (candadoAntes === undefined) delete process.env.BLUMON_SDK_PROPIO_ENABLED
+  else process.env.BLUMON_SDK_PROPIO_ENABLED = candadoAntes
 })
 beforeEach(() => {
   jest.clearAllMocks()
@@ -63,7 +71,7 @@ const avoqadoDe = (ev: { payload: unknown }) => (ev.payload as Record<string, an
 const bitacora = (action: string) => (logAction as jest.Mock).mock.calls.filter(([p]) => p?.action === action)
 
 /** La terminal (la del fixture, salvo otra) anuncia el intento (S1) por su socket autenticado. */
-async function vincular(requestId: string, attemptId = randomUUID()) {
+async function vincular(requestId: string, attemptId: string = randomUUID()) {
   const ack = await terminalPaymentService.handleAttemptOpenedFromSocket(
     { requestId, attemptId },
     { socketId: 's', terminalId: f.serial, venueId: f.venueId },
@@ -795,7 +803,6 @@ describe('la red de 30 s (hallazgo 7)', () => {
     const r2 = await aviso(f.eventoBlumon(undefined))
     await prisma.$executeRaw`UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours' WHERE id = ${r2.eventLogId}`
 
-    // R3-5 (brazo legado): el vencimiento sólo alcanza lo que el pase intentó; `run` lo intenta primero y luego lo vence.
     await (red as unknown as { run: () => Promise<void> }).run()
 
     expect(await eventoDe(r2.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
@@ -809,7 +816,8 @@ describe('la red de 30 s (hallazgo 7)', () => {
       UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours', "nextAttemptAt" = now() + interval '5 minutes'
       WHERE id = ${ev.id}`
 
-    await red.markOrphaned()
+    // Como si este pase lo hubiera intentado: lo único que lo protege es su turno (si se quita esa condición, se vence aquí).
+    await red.markOrphaned(new Date(), new Set([ev.id]))
 
     expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING' })
 
@@ -967,39 +975,43 @@ describe('la red y la conciliación con avisos sin vínculo (Codex r3)', () => {
     },
   )
 
-  it.each([
-    ['lanza', () => Promise.reject(new Error('aviso roto'))],
-    [
-      'contesta PROCESSING_ERROR',
-      async () => ({ success: false, action: 'ERROR', errorReason: 'PROCESSING_ERROR', message: 'aviso roto' }),
-    ],
-  ] as const)(
-    'R3-6: más avisos que fallan siempre (%s) que el lote ⇒ el aviso sano de detrás se registra en a lo más 2 pases',
-    async (_caso, falla) => {
-      const { merchantAccountId } = await f.conAfiliacionBlumon()
-      const rotos: string[] = []
-      for (let i = 0; i < 3; i++) rotos.push((await sembrarAviso(f.eventoBlumon(undefined), (10 - i) * 60_000)).id)
-      const sano = f.eventoBlumon(undefined)
-      const filaSana = await sembrarAviso(sano, 60_000)
-      const rest = await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: sano.operationNumber })
-      const lote = red as unknown as { BATCH_SIZE: number }
-      const original = lote.BATCH_SIZE
-      lote.BATCH_SIZE = 2
-      const espia = romper(new Set(rotos), falla as () => Promise<never>)
-      try {
-        await correr()
-        await correr()
-      } finally {
-        espia.mockRestore()
-        lote.BATCH_SIZE = original
-      }
+  /**
+   * Rediseño v2 (Codex r4 #3, #4 y #5): para los avisos SIN contexto (`nextAttemptAt` null, el tráfico de hoy) la red es la de
+   * `develop`: sólo dentro de la ventana de 24 h, el más viejo primero, y a las 24 h se vencen aunque este pase no los haya
+   * intentado.
+   */
+  it('Codex r4 #5: aviso aprobado sin contexto de más de 24 h + un Payment nuevo con el código de autorización reciclado ⇒ no se le enlaza; ORPHANED', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const viejo = f.eventoBlumon(undefined)
+    const filaVieja = await sembrarAviso(viejo, 25 * HORA)
+    // Otro cobro de hoy: la misma afiliación, importe y marca, y el banco reutilizó el código de autorización.
+    const nuevo = await restBlumon(merchantAccountId, { attemptId: randomUUID(), auth: viejo.authorizationCode, ref: `R${randomUUID()}` })
 
-      expect(await eventoDe(filaSana.id)).toMatchObject({ status: 'PROCESSED', paymentId: rest.id })
-      for (const id of rotos) expect(await eventoDe(id)).toMatchObject({ status: 'PENDING', paymentId: null })
-    },
-  )
+    await correr()
 
-  it('R3-5 (brazo legado): un aviso sin turno vencido cuya recuperación lanza no pasa a ORPHANED; con desenlace, el pase siguiente sí', async () => {
+    expect(await eventoDe(filaVieja.id)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED', paymentId: null })
+    const pago = await exigir(prisma.payment.findUnique({ where: { id: nuevo.id } }))
+    expect(pago.processorData ?? {}).not.toHaveProperty('blumonWebhookReceived')
+    expect((pago.processorData as Record<string, unknown> | null)?.blumonOperationNumber).not.toBe(viejo.operationNumber)
+  })
+
+  it('paridad con develop: la red sólo toma avisos sin contexto de menos de 24 h, el más viejo primero', async () => {
+    const vencido = await sembrarAviso(f.eventoBlumon(undefined), 25 * HORA)
+    const filas = [10, 5, 1].map(min => () => sembrarAviso(f.eventoBlumon(undefined), min * 60_000))
+    const [diez, cinco, uno] = [await filas[0](), await filas[1](), await filas[2]()]
+    const espia = romper(new Set(), () => Promise.reject(new Error('sin uso')))
+    let vistos: string[] = []
+    try {
+      await red.reconcilePending()
+      vistos = espia.mock.calls.map(([id]) => id as string).filter(id => [vencido.id, diez.id, cinco.id, uno.id].includes(id))
+    } finally {
+      espia.mockRestore()
+    }
+
+    expect(vistos).toEqual([diez.id, cinco.id, uno.id])
+  })
+
+  it('paridad con develop: un aviso sin contexto vencido pasa a ORPHANED aunque su recuperación falle (o no se intente)', async () => {
     const fila = await sembrarAviso(f.eventoBlumon(undefined), 25 * HORA)
     const espia = romper(new Set([fila.id]), () => Promise.reject(new Error('lectura caída')))
     try {
@@ -1008,10 +1020,63 @@ describe('la red y la conciliación con avisos sin vínculo (Codex r3)', () => {
       espia.mockRestore()
     }
 
-    expect(await eventoDe(fila.id)).toMatchObject({ status: 'PENDING', nextAttemptAt: null })
+    expect(await eventoDe(fila.id)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+    // `markOrphaned` suelto (sin el conjunto de intentados) también lo vence: así era en develop.
+    const otra = await sembrarAviso(f.eventoBlumon(undefined), 25 * HORA)
+    await red.markOrphaned()
+    expect(await eventoDe(otra.id)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+  })
+
+  it('paridad con develop: un aviso sin contexto que falla dentro de las 24 h sigue PENDING y vuelve a intentarse en el pase siguiente', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const sano = f.eventoBlumon(undefined)
+    // El REST primero: así su respaldo inmediato no encuentra el aviso y sólo la red lo concilia.
+    const rest = await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: sano.operationNumber })
+    const fila = await sembrarAviso(sano, 60_000)
+    const espia = romper(new Set([fila.id]), () => Promise.reject(new Error('aviso roto')))
+    try {
+      await correr()
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await eventoDe(fila.id)).toMatchObject({ status: 'PENDING', attempts: 0 })
 
     await correr()
 
-    expect(await eventoDe(fila.id)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+    expect(await eventoDe(fila.id)).toMatchObject({ status: 'PROCESSED', paymentId: rest.id })
+  })
+})
+
+/**
+ * Rediseño v2 (Codex r4 #2): con el candado general APAGADO —el default— ningún aviso entra por vínculo. Aunque exista un vínculo
+ * S1 con la referencia numérica de un aviso real (el escritor S1 acepta cualquier cadena de hasta 64), con terminal, afiliación e
+ * importe que coinciden, el aviso sigue el emparejamiento de `develop`: no crea el cobro y su fila nace sin contexto.
+ */
+describe('rediseño v2 · candado apagado', () => {
+  beforeEach(() => {
+    delete process.env.BLUMON_SDK_PROPIO_ENABLED
+  })
+  afterEach(() => {
+    process.env.BLUMON_SDK_PROPIO_ENABLED = 'true'
+  })
+
+  it('vínculo con un attemptId de 14 dígitos + aviso aprobado con esa reference, terminal, afiliación e importe ⇒ sin Payment; la fila nace sin contexto', async () => {
+    await f.conAfiliacionBlumon()
+    const solicitud = await f.solicitud()
+    const referencia = `2026${String(Date.now()).slice(-10)}`
+    expect(referencia).toMatch(/^\d{14}$/)
+    await vincular(solicitud.requestId, referencia)
+
+    const r = await aviso(f.eventoBlumon(referencia))
+
+    expect(r.action).not.toBe('CONFIRMED')
+    expect(await pagos()).toHaveLength(0)
+    const ev = await eventoDe(r.eventLogId)
+    expect(ev).toMatchObject({ status: 'PENDING', attemptId: null, nextAttemptAt: null, paymentId: null })
+    expect(avoqadoDe(ev)).toBeUndefined()
+
+    // La red tampoco lo toma por vínculo: sigue PENDING sin dinero.
+    await red.reconcilePending()
+    expect(await pagos()).toHaveLength(0)
   })
 })

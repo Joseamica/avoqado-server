@@ -22,6 +22,15 @@ import { dineroConEstaLlaveSql, hayDineroConEstaLlaveSql } from './evidenciaPosi
 import { tipoDeEvidencia } from './segundaCaptura'
 import { utcTs } from '@/utils/sqlDates'
 
+/**
+ * Rediseño v2 (Codex r4 #1 y #2): el candado GENERAL del SDK propio. Apagado salvo `BLUMON_SDK_PROPIO_ENABLED` exactamente `'true'`;
+ * se lee en cada llamada. Apagado —el default—: ningún aviso de Blumon entra por vínculo (`contextoDelIntento`), las rutas del
+ * reverso no existen (404, `tpv.routes.ts`) y la red de 30 s no barre lápidas. La fase 3 lo cambia por el apagador por terminal.
+ */
+export function sdkPropioEncendido(): boolean {
+  return process.env.BLUMON_SDK_PROPIO_ENABLED === 'true'
+}
+
 export const EVENTO_REVERSO = (attemptId: string) => `blumon-tpv-reverso-${attemptId}`
 export const TIPO_REVERSO = 'REVERSO_TERMINAL'
 /**
@@ -393,6 +402,17 @@ export async function registrarResultadoDelReverso(entrada: {
   const llave = llaveDeIntento(entrada.attemptId)
   if (!llave) throw intentoNoEncontrado()
   const clase = clasificarResultadoDelReverso(entrada.resultado)
+  // Rediseño v2 (Codex r4 #6): lo que se guarda y se loguea del resultado. `descripcion` con el saneador del texto libre del aviso;
+  // `codigo` normalizado y sólo con forma de código corto (pocos dígitos: `TX_007`, `RQ_006`, `68`), si no se omite. La
+  // clasificación de arriba ya usó los valores normalizados en memoria.
+  const { enmascararTextoLibre } = await import('./blumon-webhook.service')
+  const codigoNormalizado = entrada.resultado.codigo?.trim().toUpperCase()
+  const codigo =
+    codigoNormalizado && /^[A-Z0-9_]{1,16}$/.test(codigoNormalizado) && (codigoNormalizado.match(/\d/g)?.length ?? 0) <= 4
+      ? codigoNormalizado
+      : undefined
+  const descripcion =
+    entrada.resultado.descripcion === undefined ? undefined : (enmascararTextoLibre(entrada.resultado.descripcion) as string)
 
   const decision = await prisma.$transaction(async tx => {
     await candadoDeIntento(tx, llave)
@@ -446,7 +466,7 @@ export async function registrarResultadoDelReverso(entrada: {
     const pagoDeOtroNegocio = estado === 'contradiction' && pagos[0].venueId !== entrada.venueId
     const paymentIdPublico = pagoDeOtroNegocio ? undefined : paymentId
     const ahora = new Date()
-    const { descripcion, codigo, operationNumber, reversadoEn } = entrada.resultado
+    const { operationNumber, reversadoEn } = entrada.resultado
     const payload = (
       clase === 'no_concluyente'
         ? {
@@ -549,7 +569,7 @@ export async function registrarResultadoDelReverso(entrada: {
 
   const { estado, eventLogId, paymentId } = decision
   if (decision.nuevo) {
-    const contexto = { attemptId: llave, venueId: entrada.venueId, eventLogId, codigo: entrada.resultado.codigo ?? null }
+    const contexto = { attemptId: llave, venueId: entrada.venueId, eventLogId, codigo: codigo ?? null }
     if (estado === 'contradiction') {
       logger.error('🚨 [Reverso] La terminal dice que reversó, pero el cobro ya está registrado — no se toca: lo resuelve una persona', {
         ...contexto,

@@ -462,6 +462,8 @@ describe('R6 — la base no guarda el titular', () => {
     const esperado: Record<string, unknown> = { ...completo }
     delete esperado.cardHolder
     delete esperado.arqc
+    // Rediseño v2 (Codex r4 #6): `aid` ya no se guarda — nada lo lee para emparejar ni conciliar, y su forma hex admite un criptograma.
+    delete esperado.aid
     expect(sinTitular(completo)).toEqual(esperado)
   })
 
@@ -496,16 +498,57 @@ describe('R6 — la base no guarda el titular', () => {
     const loLogueado = () => JSON.stringify(espias.flatMap(e => e.mock.calls))
     const guardado = () => mockedEventLogCreate.mock.calls[0][0].data
 
-    it.each(ramas)('un PAN en lastFour, bin o aid no va ni a la base ni al log; su nombre sí (%s)', async (_rama, cambios) => {
-      await processBlumonPaymentWebhook({ ...conTitular, ...cambios, lastFour: PAN, bin: PAN, aid: PAN })
+    it.each(ramas)(
+      'un PAN en lastFour, bin o aid no va ni a la base ni al log; el nombre de los dos primeros sí (%s)',
+      async (_rama, cambios) => {
+        await processBlumonPaymentWebhook({ ...conTitular, ...cambios, lastFour: PAN, bin: PAN, aid: PAN })
 
-      const p = guardado().payload
-      expect(JSON.stringify(guardado())).not.toContain(PAN)
-      expect(p).not.toHaveProperty('lastFour')
-      expect(p).not.toHaveProperty('bin')
-      expect(p).not.toHaveProperty('aid')
-      expect(p.camposNoReconocidos).toEqual(expect.arrayContaining(['lastFour', 'bin', 'aid']))
-      expect(loLogueado()).not.toContain(PAN)
+        const p = guardado().payload
+        expect(JSON.stringify(guardado())).not.toContain(PAN)
+        expect(p).not.toHaveProperty('lastFour')
+        expect(p).not.toHaveProperty('bin')
+        expect(p).not.toHaveProperty('aid')
+        expect(p.camposNoReconocidos).toEqual(expect.arrayContaining(['lastFour', 'bin']))
+        expect(loLogueado()).not.toContain(PAN)
+      },
+    )
+
+    // Rediseño v2 (Codex r4 #6): en el texto libre TODO dígito se enmascara (cualquier separador) y toda racha de 12+ hex también.
+    it.each(ramas)(
+      'descriptionResponse con un PAN separado por puntos o diagonales ⇒ ni en la base ni en el log (%s)',
+      async (_rama, cambios) => {
+        await processBlumonPaymentWebhook({
+          ...conTitular,
+          ...cambios,
+          descriptionResponse: 'TARJETA 4111.1111.1111.1111 Y 4111/1111/1111/1111 FIN',
+        })
+
+        const d = guardado().payload.descriptionResponse
+        expect(d).toMatch(/^TARJETA .+ Y .+ FIN$/)
+        expect(d).not.toMatch(/\d/)
+        for (const visto of [JSON.stringify(guardado()), loLogueado()]) {
+          for (const trozo of ['4111.1111', '1111.1111', '4111/1111', '1111/1111']) expect(visto).not.toContain(trozo)
+        }
+      },
+    )
+
+    it.each(ramas)(
+      'descriptionResponse con 16 hexadecimales (un criptograma) ⇒ enmascarado en la base y en el log (%s)',
+      async (_rama, cambios) => {
+        await processBlumonPaymentWebhook({ ...conTitular, ...cambios, descriptionResponse: 'ARQC ABCDEF0123456789 FIN' })
+
+        expect(guardado().payload.descriptionResponse).toMatch(/^ARQC .+ FIN$/)
+        expect(JSON.stringify(guardado())).not.toContain('ABCDEF')
+        expect(loLogueado()).not.toContain('ABCDEF')
+      },
+    )
+
+    it.each(ramas)('aid no se guarda ni se loguea, ni siquiera uno legítimo, y no cuenta como campo nuevo (%s)', async (_rama, cambios) => {
+      await processBlumonPaymentWebhook({ ...conTitular, ...cambios, aid: 'A0000000031010' })
+
+      expect(guardado().payload).not.toHaveProperty('aid')
+      expect(guardado().payload.camposNoReconocidos ?? []).not.toContain('aid')
+      expect(loLogueado()).not.toContain('A0000000031010')
     })
 
     it.each(ramas)(
@@ -546,11 +589,16 @@ describe('R6 — la base no guarda el titular', () => {
       const largo = sinTitular({ ...ventaPayload, descriptionResponse: 'A'.repeat(500), bank: 'BANCO' }) as any
       expect(largo.descriptionResponse.length).toBeLessThanOrEqual(120)
       expect(largo.bank).toBe('BANCO')
-      expect(sinTitular({ ...ventaPayload, lastFour: '1234', bin: '41111111', aid: 'A0000000031010' })).toMatchObject({
+      expect(sinTitular({ ...ventaPayload, lastFour: '1234', bin: '41111111' })).toMatchObject({
         lastFour: '1234',
         bin: '41111111',
-        aid: 'A0000000031010',
       })
+      // Las fechas y el RFC tienen forma fija: pasan enteros; con otra forma no se copian.
+      expect(sinTitular({ ...ventaPayload, dateTransaction: '20/01/2021 18:24:38', businessRfc: 'XAXX010101000' })).toMatchObject({
+        dateTransaction: '20/01/2021 18:24:38',
+        businessRfc: 'XAXX010101000',
+      })
+      expect(sinTitular({ ...ventaPayload, dateTransaction: `x ${PAN}`, businessRfc: PAN })).not.toHaveProperty('dateTransaction')
       expect(JSON.stringify(paraElLog({ ...ventaPayload, descriptionResponse: `X ${PAN}` }))).not.toContain(PAN)
     })
   })
