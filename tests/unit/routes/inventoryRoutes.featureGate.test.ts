@@ -51,8 +51,8 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 // El permiso EFECTIVO (con el filtro de marca blanca) se simula: `mockPermisoEfectivo` decide si `verifyAccess` deja pasar.
 const mockPermisoEfectivo = { ok: true, pedidos: [] as string[] }
 jest.mock('@/middlewares/verifyAccess.middleware', () => ({
-  verifyAccess: (opciones: { permission?: string }) => (_req: any, res: any, next: any) => {
-    mockPermisoEfectivo.pedidos.push(String(opciones.permission))
+  verifyAccess: (opciones: { permission?: string; featureCode?: string }) => (_req: any, res: any, next: any) => {
+    mockPermisoEfectivo.pedidos.push(`${opciones.permission}+${opciones.featureCode}`)
     return mockPermisoEfectivo.ok ? next() : res.status(403).json({ code: 'PERMISSION_DENIED', permisoEfectivo: opciones.permission })
   },
 }))
@@ -411,6 +411,14 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
       const res = await request(server).post(WIZARD_URL).send(porPiezas)
       expect(res.status).toBe(403)
       expect(res.body.permisoEfectivo).toBe('inventory:update')
+      expect(mockPermisoEfectivo.pedidos).toEqual(['inventory:update+AVOQADO_INVENTORY']) // permiso Y función de marca blanca (r10 #1)
+    })
+
+    it('Codex r10 #2: la recomendación también pide Inventario de marca blanca: no se ofrecen piezas que no se pueden guardar', async () => {
+      mockPermisoEfectivo.ok = false
+      const res = await request(server).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/should-use-inventory`)
+      expect(res.status).toBe(403)
+      expect(mockPermisoEfectivo.pedidos).toEqual(['inventory:read+AVOQADO_INVENTORY'])
     })
 
     it('el alta SIN inventario no pide el permiso efectivo de inventario (como siempre)', async () => {

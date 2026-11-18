@@ -124,11 +124,13 @@ const router = Router({ mergeParams: true })
 const candadoSiPidePremium: RequestHandler = (req, res, next) =>
   altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
 
-// Codex r9 #1 de na1d52b5: con marca blanca, el panel le quita los permisos de inventario a quien tiene Inventario apagado, pero
-// `checkPermission` evalúa el rol sin ese filtro. El alta CON inventario pide además el permiso EFECTIVO (`verifyAccess`, con el filtro
-// de marca blanca y la suplantación), el mismo que ve el panel.
+// Codex r9 #1 y r10 #1-#2 de na1d52b5: con marca blanca e Inventario apagado, `checkPermission` evalúa el rol sin ese filtro, y el
+// filtro deja pasar el comodín `inventory:*` de Admin y Dueño. Por eso se pide también la FUNCIÓN de marca blanca (`AVOQADO_INVENTORY`;
+// fuera de marca blanca siempre pasa), con la suplantación resuelta (`verifyAccess`). La usan el alta CON inventario y la recomendación,
+// para no ofrecer piezas que no se pueden guardar.
+const inventarioDeMarcaBlanca = (permission: string) => verifyAccess({ permission, featureCode: 'AVOQADO_INVENTORY' })
 const permisoEfectivoSiLlevaInventario: RequestHandler = (req, res, next) =>
-  productoLlevaInventario(req.body?.inventory) ? verifyAccess({ permission: 'inventory:update' })(req, res, next) : next()
+  productoLlevaInventario(req.body?.inventory) ? inventarioDeMarcaBlanca('inventory:update')(req, res, next) : next()
 
 // Codex r5 #1 de na1d52b5: donde el alta por el asistente era 403 (negocio SIN inventario Premium), ahora pasa; ahí pide también el
 // permiso del alta normal (`menu:create`), para no ampliar lo que puede un rol personalizado con sólo `inventory:update`. Con inventario
@@ -174,6 +176,7 @@ router.post(
 router.get(
   '/should-use-inventory',
   checkPermission('inventory:read'),
+  inventarioDeMarcaBlanca('inventory:read'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.shouldUseInventory,
 )
