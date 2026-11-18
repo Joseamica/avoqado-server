@@ -6,14 +6,14 @@
  * returns a lighter payload suitable for mobile clients.
  */
 
-import { PaymentMethod, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, Prisma, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
-import { totalDelRenglonEnElTicket, totalesDelComprobante, totalesSinLaCortesia } from '../shared/ticketTotals'
+import { cortesiaEnCeroDe, totalDelRenglonEnElTicket, totalesDelComprobante, totalesSinLaCortesia } from '../shared/ticketTotals'
 import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
@@ -270,7 +270,14 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
   // D41 «C» (Codex r2 #1): `ticketTotals` sigue diciendo lo que entienden las apps publicadas (sin la cortesía en $0, que sus renglones
   // pintan en $0); la app nueva la suma con `cortesiaDelTicket` y pinta cada renglón con `totalEnElTicket`.
-  const { totales: totalesParaLasApps, cortesia: cortesiaDelTicket } = totalesSinLaCortesia(totalesDelTicket)
+  const { totales: totalesParaLasApps, cortesia: cortesiaDelComprobante } = totalesSinLaCortesia(totalesDelTicket)
+  // Codex r5 #1: la cortesía del comprobante sólo viaja si cuadra con los renglones que se van a pintar (los de la orden de HOY). Un
+  // cobro que Soporte movió a otra orden tras emitir su recibo trae la cortesía de la mesa original: sin esto, la app nueva pintaba un
+  // subtotal de $75 con renglones de $55. Sin cuadrar, se reimprime como antes (subtotal y renglones sin la cortesía).
+  const cortesiaDelTicket =
+    cortesiaDelComprobante > 0 && cortesiaEnCeroDe(payment.order?.items ?? []).equals(new Prisma.Decimal(String(cortesiaDelComprobante)))
+      ? cortesiaDelComprobante
+      : 0
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -388,7 +395,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
         total: Number(item.total),
         // D41 «C» (aditivo): lo que pinta el renglón en la reimpresión de la app nueva, que suma `cortesiaDelTicket` al subtotal (la
         // cortesía que Mesas guardó en $0, a su bruto). `total` no cambia: lo leen las devoluciones y las apps publicadas.
-        totalEnElTicket: totalDelRenglonEnElTicket(item, totalesDelTicket),
+        totalEnElTicket: totalDelRenglonEnElTicket(item, cortesiaDelTicket > 0 ? totalesDelTicket : null),
         // C2 A-R4 (aditivo, opcional): lo que cobró el renglón completo; se omite si la venta no es atribuible (A-R3).
         // Los POS usan `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor al devolver.
         ...(chargedTotal === undefined ? {} : { chargedTotal }),
