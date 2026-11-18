@@ -25,6 +25,49 @@ export function fechaHoraDelNegocio(raw: string | Date, timezone: string): Date 
   return new Date(texto)
 }
 
+/**
+ * `true` si es un texto SIN zona cuya hora no existe en `timezone` porque el reloj se la salta (cambio de horario de
+ * primavera: en Tijuana, el 14-mar-2027 de 02:00 brinca a 03:00). Convertirla daría otra hora (01:30 o 03:30) sin que nadie
+ * lo pidiera (tarjeta naa485b3). Se compara la hora de vuelta en la zona con la escrita. La hora que pasa DOS veces
+ * (otoño) sí existe: se toma una y no se rechaza. Una hora con `Z`, con desfase o un `Date` ya es un instante: nunca.
+ *
+ * No usa date-fns-tz: arma la fecha con la zona del PROCESO y su `getTimezoneOffset` se equivoca junto al salto (medido:
+ * −7 h a las 01:59 de Tijuana, que todavía es −8 h). Aquí todo se mide con `Intl` en la zona pedida.
+ */
+export function horaQueNoExiste(raw: string | Date, timezone: string): boolean {
+  if (typeof raw !== 'string') return false
+  const texto = raw.trim()
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(texto)
+  if (!m || !SIN_ZONA.test(texto)) return false
+  const comoUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
+  if (Number.isNaN(comoUtc)) return false
+  try {
+    // Desfase de la zona en el instante tentativo y, si cambia ahí, en el corregido.
+    const primero = relojDeLaZonaComoUtc(comoUtc, timezone) - comoUtc
+    let instante = comoUtc - primero
+    const segundo = relojDeLaZonaComoUtc(instante, timezone) - instante
+    if (segundo !== primero) instante = comoUtc - segundo
+    return relojDeLaZonaComoUtc(instante, timezone) !== comoUtc
+  } catch {
+    return false // zona desconocida: no es «hora inexistente»; la conversión de siempre decide
+  }
+}
+
+/** La hora del reloj de `timezone` en el instante `ms`, escrita como si fuera UTC (minutos exactos). */
+function relojDeLaZonaComoUtc(ms: number, timezone: string): number {
+  const partes = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date(ms))
+  const v = (tipo: string) => Number(partes.find(p => p.type === tipo)?.value)
+  return Date.UTC(v('year'), v('month') - 1, v('day'), v('hour'), v('minute'))
+}
+
 /** Forma válida para el esquema: un Date válido o un texto que `fechaHoraDelNegocio` entiende. */
 export function esFechaHoraValida(raw: unknown): boolean {
   if (raw instanceof Date) return !Number.isNaN(raw.getTime())

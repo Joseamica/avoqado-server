@@ -50,7 +50,7 @@ import {
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
-import { fechaHoraDelNegocio } from '@/utils/fechaHoraDelNegocio'
+import { fechaHoraDelNegocio, horaQueNoExiste } from '@/utils/fechaHoraDelNegocio'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -1953,6 +1953,11 @@ export async function rescheduleReservation(
   const originalStartsAt = original.startsAt
   const tz = original.venue?.timezone || 'America/Mexico_City'
 
+  // naa485b3: en una zona con horario de verano (Tijuana y la frontera) una hora sin zona puede no existir; convertirla la
+  // corría en silencio a otra. Se rechaza ANTES de tocar nada.
+  if (horaQueNoExiste(data.startsAt, tz) || horaQueNoExiste(data.endsAt, tz)) {
+    throw new BadRequestError('Esa hora no existe por el cambio de horario; elige otra')
+  }
   const newStartsAt = fechaHoraDelNegocio(data.startsAt, tz)
   const newEndsAt = fechaHoraDelNegocio(data.endsAt, tz)
   if (Number.isNaN(newStartsAt.getTime()) || Number.isNaN(newEndsAt.getTime())) {
