@@ -72,7 +72,10 @@ describe('even exchange (E1)', () => {
       exchange: { role: 'CREDIT' },
     })
     const sale = await prisma.order.findUniqueOrThrow({ where: { id: e.newOrderId }, include: { payments: true, orderCustomers: true } })
+    expect(e.newOrderNumber).toMatch(/^ORD-0\d{12}$/)
     expect(sale).toMatchObject({
+      // D30: la venta del cambio recibe su folio de la base (no `ORD-<ms>`), y la respuesta trae ese mismo.
+      orderNumber: e.newOrderNumber,
       paymentStatus: 'PAID',
       servedById: s.seller.id,
       createdById: s.seller.id,
@@ -219,7 +222,12 @@ describe('even exchange (E1)', () => {
       select: { effectKey: true, status: true, reason: true, expectedQuantityBase: true },
     })
     expect(lineas).toEqual([
-      { effectKey: s.order.items[0].id + '#NO_REPONER', status: 'SKIPPED', reason: 'NOT_RESTOCKED', expectedQuantityBase: new Prisma.Decimal(1) },
+      {
+        effectKey: s.order.items[0].id + '#NO_REPONER',
+        status: 'SKIPPED',
+        reason: 'NOT_RESTOCKED',
+        expectedQuantityBase: new Prisma.Decimal(1),
+      },
     ])
   })
 

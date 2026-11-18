@@ -1584,7 +1584,6 @@ export interface PreparacionDeVenta {
   fuente: NonNullable<CreateOrderInput['source']>
   itemsNormales: CreateOrderItemInput[]
   promocionesUnicas: Array<NonNullable<CreateOrderItemInput['promotionRef']>>
-  orderNumber: string
   tipDecimal: number
   normalizedCustomerId: string | null
   resolvedCustomerName: string | null
@@ -1708,8 +1707,7 @@ export async function prepararVentaDeMostrador(
   // MISMA promoción (un doble tap del cajero), no dos combos.
   const promocionesUnicas = [...new Map(itemsConPromocion.map(it => [it.promotionRef!.promotionInstanceId, it.promotionRef!])).values()]
 
-  // Generate order number
-  const orderNumber = `ORD-${Date.now()}`
+  // D30: el folio ya no se arma aquí; lo pone la base al insertar la orden (`order_number_next()`).
 
   // Tip (cents -> decimal). In Mexico, tip is added on top of the tax-inclusive subtotal.
   const tipDecimal = (input.tip || 0) / 100
@@ -1777,7 +1775,6 @@ export async function prepararVentaDeMostrador(
     fuente,
     itemsNormales,
     promocionesUnicas,
-    orderNumber,
     tipDecimal,
     normalizedCustomerId,
     resolvedCustomerName,
@@ -1871,7 +1868,6 @@ export async function crearVentaDeMostradorEnTx(
     fuente,
     itemsNormales,
     promocionesUnicas,
-    orderNumber,
     tipDecimal,
     normalizedCustomerId,
     resolvedCustomerName,
@@ -2081,7 +2077,7 @@ export async function crearVentaDeMostradorEnTx(
     data: {
       venueId,
       shiftId: turnoDeLaOrden?.id ?? null,
-      orderNumber,
+      // D30: sin `orderNumber` — el folio lo pone la base (`order_number_next()`); la respuesta lee el insertado.
       externalId,
       reservationId: linkedReservationId,
       tableId: input.tableId || null,
@@ -2225,7 +2221,7 @@ export async function crearVentaDeMostradorEnTx(
       entity: 'Order',
       entityId: createdOrder.id,
       data: {
-        orderNumber,
+        orderNumber: createdOrder.orderNumber,
         source: fuente,
         enLaCola: input.isOfflineReplay === true,
         horaDeLaVenta: precioMostrado.horaDeLaVenta.toISOString(),
@@ -3453,7 +3449,7 @@ export async function splitOrderItemsInTransaction(
       shiftId: source.shiftId,
       tableId: source.tableId,
       covers: source.covers,
-      orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      // D30: el folio lo pone la base (`order_number_next()`); el `ORD-<ms>-<4 al azar>` de antes podía repetirse.
       servedById: source.servedById,
       type: source.type,
       status: 'PENDING',
@@ -3631,6 +3627,9 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
 
   const movedItemIds: string[] = []
   const results: Array<{ id: string; orderNumber: string; seat: number }> = []
+  // D30: UN tronco de la base para toda la división; cada cuenta es `<tronco>-S<asiento>`. Dos mesas divididas a la vez, ambas
+  // con asiento 2, ya no comparten folio (antes `ORD-<ms>-<2 al azar>-S2`).
+  const [{ folio: tronco }] = await tx.$queryRaw<Array<{ folio: string }>>`SELECT order_number_next() AS folio`
   for (const seat of seatsToMove) {
     const itemIds = bySeat.get(seat) as string[]
     const newOrder = await tx.order.create({
@@ -3645,7 +3644,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
         // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
         // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
         covers: 1,
-        orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 4).toUpperCase()}-S${seat}`,
+        orderNumber: `${tronco}-S${seat}`,
         customerName: `Asiento ${seat}`,
         servedById: source.servedById,
         type: source.type,

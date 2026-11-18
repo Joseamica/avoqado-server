@@ -4134,7 +4134,9 @@ model Order {
   venue          Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
 
   // Order info
-  orderNumber      String
+  // D30: el folio lo pone la base (`ORD-0` + 12 cifras de la secuencia `order_number_seq`, sin vuelta). Un escritor que
+  // no lo manda recibe uno distinto aunque dos procesos inserten en el mismo milisegundo; los folios externos se guardan tal cual.
+  orderNumber      String           @default(dbgenerated("order_number_next()"))
   type             OrderType        @default(DINE_IN)
   source           OrderSource      @default(TPV)
   // ¿El precio cobrado ya traía el IVA? Lo declara cada escritor al crear (prueba de arquitectura

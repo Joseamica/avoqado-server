@@ -826,7 +826,7 @@ async function createExchangeSaleInTx(
     data: {
       venueId,
       createdAt: accountingAt,
-      orderNumber: `ORD-${Date.now()}`,
+      // D30: sin `orderNumber` — el folio lo pone la base (`order_number_next()`).
       externalId: `exchange:${body.idempotencyKey}`,
       shiftId: shift?.id ?? null,
       servedById: sale.order.servedById,

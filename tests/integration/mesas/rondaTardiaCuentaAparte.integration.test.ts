@@ -121,6 +121,8 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
       servedById: mesera,
       rondaTardiaDeId: cobrada,
       rondaTardiaAparato: aparatoMesera,
+      // D30: la cuenta aparte recibe su propio folio de la base, distinto del de la cobrada.
+      orderNumber: expect.stringMatching(/^ORD-0\d{12}$/),
     })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: t } })).toMatchObject({ status: 'OCCUPIED', currentOrderId: aparte })
     const [nota] = await notasDe(cobrada)
