@@ -222,6 +222,7 @@ beforeEach(() => {
     orderKeyRelease: { findUnique: jest.fn().mockResolvedValue(null) },
     $queryRaw: jest.fn().mockImplementation(async (query: any) => {
       const sql = Array.isArray(query) ? query.join('?') : query.sql
+      if (sql.includes('order_number_next()')) return [{ folio: 'ORD-0000000000077' }] // D30: el tronco de dividir por asiento
       return [
         { id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') && !sql.includes('FROM "Order"') ? 'venue' : 'order' },
       ]
@@ -347,6 +348,8 @@ describe('locked mobile writers', () => {
           values: ['venue', ['order']],
         },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
+        // D30: dividir por asiento pide UN tronco de folio a la base, ya con todos los candados tomados.
+        ...(name === 'splitBySeat' ? [{ sql: 'SELECT order_number_next() AS folio', values: [] }] : []),
       ])
       const [venueLock, kitchenLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
       expect(kitchenLock).toBeLessThan(orderLock)

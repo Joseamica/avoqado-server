@@ -501,8 +501,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
     }
   }
 
-  // Generate order number (sequential timestamp-based)
-  const orderNumber = `ORD-${Date.now()}`
+  // D30: el folio lo pone la base al insertar (`order_number_next()`), nunca el reloj.
 
   // Resolve terminalId: use explicit terminalId, or auto-resolve from deviceSerialNumber (JWT)
   let resolvedTerminalId = input.terminalId || null
@@ -531,7 +530,6 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
         shiftId: currentShift?.id ?? null,
         tableId: input.tableId || null,
         covers: input.covers || 1,
-        orderNumber,
         servedById: input.waiterId || null,
         createdById: input.waiterId || null,
         terminalId: resolvedTerminalId, // Track which terminal created this order
@@ -1311,7 +1309,6 @@ export async function createOrderWithItems(
 
   // Etapa 3 del KDS: un carrito GRATIS nace pagado en esta transacción ⇒ lleva la marca de cocina. FUERA de la tx.
   const marcarCocina = totalPesos === 0 ? await debeMarcarCocina(venueId) : false
-  const orderNumber = `ORD-${Date.now()}`
   let createdOrder
   try {
     createdOrder = await runCreateOrderTransaction()
@@ -1389,7 +1386,7 @@ export async function createOrderWithItems(
             tableId: input.tableId || null,
             customerId: input.customerId || null,
             covers: 1,
-            orderNumber,
+            // D30: sin `orderNumber` — el folio lo pone la base (`order_number_next()`), nunca el reloj.
             // Estampar la llave de idempotencia: sin esto el dedup del retry
             // nunca encontraría la orden original.
             externalId,

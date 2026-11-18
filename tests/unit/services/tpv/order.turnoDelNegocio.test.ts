@@ -201,4 +201,71 @@ describe('assignTable (abrir mesa) — cae en el turno del NEGOCIO', () => {
     expect(isNewOrder).toBe(true)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
   })
+
+  // D30 (17-nov): dos mesas abiertas en el mismo milisegundo quedaban con el mismo `ORD-<ms>`. El folio lo pone la base.
+  it('D30: con el reloj congelado, la mesa no manda folio y responde el que insertó la base', async () => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.order.create.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-0000000000042', items: [] } as any)
+    try {
+      const { order } = await assignTable(VENUE, 'mesa-1', 'staff-1', 2, null)
+
+      expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+      expect(order.orderNumber).toBe('ORD-0000000000042')
+    } finally {
+      reloj.mockRestore()
+    }
+  })
+})
+
+describe('D30 · el folio de la orden de la TPV lo pone la base, no el reloj', () => {
+  let reloj: jest.SpyInstance
+  beforeEach(() => {
+    reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-0000000000042',
+      table: null,
+      items: [],
+      payments: [],
+    } as any)
+  })
+  afterEach(() => reloj.mockRestore())
+
+  it('createOrder no manda folio y responde el insertado', async () => {
+    const order = await createOrder(VENUE, { orderType: 'TAKEOUT' } as any)
+
+    expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+    expect(order.orderNumber).toBe('ORD-0000000000042')
+  })
+
+  it('createOrderWithItems no manda folio (la respuesta se relee de la base)', async () => {
+    ;(prismaMock as any).orderAction ??= { create: jest.fn() }
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ active: true, staff: { id: 'staff-1', active: true } } as any)
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', name: 'Café', price: 100, category: { name: 'Bebidas' } }] as any)
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([])
+    prismaMock.orderItem.create.mockResolvedValue({ id: 'oi-1' } as any)
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-0000000000042',
+      table: null,
+      items: [],
+      payments: [],
+    } as any)
+
+    const r: any = await createOrderWithItems(VENUE, {
+      items: [{ productId: 'p1', quantity: 1, unitPrice: 100 }],
+      staffId: 'staff-1',
+      taxAmount: 0,
+      subtotal: 100,
+      total: 100,
+      tip: 0,
+    } as any)
+
+    expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+    expect(JSON.stringify(r)).toContain('ORD-0000000000042')
+    expect(JSON.stringify(r)).not.toContain('1794963374538')
+  })
 })

@@ -89,6 +89,28 @@ describe('convertToOrder (presupuesto → orden) — cae en el turno del NEGOCIO
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
   })
+
+  it('D30: el folio lo pone la base; la respuesta y la bitácora llevan el insertado, no el reloj', async () => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-0000000000042',
+      items: [],
+      total: new Prisma.Decimal(100),
+      createdAt: new Date('2026-09-03T10:00:00.000Z'),
+    } as any)
+    try {
+      const r = await convertToOrder('est-1', VENUE, 'staff-1')
+
+      expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+      expect(r.order.orderNumber).toBe('ORD-0000000000042')
+      const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+      expect(logAction.mock.calls[0][0].data.orderNumber).toBe('ORD-0000000000042')
+    } finally {
+      reloj.mockRestore()
+    }
+  })
 })
 
 describe('openAreaTicket (vale de área) — cae en el turno del NEGOCIO', () => {
@@ -127,5 +149,18 @@ describe('openAreaTicket (vale de área) — cae en el turno del NEGOCIO', () =>
 
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+  })
+
+  it('D30: la cuenta del vale no manda folio (lo pone la base)', async () => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    try {
+      await openAreaTicket(VENUE, { code: CODIGO, deviceUid: 'dev-1', staffId: 'staff-1', items: [] } as any).catch(() => undefined)
+
+      expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+      expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+    } finally {
+      reloj.mockRestore()
+    }
   })
 })

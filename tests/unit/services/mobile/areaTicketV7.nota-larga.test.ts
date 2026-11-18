@@ -198,5 +198,7 @@ describe('D5 v5: materializar un vale con nota larga escribe el renglón con la 
     // El vale histórico no se toca: ninguna escritura a sus líneas, y la que se leyó sigue completa.
     expect(prismaMock.areaTicketLine.update).not.toHaveBeenCalled()
     expect(lineaVieja.notes).toBe(notaLarga)
+    // D30: la cuenta del cobro de vales no arma su folio (antes `ORD-<ms>-<4 al azar>`); lo pone la base.
+    expect((prismaMock.order.create as jest.Mock).mock.calls[0][0].data).not.toHaveProperty('orderNumber')
   })
 })

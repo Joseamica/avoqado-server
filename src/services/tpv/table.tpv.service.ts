@@ -426,8 +426,8 @@ export async function assignTable(
         data: { tableId: null },
       })
 
-    // Create new order
-    const orderNumber = `ORD-${Date.now()}`
+    // Create new order. D30: sin `orderNumber` — el folio lo pone la base (`order_number_next()`); el `ORD-${Date.now()}` de antes
+    // repitió folio cuando dos cajas abrieron mesas en el mismo milisegundo (ensayo del 17-nov).
 
     // 🔴 Abrir mesa ocurre EN el mostrador, dentro del turno de caja abierto ahora
     // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
@@ -444,7 +444,6 @@ export async function assignTable(
         shiftId: currentShift?.id ?? null,
         tableId: table.id,
         covers,
-        orderNumber,
         servedById: staffId,
         terminalId: terminalId || null, // Track which terminal created this order
         status: 'PENDING',
@@ -480,7 +479,7 @@ export async function assignTable(
         },
       })
 
-    logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
+    logger.info(`✅ [TABLE SERVICE] Created order ${newOrder.orderNumber} for table ${table.number}`)
     const otrasCuentas = [...juntoAOtras, ...ajenasQueSeQuedan]
     await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true, ...(otrasCuentas.length ? { otrasCuentas } : {}) })
 
@@ -627,7 +626,7 @@ export async function cuentaAparteParaRondaTardia(p: {
         shiftId: turnoVivo?.id ?? null,
         tableId: table.id,
         covers: p.covers,
-        orderNumber: `ORD-${Date.now()}`,
+        // D30: la cuenta aparte recibe su propio folio de la base (sin `orderNumber`).
         servedById: staffId,
         terminalId: null,
         status: 'PENDING',
