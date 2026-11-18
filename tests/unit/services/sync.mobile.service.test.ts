@@ -2706,6 +2706,265 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     )
   })
 
+  // ─── D20 (hz:72be07e6:D20): el cobro de la llave YA está en la base ─────────────────────────────────────────────────────
+  // El servidor cayó tras guardar el cobro y antes de cerrar la reserva (queda PROCESSING con su huella). El MISMO aparato lo
+  // reenvía con otra persona en sesión o sin el permiso de hoy: antes contestaba REJECTED y la TPV/el POS lo mandaban a «Acciones
+  // rechazadas» siendo dinero registrado. Ahora se contesta con ESE cobro (sólo devolver, nunca crear) y se cierra la reserva.
+  describe('D20 · el cobro de la llave ya está en la base', () => {
+    const conHuella = { ...MARCA, huella: { orderId: 'order-9', paymentId: 'payment-1' } }
+    const cobroGuardado = { id: 'payment-1', orderId: 'order-9', status: 'COMPLETED', type: 'REGULAR' }
+    const respuestaDelCobro = {
+      paymentId: 'payment-1',
+      orderId: 'order-9',
+      orderNumber: 'ORD-9',
+      amount: 5000,
+      tipAmount: 0,
+      changeCents: 0,
+      cashRetainedCents: 5000,
+      method: 'CASH',
+      status: 'COMPLETED',
+      digitalReceipt: { accessKey: 'k', receiptUrl: 'https://r', autofacturaAvailable: false },
+      remainingBalanceCents: 0,
+      orderPaymentStatus: 'PAID',
+      orderTotalCents: 5000,
+      totalPaidCents: 5000,
+    }
+    const ackEsperado = {
+      id: 'i-pay',
+      status: 'ACKED',
+      result: {
+        orderId: 'order-9',
+        paymentId: 'payment-1',
+        orderNumber: 'ORD-9',
+        digitalReceipt: { accessKey: 'k', receiptUrl: 'https://r', autofacturaAvailable: false },
+        amount: 5000,
+        tipAmount: 0,
+        changeCents: 0,
+        cashRetainedCents: 5000,
+        method: 'CASH',
+        remainingBalanceCents: 0,
+        orderPaymentStatus: 'PAID',
+        orderTotalCents: 5000,
+        totalPaidCents: 5000,
+      },
+    }
+    beforeEach(() => {
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(cobroGuardado)
+      ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue(respuestaDelCobro)
+    })
+
+    it.each([
+      // El recibo digital sólo a quien cobró: a otra persona del aparato le llega sin él.
+      { cual: 'otra persona en el mismo aparato', extra: { staffId: 'staff-ana' }, permiso: true, actor: 'staff-ana', recibo: false },
+      { cual: 'otra secuencia en el mismo aparato', extra: { seq: 3 }, permiso: true, actor: STAFF, recibo: true },
+      { cual: 'el mismo dueño sin el permiso de hoy', extra: {}, permiso: false, actor: STAFF, recibo: true },
+    ])('$cual ⇒ ACKED con ESE cobro, sin cobrar de nuevo, y la reserva se cierra con él', async ({ extra, permiso, actor, recibo }) => {
+      const fila = reserva('PAY_CASH', 'i-pay', 90_000, conHuella, extra)
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(fila)
+      const params = baseParams([pago()])
+      params.authorizeIntent.mockReturnValue(permiso)
+
+      const [ack] = await processIntents(params)
+
+      const esperado = recibo ? ackEsperado : { ...ackEsperado, result: { ...ackEsperado.result, digitalReceipt: null } }
+      expect(ack).toEqual(esperado)
+      // Sólo devolver: la bandera cierra el camino del pago nuevo y no viaja la huella (no hay transacción que marcar).
+      expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+      const [venueArg, ordenArg, input] = (orderMobileService.payCashOrder as jest.Mock).mock.calls[0]
+      expect([venueArg, ordenArg]).toEqual([VENUE, 'order-9'])
+      expect(input).toMatchObject({
+        amount: 5000,
+        tip: 0,
+        staffId: actor,
+        idempotencyKey: 'i-pay',
+        isOfflineReplay: true,
+        soloDevolverElCobroDeLaLlave: true,
+      })
+      expect(input.dentroDeLaTx).toBeUndefined()
+      // Contestar no escribe la reserva: sigue siendo de su dueño, y el recibo filtrado vale sólo para quien preguntó (Codex r2 #1).
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.deleteMany).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+    })
+
+    it('D7: el cobro cayó en la cuenta aparte ⇒ el acuse nombra la cuenta pedida y la aparte, como la primera vez', async () => {
+      const huellaD7 = { ...MARCA, huella: { orderId: 'order-aparte', paymentId: 'payment-1', cuentaOriginal: 'order-9' } }
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, huellaD7, { staffId: 'staff-ana' }),
+      )
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ ...cobroGuardado, orderId: 'order-aparte' })
+      ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ ...respuestaDelCobro, orderId: 'order-aparte' })
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({
+        status: 'ACKED',
+        result: { orderId: 'order-9', cuentaAparte: { orderId: 'order-aparte' }, paymentId: 'payment-1' },
+      })
+      expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][1]).toBe('order-aparte')
+    })
+
+    it('un mapa local del lote queda con la cuenta del cobro (localOrderId → orden del servidor)', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock)
+        .mockResolvedValueOnce(reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana', localRef: 'local-9' }))
+        .mockResolvedValue(null)
+
+      const acks = await processIntents(
+        baseParams([
+          { id: 'i-pay', seq: 9, type: 'PAY_CASH', payload: { localOrderId: 'local-9', amountCents: 5000 } },
+          { id: 'i-add', seq: 10, type: 'ADD_ITEMS', payload: { localOrderId: 'local-9', items: [{ productId: 'p1', quantity: 1 }] } },
+        ]),
+      )
+
+      expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
+      expect((orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0][1]).toBe('order-9')
+    })
+
+    it('OTRO aparato con la misma llave ⇒ el rechazo de siempre: no se le enseña el cobro ni se toca la fila', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { deviceId: 'device-b' }),
+      )
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+      expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { cual: 'la huella nombra otro pago', pagoEnBase: { ...cobroGuardado, id: 'payment-otro' } },
+      { cual: 'el pago de la llave es de otra cuenta', pagoEnBase: { ...cobroGuardado, orderId: 'order-otra' } },
+      { cual: 'el pago de la llave no se completó', pagoEnBase: { ...cobroGuardado, status: 'FAILED' } },
+      { cual: 'la llave es de una devolución', pagoEnBase: { ...cobroGuardado, type: 'REFUND' } },
+      { cual: 'no hay pago con la llave', pagoEnBase: null },
+    ])('sin prueba del cobro ($cual) ⇒ el rechazo de siempre, sin llamar al cobro ni tocar la fila', async ({ pagoEnBase }) => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
+      )
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(pagoEnBase)
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+      expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('si el cobro ya no se puede devolver (409 de «sólo devolver») ⇒ el rechazo de siempre y la fila intacta', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
+      )
+      ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(
+        new ConflictError('No hay un cobro registrado con esta llave en esta cuenta.', 'COBRO_DE_LA_LLAVE_NO_ENCONTRADO'),
+      )
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('una caída de base al leer el cobro ⇒ RETRY (transitorio), nunca un rechazo', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
+      )
+      ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(Object.assign(new Error('timeout'), { code: 'P2028' }))
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({ status: 'RETRY' })
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('Codex r2 #4: un reenvío SIN payload no truena el lote: el rechazo de siempre y el resto del lote sigue', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock)
+        .mockResolvedValueOnce(reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }))
+        .mockResolvedValue(null)
+
+      const acks = await processIntents(
+        baseParams([
+          { id: 'i-pay', seq: 9, type: 'PAY_CASH' },
+          { id: 'i-add', seq: 10, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } },
+        ]),
+      )
+
+      expect(acks.map(a => [a.id, a.status, a.errorCode])).toEqual([
+        ['i-pay', 'REJECTED', 'ACTOR_MISMATCH'],
+        ['i-add', 'ACKED', undefined],
+      ])
+      expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    })
+
+    it('control: sin huella (el cobro no ocurrió) otra persona sigue recibiendo ACTOR_MISMATCH y no se busca el pago', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, MARCA, { staffId: 'staff-ana' }),
+      )
+
+      const [ack] = await processIntents(baseParams([pago()]))
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+      expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    })
+
+    it('control: otra operación (OPEN_TABLE) de otra persona con huella sigue en ACTOR_MISMATCH (sólo el cobro se devuelve)', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('OPEN_TABLE', 'i-open', 90_000, { ...MARCA, huella: { orderId: 'order-1', isNewOrder: true } }, { staffId: 'staff-ana' }),
+      )
+
+      const [ack] = await processIntents(baseParams([{ id: 'i-open', seq: 9, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
+
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+      expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  it.each([
+    { errorCode: 'ACTOR_MISMATCH', texto: 'La operación pertenece a otra sesión. Requiere revisión del gerente.' },
+    { errorCode: 'PERMISSION_DENIED', texto: 'No tienes permiso para reproducir PAY_CASH.' },
+    { errorCode: 'OUTCOME_UNKNOWN', texto: 'No se pudo confirmar si la operación terminó. Revisa la cuenta antes de repetirla.' },
+    { errorCode: 'ALGO_DEL_DOMINIO', texto: 'El servidor ya había rechazado esta operación. Revisa la cuenta antes de repetirla.' },
+    { errorCode: null, texto: 'El servidor ya había rechazado esta operación. Revisa la cuenta antes de repetirla.' },
+  ])('D20: el rechazo repetido ($errorCode) trae un texto en español, no viene vacío', async ({ errorCode, texto }) => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue({
+      ...reserva('PAY_CASH', 'i-pay', 0, null),
+      status: 'REJECTED',
+      errorCode,
+    })
+
+    const [ack] = await processIntents(baseParams([pago()]))
+
+    expect(ack).toEqual({ id: 'i-pay', status: 'REJECTED', errorCode: errorCode ?? undefined, message: texto, result: undefined })
+  })
+
+  it('D20: un ACKED repetido sigue igual que siempre (sin texto añadido)', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue({
+      ...reserva('PAY_CASH', 'i-pay', 0, null),
+      status: 'ACKED',
+      resultJson: { paymentId: 'payment-1' },
+    })
+
+    const [ack] = await processIntents(baseParams([pago()]))
+
+    expect(ack).toEqual({ id: 'i-pay', status: 'ACKED', errorCode: undefined, result: { paymentId: 'payment-1' } })
+  })
+
+  it('D20: quien perdió su cierre y encuentra la fila REJECTED también recibe el texto', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...reserva('PAY_CASH', 'i-pay', 0, null), status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' })
+    ;(prisma.posSyncIntent.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    const [ack] = await processIntents(baseParams([pago()]))
+
+    expect(ack).toMatchObject({
+      status: 'REJECTED',
+      errorCode: 'OUTCOME_UNKNOWN',
+      message: 'No se pudo confirmar si la operación terminó. Revisa la cuenta antes de repetirla.',
+    })
+  })
+
   it('tras retomar, el resto del lote sigue en orden y usa la cuenta retomada', async () => {
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce(reserva('OPEN_TABLE', 'i-open', 61_000)).mockResolvedValue(null)
 

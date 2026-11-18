@@ -188,11 +188,41 @@ const enCurso = (intentId: string): SyncIntentAck => ({
 async function contestarVigente(venueId: string, intentId: string): Promise<SyncIntentAck> {
   const vigente = await prisma.posSyncIntent.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: intentId } } })
   if (!vigente || vigente.status === 'PROCESSING') return enCurso(intentId)
+  return ackDeFilaCerrada(vigente, intentId)
+}
+
+/**
+ * D20: la tabla no guarda el texto de un rechazo (sólo su código), y el rechazo repetido llegaba sin `message`: la TPV y el POS lo
+ * mostraban como «El cobro fue rechazado» sin decir por qué. Se repite con un texto fijo por código: el mismo de la primera vez
+ * cuando aquel era fijo, y uno genérico para los de dominio (su texto original no se guardó).
+ */
+function textoDelRechazoRepetido(errorCode: string | null | undefined, tipo: string | null | undefined): string {
+  switch (errorCode) {
+    case 'ACTOR_MISMATCH':
+      return 'La operación pertenece a otra sesión. Requiere revisión del gerente.'
+    case 'PERMISSION_DENIED':
+      return `No tienes permiso para reproducir ${tipo ?? 'esta operación'}.`
+    case 'OUTCOME_UNKNOWN':
+      return 'No se pudo confirmar si la operación terminó. Revisa la cuenta antes de repetirla.'
+    case 'UNKNOWN_INTENT_TYPE':
+      return `Tipo de intent desconocido: ${tipo ?? ''}`.trimEnd()
+    default:
+      return 'El servidor ya había rechazado esta operación. Revisa la cuenta antes de repetirla.'
+  }
+}
+
+/** El acuse de una reserva ya cerrada, tal cual se guardó; el rechazo, con su texto (D20). Aditivo: `status`/`errorCode` no cambian. */
+function ackDeFilaCerrada(
+  fila: { status: string; errorCode: string | null; resultJson: unknown; type?: string | null },
+  intentId: string,
+): SyncIntentAck {
+  const status = fila.status as 'ACKED' | 'REJECTED'
   return {
     id: intentId,
-    status: vigente.status as 'ACKED' | 'REJECTED',
-    errorCode: vigente.errorCode ?? undefined,
-    result: (vigente.resultJson as Record<string, unknown> | null) ?? undefined,
+    status,
+    errorCode: fila.errorCode ?? undefined,
+    ...(status === 'REJECTED' ? { message: textoDelRechazoRepetido(fila.errorCode, fila.type) } : {}),
+    result: (fila.resultJson as Record<string, unknown> | null) ?? undefined,
   }
 }
 
@@ -400,14 +430,7 @@ async function ackFromExisting(existing: any, intentId: string, intentType?: str
       message: 'Esta operación se recupera por su identidad HTTP',
     }
   }
-  if (existing.status !== 'PROCESSING') {
-    return {
-      id: intentId,
-      status: existing.status as 'ACKED' | 'REJECTED',
-      errorCode: existing.errorCode ?? undefined,
-      result: (existing.resultJson as Record<string, unknown> | null) ?? undefined,
-    }
-  }
+  if (existing.status !== 'PROCESSING') return ackDeFilaCerrada(existing, intentId)
 
   const createdAt = existing.createdAt instanceof Date ? existing.createdAt.getTime() : Date.now()
   const edad = Date.now() - createdAt
@@ -501,7 +524,15 @@ export async function processIntents(params: {
     let marca: MarcaDeReserva | null = null
     let huellaPrevia: Record<string, unknown> | undefined
     if (existing) {
-      const retoma = await intentarRetomar({ existing, intent, venueId, staffId, deviceId, authorizeIntent })
+      const retoma = await intentarRetomar({
+        existing,
+        intent,
+        venueId,
+        staffId,
+        deviceId,
+        authorizeIntent,
+        terminalSerialNumber: params.terminalSerialNumber,
+      })
       if (retoma.tipo === 'contestar') {
         const ack = retoma.ack
         // Reponer el mapa local para intents posteriores del mismo batch.
@@ -746,6 +777,7 @@ async function intentarRetomar(p: {
   staffId: string
   deviceId: string
   authorizeIntent: (intent: SyncIntentInput, requiredPermission: string) => boolean
+  terminalSerialNumber?: string
 }): Promise<Retoma> {
   const { existing, intent } = p
   const marca = leerMarca(existing.resultJson)
@@ -759,6 +791,14 @@ async function intentarRetomar(p: {
     existing.staffId === p.staffId &&
     (existing.seq ?? null) === (intent.seq ?? null) &&
     (!intent.staffId || intent.staffId === p.staffId)
+  const sinPermiso = mismoDueño
+    ? requiredPermissionsForIntent(intent).find(permission => !p.authorizeIntent(intent, permission))
+    : undefined
+  if (!mismoDueño || sinPermiso) {
+    // D20: antes de rechazar, ¿la huella ya prueba el cobro? Entonces el dinero está registrado y se contesta con él.
+    const delCobro = await ackDelCobroYaRegistrado({ ...p, marca })
+    if (delCobro) return { tipo: 'contestar', ack: delCobro }
+  }
   if (!mismoDueño) {
     return {
       tipo: 'contestar',
@@ -770,7 +810,6 @@ async function intentarRetomar(p: {
       },
     }
   }
-  const sinPermiso = requiredPermissionsForIntent(intent).find(permission => !p.authorizeIntent(intent, permission))
   if (sinPermiso) {
     return {
       tipo: 'contestar',
@@ -795,6 +834,86 @@ async function intentarRetomar(p: {
   })
   if (count !== 1) return { tipo: 'contestar', ack: await contestarVigente(p.venueId, intent.id) }
   return { tipo: 'retomar', reclamo, marca }
+}
+
+/**
+ * D20 (hz:72be07e6:D20): la reserva de un PAY_CASH quedó abierta CON su huella (el cobro commiteó y el servidor cayó antes de cerrarla)
+ * y la reenvía el mismo aparato con otra persona en sesión, con otra secuencia o sin el permiso de hoy. Retomarla no toca: no se cobra
+ * nada. Pero el cobro YA está en la base, y contestar REJECTED lo mandaba a «Acciones rechazadas» de la TPV y del POS siendo dinero
+ * registrado. Se contesta con ESE cobro, SIN escribir la reserva (sigue siendo de su dueño, como hoy):
+ *  - la prueba es la huella (commiteó con el pago) Y el pago de la llave: el mismo id, completado, de la cuenta de la huella;
+ *  - la respuesta sale de `payCashOrder` en modo «sólo devolver» (`soloDevolverElCobroDeLaLlave`): el mismo reintento idempotente de
+ *    siempre (libera la mesa si quedó saldada y repite los avisos idempotentes), que nunca llega al camino del pago nuevo;
+ *  - el acuse tiene la forma del cobro (`ackDelCobro`), con la cuenta pedida y la aparte de D7 como la primera vez;
+ *  - el recibo digital sólo se le da a quien cobró: a otra persona del aparato le llega sin recibo (`digitalReceipt: null`). Como no se
+ *    guarda nada, esa decisión vale sólo para quien pregunta (Codex r2 #1);
+ *  - otro aparato (`deviceId` distinto) no entra aquí: recibe el rechazo de siempre.
+ * null = no hay prueba del cobro o no aplica: el que llama contesta el rechazo de siempre.
+ */
+async function ackDelCobroYaRegistrado(p: {
+  existing: any
+  intent: SyncIntentInput
+  venueId: string
+  staffId: string
+  deviceId: string
+  marca: MarcaDeReserva
+  terminalSerialNumber?: string
+}): Promise<SyncIntentAck | null> {
+  const { existing, intent, venueId, marca } = p
+  if (intent.type !== 'PAY_CASH' || existing.deviceId !== p.deviceId) return null
+  const huella = marca.huella
+  const orderId = typeof huella?.orderId === 'string' ? huella.orderId : null
+  const paymentId = typeof huella?.paymentId === 'string' ? huella.paymentId : null
+  if (!orderId || !paymentId) return null
+  const cuentaOriginal = typeof huella?.cuentaOriginal === 'string' ? huella.cuentaOriginal : null
+  // Lo mismo que manda la cola desde la primera vez (la misma llave trae el mismo payload): sólo sirve para el cambio del acuse. Un
+  // intent sin payload no truena el lote (Codex r2 #4): sin importe, no hay acuse por evidencia.
+  const payload = (intent.payload ?? {}) as Record<string, unknown>
+  const amountCents = Number(payload.amountCents ?? NaN)
+  const tipCents = Number(payload.tipCents ?? 0)
+  if (!Number.isFinite(amountCents) || amountCents < 0 || !Number.isFinite(tipCents) || tipCents < 0) return null
+
+  try {
+    const guardado = await prisma.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+      select: { id: true, orderId: true, status: true, type: true },
+    })
+    if (!guardado || guardado.id !== paymentId || !esCobroCompletadoDeLaOrden(guardado, orderId)) return null
+    const cobro = await orderMobileService.payCashOrder(venueId, orderId, {
+      amount: amountCents,
+      tip: tipCents,
+      staffId: existing.staffId ?? p.staffId,
+      idempotencyKey: intent.id,
+      isOfflineReplay: true,
+      ...(p.terminalSerialNumber ? { terminalSerialNumber: p.terminalSerialNumber } : {}),
+      soloDevolverElCobroDeLaLlave: true,
+    })
+    const deQuienCobro = existing.staffId === p.staffId
+    logger.info(
+      `🧾 [POS SYNC] D20: el cobro ${paymentId} de ${intent.id} ya estaba en la base; se contesta con él a otra sesión del aparato ${p.deviceId}`,
+      { venueId, cobro: existing.staffId ?? null, sesion: p.staffId },
+    )
+    return ackDelCobro(
+      intent.id,
+      cuentaOriginal ?? orderId,
+      cuentaOriginal ? orderId : null,
+      deQuienCobro ? cobro : { ...cobro, digitalReceipt: null },
+    )
+  } catch (error: any) {
+    if (esErrorTransitorio(error)) {
+      return {
+        id: intent.id,
+        status: 'RETRY',
+        errorCode: error?.code ?? 'INTENT_RECOVERING',
+        message: 'No se pudo leer el cobro de forma segura. Reintenta.',
+      }
+    }
+    logger.warn(`⚠️ [POS SYNC] D20: el cobro de ${intent.id} no se pudo devolver; queda el rechazo de siempre`, {
+      venueId,
+      errorCode: error?.errorCode ?? error?.code,
+    })
+    return null
+  }
 }
 
 /**
@@ -1849,12 +1968,25 @@ async function applyPayCash(
         }
       : {}),
   })
+  return ackDelCobro(intent.id, cuentaAparte ? (cuentaPedida as string) : orderId, cuentaAparte, payment)
+}
+
+/**
+ * El acuse de un cobro: la MISMA forma para el que se acaba de registrar y para el que ya estaba en la base (D20). `cuentaPedida` es la
+ * cuenta que nombró el aparato; `cuentaAparte`, la de D7 cuando el cobro cayó ahí.
+ */
+function ackDelCobro(
+  intentId: string,
+  cuentaPedida: string,
+  cuentaAparte: string | null,
+  payment: Awaited<ReturnType<typeof orderMobileService.payCashOrder>>,
+): SyncIntentAck {
   return {
-    id: intent.id,
+    id: intentId,
     status: 'ACKED',
     result: {
       // D7: el aparato conoce la cuenta que pidió; la aparte va nombrada y el saldo de abajo es el de ella.
-      orderId: cuentaAparte ? cuentaPedida : orderId,
+      orderId: cuentaPedida,
       ...(cuentaAparte ? { cuentaAparte: { orderId: cuentaAparte } } : {}),
       paymentId: payment.paymentId,
       orderNumber: payment.orderNumber,
