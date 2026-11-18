@@ -85,20 +85,22 @@ describe('Task 4 — ACK only after durable persistence', () => {
  * La regresión «200 con eventLogId y 503 sin él» son las pruebas de arriba (H1: no se duplican).
  */
 describe('R6 — el aviso no deja titular ni tarjeta en el log', () => {
-  const conTarjeta = { ...validBody, cardHolder: 'HOMER SIMPSON', bin: '411111', lastFour: '1111' }
+  const conTarjeta = { ...validBody, cardHolder: 'HOMER SIMPSON', bin: '411111', lastFour: '1111', arqc: 'A1B2C3D4E5F60718' }
   const reqBuffer = (texto: string) => mockReq(Buffer.from(texto, 'utf8'))
   let espias: jest.SpyInstance[]
 
   /** Todos los argumentos de todas las llamadas a logger.*, serializados. */
-  const todoLoLogueado = () => espias.flatMap(s => s.mock.calls).map(args => JSON.stringify(args)).join('\n')
+  const todoLoLogueado = () =>
+    espias
+      .flatMap(s => s.mock.calls)
+      .map(args => JSON.stringify(args))
+      .join('\n')
 
   beforeEach(() => {
     mockedProcess.mockReset()
     // correlationId lleva Date.now(): fijo, para que '1111' no salga por casualidad.
     jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
-    espias = (['info', 'warn', 'error', 'debug'] as const).map(nivel =>
-      jest.spyOn(logger, nivel).mockImplementation((() => logger) as any),
-    )
+    espias = (['info', 'warn', 'error', 'debug'] as const).map(nivel => jest.spyOn(logger, nivel).mockImplementation((() => logger) as any))
   })
   afterEach(() => jest.restoreAllMocks())
 
@@ -114,6 +116,7 @@ describe('R6 — el aviso no deja titular ni tarjeta en el log', () => {
     expect(log).not.toContain('HOMER') // …pero sin titular
     expect(log).not.toContain('411111')
     expect(log).not.toContain('1111')
+    expect(log).not.toContain('A1B2C3D4E5F60718') // F6: ni el criptograma del chip
   })
 
   it.each([

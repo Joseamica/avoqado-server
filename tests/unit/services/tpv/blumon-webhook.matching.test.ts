@@ -1,5 +1,6 @@
 import {
   buildBlumonEventId,
+  centavosExactos,
   processBlumonPaymentWebhook,
   reconcileBlumonEvent,
   sinTitular,
@@ -390,7 +391,7 @@ describe('Task 5 — reversals never run sale logic and get their own event id',
  * blumon-webhook.service.test.ts (H2): este mock sí llega a los tres `create`.
  */
 describe('R6 — la base no guarda el titular', () => {
-  const conTitular = { ...ventaPayload, cardHolder: 'HOMER SIMPSON', bin: '411111', lastFour: '1111' }
+  const conTitular = { ...ventaPayload, cardHolder: 'HOMER SIMPSON', bin: '411111', lastFour: '1111', arqc: 'A1B2C3D4E5F60718' }
 
   it.each([
     ['UNKNOWN_TERMINAL', { serialNumber: '99999999999' }],
@@ -403,6 +404,8 @@ describe('R6 — la base no guarda el titular', () => {
     if (_rama === 'PENDING') expect(guardado.status).toBe('PENDING')
     else expect(guardado.errorReason).toBe(_rama)
     expect(guardado.payload).not.toHaveProperty('cardHolder')
+    // F6: el criptograma del chip (EMV) tampoco se guarda.
+    expect(guardado.payload).not.toHaveProperty('arqc')
     expect(guardado.payload).toEqual(expect.objectContaining({ lastFour: '1111', bin: '411111' }))
   })
 
@@ -422,6 +425,29 @@ describe('R6 — la base no guarda el titular', () => {
   it('sinTitular no toca el payload original', () => {
     const copia = sinTitular(conTitular)
     expect(copia).not.toHaveProperty('cardHolder')
+    expect(copia).not.toHaveProperty('arqc')
     expect(conTitular.cardHolder).toBe('HOMER SIMPSON')
+    expect(conTitular.arqc).toBe('A1B2C3D4E5F60718')
   })
+})
+
+/** F11 (minor T5): el importe del aviso en centavos EXACTOS — sólo cadenas con hasta 2 decimales; lo demás es ilegible. */
+describe('centavosExactos', () => {
+  it.each([
+    ['105.00', 10500], // base 100.00 + propina 5.00
+    ['100.5', 10050],
+    ['100', 10000],
+    ['0.01', 1],
+    ['0', 0],
+    ['29150.00', 2915000],
+  ])('%p ⇒ %p', (amount, centavos) => {
+    expect(centavosExactos(amount)).toBe(centavos)
+  })
+
+  it.each([[100], [100.5], ['-1.00'], ['1.234'], ['1,000.00'], [' 100.00'], ['100.'], ['.50'], [''], [null], [undefined], ['1e3']])(
+    '%p ⇒ null (ilegible)',
+    amount => {
+      expect(centavosExactos(amount)).toBeNull()
+    },
+  )
 })

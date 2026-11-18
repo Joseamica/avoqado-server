@@ -7089,13 +7089,78 @@ class TerminalPaymentService {
     return { posAwakened, terminalNotified }
   }
 
+  /**
+   * F4 (SDK propio): la terminal reversó (REVERSADA) el cobro de un intento cuyo aviso aprobado —retenido por la lápida— hizo que
+   * la ventana retuviera la solicitud con `BANK_APPROVED_AWAITING_PAYMENT`. El resultado ya selló ese aviso sin dinero, así que
+   * la retención se quedó sin evidencia; sin esto la VENTA quedaba esperando un Payment que el propio reverso impide registrar
+   * (el cierre tardío de la terminal y la declaración del cajero excluyen la marca). Se quita la marca —la fila vuelve a la
+   * ventana— sólo si no queda evidencia: mismo orden de candados que la ventana (solicitud → sus intentos, ordenados), la
+   * aprobación propia releída bajo ellos y el juego único de vetos en la escritura (CAS). Devuelve si la quitó.
+   */
+  async soltarRetencionSinAprobacion(attemptId: string): Promise<boolean> {
+    const link = await this.findAttemptLink(attemptId)
+    if (!link) return false
+    const soltada = await prisma.$transaction(async tx => {
+      await candadoDeSolicitud(tx, link.requestId)
+      const attemptIds =
+        // ponytail: tope de 100 intentos por solicitud (son 1–3); el CAS de abajo revisa los vetos por solicitud, no por esta lista.
+        (
+          await tx.terminalPaymentAttemptLink.findMany({
+            where: { requestId: link.requestId, venueId: link.venueId },
+            select: { attemptId: true },
+            take: 100,
+          })
+        )
+          .map(l => llaveDeIntento(l.attemptId))
+          .filter((a): a is string => Boolean(a))
+          .sort()
+      for (const id of attemptIds) await candadoDeIntento(tx, id)
+      const row = await tx.terminalPaymentRequest.findFirst({
+        where: {
+          requestId: link.requestId,
+          venueId: link.venueId,
+          status: TerminalPaymentRequestStatus.TIMED_OUT,
+          failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
+          paymentId: null,
+        },
+        select: { id: true, terminalId: true },
+      })
+      if (!row || (await this.aprobacionBancariaConocida(tx, link.venueId, attemptIds))) return null
+      const n = await tx.$executeRaw`
+        UPDATE "TerminalPaymentRequest"
+        SET "failureCode" = NULL, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+        WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT' AND "paymentId" IS NULL
+          AND ${sinVetoDeDineroSql({ requestId: link.requestId, venueId: link.venueId, attemptIds, terminalId: row.terminalId })}`
+      if (n === 0) return null
+      await tx.activityLog.create({
+        data: {
+          action: 'TERMINAL_PAYMENT_HOLD_RELEASED_BY_REVERSAL',
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          venueId: link.venueId,
+          data: { requestId: link.requestId, attemptId, terminalId: row.terminalId },
+        },
+      })
+      return row.id
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    if (soltada) {
+      logger.info('🔓 [TerminalPayment] La terminal reversó el cobro: la solicitud retenida por su aviso vuelve a la ventana', {
+        requestId: link.requestId,
+        venueId: link.venueId,
+        attemptId,
+      })
+    }
+    return soltada !== null
+  }
+
   /** El dueño de un intento (S1), para el webhook (S2) y la consulta por intento (S6). `null` = intento desconocido. */
   async findAttemptLink(
     attemptId: string,
+    db: Pick<Prisma.TransactionClient, 'terminalPaymentAttemptLink'> = prisma,
   ): Promise<{ requestId: string; venueId: string; terminalId: string; createdAt: Date; operatorResolution: unknown } | null> {
     if (!attemptId) return null
     // `operatorResolution` (22-sep): S6 publica la declaración del cajero en `attempt.resolution`, y con solicitud vive aquí.
-    return prisma.terminalPaymentAttemptLink.findUnique({
+    return db.terminalPaymentAttemptLink.findUnique({
       where: { attemptId },
       select: { requestId: true, venueId: true, terminalId: true, createdAt: true, operatorResolution: true },
     })
@@ -7162,11 +7227,18 @@ class TerminalPaymentService {
     }
   }
 
-  async consultarIntentoDeTerminal(input: {
-    attemptId: string
-    venueId: string
-    terminalSerial: string
-  }): Promise<TerminalAttemptStatus | null> {
+  async consultarIntentoDeTerminal(
+    input: {
+      attemptId: string
+      venueId: string
+      terminalSerial: string
+    },
+    // F9: el permiso del reverso la llama con el cliente de su transacción (que ya tiene el candado); los demás, sin él.
+    db: Pick<
+      Prisma.TransactionClient,
+      'terminalPaymentAttemptLink' | 'terminalPaymentRequest' | 'terminalAttemptResolution' | 'payment' | '$queryRaw'
+    > = prisma,
+  ): Promise<TerminalAttemptStatus | null> {
     const attemptId = typeof input.attemptId === 'string' ? input.attemptId.trim() : ''
     const terminalKey = typeof input.terminalSerial === 'string' ? normalizeTerminalId(input.terminalSerial) : ''
     if (!attemptId || attemptId.length > 64 || !terminalKey || !input.venueId) return null
@@ -7179,11 +7251,9 @@ class TerminalPaymentService {
     // por SERIAL que ya existía abajo (`terminalPaymentRequestId == null && serial === terminalKey`), que es exactamente el
     // cobro local. Lo que NO cambia: con vínculo se siguen exigiendo venue y terminal, y nada de esto acredita ausencia de
     // cargo — `NOT_RECORDED`/`NONE` es «no sé», y es justo lo que habilita la ventana de confirmación y la declaración.
-    const link = await this.findAttemptLink(attemptId)
+    const link = await this.findAttemptLink(attemptId, db)
     if (link && (link.venueId !== input.venueId || normalizeTerminalId(link.terminalId) !== terminalKey)) return null
-    const row = link
-      ? await prisma.terminalPaymentRequest.findFirst({ where: { requestId: link.requestId, venueId: input.venueId } })
-      : null
+    const row = link ? await db.terminalPaymentRequest.findFirst({ where: { requestId: link.requestId, venueId: input.venueId } }) : null
     // Un vínculo cuya solicitud no existe es un estado incoherente, no un cobro local: se conserva el 404 de siempre.
     if (link && !row) return null
 
@@ -7193,7 +7263,7 @@ class TerminalPaymentService {
     // (el POS reclama esa venta más tarde) dejaba `resolution:null`: el POST sí encontraba el testimonio previo y
     // prohibía otro, pero la consulta ya no lo publicaba — y el cliente, tras perder la respuesta original, se quedaba
     // sin una declaración recuperable. Manda la del vínculo si existe; si no, la local, que es igual de acreditada.
-    const declaracionLocal = await prisma.terminalAttemptResolution.findFirst({
+    const declaracionLocal = await db.terminalAttemptResolution.findFirst({
       where: { attemptId, venueId: input.venueId, terminalId: terminalKey },
       select: { resolution: true },
     })
@@ -7203,7 +7273,7 @@ class TerminalPaymentService {
     // —LINK_VENUE_MISMATCH— no es evidencia de este intento — ver la consulta SQL de evidencia más abajo); y un Payment
     // con `type` NULL (fila vieja) cuenta igual que uno REGULAR.
     const [candidato, ganador] = await Promise.all([
-      prisma.payment.findFirst({
+      db.payment.findFirst({
         where: { venueId: input.venueId, idempotencyKey: attemptId, OR: [{ type: null }, { type: { not: PaymentType.REFUND } }] },
         select: {
           id: true,
@@ -7217,7 +7287,7 @@ class TerminalPaymentService {
         },
       }),
       row?.paymentId
-        ? prisma.payment.findUnique({ where: { id: row.paymentId }, select: { id: true, idempotencyKey: true } })
+        ? db.payment.findUnique({ where: { id: row.paymentId }, select: { id: true, idempotencyKey: true } })
         : Promise.resolve(null),
     ])
 
@@ -7270,7 +7340,7 @@ class TerminalPaymentService {
     const [primera] = solicitudesDelPago
     const solicitudDelPago =
       !link && typeof primera === 'string' && solicitudesDelPago.every(r => r === primera)
-        ? await prisma.terminalPaymentRequest.findFirst({ where: { requestId: primera, venueId: input.venueId } })
+        ? await db.terminalPaymentRequest.findFirst({ where: { requestId: primera, venueId: input.venueId } })
         : null
     const atribuiblePorSolicitudDeEstaTerminal =
       !!solicitudDelPago &&
@@ -7289,7 +7359,7 @@ class TerminalPaymentService {
     // —`llave = A OR recorte = A`— que ni usaba el índice del recorte (esto corre cada 5 s en el sondeo) ni decía lo mismo que
     // el POST: excluía los REFUND, y el veto del POST no. Aceptar la declaración y poder usarla tienen que decir lo mismo.
     const dineroNoAtribuible =
-      !candidato && (await prisma.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`)[0]?.hay === true
+      !candidato && (await db.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`)[0]?.hay === true
     const paymentContradiction = (!!candidato && !atribuible) || dineroNoAtribuible
     if (paymentContradiction && candidato) {
       logger.error(
@@ -7318,7 +7388,7 @@ class TerminalPaymentService {
     // un `123` o un `{}` y S6 publicaba DECLINED sin rechazo bancario acreditado).
     // Lógica trivalente de SQL: un `errorReason` NULL (evento sano) no puede volver NULL la contradicción entera — por eso
     // `IS NOT DISTINCT FROM` y no `=`; sin eso, el approved propio del evento CONFIRMADO desaparecía de la evidencia.
-    const evidencia = await prisma.$queryRaw<
+    const evidencia = await db.$queryRaw<
       { contradicciones: bigint | number; sinDueno: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]
     >`
       WITH eventos AS (
@@ -7423,13 +7493,13 @@ class TerminalPaymentService {
     const ganadorDeLaSolicitud =
       ganador ??
       (!row && solicitud?.paymentId
-        ? await prisma.payment.findUnique({ where: { id: solicitud.paymentId }, select: { id: true, idempotencyKey: true } })
+        ? await db.payment.findUnique({ where: { id: solicitud.paymentId }, select: { id: true, idempotencyKey: true } })
         : null)
     let winnerAttemptId: string | null = null
     if (ganadorDeLaSolicitud?.idempotencyKey) {
       if (ganadorDeLaSolicitud.idempotencyKey === attemptId) winnerAttemptId = attemptId
       else {
-        const vinculoDelGanador = await this.findAttemptLink(ganadorDeLaSolicitud.idempotencyKey)
+        const vinculoDelGanador = await this.findAttemptLink(ganadorDeLaSolicitud.idempotencyKey, db)
         winnerAttemptId = !!solicitud && vinculoDelGanador?.requestId === solicitud.requestId ? ganadorDeLaSolicitud.idempotencyKey : null
       }
     }

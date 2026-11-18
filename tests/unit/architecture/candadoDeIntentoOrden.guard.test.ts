@@ -432,8 +432,9 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // terminal va bajo el mismo `candadoDeSolicitud` que toma la declaración del cajero (marca durable antes, emit dentro).
       // S2 (A4b, 21-oct): y SEIS con `soltarRanuraTrasCierre` — el destrabe de la ranura tras el cese acreditado, bajo el candado
       // de la solicitud (CAS → asiento). S6 (A6, 21-oct): y SIETE con `soltarRanuraPorSoporte` — soporte suelta la terminal en el
-      // orden de la ventana (solicitud → vínculos → intentos → vetos → CAS → asiento).
-      'services/terminal-payment.service.ts': 7,
+      // orden de la ventana (solicitud → vínculos → intentos → vetos → CAS → asiento). SDK propio (F4): y OCHO con
+      // `soltarRetencionSinAprobacion` — tras un REVERSADA, quita la marca de la ventana en el mismo orden (solicitud → intentos).
+      'services/terminal-payment.service.ts': 8,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción
@@ -444,7 +445,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // Codex r1 (P1-C): y SEIS con el INSERT del fallback bajo el candado de la SOLICITUD (transacción propia: candado de la
       // solicitud → insertar), antes del toque; si ese candado también vence, se inserta sin candado como antes (residuo declarado).
       // Hallazgo D3 (22-oct): y SIETE con el aviso durable del aprobado sin folio, bajo el candado del intento.
-      'services/tpv/angelpay-webhook.service.ts': 7,
+      // SDK propio (F3): y OCHO con la retención HELD_BY_REVERSAL del aviso de Blumon, bajo el candado del intento.
+      'services/tpv/angelpay-webhook.service.ts': 8,
       'services/tpv/registroRepetido.ts': 1,
       // Plan 16-sep, Task 4: la declaración del cajero decide sobre un intento (candado del intento → Order → solicitud → CAS).
       'services/tpv/no-instrument-resolution.service.ts': 1,

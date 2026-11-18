@@ -18,7 +18,7 @@
 
 import { parcharProcessorData } from '../shared/parcheDeProcessorData'
 import prisma from '../../utils/prismaClient'
-import { Prisma, ProviderType, EventStatus, TerminalType } from '@prisma/client'
+import { CardBrand, Prisma, ProviderType, EventStatus, TerminalType } from '@prisma/client'
 import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
 import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
@@ -304,7 +304,10 @@ export interface BlumonWebhookPayload {
   /** EMV Application Identifier — different per card brand. AMEX: A000000025010801, VISA: A0000000031010 */
   aid?: string
 
-  /** EMV Authorization Request Cryptogram — proof that the chip authenticated. 16 hex chars. */
+  /**
+   * EMV Authorization Request Cryptogram — proof that the chip authenticated. 16 hex chars. F6: dato del chip — NUNCA se
+   * guarda en `ProviderEventLog.payload` (`sinTitular`) ni va al log (`paraElLog`).
+   */
   arqc?: string
 
   /**
@@ -1267,24 +1270,32 @@ async function attemptPaymentMatch(
 }
 
 /**
- * Copia del aviso sin el nombre del titular: es lo único que se guarda en `ProviderEventLog.payload`.
- * `bin` y `lastFour` sí se quedan en la base (los usan el emparejamiento y la conciliación a mano).
+ * Copia del aviso sin el nombre del titular ni el criptograma del chip (`arqc`, F6): es lo único que se guarda en
+ * `ProviderEventLog.payload`. `bin` y `lastFour` sí se quedan en la base (los usan el emparejamiento y la conciliación a
+ * mano); `aid` también (identifica la aplicación de la marca y va impreso en cada voucher: no es secreto).
  * Tampoco viaja `_avoqado`: es el sello que escribe el SERVIDOR (contexto y tarifa del ingreso, marca 55P03, afiliación
  * receptora); uno que llegue en el aviso nunca puede hacerse pasar por él.
  */
 export function sinTitular(payload: BlumonWebhookPayload): BlumonWebhookPayload {
-  const { cardHolder: _titular, _avoqado: _selloAjeno, ...resto } = payload as BlumonWebhookPayload & { _avoqado?: unknown }
+  const {
+    cardHolder: _titular,
+    arqc: _criptograma,
+    _avoqado: _selloAjeno,
+    ...resto
+  } = payload as BlumonWebhookPayload & {
+    _avoqado?: unknown
+  }
   return resto as BlumonWebhookPayload
 }
 
 /**
- * Lo que del aviso puede ir al log: sin titular, sin bin y sin últimos 4. Si la raíz no es un objeto
+ * Lo que del aviso puede ir al log: sin titular, sin bin, sin últimos 4 y sin el criptograma del chip (`arqc`, F6). Si la raíz no es un objeto
  * (cadena, número, arreglo, `null`), sólo su tipo y el tamaño, nunca el valor: un JSON doblemente
  * codificado trae la tarjeta entera dentro de la cadena.
  */
 export function paraElLog(body: unknown, rawBodyLength?: number): Record<string, unknown> {
   if (body && typeof body === 'object' && !Array.isArray(body)) {
-    const { cardHolder: _titular, bin: _bin, lastFour: _lastFour, ...resto } = body as Record<string, unknown>
+    const { cardHolder: _titular, bin: _bin, lastFour: _lastFour, arqc: _criptograma, ...resto } = body as Record<string, unknown>
     return resto
   }
   const rootType = body === null ? 'null' : Array.isArray(body) ? 'array' : typeof body
@@ -1298,6 +1309,17 @@ export function normalizeBrand(b: unknown): string | null {
     .toUpperCase()
   if (!s || s === 'UNKNOWN' || s === 'OTHER') return null
   return s === 'AMEX' ? 'AMERICAN_EXPRESS' : s
+}
+
+/**
+ * F7: la marca con la que el aviso CREA el Payment: la normalizada si es un valor de `CardBrand`; otra conocida por Blumon que
+ * el enum no tiene (p. ej. `CARNET`) ⇒ `OTHER` (con ella el registrador fallaba en cada reintento). El emparejamiento sigue
+ * con `normalizeBrand`.
+ */
+export function marcaParaElRegistro(b: unknown): CardBrand | undefined {
+  const marca = normalizeBrand(b)
+  if (!marca) return undefined
+  return (Object.values(CardBrand) as string[]).includes(marca) ? (marca as CardBrand) : CardBrand.OTHER
 }
 
 /** El importe del aviso en centavos EXACTOS: sólo una cadena `123` o `123.4` o `123.45`; lo demás (número, comas, 3 decimales) ⇒ `null`. */
@@ -1351,7 +1373,11 @@ export async function contextoDelIntento(payload: BlumonWebhookPayload): Promise
       where: { venueId: link.venueId },
       select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
     }),
-    prisma.terminal.findUnique({ where: { serialNumber: canonicalizeBlumonSerial(serial) }, select: { id: true } }),
+    // F12: el mismo normalizador que guarda `Terminal.serialNumber` (mayúsculas), no `canonicalizeBlumonSerial`.
+    prisma.terminal.findUnique({
+      where: { serialNumber: normalizeTerminalSerialNumber(serial, TerminalType.TPV_ANDROID) },
+      select: { id: true },
+    }),
   ])
   const enLaConfiguracion =
     !!config && [config.primaryAccountId, config.secondaryAccountId, config.tertiaryAccountId].includes(merchantAccountId)
@@ -1407,8 +1433,9 @@ export async function confirmarBlumonPorVinculo(args: {
   ctx: ContextoDelIngreso
 }): Promise<WebhookProcessingResult | null> {
   const { payload, eventLogId, ctx } = args
-  // Tarea 7: una lápida `reversing` vencida (o ya `reverse_unconfirmed`) no detiene el aviso: el cobro nace marcado como incierto.
-  const incierto = await vencerReversoSinRespuesta(ctx.attemptId)
+  // Tarea 7: una lápida `reversing` vencida no detiene el aviso: aquí se vence. F2: la MARCA `reversoIncierto` no sale de esta
+  // lectura (previa al candado: la red puede vencerla en medio) sino de la que hace la guarda del registrador bajo el candado.
+  await vencerReversoSinRespuesta(ctx.attemptId)
   const r = await confirmarAvisoPorVinculo({
     etiqueta: 'Blumon',
     attemptId: ctx.attemptId,
@@ -1421,7 +1448,7 @@ export async function confirmarBlumonPorVinculo(args: {
     datosDelRegistro: {
       referenceNumber: payload.reference,
       authorizationNumber: payload.authorizationCode,
-      cardBrand: normalizeBrand(payload.brand) ?? undefined,
+      cardBrand: marcaParaElRegistro(payload.brand),
       blumonOperationNumber: payload.operationNumber,
       blumonSerialNumber: payload.serialNumber,
     },
@@ -1434,14 +1461,19 @@ export async function confirmarBlumonPorVinculo(args: {
         serialNumber: payload.serialNumber ?? null,
       },
       // Codex r5: la marca que lee el auditor de cobros sin aviso (`blumon-payment-audit.job.ts`).
-      extra: { blumonWebhookReceived: true, ...(incierto ? { reversoIncierto: true } : {}) },
+      extra: { blumonWebhookReceived: true },
     },
     propietario: {},
     correlationId: `blumon-wh-${eventLogId.slice(-8)}`,
   })
   if (!r) return null
   // H15: la alarma sale sólo si de verdad se registró (o ya estaba) el cobro; en la carrera con un REVERSADA no hay dinero.
-  if (incierto && r.paymentId && (r.action === 'CONFIRMED' || r.action === 'MATCHED' || r.action === 'SECOND_CAPTURE')) {
+  // F2: y sólo si ese cobro nació marcado: la marca la puso el registrador con la lápida que leyó BAJO el candado.
+  const registrado = r.action === 'CONFIRMED' || r.action === 'MATCHED' || r.action === 'SECOND_CAPTURE'
+  const pago =
+    registrado && r.paymentId ? await prisma.payment.findUnique({ where: { id: r.paymentId }, select: { processorData: true } }) : null
+  const nacioIncierto = (pago?.processorData as Record<string, unknown> | null | undefined)?.reversoIncierto === true
+  if (nacioIncierto) {
     logger.error('🚨 [Blumon reverso] El banco aprobó y el reverso nunca se confirmó: se registra el cobro', {
       attemptId: ctx.attemptId,
       requestId: ctx.requestId,

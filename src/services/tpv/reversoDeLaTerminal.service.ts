@@ -76,12 +76,19 @@ export async function leerLapida(
   return estado ? { id: fila.id, estado, createdAt: fila.createdAt, venueId: fila.venueId, attemptId: fila.attemptId, payload } : null
 }
 
-/** Dentro de la transacción que YA tomó candadoDeIntento(llave). */
-export async function exigirIntentoSinReverso(tx: Pick<Prisma.TransactionClient, 'providerEventLog'>, llave: string): Promise<void> {
+/**
+ * Dentro de la transacción que YA tomó candadoDeIntento(llave). Devuelve el estado de la lápida que leyó (o null): el
+ * registrador marca con él, BAJO este mismo candado, un cobro que nace con el reverso sin confirmar (F2).
+ */
+export async function exigirIntentoSinReverso(
+  tx: Pick<Prisma.TransactionClient, 'providerEventLog'>,
+  llave: string,
+): Promise<EstadoDelReverso | null> {
   const lapida = await leerLapida(tx, llave)
   if (lapida && ESTADOS_QUE_BLOQUEAN.includes(lapida.estado)) {
     throw new IntentoConReverso(lapida.estado as 'reversing' | 'reversed', lapida.createdAt)
   }
+  return lapida?.estado ?? null
 }
 
 /**
@@ -252,8 +259,9 @@ export async function pedirPermisoDeReverso(entrada: {
     await candadoDeIntento(tx, llave)
     const { terminalKey } = await exigirPertenencia(tx, { ...entrada, attemptId: llave })
 
-    // S6 lee con su propia conexión: sigue siendo sano porque ningún registrador puede confirmar mientras este candado esté tomado.
-    const s6 = await terminalPaymentService.consultarIntentoDeTerminal({ ...entrada, attemptId: llave })
+    // F9: S6 lee con la conexión de ESTA transacción. Con la suya propia, N permisos a la vez retenían N conexiones esperando
+    // otras N (pool agotado, P2024 ⇒ 503 ⇒ la terminal reversaba sin permiso).
+    const s6 = await terminalPaymentService.consultarIntentoDeTerminal({ ...entrada, attemptId: llave }, tx)
     const propio = s6?.attempt.paymentId
       ? await tx.payment.findUnique({
           where: { id: s6.attempt.paymentId },
@@ -304,9 +312,19 @@ export async function pedirPermisoDeReverso(entrada: {
 /** Lo que la terminal reporta del reverso (Tarea 10). */
 export type ResultadoDelReverso = { descripcion?: string; codigo?: string; operationNumber?: number | string; reversadoEn: string }
 
-/** Blumon confirmó el reverso: «REVERSADA» o los códigos de reverso hecho (`TX_014`, `TX_013`). Lo demás: no se reversó. */
-export function esReversoConfirmado(r: ResultadoDelReverso): boolean {
-  return r.descripcion?.trim().toUpperCase() === 'REVERSADA' || r.codigo === 'TX_014' || r.codigo === 'TX_013'
+/**
+ * Qué dice el resultado del reverso (spec §14 y §16), con `codigo` y `descripcion` normalizados (trim + mayúsculas):
+ *  · `confirmado` — «REVERSADA», `TX_014` (reversada anteriormente) o `TX_013` (cancelada anteriormente): el cobro se deshizo;
+ *  · `rechazado` — `TX_007` (fuera de la ventana) o `TX_008` (no existe): definitivo, la venta sigue cobrada si se aprobó;
+ *  · `no_concluyente` — todo lo demás (`RQ_006`, `68`, `6`, `N0`, `TX_009`, una descripción sin código conocido…): el reverso
+ *    no se procesó o no se sabe; la terminal reintenta dentro de la ventana y, si nada llega, el vencimiento decide.
+ */
+export type ClaseDelResultado = 'confirmado' | 'rechazado' | 'no_concluyente'
+export function clasificarResultadoDelReverso(r: ResultadoDelReverso): ClaseDelResultado {
+  const codigo = r.codigo?.trim().toUpperCase()
+  if (r.descripcion?.trim().toUpperCase() === 'REVERSADA' || codigo === 'TX_014' || codigo === 'TX_013') return 'confirmado'
+  if (codigo === 'TX_007' || codigo === 'TX_008') return 'rechazado'
+  return 'no_concluyente'
 }
 
 const ESTADOS_FINALES: readonly EstadoDelReverso[] = ['reversed', 'reverse_failed', 'contradiction']
@@ -317,10 +335,14 @@ const ESTADOS_FINALES: readonly EstadoDelReverso[] = ['reversed', 'reverse_faile
  *  · autoriza con la identidad GUARDADA en la lápida (negocio, intento y `terminalKey`), no con la configuración de ahora;
  *    sin lápida (la terminal no pudo pedir permiso), con `exigirPertenencia` (Tarea 9);
  *  · H16: un desenlace final no se reescribe — el mismo resultado (por clase: confirmado ≡ `reversed`/`contradiction`,
- *    no confirmado ≡ `reverse_failed`) contesta el estado guardado; uno distinto, 409 `REVERSAL_RESULT_CONFLICT`;
- *  · si no: confirmado sin dinero del intento ⇒ `reversed` (los avisos de venta de Blumon retenidos se sellan sin dinero);
- *    confirmado con dinero ⇒ `contradiction` (el dinero NO se toca: lo resuelve una persona); no confirmado ⇒ `reverse_failed`
- *    (los avisos retenidos quedan con turno ya y, después del commit, crean el cobro: el dinero sí existe).
+ *    rechazado ≡ `reverse_failed`) contesta el estado guardado; uno distinto, 409 `REVERSAL_RESULT_CONFLICT`; un no
+ *    concluyente contesta el estado guardado sin escribir;
+ *  · si no: confirmado sin dinero del intento ⇒ `reversed` (los avisos de venta de Blumon retenidos se sellan sin dinero y,
+ *    después del commit, se suelta la solicitud que la ventana retuvo por ellos: F4); confirmado con dinero ⇒ `contradiction`
+ *    (el dinero NO se toca: lo resuelve una persona); rechazado ⇒ `reverse_failed` (los avisos retenidos quedan con turno ya
+ *    y, después del commit, crean el cobro: el dinero sí existe); no concluyente (F1) ⇒ NO fija desenlace: la lápida sigue
+ *    `reversing` (o `reverse_unconfirmed`) con `ultimoNoConcluyente`, el aviso sigue retenido y el vencimiento decide. Sin
+ *    lápida (la terminal no pudo pedir permiso), un no concluyente la crea `reversing`, como el permiso.
  * Vale igual desde `reversing`, sin lápida o desde `reverse_unconfirmed` (H14: la cola durable de la terminal entrega tarde a
  * propósito). Nada de AngelPay (`angelpay-%`) se toca aquí: sigue en manos de su receptor y su worker.
  */
@@ -333,7 +355,7 @@ export async function registrarResultadoDelReverso(entrada: {
 }): Promise<{ estado: EstadoDelReverso; eventLogId: string; paymentId?: string }> {
   const llave = llaveDeIntento(entrada.attemptId)
   if (!llave) throw intentoNoEncontrado()
-  const confirmado = esReversoConfirmado(entrada.resultado)
+  const clase = clasificarResultadoDelReverso(entrada.resultado)
 
   const decision = await prisma.$transaction(async tx => {
     await candadoDeIntento(tx, llave)
@@ -344,7 +366,7 @@ export async function registrarResultadoDelReverso(entrada: {
         throw intentoNoEncontrado()
       }
       if (ESTADOS_FINALES.includes(lapida.estado)) {
-        if (confirmado === (lapida.estado === 'reverse_failed')) {
+        if (clase !== 'no_concluyente' && (clase === 'confirmado') === (lapida.estado === 'reverse_failed')) {
           throw new ConflictError('El reverso de este intento ya tiene otro desenlace.', 'REVERSAL_RESULT_CONFLICT', {
             estado: lapida.estado,
           })
@@ -352,7 +374,15 @@ export async function registrarResultadoDelReverso(entrada: {
         // A la terminal sólo se le publica un pago de ESTE negocio (mismo criterio que S6 y el permiso).
         const publicable = typeof lapida.payload.paymentId === 'string' && lapida.payload.pagoDeOtroNegocio !== true
         const paymentId = publicable ? (lapida.payload.paymentId as string) : undefined
-        return { estado: lapida.estado, eventLogId: lapida.id, paymentId, paymentIdPublico: paymentId, avisos: [], nuevo: false }
+        return {
+          estado: lapida.estado,
+          eventLogId: lapida.id,
+          paymentId,
+          paymentIdPublico: paymentId,
+          paymentStatus: undefined,
+          avisos: [],
+          nuevo: false,
+        }
       }
     } else {
       await exigirPertenencia(tx, { ...entrada, attemptId: llave })
@@ -364,23 +394,41 @@ export async function registrarResultadoDelReverso(entrada: {
       WHERE p."id" IN (${dineroConEstaLlaveSql(llave)})
       ORDER BY (p."venueId" = ${entrada.venueId}) DESC, (p."status" = 'COMPLETED') DESC, p."createdAt" ASC
       LIMIT 10`
-    const estado: EstadoDelReverso = !confirmado ? 'reverse_failed' : pagos.length > 0 ? 'contradiction' : 'reversed'
+    const estado: EstadoDelReverso =
+      clase === 'no_concluyente'
+        ? (lapida?.estado ?? 'reversing') // F1: no fija desenlace (sólo llega aquí desde reversing, reverse_unconfirmed o sin lápida)
+        : clase === 'rechazado'
+          ? 'reverse_failed'
+          : pagos.length > 0
+            ? 'contradiction'
+            : 'reversed'
     const paymentId = estado === 'contradiction' ? pagos[0].id : undefined
+    // F10: en qué estado está ese Payment (PENDING/FAILED no es «ya registrado»).
+    const paymentStatus = estado === 'contradiction' ? pagos[0].status : undefined
     // Un pago de OTRO negocio (llave repetida): se detecta igual, pero ni a la terminal ni a la bitácora de este negocio se le liga.
     const pagoDeOtroNegocio = estado === 'contradiction' && pagos[0].venueId !== entrada.venueId
     const paymentIdPublico = pagoDeOtroNegocio ? undefined : paymentId
     const ahora = new Date()
     const { descripcion, codigo, operationNumber, reversadoEn } = entrada.resultado
-    const payload = {
-      ...(lapida?.payload ?? { terminalKey }),
-      estado,
-      status: estado,
-      resultado: { descripcion, codigo, operationNumber, reversadoEn },
-      ...(entrada.staffId ? { staffId: entrada.staffId } : {}),
-      resultadoEn: ahora.toISOString(),
-      ...(paymentId ? { paymentId } : {}),
-      ...(pagoDeOtroNegocio ? { pagoDeOtroNegocio } : {}),
-    } as Prisma.InputJsonValue
+    const payload = (
+      clase === 'no_concluyente'
+        ? {
+            ...(lapida?.payload ?? { terminalKey }),
+            estado,
+            status: estado,
+            ultimoNoConcluyente: { descripcion, codigo, operationNumber, reversadoEn, en: ahora.toISOString() },
+          }
+        : {
+            ...(lapida?.payload ?? { terminalKey }),
+            estado,
+            status: estado,
+            resultado: { descripcion, codigo, operationNumber, reversadoEn },
+            ...(entrada.staffId ? { staffId: entrada.staffId } : {}),
+            resultadoEn: ahora.toISOString(),
+            ...(paymentId ? { paymentId } : {}),
+            ...(pagoDeOtroNegocio ? { pagoDeOtroNegocio } : {}),
+          }
+    ) as Prisma.InputJsonValue
     const eventLogId = lapida
       ? (await tx.providerEventLog.update({ where: { id: lapida.id }, data: { payload }, select: { id: true } })).id
       : (
@@ -437,6 +485,7 @@ export async function registrarResultadoDelReverso(entrada: {
             ...(pagoDeOtroNegocio
               ? { pagoDeOtroNegocio }
               : {
+                  paymentStatus,
                   otrosPagos: pagos
                     .filter(p => p.venueId === entrada.venueId)
                     .slice(1)
@@ -446,7 +495,7 @@ export async function registrarResultadoDelReverso(entrada: {
           },
         },
       })
-    } else {
+    } else if (estado === 'reverse_failed') {
       // Con turno YA dentro de la transacción: si la llamada de después del commit falla, la red de 30 s lo toma.
       const retenidos = { ...avisosDeBlumon, errorReason: 'HELD_BY_REVERSAL' }
       // ponytail: se llaman ya hasta 10 (un intento trae uno, a lo más un par); el resto lo toma la red con el mismo turno.
@@ -458,7 +507,7 @@ export async function registrarResultadoDelReverso(entrada: {
       })
       await tx.providerEventLog.updateMany({ where: retenidos, data: { nextAttemptAt: ahora } })
     }
-    return { estado, eventLogId, paymentId, paymentIdPublico, avisos, nuevo: true }
+    return { estado, eventLogId, paymentId, paymentIdPublico, paymentStatus, avisos, nuevo: true }
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   const { estado, eventLogId, paymentId } = decision
@@ -468,10 +517,22 @@ export async function registrarResultadoDelReverso(entrada: {
       logger.error('🚨 [Reverso] La terminal dice que reversó, pero el cobro ya está registrado — no se toca: lo resuelve una persona', {
         ...contexto,
         paymentId,
+        paymentStatus: decision.paymentStatus,
       })
+    } else if (clase === 'no_concluyente') {
+      logger.warn(`⏳ [Blumon reverso] Resultado no concluyente — la lápida sigue ${estado}; la terminal reintenta o vence`, contexto)
     } else {
       logger.info(`🔁 [Blumon reverso] Resultado del reverso — lápida ${estado}`, { ...contexto, avisosRetenidos: decision.avisos.length })
     }
+  }
+  // F4: la ventana pudo retener la solicitud por el aviso que acaba de sellarse sin dinero: si ya no queda evidencia, se suelta.
+  if (decision.nuevo && estado === 'reversed') {
+    await terminalPaymentService.soltarRetencionSinAprobacion(llave).catch(error =>
+      logger.error('❌ [Blumon reverso] No se pudo soltar la solicitud retenida por el aviso reversado — sigue retenida', {
+        attemptId: llave,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
   }
   if (decision.avisos.length > 0) {
     const { reconcileBlumonEvent } = await import('./blumon-webhook.service')

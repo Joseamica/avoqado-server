@@ -3105,6 +3105,11 @@ interface PaymentCreationData {
   pricingSlot?: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' | null
   /** Codex R4-3: las tarifas (proveedor y negocio) vigentes al cobrar para la afiliación acreditada — congeladas en `processorData.pricing`. */
   pricing?: TarifaCongelada | null
+  /**
+   * SDK propio (F2): el cobro de Blumon nace con la lápida del reverso `reverse_unconfirmed` (la terminal pidió reversar y nunca
+   * confirmó). Lo pone el registrador con la lápida que lee BAJO el candado del intento; va a `processorData.reversoIncierto`.
+   */
+  reversoIncierto?: boolean
 }
 
 /**
@@ -4016,7 +4021,8 @@ export async function recordOrderPayment(
           // SDK propio (Tarea 7, H13): la lápida del reverso, bajo el MISMO candado que el permiso del reverso, y después del
           // atajo idempotente (si el cobro ya existe, la verdad es «Aprobado», no un 409). Sólo para cobros de Blumon.
           if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
-            await exigirIntentoSinReverso(tx, llaveDelIntento)
+            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado.
+            paymentData.reversoIncierto = (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed'
           }
         }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
@@ -4306,6 +4312,7 @@ export async function recordOrderPayment(
               pricing: tarifaComoJson(paymentData.pricing),
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+              ...(paymentData.reversoIncierto ? { reversoIncierto: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
               // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
               ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled({ method: classicMethod }) ? { costPending: true } : {}),
@@ -5743,7 +5750,8 @@ export async function recordFastPayment(
           await candadoDeIntento(tx, llaveDelIntento)
           // SDK propio (Tarea 7): la lápida del reverso, bajo el mismo candado que el permiso del reverso. Sólo cobros de Blumon.
           if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
-            await exigirIntentoSinReverso(tx, llaveDelIntento)
+            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado.
+            paymentData.reversoIncierto = (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed'
           }
         }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) y vuelve a resolver ya con el candado.
@@ -6005,6 +6013,7 @@ export async function recordFastPayment(
               pricing: tarifaComoJson(paymentData.pricing),
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+              ...(paymentData.reversoIncierto ? { reversoIncierto: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
               // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
               ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled(resolvedTender ?? { method: effectiveMethod })

@@ -21,7 +21,7 @@ import logger from '@/config/logger'
 import { normalizeTerminalSerialNumber, terminalIdentityKey } from '@/utils/terminalSerial'
 import { randomUUID } from 'crypto'
 import { tipoDeEvidencia } from './segundaCaptura'
-import { IntentoConReverso, VENTANA_DEL_REVERSO_MS } from './reversoDeLaTerminal.service'
+import { IntentoConReverso, VENTANA_DEL_REVERSO_MS, leerLapida } from './reversoDeLaTerminal.service'
 import {
   OPCIONES_DE_TRANSACCION_DEL_INTENTO,
   candadoDeIntento,
@@ -931,14 +931,22 @@ export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): 
         motivo: 'HELD_BY_REVERSAL',
       })
       // La red de 30 s lo destraba: al vencer la ventana, la lápida pasa a `reverse_unconfirmed` y el aviso crea el cobro.
-      const escritura = await prisma.providerEventLog.updateMany({
-        where: { id: eventLogId, ...propietario },
-        data: {
-          status: EventStatus.PENDING,
-          errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.HELD_BY_REVERSAL,
-          nextAttemptAt: new Date(error.lapidaCreadaEn.getTime() + VENTANA_DEL_REVERSO_MS),
-        },
-      })
+      // F3: el registrador ya soltó el candado, así que el resultado del reverso pudo entrar en medio. La retención se escribe
+      // bajo el candado del intento (el mismo del resultado) y sólo si el aviso sigue PENDING: uno que el REVERSADA ya selló
+      // PROCESSED no se reabre (0 filas no es error); con la lápida ya `reverse_failed`, el turno es ya (nadie más lo despertaría).
+      const escritura = await prisma.$transaction(async tx => {
+        await candadoDeIntento(tx, attemptId)
+        const lapida = await leerLapida(tx, attemptId)
+        return tx.providerEventLog.updateMany({
+          where: { id: eventLogId, ...propietario, status: EventStatus.PENDING },
+          data: {
+            status: EventStatus.PENDING,
+            errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.HELD_BY_REVERSAL,
+            nextAttemptAt:
+              lapida?.estado === 'reverse_failed' ? new Date() : new Date(error.lapidaCreadaEn.getTime() + VENTANA_DEL_REVERSO_MS),
+          },
+        })
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
       return desenlaceDurableSiPerdioLaPropiedad(eventLogId, escritura, {
         action: 'HELD_BY_REVERSAL',
         errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.HELD_BY_REVERSAL,
@@ -1485,6 +1493,10 @@ async function desenlaceDurableSiPerdioLaPropiedad(
       errorReason: durable.errorReason ?? undefined,
       message: 'RESOLVED_BY_ANOTHER_OWNER',
     }
+  }
+  // F3: el resultado del reverso selló el aviso sin dinero mientras su dueño lo iba a retener.
+  if (durable.status === EventStatus.PROCESSED && durable.errorReason === ANGELPAY_WEBHOOK_ERROR_REASONS.REVERSED_BY_TERMINAL) {
+    return { action: 'REVERSED_BY_TERMINAL', eventLogId, errorReason: durable.errorReason, message: 'RESOLVED_BY_ANOTHER_OWNER' }
   }
   if (durable.status === EventStatus.ERROR) {
     return {

@@ -357,6 +357,43 @@ describe('el aviso de Blumon crea el cobro por vínculo', () => {
     expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
   })
 
+  it('F12: serial físico de OTRA terminal escrito en minúsculas (y así su afiliación) ⇒ la reconoce igual: LINK_TERMINAL_MISMATCH sin Payment', async () => {
+    const otra = await f.otraTerminal()
+    const minusculas = otra.serialCrudo.toLowerCase()
+    await f.conAfiliacionBlumon({ serial: minusculas, asignadaA: [f.serial, otra.serial] })
+    const { requestId, attemptId } = await intentoVinculado()
+
+    const r = await aviso(f.eventoBlumon(attemptId, { serialNumber: minusculas }))
+
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'LINK_TERMINAL_MISMATCH' })
+    expect(await pagos()).toHaveLength(0)
+    expect(await fila(requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+  })
+
+  it('F7: marca que el servidor no conoce (CARNET) ⇒ el aviso crea el cobro igual, con marca OTHER', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+
+    const r = await aviso(f.eventoBlumon(attemptId, { brand: 'CARNET' }))
+
+    expect(r).toMatchObject({ action: 'CONFIRMED', paymentId: expect.any(String) })
+    expect(await pagos()).toEqual([expect.objectContaining({ id: r.paymentId, cardBrand: 'OTHER', status: 'COMPLETED' })])
+  })
+
+  it.each([
+    ['105.00', 10000, 500],
+    ['100.5', 10050, 0],
+  ])('F11: importe %p con base %p y propina %p ⇒ CONFIRMED con ese importe exacto', async (amount, amountCents, tipCents) => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado({ amountCents, tipCents })
+
+    const r = await aviso(f.eventoBlumon(attemptId, { amount }))
+
+    expect(r).toMatchObject({ action: 'CONFIRMED', paymentId: expect.any(String) })
+    const [pago] = await pagos()
+    expect({ amount: Number(pago.amount), tip: Number(pago.tipAmount) }).toEqual({ amount: amountCents / 100, tip: tipCents / 100 })
+  })
+
   it('serial virtual (sin Terminal) asignado sólo a OTRA terminal del venue ⇒ LINK_TERMINAL_MISMATCH sin Payment', async () => {
     const otra = await f.otraTerminal()
     const virtual = `${otra.serialCrudo}2`
@@ -779,5 +816,38 @@ describe('la red de 30 s (hallazgo 7)', () => {
     const todos = await pagos()
     expect(todos).toHaveLength(1)
     expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+  })
+
+  it('F5: más avisos vencidos con contexto que el lote ⇒ el que quedó fuera NO pasa a ORPHANED sin intentarlo; el pase siguiente lo recupera', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    // El más viejo se intenta y sigue PENDING (importe distinto); el segundo quedaría fuera de un lote de 1.
+    const primero = await aviso(f.eventoBlumon(attemptId, { amount: '99.00' }))
+    expect(await eventoDe(primero.eventLogId)).toMatchObject({ status: 'PENDING', errorReason: 'AMOUNT_MISMATCH' })
+    const segundo = await ingresoYCaida(f.eventoBlumon(attemptId))
+    await prisma.$executeRaw`
+      UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours 1 minute', "nextAttemptAt" = now() - interval '1 second'
+      WHERE id = ${primero.eventLogId}`
+    await prisma.$executeRaw`
+      UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours', "nextAttemptAt" = now() - interval '1 second'
+      WHERE id = ${segundo.id}`
+    const lote = red as unknown as { BATCH_SIZE: number; run: () => Promise<void> }
+    const original = lote.BATCH_SIZE
+    lote.BATCH_SIZE = 1
+    try {
+      await lote.run()
+
+      expect(await eventoDe(primero.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+      expect(await eventoDe(segundo.id)).toMatchObject({ status: 'PENDING' })
+      expect(await pagos()).toHaveLength(0)
+
+      await lote.run()
+    } finally {
+      lote.BATCH_SIZE = original
+    }
+
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(await eventoDe(segundo.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
   })
 })

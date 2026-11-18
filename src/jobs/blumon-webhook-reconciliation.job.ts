@@ -90,9 +90,20 @@ export class BlumonWebhookReconciliationJob {
       // Un solo «ahora» por pase (Tarea 7, pendiente de la 6): lo que `reconcilePending` deja fuera por su turno, `markOrphaned`
       // tampoco lo vence. Primero las lápidas del reverso que vencieron: así su aviso retenido sale en este mismo pase.
       const ahora = new Date()
-      const lapidasVencidas = await vencerLapidasSinRespuesta(ahora)
-      const reconciled = await this.reconcilePending(ahora)
-      const orphaned = await this.markOrphaned(ahora)
+      // F8: una falla del barrido de lápidas (p. ej. P1001) no tumba el pase: los avisos pendientes se recuperan igual.
+      let lapidasVencidas = 0
+      try {
+        lapidasVencidas = await vencerLapidasSinRespuesta(ahora)
+      } catch (err) {
+        logger.error('❌ [Blumon recon] El barrido de lápidas del reverso falló — el pase sigue con los avisos pendientes', {
+          error: err instanceof Error ? err.message : err,
+          stack: err instanceof Error ? err.stack : undefined,
+        })
+      }
+      // F5: los avisos que este pase intentó; `markOrphaned` no vence uno con contexto que no se intentó (quedó fuera del lote).
+      const intentados = new Set<string>()
+      const reconciled = await this.reconcilePending(ahora, intentados)
+      const orphaned = await this.markOrphaned(ahora, intentados)
       if (reconciled > 0 || orphaned > 0 || lapidasVencidas > 0) {
         logger.info('🪝 [Blumon recon] Pass complete', {
           lapidasVencidas,
@@ -115,7 +126,7 @@ export class BlumonWebhookReconciliationJob {
    * Pull PENDING events and retry matching once each.
    * Returns the count of events that newly transitioned out of PENDING.
    */
-  async reconcilePending(now: Date = new Date()): Promise<number> {
+  async reconcilePending(now: Date = new Date(), intentados?: Set<string>): Promise<number> {
     const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const pending = await retry(
       () =>
@@ -151,6 +162,7 @@ export class BlumonWebhookReconciliationJob {
 
     let resolved = 0
     for (const row of pending) {
+      intentados?.add(row.id)
       try {
         const payload = row.payload as unknown as BlumonWebhookPayload
         // No explicit scope — `reconcileBlumonEvent` re-resolves the venue
@@ -175,8 +187,11 @@ export class BlumonWebhookReconciliationJob {
   /**
    * Promote stale PENDING events (> TTL) to ERROR with errorReason=ORPHANED.
    * Bulk update is fine — these are not eligible for further retries.
+   * F5: un evento con contexto (`nextAttemptAt` no nulo: el que `reconcilePending` todavía intenta pasadas las 24 h) sólo se
+   * vence si ESTE pase lo intentó (`intentados`); uno que quedó fuera del lote espera al siguiente pase, que lo toma primero
+   * (orden por antigüedad), así que no se atasca.
    */
-  async markOrphaned(now: Date = new Date()): Promise<number> {
+  async markOrphaned(now: Date = new Date(), intentados: ReadonlySet<string> = new Set()): Promise<number> {
     const cutoff = new Date(now.getTime() - BLUMON_WEBHOOK_PENDING_TTL_MS)
     const orphanWhere = {
       provider: ProviderType.PAYMENT_PROCESSOR,
@@ -190,6 +205,8 @@ export class BlumonWebhookReconciliationJob {
         { OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }] },
         // Tarea 6: nunca se vence un evento antes de su turno: su recuperación por el vínculo todavía va a correr.
         { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
+        // F5: con contexto, sólo si este pase ya le dio su último intento.
+        { OR: [{ nextAttemptAt: null }, { id: { in: [...intentados] } }] },
       ],
     } satisfies Prisma.ProviderEventLogWhereInput
 
