@@ -79,6 +79,11 @@ describe('horaQueNoExiste', () => {
     expect(horaQueNoExiste(new Date('2027-03-14T10:30:00.000Z'), TIJUANA)).toBe(false)
   })
 
+  it('«24:00» no la juzga el detector (la resuelve la conversión de siempre), aunque al día siguiente salte el reloj', () => {
+    expect(horaQueNoExiste('2027-03-13T24:00', 'America/Havana')).toBe(false)
+    expect(horaQueNoExiste('2027-03-13T24:15', 'America/Havana')).toBe(false)
+  })
+
   it('zona con desfase de segundos (Colombo, 1906): la hora existe', () => {
     expect(horaQueNoExiste('1906-01-01T00:10:29', 'Asia/Colombo')).toBe(false)
   })

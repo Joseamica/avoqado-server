@@ -39,6 +39,8 @@ export function horaQueNoExiste(raw: string | Date, timezone: string): boolean {
   const texto = raw.trim()
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(texto)
   if (!m || !SIN_ZONA.test(texto)) return false
+  // «24:00» y otras horas fuera del reloj las sigue resolviendo la conversión de siempre (Codex r4 #1).
+  if (+m[4] > 23 || +m[5] > 59 || +(m[6] ?? 0) > 59) return false
   // Hasta el segundo: hay zonas viejas con desfase de segundos (Asia/Colombo en 1906, Codex r2 #8).
   const comoUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0))
   if (Number.isNaN(comoUtc)) return false
