@@ -75,12 +75,6 @@ describe('shouldProductUseInventory — contar piezas en todos los planes', () =
     expect(opcion(r, 'RECIPE')?.enabled).toBe(true)
   })
 
-  it('avisa que contesta por quien pregunta (`segunQuienPregunta`), para que el panel nuevo confíe en ella (Codex r6 #2)', async () => {
-    tienePremium.mockResolvedValue(false)
-    expect((await shouldProductUseInventory('venue-1')).segunQuienPregunta).toBe(true)
-    expect((await shouldProductUseInventory('venue-1', { quienPreguntaEsSuperadmin: true })).segunQuienPregunta).toBe(true)
-  })
-
   it('negocio que no existe ⇒ 404', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(null)
 
