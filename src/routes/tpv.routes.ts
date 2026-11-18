@@ -53,7 +53,7 @@ import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware
 import { checkPermission, resolveUserRoleForVenue } from '../middlewares/checkPermission.middleware'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '../lib/authPrincipals'
 import { NO_INSTRUMENT_PERMISSION } from '../services/tpv/no-instrument-resolution.service'
-import { noInstrumentPinRateLimiter, pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { noInstrumentPinRateLimiter, pinLoginRateLimiter, pinMasterRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { requireVenueMembership, validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
 import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
@@ -2657,7 +2657,7 @@ router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLog
  *       404:
  *         description: Venue or terminal not found
  */
-router.post('/venues/:venueId/auth/master', pinLoginRateLimiter, authController.masterSignIn)
+router.post('/venues/:venueId/auth/master', pinMasterRateLimiter, authController.masterSignIn)
 
 /**
  * @openapi

@@ -22,9 +22,10 @@
  * @module PinLoginRateLimitMiddleware
  */
 
-import rateLimit, { RateLimitRequestHandler } from 'express-rate-limit'
+import rateLimit, { RateLimitInfo, RateLimitRequestHandler } from 'express-rate-limit'
 import { NextFunction, Request, RequestHandler, Response } from 'express'
 import logger from '@/config/logger'
+import { AlmacenPorVentana } from './almacenPorVentana'
 
 /**
  * Rate limit configuration (environment-aware)
@@ -50,6 +51,50 @@ const RATE_LIMIT_CONFIG = {
 }
 
 /**
+ * 🔴 Tarjeta `hz:nube0000:na526456` (17-nov-2026): el login por PIN (checador y TPV) sólo gasta su tope con lo que FALLA.
+ *
+ * Antes contaba también las peticiones que salían bien. Los cinco caminos del checador (`mobile.routes.ts`) y el login por PIN de la
+ * TPV (`tpv.routes.ts`) comparten estas dos cubetas, y la «IP» que ve el servidor es el borde de Cloudflare (`src/utils/clientIp.ts`).
+ * En un cambio de turno, identify + clock-in de cinco empleados agotaban los 10 de la IP y el sexto recibía 429 con su PIN correcto.
+ *
+ * Cómo cuenta ahora: express-rate-limit suma al ENTRAR, como siempre; al terminar, `devolverSiSalioBien` resta la petición que
+ * contestó < 400, y SÓLO si su ventana sigue siendo la misma. No se usa `skipSuccessfulRequests` de la librería (resta por llave sin
+ * mirar la ventana: Codex r1 #3 y r2 #1) ni su `MemoryStore` (reescribe el mismo `Date` al reiniciar, y una petición podía «ver» la
+ * ventana de otra: Codex r3 #1): el almacén es `AlmacenPorVentana`, copia fiel del `MemoryStore` (cuenta igual frente a cualquier brinco del
+ * reloj) salvo que cada ventana es un registro nuevo y cada intento lleva su ficha. Por eso:
+ * - un PIN equivocado (checador 401, TPV 404 «Pin Incorrecto») gasta igual que hoy: 10 por IP y 20 por negocio cada 15 min;
+ * - un error con el PIN correcto (400 «ya tienes entrada») también gasta, como hoy;
+ * - una petición cortada antes de contestar no se resta (cuenta);
+ * - lo que sigue en vuelo cuenta mientras dura: 11 peticiones simultáneas de la misma IP todavía pueden dar un 429.
+ *
+ * Lo que NO cambia: la llave (`req.ip`), los topes, los mensajes. Cambiar la llave a la IP real del visitante dejaría a dos IPs del
+ * mismo borde con 10 cada una contra la misma sucursal (Codex r1 #1): es otra decisión, aparte. El código MAESTRO de la TPV ya no usa
+ * estas cubetas: tiene las suyas y cuenta TODO, como antes (`pinMasterRateLimiter`, Codex r2 #2).
+ * Promesa: `docs/audit/2026-11-17-nube-servidor-cliente/checador-pin/promesa.md` del workspace.
+ */
+const llavePorIp = (req: Request) => `pin-login:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`
+const llavePorNegocio = (req: Request) => `pin-login:venue:${req.params.venueId || 'unknown'}`
+const almacenPorIp = new AlmacenPorVentana()
+const almacenPorNegocio = new AlmacenPorVentana()
+
+/**
+ * Resta la petición que salió bien, en la MISMA ventana en la que se contó. La ficha es el `Date` propio que devolvió el almacén al
+ * contarla (`resetTime`, atado a su registro); al terminar, `devolverEnVentana` resta sólo en ese registro, en el mismo tramo síncrono.
+ * No hay promesa que pueda quedarse sin manejar (Codex r3 #3).
+ */
+function devolverSiSalioBien(almacen: AlmacenPorVentana, llave: (req: Request) => string, propiedad: string): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ventana = (req as unknown as Record<string, RateLimitInfo | undefined>)[propiedad]?.resetTime as Date | undefined
+    if (ventana === undefined) return next() // el limitador se saltó (sin negocio en la ruta): no contó nada
+    const clave = llave(req)
+    res.once('finish', () => {
+      if (res.statusCode < 400) almacen.devolverEnVentana(clave, ventana)
+    })
+    next()
+  }
+}
+
+/**
  * Per-IP rate limiter
  *
  * Limits PIN login attempts to 5 per 15 minutes per IP address.
@@ -64,11 +109,11 @@ export const ipRateLimiter: RateLimitRequestHandler = rateLimit({
   max: RATE_LIMIT_CONFIG.IP.max,
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable deprecated `X-RateLimit-*` headers
+  // Sólo gasta el tope lo que FALLA: `devolverSiSalioBien` resta lo correcto (ver arriba). Almacén y propiedad propios para eso.
+  store: almacenPorIp,
+  requestPropertyName: 'topePinPorIp',
   // Key generator: use IP address
-  keyGenerator: (req: Request) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown'
-    return `pin-login:ip:${ip}`
-  },
+  keyGenerator: llavePorIp,
   handler: (req: Request, res: Response) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown'
     const venueId = req.params.venueId || 'unknown'
@@ -105,11 +150,10 @@ export const venueRateLimiter: RateLimitRequestHandler = rateLimit({
   max: RATE_LIMIT_CONFIG.VENUE.max,
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable deprecated `X-RateLimit-*` headers
+  store: almacenPorNegocio,
+  requestPropertyName: 'topePinPorNegocio',
   // Key generator: use venueId from route params
-  keyGenerator: (req: Request) => {
-    const venueId = req.params.venueId || 'unknown'
-    return `pin-login:venue:${venueId}`
-  },
+  keyGenerator: llavePorNegocio,
   // Skip if no venueId (let validation handle it)
   skip: (req: Request) => !req.params.venueId,
   handler: (req: Request, res: Response) => {
@@ -148,7 +192,64 @@ export const venueRateLimiter: RateLimitRequestHandler = rateLimit({
  *   authController.staffSignIn
  * )
  */
-export const pinLoginRateLimiter = [ipRateLimiter, venueRateLimiter]
+export const pinLoginRateLimiter: RequestHandler[] = [
+  ipRateLimiter,
+  venueRateLimiter,
+  devolverSiSalioBien(almacenPorIp, llavePorIp, 'topePinPorIp'),
+  devolverSiSalioBien(almacenPorNegocio, llavePorNegocio, 'topePinPorNegocio'),
+]
+
+/**
+ * Código MAESTRO de la TPV (TOTP de 8 dígitos, acceso de SUPERADMIN a cualquier terminal) — CUBETA PROPIA que cuenta TODO.
+ *
+ * Hasta el 17-nov compartía las cubetas del login por PIN. Desde que esas devuelven lo que sale bien (na526456), las checadas correctas
+ * del mismo borde ya no le gastarían cupo al maestro y quien lo prueba tendría más intentos (Codex r2 #2). Aquí conserva exactamente
+ * lo de antes: 10 por IP y 20 por negocio cada 15 min (producción), contando aciertos y fallos, con los mismos mensajes.
+ */
+const masterIpRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: RATE_LIMIT_CONFIG.IP.windowMs,
+  max: RATE_LIMIT_CONFIG.IP.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => `pin-master:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`,
+  handler: (req: Request, res: Response) => {
+    logger.warn('🚨 Rate limit del código maestro excedido (por IP)', {
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+      venueId: req.params.venueId || 'unknown',
+      endpoint: req.path,
+    })
+    res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: 'Demasiados intentos de inicio de sesión. Por favor intenta de nuevo en 15 minutos.',
+      retryAfter: 15 * 60,
+    })
+  },
+})
+
+const masterVenueRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: RATE_LIMIT_CONFIG.VENUE.windowMs,
+  max: RATE_LIMIT_CONFIG.VENUE.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => `pin-master:venue:${req.params.venueId || 'unknown'}`,
+  skip: (req: Request) => !req.params.venueId,
+  handler: (req: Request, res: Response) => {
+    logger.warn('🚨 Rate limit del código maestro excedido (por venue)', {
+      venueId: req.params.venueId || 'unknown',
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+      endpoint: req.path,
+    })
+    res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: 'Este local ha tenido demasiados intentos de inicio de sesión. Por favor intenta de nuevo en 15 minutos.',
+      retryAfter: 15 * 60,
+    })
+  },
+})
+
+export const pinMasterRateLimiter = [masterIpRateLimiter, masterVenueRateLimiter]
 
 /**
  * Autorización con PIN de gerente — CUBETA PROPIA.

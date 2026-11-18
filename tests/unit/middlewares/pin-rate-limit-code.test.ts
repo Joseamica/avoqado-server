@@ -22,12 +22,14 @@ let servidores: Server[] = []
  * conecta por IPv4 a ese puerto — con cientos de peticiones en una máquina con otros servidores vivos, alguna cae en el proceso
  * de otro (medido el 17-sep: `Parse Error: Expected HTTP/` y un 501 ajeno). Atado a 127.0.0.1, el puerto es de esta prueba.
  */
-async function app(limiters: RequestHandler[]): Promise<Server> {
+async function app(limiters: RequestHandler[], estado = 200): Promise<Server> {
   const a = express()
   // Un salto de proxy: `X-Forwarded-For` decide `req.ip` y cada petición puede venir de una IP distinta.
   a.set('trust proxy', 1)
+  // `estado` = lo que contesta la ruta. El login por PIN sólo gasta su tope con lo que FALLA (na526456, 17-nov): sus pruebas
+  // contestan 401, como un PIN equivocado del checador.
   a.post('/v/:venueId/pin', ...limiters, (_req, res) => {
-    res.json({ ok: true })
+    res.status(estado).json({ ok: estado < 400 })
   })
   const servidor = a.listen(0, '127.0.0.1')
   servidores.push(servidor)
@@ -42,11 +44,11 @@ afterEach(async () => {
 })
 
 /** Dispara hasta el primer 429 y lo devuelve junto con cuántas pasaron antes. */
-async function hastaElPrimer429(enviar: (i: number) => request.Test, tope: number) {
+async function hastaElPrimer429(enviar: (i: number) => request.Test, tope: number, estado = 200) {
   for (let i = 0; i < tope; i++) {
     const res = await enviar(i)
     if (res.status === 429) return { pasaron: i, res }
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(estado)
   }
   throw new Error(`nunca llegó el 429 en ${tope} intentos`)
 }
@@ -64,21 +66,22 @@ const cuerpoDel429 = (res: request.Response, mensaje: RegExp) => {
 }
 
 describe('D · el 429 de los limitadores de PIN lleva `code` sin perder `retryAfter` ni `Retry-After`', () => {
-  it('login por PIN, cubeta por IP: el 101º intento de la misma IP ⇒ 429 con code', async () => {
-    const a = await app(pinLoginRateLimiter)
-    const { pasaron, res } = await hastaElPrimer429(() => request(a).post('/v/venue-ip/pin').set('X-Forwarded-For', '10.1.0.1'), 150)
+  it('login por PIN, cubeta por IP: el 101º PIN equivocado de la misma IP ⇒ 429 con code', async () => {
+    const a = await app(pinLoginRateLimiter, 401)
+    const { pasaron, res } = await hastaElPrimer429(() => request(a).post('/v/venue-ip/pin').set('X-Forwarded-For', '10.1.0.1'), 150, 401)
     expect(pasaron).toBe(100)
     cuerpoDel429(res, /inicio de sesión/)
   })
 
-  it('login por PIN, cubeta por venue: 201 intentos desde IPs DISTINTAS ⇒ 429 del venue con code', async () => {
-    const a = await app(pinLoginRateLimiter)
+  it('login por PIN, cubeta por venue: 201 PIN equivocados desde IPs DISTINTAS ⇒ 429 del venue con code', async () => {
+    const a = await app(pinLoginRateLimiter, 401)
     const { pasaron, res } = await hastaElPrimer429(
       i =>
         request(a)
           .post('/v/venue-venue/pin')
           .set('X-Forwarded-For', `10.2.${Math.floor(i / 250)}.${i % 250}`),
       250,
+      401,
     )
     expect(pasaron).toBe(200)
     cuerpoDel429(res, /Este local/)
