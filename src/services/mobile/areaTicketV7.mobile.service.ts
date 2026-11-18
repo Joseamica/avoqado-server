@@ -1834,6 +1834,19 @@ async function crearEspejosDeLosVales(
       })
     : []
   const membresiaDe = new Map(membresias.map(m => [m.staffId, m.id]))
+  // D4: quien aprobó es una foto del id de su membresía (sin llave foránea); si la borraron entre emitir y cobrar, la fila va sin él.
+  const aprobadores = [...new Set(conDescuento.map(r => r.aprobador).filter((id): id is string => !!id))]
+  const vigentes = new Set(
+    aprobadores.length
+      ? (
+          await tx.staffVenue.findMany({
+            where: { venueId: p.venueId, id: { in: aprobadores } },
+            select: { id: true },
+            take: aprobadores.length,
+          })
+        ).map(m => m.id)
+      : [],
+  )
   const grupos = new Map<
     string,
     {
@@ -1849,19 +1862,20 @@ async function crearEspejosDeLosVales(
     const catalogo = p.descuentos.get(r.appliedDiscountId!)
     const reproduce = catalogo != null && calculateDiscountCents(catalogo, centavos(r.total)) === cents
     // D4: también por motivo, comentario y aprobador, como los sueltos: el reporte por motivo cuadra al centavo.
+    const aprobador = r.aprobador && vigentes.has(r.aprobador) ? r.aprobador : null
     const llave = JSON.stringify([
       r.appliedDiscountId,
       r.area,
       r.emisor,
       r.motivo.reason ?? null,
       r.motivo.reasonComment ?? null,
-      r.aprobador,
+      aprobador,
     ])
     const grupo = grupos.get(llave) ?? {
       descuentoId: r.appliedDiscountId!,
       emisor: r.emisor,
       motivo: r.motivo,
-      aprobador: r.aprobador,
+      aprobador,
       renglones: [],
     }
     grupo.renglones.push({ id: r.id, cents, reproduce })

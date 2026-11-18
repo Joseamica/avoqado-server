@@ -378,4 +378,48 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     const motivos = Object.fromEntries(reporte.porMotivo.map(g => [g.reason ?? 'SIN_MOTIVO', g.amount]))
     expect(motivos).toMatchObject({ 'Cliente frecuente': 15, 'Producto dañado': 20, SIN_MOTIVO: 10 })
   })
+
+  // D4 (Codex r1-r4): quien aprobó es una foto del id de su membresía, sin llave foránea. Si la borran para siempre entre emitir y
+  // cobrar, el cobro sigue y la fila va sin aprobador (como `OrderDiscount`, que la deja en NULL), dada por el emisor del vale.
+  it('D4: si borran la membresía de quien aprobó antes de cobrar, el cobro sigue y la fila va sin aprobador', async () => {
+    const otra = await prisma.staff.create({
+      data: { email: `vales-espejo-gerente-${suffix}@example.com`, firstName: 'Gerente', lastName: 'Temporal' },
+    })
+    const membresia = await prisma.staffVenue.create({ data: { staffId: otra.id, venueId, role: StaffRole.MANAGER } })
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-borrada-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: otra.id,
+      aprobacionDelDescuento: {},
+      lines: [{ clientLineId: `d4-borrada-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId }],
+    })
+    expect(
+      (await prisma.areaTicketLine.findFirstOrThrow({ where: { areaTicket: { code: vale.code, venueId } } })).discountAuthorizedById,
+    ).toBe(membresia.id)
+    await prisma.staffVenue.delete({ where: { id: membresia.id } })
+
+    const caja = await createAreaTicketCheckout(venueId, {
+      idempotencyKey: `d4-borrada-caja-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    await addTicketToCheckout(venueId, caja.id, vale.code, {
+      idempotencyKey: `d4-borrada-claim-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d4-borrada-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+    })
+    const filas = await prisma.orderDiscount.findMany({ where: { orderId: materializada.order!.id }, take: 5 })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ discountId: dGerenteId, authorizedById: null, appliedById: staffVenueId })
+    expect(filas[0].amount.toFixed(2)).toBe('20.00')
+    await prisma.staff.delete({ where: { id: otra.id } })
+  })
 })

@@ -110,5 +110,6 @@ describe('motivoDelDescuento · caracteres de control', () => {
       reasonComment: 'Viene diario',
     })
     expect(motivoDelDescuento('\u0000\u0000', '\u0000')).toEqual({})
+    expect(motivoDelDescuento('Cliente\u0085frecuente\u009F', null)).toEqual({ reason: 'Cliente frecuente' })
   })
 })
