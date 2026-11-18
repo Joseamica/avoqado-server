@@ -268,7 +268,8 @@ describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () 
       expect(JSON.stringify(r)).toContain('ORD-0000000000042')
     })
 
-    it('splitOrderBySeat: UN tronco de la base para toda la división, `-S<asiento>` por cuenta, sin azar', async () => {
+    // Auditoría de apps viejas (18-nov): ya no hay tronco ni `-S<asiento>`; cada cuenta toma su folio del valor por defecto de la base.
+    it('splitOrderBySeat: cada asiento nace sin folio propio y la respuesta trae el que puso la base', async () => {
       prismaMock.order.findFirst.mockResolvedValue(
         cuentaOrigen('t', [
           { id: 'it-1', seat: 1 },
@@ -276,20 +277,26 @@ describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () 
           { id: 'it-3', seat: 3 },
         ]) as any,
       )
-      prismaMock.order.create.mockImplementation(async (args: any) => ({ id: `hija-${args.data.orderNumber}`, ...args.data }))
+      let siguiente = 77
+      prismaMock.order.create.mockImplementation(async (args: any) => {
+        const orderNumber = `ORD-${String(++siguiente).padStart(13, '0')}`
+        return { id: `hija-${orderNumber}`, ...args.data, orderNumber }
+      })
 
       const r = await splitOrderBySeat(VENUE, 'order-origen', 'staff-1')
 
-      const folios = (prismaMock.order.create as jest.Mock).mock.calls.map(([a]: any) => a.data.orderNumber)
-      expect(folios).toEqual(['ORD-0000000000077-S2', 'ORD-0000000000077-S3'])
+      const creadas = (prismaMock.order.create as jest.Mock).mock.calls.map(([a]: any) => a.data)
+      expect(creadas).toHaveLength(2)
+      creadas.forEach(d => expect(d).not.toHaveProperty('orderNumber'))
+      expect(creadas.map(d => d.customerName)).toEqual(['Asiento 2', 'Asiento 3'])
       const pedidos = (prismaMock.$queryRaw as jest.Mock).mock.calls.filter(([q]: any) =>
         (Array.isArray(q) ? q.join('?') : q.sql).includes('order_number_next()'),
       )
-      expect(pedidos).toHaveLength(1)
-      // Cada respuesta apunta a SU hija con lo realmente insertado.
+      expect(pedidos).toHaveLength(0)
+      // Cada respuesta apunta a SU hija con el folio que realmente puso la base: dos folios distintos, sin sufijo.
       expect(r.created.map((c: any) => [c.id, c.orderNumber])).toEqual([
-        ['hija-ORD-0000000000077-S2', 'ORD-0000000000077-S2'],
-        ['hija-ORD-0000000000077-S3', 'ORD-0000000000077-S3'],
+        ['hija-ORD-0000000000078', 'ORD-0000000000078'],
+        ['hija-ORD-0000000000079', 'ORD-0000000000079'],
       ])
     })
   })

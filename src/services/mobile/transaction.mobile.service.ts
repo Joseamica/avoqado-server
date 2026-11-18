@@ -7,6 +7,7 @@
  */
 
 import { PaymentMethod, Prisma, TransactionStatus } from '@prisma/client'
+import { filtroPorFolio } from '@/services/shared/filtroPorFolio'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shared/customerAttributionPolicy'
@@ -72,11 +73,7 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         { maskedPan: { contains: searchTerm, mode: 'insensitive' } },
         { referenceNumber: { contains: searchTerm, mode: 'insensitive' } },
         { authorizationNumber: { contains: searchTerm, mode: 'insensitive' } },
-        {
-          order: {
-            orderNumber: { contains: searchTerm, mode: 'insensitive' },
-          },
-        },
+        { order: filtroPorFolio(searchTerm) },
         {
           processedBy: {
             OR: [{ firstName: { contains: searchTerm, mode: 'insensitive' } }, { lastName: { contains: searchTerm, mode: 'insensitive' } }],
