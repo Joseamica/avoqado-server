@@ -2787,6 +2787,19 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
       expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
     })
 
+    it('Codex r4 #1: el importe se lee igual que al registrarlo (`[5000]` y texto numérico valen 5000)', async () => {
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
+      )
+
+      const [ack] = await processIntents(
+        baseParams([{ id: 'i-pay', seq: 9, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: [5000], tipCents: '0' } }]),
+      )
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: { paymentId: 'payment-1' } })
+      expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]).toMatchObject({ amount: 5000, tip: 0 })
+    })
+
     it('D7: el cobro cayó en la cuenta aparte ⇒ el acuse nombra la cuenta pedida y la aparte, como la primera vez', async () => {
       const huellaD7 = { ...MARCA, huella: { orderId: 'order-aparte', paymentId: 'payment-1', cuentaOriginal: 'order-9' } }
       ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(

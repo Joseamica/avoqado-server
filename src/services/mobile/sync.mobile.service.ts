@@ -872,10 +872,10 @@ async function ackDelCobroYaRegistrado(p: {
   try {
     // Lo mismo que manda la cola desde la primera vez (la misma llave trae el mismo payload): sólo sirve para el cambio del acuse.
     const payload = (intent.payload ?? {}) as Record<string, unknown>
-    // Como `applyPayCash` (número o texto numérico; propina ausente = 0), pero sin `Number()` sobre un objeto, que puede lanzar.
-    const numero = (v: unknown): number => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN)
-    const amountCents = numero(payload.amountCents)
-    const tipCents = payload.tipCents === undefined || payload.tipCents === null ? 0 : numero(payload.tipCents)
+    // EXACTAMENTE como lo leyó `applyPayCash` al registrarlo (Codex r4 #1: `[5000]` también vale 5000). Si `Number()` lanza (un objeto
+    // JSON), `applyPayCash` tampoco pudo registrar nada con ese payload: cae al `catch` y queda el rechazo de siempre.
+    const amountCents = Number(payload.amountCents ?? NaN)
+    const tipCents = Number(payload.tipCents ?? 0)
     if (!Number.isFinite(amountCents) || amountCents < 0 || !Number.isFinite(tipCents) || tipCents < 0) return null
     const guardado = await prisma.payment.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
