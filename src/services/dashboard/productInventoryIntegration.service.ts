@@ -678,7 +678,8 @@ export async function shouldProductUseInventory(venueId: string) {
         type: 'QUANTITY' as const,
         label: 'wizard.step2.simpleStock',
         description: 'wizard.step2.simpleStockDesc',
-        enabled: hasInventoryFeature,
+        // Contar piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta na1d52b5, 17-nov). La receta, no.
+        enabled: true,
       },
       {
         type: 'RECIPE' as const,

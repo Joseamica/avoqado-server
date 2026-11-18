@@ -23,7 +23,7 @@ import {
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
-import { productoLlevaInventario } from '../../services/dashboard/productoLlevaInventario'
+import { altaPideInventarioPremium } from '../../services/dashboard/productoLlevaInventario'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
@@ -113,11 +113,14 @@ const router = Router({ mergeParams: true })
 // ===========================================
 // «Nuevo producto» y «Crear servicio» del DASHBOARD guardan SIEMPRE por aquí, también sin inventario. Con el candado
 // general delante, un negocio nuevo en Gratis o Pro (no exento ni demo) no podía dar de alta ni un producto: 403.
-// Dar de alta un producto SIN inventario es de todos los planes; el alta CON inventario sigue pidiendo
-// INVENTORY_TRACKING, con la misma regla con que el servicio decide si lo configura (`productoLlevaInventario`).
+// Dar de alta un producto SIN inventario es de todos los planes (D8). Y desde el 17-nov también CON inventario por PIEZAS: contar
+// piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta `hz:nube0000:na1d52b5`). Sólo el alta por RECETA (o
+// cualquier método que no sea piezas) pide INVENTORY_TRACKING (`altaPideInventarioPremium`, la misma regla con que el servicio decide).
 // El cuerpo se valida ANTES de decidir, para que el candado lea lo mismo que va a leer el servicio.
-const candadoSiLlevaInventario: RequestHandler = (req, res, next) =>
-  productoLlevaInventario(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
+// Editar o ajustar las piezas de un producto que ya existe (`wizard/progress`, `step3-simple`, `adjust-stock`…) sigue detrás del
+// candado general: abrirlo pide resolver antes recetas, ventas en medio y saldos negativos (Codex r1 de na1d52b5).
+const candadoSiPidePremium: RequestHandler = (req, res, next) =>
+  altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
 
 /**
  * @openapi
@@ -129,9 +132,29 @@ const candadoSiLlevaInventario: RequestHandler = (req, res, next) =>
 router.post(
   '/wizard/complete',
   checkPermission('inventory:update'),
+  // Es un ALTA de producto: pide también el permiso del alta normal (`POST /products`, `menu:create`), como el botón «Nuevo producto»
+  // del DASHBOARD (Codex r1 #3 de na1d52b5). Los roles de fábrica que tienen `inventory:update` también tienen `menu:create`.
+  checkPermission('menu:create'),
   validateRequest(CreateProductWithInventorySchema),
-  candadoSiLlevaInventario,
+  candadoSiPidePremium,
   productWizardController.createProductWithInventory,
+)
+
+/**
+ * La recomendación del asistente «Nuevo producto»: qué inventario puede elegir este negocio. De TODOS los planes (sólo lee el plan):
+ * detrás del candado general, Gratis y Pro recibían 403 y la sección se quedaba en «Cargando…» para siempre (na1d52b5).
+ *
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/should-use-inventory:
+ *   get:
+ *     tags: [Inventory - Product Wizard]
+ *     summary: Check if venue should use inventory (recommendations)
+ */
+router.get(
+  '/should-use-inventory',
+  checkPermission('inventory:read'),
+  validateRequest(VenueIdParamsSchema),
+  productWizardController.shouldUseInventory,
 )
 
 // ===========================================
@@ -141,8 +164,8 @@ router.post(
 // Grandfathered/demo venues, explicit VenueFeature grants and superadmins all pass inside
 // checkFeatureAccess. The auto-reorder routes below ADDITIONALLY gate on AUTO_REORDER (their
 // own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
-// the MCP's planGateMessage — this closes the server side of that same paywall. The only route
-// registered above it is the product wizard's «complete» (its own conditional gate).
+// the MCP's planGateMessage — this closes the server side of that same paywall. The only routes
+// registered above it are the product wizard's «complete» (its own conditional gate) and «should-use-inventory» (read-only).
 router.use(checkFeatureAccess('INVENTORY_TRACKING'))
 
 // ===========================================
@@ -1320,20 +1343,6 @@ router.get('/reports/valuation', checkPermission('inventory:read'), reportContro
 // ===========================================
 // PRODUCT WIZARD ROUTES (NEW)
 // ===========================================
-
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/products/should-use-inventory:
- *   get:
- *     tags: [Inventory - Product Wizard]
- *     summary: Check if venue should use inventory (recommendations)
- */
-router.get(
-  '/should-use-inventory',
-  checkPermission('inventory:read'),
-  validateRequest(VenueIdParamsSchema),
-  productWizardController.shouldUseInventory,
-)
 
 /**
  * @openapi

@@ -9,3 +9,12 @@
 export function productoLlevaInventario(data: { useInventory?: unknown; inventoryMethod?: unknown } | null | undefined): boolean {
   return Boolean(data?.useInventory && data?.inventoryMethod)
 }
+
+/**
+ * ¿El alta pide Premium (INVENTORY_TRACKING)? Sólo si lleva inventario y NO es por piezas (tarjeta `hz:nube0000:na1d52b5`,
+ * 17-nov-2026). Contar piezas por producto es de todos los planes (founder, 29-sep, «B»); la receta sigue siendo Premium. Cualquier
+ * método que no sea `QUANTITY` cuenta como Premium: un valor nuevo nace cerrado, nunca abierto.
+ */
+export function altaPideInventarioPremium(data: { useInventory?: unknown; inventoryMethod?: unknown } | null | undefined): boolean {
+  return productoLlevaInventario(data) && data?.inventoryMethod !== 'QUANTITY'
+}

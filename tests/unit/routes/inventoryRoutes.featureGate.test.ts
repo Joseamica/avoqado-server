@@ -34,9 +34,14 @@ jest.mock('@/config/logger', () => ({
 }))
 
 // Permission gate is not under test — passthrough, but KEEP the real resolveRequestVenueId.
+// Cada permiso que pide una ruta queda anotado (al importar el router): así se comprueba la forma de la ruta sin probar el permiso.
+const permisosPedidos: string[] = []
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   ...jest.requireActual('@/middlewares/checkPermission.middleware'),
-  checkPermission: () => (_req: any, _res: any, next: any) => next(),
+  checkPermission: (permiso: string) => {
+    permisosPedidos.push(permiso)
+    return (_req: any, _res: any, next: any) => next()
+  },
 }))
 
 // Body/param validation is not under test — passthrough.
@@ -65,6 +70,7 @@ jest.mock('@/controllers/dashboard/inventory/inventoryTransfer.controller', () =
 
 import prisma from '@/utils/prismaClient'
 import inventoryRoutes from '@/routes/dashboard/inventory.routes'
+import { altaPideInventarioPremium } from '@/services/dashboard/productoLlevaInventario'
 
 const staffVenueFindFirst = (prisma as any).staffVenue.findFirst as jest.Mock
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
@@ -251,8 +257,23 @@ describe('alta de producto por el asistente (/wizard/complete) — el candado s�
     expect(res.status).toBe(200)
   })
 
-  it('negocio Gratis, producto con inventario por piezas → 403 INVENTORY_TRACKING (sin cambio)', async () => {
+  it('negocio Gratis, producto con inventario por PIEZAS → 200 (na1d52b5: contar piezas es de todos los planes, founder 29-sep)', async () => {
     const res = await request(server).post(WIZARD_URL).send(porPiezas)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ handler: 'createProductWithInventory' })
+  })
+
+  it('negocio Pro, producto con inventario por PIEZAS → 200', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server).post(WIZARD_URL).send(porPiezas)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('negocio Gratis, producto con RECETA → 403 INVENTORY_TRACKING (la receta sigue siendo Premium)', async () => {
+    const res = await request(server).post(WIZARD_URL).send(conReceta)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
@@ -289,5 +310,71 @@ describe('alta de producto por el asistente (/wizard/complete) — el candado s�
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+  })
+})
+
+// na1d52b5 (17-nov-2026): «Nuevo producto» deja contar piezas en todos los planes (founder, 29-sep, «B»). La recomendación del
+// asistente pasa a todos los planes (en Gratis/Pro contestaba 403 y la sección se quedaba en «Cargando…»). Editar o ajustar las piezas
+// de un producto que ya existe sigue detrás del candado (Codex r1: recetas, ventas en medio y saldos negativos van aparte).
+describe('asistente de producto — contar piezas al dar de alta, en todos los planes (na1d52b5)', () => {
+  const base = `/api/v1/dashboard/venues/${VENUE_ID}/inventory`
+
+  // NEW FEATURE TESTS
+  it('negocio Gratis: la recomendación (`should-use-inventory`) contesta 200', async () => {
+    const res = await request(server).get(`${base}/should-use-inventory`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ handler: 'shouldUseInventory' })
+  })
+
+  it('negocio Pro: la recomendación contesta 200', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server).get(`${base}/should-use-inventory`)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('el alta por el asistente pide también el permiso del alta normal (`menu:create`), además de `inventory:update`', () => {
+    expect(permisosPedidos).toEqual(expect.arrayContaining(['inventory:update', 'menu:create']))
+  })
+
+  // REGRESSION TESTS — editar y ajustar piezas de un producto existente sigue siendo Premium
+  it.each([
+    ['GET', 'products/prod_1/wizard/progress'],
+    ['POST', 'products/prod_1/wizard/step2'],
+    ['POST', 'products/prod_1/wizard/step3-simple'],
+    ['POST', 'products/prod_1/wizard/step3-recipe'],
+    ['POST', 'products/prod_1/switch-inventory-method'],
+    ['POST', 'products/prod_1/adjust-stock'],
+    ['GET', 'products/prod_1/movements'],
+    ['GET', 'products/prod_1/inventory-status'],
+  ])('negocio Gratis: %s %s sigue detrás del candado → 403', async (metodo, ruta) => {
+    const url = `${base}/${ruta}`
+    const res = metodo === 'GET' ? await request(server).get(url) : await request(server).post(url).send({})
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+  })
+
+  it('negocio Premium: la recomendación y el progreso contestan 200 (como hoy)', async () => {
+    vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
+
+    expect((await request(server).get(`${base}/should-use-inventory`)).status).toBe(200)
+    expect((await request(server).get(`${base}/products/prod_1/wizard/progress`)).status).toBe(200)
+  })
+})
+
+describe('altaPideInventarioPremium — la regla del candado del alta (na1d52b5)', () => {
+  it.each([
+    [{ useInventory: false }, false],
+    [{ useInventory: true }, false], // sin método: el servicio lo trata como sin inventario
+    [{ useInventory: true, inventoryMethod: 'QUANTITY' }, false],
+    [{ useInventory: true, inventoryMethod: 'RECIPE' }, true],
+    [{ useInventory: true, inventoryMethod: 'OTRO_FUTURO' }, true], // un método nuevo nace cerrado
+    [null, false],
+    [undefined, false],
+  ])('%j ⇒ pide Premium: %s', (entrada, esperado) => {
+    expect(altaPideInventarioPremium(entrada)).toBe(esperado)
   })
 })
