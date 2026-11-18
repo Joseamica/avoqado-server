@@ -235,5 +235,17 @@ describe('na526456 · la ventana y el código maestro (Codex r2)', () => {
     await new Promise<void>(listo => servidor.once('listening', () => listo()))
     // Misma IP, mismo negocio: el maestro todavía tiene su cupo completo.
     expect((await request(servidor).post('/venues/venue-separadas/auth/master').set('X-Forwarded-For', ip).send({})).status).toBe(401)
+
+    // Y al revés: 100 fallos del maestro desde otra IP no le gastan el cupo al checador de esa IP (Codex r3: probar las dos direcciones).
+    const ipMaestro = ipDePrueba(23)
+    for (let i = 0; i < 100; i++) {
+      expect(
+        (await request(servidor).post('/venues/venue-separadas-2/auth/master').set('X-Forwarded-For', ipMaestro).send({})).status,
+      ).toBe(401)
+    }
+    expect((await request(servidor).post('/venues/venue-separadas-2/auth/master').set('X-Forwarded-For', ipMaestro).send({})).status).toBe(
+      429,
+    )
+    expect((await checar(a, 'venue-separadas-2', '0000', ipMaestro)).status).toBe(401)
   })
 })
