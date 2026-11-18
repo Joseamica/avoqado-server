@@ -3728,6 +3728,38 @@ export async function findSesionesDeValesAtoradas(
  */
 export const ESTADOS_DE_PAGO_NO_CAPTURADOS: ReadonlySet<string> = new Set(['PENDING', 'PROCESSING', 'FAILED', 'REFUNDED'])
 
+/**
+ * Familia B (SDK propio): la alarma del cobro de Blumon que nace con el reverso SIN confirmar (`reversoIncierto`) nace donde nace la
+ * marca. Dentro de la MISMA transacción que crea el Payment queda un ActivityLog durable (si el alta se deshace, también él); el 🚨
+ * del log sale después del commit y sólo de la llamada que lo CREÓ. Así hay uno por cobro, venga del REST, del aviso o de la red,
+ * y ninguna lectura posterior puede perderlo.
+ */
+export const ACCION_COBRO_CON_REVERSO_INCIERTO = 'PAYMENT_REGISTERED_WITH_UNCERTAIN_REVERSAL'
+async function anotarCobroConReversoIncierto(
+  tx: Prisma.TransactionClient,
+  pago: { id: string; venueId: string },
+  attemptId: string | null,
+): Promise<void> {
+  await tx.activityLog.create({
+    data: {
+      action: ACCION_COBRO_CON_REVERSO_INCIERTO,
+      entity: 'Payment',
+      entityId: pago.id,
+      venueId: pago.venueId,
+      data: { attemptId, paymentId: pago.id, venueId: pago.venueId },
+    },
+  })
+}
+function alarmarCobroConReversoIncierto(pago: { id: string; venueId: string }, attemptId: string | null, paymentData: PaymentCreationData) {
+  logger.error('🚨 [Blumon reverso] El banco aprobó y el reverso nunca se confirmó: se registra el cobro', {
+    attemptId,
+    requestId: paymentData.terminalPaymentRequestId ?? null,
+    paymentId: pago.id,
+    venueId: pago.venueId,
+    registradoVia: paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal',
+  })
+}
+
 export async function recordOrderPayment(
   venueId: string,
   orderId: string,
@@ -4365,6 +4397,7 @@ export async function recordOrderPayment(
             processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
+        if (paymentData.reversoIncierto) await anotarCobroConReversoIncierto(tx, newPayment, llaveDelIntento)
 
         if (shiftClaim) {
           await recordPendingPaymentShiftReconciliation(tx, {
@@ -4728,6 +4761,8 @@ export async function recordOrderPayment(
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
+  // Familia B: sólo llega aquí un cobro nuevo y comiteado (la evidencia PENDING ya salió arriba y no lleva la marca).
+  if (paymentData.reversoIncierto) alarmarCobroConReversoIncierto(payment, llaveDelIntento, paymentData)
 
   logger.info('VenueTransaction created for payment', {
     paymentId: payment.id,
@@ -6065,6 +6100,7 @@ export async function recordFastPayment(
             processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
+        if (paymentData.reversoIncierto) await anotarCobroConReversoIncierto(tx, newPayment, llaveDelIntento)
 
         if (shiftClaim) {
           await recordPendingPaymentShiftReconciliation(tx, {
@@ -6289,6 +6325,8 @@ export async function recordFastPayment(
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
+  // Familia B: mismo punto que en el cobro con orden.
+  if (paymentData.reversoIncierto) alarmarCobroConReversoIncierto(payment, llaveDelIntento, paymentData)
 
   logger.info('VenueTransaction created for fast payment', {
     paymentId: payment.id,

@@ -119,6 +119,20 @@ describe('R6 — el aviso no deja titular ni tarjeta en el log', () => {
     expect(log).not.toContain('A1B2C3D4E5F60718') // F6: ni el criptograma del chip
   })
 
+  it('lista blanca (Familia E): un campo desconocido tipo EMV y un objeto anidado no van al log; sí sus nombres', async () => {
+    mockedProcess.mockResolvedValue({ success: true, action: 'MATCHED', message: 'ok', eventLogId: 'evt_1' })
+    const res = mockRes()
+    const cuerpo = { ...conTarjeta, tvr: '0000008000', emv: { track2: '4111111111111111D2512' } }
+
+    await handleBlumonTPVWebhook(reqBuffer(JSON.stringify(cuerpo)), res, jest.fn())
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    const log = todoLoLogueado()
+    expect(log).not.toContain('0000008000')
+    expect(log).not.toContain('4111111111111111')
+    expect(log).toContain('"camposNoReconocidos":["tvr","emv"]')
+  })
+
   it.each([
     '{"cardHolder":"HOMER', // cadena sin terminar
     '{"cardHolder": HOMER SIMPSON}', // valor sin comillas: el SyntaxError de V8 cita un fragmento del cuerpo

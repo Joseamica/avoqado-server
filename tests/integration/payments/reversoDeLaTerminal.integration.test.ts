@@ -126,8 +126,8 @@ const registradores = {
   recordFastPayment: (datos: any) => registrador.recordFastPayment(f.venueId, datos, f.staffId),
   recordOrderPayment: async (datos: any) => registrador.recordOrderPayment(f.venueId, (await f.nuevaVenta(100)).id, datos, f.staffId),
 }
-const avisoBlumon = (attemptId: string) =>
-  processBlumonPaymentWebhook(f.eventoBlumon(attemptId) as Parameters<typeof processBlumonPaymentWebhook>[0])
+const avisoBlumon = (attemptId: string, over: Record<string, unknown> = {}) =>
+  processBlumonPaymentWebhook(f.eventoBlumon(attemptId, over) as Parameters<typeof processBlumonPaymentWebhook>[0])
 const pase = () => (red as unknown as { run: () => Promise<void> }).run()
 
 beforeEach(() => {
@@ -303,6 +303,73 @@ describe('el aviso del intento con lápida', () => {
     expect(pago.processorData).toMatchObject({ reversoIncierto: true })
     expect(alarmas()).toHaveLength(1)
     expect(alarmas()[0][1]).toMatchObject({ attemptId, paymentId: pago.id })
+  })
+})
+
+/**
+ * Familia B (Codex r2 H1): la alarma de «reverso en duda» nace donde nace la marca — en la MISMA transacción que crea el Payment
+ * con `reversoIncierto`, un ActivityLog durable; el 🚨 sale después del commit y sólo de quien lo creó. Una por cobro, venga de
+ * donde venga (REST, aviso o red) y aunque otro procesador llegue después al mismo Payment.
+ */
+describe('Familia B · la alarma del reverso en duda sale una vez y queda guardada', () => {
+  // El ActivityLog vive hasta el final de la suite: se cuenta el de ESTE intento.
+  const asientos = (attemptId: string) =>
+    prisma.activityLog.findMany({
+      where: { venueId: f.venueId, action: 'PAYMENT_REGISTERED_WITH_UNCERTAIN_REVERSAL', data: { path: ['attemptId'], equals: attemptId } },
+    })
+
+  it.each(Object.keys(registradores) as (keyof typeof registradores)[])(
+    'REST primero (%s) con la lápida reverse_unconfirmed ⇒ el cobro nace marcado, 1 ActivityLog y 1 🚨',
+    async nombre => {
+      const { merchantAccountId } = await f.conAfiliacionBlumon()
+      const attemptId = randomUUID()
+      await sembrarLapida(attemptId, 'reverse_unconfirmed', 6 * MIN)
+
+      const pago = await registradores[nombre](restBlumon(merchantAccountId, attemptId))
+
+      expect(pago.processorData).toMatchObject({ reversoIncierto: true })
+      expect(alarmas()).toHaveLength(1)
+      expect(alarmas()[0][1]).toMatchObject({ attemptId, paymentId: pago.id })
+      const [asiento, ...otros] = await asientos(attemptId)
+      expect(otros).toHaveLength(0)
+      expect(asiento).toMatchObject({ entity: 'Payment', entityId: pago.id })
+      expect(asiento.data).toMatchObject({ attemptId, paymentId: pago.id, venueId: f.venueId })
+    },
+  )
+
+  it('aviso primero y después el REST del mismo intento ⇒ 1 ActivityLog y 1 🚨', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    await sembrarLapida(attemptId, 'reversing', 6 * MIN)
+
+    const r = await avisoBlumon(attemptId)
+    expect(r).toMatchObject({ action: 'CONFIRMED', paymentId: expect.any(String) })
+    const repetido = await registradores.recordFastPayment(restBlumon(merchantAccountId, attemptId))
+
+    expect(repetido.id).toBe(r.paymentId)
+    expect(await pagos()).toHaveLength(1)
+    expect(alarmas()).toHaveLength(1)
+    expect(await asientos(attemptId)).toEqual([expect.objectContaining({ entityId: r.paymentId })])
+  })
+
+  it('aviso y red sobre el mismo intento (dos avisos: el receptor registra y la red empareja el otro) ⇒ 1 ActivityLog y 1 🚨', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    await sembrarLapida(attemptId, 'reversing', 6 * MIN)
+    const primero = await avisoBlumon(attemptId)
+    expect(primero.action).toBe('CONFIRMED')
+    // Otro aviso del mismo intento (otro número de operación): el registrador se cae una vez y queda para la red.
+    const caida = jest.spyOn(registrador, 'recordFastPayment').mockRejectedValueOnce(new Error('caída simulada'))
+    const segundo = await avisoBlumon(attemptId).finally(() => caida.mockRestore())
+    expect(segundo.action).toBe('ERROR')
+    await prisma.providerEventLog.update({ where: { id: segundo.eventLogId! }, data: { nextAttemptAt: new Date(Date.now() - 1000) } })
+
+    await pase()
+
+    expect(await eventoDe(segundo.eventLogId)).toMatchObject({ status: 'PROCESSED', paymentId: primero.paymentId })
+    expect(await pagos()).toHaveLength(1)
+    expect(alarmas()).toHaveLength(1)
+    expect(await asientos(attemptId)).toHaveLength(1)
   })
 })
 
@@ -1269,14 +1336,14 @@ describe('el resultado del reverso (Tarea 10)', () => {
    * F3: el receptor ya chocó con la lápida `reversing` (el registrador soltó el candado) y, justo antes de escribir la retención,
    * entra el resultado del reverso. La barrera es la re-retención de la solicitud, que el receptor pide antes de esa escritura.
    */
-  async function resultadoAntesDeLaRetencion(attemptId: string, cuerpo: object) {
+  async function resultadoAntesDeLaRetencion(attemptId: string, cuerpo: object, over: Record<string, unknown> = {}) {
     const real = terminalPaymentService.retenerSolicitudLiberadaPorAprobacion.bind(terminalPaymentService)
     let res: Awaited<ReturnType<typeof resultado>> | undefined
     const espia = jest.spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorAprobacion').mockImplementationOnce(async entrada => {
       res = await resultado(attemptId, cuerpo)
       return real(entrada)
     })
-    const r = await avisoBlumon(attemptId).finally(() => espia.mockRestore())
+    const r = await avisoBlumon(attemptId, over).finally(() => espia.mockRestore())
     return { r, res: exigirRespuesta(res) }
   }
   const exigirRespuesta = <T>(res: T | undefined): T => {
@@ -1347,6 +1414,144 @@ describe('el resultado del reverso (Tarea 10)', () => {
         where: { entity: 'TerminalPaymentRequest', entityId: suelta.id, action: 'TERMINAL_PAYMENT_HOLD_RELEASED_BY_REVERSAL' },
       }),
     ).toHaveLength(1)
+    const declaracion = await request(app)
+      .post(ruta(attemptId, 'no-instrument-resolution'))
+      .set('Authorization', `Bearer ${tokenDe(f.serial, duena)}`)
+      .send({ requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 })
+    expect({ status: declaracion.status, code: declaracion.body.code }).toEqual({ status: 200, code: undefined })
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  /**
+   * Familia A (Codex r2 H2): ninguna escritura del núcleo reabre un aviso que el resultado del reverso ya selló. La barrera es la
+   * re-retención de la solicitud, que el receptor pide justo antes de escribir su desenlace.
+   */
+  it.each([
+    ['AMOUNT_MISMATCH', { amount: '99.00' }, false],
+    ['PROCESSING_ERROR', {}, true],
+  ] as const)(
+    'Familia A (H2): REVERSADA sella el aviso antes de que el receptor escriba %s ⇒ el aviso sigue PROCESSED/REVERSED_BY_TERMINAL y la red no lo reabre ni lo vence',
+    async (_motivo, over, registradorCae) => {
+      await f.conAfiliacionBlumon()
+      const { attemptId } = await intentoVinculado()
+      expect((await intencion(attemptId)).body).toMatchObject({ estado: 'reversing' })
+      const caida = registradorCae ? jest.spyOn(registrador, 'recordFastPayment').mockRejectedValueOnce(new Error('caída simulada')) : null
+
+      const { r, res } = await resultadoAntesDeLaRetencion(attemptId, reversada(), { ...over }).finally(() => caida?.mockRestore())
+
+      expect(res.body.estado).toBe('reversed')
+      expect(r).toMatchObject({ action: 'REVERSED_BY_TERMINAL' })
+      expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL', paymentId: null })
+      await prisma.$executeRaw`UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours' WHERE "id" = ${r.eventLogId}`
+      await pase()
+      expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL', paymentId: null })
+      expect(await pagos()).toHaveLength(0)
+    },
+  )
+
+  /** F4 hasta la retención: aviso retenido por la lápida, la terminal sin respuesta y la ventana retiene la solicitud. */
+  async function solicitudRetenidaPorElAviso() {
+    const datos = await permisoConAvisoRetenido()
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: datos.requestId, status: 'timeout', errorMessage: 'La terminal no pudo confirmar el resultado del cobro.' } as any,
+      { socketId: 's', terminalId: f.serial, venueId: f.venueId },
+    )
+    expect(
+      await terminalPaymentService.releaseUnprovenNegative(
+        datos.requestId,
+        f.venueId,
+        'WATCHDOG',
+        new Date(Date.now() + UNPROVEN_NEGATIVE_WINDOW_MS + 1_000),
+      ),
+    ).toBe('HELD_BY_BANK_EVIDENCE')
+    const fila = () => prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: datos.requestId } })
+    expect(await fila()).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT', paymentId: null })
+    return { ...datos, fila }
+  }
+
+  it('Familia C (H4): retenida por el aviso de A; la terminal afirma el cobro de B sin Payment; REVERSADA de A ⇒ queda retenida para revisión y un negativo tardío no borra la afirmación', async () => {
+    const { attemptId, requestId, fila } = await solicitudRetenidaPorElAviso()
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'success', paymentId: 'pay-de-b', transactionId: 'tx-de-b' } as any,
+      { socketId: 's', terminalId: f.serial, venueId: f.venueId },
+    )
+    const afirmada = await fila()
+    expect(afirmada).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT', paymentId: null })
+    expect((afirmada.resultJson as any).claimedSuccess).toMatchObject({ transactionId: 'tx-de-b' })
+
+    expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+
+    const retenida = await fila()
+    expect(retenida).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
+    const asiento = await prisma.activityLog.findFirst({
+      where: { entity: 'TerminalPaymentRequest', entityId: retenida.id, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT' },
+    })
+    expect(asiento?.data).toMatchObject({ reason: 'TERMINAL_CLAIMED_SUCCESS' })
+    // Un negativo ACREDITADO tardío de la terminal: el cierre tardío no toma una fila retenida.
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada por el banco' } as any,
+      { socketId: 's', terminalId: f.serial, venueId: f.venueId },
+    )
+    const despues = await fila()
+    expect(despues).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
+    expect((despues.resultJson as any).claimedSuccess).toMatchObject({ transactionId: 'tx-de-b' })
+  })
+
+  it('Familia C: soltar falla después del commit ⇒ el reenvío del mismo REVERSADA la suelta', async () => {
+    const { attemptId, fila } = await solicitudRetenidaPorElAviso()
+    const espia = jest.spyOn(terminalPaymentService, 'soltarRetencionSinAprobacion').mockRejectedValueOnce(new Error('se cayó la conexión'))
+    try {
+      expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+      expect(await fila()).toMatchObject({ failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
+
+      expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+    } finally {
+      espia.mockRestore()
+    }
+
+    expect(await fila()).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+  })
+
+  it('Familia C: soltar falla después del commit ⇒ la red de 30 s la suelta', async () => {
+    const { attemptId, fila } = await solicitudRetenidaPorElAviso()
+    const espia = jest.spyOn(terminalPaymentService, 'soltarRetencionSinAprobacion').mockRejectedValueOnce(new Error('se cayó la conexión'))
+    try {
+      expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+      expect(await fila()).toMatchObject({ failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
+
+      await pase()
+    } finally {
+      espia.mockRestore()
+    }
+
+    expect(await fila()).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+    expect(
+      await prisma.activityLog.findMany({
+        where: { entity: 'TerminalPaymentRequest', entityId: (await fila()).id, action: 'TERMINAL_PAYMENT_HOLD_RELEASED_BY_REVERSAL' },
+      }),
+    ).toHaveLength(1)
+  })
+
+  it('Familia C: más vínculos que los que se pueden evaluar ⇒ no suelta (falla cerrado), tampoco la red', async () => {
+    const { attemptId, requestId, fila } = await solicitudRetenidaPorElAviso()
+    await prisma.terminalPaymentAttemptLink.createMany({
+      data: Array.from({ length: 100 }, () => ({ attemptId: randomUUID(), requestId, venueId: f.venueId, terminalId: f.llaveTerminal })),
+    })
+
+    expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+    await pase()
+
+    expect(await fila()).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT', paymentId: null })
+  })
+
+  it('Familia C (Minor 1): REVERSADA llega después del destrabe de 20 min ⇒ la venta no se queda bloqueada: el cajero ya puede declarar', async () => {
+    duena ??= await crearBackOffice(f)
+    const { attemptId, requestId, fila } = await solicitudRetenidaPorElAviso()
+    await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date(Date.now() + 21 * MIN))
+    expect(await fila()).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED', paymentId: null })
+
+    expect((await resultado(attemptId, reversada())).body.estado).toBe('reversed')
+
     const declaracion = await request(app)
       .post(ruta(attemptId, 'no-instrument-resolution'))
       .set('Authorization', `Bearer ${tokenDe(f.serial, duena)}`)

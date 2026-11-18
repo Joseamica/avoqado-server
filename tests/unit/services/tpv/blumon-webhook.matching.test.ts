@@ -422,6 +422,53 @@ describe('R6 — la base no guarda el titular', () => {
     expect(guardado.payload).not.toHaveProperty('_avoqado')
   })
 
+  // Familia E (Codex r2 H7): lista BLANCA. Un campo que Blumon agregue (un dato EMV crudo) o un objeto anidado no se copian; sólo
+  // queda su NOMBRE para saber que llegó algo nuevo.
+  const conDesconocidos = { ...conTitular, tvr: '0000008000', emv: { track2: '4111111111111111D2512' } }
+  it.each([
+    ['UNKNOWN_TERMINAL', { serialNumber: '99999999999' }],
+    ['NOT_APPROVED', { codeResponse: '05', descriptionResponse: 'DECLINADA' }],
+    ['PENDING', {}],
+  ])('lista blanca: un campo desconocido tipo EMV y un objeto anidado no se guardan, sólo sus nombres (%s)', async (_rama, cambios) => {
+    await processBlumonPaymentWebhook({ ...conDesconocidos, ...cambios } as typeof conTitular)
+
+    const guardado = mockedEventLogCreate.mock.calls[0][0].data.payload
+    expect(guardado).not.toHaveProperty('tvr')
+    expect(guardado).not.toHaveProperty('emv')
+    expect(JSON.stringify(guardado)).not.toContain('0000008000')
+    expect(JSON.stringify(guardado)).not.toContain('4111111111111111')
+    expect(guardado.camposNoReconocidos).toEqual(['tvr', 'emv'])
+  })
+
+  it('lista blanca: sinTitular conserva lo que leen el emparejamiento, la conciliación y la red', () => {
+    const completo = {
+      ...conTitular,
+      business: 'NEGOCIO',
+      businessRfc: 'XAXX010101000',
+      cardType: 'CREDITO',
+      brand: 'VISA',
+      bank: 'BANCO',
+      authorizationCode: 'AUTH99',
+      dateTransaction: '20/01/2021 18:24:38',
+      authentication: 'pin',
+      membership: 'M1',
+      provideResponse: 'PR',
+      aid: 'A0000000031010',
+      serialNumber: '2841548628',
+      realCounter: '7',
+    }
+    const esperado: Record<string, unknown> = { ...completo }
+    delete esperado.cardHolder
+    delete esperado.arqc
+    expect(sinTitular(completo)).toEqual(esperado)
+  })
+
+  it('lista blanca: una llave conocida con un objeto dentro tampoco se copia (sólo su nombre)', () => {
+    const raro = sinTitular({ ...ventaPayload, brand: { nombre: 'VISA', pan: '4111111111111111' } } as any) as any
+    expect(raro).not.toHaveProperty('brand')
+    expect(raro.camposNoReconocidos).toEqual(['brand'])
+  })
+
   it('sinTitular no toca el payload original', () => {
     const copia = sinTitular(conTitular)
     expect(copia).not.toHaveProperty('cardHolder')

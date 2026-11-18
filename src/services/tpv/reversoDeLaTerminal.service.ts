@@ -20,6 +20,7 @@ import { terminalPaymentService } from '../terminal-payment.service'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
 import { dineroConEstaLlaveSql, hayDineroConEstaLlaveSql } from './evidenciaPositivaSql'
 import { tipoDeEvidencia } from './segundaCaptura'
+import { utcTs } from '@/utils/sqlDates'
 
 export const EVENTO_REVERSO = (attemptId: string) => `blumon-tpv-reverso-${attemptId}`
 export const TIPO_REVERSO = 'REVERSO_TERMINAL'
@@ -166,6 +167,42 @@ export async function vencerLapidasSinRespuesta(ahora: Date = new Date()): Promi
     }
   }
   return vencidas
+}
+
+/** Cuánto hacia atrás mira la red las lápidas `reversed` (la retención de la ventana se destraba a los 20 min). */
+const RECIENTES_REVERSADAS_MS = 24 * 60 * 60_000
+
+/**
+ * Familia C · la red de 30 s: lápidas `reversed` recientes (índice `[type, createdAt]`) cuya solicitud sigue retenida por la
+ * ventana (`TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT`, sin Payment) — el paso de después del commit del resultado falló y ningún
+ * reenvío llegó. A cada una le aplica `soltarRetencionSinAprobacion` (idempotente). Acotada y ordenada. Devuelve cuántas resolvió.
+ */
+export async function soltarRetencionesDeReversados(ahora: Date = new Date()): Promise<number> {
+  const filas = await prisma.$queryRaw<{ attemptId: string }[]>`
+    SELECT l."attemptId" FROM "ProviderEventLog" l
+    JOIN "TerminalPaymentAttemptLink" v ON v."attemptId" = l."attemptId"
+    JOIN "TerminalPaymentRequest" t ON t."requestId" = v."requestId" AND t."venueId" = v."venueId"
+    WHERE l."provider" = 'PAYMENT_PROCESSOR' AND l."type" = ${TIPO_REVERSO}
+      AND l."createdAt" >= ${utcTs(new Date(ahora.getTime() - RECIENTES_REVERSADAS_MS))}
+      AND l."payload"->>'estado' = 'reversed'
+      AND t."status" = 'TIMED_OUT' AND t."failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT' AND t."paymentId" IS NULL
+    ORDER BY l."createdAt" ASC, l."id" ASC
+    LIMIT ${LOTE_DE_VENCIMIENTO}`
+  let resueltas = 0
+  for (const { attemptId } of filas) {
+    try {
+      if (await terminalPaymentService.soltarRetencionSinAprobacion(attemptId)) resueltas++
+    } catch (error) {
+      logger.error(
+        '❌ [Blumon reverso] No se pudo soltar la solicitud retenida por un aviso reversado — se reintenta en el siguiente pase',
+        {
+          attemptId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      )
+    }
+  }
+  return resueltas
 }
 
 /** Sin vínculo, de otro negocio o de otra terminal: indistinguibles (no se le dice a una terminal qué intentos tiene otra). */
@@ -526,7 +563,9 @@ export async function registrarResultadoDelReverso(entrada: {
     }
   }
   // F4: la ventana pudo retener la solicitud por el aviso que acaba de sellarse sin dinero: si ya no queda evidencia, se suelta.
-  if (decision.nuevo && estado === 'reversed') {
+  // Familia C: también en el reenvío (`nuevo: false`), así un paso que falló después del commit se reintenta; es idempotente. La
+  // red de 30 s (`soltarRetencionesDeReversados`) cubre lo que ningún reenvío traiga.
+  if (estado === 'reversed') {
     await terminalPaymentService.soltarRetencionSinAprobacion(llave).catch(error =>
       logger.error('❌ [Blumon reverso] No se pudo soltar la solicitud retenida por el aviso reversado — sigue retenida', {
         attemptId: llave,

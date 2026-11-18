@@ -149,7 +149,7 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
  * referencia; desde la ronda 2, también el sello de un cobro que no fue el primer confirmador): el evento se deja PENDING, sin
  * cerrarlo, para que el worker repita la rama completa. No es un motivo durable.
  */
-const RETENCION_DIFERIDA = 'HOLD_DEFERRED'
+export const RETENCION_DIFERIDA = 'HOLD_DEFERRED'
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Payload validator
@@ -729,7 +729,10 @@ export interface AvisoAprobadoDelIntento {
    * como siempre) y `firstConfirmer`. `extra` son llaves sueltas al primer nivel (p. ej. `reversoIncierto`).
    */
   huella: { clave: 'angelpayWebhook' | 'blumonWebhook'; datos: Record<string, unknown>; extra?: Record<string, unknown> }
-  /** `{ claimToken }` del dueño del evento, o `{}`. */
+  /**
+   * La condición de dueño de TODA escritura del núcleo sobre el evento: `{ claimToken }` del dueño (AngelPay) o, para un aviso
+   * sin token (Blumon), `{ status: PENDING }` —un aviso con desenlace no se reescribe—; `{}` sólo el AngelPay sin token de hoy.
+   */
   propietario: Record<string, unknown>
   correlationId?: string
   /** Se corre justo después de sellar el evento como dueño (AngelPay: `angelpayWebhookLastReceivedAt`). */
@@ -756,11 +759,16 @@ export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): 
       receiverVenueId,
       receivedByMerchantAccountId: merchantAccount.id,
     })
-    await prisma.providerEventLog.updateMany({
+    // Familia A: como toda escritura del dueño, si no aplicó (otro ya le dio desenlace) se contesta el desenlace durable.
+    const escritura = await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_VENUE_MISMATCH, processedAt: new Date() },
     })
-    return { action: 'ERROR', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_VENUE_MISMATCH, eventLogId }
+    return desenlaceDurableSiPerdioLaPropiedad(eventLogId, escritura, {
+      action: 'ERROR',
+      errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_VENUE_MISMATCH,
+      eventLogId,
+    })
   }
   // Codex R1 (P1-2): si el webhook FIRMADO dice en qué terminal se cobró, tiene que ser la del vínculo. Una contradicción
   // conserva la evidencia y alarma, pero NO crea ni cierra dinero para esa solicitud.
@@ -793,11 +801,15 @@ export async function confirmarAvisoPorVinculo(aviso: AvisoAprobadoDelIntento): 
         message: RETENCION_DIFERIDA,
       }
     }
-    await prisma.providerEventLog.updateMany({
+    const escritura = await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH, processedAt: new Date() },
     })
-    return { action: 'ERROR', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH, eventLogId }
+    return desenlaceDurableSiPerdioLaPropiedad(eventLogId, escritura, {
+      action: 'ERROR',
+      errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH,
+      eventLogId,
+    })
   }
   const request = await prisma.terminalPaymentRequest.findFirst({
     where: { requestId: link.requestId, venueId: link.venueId },

@@ -359,6 +359,8 @@ const RELEASE_FAILURE_CODES = ['AUTO_RELEASED', 'MANUAL_RELEASE']
  * Ninguno está en `CODIGOS_SIN_COBRO`; un negativo ACREDITADO tardío tampoco los cierra (G2).
  */
 const MARCADORES_DE_RETENCION_DE_LA_VENTANA = ['BANK_APPROVED_AWAITING_PAYMENT', 'PAYMENT_UNBOUND_AWAITING_REVIEW'] as const
+/** Familia C: cuántos intentos de una solicitud evalúa `soltarRetencionSinAprobacion` (son 1–3); con más, no suelta. */
+const TOPE_DE_INTENTOS_AL_SOLTAR = 100
 /** Codex r1 (P1-B): el barrido de las filas liberadas avanza por keyset en lotes de 200, con tope de 25 lotes por pasada. */
 const TAMANO_DEL_LOTE_LIBERADAS = 200
 const LOTES_MAXIMOS_DE_LIBERADAS = 25
@@ -7090,67 +7092,140 @@ class TerminalPaymentService {
   }
 
   /**
-   * F4 (SDK propio): la terminal reversó (REVERSADA) el cobro de un intento cuyo aviso aprobado —retenido por la lápida— hizo que
-   * la ventana retuviera la solicitud con `BANK_APPROVED_AWAITING_PAYMENT`. El resultado ya selló ese aviso sin dinero, así que
-   * la retención se quedó sin evidencia; sin esto la VENTA quedaba esperando un Payment que el propio reverso impide registrar
-   * (el cierre tardío de la terminal y la declaración del cajero excluyen la marca). Se quita la marca —la fila vuelve a la
-   * ventana— sólo si no queda evidencia: mismo orden de candados que la ventana (solicitud → sus intentos, ordenados), la
-   * aprobación propia releída bajo ellos y el juego único de vetos en la escritura (CAS). Devuelve si la quitó.
+   * F4 + Familia C (SDK propio): la terminal reversó (REVERSADA) el cobro de un intento cuyo aviso aprobado —retenido por la
+   * lápida— hizo que la ventana retuviera la solicitud con `BANK_APPROVED_AWAITING_PAYMENT`. El resultado ya selló ese aviso sin
+   * dinero, así que esa retención se quedó sin su evidencia; sin esto la VENTA esperaba un Payment que el propio reverso impide.
+   *
+   * La fila termina donde la ventana (`releaseUnprovenNegative`) la dejaría HOY, con sus mismos candados (solicitud → todos sus
+   * intentos, ordenados) y sus mismas reglas, nunca con un subconjunto propio:
+   *  · otra aprobación conocida de cualquier intento (cualquier procesador, también la que sólo vive en memoria) ⇒ sigue retenida
+   *    por el banco, sin cambio;
+   *  · sin afirmación de la terminal y sin ningún veto de dinero (el CAS de liberación de la ventana: `SIN_AFIRMACION_DE_LA_TERMINAL_SQL`
+   *    y `sinVetoDeDineroSql`) ⇒ vuelve a la ventana (`failureCode` NULL), que decide como siempre;
+   *  · con cualquiera de ellos ⇒ retenida para revisión con el MISMO marcador y asiento que la ventana (`PAYMENT_UNBOUND_AWAITING_REVIEW`,
+   *    motivo en su orden: `TERMINAL_CLAIMED_SUCCESS`, `PAYMENT_NOT_ATTRIBUTABLE`, `PROVENANCE_CONTRADICTION`, `RECONCILIATION_EVIDENCE`).
+   *    Nunca queda en la ventana con una afirmación encima: el cierre tardío la tomaría y borraría la afirmación (Codex r2 H4).
+   * Los vínculos se leen como la ventana, con tope: si la solicitud tiene más de los que se evalúan, no se suelta (falla cerrado).
+   * Idempotente: lo reintentan el reenvío del resultado y la red de 30 s (`soltarRetencionesDeReversados`). Devuelve qué hizo.
    */
-  async soltarRetencionSinAprobacion(attemptId: string): Promise<boolean> {
+  async soltarRetencionSinAprobacion(attemptId: string): Promise<'VENTANA' | 'REVISION' | null> {
     const link = await this.findAttemptLink(attemptId)
-    if (!link) return false
-    const soltada = await prisma.$transaction(async tx => {
-      await candadoDeSolicitud(tx, link.requestId)
-      const attemptIds =
-        // ponytail: tope de 100 intentos por solicitud (son 1–3); el CAS de abajo revisa los vetos por solicitud, no por esta lista.
-        (
-          await tx.terminalPaymentAttemptLink.findMany({
-            where: { requestId: link.requestId, venueId: link.venueId },
-            select: { attemptId: true },
-            take: 100,
-          })
-        )
-          .map(l => llaveDeIntento(l.attemptId))
-          .filter((a): a is string => Boolean(a))
-          .sort()
+    if (!link) return null
+    const { requestId, venueId } = link
+    const decision = await prisma.$transaction(async tx => {
+      await candadoDeSolicitud(tx, requestId)
+      const vinculos = await tx.terminalPaymentAttemptLink.findMany({
+        where: { requestId, venueId },
+        select: { attemptId: true },
+        orderBy: { attemptId: 'asc' },
+        take: TOPE_DE_INTENTOS_AL_SOLTAR + 1,
+      })
+      if (vinculos.length > TOPE_DE_INTENTOS_AL_SOLTAR) return { tipo: 'DEMASIADOS_INTENTOS' as const }
+      const attemptIds = vinculos
+        .map(l => llaveDeIntento(l.attemptId))
+        .filter((a): a is string => Boolean(a))
+        .sort()
       for (const id of attemptIds) await candadoDeIntento(tx, id)
       const row = await tx.terminalPaymentRequest.findFirst({
         where: {
-          requestId: link.requestId,
-          venueId: link.venueId,
+          requestId,
+          venueId,
           status: TerminalPaymentRequestStatus.TIMED_OUT,
           failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
           paymentId: null,
         },
-        select: { id: true, terminalId: true },
+        select: { id: true, terminalId: true, orderId: true, amountCents: true, resultJson: true },
       })
-      if (!row || (await this.aprobacionBancariaConocida(tx, link.venueId, attemptIds))) return null
+      if (!row || (await this.aprobacionBancariaConocida(tx, venueId, attemptIds))) return null
       const n = await tx.$executeRaw`
         UPDATE "TerminalPaymentRequest"
         SET "failureCode" = NULL, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
         WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT' AND "paymentId" IS NULL
-          AND ${sinVetoDeDineroSql({ requestId: link.requestId, venueId: link.venueId, attemptIds, terminalId: row.terminalId })}`
-      if (n === 0) return null
+          AND ${SIN_AFIRMACION_DE_LA_TERMINAL_SQL}
+          AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: row.terminalId })}`
+      if (n === 1) {
+        await tx.activityLog.create({
+          data: {
+            action: 'TERMINAL_PAYMENT_HOLD_RELEASED_BY_REVERSAL',
+            entity: 'TerminalPaymentRequest',
+            entityId: row.id,
+            venueId,
+            data: { requestId, attemptId, terminalId: row.terminalId },
+          },
+        })
+        return { tipo: 'VENTANA' as const }
+      }
+      // Lo que la retiene, en el orden de la ventana; con el mismo marcador y asiento que `retenerPorPagoSinLigar`.
+      const afirmacion = afirmacionDeLaTerminal(row.resultJson)
+      const [ligado] = await pagosLigados(tx, requestId, venueId)
+      const veto = await this.otrosVetosDeDinero(tx, requestId, venueId, attemptIds, row.terminalId)
+      const reason = afirmacion
+        ? 'TERMINAL_CLAIMED_SUCCESS'
+        : ligado
+          ? 'PAYMENT_NOT_ATTRIBUTABLE'
+          : veto.contradiccionDeProcedencia
+            ? 'PROVENANCE_CONTRADICTION'
+            : veto.conciliacion
+              ? 'RECONCILIATION_EVIDENCE'
+              : null
+      // Sin motivo legible (el veto vio un aprobado vinculado que la lectura de arriba no): sigue retenida por el banco.
+      if (!reason) return null
+      const m = await tx.$executeRaw`
+        UPDATE "TerminalPaymentRequest"
+        SET "failureCode" = 'PAYMENT_UNBOUND_AWAITING_REVIEW', "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+        WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT' AND "paymentId" IS NULL`
+      if (m === 0) return null
       await tx.activityLog.create({
         data: {
-          action: 'TERMINAL_PAYMENT_HOLD_RELEASED_BY_REVERSAL',
+          action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT',
           entity: 'TerminalPaymentRequest',
           entityId: row.id,
-          venueId: link.venueId,
-          data: { requestId: link.requestId, attemptId, terminalId: row.terminalId },
+          venueId,
+          data: {
+            requestId,
+            terminalId: row.terminalId,
+            orderId: row.orderId,
+            amountCents: row.amountCents,
+            paymentId: ligado?.id ?? null,
+            reason,
+            ...(afirmacion ? { claimedSuccess: afirmacion as Prisma.InputJsonValue } : {}),
+            origen: 'REVERSO',
+            attemptId,
+          },
         },
       })
-      return row.id
+      return { tipo: 'REVISION' as const, reason }
     }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
-    if (soltada) {
+    if (decision?.tipo === 'DEMASIADOS_INTENTOS') {
+      logger.error(
+        '🚨 [TerminalPayment] La terminal reversó el cobro, pero la solicitud tiene más intentos de los que se evalúan — no se suelta',
+        {
+          requestId,
+          venueId,
+          attemptId,
+          tope: TOPE_DE_INTENTOS_AL_SOLTAR,
+        },
+      )
+      return null
+    }
+    if (decision?.tipo === 'VENTANA') {
       logger.info('🔓 [TerminalPayment] La terminal reversó el cobro: la solicitud retenida por su aviso vuelve a la ventana', {
-        requestId: link.requestId,
-        venueId: link.venueId,
+        requestId,
+        venueId,
         attemptId,
       })
+    } else if (decision?.tipo === 'REVISION') {
+      logger.error(
+        '🚨 [TerminalPayment] La terminal reversó el cobro, pero la solicitud tiene otra evidencia — queda retenida para revisión',
+        {
+          requestId,
+          venueId,
+          attemptId,
+          reason: decision.reason,
+        },
+      )
     }
-    return soltada !== null
+    return decision?.tipo ?? null
   }
 
   /** El dueño de un intento (S1), para el webhook (S2) y la consulta por intento (S6). `null` = intento desconocido. */

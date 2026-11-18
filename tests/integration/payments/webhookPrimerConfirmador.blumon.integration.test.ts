@@ -6,6 +6,7 @@
  * Tarea 6: la red de 30 s respeta el turno del receptor (`nextAttemptAt`) y recupera con el contexto guardado AL INGRESO.
  */
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
@@ -850,4 +851,49 @@ describe('la red de 30 s (hallazgo 7)', () => {
     expect(todos).toHaveLength(1)
     expect(await eventoDe(segundo.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
   })
+
+  /**
+   * Familia D (Codex r2 H6): la red sólo da por perdido un aviso cuyo intento terminó con un desenlace. Uno vencido (más de 24 h)
+   * cuya recuperación falla una vez —la lectura del vínculo, o el registrador (su candado)— sigue PENDING; el pase siguiente lo
+   * registra.
+   */
+  it.each([
+    [
+      'la lectura del vínculo',
+      () =>
+        jest
+          .spyOn(terminalPaymentService, 'findAttemptLink')
+          .mockRejectedValueOnce(
+            new Prisma.PrismaClientKnownRequestError("Can't reach database server", { code: 'P1001', clientVersion: 'prueba' }),
+          ),
+    ],
+    ['el registrador', () => jest.spyOn(registrador, 'recordFastPayment').mockRejectedValueOnce(new Error('lock_timeout simulado'))],
+  ] as const)(
+    'Familia D (H6): aviso vencido con contexto y %s falla una vez ⇒ sigue PENDING; el pase siguiente lo registra',
+    async (_caso, falla) => {
+      await f.conAfiliacionBlumon()
+      const { attemptId } = await intentoVinculado()
+      const ev = await ingresoYCaida(f.eventoBlumon(attemptId))
+      await prisma.$executeRaw`
+      UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours', "nextAttemptAt" = now() - interval '1 second'
+      WHERE id = ${ev.id}`
+      const pase = () => (red as unknown as { run: () => Promise<void> }).run()
+      const espia = falla()
+      try {
+        await pase()
+      } finally {
+        espia.mockRestore()
+      }
+
+      expect(await eventoDe(ev.id)).toMatchObject({ status: 'PENDING', paymentId: null })
+      expect(await pagos()).toHaveLength(0)
+
+      await tocaYa(ev.id)
+      await pase()
+
+      const todos = await pagos()
+      expect(todos).toHaveLength(1)
+      expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+    },
+  )
 })

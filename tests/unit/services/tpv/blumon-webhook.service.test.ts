@@ -84,7 +84,7 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
     })
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'evt_tip' },
+        where: { id: 'evt_tip', status: 'PENDING' }, // Familia A: sólo un aviso que sigue PENDING
         data: expect.objectContaining({ status: 'PROCESSED' }),
       }),
     )
@@ -112,7 +112,7 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
     })
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'evt_bad' },
+        where: { id: 'evt_bad', status: 'PENDING' }, // Familia A: sólo un aviso que sigue PENDING
         data: expect.objectContaining({ status: 'ERROR', errorReason: 'AMOUNT_MISMATCH' }),
       }),
     )

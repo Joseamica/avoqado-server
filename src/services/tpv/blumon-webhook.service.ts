@@ -30,6 +30,8 @@ import {
   confirmarAvisoPorVinculo,
   ingresarEventoDelIntento,
 } from './angelpay-webhook.service'
+// Familia D: la red lo lee de aquí (importar el núcleo directo desde el job lo acercaría a los transportes de mensajes).
+export { RETENCION_DIFERIDA } from './angelpay-webhook.service'
 
 /**
  * Helper function for async delay
@@ -829,7 +831,13 @@ async function updateEventLogFromMatchResult(eventLogId: string, result: Webhook
       return
   }
 
-  await prisma.providerEventLog.update({ where: { id: eventLogId }, data }).catch(err => {
+  // Familia A: sólo un aviso que sigue PENDING (el receptor, la red, el respaldo del REST y el resultado del reverso lo pueden tocar):
+  // uno que otro ya resolvió no se reescribe; no aplicar no es error.
+  await prisma.providerEventLog.update({ where: { id: eventLogId, status: EventStatus.PENDING }, data }).catch(err => {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+      logger.info('🔒 [Blumon webhook] El aviso ya tenía desenlace: no se reescribe', { eventLogId, action: result.action })
+      return
+    }
     logger.error('❌ [Blumon webhook] Failed to update event log row', {
       eventLogId,
       action: result.action,
@@ -1270,34 +1278,75 @@ async function attemptPaymentMatch(
 }
 
 /**
- * Copia del aviso sin el nombre del titular ni el criptograma del chip (`arqc`, F6): es lo único que se guarda en
- * `ProviderEventLog.payload`. `bin` y `lastFour` sí se quedan en la base (los usan el emparejamiento y la conciliación a
- * mano); `aid` también (identifica la aplicación de la marca y va impreso en cada voucher: no es secreto).
- * Tampoco viaja `_avoqado`: es el sello que escribe el SERVIDOR (contexto y tarifa del ingreso, marca 55P03, afiliación
- * receptora); uno que llegue en el aviso nunca puede hacerse pasar por él.
+ * Familia E: los campos del aviso que se COPIAN, por lista BLANCA (antes se quitaban por lista negra y un campo EMV nuevo o un
+ * objeto anidado se colaba). Son los del tipo `BlumonWebhookPayload` que leen el emparejamiento, la red de 30 s, la conciliación
+ * a mano, el auditor de cobros sin aviso y los lectores SQL (`codeResponse`, `serialNumber`). Ninguno es un objeto: sólo se copia
+ * un valor primitivo. `cardHolder` y `arqc` nunca están (R6, F6); `bin` y `lastFour` sólo en la base, nunca en el log.
  */
-export function sinTitular(payload: BlumonWebhookPayload): BlumonWebhookPayload {
-  const {
-    cardHolder: _titular,
-    arqc: _criptograma,
-    _avoqado: _selloAjeno,
-    ...resto
-  } = payload as BlumonWebhookPayload & {
-    _avoqado?: unknown
+const CAMPOS_DEL_AVISO = [
+  'business',
+  'businessRfc',
+  'bin',
+  'lastFour',
+  'cardType',
+  'brand',
+  'bank',
+  'amount',
+  'reference',
+  'authorizationCode',
+  'operationType',
+  'operationNumber',
+  'descriptionResponse',
+  'dateTransaction',
+  'authentication',
+  'membership',
+  'provideResponse',
+  'codeResponse',
+  'aid',
+  'serialNumber',
+  'realCounter',
+] as const
+const SOLO_EN_LA_BASE = new Set(['bin', 'lastFour'])
+/** Lo que se quita a propósito y en silencio: no es «nuevo» (`_avoqado` lo escribe sólo el SERVIDOR). */
+const CAMPOS_QUE_NUNCA_SE_COPIAN = new Set(['cardHolder', 'arqc', '_avoqado'])
+/** Cuántos nombres de campos desconocidos se guardan (y de qué largo): basta para saber que Blumon agregó algo. */
+const TOPE_DE_CAMPOS_NO_RECONOCIDOS = 20
+const LARGO_DEL_NOMBRE = 64
+
+function copiaPorListaBlanca(aviso: Record<string, unknown>, destino: 'base' | 'log'): Record<string, unknown> {
+  const copia: Record<string, unknown> = {}
+  const permitidos = new Set<string>(CAMPOS_DEL_AVISO)
+  const noReconocidos: string[] = []
+  for (const [campo, valor] of Object.entries(aviso)) {
+    if (CAMPOS_QUE_NUNCA_SE_COPIAN.has(campo)) continue
+    const primitivo = valor === null || ['string', 'number', 'boolean'].includes(typeof valor)
+    if (permitidos.has(campo) && primitivo) {
+      if (destino === 'base' || !SOLO_EN_LA_BASE.has(campo)) copia[campo] = valor
+    } else if (noReconocidos.length < TOPE_DE_CAMPOS_NO_RECONOCIDOS) {
+      noReconocidos.push(campo.slice(0, LARGO_DEL_NOMBRE))
+    }
   }
-  return resto as BlumonWebhookPayload
+  if (noReconocidos.length > 0) copia.camposNoReconocidos = noReconocidos
+  return copia
 }
 
 /**
- * Lo que del aviso puede ir al log: sin titular, sin bin, sin últimos 4 y sin el criptograma del chip (`arqc`, F6). Si la raíz no es un objeto
- * (cadena, número, arreglo, `null`), sólo su tipo y el tamaño, nunca el valor: un JSON doblemente
- * codificado trae la tarjeta entera dentro de la cadena.
+ * Lo que del aviso se guarda en `ProviderEventLog.payload`: los campos de la lista blanca (con `bin` y `lastFour`, que usan el
+ * emparejamiento y la conciliación a mano) y los NOMBRES de los que no conoce (`camposNoReconocidos`). Sin titular, sin `arqc`
+ * y sin `_avoqado`: ése es el sello que escribe el SERVIDOR (contexto y tarifa del ingreso, marca 55P03, afiliación receptora);
+ * uno que llegue en el aviso nunca puede hacerse pasar por él. No toca el aviso original.
+ */
+export function sinTitular(payload: BlumonWebhookPayload): BlumonWebhookPayload {
+  return copiaPorListaBlanca(payload, 'base') as BlumonWebhookPayload
+}
+
+/**
+ * Lo que del aviso puede ir al log: la misma lista blanca sin `bin` ni `lastFour`, y los nombres de lo desconocido. Si la raíz
+ * no es un objeto (cadena, número, arreglo, `null`), sólo su tipo y el tamaño, nunca el valor: un JSON doblemente codificado
+ * trae la tarjeta entera dentro de la cadena.
  */
 export function paraElLog(body: unknown, rawBodyLength?: number): Record<string, unknown> {
-  if (body && typeof body === 'object' && !Array.isArray(body)) {
-    const { cardHolder: _titular, bin: _bin, lastFour: _lastFour, arqc: _criptograma, ...resto } = body as Record<string, unknown>
-    return resto
-  }
+  if (body && typeof body === 'object' && !Array.isArray(body)) return copiaPorListaBlanca(body as Record<string, unknown>, 'log')
   const rootType = body === null ? 'null' : Array.isArray(body) ? 'array' : typeof body
   return { rootType, rawBodyLength }
 }
@@ -1463,25 +1512,15 @@ export async function confirmarBlumonPorVinculo(args: {
       // Codex r5: la marca que lee el auditor de cobros sin aviso (`blumon-payment-audit.job.ts`).
       extra: { blumonWebhookReceived: true },
     },
-    propietario: {},
+    // Familia A: el aviso de Blumon no tiene token de dueño (lo procesan el receptor, la red y el resultado del reverso); cada
+    // escritura del núcleo exige que siga PENDING. Uno que ya tiene desenlace (p. ej. el REVERSADA lo selló) no se reabre: 0 filas
+    // no es error y se contesta el desenlace que la fila ya tiene.
+    propietario: { status: EventStatus.PENDING },
     correlationId: `blumon-wh-${eventLogId.slice(-8)}`,
   })
   if (!r) return null
-  // H15: la alarma sale sólo si de verdad se registró (o ya estaba) el cobro; en la carrera con un REVERSADA no hay dinero.
-  // F2: y sólo si ese cobro nació marcado: la marca la puso el registrador con la lápida que leyó BAJO el candado.
-  const registrado = r.action === 'CONFIRMED' || r.action === 'MATCHED' || r.action === 'SECOND_CAPTURE'
-  const pago =
-    registrado && r.paymentId ? await prisma.payment.findUnique({ where: { id: r.paymentId }, select: { processorData: true } }) : null
-  const nacioIncierto = (pago?.processorData as Record<string, unknown> | null | undefined)?.reversoIncierto === true
-  if (nacioIncierto) {
-    logger.error('🚨 [Blumon reverso] El banco aprobó y el reverso nunca se confirmó: se registra el cobro', {
-      attemptId: ctx.attemptId,
-      requestId: ctx.requestId,
-      paymentId: r.paymentId,
-      eventLogId,
-      action: r.action,
-    })
-  }
+  // Familia B: el 🚨 del cobro con el reverso en duda ya no sale de aquí: lo emite el registrador que CREÓ el Payment, con su
+  // ActivityLog en la misma transacción (una lectura después del sello podía perderlo y dos procesadores, repetirlo).
   const pasan = [
     'CONFIRMED',
     'SECOND_CAPTURE',

@@ -8,13 +8,22 @@ import {
   BLUMON_WEBHOOK_ERROR_REASONS,
   BLUMON_WEBHOOK_PENDING_TTL_MS,
   BlumonWebhookPayload,
+  RETENCION_DIFERIDA,
   REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
-import { vencerLapidasSinRespuesta } from '../services/tpv/reversoDeLaTerminal.service'
+import { soltarRetencionesDeReversados, vencerLapidasSinRespuesta } from '../services/tpv/reversoDeLaTerminal.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+
+/**
+ * Familia D: lo que el núcleo contesta SIN lanzar pero no es desenlace — el registrador cayó (su candado, la base:
+ * `PROCESSING_ERROR`, el aviso sigue PENDING) o la re-retención de la solicitud se difirió (`HOLD_DEFERRED`).
+ */
+function esFallaTransitoria(r: { errorReason?: string; message?: string }): boolean {
+  return r.errorReason === BLUMON_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR || r.message === RETENCION_DIFERIDA
+}
 
 /**
  * Blumon TPV webhook async reconciliation job
@@ -100,6 +109,15 @@ export class BlumonWebhookReconciliationJob {
           stack: err instanceof Error ? err.stack : undefined,
         })
       }
+      // Familia C: las solicitudes que la ventana retuvo por un aviso que la terminal ya reversó y que nadie soltó.
+      try {
+        await soltarRetencionesDeReversados(ahora)
+      } catch (err) {
+        logger.error('❌ [Blumon recon] El barrido de retenciones de avisos reversados falló — el pase sigue', {
+          error: err instanceof Error ? err.message : err,
+          stack: err instanceof Error ? err.stack : undefined,
+        })
+      }
       // F5: los avisos que este pase intentó; `markOrphaned` no vence uno con contexto que no se intentó (quedó fuera del lote).
       const intentados = new Set<string>()
       const reconciled = await this.reconcilePending(ahora, intentados)
@@ -162,7 +180,6 @@ export class BlumonWebhookReconciliationJob {
 
     let resolved = 0
     for (const row of pending) {
-      intentados?.add(row.id)
       try {
         const payload = row.payload as unknown as BlumonWebhookPayload
         // No explicit scope — `reconcileBlumonEvent` re-resolves the venue
@@ -170,6 +187,10 @@ export class BlumonWebhookReconciliationJob {
         // MerchantAccount (one merchant → N venues) doesn't get pinned to the
         // single terminal's venue that was cached at insert time.
         const result = await reconcileBlumonEvent(row.id, payload)
+        // Familia D: sólo cuenta como intentado (y `markOrphaned` puede vencerlo) el aviso cuyo intento terminó con un desenlace.
+        // Una excepción (la lectura de recuperación, la base) o una falla transitoria que el núcleo contesta sin lanzar —el
+        // registrador cayó (su candado, la base) o la re-retención se difirió— lo deja PENDING para el siguiente pase.
+        if (!esFallaTransitoria(result)) intentados?.add(row.id)
         // Con contexto, el núcleo contesta PENDING cuando el evento sigue esperando (p. ej. AMOUNT_MISMATCH): no salió.
         // HELD_BY_REVERSAL: retenido por la lápida del reverso, sigue PENDING.
         if (result.action !== 'NOT_FOUND' && result.action !== 'PENDING' && result.action !== 'HELD_BY_REVERSAL') resolved++
