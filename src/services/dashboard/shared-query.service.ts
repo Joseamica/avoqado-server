@@ -57,6 +57,7 @@ import * as reservationService from './reservation.dashboard.service'
 import * as teamDashboardService from './team.dashboard.service'
 import { localWallClockRaw, utcTs } from '../../utils/sqlDates'
 import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
+import { sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -1334,11 +1335,14 @@ export class SharedQueryService {
         FROM "Staff" s
         INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}
         LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
-          AND o."createdAt" >= ${utcTs(from)}
-          AND o."createdAt" <= ${utcTs(to)}
+          -- D2 (Codex r1 #1): sólo las órdenes de ESTA sucursal (quien trabaja en dos ya no suma las de la otra), por su hora real
+          -- (la del aparato si se vendió sin internet), como el Resumen.
+          AND o."venueId" = ${venueId}
+          AND ${sqlRangoHoraRealSql('o', from, to)}
           AND ${sqlOrdenSinTarjetas('o.id')}
         LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
         LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
+          AND sh."venueId" = ${venueId}
           AND sh."startTime" >= ${utcTs(from)}
           AND sh."startTime" <= ${utcTs(to)}
         WHERE sv."venueId" = ${venueId}
