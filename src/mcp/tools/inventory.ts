@@ -17,6 +17,7 @@ import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine }
 import { resumirConteo, retencionShopify } from '@/services/shared/stockCountSummary'
 import { cancelStockCount } from '@/services/mobile/inventory.mobile.service'
 import { planGateMessage } from '../planGate'
+import { canAccessFeature } from '@/services/access/access.service'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import { BatchStatus, MovementType, RawMaterialMovementType, RawMaterialCategory, Unit } from '@prisma/client'
@@ -190,7 +191,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'adjust_stock',
-    'Adjust the stock of a QUANTITY-tracked product in a venue you can access, found by name. `delta` is the CHANGE (not the new total): positive adds (e.g. 50 = stock received), negative subtracts (e.g. -10 = waste/correction). Cannot push stock below 0. By DEFAULT this only PREVIEWS the change (current stock → new stock); call again with confirm:true to actually apply it. This WRITES — requires inventory:adjust. If the name matches several products it returns them so you can be specific.',
+    'Adjust the stock of a QUANTITY-tracked product in a venue you can access, found by name. `delta` is the CHANGE (not the new total): positive adds (e.g. 50 = stock received), negative subtracts (e.g. -10 = waste/correction). Cannot push stock below 0. By DEFAULT this only PREVIEWS the change (current stock → new stock); call again with confirm:true to actually apply it. This WRITES — requires inventory:adjust. Without PREMIUM (INVENTORY_TRACKING) only type `adjustment` is allowed; `purchase` and `loss` need PREMIUM. If the name matches several products it returns them so you can be specific.',
     {
       venueId: z.string().describe('Venue that owns the product (must be in your scope)'),
       name: z.string().min(1).describe('Product name or part of it'),
@@ -206,7 +207,22 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
-      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      if (gate) {
+        // D2 (18-nov): sin Premium sólo el AJUSTE simple de piezas, como «Ajustar existencias» del panel
+        // (routes/dashboard/inventory.routes.ts, candadoDelAjusteDePiezas). Compra y merma siguen Premium.
+        if ((type ?? 'adjustment') !== 'adjustment') return text({ ok: false, planRequired: true, error: gate })
+        const access = scope.perVenueAccess.get(venueId)
+        const marcaBlanca = access ? canAccessFeature(access, 'AVOQADO_INVENTORY') : null
+        if (!marcaBlanca?.allowed) {
+          return text({
+            ok: false,
+            error:
+              marcaBlanca?.reason === 'ROLE_NOT_ALLOWED'
+                ? 'Tu rol no tiene acceso al inventario en esta sucursal.'
+                : 'El inventario no está activado en esta sucursal.',
+          })
+        }
+      }
       const matches = await prisma.product.findMany({
         where: { ...where, name: { contains: name, mode: 'insensitive' as const }, trackInventory: true, inventoryMethod: 'QUANTITY' },
         select: { id: true, name: true, inventory: { select: { currentStock: true } } },
