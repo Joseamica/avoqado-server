@@ -659,7 +659,14 @@ export async function shouldProductUseInventory(
    * Quien pregunta es superadmin de verdad (no suplantando): el candado de plan lo deja pasar (`checkFeatureAccess`), así que la
    * recomendación contesta lo mismo (na1d52b5, Codex r3 #5). El DASHBOARD decide con esta respuesta, no con un cálculo propio.
    */
-  opciones: { quienPreguntaEsSuperadmin?: boolean } = {},
+  opciones: {
+    quienPreguntaEsSuperadmin?: boolean
+    /**
+     * na1d52b5, Codex r11 #2: si quien pregunta puede GUARDAR un alta con piezas sin Premium (permiso efectivo de inventario y de alta
+     * de productos, con marca blanca). Sin dato (otro llamador), como antes: habilitada.
+     */
+    puedeGuardarPiezasSinPremium?: boolean
+  } = {},
 ) {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
 
@@ -686,7 +693,7 @@ export async function shouldProductUseInventory(
         label: 'wizard.step2.simpleStock',
         description: 'wizard.step2.simpleStockDesc',
         // Contar piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta na1d52b5, 17-nov). La receta, no.
-        enabled: true,
+        enabled: hasInventoryFeature || opciones.puedeGuardarPiezasSinPremium !== false,
       },
       {
         type: 'RECIPE' as const,

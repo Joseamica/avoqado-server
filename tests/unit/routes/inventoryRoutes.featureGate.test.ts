@@ -49,11 +49,14 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 }))
 
 // El permiso EFECTIVO (con el filtro de marca blanca) se simula: `mockPermisoEfectivo` decide si `verifyAccess` deja pasar.
-const mockPermisoEfectivo = { ok: true, pedidos: [] as string[] }
+// Un permiso de `mockPermisoEfectivo.negados` contesta 403 (p. ej., marca blanca con esa función apagada).
+const mockPermisoEfectivo = { negados: new Set<string>(), pedidos: [] as string[] }
 jest.mock('@/middlewares/verifyAccess.middleware', () => ({
   verifyAccess: (opciones: { permission?: string; featureCode?: string }) => (_req: any, res: any, next: any) => {
     mockPermisoEfectivo.pedidos.push(`${opciones.permission}+${opciones.featureCode}`)
-    return mockPermisoEfectivo.ok ? next() : res.status(403).json({ code: 'PERMISSION_DENIED', permisoEfectivo: opciones.permission })
+    return !mockPermisoEfectivo.negados.has(String(opciones.permission))
+      ? next()
+      : res.status(403).json({ code: 'PERMISSION_DENIED', permisoEfectivo: opciones.permission })
   },
 }))
 
@@ -117,7 +120,7 @@ const RAW_MATERIALS_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/raw-ma
 beforeEach(() => {
   jest.clearAllMocks()
   mockPermisosNegados.clear()
-  mockPermisoEfectivo.ok = true
+  mockPermisoEfectivo.negados.clear()
   mockPermisoEfectivo.pedidos = []
   staffVenueFindFirst.mockResolvedValue(null) // requester is NOT a platform superadmin
   venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
@@ -373,11 +376,11 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
       'negocio %s: un rol con `inventory:update` y SIN `menu:create` no da de alta (piezas ni sin inventario): hoy era 403',
       async (_p, plan) => {
         vfFindMany.mockResolvedValue(plan)
-        mockPermisosNegados.add('menu:create')
+        mockPermisoEfectivo.negados.add('menu:create')
         for (const cuerpo of [porPiezas, sinInventario]) {
           const res = await request(server).post(WIZARD_URL).send(cuerpo)
           expect(res.status).toBe(403)
-          expect(res.body.permisoFaltante).toBe('menu:create')
+          expect(res.body.permisoEfectivo).toBe('menu:create')
         }
       },
     )
@@ -385,14 +388,14 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
     // REGRESSION TESTS
     it('negocio Premium: el mismo rol sigue dando de alta con sólo `inventory:update` (Recetas, Codex r3 #4)', async () => {
       vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
-      mockPermisosNegados.add('menu:create')
+      mockPermisoEfectivo.negados.add('menu:create')
       const res = await request(server).post(WIZARD_URL).send(porPiezas)
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ handler: 'createProductWithInventory' })
     })
 
     it('negocio exento o superadmin: tampoco lo necesita, como el candado', async () => {
-      mockPermisosNegados.add('menu:create')
+      mockPermisoEfectivo.negados.add('menu:create')
       venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
       expect((await request(server).post(WIZARD_URL).send(porPiezas)).status).toBe(200)
       venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
@@ -407,25 +410,33 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
 
     it('Codex r9 #1: marca blanca con Inventario apagado (sin el permiso EFECTIVO): el alta con piezas no pasa', async () => {
       vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
-      mockPermisoEfectivo.ok = false
+      mockPermisoEfectivo.negados.add('inventory:update')
       const res = await request(server).post(WIZARD_URL).send(porPiezas)
       expect(res.status).toBe(403)
       expect(res.body.permisoEfectivo).toBe('inventory:update')
-      expect(mockPermisoEfectivo.pedidos).toEqual(['inventory:update+AVOQADO_INVENTORY']) // permiso Y función de marca blanca (r10 #1)
+      expect(mockPermisoEfectivo.pedidos).toContain('inventory:update+AVOQADO_INVENTORY') // permiso Y función de marca blanca (r10 #1)
+    })
+
+    it('Codex r11 #1: sin Premium y con Menú apagado en marca blanca: el alta no pasa aunque el rol tenga `menu:create`', async () => {
+      vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+      mockPermisoEfectivo.negados.add('menu:create')
+      const res = await request(server).post(WIZARD_URL).send(porPiezas)
+      expect(res.status).toBe(403)
+      expect(mockPermisoEfectivo.pedidos).toContain('menu:create+AVOQADO_MENU')
     })
 
     it('Codex r10 #2: la recomendación también pide Inventario de marca blanca: no se ofrecen piezas que no se pueden guardar', async () => {
-      mockPermisoEfectivo.ok = false
+      mockPermisoEfectivo.negados.add('inventory:read')
       const res = await request(server).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/should-use-inventory`)
       expect(res.status).toBe(403)
       expect(mockPermisoEfectivo.pedidos).toEqual(['inventory:read+AVOQADO_INVENTORY'])
     })
 
     it('el alta SIN inventario no pide el permiso efectivo de inventario (como siempre)', async () => {
-      mockPermisoEfectivo.ok = false
+      mockPermisoEfectivo.negados.add('inventory:update')
       const res = await request(server).post(WIZARD_URL).send(sinInventario)
       expect(res.status).toBe(200)
-      expect(mockPermisoEfectivo.pedidos).toEqual([])
+      expect(mockPermisoEfectivo.pedidos.filter(p => p.startsWith('inventory'))).toEqual([])
     })
 
     it('sin `inventory:update` no entra, como siempre', async () => {

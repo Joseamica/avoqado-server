@@ -139,7 +139,8 @@ const permisoDelAltaSinPremium: RequestHandler = async (req, res, next) => {
   try {
     const conPremium =
       (await requestIsSuperAdmin((req as any).authContext)) || (await venueHasFeatureAccess(req.params.venueId, 'INVENTORY_TRACKING'))
-    return conPremium ? next() : checkPermission('menu:create')(req, res, next)
+    // Con el filtro de marca blanca: Menú apagado no da de alta, aunque el rol tenga `menu:create` (Codex r11 #1).
+    return conPremium ? next() : verifyAccess({ permission: 'menu:create', featureCode: 'AVOQADO_MENU' })(req, res, next)
   } catch (error) {
     next(error)
   }

@@ -5,6 +5,7 @@ import * as costRecalculationService from '../../../services/dashboard/costRecal
 import * as recipeRecalculationService from '../../../services/dashboard/recipeRecalculation.service'
 import logger from '@/config/logger'
 import { requestIsSuperAdmin } from '@/middlewares/checkFeatureAccess.middleware'
+import { canAccessFeature, hasPermission, type UserAccess } from '@/services/access/access.service'
 import { resolveLegacyCatalogActor } from '@/services/master-catalog/catalogGovernance.service'
 
 /**
@@ -16,7 +17,19 @@ export async function shouldUseInventory(req: Request, res: Response, next: Next
 
     // Mismo criterio que el candado de plan: superadmin de verdad y sin suplantar (con suplantación el token trae el rol suplantado).
     const quienPreguntaEsSuperadmin = await requestIsSuperAdmin((req as any).authContext)
-    const recommendations = await productInventoryService.shouldProductUseInventory(venueId, { quienPreguntaEsSuperadmin })
+    // El acceso EFECTIVO que dejó `verifyAccess` en la ruta (marca blanca y suplantación ya resueltas): la opción de piezas sólo se ofrece a
+    // quien puede guardarla sin Premium, con los mismos permisos que pide el alta (Codex r11 #2).
+    const acceso = (req as any).access as UserAccess | undefined
+    const puedeGuardarPiezasSinPremium = acceso
+      ? hasPermission(acceso, 'inventory:update') &&
+        hasPermission(acceso, 'menu:create') &&
+        canAccessFeature(acceso, 'AVOQADO_MENU').allowed &&
+        canAccessFeature(acceso, 'AVOQADO_INVENTORY').allowed
+      : undefined
+    const recommendations = await productInventoryService.shouldProductUseInventory(venueId, {
+      quienPreguntaEsSuperadmin,
+      puedeGuardarPiezasSinPremium,
+    })
 
     res.json({
       success: true,

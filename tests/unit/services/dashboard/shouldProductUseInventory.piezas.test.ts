@@ -75,6 +75,14 @@ describe('shouldProductUseInventory — contar piezas en todos los planes', () =
     expect(opcion(r, 'RECIPE')?.enabled).toBe(true)
   })
 
+  it('Codex r11 #2: sin Premium, las piezas sólo se ofrecen a quien puede guardarlas; con Premium, como siempre', async () => {
+    tienePremium.mockResolvedValue(false)
+    expect(opcion(await shouldProductUseInventory('venue-1', { puedeGuardarPiezasSinPremium: false }), 'QUANTITY')?.enabled).toBe(false)
+    expect(opcion(await shouldProductUseInventory('venue-1', { puedeGuardarPiezasSinPremium: true }), 'QUANTITY')?.enabled).toBe(true)
+    tienePremium.mockResolvedValue(true)
+    expect(opcion(await shouldProductUseInventory('venue-1', { puedeGuardarPiezasSinPremium: false }), 'QUANTITY')?.enabled).toBe(true)
+  })
+
   it('negocio que no existe ⇒ 404', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(null)
 
