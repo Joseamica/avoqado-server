@@ -866,14 +866,17 @@ async function ackDelCobroYaRegistrado(p: {
   const paymentId = typeof huella?.paymentId === 'string' ? huella.paymentId : null
   if (!orderId || !paymentId) return null
   const cuentaOriginal = typeof huella?.cuentaOriginal === 'string' ? huella.cuentaOriginal : null
-  // Lo mismo que manda la cola desde la primera vez (la misma llave trae el mismo payload): sólo sirve para el cambio del acuse. Un
-  // intent sin payload no truena el lote (Codex r2 #4): sin importe, no hay acuse por evidencia.
-  const payload = (intent.payload ?? {}) as Record<string, unknown>
-  const amountCents = Number(payload.amountCents ?? NaN)
-  const tipCents = Number(payload.tipCents ?? 0)
-  if (!Number.isFinite(amountCents) || amountCents < 0 || !Number.isFinite(tipCents) || tipCents < 0) return null
 
+  // Todo va dentro del `try`: un payload ausente o un importe que no se deja convertir (un objeto JSON) no truena el lote (Codex r2
+  // #4, r3 #1): sin importe legible no hay acuse por evidencia y queda el rechazo de siempre.
   try {
+    // Lo mismo que manda la cola desde la primera vez (la misma llave trae el mismo payload): sólo sirve para el cambio del acuse.
+    const payload = (intent.payload ?? {}) as Record<string, unknown>
+    // Como `applyPayCash` (número o texto numérico; propina ausente = 0), pero sin `Number()` sobre un objeto, que puede lanzar.
+    const numero = (v: unknown): number => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN)
+    const amountCents = numero(payload.amountCents)
+    const tipCents = payload.tipCents === undefined || payload.tipCents === null ? 0 : numero(payload.tipCents)
+    if (!Number.isFinite(amountCents) || amountCents < 0 || !Number.isFinite(tipCents) || tipCents < 0) return null
     const guardado = await prisma.payment.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
       select: { id: true, orderId: true, status: true, type: true },

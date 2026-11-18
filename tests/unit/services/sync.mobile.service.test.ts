@@ -2878,14 +2878,21 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
       expect(prisma.posSyncIntent.deleteMany).not.toHaveBeenCalled()
     })
 
-    it('Codex r2 #4: un reenvío SIN payload no truena el lote: el rechazo de siempre y el resto del lote sigue', async () => {
+    it.each([
+      { cual: 'SIN payload (Codex r2 #4)', intent: { id: 'i-pay', seq: 9, type: 'PAY_CASH' } },
+      {
+        // `Number()` sobre este objeto LANZA («Cannot convert object to primitive value»): antes de r3 tumbaba el lote con un 500.
+        cual: 'con un importe que no se deja convertir (Codex r3 #1)',
+        intent: { id: 'i-pay', seq: 9, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: { valueOf: 1, toString: 1 } } },
+      },
+    ])('un reenvío $cual no truena el lote: el rechazo de siempre y el resto del lote sigue', async ({ intent }) => {
       ;(prisma.posSyncIntent.findUnique as jest.Mock)
         .mockResolvedValueOnce(reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }))
         .mockResolvedValue(null)
 
       const acks = await processIntents(
         baseParams([
-          { id: 'i-pay', seq: 9, type: 'PAY_CASH' },
+          intent,
           { id: 'i-add', seq: 10, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } },
         ]),
       )

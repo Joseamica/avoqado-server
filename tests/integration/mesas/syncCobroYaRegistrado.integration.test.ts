@@ -96,6 +96,8 @@ async function cobroConCaida() {
     caida.mockRestore()
   }
   expect(primera.status).toBe('ACKED') // esa respuesta se la llevó la caída: el aparato nunca la vio
+  // El cobro sí creó su recibo (Codex r3 #3): sin él, la prueba del filtro «recibo sólo a quien cobró» no probaría nada.
+  expect(primera.result!.digitalReceipt).toEqual(expect.objectContaining({ accessKey: expect.any(String), receiptUrl: expect.any(String) }))
   const orderId = String(a1.result!.orderId)
   const paymentId = String(primera.result!.paymentId)
   const reservada = await fila(p.id)
