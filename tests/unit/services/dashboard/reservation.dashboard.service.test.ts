@@ -3188,6 +3188,36 @@ describe('Reservation Dashboard Service', () => {
       )
     })
 
+    // naa485b3: Tijuana sigue el horario de verano de EE. UU.; el 14-mar-2027 el reloj salta de 02:00 a 03:00.
+    it('una hora sin zona que NO existe por el cambio de horario se rechaza en español y no mueve la cita', async () => {
+      prepararReagendar({ venue: { name: 'Barbería Frontera', timezone: 'America/Tijuana' } })
+
+      await expect(
+        rescheduleReservation(
+          VENUE_ID,
+          'res-1',
+          { startsAt: '2027-03-14T02:30', endsAt: '2027-03-14T03:30', notificationChannel: 'none' },
+          DASHBOARD_WRITE,
+          STAFF_ID,
+        ),
+      ).rejects.toThrow('Esa hora no existe por el cambio de horario; elige otra')
+      expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    })
+
+    it('la hora que pasa dos veces (noviembre en Tijuana) sí se acepta', async () => {
+      prepararReagendar({ venue: { name: 'Barbería Frontera', timezone: 'America/Tijuana' } })
+
+      await rescheduleReservation(
+        VENUE_ID,
+        'res-1',
+        { startsAt: '2026-11-01T01:30', endsAt: '2026-11-01T02:30', notificationChannel: 'none' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(prismaMock.reservation.update).toHaveBeenCalled()
+    })
+
     it('una hora con Z (ANDROID e iOS) se respeta tal cual', async () => {
       prepararReagendar()
 
