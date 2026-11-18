@@ -55,6 +55,7 @@ const txStaffOrganizationCreate = jest.fn()
 const txStaffVenueCreateMany = jest.fn()
 const txInvitationUpdate = jest.fn()
 const transactionRuns = jest.fn()
+const txQueryRaw = jest.fn().mockResolvedValue([])
 
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -78,6 +79,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
         staffOrganization: { create: txStaffOrganizationCreate },
         staffVenue: { createMany: txStaffVenueCreateMany },
         invitation: { updateMany: txInvitationUpdate },
+        $queryRaw: txQueryRaw,
       }
       return cb(tx)
     }),
@@ -85,7 +87,8 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 }))
 
 const assertCanAddSeatsBulk = jest.fn().mockResolvedValue(undefined)
-jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk }))
+const lockSeatCap = jest.fn().mockResolvedValue(undefined)
+jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk, lockSeatCap }))
 
 // Parte A (sesiones revocables): loginWithGoogle ahora crea una `Session` antes de emitir
 // los tokens. El mock de prisma de este archivo enumera sus modelos a mano y no incluye
@@ -231,6 +234,20 @@ describe('loginWithGoogle — invitation acceptance parity with the password pat
         primaryVenueId: 'venue-1',
         excludeInvitationId: 'inv-1',
       })
+    })
+
+    it('🔴 counts the seats inside the accept tx: its invitation row, then the venue seat-cap lock (final review #8)', async () => {
+      state.invitation = buildInvitation({ role: StaffRole.OWNER, permissions: { inviteToAllVenues: true } })
+      state.orgVenues = [{ id: 'venue-1' }, { id: 'venue-2' }]
+      state.staffAfterCreate = buildStaffAfterCreate(['venue-1', 'venue-2'], StaffRole.OWNER)
+
+      await loginWithGoogle('id-token', false)
+
+      expect((txQueryRaw.mock.calls[0][0] as string[]).join('?')).toContain('FOR UPDATE')
+      expect(lockSeatCap).toHaveBeenCalledWith(expect.objectContaining({ $queryRaw: txQueryRaw }), ['venue-1', 'venue-2'])
+      expect(txQueryRaw.mock.invocationCallOrder[0]).toBeLessThan(lockSeatCap.mock.invocationCallOrder[0])
+      expect(lockSeatCap.mock.invocationCallOrder[0]).toBeLessThan(assertCanAddSeatsBulk.mock.invocationCallOrder[0])
+      expect(assertCanAddSeatsBulk.mock.invocationCallOrder[0]).toBeLessThan(txStaffVenueCreateMany.mock.invocationCallOrder[0])
     })
 
     it('grants only the invitation venue without the flag (regression)', async () => {

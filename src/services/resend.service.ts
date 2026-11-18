@@ -802,6 +802,8 @@ export interface PlanActivatedNoticeData {
   /** ISO del siguiente cobro según Stripe. */
   nextChargeAt: string
   campaignCode: string | null
+  /** Plan Básico: la prueba de Pro termina SIN cobro (eligió el Básico). Sin él, lo de siempre. */
+  trialEndsFree?: boolean
 }
 
 export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Promise<boolean> {
@@ -820,9 +822,11 @@ export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Pr
     year: 'numeric',
     timeZone: 'America/Mexico_City',
   })
-  const cobro = data.payNow
-    ? `Pagó hoy ${monto}. Siguiente cobro: ${fecha}.`
-    : `Prueba gratis con tarjeta. Primer cobro: ${monto} el ${fecha}.`
+  const cobro = data.trialEndsFree
+    ? 'Prueba de Pro sin cobro (eligió el Básico)'
+    : data.payNow
+      ? `Pagó hoy ${monto}. Siguiente cobro: ${fecha}.`
+      : `Prueba gratis con tarjeta. Primer cobro: ${monto} el ${fecha}.`
   const filas: Array<[string, string]> = [
     ['Negocio', data.venueName],
     ['Plan', data.planName],

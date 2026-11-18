@@ -68,7 +68,7 @@ const crearNegocioNuevo = jest.fn()
 const resolverAtribucionDelAlta = jest.fn()
 jest.mock('../../../src/services/onboarding/nuevoNegocio', () => ({ crearNegocioNuevo, resolverAtribucionDelAlta }))
 
-jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn() }))
+jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn(), lockSeatCap: jest.fn() }))
 jest.mock('@/services/auth/session.service', () => ({ createSession: jest.fn().mockResolvedValue({ id: 'sess' }) }))
 jest.mock('@/services/auth/refreshGrant.service', () => ({ issueGrant: jest.fn().mockResolvedValue(undefined) }))
 const logAction = jest.fn()

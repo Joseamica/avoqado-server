@@ -108,7 +108,9 @@ describe('endLapsedHybridContracts', () => {
   })
 
   it('a lapsed PLAN contract applies the Free cap first, then ends and audits', async () => {
-    prismaMock.hybridContract.findMany.mockResolvedValue([{ id: 'hc_plan', planTier: 'PRO' }])
+    prismaMock.hybridContract.findMany.mockResolvedValue([
+      { id: 'hc_plan', planTier: 'PRO', publication: { definition: { kind: 'PLAN' } } },
+    ])
     const order: string[] = []
     execute.mockImplementation(async () => {
       order.push('seats')
@@ -138,14 +140,18 @@ describe('endLapsedHybridContracts', () => {
   })
 
   it('a lapsed functions-only contract ends without touching the team', async () => {
-    prismaMock.hybridContract.findMany.mockResolvedValue([{ id: 'hc_fn', planTier: null }])
+    prismaMock.hybridContract.findMany.mockResolvedValue([
+      { id: 'hc_fn', planTier: null, publication: { definition: { kind: 'FEATURES' } } },
+    ])
     await endLapsedHybridContracts('venue', 'purchase')
     expect(execute).not.toHaveBeenCalled()
     expect(prismaMock.hybridContract.updateMany).toHaveBeenCalled()
   })
 
   it('if the cap fails, the contract stays open for the next sweep', async () => {
-    prismaMock.hybridContract.findMany.mockResolvedValue([{ id: 'hc_plan', planTier: 'PREMIUM' }])
+    prismaMock.hybridContract.findMany.mockResolvedValue([
+      { id: 'hc_plan', planTier: 'PREMIUM', publication: { definition: { kind: 'PLAN' } } },
+    ])
     execute.mockRejectedValue(new Error('db down'))
     await expect(endLapsedHybridContracts('venue', 'purchase')).rejects.toThrow('db down')
     expect(prismaMock.hybridContract.updateMany).not.toHaveBeenCalled()

@@ -9,6 +9,11 @@ export interface PlanNotificationTarget {
   locale: 'es' | 'en'
   venueName: string
   ownerName: string | null
+  /**
+   * Plan Básico (17-nov): el OWNER (o ADMIN) cuyas preferencias deciden los avisos que se pueden apagar (categoría `PLAN`) y
+   * a quien firma su baja en un clic. `null` sin dueño activo: ese aviso sale sin liga de baja.
+   */
+  staffId?: string | null
 }
 
 /**
@@ -37,7 +42,7 @@ export async function resolvePlanNotificationTarget(venueId: string): Promise<Pl
         where: { active: true, role: { in: ['OWNER', 'ADMIN'] } },
         select: {
           role: true,
-          staff: { select: { email: true, firstName: true, lastName: true } },
+          staff: { select: { id: true, email: true, firstName: true, lastName: true } },
         },
       },
     },
@@ -57,5 +62,5 @@ export async function resolvePlanNotificationTarget(venueId: string): Promise<Pl
   const ownerName = owner ? `${owner.firstName ?? ''} ${owner.lastName ?? ''}`.trim() || null : null
   const locale = venue.language === 'en' ? 'en' : 'es'
 
-  return { email, locale, venueName: venue.name, ownerName }
+  return { email, locale, venueName: venue.name, ownerName, staffId: owner?.id ?? null }
 }

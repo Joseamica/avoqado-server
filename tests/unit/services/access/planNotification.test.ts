@@ -23,6 +23,7 @@ describe('resolvePlanNotificationTarget', () => {
       locale: 'en',
       venueName: 'Bar',
       ownerName: null,
+      staffId: null,
     })
   })
 

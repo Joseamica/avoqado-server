@@ -9,7 +9,7 @@ import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.servic
 import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 import { logAction } from './dashboard/activity-log.service'
-import { assertCanAddSeatsBulk } from './access/seatCap.service'
+import { assertCanAddSeatsBulk, lockSeatCap } from './access/seatCap.service'
 import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
 import { esCorreoDemo } from './demo/candadoDemo'
 import { esCuentaProvisional } from './cuentaProvisional'
@@ -430,6 +430,8 @@ export async function acceptInvitation(
         // own venue carries that pending row, so the exclusion applies there only.
         const newVenueIds = venueIds.filter(id => !existingByVenue.has(id))
         if (newVenueIds.length > 0) {
+          // The seat-cap lock shared with restoring seats and creating invitations (final review #8), before counting.
+          await lockSeatCap(tx, newVenueIds)
           await assertCanAddSeatsBulk(newVenueIds, { primaryVenueId: invitation.venueId, excludeInvitationId: invitation.id })
         }
 

@@ -46,7 +46,7 @@ const terms = z
   .strict('Condición comercial no admitida')
 
 const common = { schemaVersion: z.literal(1, { errorMap }), terms }
-export const hybridOfferDefinition = z.discriminatedUnion(
+const offerUnion = z.discriminatedUnion(
   'kind',
   [
     z
@@ -54,7 +54,20 @@ export const hybridOfferDefinition = z.discriminatedUnion(
       .strict('Campo de oferta no admitido'),
     z
       .object(
-        { ...common, kind: z.literal('FEATURES', { errorMap }), featureCodes: codes.min(1, 'Selecciona al menos una función') },
+        {
+          ...common,
+          kind: z.literal('FEATURES', { errorMap }),
+          featureCodes: codes.min(1, 'Selecciona al menos una función'),
+          // Plan Básico marker; optional with no default so today's definitions keep their hash.
+          basicPlan: z.literal(true, { errorMap }).optional(),
+          seatCap: z
+            .number({ errorMap })
+            .int('El tope de usuarios debe ser entero')
+            .min(1, 'El tope de usuarios mínimo es 1')
+            .max(500, 'El tope de usuarios máximo es 500')
+            .nullable()
+            .optional(),
+        },
         { errorMap },
       )
       .strict('Campo de oferta no admitido'),
@@ -76,6 +89,11 @@ export const hybridOfferDefinition = z.discriminatedUnion(
   ],
   { errorMap },
 )
+
+export const hybridOfferDefinition = offerUnion.superRefine((offer, ctx) => {
+  if (offer.kind === 'FEATURES' && offer.seatCap !== undefined && offer.basicPlan !== true)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['seatCap'], message: 'El tope de usuarios sólo aplica al Plan Básico' })
+})
 
 /** Superadmin simulation only. A customer's entitlements must never be accepted from this body at purchase time. */
 export const hybridOfferPreviewBody = z

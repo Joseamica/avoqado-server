@@ -3,11 +3,15 @@ import { ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import type { HybridOfferDefinition } from './hybridOffer.schema'
 
-export type ProductKey = `FEATURE:${string}` | 'PLAN:PRO' | 'PLAN:PREMIUM'
+/** The Plan Básico is a FEATURES offer marked `basicPlan`; its key is not a tier and never gets a list price. */
+export const BASIC_PLAN_KEY = 'PLAN:BASICO' as const
+
+export type ProductKey = `FEATURE:${string}` | 'PLAN:PRO' | 'PLAN:PREMIUM' | typeof BASIC_PLAN_KEY
 
 /** The single product an offer prices, or null for bundles/choice (they never enter the list-price rule). */
 export function productKeyOf(definition: HybridOfferDefinition): ProductKey | null {
   if (definition.kind === 'PLAN') return `PLAN:${definition.planTier}`
+  if (definition.kind === 'FEATURES' && definition.basicPlan === true) return BASIC_PLAN_KEY
   if (definition.kind === 'FEATURES' && definition.featureCodes.length === 1) return `FEATURE:${definition.featureCodes[0]}`
   return null
 }
@@ -19,7 +23,7 @@ export function productKeyOf(definition: HybridOfferDefinition): ProductKey | nu
 export function productKeySql(alias: string): Prisma.Sql {
   if (!/^[a-z_]+$/.test(alias)) throw new Error(`Invalid SQL alias: ${alias}`)
   const d = Prisma.raw(`${alias}.definition`)
-  return Prisma.sql`(CASE WHEN ${d}->>'kind' = 'PLAN' THEN 'PLAN:' || (${d}->>'planTier') WHEN ${d}->>'kind' = 'FEATURES' AND jsonb_array_length(${d}->'featureCodes') = 1 THEN 'FEATURE:' || (${d}->'featureCodes'->>0) END)`
+  return Prisma.sql`(CASE WHEN ${d}->>'kind' = 'PLAN' THEN 'PLAN:' || (${d}->>'planTier') WHEN ${d}->>'kind' = 'FEATURES' AND ${d}->>'basicPlan' = 'true' THEN 'PLAN:BASICO' WHEN ${d}->>'kind' = 'FEATURES' AND jsonb_array_length(${d}->'featureCodes') = 1 THEN 'FEATURE:' || (${d}->'featureCodes'->>0) END)`
 }
 
 /** Catalog price writes queue on the product locks behind each other (list saves, groups, the editor): room to wait. */

@@ -6,6 +6,7 @@ import * as whatsappService from '../whatsapp.service'
 import socketManager from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
+import { canalesAlCrear } from '../notifications/avisosSinCobro'
 import logger from '../../config/logger'
 import { filterDeliverableRecipients } from '../../utils/undeliverableEmail'
 
@@ -691,6 +692,8 @@ export async function updateNotificationPreference(
       venueId,
       type,
       ...data,
+      // Plan Básico: una fila de los avisos sin cobro nace con correo, salvo canales explícitos (`avisosSinCobro.ts`).
+      ...(canalesAlCrear(type, data.channels) ? { channels: canalesAlCrear(type, data.channels)! } : {}),
     },
     update: data,
   })

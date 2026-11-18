@@ -51,7 +51,10 @@ jest.mock('google-auth-library', () => ({
     verifyIdToken: jest.fn().mockResolvedValue({ getPayload: () => GOOGLE_PAYLOAD }),
   })),
 }))
-jest.mock('@/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/access/seatCap.service', () => ({
+  assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
+  lockSeatCap: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('otplib', () => ({
   TOTP: jest.fn().mockImplementation(() => ({ verify: jest.fn().mockResolvedValue({ valid: false }) })),
   NobleCryptoPlugin: jest.fn(),

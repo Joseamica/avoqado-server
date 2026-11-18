@@ -95,6 +95,7 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 // the Free-tier cap itself is covered by seatCap.service.test.ts + team.seatCap.test.ts.
 jest.mock('../../../src/services/access/seatCap.service', () => ({
   assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
+  lockSeatCap: jest.fn().mockResolvedValue(undefined),
 }))
 
 import { acceptInvitation } from '../../../src/services/invitation.service'

@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { updateManyNotificationPreferences } from '../dashboard/notification.dashboard.service'
 import { setAnnouncementEmailOn } from '../announcements/announcementEmailPreference.service'
 import type { EmailUnsubscribeCategory } from '../../utils/unsubscribeToken'
+import { TIPO_AVISOS_SIN_COBRO } from './avisosSinCobro'
 
 /**
  * Login-free email unsubscribe, tied to the recipient (staff) — not to whoever
@@ -23,6 +24,9 @@ const CATEGORY_TYPES: Record<EmailUnsubscribeCategory, NotificationType[]> = {
   RESERVATIONS: [NotificationType.RESERVATION_NO_SHOW_SUMMARY, NotificationType.RESERVATION_NEEDS_REVIEW],
   // Global por persona (Staff.announcementEmailOptOutAt): no usa NotificationPreference.
   ANNOUNCEMENTS: [],
+  // Plan Básico (17-nov): «Tu prueba termina» y «Tu prueba/Pro terminó» (avisos SIN cobro). El aviso de un cobro no se apaga.
+  // 🔴 Su propio tipo, nunca SUBSCRIPTION_TRIAL_ENDING: ver `notifications/avisosSinCobro.ts`.
+  PLAN: [TIPO_AVISOS_SIN_COBRO],
 }
 
 // Default channels a type has when no preference row exists yet (mirrors the
@@ -31,12 +35,14 @@ const DEFAULT_CHANNELS: Partial<Record<NotificationType, NotificationChannel[]>>
   [NotificationType.LOW_INVENTORY]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
   [NotificationType.RESERVATION_NO_SHOW_SUMMARY]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
   [NotificationType.RESERVATION_NEEDS_REVIEW]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+  [TIPO_AVISOS_SIN_COBRO]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
 }
 
 export const CATEGORY_LABELS: Record<EmailUnsubscribeCategory, string> = {
   INVENTORY: 'alertas de inventario',
   RESERVATIONS: 'avisos de reservaciones',
   ANNOUNCEMENTS: 'anuncios de Avoqado',
+  PLAN: 'avisos del fin de tu prueba',
 }
 
 export interface UnsubscribeContext {

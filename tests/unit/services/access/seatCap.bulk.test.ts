@@ -13,6 +13,8 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     venueFeature: { findMany: jest.fn() },
     staffVenue: { groupBy: jest.fn() },
     invitation: { groupBy: jest.fn(), count: jest.fn() },
+    // Plan Básico (Task 3): ningún Básico vigente por default → el tope de Gratis.
+    hybridContract: { findMany: jest.fn().mockResolvedValue([]) },
   },
 }))
 

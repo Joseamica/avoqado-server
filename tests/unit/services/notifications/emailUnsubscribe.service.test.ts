@@ -35,6 +35,24 @@ const VENUE = 'venue_1'
 
 beforeEach(() => jest.clearAllMocks())
 
+describe('unsubscribeFromEmailCategory (PLAN, Plan Básico)', () => {
+  it('apaga por correo los avisos sin cobro del plan (su propio tipo, SUBSCRIPTION_CANCELLED, nunca el que se crea solo) y deja la campanita', async () => {
+    mockFindMany.mockResolvedValue([])
+    mockFindFirst.mockResolvedValue(null)
+    mockCreate.mockImplementation(async ({ data }: any) => ({ id: 'x', ...data }))
+
+    const res = await unsubscribeFromEmailCategory(STAFF, VENUE, 'PLAN')
+
+    expect(mockCreate.mock.calls[0][0].data).toMatchObject({
+      staffId: STAFF,
+      venueId: VENUE,
+      type: NotificationType.SUBSCRIPTION_CANCELLED,
+      channels: [NotificationChannel.IN_APP],
+    })
+    expect(res).toEqual({ affectedTypes: 1, alreadyUnsubscribed: false })
+  })
+})
+
 describe('unsubscribeFromEmailCategory (INVENTORY)', () => {
   it('CREATES an email-suppressed row when none exists (missing row = email on by default)', async () => {
     mockFindMany.mockResolvedValue([]) // no rows → default [IN_APP, EMAIL]

@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
-import { lockProducts, productKeyOf, promotionWindow } from '@/services/launchCampaigns/hybridProduct'
-import type { HybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
+import { BASIC_PLAN_KEY, lockProducts, productKeyOf, productKeySql, promotionWindow } from '@/services/launchCampaigns/hybridProduct'
+import { hybridOfferDefinition, type HybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
+import { hybridHash } from '@/services/launchCampaigns/hybridProvider'
 
 const terms = {
   currency: 'MXN',
@@ -18,6 +19,40 @@ describe('productKeyOf', () => {
     expect(productKeyOf({ schemaVersion: 1, kind: 'FEATURES', featureCodes: ['CFDI', 'RESERVATIONS'], terms })).toBeNull()
     const choice: HybridOfferDefinition = { schemaVersion: 1, kind: 'CHOICE_BUNDLE', eligibleFeatureCodes: ['CFDI'], choiceCount: 1, terms }
     expect(productKeyOf(choice)).toBeNull()
+  })
+})
+
+describe('Plan Básico marker', () => {
+  it('names PLAN:BASICO for a FEATURES offer with basicPlan, however many functions it has', () => {
+    expect(BASIC_PLAN_KEY).toBe('PLAN:BASICO')
+    expect(productKeyOf({ schemaVersion: 1, kind: 'FEATURES', featureCodes: ['CFDI', 'RESERVATIONS'], basicPlan: true, terms })).toBe(
+      'PLAN:BASICO',
+    )
+    expect(productKeyOf({ schemaVersion: 1, kind: 'FEATURES', featureCodes: ['CFDI'], basicPlan: true, terms })).toBe('PLAN:BASICO')
+  })
+
+  it('its SQL twin knows the marker too', () => {
+    const text = productKeySql('p').sql
+    expect(text).toContain("'basicPlan'")
+    expect(text).toContain('PLAN:BASICO')
+  })
+
+  it('accepts seatCap 1-500 or null only with basicPlan', () => {
+    const base = { schemaVersion: 1, kind: 'FEATURES', featureCodes: ['CFDI'], terms }
+    expect(hybridOfferDefinition.safeParse({ ...base, basicPlan: true, seatCap: 3 }).success).toBe(true)
+    expect(hybridOfferDefinition.safeParse({ ...base, basicPlan: true, seatCap: null }).success).toBe(true)
+    expect(hybridOfferDefinition.safeParse({ ...base, basicPlan: true, seatCap: 0 }).success).toBe(false)
+    expect(hybridOfferDefinition.safeParse({ ...base, basicPlan: true, seatCap: 501 }).success).toBe(false)
+    expect(hybridOfferDefinition.safeParse({ ...base, basicPlan: true, seatCap: 1.5 }).success).toBe(false)
+    const orphan = hybridOfferDefinition.safeParse({ ...base, seatCap: 3 })
+    expect(orphan.success).toBe(false)
+    expect(JSON.stringify((orphan as { error: unknown }).error)).toContain('El tope de usuarios sólo aplica al Plan Básico')
+  })
+
+  it('a definition without the new fields keeps its hash', () => {
+    const today = { schemaVersion: 1, kind: 'FEATURES', featureCodes: ['CFDI', 'RESERVATIONS'], terms }
+    const parsed = hybridOfferDefinition.parse({ ...today, terms: { ...terms, price: 199 } })
+    expect(hybridHash(parsed)).toBe('de8b32928f546743138ed9fc7f17d1c84e8c7a9d8befd83a8112e2bd20cb3a88')
   })
 })
 

@@ -534,8 +534,9 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
   try {
     const { venueId } = req.params
     // `grantedFeatureCodes` es ADITIVO: un dashboard viejo lo ignora. Sólo códigos (#10, 21-sep).
-    const plan = await getVenuePlanInfo(venueId)
-    res.status(200).json({ success: true, data: plan })
+    const [plan, basico] = await Promise.all([getVenuePlanInfo(venueId), planStateService.basicPlanActive(venueId)])
+    // Plan Básico: el chip del negocio dice «Básico» y no «Free». ADITIVO y sólo cuando es verdad: sin Básico, la respuesta de siempre.
+    res.status(200).json({ success: true, data: basico ? { ...plan, basicPlanActive: true } : plan })
   } catch (error) {
     logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -550,14 +551,14 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
  * POST /api/v1/dashboard/venues/:venueId/plan/cancel
  */
 export async function cancelVenuePlan(
-  req: Request<{ venueId: string }, any, CancellationInput>,
+  req: Request<{ venueId: string }, any, CancellationInput & { purpose?: 'BASIC_PLAN' }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
-    const { reason, comment } = req.body ?? {}
-    const planState = await planStateService.cancelPlan(venueId, { reason, comment, staffId: (req as any).authContext?.userId })
+    const { reason, comment, purpose } = req.body ?? {}
+    const planState = await planStateService.cancelPlan(venueId, { reason, comment, purpose, staffId: (req as any).authContext?.userId })
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error canceling venue plan', {
@@ -638,17 +639,18 @@ export async function getVenueDowngradePreview(req: Request<{ venueId: string }>
  * POST /api/v1/dashboard/venues/:venueId/plan/downgrade
  */
 export async function downgradeVenueToFree(
-  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[] } & CancellationInput>,
+  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[]; purpose?: 'BASIC_PLAN' } & CancellationInput>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
     const keepStaffVenueIds = req.body.keepStaffVenueIds ?? []
-    const { reason, comment } = req.body
+    const { reason, comment, purpose } = req.body
     const planState = await seatReconciliationService.scheduleDowngradeToFree(venueId, keepStaffVenueIds, {
       reason,
       comment,
+      purpose,
       staffId: (req as any).authContext?.userId,
     })
     res.status(200).json({ success: true, data: planState })

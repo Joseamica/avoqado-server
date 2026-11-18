@@ -656,6 +656,9 @@ prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16'
 prismaMock.venueFeature.findMany.mockResolvedValue([])
 prismaMock.capabilityGrant.groupBy.mockResolvedValue([])
 prismaMock.capabilityGrant.findFirst.mockResolvedValue(null)
+// Tope de usuarios (Task 3 del Plan Básico): getVenueSeatCap / assertCanAddSeatsBulk preguntan por un Básico vigente con
+// hybridContract.findMany. Por default ninguno (= tope de Gratis), igual que venueFeature.findMany arriba.
+prismaMock.hybridContract.findMany.mockResolvedValue([])
 prismaMock.hybridPurchase.findFirst.mockResolvedValue(null)
 prismaMock.hybridPurchase.findMany.mockResolvedValue([])
 // Mobile venue-settings promotions block (getVenueTpvSettings, src/controllers/mobile/

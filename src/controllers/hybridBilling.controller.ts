@@ -11,6 +11,7 @@ import {
   hybridPurchaseView,
 } from '@/services/launchCampaigns/hybridPurchase.service'
 import { provisionHybridPurchase } from '@/services/launchCampaigns/hybridProvision.service'
+import { getBasicPlanRow, saveBasicPlan } from '@/services/launchCampaigns/hybridListPrice.service'
 import { getHybridFeatureGrid } from '@/services/launchCampaigns/hybridFeatureGrid.service'
 import { cancelHybridPurchase, reconcileHybridPurchase } from '@/services/launchCampaigns/hybridLifecycle.service'
 import { listHybridContracts, scheduleHybridSelection, cancelHybridContract } from '@/services/launchCampaigns/hybridManagement.service'
@@ -24,6 +25,7 @@ import {
   listHybridCampaigns,
   listPublicHybridOffers,
   getPublicHybridOffer,
+  getPublicBasicPlan,
 } from '@/services/launchCampaigns/hybridCampaign.service'
 
 export const quote = asyncHandler(async (req, res) =>
@@ -83,6 +85,22 @@ export const campaignCatalog = asyncHandler(async (req, res) => {
   const query = featureCatalogQuery.safeParse(req.query)
   if (!query.success) throw new BadRequestError('Revisa los filtros del catálogo.')
   res.json({ success: true, data: listFeatureCatalog(query.data) })
+})
+export const publicBasicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getPublicBasicPlan() }))
+export const basicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getBasicPlanRow() }))
+const basicPlanBody = z
+  .object({
+    name: z.string(),
+    featureCodes: z.array(z.string()),
+    price: z.number(),
+    seatCap: z.number().int().nullable(),
+    expectedRevision: z.number().int().positive().nullable(),
+  })
+  .strict()
+export const saveBasicPlanCtrl = asyncHandler(async (req, res) => {
+  const parsed = basicPlanBody.safeParse(req.body)
+  if (!parsed.success) throw new BadRequestError('Revisa los datos del Plan Básico.', 'HYBRID_BASIC_INVALID')
+  res.json({ success: true, data: await saveBasicPlan(parsed.data, req.authContext!.userId) })
 })
 export const publicOffer = asyncHandler(async (req, res) => res.json({ success: true, data: await getPublicHybridOffer(req.params.slug) }))
 

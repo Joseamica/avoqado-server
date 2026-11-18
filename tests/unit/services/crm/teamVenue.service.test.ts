@@ -153,6 +153,9 @@ function fakeTeamTables() {
     },
     organization: { create: jest.fn(async ({ data }: any) => ({ id: ORG_ID, ...data })) },
     venue: { create: jest.fn(async ({ data }: any) => (venueRow = { id: VENUE_ID, ...data })) },
+    // The real invitation counts and inserts its row inside its own transaction (seat-cap lock, final review #8): same tables.
+    invitation: prismaMock.invitation,
+    staffVenue: prismaMock.staffVenue,
   }
   prismaMock.$transaction.mockImplementation((callback: any) => callback(teamTx))
 }
