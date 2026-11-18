@@ -152,6 +152,15 @@ describe('tarifa del negocio desde el panel (PricingCard)', () => {
     expect(Number((await tarifaVigente())!.debitRate)).toBeCloseTo(0.023)
   })
 
+  it('🔴 Codex r7: la versión de hoy que otro guardado ya APAGÓ rigió un rato ⇒ 409, no se reactiva reescrita', async () => {
+    expect(await guardarTarifa(tarifa(HOY, 0.025))).toBeNull() // la de hoy
+    expect(await guardarTarifa(tarifa('2026-11-16', 0.03))).toBeNull() // otra con fecha de ayer: apaga la de hoy
+
+    expect(await guardarTarifa(tarifa(HOY, 0.04))).toMatchObject({ statusCode: 409, code: 'VERSION_QUE_YA_RIGIO' })
+    expect(Number((await tarifaVigente())!.debitRate)).toBeCloseTo(0.03)
+    expect(await activas()).toBe(1)
+  })
+
   it('🔴 la misma fecha que una versión que YA RIGIÓ (la que enseña la tarjeta al abrir) ⇒ 409 y no se apaga nada', async () => {
     expect(await guardarTarifa(tarifa('2026-01-01', 0.03))).toMatchObject({ statusCode: 409, code: 'VERSION_QUE_YA_RIGIO' })
     expect(Number((await tarifaVigente())!.debitRate)).toBeCloseTo(0.02)

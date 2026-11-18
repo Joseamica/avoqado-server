@@ -684,10 +684,15 @@ async function guardarVersionDelPanel(
 
   // Misma fecha EXACTA (Codex r5 #1 y #2: buscar por día UTC reactivaba versiones apagadas o reescribía la que rigió ayer en
   // México). Una versión guardada con hora (alta de AngelPay) no choca: se crea otra desde esa medianoche (ver la deuda).
-  // Se corrige en su lugar sólo la versión que empieza hoy Y se guardó hoy en México: la de medianoche UTC guardada ayer en la
-  // noche ya rigió desde las 18:00 de ayer (Codex r6).
-  const misma = await delegado.findFirst({ where: { ...v.alcance, effectiveFrom: desde }, select: { id: true, createdAt: true } })
-  const esLaDeHoy = misma && desde.getTime() === hoyDelPanel(ahora).getTime() && misma.createdAt >= inicioDeHoyEnMexico(ahora)
+  // Se corrige en su lugar sólo la versión que empieza hoy, se guardó hoy en México y SIGUE vigente: la de medianoche UTC
+  // guardada ayer en la noche ya rigió desde las 18:00 de ayer (Codex r6), y una que otro guardado ya apagó rigió un rato y no
+  // se reactiva reescrita (Codex r7).
+  const misma = await delegado.findFirst({
+    where: { ...v.alcance, effectiveFrom: desde },
+    select: { id: true, createdAt: true, active: true },
+  })
+  const esLaDeHoy =
+    misma && misma.active && desde.getTime() === hoyDelPanel(ahora).getTime() && misma.createdAt >= inicioDeHoyEnMexico(ahora)
   if (misma && !esLaDeHoy) throw new ConflictError(TEXTO_VERSION_QUE_YA_RIGIO, 'VERSION_QUE_YA_RIGIO')
 
   const vigente = await v.leerVigente(ahora)
