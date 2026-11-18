@@ -226,6 +226,49 @@ describe('AlmacenPorVentana', () => {
     }
   })
 
+  it('Codex r10: un acierto cuya llave se olvidó tras dos rotaciones y se recreó no resta en el registro nuevo', () => {
+    const a = almacen()
+    const acierto = a.increment('k')
+    a.rotarAhora()
+    a.rotarAhora() // la llave se olvidó
+    a.increment('k') // y se recreó: un registro nuevo, con su fallo
+
+    a.devolverEnVentana('k', acierto.resetTime)
+
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('Codex r10: con la cadena IP → negocio, un acierto que termina mientras otra petición decide le devuelve el cupo sólo en su ventana', () => {
+    // Emula a express: cada petición cuenta en la IP, LUEGO lee su total (tras su `await`) y sólo si pasa cuenta en el negocio.
+    const TOPE = 3
+    const ip = almacen()
+    const negocio = almacen()
+    // Dos fallos y una checada correcta en vuelo: la IP lleva 3.
+    for (let i = 0; i < 2; i++) {
+      ip.increment('ip')
+      negocio.increment('negocio')
+    }
+    const aciertoIp = ip.increment('ip')
+    const aciertoNegocio = negocio.increment('negocio')
+
+    // Otra petición cuenta en la IP (4)… y ANTES de que express lea su total, la checada correcta termina y devuelve.
+    const otra = ip.increment('ip')
+    ip.devolverEnVentana('ip', aciertoIp.resetTime)
+    negocio.devolverEnVentana('negocio', aciertoNegocio.resetTime)
+
+    expect(otra.totalHits).toBe(3) // lee el total ya con la devolución: 3 ≤ 3 ⇒ pasa a contar en el negocio
+    expect(otra.totalHits <= TOPE).toBe(true)
+    expect(negocio.increment('negocio').totalHits).toBe(3)
+
+    // Si la checada correcta era de la ventana VIEJA, su devolución no le da cupo a la ventana nueva.
+    const ip2 = almacen()
+    const viejo = ip2.increment('ip')
+    ahora = inicio + VENTANA
+    const nueva = ip2.increment('ip')
+    ip2.devolverEnVentana('ip', viejo.resetTime)
+    expect(nueva.totalHits).toBe(1)
+  })
+
   it('🔴 Codex r7-r9: con intentos EN VUELO en cualquier orden y cualquier brinco del reloj, decide igual que el `MemoryStore` real (prueba diferencial)', async () => {
     let semilla = 20261118
     const azar = () => {
@@ -269,8 +312,12 @@ describe('AlmacenPorVentana', () => {
         if (t < 0.2) {
           ahora += Math.floor((azar() - 0.45) * 3 * VENTANA) // brinco hacia adelante o hacia atrás, hasta ~1.6 ventanas
         } else if (t < 0.26) {
-          nuestro.rotarAhora()
-          ;(base as unknown as { clearExpired(): void }).clearExpired()
+          await enLosDos(
+            paso,
+            [],
+            () => nuestro.rotarAhora(),
+            () => (base as unknown as { clearExpired(): void }).clearExpired(),
+          )
         } else if (t < 0.28) {
           await enLosDos(
             paso,
