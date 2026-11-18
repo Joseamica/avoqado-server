@@ -58,7 +58,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada, devolverCanjesDeVentaAnuladaEnTx } from '../shared/orderCancelGuard'
 import { buildItemDiscountRow, calculateDiscountCents } from '../shared/discount.service'
 import { comoJson, nuevoRepartoDirigido } from '../shared/repartoDescuento'
-import type { MotivoDeDescuento } from '../shared/motivoDelDescuento'
+import { motivoDelDescuento, type MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import {
   buildOrderItemsData,
@@ -82,6 +82,9 @@ export interface AreaTicketLineInput {
   notes?: string | null
   modifierIds?: string[]
   discountId?: string | null
+  /** D4 (18-nov): motivo y comentario del descuento, como en Mostrador. Nunca rechaza: se recortan y se copian como texto. */
+  discountReason?: string | null
+  discountReasonComment?: string | null
 }
 
 export interface IssueAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
@@ -991,7 +994,7 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory } = await buildOrderItemsData(
+  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory, discounts } = await buildOrderItemsData(
     venueId,
     normalizedItems,
     fulfillmentAreaId,
@@ -1000,6 +1003,10 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
     input,
   )
   const snapshots = buildSnapshotLines(input.lines, itemsData, modifierSkus, modifierInventory)
+  // D4 (18-nov): el motivo del descuento se congela en el renglón (sólo si lleva descuento, como `buildOrderItemsData`).
+  const motivos = snapshots.map((snapshot, index) =>
+    snapshot.appliedDiscountId ? motivoDelDescuento(input.lines[index]?.discountReason, input.lines[index]?.discountReasonComment) : {},
+  )
   if (isExternal) assertExternalRouteIssuable(snapshots)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
   const total = new Prisma.Decimal(subtotal).sub(itemDiscountTotal)
@@ -1040,8 +1047,14 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
               expiresAt,
             },
           })
+          // D4: quién aprobó un descuento con «Requiere aprobación» = la sesión con permiso propio (aquí no hay PIN), como los sueltos.
+          const aprobo =
+            input.aprobacionDelDescuento && discounts.some(pideAprobacionDeGerente)
+              ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
+              : null
           const createdLines: Array<{ id: string }> = []
-          for (const snapshot of snapshots) {
+          for (const [index, snapshot] of snapshots.entries()) {
+            const descuento = discounts.find(d => d.id === snapshot.appliedDiscountId)
             createdLines.push(
               await tx.areaTicketLine.create({
                 data: {
@@ -1057,6 +1070,9 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
                   unitPrice: new Prisma.Decimal(snapshot.unitPrice),
                   discountAmount: new Prisma.Decimal(snapshot.discountAmount),
                   appliedDiscountId: snapshot.appliedDiscountId,
+                  discountReason: motivos[index].reason ?? null,
+                  discountReasonComment: motivos[index].reasonComment ?? null,
+                  discountAuthorizedById: aprobo && pideAprobacionDeGerente(descuento) ? aprobo : null,
                   taxAmount: new Prisma.Decimal(snapshot.taxAmount),
                   total: new Prisma.Decimal(snapshot.total),
                   notes: snapshot.notes,
@@ -1718,6 +1734,9 @@ type RenglonDeValeCobrado = {
   total: Prisma.Decimal
   area: string
   emisor: string | null
+  /** D4: lo que el renglón del vale congeló al emitir (vacío / null en un vale viejo). */
+  motivo: MotivoDeDescuento
+  aprobador: string | null
 }
 
 /** Un renglón suelto de la caja, recién creado. */
@@ -1794,8 +1813,9 @@ function datosDeFilaDeLaVenta(orderId: string, f: FilaDeLaVenta): Prisma.OrderDi
 
 /**
  * Tarjeta na24531d: los renglones de VALE con descuento ganan su fila espejo al cobrarse, UNA por (descuento, área, quien emitió el
- * vale) (Codex r2 #2, r3 #5), dirigida a sus renglones con lo exacto de cada uno. Lo que el vale NO congeló no se inventa: quien lo dio es
- * el emisor (su membresía); quién lo APROBÓ no se sabe al cobrar, así que la fila no lleva `authorizedById`; el monto es el congelado y, si
+ * vale) (Codex r2 #2, r3 #5), y desde D4 (18-nov) también por el motivo, el comentario y quien aprobó, que el renglón congeló al emitir.
+ * Lo que el vale NO congeló no se inventa: quien lo dio es quien aprobó o, si nadie, el emisor (su membresía); un vale de antes de D4 sale
+ * sin motivo ni `authorizedById`; el monto es el congelado y, si
  * el catálogo ya no lo reproduce en algún renglón (el dueño lo editó entre emitir y cobrar), la fila va como importe fijo por la suma,
  * salvo que no quepa en `value` (Codex r2 #5). Un descuento borrado del catálogo deja la fila sin liga. Rebaja $0 ⇒ sin fila.
  */
@@ -1816,14 +1836,34 @@ async function crearEspejosDeLosVales(
   const membresiaDe = new Map(membresias.map(m => [m.staffId, m.id]))
   const grupos = new Map<
     string,
-    { descuentoId: string; emisor: string | null; renglones: Array<{ id: string; cents: number; reproduce: boolean }> }
+    {
+      descuentoId: string
+      emisor: string | null
+      motivo: MotivoDeDescuento
+      aprobador: string | null
+      renglones: Array<{ id: string; cents: number; reproduce: boolean }>
+    }
   >()
   for (const r of conDescuento) {
     const cents = centavos(r.discountAmount)
     const catalogo = p.descuentos.get(r.appliedDiscountId!)
     const reproduce = catalogo != null && calculateDiscountCents(catalogo, centavos(r.total)) === cents
-    const llave = JSON.stringify([r.appliedDiscountId, r.area, r.emisor])
-    const grupo = grupos.get(llave) ?? { descuentoId: r.appliedDiscountId!, emisor: r.emisor, renglones: [] }
+    // D4: también por motivo, comentario y aprobador, como los sueltos: el reporte por motivo cuadra al centavo.
+    const llave = JSON.stringify([
+      r.appliedDiscountId,
+      r.area,
+      r.emisor,
+      r.motivo.reason ?? null,
+      r.motivo.reasonComment ?? null,
+      r.aprobador,
+    ])
+    const grupo = grupos.get(llave) ?? {
+      descuentoId: r.appliedDiscountId!,
+      emisor: r.emisor,
+      motivo: r.motivo,
+      aprobador: r.aprobador,
+      renglones: [],
+    }
     grupo.renglones.push({ id: r.id, cents, reproduce })
     grupos.set(llave, grupo)
   }
@@ -1838,8 +1878,9 @@ async function crearEspejosDeLosVales(
     await tx.orderDiscount.create({
       data: datosDeFilaDeLaVenta(p.orderId, {
         discount,
-        appliedById: (grupo.emisor && membresiaDe.get(grupo.emisor)) || null,
-        motivo: {},
+        appliedById: grupo.aprobador ?? ((grupo.emisor && membresiaDe.get(grupo.emisor)) || null),
+        ...(grupo.aprobador ? { authorizedById: grupo.aprobador } : {}),
+        motivo: grupo.motivo,
         renglones: grupo.renglones,
       }),
     })
@@ -2077,7 +2118,16 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
                 },
                 select: { id: true, appliedDiscountId: true, discountAmount: true, total: true },
               })
-              renglonesDeVale.push({ ...renglon, area: ticket.fulfillmentAreaId, emisor: ticket.issuedByStaffId ?? null })
+              renglonesDeVale.push({
+                ...renglon,
+                area: ticket.fulfillmentAreaId,
+                emisor: ticket.issuedByStaffId ?? null,
+                motivo: {
+                  ...(line.discountReason ? { reason: line.discountReason } : {}),
+                  ...(line.discountReasonComment ? { reasonComment: line.discountReasonComment } : {}),
+                },
+                aprobador: line.discountAuthorizedById ?? null,
+              })
             }
           }
           const sueltos: RenglonSueltoCobrado[] = []

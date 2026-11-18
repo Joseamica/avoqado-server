@@ -12,7 +12,12 @@ export const MAX_MOTIVOS = 30
 
 function limpiar(raw: unknown, tope: number): string | null {
   if (typeof raw !== 'string') return null
-  const texto = raw.replace(/\s+/g, ' ').trim()
+  // D4 (Codex r3 #2): el nulo y los de control se vuelven espacio; PostgreSQL rechaza un texto con nulo y tumbaba la escritura entera.
+  // eslint-disable-next-line no-control-regex
+  const texto = raw
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (!texto) return null
   return texto.slice(0, tope).trim()
 }
