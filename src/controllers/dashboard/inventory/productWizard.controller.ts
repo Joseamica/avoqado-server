@@ -4,7 +4,7 @@ import * as productInventoryService from '../../../services/dashboard/productInv
 import * as costRecalculationService from '../../../services/dashboard/costRecalculationTrigger.service'
 import * as recipeRecalculationService from '../../../services/dashboard/recipeRecalculation.service'
 import logger from '@/config/logger'
-import { esSuperadminDeLaSesion } from '@/services/access/rolVigente'
+import { requestIsSuperAdmin } from '@/middlewares/checkFeatureAccess.middleware'
 import { resolveLegacyCatalogActor } from '@/services/master-catalog/catalogGovernance.service'
 
 /**
@@ -15,7 +15,7 @@ export async function shouldUseInventory(req: Request, res: Response, next: Next
     const { venueId } = req.params
 
     // Mismo criterio que el candado de plan: superadmin de verdad y sin suplantar (con suplantación el token trae el rol suplantado).
-    const quienPreguntaEsSuperadmin = await esSuperadminDeLaSesion((req as any).authContext)
+    const quienPreguntaEsSuperadmin = await requestIsSuperAdmin((req as any).authContext)
     const recommendations = await productInventoryService.shouldProductUseInventory(venueId, { quienPreguntaEsSuperadmin })
 
     res.json({

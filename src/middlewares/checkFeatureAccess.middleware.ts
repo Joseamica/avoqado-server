@@ -28,7 +28,7 @@ import { esSuperadminReal } from '@/services/access/rolVigente'
  * A superadmin sees EVERY feature on EVERY venue, so feature gates must let them through too — without
  * this, a superadmin inspecting a non-Premium venue (e.g. a Pro venue's accounting) wrongly 403s.
  */
-async function requestIsSuperAdmin(authContext: { userId: string; isImpersonating?: boolean }): Promise<boolean> {
+export async function requestIsSuperAdmin(authContext: { userId: string; isImpersonating?: boolean }): Promise<boolean> {
   if (authContext.isImpersonating) return false
   // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
   return esSuperadminReal(authContext.userId)

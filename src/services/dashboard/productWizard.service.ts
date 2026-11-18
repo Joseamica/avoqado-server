@@ -82,127 +82,123 @@ export interface WizardStep3RecipeData {
   }>
 }
 
+/** Categoría del alta: tiene que ser de este negocio. */
+async function validarCategoriaDelAlta(venueId: string, categoryId: string) {
+  const category = await prisma.menuCategory.findFirst({ where: { id: categoryId, venueId } })
+  if (!category) throw new AppError('La categoría no existe o no pertenece a este negocio', 404)
+  return category
+}
+
 /**
- * Step 1: Create basic product
- * Returns productId for subsequent steps
+ * El alta del producto (paso 1) dentro de una transacción que le pasan: así el alta por piezas guarda producto, método y saldo en
+ * UNA sola (na1d52b5, Codex r4 #1-#3). Lanza los errores crudos de Prisma; `traducirErrorDelAlta` los pone en español.
  */
-export async function createProductStep1(
-  venueId: string,
-  data: WizardStep1Data,
-  actor: CatalogActor,
-  /**
-   * `nacerOculto`: el alta todo-en-uno con inventario crea el producto INACTIVO y lo publica hasta que sus piezas quedan guardadas
-   * (na1d52b5, Codex r2 #3 y r3 #1): el POS sólo lista productos activos, así que nadie puede venderlo antes de tener su saldo.
-   */
-  opciones: { nacerOculto?: boolean } = {},
-) {
-  // Validate category belongs to venue
-  const category = await prisma.menuCategory.findFirst({
-    where: {
-      id: data.categoryId,
-      venueId,
-    },
-  })
-
-  if (!category) {
-    throw new AppError('La categoría no existe o no pertenece a este negocio', 404)
-  }
-
-  // SKU: use provided value if non-empty, otherwise auto-generate.
-  // GTIN: optional; pass through if provided, omit (NULL) otherwise.
+async function crearProductoEnTx(tx: Prisma.TransactionClient, venueId: string, data: WizardStep1Data, actor: CatalogActor) {
   const providedSku = data.sku?.trim()
   const providedGtin = data.gtin?.trim()
   const modifierGroupIds = [...new Set(data.modifierGroupIds ?? [])]
   // Como el alta normal: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo).
   const traeIva = data.objetoImp !== undefined && data.objetoImp !== null
+  if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
+  await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+  await assertLegacyProductReferencesForVenue(tx, {
+    venueId,
+    categoryId: data.categoryId,
+    printStationId: data.printStationId,
+  })
+  if (modifierGroupIds.length > 0) {
+    const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
+    if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
+  }
+  const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+  const created = await tx.product.create({
+    data: {
+      venueId,
+      createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+      categoryId: data.categoryId,
+      printStationId: data.printStationId ?? null,
+      name: data.name,
+      sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
+      gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,
+      description: data.description,
+      price: new Decimal(data.price),
+      imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
+      active: true,
+      ...(data.type && { type: data.type as any }),
+      ...(data.duration && { duration: data.duration }),
+      ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
+      ...(data.layoutConfig !== undefined && {
+        layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
+      }),
+      // Venta por peso: price es el precio POR KG; la unidad se fija en KILOGRAM.
+      soldByWeight: data.soldByWeight ?? false,
+      ...(data.soldByWeight ? { unit: Unit.KILOGRAM } : {}),
+      ...(data.satProductKey !== undefined && { satProductKey: data.satProductKey }),
+      ...(data.satUnitKey !== undefined && { satUnitKey: data.satUnitKey }),
+      // IVA: sólo `ivaTratamiento`; el trigger de Product deriva la tupla.
+      ...normalizarIvaDeProducto({ objetoImp: data.objetoImp }, null, encendido),
+      modifierGroups: modifierGroupIds.length
+        ? { create: modifierGroupIds.map((groupId, index) => ({ groupId, displayOrder: index })) }
+        : undefined,
+      externalData: {
+        wizardCompleted: false,
+        inventoryConfigured: false,
+      },
+    },
+  })
+  // Plan 6b (H14): con la tupla vieja del asistente (D18 lo cubre el normalizador del alta), un alta con otro IVA deja rastro.
+  await registrarCambioDeIva(tx, {
+    venueId,
+    productId: created.id,
+    producto: created.name,
+    antes: null,
+    despues: created.ivaTratamiento,
+    staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+    origen: 'DASHBOARD',
+  })
+  if (actor.type === 'SERVICE') {
+    await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+  }
+  return created
+}
 
-  // Create product. Handle unique-constraint collisions (P2002) with a
-  // user-friendly Spanish message identifying WHICH column collided, so the
-  // frontend toast can tell the user exactly which code to change instead of
-  // showing a generic 500.
+/**
+ * Un choque de llave única (P2002) dice CUÁL columna chocó, para que el panel le diga al usuario qué código cambiar en vez de un
+ * 500 genérico; un error de IVA sale en español. Lo demás se lanza tal cual.
+ */
+function traducirErrorDelAlta(error: unknown, data: WizardStep1Data): never {
+  const providedSku = data.sku?.trim()
+  const providedGtin = data.gtin?.trim()
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    const target = (error.meta?.target as string[] | string | undefined) ?? ''
+    const isSkuConflict = Array.isArray(target) ? target.includes('sku') : String(target).includes('sku')
+    const isGtinConflict = Array.isArray(target) ? target.includes('gtin') : String(target).includes('gtin')
+    if (isSkuConflict) {
+      throw new AppError(
+        `El SKU "${providedSku}" ya está en uso por otro producto en esta sucursal. Usa un código distinto o déjalo vacío para auto-generar.`,
+        409,
+      )
+    }
+    if (isGtinConflict) {
+      throw new AppError(`El GTIN "${providedGtin}" ya está asignado a otro producto en esta sucursal.`, 409)
+    }
+    throw new AppError('Ya existe un producto con esos datos en esta sucursal.', 409)
+  }
+  traducirErrorDeIva(error)
+  throw error
+}
+
+/**
+ * Step 1: Create basic product
+ * Returns productId for subsequent steps
+ */
+export async function createProductStep1(venueId: string, data: WizardStep1Data, actor: CatalogActor) {
+  const category = await validarCategoriaDelAlta(venueId, data.categoryId)
   let product
   try {
-    product = await prisma.$transaction(async tx => {
-      if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
-      await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
-      await assertLegacyProductReferencesForVenue(tx, {
-        venueId,
-        categoryId: data.categoryId,
-        printStationId: data.printStationId,
-      })
-      if (modifierGroupIds.length > 0) {
-        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
-        if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
-      }
-      const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
-      const created = await tx.product.create({
-        data: {
-          venueId,
-          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-          categoryId: data.categoryId,
-          printStationId: data.printStationId ?? null,
-          name: data.name,
-          sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
-          gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,
-          description: data.description,
-          price: new Decimal(data.price),
-          imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
-          active: !opciones.nacerOculto,
-          ...(data.type && { type: data.type as any }),
-          ...(data.duration && { duration: data.duration }),
-          ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
-          ...(data.layoutConfig !== undefined && {
-            layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
-          }),
-          // Venta por peso: price es el precio POR KG; la unidad se fija en KILOGRAM.
-          soldByWeight: data.soldByWeight ?? false,
-          ...(data.soldByWeight ? { unit: Unit.KILOGRAM } : {}),
-          ...(data.satProductKey !== undefined && { satProductKey: data.satProductKey }),
-          ...(data.satUnitKey !== undefined && { satUnitKey: data.satUnitKey }),
-          // IVA: sólo `ivaTratamiento`; el trigger de Product deriva la tupla.
-          ...normalizarIvaDeProducto({ objetoImp: data.objetoImp }, null, encendido),
-          modifierGroups: modifierGroupIds.length
-            ? { create: modifierGroupIds.map((groupId, index) => ({ groupId, displayOrder: index })) }
-            : undefined,
-          externalData: {
-            wizardCompleted: false,
-            inventoryConfigured: false,
-          },
-        },
-      })
-      // Plan 6b (H14): con la tupla vieja del asistente (D18 lo cubre el normalizador del alta), un alta con otro IVA deja rastro.
-      await registrarCambioDeIva(tx, {
-        venueId,
-        productId: created.id,
-        producto: created.name,
-        antes: null,
-        despues: created.ivaTratamiento,
-        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
-        origen: 'DASHBOARD',
-      })
-      if (actor.type === 'SERVICE') {
-        await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
-      }
-      return created
-    })
+    product = await prisma.$transaction(tx => crearProductoEnTx(tx, venueId, data, actor))
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const target = (error.meta?.target as string[] | string | undefined) ?? ''
-      const isSkuConflict = Array.isArray(target) ? target.includes('sku') : String(target).includes('sku')
-      const isGtinConflict = Array.isArray(target) ? target.includes('gtin') : String(target).includes('gtin')
-      if (isSkuConflict) {
-        throw new AppError(
-          `El SKU "${providedSku}" ya está en uso por otro producto en esta sucursal. Usa un código distinto o déjalo vacío para auto-generar.`,
-          409,
-        )
-      }
-      if (isGtinConflict) {
-        throw new AppError(`El GTIN "${providedGtin}" ya está asignado a otro producto en esta sucursal.`, 409)
-      }
-      throw new AppError('Ya existe un producto con esos datos en esta sucursal.', 409)
-    }
-    traducirErrorDeIva(error)
-    throw error
+    traducirErrorDelAlta(error, data)
   }
 
   return {
@@ -282,6 +278,115 @@ export async function configureInventoryStep2(venueId: string, productId: string
 }
 
 /**
+ * Lo que guarda el paso 3 por piezas, dentro de una transacción que le pasan (el paso 3 suelto y el alta por piezas de un solo
+ * paso, na1d52b5). Devuelve el saldo con el que queda.
+ */
+async function guardarPiezasEnTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  productId: string,
+  data: WizardStep3SimpleStockData,
+): Promise<Decimal> {
+  const esperado = data.expectedUpdatedAt ? new Date(data.expectedUpdatedAt) : undefined
+  const mismaVersion = (v: Date) => !esperado || v.getTime() === esperado.getTime()
+  // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
+  const product = await tx.product.findUnique({
+    where: { id: productId, venueId },
+    select: { externalData: true, updatedAt: true, recipe: { select: { id: true } } },
+  })
+  if (!product) throw new AppError('Producto no encontrado', 404)
+  if (!mismaVersion(product.updatedAt)) throw productoCambioError()
+  // La versión se vuelve a exigir al escribir el producto (abajo), salvo si este paso ya lo escribió y tiene su candado.
+  let versionAlEscribir = esperado
+
+  // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
+  if (product.recipe) {
+    // Este camino escribe el producto PRIMERO (switchInventoryMethod toma su candado): la versión se compara bajo ese mismo candado.
+    if (esperado) {
+      const [fila] = await tx.$queryRaw<Array<{ updatedAt: Date }>>`SELECT "updatedAt" FROM "Product" WHERE id = ${productId} FOR UPDATE`
+      if (!fila || !mismaVersion(fila.updatedAt)) throw productoCambioError()
+    }
+    logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
+    await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
+    versionAlEscribir = undefined
+  }
+
+  // La fila tiene que existir para poder tomar su candado; una existente no se toca.
+  await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
+  const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+    SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
+  const saldoPrevio = new Decimal(fila.currentStock)
+  // Sin existencias en la petición el saldo queda como esté: ni se escribe ni deja movimiento.
+  const nuevoSaldo = data.initialStock === undefined ? saldoPrevio : new Decimal(data.initialStock)
+  const delta = nuevoSaldo.minus(saldoPrevio)
+  // Una fila en 0 y sin kardex (la deja el paso 2 o nace aquí) recibe el PRIMER saldo, no un ajuste.
+  const esSaldoInicial =
+    saldoPrevio.isZero() && !(await tx.inventoryMovement.findFirst({ where: { inventoryId: fila.id }, select: { id: true } }))
+
+  await tx.inventory.update({
+    where: { id: fila.id },
+    data: {
+      ...(data.initialStock === undefined ? {} : { currentStock: nuevoSaldo }),
+      minimumStock: new Decimal(data.reorderPoint),
+    },
+  })
+
+  // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
+  // kardex); re-correr el asistente con el mismo número no ensucia el historial.
+  if (!delta.isZero()) {
+    await tx.inventoryMovement.create({
+      data: {
+        inventoryId: fila.id,
+        type: 'ADJUSTMENT',
+        quantity: delta,
+        previousStock: saldoPrevio,
+        newStock: nuevoSaldo,
+        reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
+      },
+    })
+  }
+
+  // El producto AL FINAL, como la entrada de mercancía (inventario → costo): con el orden al revés, una
+  // entrada del mismo producto a la vez se trababa con este paso (Postgres abortaba una de las dos).
+  // Y queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin
+  // receta, o sin inventario, recibía un saldo que la venta ignoraba.
+  let updated
+  try {
+    updated = await tx.product.update({
+      // Con versión: si otro la cambió desde que se leyó, no hay fila que escribir (P2025) y se revierte todo el paso.
+      where: { id: productId, ...(versionAlEscribir ? { updatedAt: versionAlEscribir } : {}) },
+      data: {
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+        externalData: {
+          ...(product.externalData as any),
+          wizardCompleted: true,
+          inventoryConfigured: true,
+        },
+      },
+    })
+  } catch (e) {
+    if (versionAlEscribir && (e as { code?: string }).code === 'P2025') throw productoCambioError()
+    throw e
+  }
+  // Una clase o una cita no llevan existencias: se revierte todo el paso (misma regla que Artículos).
+  if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+  return nuevoSaldo
+}
+
+function respuestaDePiezas(saldoFinal: Decimal, data: WizardStep3SimpleStockData) {
+  return {
+    success: true,
+    inventoryMethod: 'QUANTITY',
+    initialStock: saldoFinal.toNumber(),
+    minimumStock: data.reorderPoint,
+    nextStep: 'complete',
+    message: `Simple stock tracking configured: ${saldoFinal.toString()} unit(s) in stock`,
+  }
+}
+
+/**
  * Step 3A: Setup simple stock (for retail/jewelry)
  * Creates/updates the product's raw material record
  */
@@ -296,104 +401,8 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
   // el producto, el saldo leído BAJO CANDADO de la fila, el kardex y el costo. Leído afuera, una venta en
   // medio dejaba saldo ≠ Σ movimientos; y un fallo al anotar el movimiento dejaba el saldo cambiado sin
   // kardex, o la receta ya borrada. La venta (`deductSimpleStock`) toma el mismo candado de la fila.
-  const esperado = data.expectedUpdatedAt ? new Date(data.expectedUpdatedAt) : undefined
-  const mismaVersion = (v: Date) => !esperado || v.getTime() === esperado.getTime()
-  let saldoFinal = new Decimal(0)
-  await prisma.$transaction(async tx => {
-    // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
-    const product = await tx.product.findUnique({
-      where: { id: productId, venueId },
-      select: { externalData: true, updatedAt: true, recipe: { select: { id: true } } },
-    })
-    if (!product) throw new AppError('Producto no encontrado', 404)
-    if (!mismaVersion(product.updatedAt)) throw productoCambioError()
-    // La versión se vuelve a exigir al escribir el producto (abajo), salvo si este paso ya lo escribió y tiene su candado.
-    let versionAlEscribir = esperado
-
-    // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
-    if (product.recipe) {
-      // Este camino escribe el producto PRIMERO (switchInventoryMethod toma su candado): la versión se compara bajo ese mismo candado.
-      if (esperado) {
-        const [fila] = await tx.$queryRaw<Array<{ updatedAt: Date }>>`SELECT "updatedAt" FROM "Product" WHERE id = ${productId} FOR UPDATE`
-        if (!fila || !mismaVersion(fila.updatedAt)) throw productoCambioError()
-      }
-      logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
-      await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
-      versionAlEscribir = undefined
-    }
-
-    // La fila tiene que existir para poder tomar su candado; una existente no se toca.
-    await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
-    const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
-      SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
-    const saldoPrevio = new Decimal(fila.currentStock)
-    // Sin existencias en la petición el saldo queda como esté: ni se escribe ni deja movimiento.
-    const nuevoSaldo = data.initialStock === undefined ? saldoPrevio : new Decimal(data.initialStock)
-    saldoFinal = nuevoSaldo
-    const delta = nuevoSaldo.minus(saldoPrevio)
-    // Una fila en 0 y sin kardex (la deja el paso 2 o nace aquí) recibe el PRIMER saldo, no un ajuste.
-    const esSaldoInicial =
-      saldoPrevio.isZero() && !(await tx.inventoryMovement.findFirst({ where: { inventoryId: fila.id }, select: { id: true } }))
-
-    await tx.inventory.update({
-      where: { id: fila.id },
-      data: {
-        ...(data.initialStock === undefined ? {} : { currentStock: nuevoSaldo }),
-        minimumStock: new Decimal(data.reorderPoint),
-      },
-    })
-
-    // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
-    // kardex); re-correr el asistente con el mismo número no ensucia el historial.
-    if (!delta.isZero()) {
-      await tx.inventoryMovement.create({
-        data: {
-          inventoryId: fila.id,
-          type: 'ADJUSTMENT',
-          quantity: delta,
-          previousStock: saldoPrevio,
-          newStock: nuevoSaldo,
-          reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
-        },
-      })
-    }
-
-    // El producto AL FINAL, como la entrada de mercancía (inventario → costo): con el orden al revés, una
-    // entrada del mismo producto a la vez se trababa con este paso (Postgres abortaba una de las dos).
-    // Y queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin
-    // receta, o sin inventario, recibía un saldo que la venta ignoraba.
-    let updated
-    try {
-      updated = await tx.product.update({
-        // Con versión: si otro la cambió desde que se leyó, no hay fila que escribir (P2025) y se revierte todo el paso.
-        where: { id: productId, ...(versionAlEscribir ? { updatedAt: versionAlEscribir } : {}) },
-        data: {
-          trackInventory: true,
-          inventoryMethod: 'QUANTITY',
-          cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-          externalData: {
-            ...(product.externalData as any),
-            wizardCompleted: true,
-            inventoryConfigured: true,
-          },
-        },
-      })
-    } catch (e) {
-      if (versionAlEscribir && (e as { code?: string }).code === 'P2025') throw productoCambioError()
-      throw e
-    }
-    // Una clase o una cita no llevan existencias: se revierte todo el paso (misma regla que Artículos).
-    if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
-  })
-
-  return {
-    success: true,
-    inventoryMethod: 'QUANTITY',
-    initialStock: saldoFinal.toNumber(),
-    minimumStock: data.reorderPoint,
-    nextStep: 'complete',
-    message: `Simple stock tracking configured: ${saldoFinal.toString()} unit(s) in stock`,
-  }
+  const saldoFinal = await prisma.$transaction(tx => guardarPiezasEnTx(tx, venueId, productId, data))
+  return respuestaDePiezas(saldoFinal, data)
 }
 
 /**
@@ -480,6 +489,67 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
 }
 
 /**
+ * Alta por piezas en UN solo paso (na1d52b5, 17-nov-2026, tras la parada de Codex r4): el producto, su método «por piezas», su fila
+ * de inventario y su saldo inicial con su movimiento se guardan en UNA transacción. Nadie puede verlo, venderlo, ligarlo por SKU
+ * (agregadores) ni encenderlo antes de que exista con sus piezas; si algo falla o el SERVIDOR se reinicia a medio camino, no queda
+ * nada; y el gobierno del catálogo maestro se revisa bajo el mismo candado que el alta (antes: tres pasos con huecos entre ellos).
+ */
+async function altaPorPiezasEnUnSoloPaso(
+  venueId: string,
+  data: { product: WizardStep1Data; simpleStock?: WizardStep3SimpleStockData },
+  actor: CatalogActor,
+) {
+  await validarCategoriaDelAlta(venueId, data.product.categoryId)
+  let alta!: { productId: string; saldo?: Decimal }
+  try {
+    alta = await prisma.$transaction(async tx => {
+      const created = await crearProductoEnTx(tx, venueId, data.product, actor)
+      // El paso 2 por piezas (`setProductInventoryMethod`), en la misma transacción.
+      const porPiezas = await tx.product.update({
+        where: { id: created.id, venueId },
+        data: {
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          externalData: { ...(created.externalData as any), inventoryConfigured: true },
+        },
+      })
+      await pedirCuadreAlVolverACantidad(tx, created.id)
+      await ensureQuantityInventoryRow(tx, porPiezas)
+      const saldo = data.simpleStock ? await guardarPiezasEnTx(tx, venueId, created.id, data.simpleStock) : undefined
+      return { productId: created.id, saldo }
+    })
+  } catch (error) {
+    traducirErrorDelAlta(error, data.product)
+  }
+
+  const staffId = actor.type === 'HUMAN' ? actor.staffId : undefined
+  logAction({
+    venueId,
+    staffId,
+    action: 'PRODUCT_INVENTORY_METHOD_SET',
+    entity: 'Product',
+    entityId: alta.productId,
+    data: { inventoryMethod: 'QUANTITY' },
+  })
+  logAction({
+    venueId,
+    staffId,
+    action: 'PRODUCT_CREATED',
+    entity: 'Product',
+    entityId: alta.productId,
+    data: { name: data.product.name, inventoryMethod: 'QUANTITY' },
+  })
+
+  return {
+    success: true,
+    productId: alta.productId,
+    inventoryMethod: 'QUANTITY' as const,
+    details: alta.saldo && data.simpleStock ? respuestaDePiezas(alta.saldo, data.simpleStock) : undefined,
+    message: 'Product created successfully with inventory configuration',
+  }
+}
+
+/**
  * Complete wizard flow - all in one call
  * For simpler UIs that don't need step-by-step
  */
@@ -493,16 +563,19 @@ export async function createProductWithInventory(
   },
   actor: CatalogActor,
 ) {
-  // na1d52b5 (17-nov-2026): con inventario, el producto nace OCULTO y se publica al final, ya con su saldo (Codex r2 #3 y r3 #1). Y un
-  // tipo que no lleva inventario (clase, cita, servicio…) no puede nacer con él, aunque falte el saldo inicial (Codex r3 #3): la misma
-  // regla que la edición normal (`isNonInventoriable`).
+  // na1d52b5: un tipo que no lleva inventario (clase, cita, servicio…) no puede nacer con él, aunque falte el saldo inicial (Codex
+  // r3 #3): la misma regla que la edición normal (`isNonInventoriable`).
   const llevaInventario = productoLlevaInventario(data.inventory)
   if (llevaInventario && isNonInventoriable(data.product.type, true)) {
     throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
   }
+  // Por piezas (todos los planes): todo en una transacción. La receta (Premium) sigue en pasos, como siempre.
+  if (llevaInventario && data.inventory.inventoryMethod === 'QUANTITY') {
+    return altaPorPiezasEnUnSoloPaso(venueId, data, actor)
+  }
 
   // Step 1: Create product
-  const step1Result = await createProductStep1(venueId, data.product, actor, { nacerOculto: llevaInventario })
+  const step1Result = await createProductStep1(venueId, data.product, actor)
   const productId = step1Result.productId
 
   try {
@@ -515,11 +588,6 @@ export async function createProductWithInventory(
       step3Result = await setupSimpleStockStep3(venueId, productId, data.simpleStock)
     } else if (step2Result.inventoryMethod === 'RECIPE' && data.recipe) {
       step3Result = await setupRecipeStep3(venueId, productId, data.recipe)
-    }
-
-    // Ya con su inventario configurado: se publica. Si esto falla, el `catch` borra el producto como cualquier otro paso.
-    if (llevaInventario) {
-      await prisma.product.update({ where: { id: productId, venueId }, data: { active: true } })
     }
 
     logAction({

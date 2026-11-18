@@ -1,10 +1,12 @@
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
-import { createProductStep1, createProductWithInventory } from '@/services/dashboard/productWizard.service'
+import { createProductWithInventory } from '@/services/dashboard/productWizard.service'
+import * as tiendaShopify from '@/services/commerce-channels/shopify/shopify.store.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
-// Tarjeta `hz:nube0000:na1d52b5` (17-nov-2026): «Nuevo producto» deja contar piezas en todos los planes. El alta del asistente son
-// tres pasos (producto, método, saldo): con inventario, el producto nace OCULTO y se publica al final, ya con su saldo, para que el POS
-// (que sólo lista activos) no lo venda antes (Codex r2 #3 y r3 #1). Un tipo que no lleva inventario no puede nacer con él (r3 #3).
+// Tarjeta `hz:nube0000:na1d52b5` (17-nov-2026): «Nuevo producto» deja contar piezas en todos los planes. El alta del asistente
+// por piezas guarda producto, método y saldo en UNA transacción (Codex r4): nadie lo ve ni lo vende antes de tener sus piezas, y si algo
+// falla no queda nada. Un tipo que no lleva inventario no puede nacer con él (r3 #3).
 // Arnés de `product-wizard-campos-del-alta.integration.test.ts`.
 const fixture = `wiz-piezas-${randomUUID()}`
 const ids = { org: '', venue: '', otraOrg: '', otroVenue: '', category: '', staff: '', grupo1: '', grupo2: '', grupoAjeno: '' }
@@ -31,7 +33,7 @@ const actor = () => ({ type: 'HUMAN' as const, staffId: ids.staff, impersonating
 
 const altaConPiezas = (
   product: Record<string, unknown> = {},
-  simpleStock: Record<string, unknown> | undefined = { initialStock: 10, reorderPoint: 2, costPerUnit: 5 },
+  simpleStock: Record<string, unknown> | null = { initialStock: 10, reorderPoint: 2, costPerUnit: 5 }, // «sin saldo» = null (un undefined activa este valor)
 ) =>
   createProductWithInventory(
     ids.venue,
@@ -83,18 +85,56 @@ describe('na1d52b5 · alta con piezas por el asistente', () => {
     expect(movimientos.map(m => Number(m.quantity))).toEqual([10])
   })
 
-  it('el paso 1 con «nacer oculto» crea el producto INACTIVO (el POS sólo lista activos)', async () => {
-    const r = await createProductStep1(
-      ids.venue,
-      { name: `Oculto ${randomUUID()}`, price: 10, categoryId: ids.category, type: 'REGULAR' } as never,
-      actor(),
-      { nacerOculto: true },
-    )
-    expect((await prisma.product.findUniqueOrThrow({ where: { id: r.productId } })).active).toBe(false)
+  it('mientras se guarda, OTRA conexión no encuentra el producto: nadie lo vende ni lo enciende antes de tener sus piezas (Codex r4 #1 y #3)', async () => {
+    const nombre = `Invisible ${randomUUID()}`
+    let visto: number | 'sin-conexion' | undefined
+    // A media alta (después de crear el producto, antes de su saldo), otra conexión lo busca, como lo haría el POS o un agregador.
+    const espia = jest.spyOn(tiendaShopify, 'pedirCuadreAlVolverACantidad').mockImplementation(async () => {
+      visto = await Promise.race([
+        prisma.product.count({ where: { venueId: ids.venue, name: nombre } }),
+        new Promise<'sin-conexion'>(r => setTimeout(() => r('sin-conexion'), 3_000)),
+      ])
+    })
+    try {
+      await altaConPiezas({ name: nombre })
+    } finally {
+      espia.mockRestore()
+    }
+    expect(visto).toBe(0)
+    expect(await prisma.product.count({ where: { venueId: ids.venue, name: nombre, active: true } })).toBe(1)
+  })
+
+  it('si algo falla a medio camino (aquí, el costo), NO queda nada: ni producto, ni inventario, ni movimiento (Codex r4 #2)', async () => {
+    const antes = await prisma.product.count({ where: { venueId: ids.venue } })
+    const filas = await prisma.inventory.count({ where: { venueId: ids.venue } })
+
+    await expect(altaConPiezas({}, { initialStock: 10, reorderPoint: 2 })).rejects.toBeTruthy()
+
+    expect(await prisma.product.count({ where: { venueId: ids.venue } })).toBe(antes)
+    expect(await prisma.inventory.count({ where: { venueId: ids.venue } })).toBe(filas)
+  })
+
+  it('el producto nace PUBLICADO desde el principio: nunca existe sin sus piezas (una sola transacción)', async () => {
+    const { productId } = await altaConPiezas({ name: `Uno ${randomUUID()}` })
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: productId }, include: { inventory: true } })
+    expect(p.active).toBe(true)
+    expect(Number(p.inventory?.currentStock)).toBe(10)
+    // El arnés de integración reemplaza la bitácora por un simulador (`integration-setup.ts`): se lee lo que se le pidió.
+    const acciones = (logAction as jest.Mock).mock.calls.map(([a]) => a).filter(a => a.entityId === productId)
+    expect(acciones.map(a => a.action).sort()).toEqual(['PRODUCT_CREATED', 'PRODUCT_INVENTORY_METHOD_SET'])
+    expect(acciones.every(a => a.staffId === ids.staff && a.venueId === ids.venue)).toBe(true)
+  })
+
+  it('un SKU repetido da el 409 en español de siempre, y tampoco deja nada', async () => {
+    const sku = `SKU-PZ-${randomUUID().slice(0, 8)}`
+    await altaConPiezas({ sku })
+    const antes = await prisma.product.count({ where: { venueId: ids.venue } })
+    await expect(altaConPiezas({ sku })).rejects.toMatchObject({ statusCode: 409 })
+    expect(await prisma.product.count({ where: { venueId: ids.venue } })).toBe(antes)
   })
 
   it('por piezas SIN saldo inicial: también termina publicado, con su fila en cero', async () => {
-    const { productId } = await altaConPiezas({}, undefined)
+    const { productId } = await altaConPiezas({}, null)
     const p = await prisma.product.findUniqueOrThrow({ where: { id: productId }, include: { inventory: true } })
     expect(p.active).toBe(true)
     expect(p.inventoryMethod).toBe('QUANTITY')
@@ -103,7 +143,7 @@ describe('na1d52b5 · alta con piezas por el asistente', () => {
 
   it('una CLASE con piezas se rechaza (aunque no traiga saldo inicial) y no se crea nada', async () => {
     const antes = await prisma.product.count({ where: { venueId: ids.venue } })
-    await expect(altaConPiezas({ type: 'CLASS' }, undefined)).rejects.toMatchObject({ statusCode: 400 })
+    await expect(altaConPiezas({ type: 'CLASS' }, null)).rejects.toMatchObject({ statusCode: 400 })
     expect(await prisma.product.count({ where: { venueId: ids.venue } })).toBe(antes)
   })
 
