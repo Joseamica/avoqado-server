@@ -114,6 +114,45 @@ describe('App (/mobile) · el padre de una categoría es del mismo negocio', () 
     expect(res.status).toHaveBeenCalledWith(400)
   })
 
+  it('P1 Codex r1 #7: editar no escribe otras columnas ni relaciones (venueId, parent anidado)', async () => {
+    prismaMock.menuCategory.findFirst.mockImplementation(((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === 'cat-001' && where.venueId === MIO) return Promise.resolve({ id: 'cat-001' } as any)
+      return Promise.resolve(null)
+    }) as any)
+    const res = respuesta()
+    await updateCategory(
+      {
+        params: { venueId: MIO, categoryId: 'cat-001' },
+        body: { name: 'Bebidas', color: '#fff', venueId: 'otro-negocio', parent: { connect: { id: AJENA } }, createdAt: '2020-01-01' },
+      } as any,
+      res,
+      jest.fn(),
+    )
+    expect(prismaMock.menuCategory.update).toHaveBeenCalledTimes(1)
+    const data = prismaMock.menuCategory.update.mock.calls[0][0].data as Record<string, unknown>
+    expect(Object.keys(data).sort()).toEqual(['color', 'name', 'slug'])
+  })
+
+  it('control: lo que mandan las apps (nombre, descripción, color) se sigue guardando, y quitar el padre también', async () => {
+    prismaMock.menuCategory.findFirst.mockImplementation(((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === 'cat-001' && where.venueId === MIO) return Promise.resolve({ id: 'cat-001' } as any)
+      return Promise.resolve(null)
+    }) as any)
+    const res = respuesta()
+    await updateCategory(
+      {
+        params: { venueId: MIO, categoryId: 'cat-001' },
+        body: { name: 'Bebidas', description: 'Frías', color: '#fff', parentId: null },
+      } as any,
+      res,
+      jest.fn(),
+    )
+    const data = prismaMock.menuCategory.update.mock.calls[0][0].data as Record<string, unknown>
+    expect(data).toMatchObject({ name: 'Bebidas', description: 'Frías', color: '#fff', parentId: null })
+  })
+
   it('control: con un padre del mismo negocio crea con ese padre', async () => {
     const res = respuesta()
     await createCategory({ params: { venueId: MIO }, body: { name: 'Postres', parentId: PROPIA } } as any, res, jest.fn())
