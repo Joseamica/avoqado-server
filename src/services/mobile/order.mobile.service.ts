@@ -78,7 +78,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
-import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
@@ -146,7 +146,7 @@ import {
 import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
-import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { rechazarSiLaCuentaTieneVales, rechazarSiQuitaUnDescuentoDeVale } from '../shared/cuentaConVales'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
@@ -1498,8 +1498,14 @@ export async function buildOrderItemsData(
     if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
     const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
+    // Tarjeta na24531d (Codex r6 #3): el «Otro importe» con descuento y motivo también lleva id propio, como el renglón de producto,
+    // para que su fila de descuento copie el motivo (antes salía «Sin motivo» aunque llegara).
+    const motivo = appliedDiscount ? motivoDelDescuento(item.discountReason, item.discountReasonComment) : {}
+    const id = Object.keys(motivo).length > 0 ? cuid() : null
+    if (id) motivosPorRenglon.set(id, motivo)
 
     return {
+      ...(id ? { id } : {}),
       productId: null,
       // La llave de línea también en la línea libre (la terminal correlaciona su venta guardada). Basura ⇒ sin llave, como hoy.
       ...(typeof item.externalId === 'string' && item.externalId.length >= 1 && item.externalId.length <= 256
@@ -3092,7 +3098,15 @@ export async function applyOrderDiscountInTransaction(
   }
 
   const dup = await tx.orderDiscount.findFirst({ where: { orderId, discountId } })
-  if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
+  // Tarjeta na24531d (Codex r6 #1, r7 #2): la fila marcada de un cobro de vales V7 es sólo reporte y no cuenta como «ya aplicado» (p. ej.
+  // el dueño cambió el alcance del descuento después de cobrar el vale). Si la primera que aparece es marcada, se cuenta exacto, bajo el
+  // candado de la cuenta: hay otra que sí cuenta si las del descuento son más que las marcadas.
+  const yaAplicado =
+    dup != null &&
+    (!esFilaDeValeV7(dup.reparto) ||
+      (await tx.orderDiscount.count({ where: { orderId, discountId } })) >
+        (await tx.orderDiscount.count({ where: { orderId, discountId, reparto: { path: ['deValeV7'], equals: true } } })))
+  if (yaAplicado) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
 
   const subtotal = Number(order.subtotal)
   const value = Number(discount.value)
@@ -3234,6 +3248,8 @@ export async function removeOrderDiscountInTransaction(
 
   const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
   if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+  // Tarjeta na24531d: la fila que nació al cobrar vales V7 (marcada) no se quita desde la caja (la anulación sólo regresa canjes).
+  if (!opciones.porAnulacion) rechazarSiQuitaUnDescuentoDeVale(row)
   // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
   // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)

@@ -220,7 +220,8 @@ describe('Discount Engine Service', () => {
       ]
 
       prismaMock.discount.findMany.mockResolvedValue(mockDiscounts)
-      prismaMock.orderDiscount.count.mockResolvedValue(3) // Customer used 3 times
+      // Customer used 3 times (na24531d: el conteo va en SQL y deja fuera las filas marcadas de un cobro de vales).
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ n: 3 }])
 
       const result = await getEligibleDiscounts('venue-123', 'customer-123')
 

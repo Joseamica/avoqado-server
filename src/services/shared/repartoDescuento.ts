@@ -37,6 +37,11 @@ export type RepartoDescuento = {
   tope?: number
   /** La fila participa en D16 (la escribe el motor en B2b, aunque su reducción resulte 0). Ausente = no. */
   reduceImpuesto?: boolean
+  /**
+   * Tarjeta na24531d: la fila nació al cobrar vales V7 (`materializeAreaTicketCheckout`). No se quita desde la caja ni el POS
+   * (`rechazarSiQuitaUnDescuentoDeVale`), no cuenta como «ya aplicado» ni en los topes por cliente. Ausente = no.
+   */
+  deValeV7?: boolean
 }
 
 /** El ámbito de un % dirigido del motor: sus productos o categorías. */
@@ -156,7 +161,7 @@ export function nuevoRepartoDeCuenta(o: { conPromociones: boolean; base?: string
 export function nuevoRepartoDirigido(
   montoPesos: unknown,
   pesosPorRenglon: Record<string, unknown>,
-  o: { espejo: boolean; ambito?: Ambito | null; tope?: number | null },
+  o: { espejo: boolean; ambito?: Ambito | null; tope?: number | null; deValeV7?: boolean },
 ): RepartoDescuento {
   const ids = Object.keys(pesosPorRenglon)
     .filter(id => aCentavos(pesosPorRenglon[id]) > 0)
@@ -177,7 +182,16 @@ export function nuevoRepartoDirigido(
     renglones: Object.fromEntries(ids.map((id, i) => [id, partes[i] ?? 0] as const)),
     ...(o.ambito ? { ambito: o.ambito } : {}),
     ...(o.tope != null ? { tope: o.tope } : {}),
+    ...(o.deValeV7 ? { deValeV7: true } : {}),
   }
+}
+
+/**
+ * Tarjeta na24531d: ¿la fila nació al cobrar vales V7? Se lee del JSON CRUDO, no de `leerReparto`: la marca protege la fila aunque el
+ * resto de su reparto no se pudiera leer. Nunca lanza.
+ */
+export function esFilaDeValeV7(valor: unknown): boolean {
+  return !!valor && typeof valor === 'object' && !Array.isArray(valor) && (valor as Record<string, unknown>).deValeV7 === true
 }
 
 /** El contrato v1 con combinaciones coherentes, o null (la factura aplica D8). Nunca lanza. */
@@ -201,6 +215,7 @@ export function leerReparto(valor: unknown): RepartoDescuento | null {
     return null
   if (r.tope !== undefined && !(typeof r.tope === 'number' && Number.isFinite(r.tope) && r.tope >= 0)) return null
   if (r.reduceImpuesto !== undefined && typeof r.reduceImpuesto !== 'boolean') return null
+  if (r.deValeV7 !== undefined && typeof r.deValeV7 !== 'boolean') return null
   if (!r.renglones || typeof r.renglones !== 'object' || Array.isArray(r.renglones)) return null
   const renglones: Record<string, number> = {}
   for (const [id, c] of Object.entries(r.renglones as Record<string, unknown>)) {
@@ -218,6 +233,7 @@ export function leerReparto(valor: unknown): RepartoDescuento | null {
     ...(ambito ? { ambito: { productos: ambito.productos as string[], categorias: ambito.categorias as string[] } } : {}),
     ...(typeof r.tope === 'number' ? { tope: r.tope } : {}),
     ...(typeof r.reduceImpuesto === 'boolean' ? { reduceImpuesto: r.reduceImpuesto } : {}),
+    ...(typeof r.deValeV7 === 'boolean' ? { deValeV7: r.deValeV7 } : {}),
   }
 }
 
@@ -234,6 +250,7 @@ export function mismoReparto(a: RepartoDescuento | null, b: RepartoDescuento | n
     a.espejo === b.espejo &&
     a.tope === b.tope &&
     a.reduceImpuesto === b.reduceImpuesto &&
+    !!a.deValeV7 === !!b.deValeV7 &&
     !a.ambito === !b.ambito &&
     igualLista(ordenada(a.ambito?.productos), ordenada(b.ambito?.productos)) &&
     igualLista(ordenada(a.ambito?.categorias), ordenada(b.ambito?.categorias)) &&
