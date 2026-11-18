@@ -27,6 +27,7 @@ import {
 } from '../../schemas/dashboard/menu.schema'
 import AppError, { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
+import { MENSAJE_PADRE_FUERA_DEL_NEGOCIO, padreEsDelNegocio } from '../menus/padreDeCategoria'
 import { deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -148,7 +149,8 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   }
 
   if (data.parentId) {
-    // Only connect if parentId is a non-empty string
+    // na7522fd: el padre tiene que ser de ESTE negocio (antes se conectaba sólo por id).
+    if (!(await padreEsDelNegocio(venueId, data.parentId))) throw new BadRequestError(MENSAJE_PADRE_FUERA_DEL_NEGOCIO)
     createData.parent = { connect: { id: data.parentId } }
   }
   // If data.parentId is null or undefined, it's omitted, Prisma won't try to set it to null.
@@ -357,7 +359,8 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
       // Client wants to remove parent
       updateData.parent = { disconnect: true }
     } else if (typeof data.parentId === 'string') {
-      // Client wants to set/change parent
+      // Client wants to set/change parent — na7522fd: sólo a una categoría de ESTE negocio.
+      if (!(await padreEsDelNegocio(venueId, data.parentId))) throw new BadRequestError(MENSAJE_PADRE_FUERA_DEL_NEGOCIO)
       updateData.parent = { connect: { id: data.parentId } }
     }
     // If data.parentId is undefined (but key was present), it implies no change to parent if not handled

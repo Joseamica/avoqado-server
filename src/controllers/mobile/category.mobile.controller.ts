@@ -8,6 +8,7 @@
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { MENSAJE_PADRE_FUERA_DEL_NEGOCIO, padreEsDelNegocio } from '../../services/menus/padreDeCategoria'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,6 +67,11 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
       return res.status(400).json({ success: false, message: 'name es requerido' })
     }
 
+    // na7522fd: el padre tiene que ser de ESTE negocio (antes se guardaba cualquier id).
+    if (parentId && !(await padreEsDelNegocio(venueId, parentId))) {
+      return res.status(400).json({ success: false, message: MENSAJE_PADRE_FUERA_DEL_NEGOCIO })
+    }
+
     // Generate slug, ensure uniqueness within venue
     let slug = slugify(name)
     const existing = await prisma.menuCategory.findUnique({
@@ -120,6 +126,11 @@ export async function updateCategory(req: Request, res: Response, next: NextFunc
 
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Categoría no encontrada' })
+    }
+
+    // na7522fd: colgarla de otra categoría, sólo de una de ESTE negocio.
+    if (typeof data.parentId === 'string' && data.parentId && !(await padreEsDelNegocio(venueId, data.parentId))) {
+      return res.status(400).json({ success: false, message: MENSAJE_PADRE_FUERA_DEL_NEGOCIO })
     }
 
     // If name changed, regenerate slug
