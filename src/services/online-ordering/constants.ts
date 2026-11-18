@@ -23,12 +23,13 @@ export const ACCEPT_TIMEOUT_MINUTES = 10
 /** Un aparato «cuenta» si su bandeja abierta consultó en los últimos 2 minutos. */
 export const PRESENCE_WINDOW_MS = 120_000
 /**
- * D659 (17-nov): en «Nadie» la caja que cobra folios cuenta si latió en los últimos 10 min. Con la pantalla apagada la TPV duerme y su
- * vigía sólo late cuando la despierta la señal de la terminal (medido en Mindform y Flautas: cada 3–5 min); con 2 min la tienda salía
- * «fuera de línea» casi todo el día. Toast pausa a los ~5 min sin conexión. Riesgo bajo: en «Nadie» se paga en caja y se prepara al
- * pagar; un folio con la caja apagada vence solo a los 30 min.
+ * D659 (17-nov): en «Nadie» la caja que cobra folios cuenta si latió en los últimos 15 min. Con la pantalla apagada la TPV duerme y su
+ * vigía sólo late cuando la despierta la señal de la terminal; con 2 min la tienda salía «fuera de línea» casi todo el día.
+ * D660 (17-nov, medido en producción): Flautas late cada 2–5 min, pero Mindform cada 5–7 y de noche cada 10–11 (Doze), y con 10 min
+ * su tienda parpadeaba «fuera de línea». Toast pausa a los ~5 min sin conexión. Riesgo bajo: en «Nadie» se paga en caja y se prepara
+ * al pagar; un folio con la caja apagada vence solo a los 30 min. Lo de fondo (la TPV que late dormida) va en una TPV nueva.
  */
-export const FOLIO_PRESENCE_WINDOW_MS = 10 * 60_000
+export const FOLIO_PRESENCE_WINDOW_MS = 15 * 60_000
 /** La escritura del latido se amortigua: el sondeo es cada ~10 s, la base se toca cada 30 s. */
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
 /** R13: sólo la pantalla de bandeja en primer plano manda esta cabecera con `1`; es la única que cuenta como «hay alguien». */
