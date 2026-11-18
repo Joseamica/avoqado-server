@@ -111,9 +111,9 @@ describe('touchToPayPoll (tienda híbrida: el latido de quien puede cobrar folio
 })
 
 describe('getAcceptingStatus — «Nadie» lee el latido de folios', () => {
-  it('con la Bandeja abierta y sin latido de folios en 10 min ⇒ OFFLINE / NO_DEVICE', async () => {
+  it('con la Bandeja abierta y sin latido de folios en 15 min ⇒ OFFLINE / NO_DEVICE', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
-      settingsRow({ requiresAcceptance: false, lastToPayPollAt: new Date(NOW.getTime() - 600_001) }) as any,
+      settingsRow({ requiresAcceptance: false, lastToPayPollAt: new Date(NOW.getTime() - 900_001) }) as any,
     )
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OFFLINE', reason: 'NO_DEVICE' })
   })
@@ -125,16 +125,27 @@ describe('getAcceptingStatus — «Nadie» lee el latido de folios', () => {
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', reason: null })
   })
 
-  it('D659: justo en 10 min todavía cuenta (el borde es inclusivo, como el de la Bandeja)', async () => {
+  it('D660: de noche la caja de Mindform latió cada 10–11 min (medido el 17-nov) ⇒ con latido hace 11 min sigue OPEN', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
-      settingsRow({ requiresAcceptance: false, lastInboxPollAt: null, lastToPayPollAt: new Date(NOW.getTime() - 600_000) }) as any,
+      settingsRow({ requiresAcceptance: false, lastInboxPollAt: null, lastToPayPollAt: new Date(NOW.getTime() - 660_000) }) as any,
+    )
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', reason: null })
+  })
+
+  it('D660: justo en 15 min todavía cuenta (el borde es inclusivo, como el de la Bandeja)', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ requiresAcceptance: false, lastInboxPollAt: null, lastToPayPollAt: new Date(NOW.getTime() - 900_000) }) as any,
     )
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
   })
 
   it('D659: «Mi equipo» no cambia: la Bandeja sin consultar en 2 min ⇒ OFFLINE aunque la caja haya latido hace 1 min', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
-      settingsRow({ requiresAcceptance: true, lastInboxPollAt: new Date(NOW.getTime() - 121_000), lastToPayPollAt: new Date(NOW.getTime() - 60_000) }) as any,
+      settingsRow({
+        requiresAcceptance: true,
+        lastInboxPollAt: new Date(NOW.getTime() - 121_000),
+        lastToPayPollAt: new Date(NOW.getTime() - 60_000),
+      }) as any,
     )
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OFFLINE', reason: 'NO_DEVICE' })
   })

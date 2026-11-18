@@ -88,7 +88,7 @@ export async function getAcceptingStatus(
   }
   // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», a la Bandeja abierta.
   const latido = config.requiresAcceptance === false ? lastToPayPollAt : lastInboxPollAt
-  // D659: la caja que cobra folios duerme con la pantalla apagada y late cada 3–5 min; la Bandeja abierta, cada ~10 s.
+  // D659/D660: la caja que cobra folios duerme con la pantalla apagada y late cada 2–11 min; la Bandeja abierta, cada ~10 s.
   const ventana = config.requiresAcceptance === false ? FOLIO_PRESENCE_WINDOW_MS : PRESENCE_WINDOW_MS
   if (!latido || now.getTime() - latido.getTime() > ventana) return done('OFFLINE', 'NO_DEVICE')
 
