@@ -60,7 +60,15 @@ export class AlmacenPorVentana implements Store {
     r.intentos++
     const ficha = new Date(r.vence)
     this.fichas.set(ficha, r)
-    return { totalHits: r.intentos, resetTime: ficha }
+    // `totalHits` EN VIVO, como la librería (que devuelve su objeto y express lo lee después del `await`): dos intentos que se cuentan
+    // juntos ven los dos el mismo total y reciben la misma respuesta (Codex r8 #1). La ventana (`resetTime`), en cambio, es la ficha fija.
+    const registro = r
+    return {
+      get totalHits() {
+        return registro.intentos
+      },
+      resetTime: ficha,
+    }
   }
 
   /** Como `MemoryStore.decrement`. El tope de PIN no la usa (devuelve con `devolverEnVentana`). */

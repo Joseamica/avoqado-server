@@ -163,6 +163,35 @@ describe('AlmacenPorVentana', () => {
     expect(a.increment('k').resetTime!.getTime()).toBe(inicio + 2 * VENTANA + 5)
   })
 
+  it('Codex r8 #3: un acierto que termina después de una rotación se devuelve en su registro (ya en «anterior»)', () => {
+    const a = almacen()
+    const acierto = a.increment('k')
+    a.increment('k') // un fallo
+    a.rotarAhora()
+
+    a.devolverEnVentana('k', acierto.resetTime)
+
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('🔴 Codex r8 #1: dos intentos contados juntos leen el mismo total, como la librería', async () => {
+    const a = almacen()
+    const base = new MemoryStore()
+    base.init({ windowMs: VENTANA } as never)
+    try {
+      for (let i = 0; i < 9; i++) {
+        a.increment('k')
+        await base.increment('k')
+      }
+      const [n1, n2] = [a.increment('k'), a.increment('k')] // los dos se cuentan antes de que express lea el primero
+      const [b1, b2] = await Promise.all([base.increment('k'), base.increment('k')])
+
+      expect([n1.totalHits, n2.totalHits]).toEqual([b1.totalHits, b2.totalHits]) // [11, 11]: los dos reciben 429
+    } finally {
+      base.shutdown()
+    }
+  })
+
   it('una llave sin uso se olvida a la segunda rotación, como la librería', () => {
     const a = almacen()
     a.increment('k')
@@ -179,7 +208,17 @@ describe('AlmacenPorVentana', () => {
       return semilla / 2147483648
     }
     let lecturas: number[] = []
-    reloj.mockImplementation(() => lecturas.shift() ?? ahora)
+    let llamadas = 0
+    reloj.mockImplementation(() => {
+      llamadas++
+      return lecturas.shift() ?? ahora
+    })
+    /** Cuántas veces lee el reloj una operación (Codex r8 #2: la base y el almacén deben leerlo las mismas veces). */
+    const lecturasDe = async (op: () => unknown) => {
+      llamadas = 0
+      await op()
+      return llamadas
+    }
     const nuestro = almacen()
     const base = new MemoryStore()
     base.init({ windowMs: VENTANA } as never)
@@ -197,16 +236,23 @@ describe('AlmacenPorVentana', () => {
           nuestro.resetKey(k)
           await base.resetKey(k)
         } else if (t < 0.37) {
-          nuestro.decrement(k)
-          await base.decrement(k)
+          expect([paso, await lecturasDe(() => nuestro.decrement(k))]).toEqual([paso, await lecturasDe(() => base.decrement(k))])
+        } else if (t < 0.45) {
+          // Dos intentos contados juntos, leídos después (como express tras el `await`): Codex r8 #1.
+          const [n1, n2] = [nuestro.increment(k), nuestro.increment(k)]
+          const [b1, b2] = await Promise.all([base.increment(k), base.increment(k)])
+          expect([paso, n1.totalHits, n2.totalHits]).toEqual([paso, b1.totalHits, b2.totalHits])
         } else {
           // A veces el reloj brinca ENTRE las dos lecturas de un mismo incremento (Codex r7 #2).
           const segunda = azar() < 0.2 ? ahora + Math.floor((azar() - 0.3) * 2 * VENTANA) : ahora
+          let n!: ReturnType<AlmacenPorVentana['increment']>
+          let b!: Awaited<ReturnType<MemoryStore['increment']>>
           lecturas = [ahora, segunda]
-          const n = nuestro.increment(k)
+          const lecturasMias = await lecturasDe(() => (n = nuestro.increment(k)))
           lecturas = [ahora, segunda]
-          const b = await base.increment(k)
+          const lecturasSuyas = await lecturasDe(async () => (b = await base.increment(k)))
           lecturas = []
+          expect([paso, lecturasMias]).toEqual([paso, lecturasSuyas])
           ahora = segunda
           expect([paso, n.totalHits, n.resetTime!.getTime()]).toEqual([paso, b.totalHits, b.resetTime!.getTime()])
         }
