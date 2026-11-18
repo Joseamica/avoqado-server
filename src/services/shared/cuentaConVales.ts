@@ -28,9 +28,15 @@ export function rechazarSiLaCuentaTieneVales(...cuentas: Cuenta[]): void {
     throw new BadRequestError(MENSAJE_CUENTA_CON_VALES, 'AREA_TICKET_ORDER_NOT_SPLITTABLE')
 }
 
-/** Tarjeta na24531d: lo que ve quien intenta quitar el descuento de un producto en una venta de vales. */
+/**
+ * Tarjeta na24531d: lo que ve quien intenta quitar el descuento de un producto en una venta de vales, en TODAS las versiones de la TPV,
+ * de ANDROID/WINDOWS y de iOS (el texto del 400). Pizarrón D14, 18-nov (Codex r2 #3 y #4): debe dar una salida que exista.
+ *   - «ármala sin ese descuento» no la daba: volver a leer el MISMO vale copia otra vez su descuento (`buildOrderItemsData`).
+ *   - Cancelar el cobro de los vales sólo se puede SIN pagos (`cancelAreaTicketCheckout` → `CHECKOUT_HAS_PAYMENT`); con pagos, el
+ *     camino es terminar la venta y devolver.
+ */
 export const MENSAJE_DESCUENTO_DE_VENTA_DE_VALES =
-  'Esta venta tiene vales de mostrador: el descuento de un producto no se quita desde la caja. Cancela la venta y vuelve a armarla sin ese descuento.'
+  'Este descuento quedó fijo al cobrar los vales y no se quita desde la caja. Si está mal y la venta va sin pagos, cancela el cobro de los vales y vuelve a armarlo (si el error viene en el vale, pide en el área un vale nuevo). Si ya tiene pagos, termina la venta y corrige con un reembolso.'
 
 /**
  * 🔴 Tarjeta na24531d (Codex r1 #1-#2, r2 #1, r3 #1-#2): la venta de vales V7 nace con la fila ESPEJO de cada descuento de producto
