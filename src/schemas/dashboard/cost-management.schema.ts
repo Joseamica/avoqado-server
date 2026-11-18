@@ -176,6 +176,8 @@ export const exportProfitDataQuerySchema = z.object({
 /**
  * Enhanced venue creation schema with payment processing and pricing
  */
+const SIN_DUENO = 'Elige quién es el dueño del negocio (un dueño de la organización).'
+
 export const enhancedCreateVenueSchema = z.object({
   body: z
     .object({
@@ -219,6 +221,9 @@ export const enhancedCreateVenueSchema = z.object({
 
       // User context
       userId: z.string().optional(),
+      // na5adb84 (decisión «A»): lo crea un superadmin, que no queda como personal; el negocio necesita su dueño (activar cobros
+      // y el KYC lo piden). Tiene que ser dueño activo de la organización (lo revisa el servicio).
+      ownerStaffId: z.string({ required_error: SIN_DUENO, invalid_type_error: SIN_DUENO }).trim().min(1, SIN_DUENO),
     })
     // D25 (15-nov): los cobros vienen prendidos por default, y la configuración de pagos exige una cuenta principal (llave
     // foránea a la cuenta de cobro). Sin ella, el alta ENTERA tronaba en la base con un error genérico. Mismo patrón que D10.

@@ -34,6 +34,8 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
+import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
+import { ForbiddenError } from '../../errors/AppError'
 
 export async function listVenues(req: Request<{}, any, any, ListVenuesQueryDto>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -167,22 +169,23 @@ export async function createEnhancedVenue(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const orgId = req.authContext?.orgId
-    if (!orgId) {
-      logger.error('Organization context not found in enhanced venue creation')
-      return next(new Error('Contexto de organización no encontrado'))
-    }
-
     const userId = req.authContext?.userId
     if (!userId) {
       logger.error('User context not found in enhanced venue creation')
       return next(new Error('Contexto de usuario no encontrado'))
     }
 
+    // na5adb84 (decisión «A»): sólo superadmin (guardia de la ruta). El negocio nuevo nace en la organización del negocio donde
+    // está parado (`x-venue-id` o el del token, como las rutas con `checkPermission`); ver `createEnhancedVenue`.
+    const venueDelPermisoId = resolveRequestVenueId(req, req.authContext!)
+    if (!venueDelPermisoId) {
+      return next(new ForbiddenError('Abre primero un negocio de la organización donde quieres crear el nuevo.'))
+    }
+
     const venueData: EnhancedCreateVenueBody = req.body
 
     logger.info('Creating enhanced venue', {
-      orgId,
+      venueDelPermisoId,
       userId,
       venueName: venueData.name,
       enablePaymentProcessing: venueData.enablePaymentProcessing,
@@ -191,7 +194,7 @@ export async function createEnhancedVenue(
     })
 
     // Create the venue with enhanced features
-    const newVenue = await venueDashboardService.createEnhancedVenue(orgId, userId, venueData)
+    const newVenue = await venueDashboardService.createEnhancedVenue({ userId, venueDelPermisoId }, venueData)
 
     res.status(201).json({
       success: true,

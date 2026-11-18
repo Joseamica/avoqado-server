@@ -30,7 +30,7 @@ import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
 import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
+import { Venue, AccountType, EntityType, StaffRole, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
@@ -764,12 +764,45 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 
 /**
  * Enhanced venue creation with payment processing and pricing configuration
+ *
+ * hz:nube0000:na5adb84 · decisión «A» del founder (17-nov): esta ruta es SÓLO de superadmin (`authorizeRole([SUPERADMIN])` en la
+ * ruta). Con eso se cerraron la cuenta de cobro de otro negocio (1b) y la tarifa propia desde 0 %: el superadmin elige cuentas y
+ * tarifa. El negocio nace en la organización del negocio donde está parado el superadmin (`resolveRequestVenueId`, leído
+ * `FOR SHARE`: un traslado espera). El superadmin no queda como personal; el dueño lo dice la petición (`ownerStaffId`) y tiene
+ * que ser dueño activo de ESA organización: queda OWNER del negocio nuevo (sin esa fila, activar cobros y el KYC dan 403 y el
+ * KYC no tiene contacto). Sólo un dueño de la organización: una fila OWNER a otro lo volvería dueño de toda la cadena (regla de
+ * cuentas viejas, `esDuenoDeLaOrganizacion`).
  */
-export async function createEnhancedVenue(orgId: string, userId: string, venueData: EnhancedCreateVenueBody) {
-  logger.info('Creating enhanced venue', { orgId, userId, venueName: venueData.name })
+export async function createEnhancedVenue(quien: { userId: string; venueDelPermisoId: string }, venueData: EnhancedCreateVenueBody) {
+  const { userId } = quien
+  logger.info('Creating enhanced venue', { venueDelPermisoId: quien.venueDelPermisoId, userId, venueName: venueData.name })
 
   // Start a transaction to ensure data consistency
   return await prisma.$transaction(async tx => {
+    // `FOR SHARE`: un traslado de ese negocio a otra organización (que lo toma `FOR UPDATE`) espera a que terminemos.
+    const [delPermiso] = await tx.$queryRaw<Array<{ organizationId: string }>>`
+      SELECT "organizationId" FROM "Venue" WHERE id = ${quien.venueDelPermisoId} FOR SHARE`
+    if (!delPermiso) throw new NotFoundError('No encontramos el negocio desde donde creas el nuevo. Recarga la página.')
+    const orgId = delPermiso.organizationId
+    // El superadmin no queda como personal, aunque además sea dueño de esa organización (Codex r8 #2).
+    if (venueData.ownerStaffId === userId) {
+      throw new BadRequestError('Elige como dueño a alguien de la organización, no a ti mismo.', 'DUENO_ES_QUIEN_CREA')
+    }
+    // `FOR SHARE` de la persona y luego de su membresía, en ese orden (el mismo del borrado de personal: Codex r9 #4). Una baja de
+    // la organización o de la cuenta a la vez espera a que el alta termine y después ya ve el negocio nuevo (Codex r8 #1, r9 #2).
+    await tx.$queryRaw`SELECT id FROM "Staff" WHERE id = ${venueData.ownerStaffId} FOR SHARE`
+    const [dueno] = await tx.$queryRaw<Array<{ staffId: string }>>`
+      SELECT so."staffId" FROM "StaffOrganization" so JOIN "Staff" s ON s.id = so."staffId"
+      WHERE so."staffId" = ${venueData.ownerStaffId} AND so."organizationId" = ${orgId} AND so.role = 'OWNER'
+        AND so."isActive" AND s.active
+      FOR SHARE OF so`
+    if (!dueno) {
+      throw new BadRequestError(
+        'La persona que elegiste como dueña no es dueña activa de esta organización.',
+        'DUENO_NO_ES_DE_LA_ORGANIZACION',
+      )
+    }
+
     // 1. Generate slug if not provided
     let slugToUse = generateSlug(venueData.name)
 
@@ -833,15 +866,8 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
       await setupPricingStructure(tx, newVenue.id, venueData)
     }
 
-    // 6. Create default staff member (venue owner)
-    // await tx.staffVenue.create({
-    //   data: {
-    //     userId: userId,
-    //     venueId: newVenue.id,
-    //     role: 'OWNER', // Highest role
-    //     active: true,
-    //   },
-    // })
+    // 6. El dueño de la organización que dijo el superadmin queda OWNER del negocio (antes nacía sin nadie: ver arriba).
+    await tx.staffVenue.create({ data: { staffId: dueno.staffId, venueId: newVenue.id, role: StaffRole.OWNER, active: true } })
 
     logger.info('Enhanced venue creation completed', {
       venueId: newVenue.id,
@@ -855,7 +881,7 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
       action: 'VENUE_CREATED',
       entity: 'Venue',
       entityId: newVenue.id,
-      data: { name: newVenue.name, slug: newVenue.slug },
+      data: { name: newVenue.name, slug: newVenue.slug, dueno: dueno.staffId },
     })
 
     return {
@@ -1008,7 +1034,7 @@ export async function convertDemoVenue(
     paymentMethodId?: string
   },
   options?: { skipOrgCheck?: boolean },
-): Promise<Venue> {
+): Promise<Venue & { canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] }> {
   logger.info('Converting demo venue to real', { orgId, venueId })
 
   // Verify that the venue belongs to the organization (unless SUPERADMIN)
@@ -1036,9 +1062,16 @@ export async function convertDemoVenue(
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
   // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
+  // na4b2c82: los canales en línea de ESTE negocio que ESTA limpieza dejó sin tarifa o costo (los de otros negocios sólo van a
+  // la bitácora de su negocio: Codex r1 #10). Límite aceptado (Codex r2 #8, r3 #5 y #6): si la conversión falla DESPUÉS de la
+  // limpieza (Stripe), el reintento ya no los trae; la bitácora (escrita en la transacción de la limpieza) sí.
+  let canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] = []
   try {
     const cleanupResult = await cleanDemoData(venueId, staffId)
     logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
+    canalesEnLineaSinTarifa = cleanupResult.canalesEnLineaSinTarifa
+      .filter(c => c.venueId === venueId)
+      .map(({ id, channelName, perdio }) => ({ id, channelName, perdio }))
   } catch (cleanupError) {
     logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)
     // Don't block conversion if cleanup fails - venue can still operate
@@ -1201,8 +1234,12 @@ export async function convertDemoVenue(
     }
   }
 
-  return updatedVenue
+  // na4b2c82: campo nuevo y opcional para los clientes; el resto de la respuesta no cambia.
+  return { ...updatedVenue, canalesEnLineaSinTarifa }
 }
+
+/** na4b2c82: un canal en línea de este negocio que la limpieza del demo dejó sin su tarifa o su costo. */
+type CanalSinTarifaEnLaRespuesta = { id: string; channelName: string; perdio: Array<'tarifa' | 'costo'> }
 
 // ==========================================
 // VENUE STATUS MANAGEMENT (Mexican Regulatory Compliance)

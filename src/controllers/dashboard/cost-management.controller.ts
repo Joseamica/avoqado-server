@@ -216,51 +216,8 @@ export async function upsertProviderCostStructure(req: Request, res: Response, n
       merchantAccountId: costData.merchantAccountId,
     })
 
-    const prisma = require('../../utils/prismaClient').default
-
-    // Deactivate existing cost structures for this merchant account
-    await prisma.providerCostStructure.updateMany({
-      where: {
-        merchantAccountId: costData.merchantAccountId,
-        active: true,
-      },
-      data: {
-        active: false,
-        effectiveTo: new Date(),
-      },
-    })
-
-    // Create new cost structure
-    const newCostStructure = await prisma.providerCostStructure.create({
-      data: {
-        providerId: costData.providerId,
-        merchantAccountId: costData.merchantAccountId,
-        debitRate: costData.debitRate,
-        creditRate: costData.creditRate,
-        amexRate: costData.amexRate,
-        internationalRate: costData.internationalRate,
-        // Flag IVA: ya validado por el zod schema. Default null = legacy.
-        includesTax: costData.includesTax ?? null,
-        ...(costData.taxRate !== undefined ? { taxRate: costData.taxRate } : {}),
-        fixedCostPerTransaction: costData.fixedCostPerTransaction,
-        monthlyFee: costData.monthlyFee,
-        minimumVolume: costData.minimumVolume,
-        volumeDiscount: costData.volumeDiscount,
-        effectiveFrom: new Date(costData.effectiveFrom),
-        effectiveTo: costData.effectiveTo ? new Date(costData.effectiveTo) : null,
-        active: true,
-        proposalReference: costData.proposalReference,
-        notes: costData.notes,
-      },
-      include: {
-        provider: {
-          select: { id: true, name: true, code: true },
-        },
-        merchantAccount: {
-          select: { id: true, alias: true, ecommerceMerchantId: true },
-        },
-      },
-    })
+    // naeba3d5: una transacción; nunca deja a la cuenta sin costo (ver `guardarCostoDeLaCuenta`).
+    const newCostStructure = await costManagementService.guardarCostoDeLaCuenta(costData, req.authContext?.userId)
 
     res.json({
       success: true,
@@ -331,49 +288,8 @@ export async function upsertVenuePricingStructure(req: Request, res: Response, n
       accountType: pricingData.accountType,
     })
 
-    const prisma = require('../../utils/prismaClient').default
-
-    // Deactivate existing pricing structures for this venue and account type
-    await prisma.venuePricingStructure.updateMany({
-      where: {
-        venueId: pricingData.venueId,
-        accountType: pricingData.accountType,
-        active: true,
-      },
-      data: {
-        active: false,
-        effectiveTo: new Date(),
-      },
-    })
-
-    // Create new pricing structure
-    const newPricingStructure = await prisma.venuePricingStructure.create({
-      data: {
-        venueId: pricingData.venueId,
-        accountType: pricingData.accountType,
-        debitRate: pricingData.debitRate,
-        creditRate: pricingData.creditRate,
-        amexRate: pricingData.amexRate,
-        internationalRate: pricingData.internationalRate,
-        // Flag IVA. Default null = legacy.
-        includesTax: pricingData.includesTax ?? null,
-        ...(pricingData.taxRate !== undefined ? { taxRate: pricingData.taxRate } : {}),
-        fixedFeePerTransaction: pricingData.fixedFeePerTransaction,
-        monthlyServiceFee: pricingData.monthlyServiceFee,
-        minimumMonthlyVolume: pricingData.minimumMonthlyVolume,
-        volumePenalty: pricingData.volumePenalty,
-        effectiveFrom: new Date(pricingData.effectiveFrom),
-        effectiveTo: pricingData.effectiveTo ? new Date(pricingData.effectiveTo) : null,
-        active: true,
-        contractReference: pricingData.contractReference,
-        notes: pricingData.notes,
-      },
-      include: {
-        venue: {
-          select: { id: true, name: true, slug: true },
-        },
-      },
-    })
+    // naeba3d5: una transacción; nunca deja a la posición sin tarifa (ver `guardarTarifaDelNegocio`).
+    const newPricingStructure = await costManagementService.guardarTarifaDelNegocio(pricingData, req.authContext?.userId)
 
     res.json({
       success: true,
