@@ -673,6 +673,9 @@ export async function shouldProductUseInventory(
 
   return {
     hasInventoryFeature,
+    // Aditivo (na1d52b5, Codex r6 #2): este SERVIDOR contesta por QUIEN PREGUNTA (superadmin incluido, con su rol vigente). El panel
+    // nuevo confía en su respuesta antes que en el rol que tenga guardado; con un SERVIDOR viejo, sin este campo, usa el rol del panel.
+    segunQuienPregunta: true,
     recommendation: hasInventoryFeature ? 'wizard.step2.recommendationEnabled' : 'wizard.step2.recommendationDisabled',
     options: [
       {
