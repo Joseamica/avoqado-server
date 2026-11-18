@@ -1,4 +1,5 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
+import { filtroPorFolio } from '@/services/shared/filtroPorFolio'
 import { inventarioDelExtra, type InventarioDelExtra } from '@/services/inventory/inventarioDelExtra'
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
@@ -733,7 +734,7 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
 
   // Search by order number
   if (input.search) {
-    where.orderNumber = { contains: input.search, mode: 'insensitive' }
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), filtroPorFolio(input.search)]
   }
 
   const [orders, total] = await prisma.$transaction([
@@ -3643,9 +3644,9 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
 
   const movedItemIds: string[] = []
   const results: Array<{ id: string; orderNumber: string; seat: number }> = []
-  // D30: UN tronco de la base para toda la división; cada cuenta es `<tronco>-S<asiento>`. Dos mesas divididas a la vez, ambas
-  // con asiento 2, ya no comparten folio (antes `ORD-<ms>-<2 al azar>-S2`).
-  const [{ folio: tronco }] = await tx.$queryRaw<Array<{ folio: string }>>`SELECT order_number_next() AS folio`
+  // D30: cada cuenta por asiento toma SU PROPIO folio de la base (no se manda `orderNumber`); el asiento va en `customerName`.
+  // Antes era `<tronco>-S<asiento>`, y la TPV (desde 2.9.1) nombra la foto de verificación con las últimas 8 cifras del folio SIN
+  // letras: `ORD-0000000000001-S2` daba `00000012`, las mismas que la orden 12 (auditoría de apps viejas, 18-nov).
   for (const seat of seatsToMove) {
     const itemIds = bySeat.get(seat) as string[]
     const newOrder = await tx.order.create({
@@ -3660,7 +3661,6 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
         // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
         // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
         covers: 1,
-        orderNumber: `${tronco}-S${seat}`,
         customerName: `Asiento ${seat}`,
         servedById: source.servedById,
         type: source.type,

@@ -348,8 +348,7 @@ describe('locked mobile writers', () => {
           values: ['venue', ['order']],
         },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
-        // D30: dividir por asiento pide UN tronco de folio a la base, ya con todos los candados tomados.
-        ...(name === 'splitBySeat' ? [{ sql: 'SELECT order_number_next() AS folio', values: [] }] : []),
+        // D30 (18-nov): dividir por asiento ya no pide un tronco; cada cuenta toma su folio del valor por defecto de la base.
       ])
       const [venueLock, kitchenLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
       expect(kitchenLock).toBeLessThan(orderLock)
