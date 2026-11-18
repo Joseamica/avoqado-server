@@ -3337,6 +3337,10 @@ router.post(
  *
  * `localId` igual que en pay-in: MISMA llave → **200** con el retiro original, sin restar
  * el dinero dos veces. Aquí el defecto va al otro lado (faltante inventado).
+ *
+ * `staffId` (opcional, en pay-in y pay-out; hz:nube0000:na7ab987) = quien hizo el movimiento en el aparato (cola sin red).
+ * Queda como autor si viene con `localId`, esa persona está activa en el negocio y tuvo sesión en ESTE aparato a la hora del
+ * movimiento; si no, como siempre, a nombre de la sesión (la bitácora dice a quién declaró el aparato). No texto o > 64 → 400.
  */
 router.post(
   '/venues/:venueId/cash-drawer/pay-out',

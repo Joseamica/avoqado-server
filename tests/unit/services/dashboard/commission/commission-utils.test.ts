@@ -541,9 +541,9 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
       expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
     })
 
-    it('r1: con 10 % de cuenta, el café queda como el prorrateo de siempre ($95), no $45', async () => {
+    it('r1: con 10 % de cuenta, el café paga lo cobrado ($90): el combo regalado ya no se lleva la mitad (na741eab; antes $95)', async () => {
       montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 110, [fila(100, { 'a-combo': 10000 }, true), fila(10, { 'c-cafe': 1000 })])
-      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(95)
+      expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(90)
     })
 
     it('🔴 r4: una cortesía en $0 cuyo descuento SÍ está en la cabecera (tiene espejo) no le resta al café', async () => {
@@ -552,6 +552,56 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
         fila(20, { 'a-peso': 2000 }, true),
       ])
       expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(100)
+    })
+
+    /**
+     * 🔴 hz:nube0000:na741eab (founder «C» 16-nov y «a» 17-nov: lo cobrado, cortesía en $0). El renglón del combo guarda su regalo
+     * de promoción en `discountAmount` y la cortesía lo pisa con su `total` NETO ($100): la base daba precio × cantidad ($200) −
+     * $100 = $100 de un combo que cobró $0. Las dos formas: Mostrador/TPV (total neto, espejo en la cabecera) y Mesas (total 0, sin
+     * fila).
+     */
+    describe('🔴 na741eab: la pieza de combo regalada comisiona $0 en sus dos formas', () => {
+      const comboMesas = () => r('a-combo', 100, 0, 100, 'bebidas', { quantity: 2, isCortesia: true, orderPromotionId: 'promo-2x1' })
+      const ESPEJO = fila(100, { 'a-combo': 10000 }, true)
+      const DIEZ_AL_CAFE = fila(10, { 'c-cafe': 1000 })
+
+      it('Mostrador (TPV): bebidas $0, café $100, la cuenta $100', async () => {
+        montar([combo(), r('c-cafe', 100, 100, 0, 'cafes')], 100, [ESPEJO])
+        expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(0)
+        expect(await calculateLeftoverAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(100)
+        expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(100)
+      })
+
+      it('Mesas: bebidas $0, café $100, la cuenta $100', async () => {
+        montar([comboMesas(), r('c-cafe', 100, 100, 0, 'cafes')], 0)
+        expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(0)
+        expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(100)
+      })
+
+      it('con 10 % de cuenta al café: café $90 y la cuenta $90 en las dos formas (lo cobrado)', async () => {
+        for (const [renglones, cabecera, filas] of [
+          [[combo(), r('c-cafe', 100, 100, 0, 'cafes')], 110, [ESPEJO, DIEZ_AL_CAFE]],
+          [[comboMesas(), r('c-cafe', 100, 100, 0, 'cafes')], 10, [DIEZ_AL_CAFE]],
+        ] as const) {
+          montar([...renglones], cabecera, [...filas])
+          expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(0)
+          expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(90)
+          expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(90)
+        }
+      })
+
+      it('🔴 Codex r1 #5: una cortesía a la que la TPV le subió la cantidad después (total $200, regalo $100) comisiona lo cobrado ($100)', async () => {
+        montar([r('a-uno', 100, 200, 100, 'bebidas', { quantity: 2, isCortesia: true }), r('c-cafe', 100, 100, 0, 'cafes')], 100, [
+          fila(100, { 'a-uno': 10000 }, true),
+        ])
+        expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(100)
+        expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(200)
+      })
+
+      it('«precio de lista» no cambia: cuenta el catálogo ($300)', async () => {
+        montar([comboMesas(), r('c-cafe', 100, 100, 0, 'cafes')], 0)
+        expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(300)
+      })
     })
 
     it('r4: un descuento dirigido sin espejo se prorratea como siempre (no cambia de reparto a media cuenta)', async () => {

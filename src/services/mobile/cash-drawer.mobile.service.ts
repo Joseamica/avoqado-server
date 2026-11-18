@@ -10,6 +10,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { writeLegacyActivityAuditTx } from '../activityAudit.service'
+import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { paymentIdDeLaVentaDelServidor } from '../shared/cashDrawerPosting'
@@ -278,6 +280,13 @@ interface PayInOutParams {
   edadMs?: unknown
   /** Cuándo ENTRÓ la petición (el controlador la toma antes de cualquier consulta). Sin ella, ahora. */
   llegada?: Date
+  /**
+   * hz:nube0000:na7ab987: el `staffId` del CUERPO = quien hizo el movimiento EN EL APARATO (la cola sin red lo sube con la sesión de
+   * otra persona). Crudo del cuerpo: lo valida y lo acepta o no `autorDelMovimiento`. Ausente = la sesión, como siempre.
+   */
+  autorDelAparato?: unknown
+  /** `Session.id` de quien sube (`authContext.sid`): de ahí sale el aparato contra el que se coteja al autor declarado. */
+  sid?: string
 }
 
 /**
@@ -293,6 +302,66 @@ export interface DrawerEventResult {
   created: boolean
   /** Quién autorizó el retiro (gerente), o `null` si nadie lo autorizó. Igual en creado y en reintento. */
   authorizedBy: { id: string; name: string } | null
+}
+
+/**
+ * El `staffId` del cuerpo, validado como la llave: ausente o en blanco ⇒ `null` (la sesión, como siempre); no texto o más de 64
+ * caracteres ⇒ 400 antes de tocar la base.
+ */
+function normalizarAutorDelAparato(raw: unknown): string | null {
+  if (typeof raw === 'string' && raw.trim() === '') return null
+  return normalizeLocalId(raw, 'staffId')
+}
+
+/**
+ * 🔴 hz:nube0000:na7ab987 — QUIÉN firma un ingreso o retiro. La cajera A lo hace sin red, su sesión se cierra sola y entra B en el
+ * mismo aparato: la cola lo sube con la sesión de B y antes quedaba A NOMBRE DE B. Ahora el aparato declara a A y se acepta si lo
+ * declarado cuadra con lo que el servidor registró: viene de la cola (con `localId`), A está ACTIVA en el negocio y tuvo una
+ * sesión en ESE MISMO aparato viva a la hora del movimiento (sin hora del aparato, en algún momento de la vida de esa caja).
+ *
+ * Es evidencia DECLARADA, no prueba (Codex r1 #1): el identificador del aparato (`X-Device-Id` → `Session.deviceId`) y la hora los
+ * pone el cliente. Acota el abuso a quien sí tuvo sesión en ese aparato a esa hora, y la bitácora siempre dice quién lo subió. Si
+ * no cuadra, no se rechaza (el dinero ya entró o salió del cajón): queda a nombre de la sesión, como hoy, y la bitácora dice a quién
+ * declaró el aparato y por qué no se aceptó. Founder: el efectivo sin red va a nombre de quien lo hizo («A24», 19-oct). Una membresía
+ * dada de baja no firma (sin la ventana de 24 h de A24: queda a nombre de quien sube, con la nota).
+ */
+/** Lo que puede tardar una petición de la cola en entrar después de que el aparato midió su espera (Codex r2 #3). */
+const MARGEN_DE_LA_PETICION_MS = 5 * 60 * 1000
+
+async function autorDelMovimiento(p: {
+  venueId: string
+  sesion: string
+  declarado: string | null
+  localId: string | null
+  sid?: string
+  inicio: Date
+  fin: Date
+}): Promise<{ staffId: string; noAceptado?: string }> {
+  const { declarado, sesion } = p
+  if (!declarado || declarado === sesion) return { staffId: sesion }
+  const no = (motivo: string) => ({ staffId: sesion, noAceptado: motivo })
+  if (!p.localId) return no('SIN_LLAVE')
+  const actual = p.sid ? await prisma.session.findUnique({ where: { id: p.sid }, select: { deviceId: true } }) : null
+  if (!actual?.deviceId) return no('SESION_SIN_APARATO')
+  // Codex r2 #2: también la CUENTA (el SUPERADMIN la desactiva sin tocar sus sucursales).
+  const activa = await prisma.staffVenue.findFirst({
+    where: { venueId: p.venueId, staffId: declarado, active: true, staff: { active: true } },
+    select: { id: true },
+  })
+  if (!activa) return no('NO_ACTIVO_EN_EL_NEGOCIO')
+  // Sin `venueId`: quien cambia de sucursal en el mismo aparato conserva su sesión (Codex r1). La membresía de arriba ya es de aquí.
+  const estuvo = await prisma.session.findFirst({
+    where: {
+      staffId: declarado,
+      deviceId: actual.deviceId,
+      createdAt: { lte: p.fin },
+      // Codex r2 #3: la hora reconstruida (`llegada − edadMs`) sale tarde por lo que tardó la petición en entrar; una sesión revocada
+      // justo después del movimiento no debe caerse por eso. ponytail: margen fijo; si se queda corto, medir la demora real.
+      OR: [{ revokedAt: null }, { revokedAt: { gte: new Date(p.inicio.getTime() - MARGEN_DE_LA_PETICION_MS) } }],
+    },
+    select: { id: true },
+  })
+  return estuvo ? { staffId: declarado } : no('SIN_SESION_EN_EL_APARATO')
 }
 
 /**
@@ -312,8 +381,7 @@ export interface DrawerEventResult {
  * Si pudiera, la idempotencia se convertiría en una puerta para mover dinero sin dejar rastro.
  */
 async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayInOutParams): Promise<DrawerEventResult> {
-  const { venueId, staffId, amount, note } = params
-  const staffName = await resolveMobileStaffName(staffId, params.staffName)
+  const { venueId, amount, note } = params
 
   if (amount <= 0) {
     throw new BadRequestError('El monto debe ser mayor a 0')
@@ -321,6 +389,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
 
   // Se valida ANTES de tocar la base: una llave basura no puede llegar al índice único.
   const localId = normalizeLocalId(params.localId)
+  const declarado = normalizarAutorDelAparato(params.autorDelAparato)
   const session = params.sessionId
     ? await prisma.cashDrawerSession.findFirst({
         where: { id: params.sessionId, venueId },
@@ -345,14 +414,36 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // Encargo 921513 (founder 16-nov «A»): el movimiento que sube de la cola sin red guarda la hora en que se hizo en el aparato, dentro
   // de la vida de su caja. Sólo cuenta al CREAR: un reintento con la misma llave devuelve la fila de la primera escritura. Y sólo con
   // llave (la cola siempre la manda): sin ella, la caja cerrada relee «el último movimiento» por hora y una fecha atrás lo confundiría.
+  const llegada = params.llegada ?? new Date()
   const horaDelAparato =
     localId && session.openedAt
       ? horaDelMovimientoDeLaCola(
           { createdAt: params.createdAt, edadMs: params.edadMs },
           { openedAt: session.openedAt, closedAt: session.closedAt ?? null },
-          params.llegada ?? new Date(),
+          llegada,
         )
       : undefined
+  const autor = await autorDelMovimiento({
+    venueId,
+    sesion: params.staffId,
+    declarado,
+    localId,
+    sid: params.sid,
+    // A la hora del movimiento si el aparato la dio; si no, la vida de esa caja.
+    inicio: horaDelAparato ?? session.openedAt,
+    fin: horaDelAparato ?? session.closedAt ?? llegada,
+  })
+  const staffId = autor.staffId
+  /** La fila queda a nombre de otra persona: su bitácora (`subidoPor`) va en la MISMA transacción (Codex r2 #1). */
+  const autorAjeno = staffId !== params.staffId
+  // Con autor declarado aceptado, su nombre sale de su registro: el `staffName` del cuerpo puede ser el de quien sube.
+  const staffName = await resolveMobileStaffName(staffId, staffId === params.staffId ? params.staffName : undefined)
+  const notaDelAutor = autorAjeno
+    ? { subidoPor: params.staffId }
+    : autor.noAceptado
+      ? { autorDelAparato: declarado, autorNoAceptado: autor.noAceptado }
+      : {}
+
   const row = {
     sessionId: session.id,
     venueId,
@@ -367,23 +458,27 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
 
   const action = type === 'PAY_IN' ? 'CASH_DRAWER_PAY_IN' : 'CASH_DRAWER_PAY_OUT'
 
-  const auditar = (entityId: string) =>
-    logAction({
-      staffId,
-      venueId,
-      action,
-      entity: 'CashDrawerEvent',
-      entityId,
-      data: {
-        sessionId: session.id,
-        amount: Number(amountDecimal),
-        note,
-        source: 'MOBILE',
-        ...(authorizedBy ? { authorizedByStaffVenueId: authorizedBy.id, authorizedByName: authorizedBy.name } : {}),
-        // Encargo 921513: lo que dijo el aparato y lo que se guardó (acotado a la caja), como la apertura N1.
-        ...(horaDelAparato ? { horaDelAparato: params.createdAt, horaGuardada: horaDelAparato.toISOString() } : {}),
-      },
-    })
+  // El actor de la bitácora es quien SUBE (la sesión), como siempre; el autor del aparato va en `data.autor`. Así su llave foránea
+  // nunca depende de la autora declarada (Codex r2 #4: borrarla a media petición revertía el movimiento).
+  const registroDelMovimiento = (entityId: string) => ({
+    staffId: params.staffId,
+    venueId,
+    action,
+    entity: 'CashDrawerEvent',
+    entityId,
+    data: {
+      sessionId: session.id,
+      amount: Number(amountDecimal),
+      note,
+      source: 'MOBILE',
+      ...(authorizedBy ? { authorizedByStaffVenueId: authorizedBy.id, authorizedByName: authorizedBy.name } : {}),
+      // Encargo 921513: lo que dijo el aparato y lo que se guardó (acotado a la caja), como la apertura N1.
+      ...(horaDelAparato ? { horaDelAparato: params.createdAt, horaGuardada: horaDelAparato.toISOString() } : {}),
+      ...(autorAjeno ? { autor: staffId } : {}),
+      ...notaDelAutor,
+    },
+  })
+  const auditar = (entityId: string) => logAction(registroDelMovimiento(entityId))
 
   // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
   // camino ni de comportamiento — simplemente no ganan la protección (Postgres permite
@@ -395,6 +490,9 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // rechazarlo, perderlo.
   if ((session as { status?: string }).status === 'CLOSED') {
     const result = await prisma.$transaction(async tx => {
+      // naa08d0a (Codex r1 #3): antes que la caja, el candado del ciclo del turno del negocio, como «Corregir conteo» y el borrado del
+      // turno. El borrado va turno → caja y esto va caja → turno: sin un candado común, Postgres aborta a uno de los dos (40P01).
+      await lockShiftLifecycleForVenue(tx, venueId)
       await tx.cashDrawerSession.updateMany({ where: { id: session.id }, data: { updatedAt: new Date() } })
       const inserted = localId
         ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
@@ -403,17 +501,37 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
         ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } })
         : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
       if (!stored) throw new InternalServerError('No se pudo confirmar el movimiento de caja')
+      if (inserted.count > 0 && autorAjeno) await writeLegacyActivityAuditTx(tx, registroDelMovimiento(stored.id))
+      let pendiente: { shiftId: string | null; reason: SyncShiftPendingReason } | null = null
       if (inserted.count > 0) {
         const full = await tx.cashDrawerSession.findUnique({
           where: { id: session.id },
-          select: { actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+          select: { actualAmount: true, overShort: true, startingAmount: true, shiftId: true },
         })
         if (full && full.actualAmount !== null) {
-          const expected = calculateExpectedAmount({ startingAmount: full.startingAmount, events: full.events })
-          const overShort = Number(full.actualAmount) - expected
-          await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(overShort.toFixed(2)) } })
-          logAction({
-            staffId,
+          // Codex r2 #5: como `/cash-drawer/sync`, la suma la hace la base (≤ 3 filas), no un `Number` sobre todos los movimientos
+          // leídos bajo el candado del negocio.
+          const totales = await tx.cashDrawerEvent.groupBy({
+            by: ['type'],
+            where: { venueId, sessionId: session.id, type: { in: CASH_DRAWER_EXPECTED_EVENT_TYPES } },
+            _sum: { amount: true },
+            orderBy: { type: 'asc' },
+          })
+          const expected = calculateExpectedAmount({
+            startingAmount: full.startingAmount,
+            events: totales.filter(t => t._sum.amount !== null).map(t => ({ type: t.type, amount: t._sum.amount })),
+          })
+          const overShort = new Decimal(full.actualAmount.toString()).minus(new Decimal(expected.toString())).toDecimalPlaces(2)
+          await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort } })
+          // 🔴 hz:nube0000:naa08d0a: el turno ligado firmó la MISMA diferencia; se corrige con las guardas de `/cash-drawer/sync`.
+          const turno = full.shiftId
+            ? await tx.shift.findFirst({ where: { id: full.shiftId, venueId }, select: TURNO_LIGADO_SELECT })
+            : null
+          const ajuste = await llevarDiferenciaAlTurno(tx, venueId, full.shiftId, turno, full.actualAmount, overShort)
+          if (ajuste.pendingReason) pendiente = { shiftId: full.shiftId, reason: ajuste.pendingReason }
+          // Codex r1 #4: el rastro de los dos resultados firmados que cambian entra en la MISMA transacción (no hay ajuste sin bitácora).
+          await writeLegacyActivityAuditTx(tx, {
+            staffId: params.staffId,
             venueId,
             action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
             entity: 'CashDrawerSession',
@@ -423,16 +541,46 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
               eventId: stored.id,
               amount: Number(amountDecimal),
               overShortBefore: full.overShort != null ? Number(full.overShort) : null,
-              overShortAfter: overShort,
+              overShortAfter: Number(overShort),
               expectedAfter: expected,
               source: 'MOBILE_OFFLINE_REPLAY',
+              linkedShiftId: full.shiftId,
+              shiftReconciliationStatus: ajuste.pendingReason ? 'PENDING' : 'APPLIED',
+              ...(ajuste.pendingReason ? { shiftReconciliationPendingReason: ajuste.pendingReason } : {}),
+              ...notaDelAutor,
             },
           })
+          if (!ajuste.pendingReason && full.shiftId) {
+            await writeLegacyActivityAuditTx(tx, {
+              staffId: params.staffId,
+              venueId,
+              action: 'SHIFT_UPDATED',
+              entity: 'Shift',
+              entityId: full.shiftId,
+              data: {
+                cause: type,
+                source: 'MOBILE_OFFLINE_REPLAY',
+                cashDrawerSessionId: session.id,
+                eventId: stored.id,
+                cashDifferenceBeforePesos: ajuste.shiftDifferenceBeforePesos ?? null,
+                cashDifferenceAfterPesos: overShort.toFixed(2),
+              },
+            })
+          }
         }
       }
-      return { stored, created: inserted.count > 0 }
+      return { stored, created: inserted.count > 0, pendiente }
     })
-    if (result.created) auditar(result.stored.id)
+    if (result.pendiente) {
+      logger.error('❌ [CASH-DRAWER] LATE_SHIFT_RECONCILIATION_PENDING', {
+        venueId,
+        sessionId: session.id,
+        linkedShiftId: result.pendiente.shiftId,
+        reason: result.pendiente.reason,
+        source: 'MOBILE_OFFLINE_REPLAY',
+      })
+    }
+    if (result.created && !autorAjeno) auditar(result.stored.id)
     return { event: formatEvent(result.stored), created: result.created, authorizedBy }
   }
   // 🔴 P1 (Codex, 2ª auditoría): el movimiento MANUAL se colaba en una caja que el cierre acababa de
@@ -453,7 +601,12 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   }
   const result = await prisma.$transaction(async tx => {
     await lockOrThrow(tx)
-    return tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+    const inserted = await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+    if (inserted.count > 0 && autorAjeno) {
+      const nuevo = await tx.cashDrawerEvent.findFirst({ where: { venueId, localId }, select: { id: true } })
+      if (nuevo) await writeLegacyActivityAuditTx(tx, registroDelMovimiento(nuevo.id))
+    }
+    return inserted
   })
   const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId } })
 
@@ -468,7 +621,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   const created = result.count > 0
 
   if (created) {
-    auditar(stored.id)
+    if (!autorAjeno) auditar(stored.id)
   } else {
     // Ni auditoría nueva ni fila nueva: el movimiento es el mismo de antes.
     logger.info('💵 [CASH-DRAWER] Movimiento manual ya registrado (reintento) — se devuelve el original, no se duplica', {
@@ -889,6 +1042,37 @@ interface SyncClosedDrawerAudit {
   pendingReason?: SyncShiftPendingReason
 }
 
+const TURNO_LIGADO_SELECT = { id: true, venueId: true, status: true, cashDeclared: true, cashDifference: true } as const
+type TurnoLigado = Prisma.ShiftGetPayload<{ select: typeof TURNO_LIGADO_SELECT }>
+
+/**
+ * Lleva al turno ligado la diferencia recién recalculada de una caja CERRADA. Sólo con la liga explícita (nunca por reloj), con el turno
+ * cerrado y con el MISMO conteo que la caja; el CAS sobre estado + conteo + valor anterior impide pisar una corrección del dueño hecha
+ * después de la lectura. Si algo no cuadra, NO inventa un valor: devuelve la razón para que quede visible. La usan `/cash-drawer/sync` y
+ * el ingreso/retiro tardío de `pay-in`/`pay-out` (naa08d0a); el reconciliador (`cashDrawerPosting`) tiene la suya, igual.
+ */
+async function llevarDiferenciaAlTurno(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  shiftId: string | null,
+  shift: TurnoLigado | null | undefined,
+  conteo: Decimal,
+  difference: Decimal,
+): Promise<{ pendingReason?: SyncShiftPendingReason; shiftDifferenceBeforePesos?: string | null }> {
+  if (!shiftId) return { pendingReason: 'MISSING_SHIFT_RELATION' }
+  if (!shift) return { pendingReason: 'SHIFT_NOT_FOUND_OR_CROSS_VENUE' }
+  if (shift.status !== 'CLOSED') return { pendingReason: 'SHIFT_NOT_CLOSED' }
+  if (shift.cashDeclared === null) return { pendingReason: 'SHIFT_MISSING_CASH_DECLARED' }
+  if (!new Decimal(shift.cashDeclared.toString()).equals(new Decimal(conteo.toString()))) return { pendingReason: 'SHIFT_COUNT_MISMATCH' }
+  if (difference.absoluteValue().greaterThan(CASH_DRAWER_SYNC_SHIFT_DIFFERENCE_MAX)) return { pendingReason: 'SHIFT_DIFFERENCE_OVERFLOW' }
+  const shiftDifferenceBeforePesos = shift.cashDifference?.toFixed(2) ?? null
+  const shifted = await tx.shift.updateMany({
+    where: { id: shift.id, venueId, status: 'CLOSED', cashDeclared: shift.cashDeclared, cashDifference: shift.cashDifference },
+    data: { cashDifference: difference },
+  })
+  return shifted.count !== 1 ? { pendingReason: 'SHIFT_CONCURRENT_WRITE_LOST', shiftDifferenceBeforePesos } : { shiftDifferenceBeforePesos }
+}
+
 function rejectCashDrawerSync(venueId: string, reason: string, details: Record<string, unknown> = {}): never {
   logger.warn('💵 [CASH-DRAWER] CASH_DRAWER_SYNC_REJECTED', { venueId, reason, ...details })
   throw new BadRequestError(
@@ -1301,7 +1485,7 @@ export async function syncEvents(
       const linkedShifts = linkedShiftIds.length
         ? await tx.shift.findMany({
             where: { venueId, id: { in: linkedShiftIds } },
-            select: { id: true, venueId: true, status: true, cashDeclared: true, cashDifference: true },
+            select: TURNO_LIGADO_SELECT,
             orderBy: { id: 'asc' },
             take: linkedShiftIds.length,
           })
@@ -1321,34 +1505,14 @@ export async function syncEvents(
         const difference = new Decimal(session.actualAmount.toString()).minus(expectedDecimal).toDecimalPlaces(2)
         await tx.cashDrawerSession.updateMany({ where: { id: session.id, venueId }, data: { overShort: difference } })
 
-        let pendingReason: SyncShiftPendingReason | undefined
-        let shiftDifferenceBeforePesos: string | null | undefined
-        if (!session.shiftId) {
-          pendingReason = 'MISSING_SHIFT_RELATION'
-        } else {
-          const shift = shiftById.get(session.shiftId)
-          if (!shift) pendingReason = 'SHIFT_NOT_FOUND_OR_CROSS_VENUE'
-          else if (shift.status !== 'CLOSED') pendingReason = 'SHIFT_NOT_CLOSED'
-          else if (shift.cashDeclared === null) pendingReason = 'SHIFT_MISSING_CASH_DECLARED'
-          else if (!new Decimal(shift.cashDeclared.toString()).equals(new Decimal(session.actualAmount.toString()))) {
-            pendingReason = 'SHIFT_COUNT_MISMATCH'
-          } else if (difference.absoluteValue().greaterThan(CASH_DRAWER_SYNC_SHIFT_DIFFERENCE_MAX)) {
-            pendingReason = 'SHIFT_DIFFERENCE_OVERFLOW'
-          } else {
-            shiftDifferenceBeforePesos = shift.cashDifference?.toFixed(2) ?? null
-            const shifted = await tx.shift.updateMany({
-              where: {
-                id: shift.id,
-                venueId,
-                status: 'CLOSED',
-                cashDeclared: shift.cashDeclared,
-                cashDifference: shift.cashDifference,
-              },
-              data: { cashDifference: difference },
-            })
-            if (shifted.count !== 1) pendingReason = 'SHIFT_CONCURRENT_WRITE_LOST'
-          }
-        }
+        const { pendingReason, shiftDifferenceBeforePesos } = await llevarDiferenciaAlTurno(
+          tx,
+          venueId,
+          session.shiftId,
+          session.shiftId ? shiftById.get(session.shiftId) : null,
+          session.actualAmount,
+          difference,
+        )
 
         audits.push({
           sessionId: session.id,
