@@ -162,7 +162,13 @@ export const resolveNoInstrument = async (req: Request, res: Response) => {
  * base no contesta (conexión, pool agotado, no arranca), 503 `REVERSO_NO_DISPONIBLE` — la respuesta con la que la terminal sabe
  * que puede reversar igual (spec §16.3); cualquier otro error sigue al manejador global (500).
  */
-export function responderErrorDelReverso(error: unknown, req: Request, res: Response, next: NextFunction) {
+export function responderErrorDelReverso(
+  error: unknown,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  mensaje503 = 'No se pudo confirmar el permiso.',
+) {
   if (error instanceof AppError) {
     const datos =
       error.details && typeof error.details === 'object' && !Array.isArray(error.details) ? (error.details as Record<string, unknown>) : {}
@@ -175,7 +181,7 @@ export function responderErrorDelReverso(error: unknown, req: Request, res: Resp
       errorName: error instanceof Error ? error.name : typeof error,
       errorCode: (error as { code?: unknown; errorCode?: unknown }).code ?? (error as { errorCode?: unknown }).errorCode,
     })
-    return res.status(503).json({ success: false, code: 'REVERSO_NO_DISPONIBLE', message: 'No se pudo confirmar el permiso.' })
+    return res.status(503).json({ success: false, code: 'REVERSO_NO_DISPONIBLE', message: mensaje503 })
   }
   return next(error)
 }
@@ -229,6 +235,6 @@ export const registrarResultadoDelReverso = async (req: Request, res: Response, 
       .status(200)
       .json({ success: true, attemptId: llaveDeIntento(req.params.attemptId), estado, eventLogId, ...(paymentId ? { paymentId } : {}) })
   } catch (error) {
-    return responderErrorDelReverso(error, req, res, next)
+    return responderErrorDelReverso(error, req, res, next, 'No se pudo registrar el resultado del reverso.')
   }
 }

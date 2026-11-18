@@ -1139,6 +1139,37 @@ describe('el resultado del reverso (Tarea 10)', () => {
     expect(await bitacora(attemptId)).toHaveLength(1)
   })
 
+  it('dinero con la llave del intento guardado en OTRO negocio + REVERSADA ⇒ contradiction, pero la respuesta (y su reenvío) no publica ese paymentId', async () => {
+    const ajeno = await crearFixture('rv10ajeno')
+    try {
+      const attemptId = randomUUID()
+      // El pago de otro negocio con la misma llave nace ANTES del vínculo de este intento (la regla de la llave lo ve igual).
+      const pagoAjeno = await registrador.recordFastPayment(ajeno.venueId, ajeno.registroDeLaTerminal({ attemptId }), ajeno.staffId)
+      const solicitud = await f.solicitud()
+      await vincular(solicitud.requestId, attemptId)
+
+      const res = await resultado(attemptId, reversada())
+      const reenvio = await resultado(attemptId, reversada())
+
+      expect(res.status).toBe(200)
+      const lapida = await lapidaDe(attemptId)
+      expect(res.body).toEqual({ success: true, attemptId, estado: 'contradiction', eventLogId: lapida.id })
+      expect(reenvio.status).toBe(200)
+      expect(reenvio.body).toEqual(res.body)
+      // Adentro sí queda: la lápida y la alarma lo llevan para que una persona lo encuentre.
+      expect(lapida.payload).toMatchObject({ estado: 'contradiction', paymentId: pagoAjeno.id })
+      expect(contradicciones()).toHaveLength(1)
+      expect(contradicciones()[0][1]).toMatchObject({ attemptId, paymentId: pagoAjeno.id })
+      // La bitácora de ESTE negocio no se liga al pago del otro.
+      const [asiento] = await bitacora(attemptId)
+      expect(asiento).toMatchObject({ action: 'TERMINAL_REVERSAL_CONTRADICTION', entity: 'ProviderEventLog', entityId: lapida.id })
+      expect(JSON.stringify(asiento.data)).not.toContain(pagoAjeno.id)
+      expect(await prisma.payment.findUniqueOrThrow({ where: { id: pagoAjeno.id } })).toMatchObject({ status: 'COMPLETED' })
+    } finally {
+      await ajeno.destruir()
+    }
+  })
+
   it('sin lápida y sin Payment + REVERSADA ⇒ reversed (bloquea lo que llegue)', async () => {
     const { merchantAccountId } = await f.conAfiliacionBlumon()
     const { attemptId } = await intentoVinculado()

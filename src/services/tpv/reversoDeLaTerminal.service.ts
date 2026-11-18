@@ -6,10 +6,10 @@
  * cobro de BLUMON del intento nace: los dos registradores la consultan bajo el candado del intento, el mismo que toma el permiso
  * del reverso (Tarea 9), así que permiso y registro quedan serializados. Un cobro de AngelPay la ignora siempre.
  *
- * Forma: `type TIPO_REVERSO`, `status PROCESSED`, `attemptId`, `venueId`, `terminalId` (FK a `Terminal.id`, o null) y
- * `payload { estado, status: estado, terminalKey, permisoEn?, resultado?, staffId?, resultadoEn?, paymentId? }`. El `status`
- * del payload nunca es `approved`: los lectores de evidencia la leen como no aprobada. La escriben los endpoints de las Tareas 9
- * y 10.
+ * Forma: `type TIPO_REVERSO`, `status PROCESSED`, `attemptId`, `venueId`, `terminalId` (FK a `Terminal.id`, o null) y `payload
+ * { estado, status: estado, terminalKey, permisoEn?, resultado?, staffId?, resultadoEn?, paymentId?, pagoDeOtroNegocio? }`. El
+ * `status` del payload nunca es `approved`: los lectores de evidencia la leen como no aprobada. La escriben los endpoints de las
+ * Tareas 9 y 10.
  */
 import { EventStatus, Prisma, ProviderType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -349,21 +349,26 @@ export async function registrarResultadoDelReverso(entrada: {
             estado: lapida.estado,
           })
         }
-        const paymentId = typeof lapida.payload.paymentId === 'string' ? lapida.payload.paymentId : undefined
-        return { estado: lapida.estado, eventLogId: lapida.id, paymentId, avisos: [], nuevo: false }
+        // A la terminal sólo se le publica un pago de ESTE negocio (mismo criterio que S6 y el permiso).
+        const publicable = typeof lapida.payload.paymentId === 'string' && lapida.payload.pagoDeOtroNegocio !== true
+        const paymentId = publicable ? (lapida.payload.paymentId as string) : undefined
+        return { estado: lapida.estado, eventLogId: lapida.id, paymentId, paymentIdPublico: paymentId, avisos: [], nuevo: false }
       }
     } else {
       await exigirPertenencia(tx, { ...entrada, attemptId: llave })
     }
 
-    // «Dinero del intento» = la regla de la llave (cualquier estado, cualquier negocio). El COMPLETED primero.
-    const pagos = await tx.$queryRaw<{ id: string; status: string }[]>`
-      SELECT p."id", p."status"::text AS "status" FROM "Payment" p
+    // «Dinero del intento» = la regla de la llave (cualquier estado, cualquier negocio). El de este negocio y COMPLETED primero.
+    const pagos = await tx.$queryRaw<{ id: string; status: string; venueId: string }[]>`
+      SELECT p."id", p."status"::text AS "status", p."venueId" FROM "Payment" p
       WHERE p."id" IN (${dineroConEstaLlaveSql(llave)})
-      ORDER BY (p."status" = 'COMPLETED') DESC, p."createdAt" ASC
+      ORDER BY (p."venueId" = ${entrada.venueId}) DESC, (p."status" = 'COMPLETED') DESC, p."createdAt" ASC
       LIMIT 10`
     const estado: EstadoDelReverso = !confirmado ? 'reverse_failed' : pagos.length > 0 ? 'contradiction' : 'reversed'
     const paymentId = estado === 'contradiction' ? pagos[0].id : undefined
+    // Un pago de OTRO negocio (llave repetida): se detecta igual, pero ni a la terminal ni a la bitácora de este negocio se le liga.
+    const pagoDeOtroNegocio = estado === 'contradiction' && pagos[0].venueId !== entrada.venueId
+    const paymentIdPublico = pagoDeOtroNegocio ? undefined : paymentId
     const ahora = new Date()
     const { descripcion, codigo, operationNumber, reversadoEn } = entrada.resultado
     const payload = {
@@ -374,6 +379,7 @@ export async function registrarResultadoDelReverso(entrada: {
       ...(entrada.staffId ? { staffId: entrada.staffId } : {}),
       resultadoEn: ahora.toISOString(),
       ...(paymentId ? { paymentId } : {}),
+      ...(pagoDeOtroNegocio ? { pagoDeOtroNegocio } : {}),
     } as Prisma.InputJsonValue
     const eventLogId = lapida
       ? (await tx.providerEventLog.update({ where: { id: lapida.id }, data: { payload }, select: { id: true } })).id
@@ -422,14 +428,20 @@ export async function registrarResultadoDelReverso(entrada: {
       await tx.activityLog.create({
         data: {
           action: 'TERMINAL_REVERSAL_CONTRADICTION',
-          entity: 'Payment',
-          entityId: paymentId,
+          ...(pagoDeOtroNegocio ? { entity: 'ProviderEventLog', entityId: eventLogId } : { entity: 'Payment', entityId: paymentId }),
           venueId: entrada.venueId,
           staffId: entrada.staffId,
           data: {
             attemptId: llave,
             eventLogId,
-            otrosPagos: pagos.slice(1).map(p => p.id),
+            ...(pagoDeOtroNegocio
+              ? { pagoDeOtroNegocio }
+              : {
+                  otrosPagos: pagos
+                    .filter(p => p.venueId === entrada.venueId)
+                    .slice(1)
+                    .map(p => p.id),
+                }),
             resultado: { descripcion, codigo, operationNumber, reversadoEn },
           },
         },
@@ -446,7 +458,7 @@ export async function registrarResultadoDelReverso(entrada: {
       })
       await tx.providerEventLog.updateMany({ where: retenidos, data: { nextAttemptAt: ahora } })
     }
-    return { estado, eventLogId, paymentId, avisos, nuevo: true }
+    return { estado, eventLogId, paymentId, paymentIdPublico, avisos, nuevo: true }
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   const { estado, eventLogId, paymentId } = decision
@@ -475,5 +487,5 @@ export async function registrarResultadoDelReverso(entrada: {
       }
     }
   }
-  return { estado, eventLogId, ...(paymentId ? { paymentId } : {}) }
+  return { estado, eventLogId, ...(decision.paymentIdPublico ? { paymentId: decision.paymentIdPublico } : {}) }
 }

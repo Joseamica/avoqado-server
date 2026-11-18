@@ -50,7 +50,7 @@ describe('POST …/reverso/intencion — la base no contesta (H18)', () => {
     await pedirPermisoDeReverso(peticion(), res, next)
 
     expect(res.status).toHaveBeenCalledWith(503)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false, code: 'REVERSO_NO_DISPONIBLE' }))
+    expect(res.json).toHaveBeenCalledWith({ success: false, code: 'REVERSO_NO_DISPONIBLE', message: 'No se pudo confirmar el permiso.' })
     expect(next).not.toHaveBeenCalled()
   })
 
@@ -82,7 +82,11 @@ describe('POST …/reverso/resultado — la base no contesta (H18)', () => {
     await registrarResultadoDelReverso(conCuerpo(), res, next)
 
     expect(res.status).toHaveBeenCalledWith(503)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false, code: 'REVERSO_NO_DISPONIBLE' }))
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'REVERSO_NO_DISPONIBLE',
+      message: 'No se pudo registrar el resultado del reverso.',
+    })
     expect(next).not.toHaveBeenCalled()
   })
 
