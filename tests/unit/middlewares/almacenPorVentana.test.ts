@@ -77,6 +77,30 @@ describe('AlmacenPorVentana', () => {
     expect(a.get('k')?.totalHits).toBe(0)
   })
 
+  it('Codex r4 #4: tras borrar la llave en el mismo milisegundo, la ventana nueva tiene OTRO número y la devolución vieja no la toca', () => {
+    const a = almacen()
+    const vieja = a.increment('k')
+    a.resetKey('k')
+    a.increment('k') // mismo milisegundo
+    a.devolverEnVentana('k', vieja.resetTime!.getTime())
+
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
+  it('si el reloj del servidor brinca para atrás, la ventana nueva sigue sin repetir número', () => {
+    const a = almacen()
+    const primera = a.increment('k')
+    ahora = inicio + VENTANA + 1 // vence la primera
+    a.increment('otra') // cualquier llave
+    ahora = inicio // el reloj vuelve atrás
+    a.resetAll()
+    const segunda = a.increment('k')
+
+    expect(segunda.resetTime!.getTime()).not.toBe(primera.resetTime!.getTime())
+    a.devolverEnVentana('k', primera.resetTime!.getTime())
+    expect(a.get('k')?.totalHits).toBe(1)
+  })
+
   // REGRESSION TESTS — lo que express-rate-limit espera de un almacén
   it('cuenta por llave y reinicia al vencer', () => {
     const a = almacen()

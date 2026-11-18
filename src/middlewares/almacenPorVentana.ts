@@ -6,7 +6,7 @@ import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
  * Existe para devolver lo que salió bien SIN borrar nunca un fallo de otra ventana. El `MemoryStore` de express-rate-limit no sirve
  * para eso: reutiliza el mismo objeto `Date` y lo reescribe al reiniciar, así que una petición que entró en la ventana vieja podía
  * «ver» la nueva y, al salir bien, restar un fallo que no era suyo (Codex r2 #1 y r3 #1). Aquí:
- * - cada ventana es un registro NUEVO con su número (`vence`, milisegundos); un reinicio nunca toca el registro anterior;
+ * - cada ventana es un registro NUEVO con su número (`vence`, milisegundos, único en el almacén); un reinicio nunca toca el anterior;
  * - `increment` es síncrono: suma y copia la ventana en el mismo tramo, sin `await` en medio;
  * - `devolverEnVentana` resta sólo si la ventana vigente de esa llave es la misma con la que se contó, también en un tramo síncrono,
  *   y nunca lanza (no hay promesa que se quede sin manejar: Codex r3 #3).
@@ -23,6 +23,12 @@ export class AlmacenPorVentana implements Store {
   localKeys = true
   private ventanaMs = 60_000
   private registros = new Map<string, Registro>()
+  /**
+   * El último vencimiento que se repartió: cada ventana nueva vence DESPUÉS de todas las anteriores de este almacén, aunque se borre
+   * una llave (`resetKey`/`resetAll`) o el reloj del servidor brinque para atrás. Así dos ventanas nunca comparten número y una
+   * devolución nunca cae en la ventana de otro (Codex r4 #4).
+   */
+  private ultimoVence = 0
   private limpieza?: ReturnType<typeof setInterval>
 
   init(options: Options): void {
@@ -47,7 +53,8 @@ export class AlmacenPorVentana implements Store {
     const ahora = Date.now()
     let r = this.vigente(llave, ahora)
     if (!r) {
-      r = { intentos: 0, vence: ahora + this.ventanaMs }
+      this.ultimoVence = Math.max(ahora + this.ventanaMs, this.ultimoVence + 1)
+      r = { intentos: 0, vence: this.ultimoVence }
       this.registros.set(llave, r)
     }
     r.intentos++

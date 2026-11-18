@@ -67,29 +67,14 @@ const RATE_LIMIT_CONFIG = {
  * - lo que sigue en vuelo cuenta mientras dura: 11 peticiones simultáneas de la misma IP todavía pueden dar un 429.
  *
  * Lo que NO cambia: la llave (`req.ip`), los topes, los mensajes. Cambiar la llave a la IP real del visitante dejaría a dos IPs del
- * mismo borde con 10 cada una contra la misma sucursal (Codex r1 #1): es otra decisión, aparte.
- * El código MAESTRO de la TPV conserva EXACTAMENTE su tope de antes (Codex r2 #2 y r3 #2): además de estas cubetas, lo frena un contador
- * de TODO lo que entra por las siete rutas (`totalPorIp`/`totalPorNegocio`), como la cubeta compartida de antes. Las checadas y el login
- * sólo suman a ese contador (no los frena); el maestro sí se frena con él (`pinMasterRateLimiter`).
+ * mismo borde con 10 cada una contra la misma sucursal (Codex r1 #1): es otra decisión, aparte. El código MAESTRO de la TPV ya no usa
+ * estas cubetas: tiene las suyas y cuenta TODO, como antes (`pinMasterRateLimiter`, Codex r2 #2).
  * Promesa: `docs/audit/2026-11-17-nube-servidor-cliente/checador-pin/promesa.md` del workspace.
  */
 const llavePorIp = (req: Request) => `pin-login:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`
 const llavePorNegocio = (req: Request) => `pin-login:venue:${req.params.venueId || 'unknown'}`
 const almacenPorIp = new AlmacenPorVentana()
 const almacenPorNegocio = new AlmacenPorVentana()
-/** TODO lo que entra por las siete rutas, bien o mal, como la cubeta compartida de antes. Sólo frena al código maestro. */
-const llaveTotalPorIp = (req: Request) => `pin-login-todo:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`
-const llaveTotalPorNegocio = (req: Request) => `pin-login-todo:venue:${req.params.venueId || 'unknown'}`
-const totalPorIp = new AlmacenPorVentana()
-const totalPorNegocio = new AlmacenPorVentana()
-
-/** Suma la petición al contador de TODO sin frenarla (las checadas y el login por PIN: los frena sólo lo que falla). */
-function contarSinFrenar(almacen: AlmacenPorVentana, llave: (req: Request) => string, saltar?: (req: Request) => boolean): RequestHandler {
-  return (req: Request, _res: Response, next: NextFunction) => {
-    if (!saltar?.(req)) almacen.increment(llave(req))
-    next()
-  }
-}
 
 /**
  * Resta la petición que salió bien, en la MISMA ventana en la que se contó. La ventana es la copia que devolvió el almacén al contarla
@@ -206,41 +191,31 @@ export const venueRateLimiter: RateLimitRequestHandler = rateLimit({
  *   authController.staffSignIn
  * )
  */
-const sinNegocio = (req: Request) => !req.params.venueId
-const devolverPorIp = devolverSiSalioBien(almacenPorIp, llavePorIp, 'topePinPorIp')
-const devolverPorNegocio = devolverSiSalioBien(almacenPorNegocio, llavePorNegocio, 'topePinPorNegocio')
-
-/** Las cinco rutas del checador y el login por PIN de la TPV. */
 export const pinLoginRateLimiter: RequestHandler[] = [
-  contarSinFrenar(totalPorIp, llaveTotalPorIp),
-  contarSinFrenar(totalPorNegocio, llaveTotalPorNegocio, sinNegocio),
   ipRateLimiter,
   venueRateLimiter,
-  devolverPorIp,
-  devolverPorNegocio,
+  devolverSiSalioBien(almacenPorIp, llavePorIp, 'topePinPorIp'),
+  devolverSiSalioBien(almacenPorNegocio, llavePorNegocio, 'topePinPorNegocio'),
 ]
 
 /**
- * Código MAESTRO de la TPV (TOTP de 8 dígitos, acceso de SUPERADMIN a cualquier terminal): su tope queda EXACTAMENTE como antes del
- * 17-nov. Antes compartía una cubeta que contaba TODO lo que entraba por las siete rutas: 10 por IP y 20 por negocio cada 15 min en
- * producción. Esa cuenta sigue viva (`totalPorIp`/`totalPorNegocio`, con lo que suman las checadas y el login) y es la que lo frena.
- * Además pasa por las cubetas de fallos, como pasaba por la compartida: sus fallos gastan el cupo del checador igual que antes.
- * Mismos mensajes y textos de log que el login por PIN (Codex r2 #2 y r3 #2).
+ * Código MAESTRO de la TPV (TOTP de 8 dígitos, acceso de SUPERADMIN a cualquier terminal) — CUBETA PROPIA que cuenta TODO.
+ *
+ * Hasta el 17-nov compartía las cubetas del login por PIN. Desde que esas devuelven lo que sale bien (na526456), las checadas correctas
+ * del mismo borde ya no le gastarían cupo al maestro y quien lo prueba tendría más intentos (Codex r2 #2). Aquí conserva exactamente
+ * lo de antes: 10 por IP y 20 por negocio cada 15 min (producción), contando aciertos y fallos, con los mismos mensajes.
  */
-const totalIpRateLimiter: RateLimitRequestHandler = rateLimit({
+const masterIpRateLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: RATE_LIMIT_CONFIG.IP.windowMs,
   max: RATE_LIMIT_CONFIG.IP.max,
   standardHeaders: true,
   legacyHeaders: false,
-  store: totalPorIp,
-  requestPropertyName: 'topePinTotalPorIp',
-  keyGenerator: llaveTotalPorIp,
+  keyGenerator: (req: Request) => `pin-master:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`,
   handler: (req: Request, res: Response) => {
-    logger.warn('🚨 PIN login rate limit exceeded (per IP)', {
+    logger.warn('🚨 Rate limit del código maestro excedido (por IP)', {
       ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
       venueId: req.params.venueId || 'unknown',
       endpoint: req.path,
-      userAgent: req.get('user-agent'),
     })
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
@@ -251,17 +226,15 @@ const totalIpRateLimiter: RateLimitRequestHandler = rateLimit({
   },
 })
 
-const totalVenueRateLimiter: RateLimitRequestHandler = rateLimit({
+const masterVenueRateLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: RATE_LIMIT_CONFIG.VENUE.windowMs,
   max: RATE_LIMIT_CONFIG.VENUE.max,
   standardHeaders: true,
   legacyHeaders: false,
-  store: totalPorNegocio,
-  requestPropertyName: 'topePinTotalPorNegocio',
-  keyGenerator: llaveTotalPorNegocio,
-  skip: sinNegocio,
+  keyGenerator: (req: Request) => `pin-master:venue:${req.params.venueId || 'unknown'}`,
+  skip: (req: Request) => !req.params.venueId,
   handler: (req: Request, res: Response) => {
-    logger.warn('🚨 PIN login rate limit exceeded (per venue)', {
+    logger.warn('🚨 Rate limit del código maestro excedido (por venue)', {
       venueId: req.params.venueId || 'unknown',
       ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
       endpoint: req.path,
@@ -275,14 +248,7 @@ const totalVenueRateLimiter: RateLimitRequestHandler = rateLimit({
   },
 })
 
-export const pinMasterRateLimiter: RequestHandler[] = [
-  ipRateLimiter,
-  venueRateLimiter,
-  totalIpRateLimiter,
-  totalVenueRateLimiter,
-  devolverPorIp,
-  devolverPorNegocio,
-]
+export const pinMasterRateLimiter = [masterIpRateLimiter, masterVenueRateLimiter]
 
 /**
  * Autorización con PIN de gerente — CUBETA PROPIA.
