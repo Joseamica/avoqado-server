@@ -10,9 +10,14 @@ import { filtroPorFolio } from '@/services/shared/filtroPorFolio'
 /** Aplica el filtro a un folio, como lo haría Postgres (sin distinguir mayúsculas donde el filtro lo pide). */
 function coincide(filtro: any, folio: string): boolean {
   if (filtro.OR) return filtro.OR.some((f: any) => coincide(f, folio))
+  if (filtro.AND) return filtro.AND.every((f: any) => coincide(f, folio))
+  if (filtro.NOT) return !coincide(filtro.NOT, folio)
   const c = filtro.orderNumber
-  const [a, b] = c.mode === 'insensitive' ? [folio.toLowerCase(), String(c.contains ?? c.endsWith).toLowerCase()] : [folio, String(c.contains ?? c.endsWith)]
-  return c.endsWith !== undefined ? a.endsWith(b) : a.includes(b)
+  const buscado = String(c.contains ?? c.endsWith ?? c.startsWith)
+  const [a, b] = c.mode === 'insensitive' ? [folio.toLowerCase(), buscado.toLowerCase()] : [folio, buscado]
+  if (c.endsWith !== undefined) return a.endsWith(b)
+  if (c.startsWith !== undefined) return a.startsWith(b)
+  return a.includes(b)
 }
 
 describe('filtroPorFolio', () => {
@@ -33,6 +38,12 @@ describe('filtroPorFolio', () => {
     expect(coincide(filtroPorFolio('374538'), 'ORD-1794963374538-S2')).toBe(true)
     expect(coincide(filtroPorFolio('374538'), 'ORD-1794963374538-41-S2')).toBe(true)
     expect(coincide(filtroPorFolio('000001'), 'ORD-0000000000001-S2')).toBe(true)
+  })
+
+  it('un folio que NO es de la base se sigue encontrando por su principio o su medio (r2 de la auditoría)', () => {
+    expect(coincide(filtroPorFolio('179496'), 'ORD-1794963374538')).toBe(true)
+    expect(coincide(filtroPorFolio('12'), '12AB3')).toBe(true)
+    expect(coincide(filtroPorFolio('7781'), 'RAPPI-7781-A')).toBe(true)
   })
 
   it('con letras se busca en cualquier parte, como siempre (folios de integraciones, «ORD-…»)', () => {
