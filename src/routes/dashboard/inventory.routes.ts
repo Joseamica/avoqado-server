@@ -1,9 +1,10 @@
 import { Router, type RequestHandler } from 'express'
+import { MovementType } from '@prisma/client'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { checkFeatureAccess, requestIsSuperAdmin } from '../../middlewares/checkFeatureAccess.middleware'
 import { venueHasFeatureAccess } from '../../services/access/basePlan.service'
-import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
+import { simCustodyIdempotency, conClave } from '../../middlewares/simCustodyIdempotency.middleware'
 import { checkInterVenueTransferCancelPermission } from '../../middlewares/interVenueTransferCancelPermission.middleware'
 import * as autoReorderController from '../../controllers/dashboard/auto-reorder.controller'
 
@@ -119,8 +120,8 @@ const router = Router({ mergeParams: true })
 // piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta `hz:nube0000:na1d52b5`). Sólo el alta por RECETA (o
 // cualquier método que no sea piezas) pide INVENTORY_TRACKING (`altaPideInventarioPremium`, la misma regla con que el servicio decide).
 // El cuerpo se valida ANTES de decidir, para que el candado lea lo mismo que va a leer el servicio.
-// Editar o ajustar las piezas de un producto que ya existe (`wizard/progress`, `step3-simple`, `adjust-stock`…) sigue detrás del
-// candado general: abrirlo pide resolver antes recetas, ventas en medio y saldos negativos (Codex r1 de na1d52b5).
+// Editar las piezas de un producto que ya existe con el asistente (`wizard/progress`, `step3-simple`…) sigue detrás del
+// candado general (ajustarlas con «Ajustar existencias» ya no: D2, más abajo): abrirlo pide resolver antes recetas, ventas en medio y saldos negativos (Codex r1 de na1d52b5).
 const candadoSiPidePremium: RequestHandler = (req, res, next) =>
   altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
 
@@ -183,6 +184,56 @@ router.get(
 )
 
 // ===========================================
+// AJUSTAR LAS PIEZAS DE UN PRODUCTO QUE YA EXISTE — antes del candado general (D2, 18-nov-2026)
+// ===========================================
+// Contar piezas por producto es de todos los planes (founder, 29-sep, «B»): una tienda Gratis/Pro que dio de alta un producto con
+// piezas también las corrige con «Ajustar existencias» de la lista de Artículos. Sin inventario Premium sólo pasa el AJUSTE SIMPLE
+// (`esAjusteSimpleDePiezas`: tipo ADJUSTMENT, sin costo ni proveedor; suma o resta con `increment`, deja su movimiento y quién lo
+// hizo; el servicio rechaza, releyéndolo dentro de la transacción, uno que ya no cuenta piezas o está archivado). La merma (LOSS, al libro de merma), la compra
+// con costo y los demás tipos siguen pidiendo INVENTORY_TRACKING. Con Premium (o exento, demo o superadmin) todo queda como antes.
+// El historial (`movements`) sigue detrás del candado general: trae compras, conteos y mermas de cuando el negocio era Premium (Codex
+// r1 #1 de D2). Editar el producto con el asistente (`wizard/progress`, `step3-simple`…) también (Codex r1 de na1d52b5).
+// Plan y marca blanca se deciden ANTES de `checkPermission`, como cuando el candado general iba primero: un rechazo de plan no gasta la
+// autorización de un gerente (Codex r2 #7). Por eso se lee el cuerpo sin validar: un `type` o un campo raro sólo puede llevar al
+// candado de siempre, nunca a saltárselo; la validación corre después, igual que antes. Sin Premium, la función de marca blanca
+// (`AVOQADO_INVENTORY`) se pide SIN pedir otra vez el permiso (Codex r1 #3). Con Premium, exento, demo o superadmin, como antes.
+// `conClave`: con `Idempotency-Key`, un reintento tras perder la respuesta devuelve la del primero y no suma dos veces (Codex r1 #7,
+// r2 #3; el mismo de Comisiones). Sin la llave, como siempre.
+const esAjusteSimpleDePiezas = (body: unknown): boolean => {
+  const b = (body ?? {}) as { type?: unknown; unitCost?: unknown; supplier?: unknown }
+  return b.type === MovementType.ADJUSTMENT && b.unitCost === undefined && b.supplier === undefined
+}
+const candadoDelAjusteDePiezas: RequestHandler = async (req, res, next) => {
+  try {
+    if (!esAjusteSimpleDePiezas(req.body)) return checkFeatureAccess('INVENTORY_TRACKING')(req, res, next)
+    const conPremium =
+      (await requestIsSuperAdmin((req as any).authContext)) || (await venueHasFeatureAccess(req.params.venueId, 'INVENTORY_TRACKING'))
+    return conPremium ? next() : verifyAccess({ featureCode: 'AVOQADO_INVENTORY' })(req, res, next)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/adjust-stock:
+ *   post:
+ *     tags: [Inventory - Product Stock]
+ *     summary: Adjust stock for a product with QUANTITY tracking
+ *     description: Increase or decrease stock for products using simple count-based inventory (not recipe-based). A simple
+ *       ADJUSTMENT (no unitCost, no supplier) is available on every plan (D2); LOSS, PURCHASE and the other movement types require
+ *       INVENTORY_TRACKING. Optional `Idempotency-Key` header.
+ */
+router.post(
+  '/products/:productId/adjust-stock',
+  candadoDelAjusteDePiezas,
+  checkPermission('inventory:adjust'), // same reasoning as the raw-material route below
+  validateRequest(AdjustProductInventoryStockSchema),
+  conClave,
+  productInventoryController.adjustInventoryStockHandler,
+)
+
+// ===========================================
 // PLAN GATE — whole inventory namespace
 // ===========================================
 // INVENTORY_TRACKING is a PREMIUM-only differentiator (PREMIUM_ONLY_CODES ↔ plan-catalog.ts).
@@ -190,7 +241,8 @@ router.get(
 // checkFeatureAccess. The auto-reorder routes below ADDITIONALLY gate on AUTO_REORDER (their
 // own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
 // the MCP's planGateMessage — this closes the server side of that same paywall. The only routes
-// registered above it are the product wizard's «complete» (its own conditional gate) and «should-use-inventory» (read-only).
+// registered above it are the product wizard's «complete» (its own conditional gate), «should-use-inventory» (read-only) and, since
+// D2, a product's «adjust-stock» (its own conditional gate: only a simple ADJUSTMENT skips it).
 router.use(checkFeatureAccess('INVENTORY_TRACKING'))
 
 // ===========================================
@@ -1494,20 +1546,7 @@ router.post(
 // PRODUCT INVENTORY (QUANTITY TRACKING) ROUTES
 // ===========================================
 
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/adjust-stock:
- *   post:
- *     tags: [Inventory - Product Stock]
- *     summary: Adjust stock for a product with QUANTITY tracking
- *     description: Increase or decrease stock for products using simple count-based inventory (not recipe-based)
- */
-router.post(
-  '/products/:productId/adjust-stock',
-  checkPermission('inventory:adjust'), // same reasoning as the raw-material route above
-  validateRequest(AdjustProductInventoryStockSchema),
-  productInventoryController.adjustInventoryStockHandler,
-)
+// `POST /products/:productId/adjust-stock` se registra ARRIBA, antes del candado general (D2, 18-nov-2026).
 
 /**
  * @openapi

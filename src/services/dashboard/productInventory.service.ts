@@ -55,7 +55,9 @@ export async function adjustInventoryStockInTx(
     where: { id: inventory.id },
     data: {
       currentStock: { increment: data.quantity },
-      lastCountedAt: data.type === 'COUNT' ? new Date() : inventory.lastCountedAt,
+      // D2 (Codex r2 #6): sólo un conteo escribe la fecha. Antes un ajuste volvía a escribir la que leyó fuera de la transacción y
+      // podía borrar la de un conteo que el POS confirmó en medio.
+      ...(data.type === 'COUNT' ? { lastCountedAt: new Date() } : {}),
     },
   })
 
@@ -139,7 +141,30 @@ export async function adjustInventoryStock(
   // `increment` delega la suma a la base; previousStock/newStock del kardex se
   // derivan del resultado del update, así la cadena previousStock[i] ==
   // newStock[i-1] no miente bajo concurrencia.
-  const { previousStock, newStock } = await prisma.$transaction(tx => adjustInventoryStockInTx(tx, productId, inventory, data, staffId))
+  // D2 (Codex r1 #5, r2 #1 y #5): la lectura de arriba va sin candado; si otra persona apagó el control, cambió el método o archivó el
+  // producto antes de que este ajuste tome la fila de existencias, el ajuste caía sobre la fila que se conserva. Dentro de la
+  // transacción se escribe PRIMERO la existencia (eso toma su fila, como la venta) y DESPUÉS se relee el producto, sin candado: si ya
+  // no cuenta piezas o está archivado, todo se revierte. Un cambio que llega después de esa relectura queda detrás del ajuste (ajustar y
+  // luego apagar), que es un orden válido. Sin candado del producto no hay cruce con el asistente, que toma existencias y luego producto.
+  // D2 (Codex r2 #2): la cantidad se redondea a los 3 decimales de la columna ANTES de sumar, para que el saldo anterior que se
+  // reconstruye (nuevo − cantidad) sea el de verdad y la guardia anti-negativos no se engañe con lo que Postgres redondea.
+  const ajuste = { ...data, quantity: new Prisma.Decimal(data.quantity).toDecimalPlaces(3) }
+  const { previousStock, newStock } = await prisma.$transaction(async tx => {
+    // D2 (Codex r3 #6): si el asistente pasó el producto a receta y BORRÓ la fila entre la primera lectura y aquí, la escritura no
+    // encuentra la fila (P2025): es el mismo «ya no cuenta piezas» (400), no un error del servidor que el panel trataría como «en duda».
+    const resultado = await adjustInventoryStockInTx(tx, productId, inventory, ajuste, staffId).catch((error: unknown) => {
+      if ((error as { code?: unknown } | null)?.code === 'P2025') throw new AppError(`Product ${productId} does not use QUANTITY tracking`, 400)
+      throw error
+    })
+    const vigente = await tx.product.findFirst({
+      where: { id: productId, venueId },
+      select: { trackInventory: true, inventoryMethod: true, deletedAt: true },
+    })
+    if (!vigente?.trackInventory || vigente.inventoryMethod !== 'QUANTITY' || vigente.deletedAt) {
+      throw new AppError(`Product ${productId} does not use QUANTITY tracking`, 400)
+    }
+    return resultado
+  })
 
   logger.info(`✅ Inventory adjusted for product ${productId}: ${previousStock} → ${newStock}`, {
     venueId,
