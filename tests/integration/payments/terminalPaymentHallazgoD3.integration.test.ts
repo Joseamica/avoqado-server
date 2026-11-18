@@ -290,7 +290,7 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
       expect(nodes(completo).some(n => n['Node Type'] === 'Seq Scan' && n['Relation Name'] === 'ProviderEventLog')).toBe(true)
       expect(accesosPorIndice(completo)).toHaveLength(0)
     }
-  })
+  }, 120_000) // ocho EXPLAIN en transacciones propias (dos selectores × cuatro formas): tope propio, no el de 60 s
 
   it('rescata fuera de 30 minutos el aprobado agotado sin Payment, por el núcleo y una sola auditoría', async () => {
     const { request, attemptId, order } = await released()
