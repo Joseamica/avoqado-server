@@ -18,7 +18,8 @@ const VENUE = 'venue-1'
 const ANA = 'staff-ana'
 const BETO = 'staff-beto'
 const ABIERTA = new Date('2026-11-17T15:00:00Z')
-const CERRADA = new Date('2026-11-17T23:00:00Z')
+/** Cuándo nació la sesión de Beto (la que sube): la de Ana tuvo que nacer antes (Codex r3 H1). */
+const BETO_ENTRO = new Date('2026-11-17T18:00:00Z')
 
 let createMany: jest.Mock
 let sesionDeAna: jest.Mock
@@ -57,7 +58,7 @@ function montar({ caja = { id: 'caja-1', status: 'OPEN', openedAt: ABIERTA, clos
   // La sesión que sube (Beto) vive en la tablet T-1. Ana tuvo una sesión en T-1 durante la caja.
   sesionDeAna = jest.fn().mockResolvedValue({ id: 'ses-ana' })
   ;(prismaMock as any).session = {
-    findUnique: jest.fn().mockResolvedValue({ deviceId: 'T-1' }),
+    findUnique: jest.fn().mockResolvedValue({ deviceId: 'T-1', createdAt: BETO_ENTRO }),
     findFirst: sesionDeAna,
   }
   ;(prismaMock as any).staffVenue = { findFirst: jest.fn().mockResolvedValue({ id: 'sv-ana' }), findUnique: jest.fn() }
@@ -71,7 +72,6 @@ const bitacora = () => (logAction as jest.Mock).mock.calls.find(([a]) => a.actio
 /** La bitácora escrita DENTRO de la transacción (`writeLegacyActivityAuditTx` → `activityLog.create`). */
 const bitacoraEnLaTx = (action: string) =>
   ((prismaMock as any).activityLog.create as jest.Mock).mock.calls.map(([a]) => a.data).find(d => d.action === action)
-const CINCO_MIN = 5 * 60 * 1000
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -91,37 +91,42 @@ it('🔴 el ingreso sin red de Ana que sube Beto queda a nombre de Ana, con su n
   expect(bitacora()).toBeUndefined()
   // Codex r2 #2: también la CUENTA activa, no sólo la sucursal.
   expect((prismaMock as any).staffVenue.findFirst.mock.calls[0][0].where).toMatchObject({ active: true, staff: { active: true } })
-  // Se cotejó contra el aparato de la sesión que sube y la vida de esa caja (con el margen de la petición).
+  // Codex r3 H1: sólo relojes del SERVIDOR. Una sesión de Ana en el aparato de la sesión que sube, viva en algún momento de la caja
+  // (no revocada antes de abrirla) y nacida antes que la de Beto. Sin margen.
   expect(sesionDeAna).toHaveBeenCalledWith(
     expect.objectContaining({
       where: expect.objectContaining({
         staffId: ANA,
         deviceId: 'T-1',
-        OR: [{ revokedAt: null }, { revokedAt: { gte: new Date(ABIERTA.getTime() - CINCO_MIN) } }],
+        createdAt: { lte: BETO_ENTRO },
+        OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
       }),
     }),
   )
 })
 
-it('🔴 en una caja ya CERRADA sin hora del aparato, la ventana es la vida de esa caja', async () => {
-  montar({ caja: { id: 'caja-1', status: 'CLOSED', openedAt: ABIERTA, closedAt: CERRADA } })
+it('🔴 Codex r3 H1: en una caja CERRADA antes de que entrara Beto, la sesión de Ana tuvo que nacer antes del cierre', async () => {
+  const cerroAntes = new Date('2026-11-17T16:00:00Z')
+  montar({ caja: { id: 'caja-1', status: 'CLOSED', openedAt: ABIERTA, closedAt: cerroAntes } })
   ;(prismaMock as any).cashDrawerSession.findUnique.mockResolvedValue({ actualAmount: null })
   await subir({ autorDelAparato: ANA, sessionId: 'caja-1' })
   expect(filaGuardada().staffId).toBe(ANA)
   expect(sesionDeAna.mock.calls[0][0].where).toMatchObject({
-    createdAt: { lte: CERRADA },
-    OR: [{ revokedAt: null }, { revokedAt: { gte: new Date(ABIERTA.getTime() - CINCO_MIN) } }],
+    createdAt: { lte: cerroAntes },
+    OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
   })
 })
 
-it('🔴 Codex r1 #1: con la hora del aparato, la sesión de Ana tuvo que estar viva A ESA HORA', async () => {
-  const llegada = new Date('2026-11-17T20:00:00Z')
-  await subir({ autorDelAparato: ANA, edadMs: 60 * 60 * 1000, llegada })
-  const hora = new Date('2026-11-17T19:00:00Z')
+it('🔴 Codex r3 H1: la hora que manda el aparato (createdAt / edadMs) no cambia la regla', async () => {
+  await subir({
+    autorDelAparato: ANA,
+    edadMs: 60 * 60 * 1000,
+    createdAt: '2026-11-17T12:00:00Z',
+    llegada: new Date('2026-11-17T20:00:00Z'),
+  })
   expect(sesionDeAna.mock.calls[0][0].where).toMatchObject({
-    createdAt: { lte: hora },
-    // Codex r2 #3: la hora reconstruida sale tarde por lo que tardó la petición; la revocación se coteja con 5 min de margen.
-    OR: [{ revokedAt: null }, { revokedAt: { gte: new Date(hora.getTime() - CINCO_MIN) } }],
+    createdAt: { lte: BETO_ENTRO },
+    OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
   })
 })
 
@@ -142,20 +147,25 @@ describe('si no se puede comprobar: a nombre de quien sube (como hoy) y la bitá
     preparar()
     await subir({ autorDelAparato: ANA })
     expect(filaGuardada().staffId).toBe(BETO)
-    expect(bitacora()).toMatchObject({ staffId: BETO, data: expect.objectContaining({ autorDelAparato: ANA, autorNoAceptado: motivo }) })
+    // Codex r3 H3: la nota de una declaración rechazada también va DENTRO de la transacción.
+    expect(bitacoraEnLaTx('CASH_DRAWER_PAY_IN')).toMatchObject({
+      staffId: BETO,
+      data: expect.objectContaining({ autorDelAparato: ANA, autorNoAceptado: motivo }),
+    })
+    expect(bitacora()).toBeUndefined()
   })
 
   it('sin la llave de la cola no se acepta y ni se consulta la sesión', async () => {
     await subir({ autorDelAparato: ANA, localId: undefined })
     expect((prismaMock as any).cashDrawerEvent.create.mock.calls[0][0].data.staffId).toBe(BETO)
     expect(sesionDeAna).not.toHaveBeenCalled()
-    expect(bitacora().data).toMatchObject({ autorDelAparato: ANA, autorNoAceptado: 'SIN_LLAVE' })
+    expect(bitacoraEnLaTx('CASH_DRAWER_PAY_IN').data).toMatchObject({ autorDelAparato: ANA, autorNoAceptado: 'SIN_LLAVE' })
   })
 
   it('token viejo sin sesión (sin `sid`)', async () => {
     await subir({ autorDelAparato: ANA, sid: undefined })
     expect(filaGuardada().staffId).toBe(BETO)
-    expect(bitacora().data).toMatchObject({ autorDelAparato: ANA, autorNoAceptado: 'SESION_SIN_APARATO' })
+    expect(bitacoraEnLaTx('CASH_DRAWER_PAY_IN').data).toMatchObject({ autorDelAparato: ANA, autorNoAceptado: 'SESION_SIN_APARATO' })
   })
 })
 
@@ -170,10 +180,18 @@ it('sin `staffId` en el cuerpo, vacío, o igual a la sesión: exactamente como h
   }
 })
 
-it('`staffId` que no es texto o pasa de 64 caracteres ⇒ 400 y nada se escribe', async () => {
-  await expect(subir({ autorDelAparato: 42 })).rejects.toMatchObject({ statusCode: 400 })
-  await expect(subir({ autorDelAparato: 'x'.repeat(65) })).rejects.toMatchObject({ statusCode: 400 })
-  expect(createMany).not.toHaveBeenCalled()
+it('🔴 Codex r3 H2: un `staffId` que no es texto o pasa de 64 caracteres NUNCA da 400: queda a nombre de quien sube, con su nota', async () => {
+  for (const [autorDelAparato, visto] of [
+    [42, null],
+    ['x'.repeat(65), 'x'.repeat(64)],
+  ] as const) {
+    jest.clearAllMocks()
+    montar()
+    await expect(subir({ autorDelAparato })).resolves.toMatchObject({ created: true })
+    expect(filaGuardada().staffId).toBe(BETO)
+    expect(sesionDeAna).not.toHaveBeenCalled()
+    expect(bitacoraEnLaTx('CASH_DRAWER_PAY_IN').data).toMatchObject({ autorDelAparato: visto, autorNoAceptado: 'MALFORMADO' })
+  }
 })
 
 it('🔴 el retiro sigue la misma regla', async () => {

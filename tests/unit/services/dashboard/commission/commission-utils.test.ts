@@ -598,6 +598,23 @@ describe('🔴 la cortesía de Mesas y la de Mostrador comisionan lo mismo (enca
         expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(200)
       })
 
+      it('Codex r3 H5 (residual del lector de D41, en deuda): un % de cuenta que excluyó el combo se prorratea con la regla de siempre; el total sí es lo cobrado ($140; en develop $200)', async () => {
+        // Mesas: una pieza de combo de $50 (neto), la otra regalada, Café $100 y 10 % de cuenta que sólo tomó el café ($10).
+        montar(
+          [
+            r('a-combo', 100, 50, 50, 'bebidas', { orderPromotionId: 'p' }),
+            r('b-combo', 100, 0, 50, 'bebidas', { isCortesia: true, orderPromotionId: 'p' }),
+            r('c-cafe', 100, 100, 0, 'cafes'),
+          ],
+          10,
+          [fila(10, { 'c-cafe': 1000 })],
+        )
+        expect(await calculateLeftoverAmount('o', [], CONFIG_DEFAULT)).toBe(140)
+        // Lo cobrado: café $90 y combo $50. La regla de D41 reparte la fila por neto (decisión «a» del 17-nov: se queda así).
+        expect(await calculateCategoryFilteredAmount('o', ['cafes'], CONFIG_DEFAULT)).toBe(93.33)
+        expect(await calculateCategoryFilteredAmount('o', ['bebidas'], CONFIG_DEFAULT)).toBe(46.67)
+      })
+
       it('«precio de lista» no cambia: cuenta el catálogo ($300)', async () => {
         montar([comboMesas(), r('c-cafe', 100, 100, 0, 'cafes')], 0)
         expect(await calculateLeftoverAmount('o', [], CONFIG_PRE_DESCUENTO)).toBe(300)
