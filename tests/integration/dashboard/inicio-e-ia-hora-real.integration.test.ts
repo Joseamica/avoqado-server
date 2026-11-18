@@ -142,8 +142,21 @@ beforeAll(async () => {
   // Dos turnos el 11 en esta sucursal: no duplican sus ventas (Codex r2 #1).
   await prisma.shift.createMany({
     data: [
-      { venueId, staffId, startTime: new Date('2026-11-11T14:00:00.000Z') },
-      { venueId, staffId, startTime: new Date('2026-11-11T22:00:00.000Z') },
+      // Cerrados: la base sólo deja un turno ABIERTO por sucursal (Codex r3).
+      {
+        venueId,
+        staffId,
+        status: 'CLOSED',
+        startTime: new Date('2026-11-11T14:00:00.000Z'),
+        endTime: new Date('2026-11-11T21:00:00.000Z'),
+      },
+      {
+        venueId,
+        staffId,
+        status: 'CLOSED',
+        startTime: new Date('2026-11-11T22:00:00.000Z'),
+        endTime: new Date('2026-11-12T05:00:00.000Z'),
+      },
     ] as never,
   })
   // En línea, el 11 a las 18:00.
@@ -264,7 +277,11 @@ describe('D2 · el inicio del DASHBOARD cuenta lo vendido sin internet a su hora
     expect(mesas12[0].orderCount).toBe(1)
     const rent = (await getExtendedMetrics(venueId, 'product-profitability', DIA_11)) as Array<{ name: string }>
     expect(rent.map(r => r.name).sort()).toEqual(['Café', 'Pan'])
-    const personal = (await getExtendedMetrics(venueId, 'staff-performance', DIA_11)) as Array<{ totalSales: number; orderCount: number }>
+    const personal = (await getExtendedMetrics(venueId, 'staff-performance', DIA_11)) as Array<{
+      totalSales: number
+      totalTips: number
+      orderCount: number
+    }>
     // 2 y no 3: la Torta que vendió en la otra sucursal no se suma aquí (Codex r1 #1). $150 y no $300 con sus dos turnos (r2 #1).
     expect(personal[0].orderCount).toBe(2)
     expect(personal[0].totalSales).toBeCloseTo(150, 2)
