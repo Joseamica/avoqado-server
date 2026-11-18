@@ -12,7 +12,9 @@ import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
  *
  * Sólo cambian dos cosas, y ninguna lee el reloj:
  * 1. Al vencer una ventana, la nueva es un registro NUEVO (la librería reescribe el mismo objeto y el mismo `Date`, así que una petición
- *    de la ventana vieja podía «ver» la nueva y, al salir bien, restar un fallo que no era suyo: Codex r2 #1 y r3 #1).
+ *    de la ventana vieja podía «ver» la nueva y, al salir bien, restar un fallo que no era suyo: Codex r2 #1 y r3 #1). Para DECIDIR,
+ *    en cambio, el total se lee como en la librería: del contador vivo de su «linaje» (el objeto cliente de la librería, que sobrevive
+ *    a los reinicios por vencimiento), así que dos intentos en vuelo reciben siempre la misma respuesta que antes (Codex r8 #1 y r9 #1).
  * 2. Cada intento recibe su FICHA: un `Date` propio (`resetTime`) atado en un `WeakMap` al registro donde se contó. `devolverEnVentana`
  *    resta sólo si ese registro sigue siendo el de la llave (aunque el reloj haya brincado: Codex r5 #2), una sola vez por ficha (r6 #3),
  *    en un tramo síncrono y sin lanzar (r3 #3).
@@ -23,6 +25,12 @@ interface Registro {
   intentos: number
   /** Milisegundos de pared en que vence la ventana (el `resetTime` de la librería). */
   vence: number
+  /** El «cliente» de la librería: el mismo a través de los reinicios por vencimiento; uno nuevo al crear la llave desde cero. */
+  linaje: Linaje
+}
+interface Linaje {
+  /** La ventana vigente de este cliente (la librería la reescribe en el mismo objeto; aquí apunta al registro nuevo). */
+  registro: Registro
 }
 
 export class AlmacenPorVentana implements Store {
@@ -54,18 +62,20 @@ export class AlmacenPorVentana implements Store {
     let r = this.registroDe(llave)
     const ahora = Date.now()
     if (r.vence <= ahora) {
-      r = { intentos: 0, vence: ahora + this.ventanaMs }
-      this.actual.set(llave, r)
+      const nuevo: Registro = { intentos: 0, vence: ahora + this.ventanaMs, linaje: r.linaje }
+      r.linaje.registro = nuevo
+      this.actual.set(llave, nuevo)
+      r = nuevo
     }
     r.intentos++
     const ficha = new Date(r.vence)
     this.fichas.set(ficha, r)
-    // `totalHits` EN VIVO, como la librería (que devuelve su objeto y express lo lee después del `await`): dos intentos que se cuentan
-    // juntos ven los dos el mismo total y reciben la misma respuesta (Codex r8 #1). La ventana (`resetTime`), en cambio, es la ficha fija.
-    const registro = r
+    // `totalHits` EN VIVO y por linaje, como el objeto de la librería que express lee después del `await`: dos intentos en vuelo,
+    // también a ambos lados del vencimiento, ven el mismo total que antes (Codex r8 #1 y r9 #1). La ventana (`resetTime`) es la ficha fija.
+    const linaje = r.linaje
     return {
       get totalHits() {
-        return registro.intentos
+        return linaje.registro.intentos
       },
       resetTime: ficha,
     }
@@ -121,8 +131,15 @@ export class AlmacenPorVentana implements Store {
     if (enActual) return enActual
     let r = this.anterior.get(llave)
     if (r) this.anterior.delete(llave)
-    else r = { intentos: 0, vence: Date.now() + this.ventanaMs }
+    else r = this.registroNuevo(Date.now() + this.ventanaMs)
     this.actual.set(llave, r)
+    return r
+  }
+
+  /** Un cliente nuevo (la llave no existía o se olvidó): su propio linaje. */
+  private registroNuevo(vence: number): Registro {
+    const r = { intentos: 0, vence } as Registro
+    r.linaje = { registro: r }
     return r
   }
 }

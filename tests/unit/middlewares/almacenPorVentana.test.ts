@@ -201,7 +201,32 @@ describe('AlmacenPorVentana', () => {
     expect(a.get('k')).toBeUndefined()
   })
 
-  it('🔴 Codex r7: frente a CUALQUIER brinco del reloj cuenta exactamente igual que el `MemoryStore` real (prueba diferencial)', async () => {
+  it('🔴 Codex r9 #1: dos intentos en vuelo a ambos lados del vencimiento leen el mismo total que en la librería', async () => {
+    const a = almacen()
+    const base = new MemoryStore()
+    base.init({ windowMs: VENTANA } as never)
+    try {
+      for (let i = 0; i < 10; i++) {
+        a.increment('k')
+        await base.increment('k')
+      }
+      ahora = inicio + VENTANA - 1
+      const mioViejo = a.increment('k') // último milisegundo de la ventana vieja (11.º)
+      const suyoViejo = await base.increment('k')
+      ahora = inicio + VENTANA
+      const mioNuevo = a.increment('k') // ya en la ventana nueva, antes de que express lea el anterior
+      const suyoNuevo = await base.increment('k')
+
+      expect([mioViejo.totalHits, mioNuevo.totalHits]).toEqual([suyoViejo.totalHits, suyoNuevo.totalHits])
+      // …y aun así el acierto de la ventana vieja nunca resta en la nueva (Codex r3 #1).
+      a.devolverEnVentana('k', mioViejo.resetTime)
+      expect(a.get('k')?.totalHits).toBe(1)
+    } finally {
+      base.shutdown()
+    }
+  })
+
+  it('🔴 Codex r7-r9: con intentos EN VUELO en cualquier orden y cualquier brinco del reloj, decide igual que el `MemoryStore` real (prueba diferencial)', async () => {
     let semilla = 20261118
     const azar = () => {
       semilla = (semilla * 1103515245 + 12345) % 2147483648
@@ -213,52 +238,75 @@ describe('AlmacenPorVentana', () => {
       llamadas++
       return lecturas.shift() ?? ahora
     })
-    /** Cuántas veces lee el reloj una operación (Codex r8 #2: la base y el almacén deben leerlo las mismas veces). */
-    const lecturasDe = async (op: () => unknown) => {
-      llamadas = 0
-      await op()
-      return llamadas
-    }
     const nuestro = almacen()
     const base = new MemoryStore()
     base.init({ windowMs: VENTANA } as never)
     const llaves = ['pin-login:ip:a', 'pin-login:ip:b', 'pin-login:venue:x']
+    /** La misma operación en los dos, con las MISMAS lecturas del reloj; deben leerlo las mismas veces (Codex r8 #2 y r9 #2). */
+    async function enLosDos<A, B>(paso: number, horas: number[], mio: () => A, suyo: () => B): Promise<[A, Awaited<B>]> {
+      lecturas = [...horas]
+      llamadas = 0
+      const a = mio()
+      const lecturasMias = llamadas
+      lecturas = [...horas]
+      llamadas = 0
+      const b = await suyo()
+      const lecturasSuyas = llamadas
+      lecturas = []
+      expect([paso, 'lecturas del reloj', lecturasMias]).toEqual([paso, 'lecturas del reloj', lecturasSuyas])
+      return [a, b]
+    }
+    /** Intentos ya contados que express todavía no lee (está en su `await`): se leen después, en cualquier orden. */
+    const enVuelo: Array<{ paso: number; mio: { totalHits: number }; suyo: { totalHits: number } }> = []
+    const leer = (i: number) => {
+      const e = enVuelo.splice(i, 1)[0]
+      expect([e.paso, 'total leído tarde', e.mio.totalHits]).toEqual([e.paso, 'total leído tarde', e.suyo.totalHits])
+    }
     try {
-      for (let paso = 0; paso < 6000; paso++) {
+      for (let paso = 0; paso < 8000; paso++) {
         const t = azar()
         const k = llaves[Math.floor(azar() * llaves.length)]
-        if (t < 0.25) {
+        if (t < 0.2) {
           ahora += Math.floor((azar() - 0.45) * 3 * VENTANA) // brinco hacia adelante o hacia atrás, hasta ~1.6 ventanas
-        } else if (t < 0.33) {
+        } else if (t < 0.26) {
           nuestro.rotarAhora()
           ;(base as unknown as { clearExpired(): void }).clearExpired()
-        } else if (t < 0.35) {
-          nuestro.resetKey(k)
-          await base.resetKey(k)
-        } else if (t < 0.37) {
-          expect([paso, await lecturasDe(() => nuestro.decrement(k))]).toEqual([paso, await lecturasDe(() => base.decrement(k))])
-        } else if (t < 0.45) {
-          // Dos intentos contados juntos, leídos después (como express tras el `await`): Codex r8 #1.
-          const [n1, n2] = [nuestro.increment(k), nuestro.increment(k)]
-          const [b1, b2] = await Promise.all([base.increment(k), base.increment(k)])
-          expect([paso, n1.totalHits, n2.totalHits]).toEqual([paso, b1.totalHits, b2.totalHits])
+        } else if (t < 0.28) {
+          await enLosDos(
+            paso,
+            [],
+            () => nuestro.resetKey(k),
+            () => base.resetKey(k),
+          )
+        } else if (t < 0.3) {
+          await enLosDos(
+            paso,
+            [],
+            () => nuestro.decrement(k),
+            () => base.decrement(k),
+          )
+        } else if (t < 0.5 && enVuelo.length > 0) {
+          leer(Math.floor(azar() * enVuelo.length))
         } else {
           // A veces el reloj brinca ENTRE las dos lecturas de un mismo incremento (Codex r7 #2).
           const segunda = azar() < 0.2 ? ahora + Math.floor((azar() - 0.3) * 2 * VENTANA) : ahora
-          let n!: ReturnType<AlmacenPorVentana['increment']>
-          let b!: Awaited<ReturnType<MemoryStore['increment']>>
-          lecturas = [ahora, segunda]
-          const lecturasMias = await lecturasDe(() => (n = nuestro.increment(k)))
-          lecturas = [ahora, segunda]
-          const lecturasSuyas = await lecturasDe(async () => (b = await base.increment(k)))
-          lecturas = []
-          expect([paso, lecturasMias]).toEqual([paso, lecturasSuyas])
+          const [mio, suyo] = await enLosDos(
+            paso,
+            [ahora, segunda],
+            () => nuestro.increment(k),
+            () => base.increment(k),
+          )
           ahora = segunda
-          expect([paso, n.totalHits, n.resetTime!.getTime()]).toEqual([paso, b.totalHits, b.resetTime!.getTime()])
+          enVuelo.push({ paso, mio, suyo })
+          if (azar() < 0.4) leer(enVuelo.length - 1) // a veces express lo lee enseguida; si no, queda en vuelo
         }
         for (const llave of llaves) {
-          const mio = nuestro.get(llave)
-          const suyo = await base.get(llave)
+          const [mio, suyo] = await enLosDos(
+            paso,
+            [],
+            () => nuestro.get(llave),
+            () => base.get(llave),
+          )
           expect([paso, llave, mio?.totalHits, mio?.resetTime?.getTime()]).toEqual([
             paso,
             llave,
@@ -267,6 +315,7 @@ describe('AlmacenPorVentana', () => {
           ])
         }
       }
+      while (enVuelo.length > 0) leer(0)
     } finally {
       base.shutdown()
     }
