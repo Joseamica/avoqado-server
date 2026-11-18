@@ -1347,6 +1347,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/table.tpv.service.ts#assignTable': 1,
   'src/services/tpv/table.tpv.service.ts#cuentaAparteParaRondaTardia': 1,
   'src/services/tpv/table.tpv.service.ts#clearTable': 1,
+  // naf9f31c (encargo 64000e): el CLEAR_TABLE sin red que nombra su cuenta comprueba la pertenencia bajo el candado.
+  'src/services/tpv/table.tpv.service.ts#clearTableDeLaCuenta': 1,
   'src/services/tpv/table.tpv.service.ts#releaseTableIfSettled': 1,
   'src/services/tpv/table.tpv.service.ts#moveOrderToTable': 1,
   'src/services/tpv/table.tpv.service.ts#reconcileTableAfterOrderRemoved': 1,
