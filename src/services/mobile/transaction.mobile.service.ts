@@ -13,7 +13,7 @@ import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shar
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
-import { totalesDelComprobante } from '../shared/ticketTotals'
+import { totalDelRenglonEnElTicket, totalesDelComprobante, totalesSinLaCortesia } from '../shared/ticketTotals'
 import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
@@ -230,6 +230,10 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
               quantity: true,
               unitPrice: true,
               total: true,
+              // D41 «C»: para pintar la cortesía en $0 a su bruto en la reimpresión (`totalEnElTicket`).
+              isCortesia: true,
+              discountAmount: true,
+              orderPromotionId: true,
               product: {
                 select: {
                   name: true,
@@ -264,6 +268,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
   // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
   const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
+  // D41 «C» (Codex r2 #1): `ticketTotals` sigue diciendo lo que entienden las apps publicadas (sin la cortesía en $0, que sus renglones
+  // pintan en $0); la app nueva la suma con `cortesiaDelTicket` y pinta cada renglón con `totalEnElTicket`.
+  const { totales: totalesParaLasApps, cortesia: cortesiaDelTicket } = totalesSinLaCortesia(totalesDelTicket)
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -350,7 +357,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
     // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
-    ticketTotals: totalesDelTicket,
+    ticketTotals: totalesParaLasApps,
+    // D41 «C», aditivo: la cortesía que Mesas guardó en $0 y que el comprobante suma a subtotal y descuento (como Mostrador). Sólo si > 0.
+    ...(cortesiaDelTicket > 0 ? { cortesiaDelTicket } : {}),
     // D1 «fotocopia del ticket», aditivo y APARTE de ticketTotals (las apps viejas no la ven): los renglones que imprimió el cobro de
     // esta parte. La reimpresión los pinta en vez de «Pago parcial». Sin copia, la llave no existe.
     lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
@@ -377,6 +386,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        // D41 «C» (aditivo): lo que pinta el renglón en la reimpresión de la app nueva, que suma `cortesiaDelTicket` al subtotal (la
+        // cortesía que Mesas guardó en $0, a su bruto). `total` no cambia: lo leen las devoluciones y las apps publicadas.
+        totalEnElTicket: totalDelRenglonEnElTicket(item, totalesDelTicket),
         // C2 A-R4 (aditivo, opcional): lo que cobró el renglón completo; se omite si la venta no es atribuible (A-R3).
         // Los POS usan `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor al devolver.
         ...(chargedTotal === undefined ? {} : { chargedTotal }),
