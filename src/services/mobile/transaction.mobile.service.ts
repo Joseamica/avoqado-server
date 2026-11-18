@@ -13,7 +13,7 @@ import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shar
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
-import { cortesiaEnCeroDe, totalDelRenglonEnElTicket, totalesDelComprobante, totalesSinLaCortesia } from '../shared/ticketTotals'
+import { comprobanteDelPago, cortesiaEnCeroDe, totalDelRenglonEnElTicket, totalesSinLaCortesia } from '../shared/ticketTotals'
 import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
@@ -267,15 +267,18 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
   // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
   // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
-  const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
+  const { totales: totalesDelTicket, ordenDelRecibo } = await comprobanteDelPago(prisma, paymentId)
   // D41 «C» (Codex r2 #1): `ticketTotals` sigue diciendo lo que entienden las apps publicadas (sin la cortesía en $0, que sus renglones
   // pintan en $0); la app nueva la suma con `cortesiaDelTicket` y pinta cada renglón con `totalEnElTicket`.
   const { totales: totalesParaLasApps, cortesia: cortesiaDelComprobante } = totalesSinLaCortesia(totalesDelTicket)
-  // Codex r5 #1: la cortesía del comprobante sólo viaja si cuadra con los renglones que se van a pintar (los de la orden de HOY). Un
-  // cobro que Soporte movió a otra orden tras emitir su recibo trae la cortesía de la mesa original: sin esto, la app nueva pintaba un
-  // subtotal de $75 con renglones de $55. Sin cuadrar, se reimprime como antes (subtotal y renglones sin la cortesía).
+  // Codex r5 #1 y r6 #1: la cortesía del comprobante sólo viaja si su recibo se emitió para la MISMA orden que tiene hoy el cobro (y,
+  // además, si cuadra con sus renglones). Un cobro que Soporte movió a otra orden tras emitir su recibo trae la cortesía de la mesa
+  // original: la app nueva pintaba un subtotal o unos renglones distintos del digital. Así, se reimprime como antes.
+  const mismaOrden = ordenDelRecibo === undefined || ordenDelRecibo === payment.orderId
   const cortesiaDelTicket =
-    cortesiaDelComprobante > 0 && cortesiaEnCeroDe(payment.order?.items ?? []).equals(new Prisma.Decimal(String(cortesiaDelComprobante)))
+    cortesiaDelComprobante > 0 &&
+    mismaOrden &&
+    cortesiaEnCeroDe(payment.order?.items ?? []).equals(new Prisma.Decimal(String(cortesiaDelComprobante)))
       ? cortesiaDelComprobante
       : 0
 

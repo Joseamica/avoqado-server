@@ -283,6 +283,19 @@ export async function cargarTotalesDelTicket(db: Prisma.TransactionClient | Pris
  * `reciboCanonicoDelPago`: el más viejo por (createdAt, id), como `generateDigitalReceipt`).
  */
 export async function totalesDelComprobante(db: Prisma.TransactionClient | PrismaClient, paymentId: string): Promise<TicketTotals | null> {
+  return (await comprobanteDelPago(db, paymentId)).totales
+}
+
+/**
+ * Lo mismo que `totalesDelComprobante` y, si hay recibo, la orden para la que se emitió (`dataSnapshot.order.id`). La reimpresión lo
+ * usa para no mezclar el recibo de una orden con los renglones de otra (un cobro que Soporte movió de orden; Codex r5 y r6 #1 de D41).
+ */
+export async function comprobanteDelPago(
+  db: Prisma.TransactionClient | PrismaClient,
+  paymentId: string,
+): Promise<{ totales: TicketTotals | null; ordenDelRecibo: string | null | undefined }> {
   const recibo = await reciboCanonicoDelPago(db, paymentId, { select: { dataSnapshot: true } })
-  return recibo ? ticketTotalsDelSnapshot(recibo.dataSnapshot) : cargarTotalesDelTicket(db, paymentId)
+  if (!recibo) return { totales: await cargarTotalesDelTicket(db, paymentId), ordenDelRecibo: undefined }
+  const orden = (recibo.dataSnapshot as { order?: { id?: unknown } } | null)?.order?.id
+  return { totales: ticketTotalsDelSnapshot(recibo.dataSnapshot), ordenDelRecibo: typeof orden === 'string' ? orden : null }
 }

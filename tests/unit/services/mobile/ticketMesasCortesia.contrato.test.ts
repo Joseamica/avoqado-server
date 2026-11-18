@@ -122,7 +122,7 @@ describe('getTransactionDetail · la cortesía en $0 de Mesas (D41 «C»)', () =
       total: 49.5,
     }
     prismaMock.digitalReceipt.findFirst.mockResolvedValue({
-      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 } },
+      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 }, order: { id: 'o1' } },
     })
     const detalle: any = await getTransactionDetail('v1', 'pay_1')
     expect(detalle.ticketTotals).toEqual({
@@ -152,7 +152,7 @@ describe('getTransactionDetail · la cortesía en $0 de Mesas (D41 «C»)', () =
       total: 49.5,
     }
     prismaMock.digitalReceipt.findFirst.mockResolvedValue({
-      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 } },
+      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 }, order: { id: 'o1' } },
     })
     // La orden destino: $55 cobrables, sin cortesía.
     prismaMock.payment.findFirst.mockResolvedValue({ ...cobro, orderId: 'o2', order: { ...cobro.order, items: [coca, cafe] } })
@@ -162,10 +162,32 @@ describe('getTransactionDetail · la cortesía en $0 de Mesas (D41 «C»)', () =
     expect(detalle.items.map((i: any) => i.totalEnElTicket)).toEqual([25, 30])
   })
 
+  it('Codex r6 #1: el cobro se movió a otra orden que TAMBIÉN regaló $20 (otros renglones): no viaja, porque el recibo es de otra orden', async () => {
+    const congelado = {
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 75,
+      discount: 25.5,
+      cortesia: 20,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 49.5,
+    }
+    prismaMock.digitalReceipt.findFirst.mockResolvedValue({
+      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 }, order: { id: 'o1' } },
+    })
+    const te = renglon('i9', 'Té', 0, { unitPrice: 20, isCortesia: true, discountAmount: new Prisma.Decimal(20) })
+    prismaMock.payment.findFirst.mockResolvedValue({ ...cobro, orderId: 'o2', order: { ...cobro.order, items: [coca, te, cafe] } })
+    const detalle: any = await getTransactionDetail('v1', 'pay_1')
+    expect(detalle).not.toHaveProperty('cortesiaDelTicket')
+    expect(detalle.items.map((i: any) => i.totalEnElTicket)).toEqual([25, 0, 30])
+  })
+
   it('con un recibo emitido ANTES (congeló $55 · −$5.50, sin `cortesia`): todo como se guardó, sin `cortesiaDelTicket`', async () => {
     const congelado = { kind: 'COBRO', desglosado: true, subtotal: 55, discount: 5.5, serviceCharge: 0, addedTax: 0, tip: 0, total: 49.5 }
     prismaMock.digitalReceipt.findFirst.mockResolvedValue({
-      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 } },
+      dataSnapshot: { ticketTotals: congelado, payment: { amount: 49.5, tipAmount: 0 }, order: { id: 'o1' } },
     })
     const detalle: any = await getTransactionDetail('v1', 'pay_1')
     expect(detalle.ticketTotals).toEqual(congelado)
