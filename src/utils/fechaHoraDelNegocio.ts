@@ -42,8 +42,12 @@ export function horaQueNoExiste(raw: string | Date, timezone: string): boolean {
   // «24:00» y otras horas fuera del reloj las sigue resolviendo la conversión de siempre (Codex r4 #1).
   if (+m[4] > 23 || +m[5] > 59 || +(m[6] ?? 0) > 59) return false
   // Hasta el segundo: hay zonas viejas con desfase de segundos (Asia/Colombo en 1906, Codex r2 #8).
-  const comoUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0))
+  const comoUtc = utc(+m[1], +m[2], +m[3], +m[4], +m[5], +(m[6] ?? 0))
   if (Number.isNaN(comoUtc)) return false
+  // Una fecha que no existe en el calendario (día 32, 30 de febrero) no es «hora del cambio de horario»: la decide el
+  // esquema como siempre (Codex r5).
+  const d = new Date(comoUtc)
+  if (d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) return false
   try {
     // Desfase de la zona en el instante tentativo y, si cambia ahí, en el corregido.
     const primero = relojDeLaZonaComoUtc(comoUtc, timezone) - comoUtc
@@ -61,15 +65,27 @@ function relojDeLaZonaComoUtc(ms: number, timezone: string): number {
   const partes = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     hourCycle: 'h23',
+    era: 'short',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    calendar: 'gregory',
   }).formatToParts(new Date(Math.floor(ms / 1000) * 1000))
   const v = (tipo: string) => Number(partes.find(p => p.type === tipo)?.value)
-  return Date.UTC(v('year'), v('month') - 1, v('day'), v('hour'), v('minute'), v('second'))
+  // El año 0 Intl lo escribe «1 a. C.»: con la era se vuelve al año astronómico.
+  const anio = partes.find(p => p.type === 'era')?.value === 'BC' ? 1 - v('year') : v('year')
+  return utc(anio, v('month'), v('day'), v('hour'), v('minute'), v('second'))
+}
+
+/** `Date.UTC` sin su trampa: lee los años 0–99 como 1900–1999 (Codex r5); aquí el año es el que se escribió. */
+function utc(anio: number, mes: number, dia: number, hora: number, minuto: number, segundo: number): number {
+  const d = new Date(0)
+  d.setUTCFullYear(anio, mes - 1, dia)
+  d.setUTCHours(hora, minuto, segundo, 0)
+  return d.getTime()
 }
 
 /** Forma válida para el esquema: un Date válido o un texto que `fechaHoraDelNegocio` entiende. */

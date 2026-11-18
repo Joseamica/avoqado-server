@@ -84,6 +84,11 @@ describe('horaQueNoExiste', () => {
     expect(horaQueNoExiste('2027-03-13T24:15', 'America/Havana')).toBe(false)
   })
 
+  it('años 0000–0099 no se leen como 1900–1999, y una fecha imposible no es «hora inexistente»', () => {
+    expect(horaQueNoExiste('0018-03-31T02:30', 'America/New_York')).toBe(false) // en 1918 sí hubo salto; en el año 18, no
+    expect(horaQueNoExiste('1905-12-32T00:05:00', 'Asia/Colombo')).toBe(false)
+  })
+
   it('zona con desfase de segundos (Colombo, 1906): la hora existe', () => {
     expect(horaQueNoExiste('1906-01-01T00:10:29', 'Asia/Colombo')).toBe(false)
   })
