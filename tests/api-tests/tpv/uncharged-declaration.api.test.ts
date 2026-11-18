@@ -156,6 +156,23 @@ describe('POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharg
       expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_UNCHARGED_AUTH_DENIED', venueId }))
     })
 
+    it('🔴 F1: el CAJERO y el GERENTE sin PIN también llegan al servicio y reciben el MISMO 403 con código, sin leer la fila', async () => {
+      for (const [staffId, role] of [
+        ['staff-cashier', 'CASHIER'],
+        ['staff-manager', 'MANAGER'],
+      ]) {
+        jest.clearAllMocks()
+        const token = sesion(staffId, role)
+        const res = await api().post(RUTA).set('Authorization', `Bearer ${token}`).set('X-Forwarded-For', '10.7.0.6').send(cuerpo())
+        expect({ status: res.status, code: res.body.code, required: res.body.required }).toEqual({
+          status: 403,
+          code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+          required: undefined,
+        })
+        expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+      }
+    })
+
     it('P1 sin ninguno de los dos permisos ⇒ 403 en la puerta, con la misma negación que el POS', async () => {
       const permissionSet = { id: 'ps-solo-leer', permissions: ['orders:read'] }
       mirrorTokenRoleOnStaffVenue('WAITER', venueId, { permissionSet })

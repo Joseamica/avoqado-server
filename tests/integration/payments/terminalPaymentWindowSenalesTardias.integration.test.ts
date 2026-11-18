@@ -247,7 +247,14 @@ describe('Ronda 3 · P1-A: la red durable alcanza un Payment ligado que llega FU
     const r = await enLaVentana()
     await resolveNoInstrument(
       { venueId: f.venueId, terminalSerial: f.serial, attemptId: r.attemptId, actorStaffId: duena.id },
-      { requestId: r.solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+      // F1 (17-nov): la firma el PIN de la dueña; su sola sesión ya no basta.
+      {
+        requestId: r.solicitud.requestId,
+        resolutionId: randomUUID(),
+        statement: 'NO_INSTRUMENT_PRESENTED',
+        statementVersion: 1,
+        supervisorPin: '2468',
+      },
     )
     expect(await fila(r.solicitud.requestId)).toMatchObject({ failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
     await envejecer(r.solicitud.id, 180)
@@ -515,7 +522,13 @@ describe('Ronda 3 · P1-C: un `success` tardío sin Payment sobre una solicitud 
     await expect(
       resolveNoInstrument(
         { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: duena.id },
-        { requestId: solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+        {
+          requestId: solicitud.requestId,
+          resolutionId: randomUUID(),
+          statement: 'NO_INSTRUMENT_PRESENTED',
+          statementVersion: 1,
+          supervisorPin: '2468',
+        },
       ),
     ).rejects.toThrow()
     expect(await fila(solicitud.requestId)).toMatchObject({ failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW' })

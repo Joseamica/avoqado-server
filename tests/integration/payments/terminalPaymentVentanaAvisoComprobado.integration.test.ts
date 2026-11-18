@@ -102,10 +102,11 @@ const consultar = (requestId: string) => terminalPaymentService.getPaymentStatus
 const ventana = (requestId: string, origen: 'TIMER' | 'WATCHDOG' = 'WATCHDOG') =>
   terminalPaymentService.releaseUnprovenNegative(requestId, f.venueId, origen) as Promise<string>
 const vigia = () => new TerminalPaymentWatchdogJob().run()
+/** F1 (17-nov): la firma SIEMPRE el PIN de un gerente; aquí, el gerente de la fixture. */
 const declarar = (requestId: string, actorStaffId: string) =>
   reconcileUncharged(
     { venueId: f.venueId, requestId, actorStaffId, source: 'MOBILE' },
-    { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+    { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: f.gerente.pin },
   )
 /** Sesiones de ESTA base esperando un candado consultivo de dos llaves (`hashtext`): mide que alguien ESPERA, no que decidió a ciegas. */
 const esperandoCandado = async () =>

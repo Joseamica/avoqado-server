@@ -25,7 +25,8 @@ let meseroId: string
 let gerenteId: string
 const PIN_GERENTE = '918273'
 
-const SIN_COBRO = { statement: 'UNCHARGED_VERIFIED', statementVersion: 1 }
+/** 🔴 F1 (17-nov): la firma SIEMPRE el PIN de un gerente. Por default el de esta suite; `supervisorPin: undefined` lo quita. */
+const SIN_COBRO: Record<string, unknown> = { statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: '918273' }
 
 const token = (staffId: string, role: string) =>
   jwt.sign({ sub: staffId, orgId: f.fixture, venueId: f.venueId, role }, process.env.ACCESS_TOKEN_SECRET as string, { expiresIn: '15m' })
@@ -107,9 +108,17 @@ afterAll(async () => {
 })
 
 describe('la declaración «no se cobró» desde la terminal', () => {
-  it('P1 un cajero con permiso declara ⇒ FAILED/OPERATOR_RECONCILED_NO_CHARGE, se libera la venta y la bitácora dice source TPV', async () => {
+  it('P1 en la terminal del cajero firma el gerente con su PIN ⇒ FAILED/OPERATOR_RECONCILED_NO_CHARGE, se libera la venta y la bitácora dice source TPV', async () => {
     const { venta, solicitud } = await ventaEnDuda()
     const resolutionId = randomUUID()
+
+    // 🔴 F1: sin el PIN, la sesión del cajero ya no basta: el MISMO 403 con código, y la fila no se mueve.
+    const sinPin = await declarar(solicitud.requestId, token(f.staffId, 'CASHIER'), {
+      ...SIN_COBRO,
+      supervisorPin: undefined,
+      resolutionId,
+    })
+    expect({ status: sinPin.status, code: sinPin.body.code }).toEqual({ status: 403, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
 
     const res = await declarar(solicitud.requestId, token(f.staffId, 'CASHIER'), { ...SIN_COBRO, resolutionId })
 
@@ -125,21 +134,30 @@ describe('la declaración «no se cobró» desde la terminal', () => {
     })
     const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: solicitud.requestId } })
     expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
-    expect(fila.operatorReconciliation).toMatchObject({ staffId: f.staffId, by: 'SESSION', source: 'TPV' })
+    expect(fila.operatorReconciliation).toMatchObject({
+      staffId: gerenteId,
+      by: 'SUPERVISOR_PIN',
+      sessionStaffId: f.staffId,
+      source: 'TPV',
+    })
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(false)
 
     const asientos = await prisma.activityLog.findMany({
       where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: fila.id },
     })
     expect(asientos).toHaveLength(1)
-    expect(asientos[0].staffId).toBe(f.staffId)
+    expect(asientos[0].staffId).toBe(gerenteId)
     expect(asientos[0].data).toMatchObject({ source: 'TPV', requestId: solicitud.requestId, resolutionId })
   })
 
   it('P1 un mesero sin PIN ⇒ 403 SUPERVISOR_AUTHORIZATION_REQUIRED y la fila no se mueve', async () => {
     const { solicitud } = await ventaEnDuda()
 
-    const res = await declarar(solicitud.requestId, token(meseroId, 'WAITER'), { ...SIN_COBRO, resolutionId: randomUUID() })
+    const res = await declarar(solicitud.requestId, token(meseroId, 'WAITER'), {
+      ...SIN_COBRO,
+      supervisorPin: undefined,
+      resolutionId: randomUUID(),
+    })
 
     expect({ status: res.status, code: res.body.code }).toEqual({ status: 403, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
     const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: solicitud.requestId } })

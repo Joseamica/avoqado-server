@@ -1671,11 +1671,13 @@ describe('Cierre común · un puntero PROPIO sin cierre (la fila apunta a su Pay
 describe('Declaración del cajero', () => {
   const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
   const resolutionId = () => randomUUID()
+  /** 🔴 F1 (17-nov): la firma SIEMPRE el PIN de un gerente; por default, el de la dueña (`supervisorPin: undefined` lo quita). */
   const declaracion = (requestId: string, extra: Record<string, unknown> = {}) => ({
     requestId,
     resolutionId: resolutionId(),
     statement: 'NO_INSTRUMENT_PRESENTED',
     statementVersion: 1,
+    supervisorPin: '4321',
     ...extra,
   })
   let owner: { id: string }
@@ -1730,7 +1732,7 @@ describe('Declaración del cajero', () => {
     const { row, attemptId } = await filaConIntento()
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
     const r = await declarar(attemptId, owner.id, declaracion(row.requestId))
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     expect(r.request).toMatchObject({
       status: 'FAILED',
       outcome: 'NOT_CHARGED',
@@ -1746,7 +1748,7 @@ describe('Declaración del cajero', () => {
       id: r.resolution.id,
       kind: 'NO_INSTRUMENT_PRESENTED',
       staffId: owner.id,
-      by: 'SESSION',
+      by: 'SUPERVISOR_PIN',
     })
     expect(await terminalPaymentService.getPaymentStatus(row.requestId, venueId)).toMatchObject({
       status: 'FAILED',
@@ -1773,12 +1775,17 @@ describe('Declaración del cajero', () => {
       where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id },
     })
     expect(asiento).toMatchObject({ staffId: owner.id })
-    expect(asiento?.data).toMatchObject({ requestId: row.requestId, attemptId, by: 'SESSION', sessionStaffId: owner.id })
+    expect(asiento?.data).toMatchObject({ requestId: row.requestId, attemptId, by: 'SUPERVISOR_PIN', sessionStaffId: owner.id })
   })
 
   it('(a-bis) la sesión CASHIER no puede sola (403 real) y con el PIN del OWNER declara por SUPERVISOR_PIN con el staffId del OWNER', async () => {
     const { row, attemptId } = await filaConIntento()
-    await expect(declarar(attemptId, cajero.id, declaracion(row.requestId))).rejects.toMatchObject({
+    await expect(declarar(attemptId, cajero.id, declaracion(row.requestId, { supervisorPin: undefined }))).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
+    // 🔴 F1: tampoco la dueña con su sola sesión.
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId, { supervisorPin: undefined }))).rejects.toMatchObject({
       code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
       statusCode: 403,
     })
@@ -1871,7 +1878,7 @@ describe('Declaración del cajero', () => {
     const rechazado = eventoAprobado(otroIntento, 'tx-declined')
     rechazado.payload.payload.status = 'declined'
     await prisma.providerEventLog.create({ data: rechazado })
-    expect((await declarar(otroIntento, owner.id, declaracion(otra.requestId))).resolution).toMatchObject({ by: 'SESSION' })
+    expect((await declarar(otroIntento, owner.id, declaracion(otra.requestId))).resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
   })
 
   it('(c-bis) dos intentos vinculados a la misma solicitud → 409 OTHER_ATTEMPT_UNRESOLVED; una fila RETENIDA por el banco → POSITIVE_EVIDENCE_EXISTS', async () => {
@@ -2447,9 +2454,9 @@ describe('Revisión final · A: la tablet espera a la ventana y recibe su desenl
     const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
     const r = await resolveNoInstrument(
       { venueId, terminalSerial: serialDelFixture, attemptId, actorStaffId: duena.id },
-      { requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+      { requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1, supervisorPin: '5678' },
     )
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     expect(await respuestaEn(enCurso, http)).toBe(422)
     expect(http.body).toMatchObject({ success: false, requestId, status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
     expect((await filasDe(requestId))[0]).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })

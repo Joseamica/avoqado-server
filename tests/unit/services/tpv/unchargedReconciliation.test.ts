@@ -22,7 +22,15 @@ const venueId = 'v1'
 const requestId = 'req-1'
 const resolutionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const identidad = { venueId, requestId, actorStaffId: 'staff-cashier', source: 'MOBILE' as const }
-const declaracion = () => ({ requestId, resolutionId, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 })
+/** 🔴 F1 (17-nov): la declaración la firma SIEMPRE un gerente con su PIN. Sin argumento, el PIN del gerente; `null`, sin PIN. */
+const PIN_GERENTE = '2222'
+const declaracion = (supervisorPin: string | null = PIN_GERENTE) => ({
+  requestId,
+  resolutionId,
+  statement: 'UNCHARGED_VERIFIED',
+  statementVersion: 1,
+  ...(supervisorPin ? { supervisorPin } : {}),
+})
 
 /** La fila del incidente de Testarudo: UNKNOWN, la terminal ya volvió, sin pago y sin evidencia. */
 function filaDelIncidente(over: Record<string, unknown> = {}) {
@@ -52,11 +60,37 @@ function filaDelIncidente(over: Record<string, unknown> = {}) {
   }
 }
 
-const CAJERO = { id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', permissionSetId: null, permissionSet: null }
-const MESERO = { id: 'sv-waiter', staffId: 'staff-waiter', role: 'WAITER', permissionSetId: null, permissionSet: null }
+/** Miembros: se buscan por `staffId` (la sesión) o por `pin` (quien firma), siempre dentro de SU local. */
+type Miembro = {
+  id: string
+  staffId: string
+  role: string
+  pin: string
+  venueId?: string
+  permissionSetId?: string | null
+  permissionSet?: unknown
+}
+const CAJERO: Miembro = { id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', pin: '3333' }
+const MESERO: Miembro = { id: 'sv-waiter', staffId: 'staff-waiter', role: 'WAITER', pin: '4444' }
+const GERENTE: Miembro = { id: 'sv-manager', staffId: 'staff-manager', role: 'MANAGER', pin: PIN_GERENTE }
+/** Un gerente de OTRO local: su PIN no firma aquí. */
+const GERENTE_DE_OTRO_LOCAL: Miembro = { id: 'sv-otro', staffId: 'staff-otro', role: 'MANAGER', pin: '5555', venueId: 'v2' }
+const MIEMBROS = [CAJERO, MESERO, GERENTE, GERENTE_DE_OTRO_LOCAL]
+
+function conMiembros(miembros: Miembro[]) {
+  prismaMock.staffVenue.findFirst.mockImplementation(async ({ where }: any) => {
+    if (where.active !== true || where.staff?.active !== true) return null
+    const m = miembros.find(
+      x => (x.venueId ?? venueId) === where.venueId && (where.pin !== undefined ? x.pin === where.pin : x.staffId === where.staffId),
+    )
+    return m
+      ? { id: m.id, staffId: m.staffId, role: m.role, permissionSetId: m.permissionSetId ?? null, permissionSet: m.permissionSet ?? null }
+      : null
+  })
+}
 
 /** `latidoHaceMs = null` ⇒ la terminal no aparece (nunca volvió). */
-function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHaceMs: number | null = null) {
+function montar(fila = filaDelIncidente(), miembros: Miembro[] = MIEMBROS, latidoHaceMs: number | null = null) {
   prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock))
   // El candado de la orden devuelve su fila; la consulta de eventos del procesador, ninguna (sin contradicción).
   // Con un mock que devuelve lo mismo a TODA consulta cruda, el veto de procedencia leería contradicción siempre.
@@ -70,7 +104,7 @@ function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHace
   prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(fila)
   prismaMock.payment.findFirst.mockResolvedValue(null)
   prismaMock.activityLog.create.mockResolvedValue({})
-  prismaMock.staffVenue.findFirst.mockResolvedValue(miembro)
+  conMiembros(miembros)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
   prismaMock.terminal.findFirst.mockResolvedValue(latidoHaceMs === null ? null : { lastHeartbeat: new Date(Date.now() - latidoHaceMs) })
   // Sin intentos ligados y sin eventos que contradigan, salvo que la prueba diga otra cosa.
@@ -97,14 +131,20 @@ describe('readUnchargedReconciliation', () => {
 })
 
 describe('reconcileUncharged — camino feliz', () => {
-  it('acepta, escribe el desenlace que libera y deja UN asiento de auditoría', async () => {
+  it('acepta, escribe el desenlace que libera y deja UN asiento de auditoría: a nombre del GERENTE, con la sesión que operaba', async () => {
     const r = await reconcileUncharged(identidad, declaracion())
     expect(r.kind).toBe('UNCHARGED_VERIFIED')
     expect(r.id).toBe(resolutionId)
-    expect(r.staffId).toBe('staff-cashier')
+    expect(r).toMatchObject({ staffId: 'staff-manager', staffVenueId: 'sv-manager', by: 'SUPERVISOR_PIN', sessionStaffId: 'staff-cashier' })
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.activityLog.create.mock.calls[0][0].data.action).toBe('TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
+    const asiento = prismaMock.activityLog.create.mock.calls[0][0].data
+    expect(asiento.action).toBe('TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
+    expect(asiento.staffId).toBe('staff-manager')
+    expect(asiento.data).toMatchObject({ by: 'SUPERVISOR_PIN', sessionStaffId: 'staff-cashier' })
+    // El PIN nunca se guarda ni se audita.
+    expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain(PIN_GERENTE)
+    expect(JSON.stringify(prismaMock.$executeRaw.mock.calls)).not.toContain(PIN_GERENTE)
   })
 
   it('🔴 el CAS escribe EXACTAMENTE el desenlace que sale de los dos candados', async () => {
@@ -170,34 +210,85 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
 })
 
 describe('reconcileUncharged — autorización', () => {
-  it('🔴 sin el permiso efectivo no se acepta, aunque el cuerpo venga perfecto', async () => {
-    montar(filaDelIncidente(), MESERO)
-    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
-      statusCode: 403,
-    })
+  /** Rechazo de firma: 403 con el código que las apps instaladas ya entienden, y sin leer ni escribir nada del cobro. */
+  const sinFirma = async (promesa: Promise<unknown>) => {
+    await expect(promesa).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED', statusCode: 403 })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.createMany).not.toHaveBeenCalled()
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
-  })
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  }
 
-  it('🔴 quien no es miembro ACTIVO del venue no declara', async () => {
-    montar(filaDelIncidente(), null)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ statusCode: 403 })
+  it('🔴 quien no es miembro ACTIVO del venue no declara, ni con el PIN del gerente', async () => {
+    montar(filaDelIncidente(), [GERENTE])
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'NOT_ALLOWED', statusCode: 403 })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
   })
 
   it('P1 A5 (Codex plan-r1-8): la AUTORIZACIÓN va antes de BUSCAR la fila: un mesero sin PIN no lee ni crea nada', async () => {
-    montar(filaDelIncidente(), MESERO)
-    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
-      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
-      statusCode: 403,
-    })
-    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
-    expect(prismaMock.terminalPaymentRequest.createMany).not.toHaveBeenCalled()
+    await sinFirma(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion(null)))
   })
 
   it('🔴 la autorización se comprueba ANTES que la elegibilidad: no filtra el estado del cobro', async () => {
-    montar(filaDelIncidente({ paymentId: 'pay-9' }), MESERO)
-    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
-      statusCode: 403,
-    })
+    montar(filaDelIncidente({ paymentId: 'pay-9' }))
+    await sinFirma(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion(null)))
+  })
+
+  // ── 🔴 F1 (founder, 17-nov): «no se cobró» lo firma SIEMPRE un gerente con su PIN; ninguna sesión basta ──
+  it('🔴 F1: el cajero sin PIN ya no declara (antes bastaba su sesión)', async () => {
+    await sinFirma(reconcileUncharged(identidad, declaracion(null)))
+  })
+
+  it('🔴 F1: un cajero con el permiso PERSONALIZADO (lista propia o comodín) tampoco declara sin PIN', async () => {
+    for (const permisos of [['payments:reconcile-uncharged'], ['payments:*']]) {
+      jest.clearAllMocks()
+      montar(filaDelIncidente(), [{ ...CAJERO, permissionSetId: 'ps-1', permissionSet: { permissions: permisos } }, GERENTE])
+      await sinFirma(reconcileUncharged(identidad, declaracion(null)))
+    }
+  })
+
+  it('🔴 F1: el GERENTE sin PIN tampoco: su sesión no firma, firma su PIN', async () => {
+    await sinFirma(reconcileUncharged({ ...identidad, actorStaffId: 'staff-manager' }, declaracion(null)))
+  })
+
+  it('🔴 F1: el PIN de un gerente de OTRO local no firma aquí', async () => {
+    await sinFirma(reconcileUncharged(identidad, declaracion(GERENTE_DE_OTRO_LOCAL.pin)))
+  })
+
+  it('🔴 F1: el PIN de un CAJERO no firma, aunque su lista propia traiga el permiso o un comodín', async () => {
+    for (const permisos of [null, ['payments:reconcile-uncharged'], ['payments:*']]) {
+      jest.clearAllMocks()
+      const cajero = permisos ? { ...CAJERO, permissionSetId: 'ps-1', permissionSet: { permissions: permisos } } : CAJERO
+      montar(filaDelIncidente(), [cajero, MESERO, GERENTE])
+      await sinFirma(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion(CAJERO.pin)))
+    }
+  })
+
+  it('🔴 F1: el PIN de un gerente SIN el permiso no firma (negado por el negocio o fuera de su lista propia)', async () => {
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: [], deniedPermissions: ['payments:reconcile-uncharged'] })
+    await sinFirma(reconcileUncharged(identidad, declaracion()))
+
+    jest.clearAllMocks()
+    montar(filaDelIncidente(), [CAJERO, { ...GERENTE, permissionSetId: 'ps-2', permissionSet: { permissions: ['orders:read'] } }])
+    await sinFirma(reconcileUncharged(identidad, declaracion()))
+  })
+
+  it('🔴 F1: un PIN que no es de nadie no firma', async () => {
+    await sinFirma(reconcileUncharged(identidad, declaracion('9999')))
+  })
+
+  it('🔴 F1: el gerente que opera él mismo el POS firma con SU PIN; el asiento lo dice', async () => {
+    const r = await reconcileUncharged({ ...identidad, actorStaffId: 'staff-manager' }, declaracion())
+    expect(r).toMatchObject({ staffId: 'staff-manager', by: 'SUPERVISOR_PIN', sessionStaffId: 'staff-manager' })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('el PIN de un ADMIN u OWNER con el permiso también firma', async () => {
+    for (const role of ['ADMIN', 'OWNER']) {
+      jest.clearAllMocks()
+      montar(filaDelIncidente(), [CAJERO, { ...GERENTE, role }])
+      await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ staffId: 'staff-manager', by: 'SUPERVISOR_PIN' })
+    }
   })
 })
 
@@ -324,12 +415,12 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
     // no que el cobro terminara, y cada intento de afinarla abrió un hueco nuevo. Lo que protege el dinero
     // es el veto de evidencia, que sigue intacto. Si alguien reintroduce una condición temporal, esta prueba
     // se cae y hay que leer el comentario del servicio antes de "arreglarla".
-    montar(filaDelIncidente({ terminalReturnedAt: null, expiresAt: new Date(Date.now() + 60 * 60 * 1000) }), CAJERO, null)
+    montar(filaDelIncidente({ terminalReturnedAt: null, expiresAt: new Date(Date.now() + 60 * 60 * 1000) }), MIEMBROS, null)
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
   })
 
   it('🔴 pero la SONDA diciendo que el cobro sigue corriendo sigue vetando: eso sí es evidencia', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), CAJERO, null)
+    montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), MIEMBROS, null)
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
   })
 
@@ -346,14 +437,14 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
           probeActiveAt: new Date(),
           deliveryProvenance: { deliveries: [entregaVieja] },
         }),
-        CAJERO,
+        MIEMBROS,
         null,
       )
       await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
     })
 
     it('🔴 si la ranura sigue apartada, el ACTIVE sigue vetando', async () => {
-      montar(filaDelIncidente({ probeActiveAt: new Date(), deliveryProvenance: { deliveries: [entregaVieja] } }), CAJERO, null)
+      montar(filaDelIncidente({ probeActiveAt: new Date(), deliveryProvenance: { deliveries: [entregaVieja] } }), MIEMBROS, null)
       await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
     })
 
@@ -365,7 +456,7 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
           probeActiveAt: new Date(),
           deliveryProvenance: { deliveries: [{ ...entregaVieja, executionVersion: 1 }] },
         }),
-        CAJERO,
+        MIEMBROS,
         null,
       )
       await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })

@@ -1,9 +1,8 @@
 /**
  * La variante DECLARADA de `release_terminal_payment` (plan 18-sep, Task 6).
  *
- * 🔴 El MCP tiene su PROPIO filtro de `UNKNOWN` antes de llamar al servicio (lo señaló Codex): sin tocarlo, una
- * fila `TIMED_OUT` —las legacy que hay que limpiar— rebotaría aquí con «sólo se libera un cobro en UNKNOWN»
- * aunque el servicio sí sepa conciliarla. Estas pruebas fijan esa puerta y el permiso que pide cada acción.
+ * 🔴 F1 (founder, 17-nov): desde aquí ya no se declara. «No se cobró» lo firma siempre un gerente con su PIN en la app, así
+ * que con `verifiedUncharged` el MCP dice dónde se firma y no toca el cobro. Estas pruebas fijan eso y el permiso de cada acción.
  */
 import { registerTerminalTools } from '../../../src/mcp/tools/terminals'
 import { auditMcpWrite } from '@/mcp/audit'
@@ -73,27 +72,33 @@ beforeEach(() => {
 })
 
 describe('release_terminal_payment — variante declarada', () => {
-  it('🔴 sin confirm devuelve VISTA PREVIA y no llama al servicio', async () => {
-    const out = parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true }))
-    expect(out.requiresConfirmation).toBe(true)
-    expect(out.amount).toBe(74.75) // PESOS, nunca centavos
-    expect(out.message).toMatch(/DECLARAR/)
+  // 🔴 F1 (founder, 17-nov): «no se cobró» lo firma SIEMPRE un gerente con su PIN, y eso pasa en la app (terminal o POS). El MCP
+  // ya no declara: con `verifiedUncharged` contesta dónde se firma y no toca el cobro, con o sin `confirm`, con fila o sin ella.
+  const diceDondeSeFirma = (out: { ok: boolean; error?: string }) => {
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/gerente/i)
+    expect(out.error).toMatch(/PIN/)
     expect(mockRelease).not.toHaveBeenCalled()
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  }
+
+  it('🔴 F1: sin confirm ya no hay vista previa de declarar: dirige a la app', async () => {
+    diceDondeSeFirma(parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true })))
   })
 
-  it('con confirm declara: el servicio recibe la declaración bien formada', async () => {
-    const out = parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true }))
-    expect(out.ok).toBe(true)
-    const arg = mockRelease.mock.calls[0][0] as any
-    expect(arg.declaration).toMatchObject({ requestId: 'req-1', statement: 'UNCHARGED_VERIFIED', statementVersion: 1 })
-    expect(typeof arg.declaration.resolutionId).toBe('string')
+  it('🔴 F1: con confirm tampoco declara: el servicio no recibe ninguna declaración', async () => {
+    diceDondeSeFirma(parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true })))
   })
 
-  it('🔴 una fila TIMED_OUT ya NO rebota cuando se declara', async () => {
+  it('🔴 F1: una fila TIMED_OUT tampoco se declara desde aquí', async () => {
     mockFindFirst.mockResolvedValue(fila({ status: 'TIMED_OUT' }))
-    const out = parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true }))
-    expect(out.ok).toBe(true)
-    expect(mockRelease).toHaveBeenCalled()
+    diceDondeSeFirma(parse(await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true })))
+  })
+
+  it('🔴 F1: una solicitud que NO existe (el POST nunca llegó) tampoco deja lápida desde aquí', async () => {
+    mockFindFirst.mockResolvedValue(null)
+    diceDondeSeFirma(parse(await call({ venueId: 'v1', requestId: 'req-x', verifiedUncharged: true })))
+    diceDondeSeFirma(parse(await call({ venueId: 'v1', requestId: 'req-x', verifiedUncharged: true, confirm: true })))
   })
 
   it('🔴 sin verifiedUncharged, una fila TIMED_OUT sigue rebotando EXACTAMENTE igual que antes', async () => {
@@ -110,10 +115,13 @@ describe('release_terminal_payment — variante declarada', () => {
     expect(out).toMatchObject({ ok: false, status: 'TIMED_OUT', outcome: 'UNRESOLVED', slotHeld: false })
     expect(out.error).toMatch(/terminal ya está libre.*venta sigue pendiente de confirmar/)
     expect(out.error).not.toMatch(/no se cobró|no está atorado/)
+    // F1: ya no invita a declarar desde aquí; dice que lo firma un gerente con su PIN.
+    expect(out.error).not.toMatch(/verifiedUncharged/)
+    expect(out.error).toMatch(/gerente.*PIN/)
     expect(mockRelease).not.toHaveBeenCalled()
   })
 
-  it('🔴 declarar pide el permiso del CAJERO', async () => {
+  it('🔴 pedir la declaración sigue exigiendo su permiso (el cajero ya no lo trae de fábrica)', async () => {
     await call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true })
     expect(mockRequirePermission).toHaveBeenCalledWith('payments:reconcile-uncharged', 'v1')
   })
@@ -129,38 +137,6 @@ describe('release_terminal_payment — variante declarada', () => {
     })
     await expect(call({ venueId: 'v1', requestId: 'req-1', verifiedUncharged: true, confirm: true })).rejects.toThrow()
     expect(mockRelease).not.toHaveBeenCalled()
-  })
-
-  it('P1 E3 (A5): con verifiedUncharged una solicitud que NO existe ya no rebota: pasa al núcleo, que deja la lápida', async () => {
-    mockFindFirst.mockResolvedValue(null)
-    // Sin confirm: vista previa honesta, sin llamar al servicio.
-    const vista = parse(await call({ venueId: 'v1', requestId: 'req-x', verifiedUncharged: true }))
-    expect(vista.requiresConfirmation).toBe(true)
-    expect(vista.message).toMatch(/DECLARAR/)
-    expect(mockRelease).not.toHaveBeenCalled()
-
-    // Con confirm: el núcleo recibe la declaración y conserva el permiso de la declaración.
-    const out = parse(await call({ venueId: 'v1', requestId: 'req-x', verifiedUncharged: true, confirm: true }))
-    expect(out.ok).toBe(true)
-    expect((mockRelease.mock.calls[0][0] as any).declaration).toMatchObject({ requestId: 'req-x', statement: 'UNCHARGED_VERIFIED' })
-    expect(mockRequirePermission).toHaveBeenCalledWith('payments:reconcile-uncharged', 'v1')
-  })
-
-  it('P2 Fix1: la auditoría del MCP en la rama sin fila apunta a la fila que quedó, y sólo dice lápida si lo es', async () => {
-    // Lápida creada por el núcleo: la auditoría lleva SU id (como la otra rama, `row.id`) y `tombstone: true`.
-    mockFindFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'row-lapida', resultJson: { tombstone: true } })
-    await call({ venueId: 'v1', requestId: 'req-x', verifiedUncharged: true, confirm: true })
-    expect(auditMcpWrite).toHaveBeenLastCalledWith(
-      scope,
-      expect.objectContaining({ entityId: 'row-lapida', data: expect.objectContaining({ requestId: 'req-x', tombstone: true }) }),
-    )
-    // La carrera cayó al camino normal (la admisión ganó la llave): ni se dice lápida ni se inventa el id.
-    mockFindFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'row-admitida', resultJson: null })
-    await call({ venueId: 'v1', requestId: 'req-y', verifiedUncharged: true, confirm: true })
-    expect(auditMcpWrite).toHaveBeenLastCalledWith(
-      scope,
-      expect.objectContaining({ entityId: 'row-admitida', data: expect.objectContaining({ requestId: 'req-y', tombstone: false }) }),
-    )
   })
 
   it('🔴 sin verifiedUncharged, una solicitud que no existe sigue diciendo «No encontré ese cobro»', async () => {

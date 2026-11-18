@@ -4,9 +4,8 @@ import { checkPermission, evaluateRolePermission, resolveRequestVenueId, resolve
 
 /**
  * 🔴 DOS acciones por una ruta, y por eso el permiso NO puede ser fijo (patrón `checkCommandTypePermission` de
- * `.claude/rules/permissions-policy.md`): liberar a secas sigue siendo de gerencia (`tpv:update`), pero DECLARAR
- * que no se cobró es del CAJERO (`payments:reconcile-uncharged`) — en un mostrador a las 10 de la mañana puede no
- * haber gerente, y esperar a uno es volver a estar parado (founder, 18-sep).
+ * `.claude/rules/permissions-policy.md`): liberar a secas sigue siendo de gerencia (`tpv:update`), y DECLARAR que no se
+ * cobró pide `payments:reconcile-uncharged` (el 18-sep lo traía el cajero; desde F1, 17-nov, lo firma un gerente con su PIN).
  *
  * Se decide por el `statement` EXACTO, nunca por un campo libre: `reason` y `confirm` ya existían y leerlos como
  * una afirmación sobre dinero sería un contrato accidental. Un `statement` desconocido cae al permiso ALTO.
@@ -20,8 +19,9 @@ import { checkPermission, evaluateRolePermission, resolveRequestVenueId, resolve
  *     permiso de declarar (un rol a la medida, una lista propia) no se queda afuera (exigir sólo `payments:create` era la
  *     regresión de A5), y quien no tiene ninguno recibe la MISMA negación de siempre — fila `PERMISSION_DENIED` en la bitácora,
  *     `required` como texto y `overridable` si el negocio tiene el PIN de gerente (re-revisión Codex r4, M1).
- * El permiso de la declaración NO se relaja: `reconcileUncharged` exige `payments:reconcile-uncharged` a la sesión o al dueño
- * del PIN (mismo venue, activo), y sin ninguno contesta 403 `SUPERVISOR_AUTHORIZATION_REQUIRED` sin buscar ni crear nada.
+ * El permiso de la declaración NO se relaja: desde F1 (17-nov) `reconcileUncharged` exige SIEMPRE el PIN de un gerente de este
+ * venue, activo y con `payments:reconcile-uncharged` (la sesión ya no basta), y sin él contesta 403
+ * `SUPERVISOR_AUTHORIZATION_REQUIRED` sin buscar ni crear nada.
  */
 export const permisoDeLiberacion = async (req: Request, res: Response, next: NextFunction) => {
   const declara = (req.body as { statement?: unknown } | undefined)?.statement === 'UNCHARGED_VERIFIED'

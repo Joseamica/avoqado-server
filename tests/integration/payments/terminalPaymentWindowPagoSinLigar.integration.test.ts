@@ -176,7 +176,14 @@ async function declaradaPorElCajero() {
   const r = await enLaVentana()
   const declaracion = await resolveNoInstrument(
     { venueId: f.venueId, terminalSerial: f.serial, attemptId: r.attemptId, actorStaffId: duena.id },
-    { requestId: r.solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+    // F1 (17-nov): la firma el PIN de la dueña; su sola sesión ya no basta.
+    {
+      requestId: r.solicitud.requestId,
+      resolutionId: randomUUID(),
+      statement: 'NO_INSTRUMENT_PRESENTED',
+      statementVersion: 1,
+      supervisorPin: '1357',
+    },
   )
   expect(await fila(r.solicitud.requestId)).toMatchObject({
     status: 'FAILED',
@@ -458,7 +465,13 @@ describe('Ronda 2 · P1: un cobro del intento que no se puede ligar tras liberar
     await expect(
       resolveNoInstrument(
         { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: duena.id },
-        { requestId: solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+        {
+          requestId: solicitud.requestId,
+          resolutionId: randomUUID(),
+          statement: 'NO_INSTRUMENT_PRESENTED',
+          statementVersion: 1,
+          supervisorPin: '1357',
+        },
       ),
     ).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
     await intacta()

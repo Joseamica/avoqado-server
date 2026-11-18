@@ -2,7 +2,8 @@
  * D22 · A1 (founder, 17-nov): «Ya revisé la terminal: no se cobró» de un **Pago rápido** llega al servidor.
  *
  * Es la tercera clase de la ruta de la terminal (`UNCHARGED_VERIFIED`), sólo en el camino LOCAL (sin solicitud del POS). Lo
- * que fijan estas pruebas: pide el permiso del CAJERO (`payments:reconcile-uncharged`), no el de gerencia; trae el monto
+ * que fijan estas pruebas: pide `payments:reconcile-uncharged`, no el de «no presentó tarjeta», y 🔴 desde F1 (17-nov) lo firma
+ * SIEMPRE el PIN de un gerente de este local (la sesión del cajero ya no basta); trae el monto
  * según la terminal y sin él se rechaza; queda en `TerminalAttemptResolution` y en la bitácora con la acción que el
  * DASHBOARD ya traduce («Cajero declaró «no se cobró»»); el reintento con el mismo cuerpo responde igual sin escribir; con
  * dinero no se declara; y las dos clases de hoy no cambian (ni su `bodyHash`).
@@ -27,14 +28,18 @@ const terminalId = '2841548417'
 const attemptId = 'att-local-1'
 const resolutionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const identidad = (actorStaffId: string | null = 'staff-cashier') => ({ venueId, terminalSerial, attemptId, actorStaffId })
+/** 🔴 F1: con el PIN del gerente por default; `supervisorPin: undefined` lo quita. */
+const PIN_GERENTE = '2222'
 const revisada = (over: Record<string, unknown> = {}) => ({
   resolutionId,
   statement: 'UNCHARGED_VERIFIED',
   statementVersion: 1,
   amountCents: 1000,
   tipCents: 150,
+  supervisorPin: PIN_GERENTE,
   ...over,
 })
+const sinPin = { supervisorPin: undefined }
 
 type Miembro = { id: string; staffId: string; role: string; pin?: string }
 const CASHIER: Miembro = { id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', pin: '3333' }
@@ -84,19 +89,19 @@ beforeEach(() => {
 })
 
 describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido llega a Avoqado', () => {
-  it('el CAJERO (payments:reconcile-uncharged, sin el permiso de gerencia) declara: testimonio con monto + bitácora que el DASHBOARD ya traduce', async () => {
+  it('🔴 F1: en la terminal del CAJERO firma el GERENTE con su PIN: testimonio con monto + bitácora que el DASHBOARD ya traduce', async () => {
     expect(CHECKED_UNCHARGED_PERMISSION).toBe('payments:reconcile-uncharged')
     const r = await resolveNoInstrument(identidad(), revisada())
-    expect(r.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
+    expect(r.resolution).toMatchObject({ id: resolutionId, by: 'SUPERVISOR_PIN' })
 
     const guardada = declaraciones.get(attemptId)
     expect(guardada).toMatchObject({ attemptId, venueId, terminalId })
     expect(guardada.resolution).toMatchObject({
       id: resolutionId,
       kind: 'UNCHARGED_VERIFIED',
-      staffId: 'staff-cashier',
-      staffVenueId: 'sv-cashier',
-      by: 'SESSION',
+      staffId: 'staff-manager',
+      staffVenueId: 'sv-manager',
+      by: 'SUPERVISOR_PIN',
       statementVersion: 1,
       amountCents: 1000,
       tipCents: 150,
@@ -111,11 +116,11 @@ describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido lle
         entity: 'TerminalAttemptResolution',
         entityId: attemptId,
         venueId,
-        staffId: 'staff-cashier',
+        staffId: 'staff-manager',
         data: {
           attemptId,
           terminalId,
-          by: 'SESSION',
+          by: 'SUPERVISOR_PIN',
           sinSolicitud: true,
           sessionStaffId: 'staff-cashier',
           resolutionId,
@@ -126,14 +131,21 @@ describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido lle
     })
     // La consulta S6 publica la declaración: es lo que deja recuperar a una terminal que murió tras mandarla.
     expect(r.attempt?.resolution).toMatchObject({ kind: 'UNCHARGED_VERIFIED', id: resolutionId })
-    // Nadie buscó un PIN: la sesión bastó.
-    expect(prismaMock.staffVenue.findFirst.mock.calls.some(([a]: any[]) => a.where.pin !== undefined)).toBe(false)
+    // El PIN no se guarda ni se audita.
+    expect(JSON.stringify([...declaraciones.values()])).not.toContain(PIN_GERENTE)
+    expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain(PIN_GERENTE)
+  })
+
+  it('🔴 F1: sin PIN no se declara — ni el cajero, ni el gerente con su propia sesión → 403, nada escrito', async () => {
+    await rechaza(resolveNoInstrument(identidad(), revisada(sinPin)), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+    await rechaza(resolveNoInstrument(identidad('staff-manager'), revisada(sinPin)), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+    nadaEscrito()
   })
 
   it('reintento con el MISMO cuerpo responde igual sin segunda escritura; otro monto es RESOLUTION_CONFLICT', async () => {
     await resolveNoInstrument(identidad(), revisada())
     const otra = await resolveNoInstrument(identidad(), revisada())
-    expect(otra.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
+    expect(otra.resolution).toMatchObject({ id: resolutionId, by: 'SUPERVISOR_PIN' })
     expect(prismaMock.terminalAttemptResolution.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
     expect(readOperatorResolution(declaraciones.get(attemptId).resolution)).not.toBeNull()
@@ -141,12 +153,17 @@ describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido lle
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
   })
 
-  it('sin el permiso del cajero (WAITER) → 403 SUPERVISOR_AUTHORIZATION_REQUIRED, nada escrito; el PIN de un cajero lo eleva', async () => {
-    await rechaza(resolveNoInstrument(identidad('staff-waiter'), revisada()), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  it('🔴 F1: el MESERO sin PIN → 403, y el PIN de un CAJERO ya no firma; el del gerente sí', async () => {
+    await rechaza(resolveNoInstrument(identidad('staff-waiter'), revisada(sinPin)), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+    await rechaza(
+      resolveNoInstrument(identidad('staff-waiter'), revisada({ supervisorPin: CASHIER.pin })),
+      'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      403,
+    )
     nadaEscrito()
-    const r = await resolveNoInstrument(identidad('staff-waiter'), revisada({ supervisorPin: '3333' }))
+    const r = await resolveNoInstrument(identidad('staff-waiter'), revisada())
     expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
-    expect(declaraciones.get(attemptId).resolution).toMatchObject({ staffId: 'staff-cashier', by: 'SUPERVISOR_PIN' })
+    expect(declaraciones.get(attemptId).resolution).toMatchObject({ staffId: 'staff-manager', by: 'SUPERVISOR_PIN' })
   })
 
   it('una sesión que ya no es del negocio → 403 SESSION_NOT_IN_VENUE, nada escrito', async () => {
@@ -157,7 +174,12 @@ describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido lle
 
   it('el permiso de la declaración NO se mezcla: el cajero sigue sin poder declarar «no presentó tarjeta»', async () => {
     await rechaza(
-      resolveNoInstrument(identidad(), { resolutionId, statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 }),
+      resolveNoInstrument(identidad(), {
+        resolutionId,
+        statement: 'NO_INSTRUMENT_PRESENTED',
+        statementVersion: 1,
+        supervisorPin: CASHIER.pin,
+      }),
       'SUPERVISOR_AUTHORIZATION_REQUIRED',
       403,
     )
@@ -205,9 +227,9 @@ describe('D22 · «Ya revisé la terminal: no se cobró» de un Pago rápido lle
     nadaEscrito()
   })
 
-  it('las dos clases de hoy no cambian su cuerpo: el bodyHash de «no presentó tarjeta» es el de siempre', async () => {
+  it('las dos clases de hoy no cambian su cuerpo: el bodyHash de «no presentó tarjeta» es el de siempre (el PIN no entra)', async () => {
     const cuerpo = { resolutionId, statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 }
-    await resolveNoInstrument(identidad('staff-manager'), cuerpo)
+    await resolveNoInstrument(identidad('staff-manager'), { ...cuerpo, supervisorPin: PIN_GERENTE })
     const guardada = declaraciones.get(attemptId).resolution
     expect(guardada.kind).toBe('NO_INSTRUMENT_PRESENTED')
     expect(guardada.amountCents).toBeUndefined()

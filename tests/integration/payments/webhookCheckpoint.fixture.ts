@@ -70,7 +70,9 @@ async function purgarFixturesHuerfanos(prefijo: string): Promise<void> {
     await prisma.angelPayUserAccount.deleteMany({ where: { venueId } })
     await prisma.staffVenue.deleteMany({ where: { venueId } })
     await prisma.staffOrganization.deleteMany({ where: { organizationId: id } })
-    await prisma.staff.deleteMany({ where: { email: { in: [`${id}-cajero@example.test`, `${id}-backoffice@example.test`] } } })
+    await prisma.staff.deleteMany({
+      where: { email: { in: [`${id}-cajero@example.test`, `${id}-backoffice@example.test`, `${id}-firmante@example.test`] } },
+    })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     await prisma.organization.deleteMany({ where: { id } })
@@ -128,6 +130,20 @@ export async function crearFixture(prefijo: string) {
       phone: '5550000001',
       organizations: { create: { organizationId: fixture, role: 'MEMBER', isPrimary: true, isActive: true } },
       venues: { create: { venueId, role: 'CASHIER', active: true } },
+    },
+  })
+  /**
+   * 🔴 F1 (founder, 17-nov): «no se cobró» y «no presentó tarjeta» los firma SIEMPRE un gerente con su PIN; la sesión del cajero
+   * ya no basta. Este gerente del local es quien firma en las suites (`supervisorPin: f.gerente.pin`).
+   */
+  const PIN_DEL_GERENTE = '739146'
+  const gerente = await prisma.staff.create({
+    data: {
+      email: `${fixture}-firmante@example.test`,
+      firstName: 'Gerente',
+      lastName: 'Webhook',
+      organizations: { create: { organizationId: fixture, role: 'MEMBER', isPrimary: true, isActive: true } },
+      venues: { create: { venueId, role: 'MANAGER', pin: PIN_DEL_GERENTE, active: true } },
     },
   })
   const provider = await prisma.paymentProvider.upsert({
@@ -420,7 +436,7 @@ export async function crearFixture(prefijo: string) {
     await prisma.angelPayUserAccount.deleteMany({ where: { id: { in: [login.id, ...secundarias.map(s => s.loginId)] } } })
     await prisma.staffVenue.deleteMany({ where: { venueId } })
     await prisma.staffOrganization.deleteMany({ where: { organizationId: fixture } })
-    await prisma.staff.deleteMany({ where: { id: staff.id } })
+    await prisma.staff.deleteMany({ where: { id: { in: [staff.id, gerente.id] } } })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     await prisma.organization.deleteMany({ where: { id: fixture } })
@@ -433,6 +449,8 @@ export async function crearFixture(prefijo: string) {
     serialCrudo,
     llaveTerminal,
     staffId: staff.id,
+    /** F1: quien firma las declaraciones con su PIN (MANAGER del local, con los permisos de fábrica). */
+    gerente: { staffId: gerente.id, pin: PIN_DEL_GERENTE },
     merchantId: merchant.id,
     merchantExternalId,
     nuevaVenta,

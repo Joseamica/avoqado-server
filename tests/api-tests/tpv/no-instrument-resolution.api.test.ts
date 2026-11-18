@@ -7,8 +7,9 @@
 
     · sin token → 401; un token SIN identidad de terminal (dashboard / POS móvil) → 403 TERMINAL_IDENTITY_REQUIRED, sin tocar la base;
     · el venue de la URL tiene que ser el del token (403 de `validateVenueAccess`), sin tocar la base;
-    · la IDENTIDAD sale del `sub` del JWT de la terminal, nunca del cuerpo: una sesión OWNER declara sin PIN (200, by SESSION), una
-      sesión CASHIER sin PIN recibe un 403 REAL (SUPERVISOR_AUTHORIZATION_REQUIRED) y con el PIN del OWNER declara (by SUPERVISOR_PIN);
+    · la IDENTIDAD sale del `sub` del JWT de la terminal, nunca del cuerpo. 🔴 F1 (17-nov): la firma SIEMPRE un gerente con su PIN —
+      la sesión OWNER sin PIN y la CASHIER sin PIN reciben el MISMO 403 REAL (SUPERVISOR_AUTHORIZATION_REQUIRED) y con el PIN del OWNER
+      declaran (by SUPERVISOR_PIN);
     · una sesión cuyo `sub` ya no es miembro activo del venue es 403 SESSION_NOT_IN_VENUE aunque mande un PIN válido;
     · los 403 de autorización dejan rastro (`TERMINAL_PAYMENT_NO_INSTRUMENT_AUTH_DENIED`) y el PIN nunca se escribe ni se serializa;
     · el 200 conserva TODOS los campos de S6 (contrato con las apps publicadas) y añade `resolution`.
@@ -155,14 +156,26 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     nadaTocado()
   })
 
-  it('(a) 200 con la sesión OWNER de la terminal: declara SIN PIN, by SESSION, y la respuesta conserva los campos de S6', async () => {
+  it('(a0) 🔴 F1: 403 REAL con la sesión OWNER sin PIN: su sesión ya no firma; el mismo código y forma que ya entienden las apps', async () => {
     const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
       .send(cuerpo())
+    expect(res.status).toBe(403)
+    expect(res.body).toMatchObject({ success: false, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    expect(typeof res.body.message).toBe('string')
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentAttemptLink.update).not.toHaveBeenCalled()
+  })
+
+  it('(a) 200 con la sesión OWNER de la terminal y SU PIN: by SUPERVISOR_PIN, y la respuesta conserva los campos de S6', async () => {
+    const res = await api()
+      .post(RUTA)
+      .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
+      .send(cuerpo({ supervisorPin: '1234' }))
     expect(res.status).toBe(200)
     expect(res.body.success).toBe(true)
-    expect(res.body.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
+    expect(res.body.resolution).toMatchObject({ id: resolutionId, by: 'SUPERVISOR_PIN' })
     expect(typeof res.body.resolution.acceptedAt).toBe('string')
     // Contrato con las apps publicadas: TODO lo que S6 ya devolvía sigue ahí. Los campos NUEVOS son aditivos — un APK
     // de la calle los ignora — y se listan aquí a propósito: si alguno desapareciera, esta prueba lo caza.
@@ -319,7 +332,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     const r409 = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
-      .send(cuerpo())
+      .send(cuerpo({ supervisorPin: '1234' }))
     expect(r409.status).toBe(409)
     expect(r409.body).toMatchObject({ success: false, code: 'POSITIVE_EVIDENCE_EXISTS' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
@@ -341,14 +354,14 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
       if (res.headers['ratelimit-limit'] === undefined && res.headers['ratelimit-remaining'] === undefined) sinCabecera++
     }
     // Un solo objeto en la aserción: si algún día falla, el reporte dice QUÉ estados volvieron, no sólo que algo no cuadró.
-    // La primera declara y el resto son replays idempotentes: todas 200, ninguna 429, ninguna con cabeceras de la cubeta.
-    expect({ estados: [...new Set(estados)], sinCabecera }).toEqual({ estados: [200], sinCabecera: 105 })
+    // F1: sin PIN ninguna declara —todas reciben el 403 que pide al gerente—, ninguna 429, ninguna con cabeceras de la cubeta.
+    expect({ estados: [...new Set(estados)], sinCabecera }).toEqual({ estados: [403], sinCabecera: 105 })
     // Con PIN la cubeta SÍ se arma (cabeceras estándar presentes) — es lo que protege el PIN de la fuerza bruta.
     const conPin = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
-    expect(conPin.status).toBe(200) // replay: ya está declarada
+    expect(conPin.status).toBe(200) // con el PIN de la dueña, declara
     expect(conPin.headers['ratelimit-limit']).toBeDefined()
     expect(conPin.headers['ratelimit-remaining']).toBeDefined()
   })

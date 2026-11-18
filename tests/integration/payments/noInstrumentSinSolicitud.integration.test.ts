@@ -91,10 +91,11 @@ async function cajeroSinPermiso() {
   })
 }
 
+/** 🔴 F1 (17-nov): la firma SIEMPRE el PIN de un gerente; por default, el del gerente de la fixture (`supervisorPin: undefined` lo quita). */
 const declarar = (attemptId: string, over: Record<string, unknown> = {}) =>
   resolveNoInstrument(
     { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: f.staffId },
-    { resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1, ...over },
+    { resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1, supervisorPin: f.gerente.pin, ...over },
   )
 
 /**
@@ -256,7 +257,7 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
     // las apps publicadas — no se toca). El `kind` se comprueba abajo, en la fila durable y en lo que publica S6.
     const eco = (r as { resolution?: { id?: string; by?: string } }).resolution
     expect(eco?.id).toEqual(expect.any(String))
-    expect(eco?.by).toBe('SESSION')
+    expect(eco?.by).toBe('SUPERVISOR_PIN')
 
     // Durable, y UNA sola vez: el `attemptId` es único.
     const fila = await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })
@@ -295,7 +296,12 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
   it('replay idempotente: la MISMA declaración dos veces no reescribe ni falla', async () => {
     await cajeroConPermiso()
     const A = randomUUID()
-    const cuerpo = { resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED' as const, statementVersion: 1 as const }
+    const cuerpo = {
+      resolutionId: randomUUID(),
+      statement: 'NO_INSTRUMENT_PRESENTED' as const,
+      statementVersion: 1 as const,
+      supervisorPin: f.gerente.pin,
+    }
     const uno = await resolveNoInstrument({ venueId: f.venueId, terminalSerial: f.serial, attemptId: A, actorStaffId: f.staffId }, cuerpo)
     const dos = await resolveNoInstrument({ venueId: f.venueId, terminalSerial: f.serial, attemptId: A, actorStaffId: f.staffId }, cuerpo)
     const rUno = (uno as { resolution: { id: string; acceptedAt: string } }).resolution
@@ -426,7 +432,12 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
   it('🔴 P2-5 · el replay NO devuelve la declaración de OTRA terminal', async () => {
     await cajeroConPermiso()
     const A = randomUUID()
-    const cuerpo = { resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED' as const, statementVersion: 1 as const }
+    const cuerpo = {
+      resolutionId: randomUUID(),
+      statement: 'NO_INSTRUMENT_PRESENTED' as const,
+      statementVersion: 1 as const,
+      supervisorPin: f.gerente.pin,
+    }
     await resolveNoInstrument({ venueId: f.venueId, terminalSerial: f.serial, attemptId: A, actorStaffId: f.staffId }, cuerpo)
 
     const otroSerial = `AVQD-N86${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`
@@ -1033,10 +1044,12 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
     expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
   })
 
-  it('sin permiso y sin PIN de supervisor: 403, y nada se escribe', async () => {
+  it('sin PIN de un gerente: 403, y nada se escribe — 🔴 F1: aunque la sesión tenga el permiso', async () => {
     await cajeroSinPermiso()
     const A = randomUUID()
-    await expect(declarar(A)).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    await expect(declarar(A, { supervisorPin: undefined })).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    await cajeroConPermiso()
+    await expect(declarar(A, { supervisorPin: undefined })).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
     expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
   })
 })
@@ -1736,19 +1749,27 @@ describe('D22 · la declaración revisada del cajero en un Pago rápido', () => 
   const revisar = (attemptId: string, over: Record<string, unknown> = {}) =>
     resolveNoInstrument(
       { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: f.staffId },
-      { resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, amountCents: 1000, tipCents: 0, ...over },
+      {
+        resolutionId: randomUUID(),
+        statement: 'UNCHARGED_VERIFIED',
+        statementVersion: 1,
+        amountCents: 1000,
+        tipCents: 0,
+        supervisorPin: f.gerente.pin,
+        ...over,
+      },
     )
 
-  it('se acepta con el permiso del cajero: testimonio con monto, bitácora «Cajero declaró» y S6 lo publica', async () => {
+  it('🔴 F1: en la terminal del cajero firma el GERENTE con su PIN: testimonio con monto, bitácora «Cajero declaró» y S6 lo publica', async () => {
     await soloPermisoDelCajero()
     const A = randomUUID()
     const r = await revisar(A, { amountCents: 1250, tipCents: 100 })
-    expect((r as { resolution?: { by?: string } }).resolution?.by).toBe('SESSION')
+    expect((r as { resolution?: { by?: string } }).resolution?.by).toBe('SUPERVISOR_PIN')
 
     const fila = await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })
-    expect(fila!.resolution).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: f.staffId, amountCents: 1250, tipCents: 100 })
+    expect(fila!.resolution).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: f.gerente.staffId, amountCents: 1250, tipCents: 100 })
     const asiento = await prisma.activityLog.findFirst({ where: { action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: A } })
-    expect(asiento).toMatchObject({ venueId: f.venueId, staffId: f.staffId, entity: 'TerminalAttemptResolution' })
+    expect(asiento).toMatchObject({ venueId: f.venueId, staffId: f.gerente.staffId, entity: 'TerminalAttemptResolution' })
     expect(asiento!.data).toMatchObject({ amountPesos: 12.5, tipPesos: 1, sinSolicitud: true, sessionStaffId: f.staffId })
 
     const visto = await consultar(A)
@@ -1774,7 +1795,7 @@ describe('D22 · la declaración revisada del cajero en un Pago rápido', () => 
     expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
   })
 
-  it('sin el permiso del cajero → 403 y nada escrito; sin monto → 409', async () => {
+  it('sin el PIN de un gerente → 403 y nada escrito (🔴 F1: ni con el permiso del cajero); sin monto → 409', async () => {
     await cajeroSinPermiso()
     const sv = await prisma.staffVenue.findFirst({ where: { venueId: f.venueId, staffId: f.staffId } })
     await prisma.venueRolePermission.update({
@@ -1782,8 +1803,15 @@ describe('D22 · la declaración revisada del cajero en un Pago rápido', () => 
       data: { deniedPermissions: [NO_INSTRUMENT_PERMISSION, CHECKED_UNCHARGED_PERMISSION] },
     })
     const A = randomUUID()
-    await expect(revisar(A)).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED', statusCode: 403 })
+    await expect(revisar(A, { supervisorPin: undefined })).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
     await soloPermisoDelCajero()
+    await expect(revisar(A, { supervisorPin: undefined })).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
     await expect(revisar(A, { amountCents: undefined })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
     expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
   })

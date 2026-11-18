@@ -3661,9 +3661,9 @@ router.get(
  *       a COMPLETED y avisa; la declaración se conserva inmutable en el vínculo del intento.
  *
  *       La identidad sale del JWT de la terminal —`terminalSerialNumber` y `sub` (la sesión con la que entró el cajero)—,
- *       nunca del cuerpo (esquema estricto: una llave extra es 409). Sin PIN si la sesión tiene el permiso efectivo
- *       `payments:resolve-no-instrument` (OWNER/ADMIN/MANAGER de fábrica); `supervisorPin` sólo eleva a un miembro válido
- *       del venue que no lo tiene. Una sesión que ya no es miembro activo del venue no se rescata con ningún PIN.
+ *       nunca del cuerpo (esquema estricto: una llave extra es 409). 🔴 F1 (17-nov): una declaración de una persona la firma
+ *       SIEMPRE el `supervisorPin` de un gerente (MANAGER o más) de este venue con el permiso efectivo; la sesión ya no basta,
+ *       aunque lo tenga. Una sesión que ya no es miembro activo del venue no se rescata con ningún PIN.
  *
  *       Veta la declaración cualquier evidencia positiva: un Payment del intento o de la solicitud, `paymentId` en la fila,
  *       una señal positiva en el sobre de la terminal, un webhook APROBADO o con contradicción de procedencia, una fila
@@ -3706,8 +3706,8 @@ router.get(
  *                 enum: [NO_INSTRUMENT_PRESENTED, NO_BANK_TRACE_AFTER_WINDOW, UNCHARGED_VERIFIED]
  *                 description: >
  *                   `UNCHARGED_VERIFIED` (D22, 17-nov) = el CAJERO revisó la terminal y no se cobró. Sólo en un Pago rápido
- *                   (sin solicitud del POS: con ella, 409 ATTEMPT_NOT_ELIGIBLE), con el permiso `payments:reconcile-uncharged`
- *                   y con `amountCents`/`tipCents` obligatorios. Mismo veto de dinero; queda en la bitácora como
+ *                   (sin solicitud del POS: con ella, 409 ATTEMPT_NOT_ELIGIBLE), firmado con el PIN de un gerente con
+ *                   `payments:reconcile-uncharged` y con `amountCents`/`tipCents` obligatorios. Mismo veto de dinero; queda en la bitácora como
  *                   TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED.
  *                   `NO_BANK_TRACE_AFTER_WINDOW` (ronda 20, 23-sep) = la TERMINAL, no una persona: esperó el aviso del banco
  *                   y no llegó. Sólo en un Pago rápido (sin solicitud del POS), sin `supervisorPin`, sin pedir permiso de
@@ -3730,7 +3730,7 @@ router.get(
  *                 enum: [1]
  *               supervisorPin:
  *                 type: string
- *                 description: Sólo cuando la sesión NO tiene el permiso — el PIN de alguien que sí lo tiene. Nunca se guarda
+ *                 description: F1 — obligatorio en las declaraciones de una persona — el PIN de un gerente con el permiso. Nunca se guarda
  *     responses:
  *       200:
  *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN | AUTOMATIC } }"
@@ -3813,7 +3813,7 @@ const exigirDeclaracionSinCobro = (req: Request, res: Response, next: NextFuncti
  *                 enum: [1]
  *               supervisorPin:
  *                 type: string
- *                 description: Sólo cuando la sesión NO tiene `payments:reconcile-uncharged` — el PIN de alguien que sí lo tiene. Nunca se guarda
+ *                 description: F1 — obligatorio — el PIN de un gerente con `payments:reconcile-uncharged`. Nunca se guarda
  *     responses:
  *       200:
  *         description: "{ success, released, status, requestId, paymentId, outcome, outcomeEvidence, resolution, message }. `released: false` = apareció dinero: no se liberó"

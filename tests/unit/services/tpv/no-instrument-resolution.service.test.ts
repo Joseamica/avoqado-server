@@ -1,8 +1,8 @@
 /**
- * La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4): UN paso en la terminal cierra la fila como
- * `FAILED/OPERATOR_RECONCILED_NO_CHARGE`, sin reinicio y sin PIN cuando la SESIÓN de la terminal (el PIN con el que entró
- * el cajero: `authContext.userId`) ya tiene el permiso efectivo `payments:resolve-no-instrument`; el PIN de otra persona
- * sólo ELEVA a un miembro válido del venue que no lo tiene.
+ * La declaración «no se presentó tarjeta» (plan 16-sep, Task 4): UN paso en la terminal cierra la fila como
+ * `FAILED/OPERATOR_RECONCILED_NO_CHARGE`, sin reinicio. 🔴 F1 (founder, 17-nov): la firma SIEMPRE el PIN de un gerente
+ * (MANAGER o superior) de este local con el permiso efectivo `payments:resolve-no-instrument`; la SESIÓN de la terminal
+ * (`authContext.userId`) sólo tiene que ser miembro válido del venue, y ya no basta aunque traiga el permiso.
  *
  * Mockeo con el `prismaMock` global de `tests/__helpers__/setup.ts` (como `terminal-payment.service.test.ts`): la
  * transacción corre el callback con el propio mock; `$queryRaw` sirve al candado del intento, a los FOR UPDATE y a la
@@ -25,7 +25,14 @@ const attemptId = 'att-1'
 const requestId = 'req-1'
 const resolutionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const identidad = { venueId, terminalSerial, attemptId, actorStaffId: 'staff-owner' }
-const declaracion = () => ({ requestId, resolutionId, statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 })
+/** 🔴 F1 (17-nov): la declaración la firma SIEMPRE un gerente con su PIN. Sin argumento, el PIN de la dueña; `null`, sin PIN. */
+const declaracion = (supervisorPin: string | null = '1234') => ({
+  requestId,
+  resolutionId,
+  statement: 'NO_INSTRUMENT_PRESENTED',
+  statementVersion: 1,
+  ...(supervisorPin ? { supervisorPin } : {}),
+})
 
 /** La fila que la ventana de confirmación todavía no decidió: negativo de la terminal SIN evidencia (Task 2). */
 function filaTimedOutSinEvidencia(over: Record<string, unknown> = {}) {
@@ -60,15 +67,27 @@ function linkDeEstaTerminal(over: Record<string, unknown> = {}) {
 }
 
 /** Miembros del venue: por `staffId` (la sesión) o por `pin` (la elevación). Todo lo demás: no es miembro. */
-type Miembro = { id: string; staffId: string; role: string; pin?: string; permissionSetId?: string | null; permissionSet?: unknown }
+type Miembro = {
+  id: string
+  staffId: string
+  role: string
+  pin?: string
+  venueId?: string
+  permissionSetId?: string | null
+  permissionSet?: unknown
+}
 const OWNER: Miembro = { id: 'sv-owner', staffId: 'staff-owner', role: 'OWNER', pin: '1234' }
 const MANAGER: Miembro = { id: 'sv-manager', staffId: 'staff-manager', role: 'MANAGER', pin: '2222' }
 const CASHIER: Miembro = { id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', pin: '3333' }
+/** Un gerente de OTRO local: su PIN no firma aquí. */
+const MANAGER_DE_OTRO_LOCAL: Miembro = { id: 'sv-otro', staffId: 'staff-otro', role: 'MANAGER', pin: '5555', venueId: 'v2' }
 
 function conMiembros(miembros: Miembro[]) {
   prismaMock.staffVenue.findFirst.mockImplementation(async ({ where }: any) => {
-    if (where.venueId !== venueId || where.active !== true || where.staff?.active !== true) return null
-    const m = miembros.find(x => (where.pin !== undefined ? x.pin === where.pin : x.staffId === where.staffId))
+    if (where.active !== true || where.staff?.active !== true) return null
+    const m = miembros.find(
+      x => (x.venueId ?? venueId) === where.venueId && (where.pin !== undefined ? x.pin === where.pin : x.staffId === where.staffId),
+    )
     if (!m) return null
     return {
       id: m.id,
@@ -128,7 +147,7 @@ function armar(filaOver: Record<string, unknown> = {}, linkOver: Record<string, 
     if (sql.includes('"Order"') && sql.includes('FOR UPDATE')) return fila.orderId ? [{ id: fila.orderId }] : []
     return []
   })
-  conMiembros([OWNER, MANAGER, CASHIER])
+  conMiembros([OWNER, MANAGER, CASHIER, MANAGER_DE_OTRO_LOCAL])
 }
 const sqlDe = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : String(call[0]))
 
@@ -168,9 +187,9 @@ beforeEach(() => {
 })
 
 describe('resolveNoInstrument — la declaración del cajero cierra el intento como OPERATOR_RECONCILED_NO_CHARGE', () => {
-  it('1. la sesión con permiso efectivo declara sin PIN y la fila queda acreditada por OPERADOR', async () => {
+  it('1. 🔴 F1: con el PIN de la dueña se declara y la fila queda acreditada por OPERADOR', async () => {
     const r = await resolveNoInstrument(identidad, declaracion())
-    expect(r.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
+    expect(r.resolution).toMatchObject({ id: resolutionId, by: 'SUPERVISOR_PIN' })
     expect(typeof r.resolution.acceptedAt).toBe('string')
     // El CAS es UN UPDATE crudo condicional (Codex r1, P1-C d): estado LEÍDO, sin Payment, y los dos NOT EXISTS de evidencia positiva.
     const cas = casEscrito()
@@ -199,7 +218,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
       id: resolutionId,
       kind: 'NO_INSTRUMENT_PRESENTED',
       staffId: 'staff-owner',
-      by: 'SESSION',
+      by: 'SUPERVISOR_PIN',
     })
     // La declaración se guarda UNA vez en el vínculo, con quién la hizo y qué había antes.
     expect(prismaMock.terminalPaymentAttemptLink.update).toHaveBeenCalledWith(
@@ -211,7 +230,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
             kind: 'NO_INSTRUMENT_PRESENTED',
             staffId: 'staff-owner',
             staffVenueId: 'sv-owner',
-            by: 'SESSION',
+            by: 'SUPERVISOR_PIN',
             statementVersion: 1,
             previousRequest: { status: 'TIMED_OUT', failureCode: null },
           }),
@@ -227,7 +246,14 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
           entityId: 'row-1',
           venueId,
           staffId: 'staff-owner',
-          data: expect.objectContaining({ requestId, attemptId, terminalId, by: 'SESSION', sessionStaffId: 'staff-owner', resolutionId }),
+          data: expect.objectContaining({
+            requestId,
+            attemptId,
+            terminalId,
+            by: 'SUPERVISOR_PIN',
+            sessionStaffId: 'staff-owner',
+            resolutionId,
+          }),
         }),
       }),
     )
@@ -245,16 +271,30 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
         evidenceClass: 'OPERATOR',
       }),
     })
-    // Nadie buscó un PIN: la sesión bastó.
-    expect(prismaMock.staffVenue.findFirst.mock.calls.some(([a]: any[]) => a.where.pin !== undefined)).toBe(false)
+    // Firmó el PIN: la sesión, aunque sea la dueña, ya no basta.
+    expect(prismaMock.staffVenue.findFirst.mock.calls.some(([a]: any[]) => a.where.pin === '1234')).toBe(true)
+    // El PIN no se guarda ni se serializa en ningún lado.
+    expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain('1234')
+    expect(JSON.stringify(prismaMock.$executeRaw.mock.calls)).not.toContain('1234')
   })
 
-  it('2. otra persona con permiso (MANAGER) también declara sin PIN: el permiso decide, no el rol OWNER', async () => {
-    const r = await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-manager' }, declaracion())
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+  it('2. 🔴 F1: una sesión CON permiso (OWNER o MANAGER) sin PIN ya no declara → 403 SUPERVISOR_AUTHORIZATION_REQUIRED, nada escrito', async () => {
+    await rechaza(resolveNoInstrument(identidad, declaracion(null)), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-manager' }, declaracion(null)),
+      'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      403,
+    )
+    nadaEscrito()
+    // Con SU PIN el gerente sí firma, y el asiento lo dice.
+    const r = await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-manager' }, declaracion('2222'))
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ staffId: 'staff-manager', data: expect.objectContaining({ by: 'SESSION' }) }),
+        data: expect.objectContaining({
+          staffId: 'staff-manager',
+          data: expect.objectContaining({ by: 'SUPERVISOR_PIN', sessionStaffId: 'staff-manager' }),
+        }),
       }),
     )
     expect(NO_INSTRUMENT_PERMISSION).toBe('payments:resolve-no-instrument')
@@ -262,7 +302,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
 
   it('3. sesión SIN permiso (CASHIER) y sin supervisorPin → 403 SUPERVISOR_AUTHORIZATION_REQUIRED, nada escrito', async () => {
     await rechaza(
-      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion()),
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion(null)),
       'SUPERVISOR_AUTHORIZATION_REQUIRED',
       403,
     )
@@ -303,7 +343,31 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
       'SUPERVISOR_AUTHORIZATION_REQUIRED',
       403,
     )
+    // 🔴 F1: ni el de un gerente de OTRO local.
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion(MANAGER_DE_OTRO_LOCAL.pin!)),
+      'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      403,
+    )
     nadaEscrito()
+  })
+
+  it('4c. 🔴 F1: un CAJERO con el permiso en su lista propia (o un comodín) no firma: ni con su sesión ni con su PIN', async () => {
+    for (const permisos of [[NO_INSTRUMENT_PERMISSION], ['payments:*']]) {
+      rearmar()
+      conMiembros([OWNER, { ...CASHIER, permissionSetId: 'ps-c', permissionSet: { permissions: permisos } }])
+      await rechaza(
+        resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion(null)),
+        'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        403,
+      )
+      await rechaza(
+        resolveNoInstrument({ ...identidad, actorStaffId: 'staff-owner' }, declaracion(CASHIER.pin!)),
+        'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        403,
+      )
+      nadaEscrito()
+    }
   })
 
   it('5. el permiso negado explícitamente en VenueRolePermission.deniedPermissions → 403 aunque el rol lo traiga', async () => {
@@ -318,9 +382,12 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     nadaEscrito()
 
     rearmar()
-    conMiembros([{ ...CASHIER, permissionSetId: 'ps-2', permissionSet: { permissions: ['orders:read', NO_INSTRUMENT_PERMISSION] } }])
-    const r = await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion())
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    conMiembros([
+      CASHIER,
+      { ...MANAGER, permissionSetId: 'ps-2', permissionSet: { permissions: ['orders:read', NO_INSTRUMENT_PERMISSION] } },
+    ])
+    const r = await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-manager' }, declaracion('2222'))
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     // Con conjunto asignado no se consulta la personalización por rol: el conjunto ES la lista efectiva.
     expect(prismaMock.venueRolePermission.findUnique).not.toHaveBeenCalled()
   })
@@ -469,7 +536,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
         status: 'UNKNOWN',
         resultJson: { requestId, status: 'timeout', claimedSuccess: { paymentId: '', reference: null, approved: false } },
       })
-      expect((await resolveNoInstrument(identidad, declaracion())).resolution).toMatchObject({ by: 'SESSION' })
+      expect((await resolveNoInstrument(identidad, declaracion())).resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     })
 
     // Codex r1 · P1-E: la identidad LEGACY del Payment (etiqueta en processorData) también veta, acotada al venue.
@@ -538,9 +605,8 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
   })
 
-  it('1b. `supervisorPin: null` es «ausente» (un DTO String? serializado con nulls no puede volverse 409): con permiso declara por SESSION; sin permiso → 403', async () => {
-    const r = await resolveNoInstrument(identidad, { ...declaracion(), supervisorPin: null })
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+  it('1b. `supervisorPin: null` es «ausente» (un DTO String? serializado con nulls no puede volverse 409): sin PIN → 403, también con permiso', async () => {
+    await rechaza(resolveNoInstrument(identidad, { ...declaracion(), supervisorPin: null }), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
     rearmar()
     await rechaza(
       resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, { ...declaracion(), supervisorPin: null }),
@@ -561,7 +627,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
 
   it('el candado del intento y el vínculo usan la llave NORMALIZADA (`llaveDeIntento`): un param con espacios alrededor es el mismo intento', async () => {
     const r = await resolveNoInstrument({ ...identidad, attemptId: '  att-1  ' }, declaracion())
-    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     const candado = prismaMock.$queryRaw.mock.calls.find((c: any[]) => sqlDe(c).includes('pg_advisory_xact_lock'))
     expect(candado).toBeDefined()
     expect(candado[candado.length - 1]).toBe('att-1')
@@ -644,7 +710,7 @@ describe('Revisión final · A: la declaración despierta al POS (después del c
     despertar.mockRejectedValueOnce(new Error('memoria corrupta'))
     // `resolves`: si el fallo al despertar escapara, la prueba cae por ASERCIÓN (promesa rechazada), no por una excepción suelta.
     await expect(resolveNoInstrument(identidad, declaracion())).resolves.toMatchObject({
-      resolution: { id: resolutionId, by: 'SESSION' },
+      resolution: { id: resolutionId, by: 'SUPERVISOR_PIN' },
       request: { status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' },
     })
     expect(despertar).toHaveBeenCalledTimes(1)
@@ -652,7 +718,7 @@ describe('Revisión final · A: la declaración despierta al POS (después del c
 
   it('un rechazo (403 sin permiso, 409 con evidencia) no despierta a nadie', async () => {
     await rechaza(
-      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion()),
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion(null)),
       'SUPERVISOR_AUTHORIZATION_REQUIRED',
       403,
     )

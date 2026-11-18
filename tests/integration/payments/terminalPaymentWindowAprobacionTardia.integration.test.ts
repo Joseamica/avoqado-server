@@ -212,7 +212,14 @@ describe('Revisión final · B: la aprobación tardía que NO crea dinero re-ret
     const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
     const declaracion = await resolveNoInstrument(
       { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: duena.id },
-      { requestId: solicitud.requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+      // F1 (17-nov): la firma el PIN de la dueña; su sola sesión ya no basta.
+      {
+        requestId: solicitud.requestId,
+        resolutionId: randomUUID(),
+        statement: 'NO_INSTRUMENT_PRESENTED',
+        statementVersion: 1,
+        supervisorPin: '2468',
+      },
     )
     expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta!.id)).toBe(false)

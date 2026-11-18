@@ -2062,7 +2062,8 @@ router.post(
  * card payment exists the request is closed as COMPLETED and NOT released. The watchdog also
  * frees it on its own once the terminal is back + 2 min; this is the manager's shortcut.
  * Releasing WITHOUT a declaration needs `tpv:update` (MANAGER+, managing the terminal). DECLARING «no se cobró» (the
- * `UNCHARGED_VERIFIED` statement) passes with `payments:create` or `payments:reconcile-uncharged`: see `permisoDeLiberacion`.
+ * `UNCHARGED_VERIFIED` statement) passes with `payments:create` or `payments:reconcile-uncharged`: see `permisoDeLiberacion`; since
+ * F1 (17-nov) the service then requires a manager's `supervisorPin`, whatever the session holds.
  */
 router.post(
   '/venues/:venueId/terminal-payment/:requestId/release',

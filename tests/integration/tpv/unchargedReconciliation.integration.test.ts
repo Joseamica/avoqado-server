@@ -206,13 +206,18 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
 
     const r = await reconcileUncharged(
       { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-      { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
     )
     expect(r.kind).toBe('UNCHARGED_VERIFIED')
 
     const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
     expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', cancelDisposition: null })
-    expect(fila?.operatorReconciliation).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: staffCajeroId })
+    expect(fila?.operatorReconciliation).toMatchObject({
+      kind: 'UNCHARGED_VERIFIED',
+      staffId: staffGerenteId,
+      by: 'SUPERVISOR_PIN',
+      sessionStaffId: staffCajeroId,
+    })
 
     // 🔴 DESPUÉS: la ranura quedó libre de verdad. Esto es lo que el cajero no podía conseguir el 18-sep.
     const nueva = await prisma.terminalPaymentRequest.create({
@@ -231,7 +236,8 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       where: { action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', venueId, entityId: fila!.id },
     })
     expect(asientos).toHaveLength(1)
-    expect(asientos[0].staffId).toBe(staffCajeroId)
+    expect(asientos[0].staffId).toBe(staffGerenteId)
+    expect(asientos[0].data).toMatchObject({ by: 'SUPERVISOR_PIN', sessionStaffId: staffCajeroId })
   })
 
   it('🔴 con un Payment ligado NO declara: el SQL del veto corre de verdad', async () => {
@@ -268,7 +274,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     await expect(
       reconcileUncharged(
         { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-        { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
       ),
     ).rejects.toThrow(UnchargedReconciliationError)
 
@@ -277,14 +283,16 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     expect(fila?.operatorReconciliation).toBeNull()
   })
 
-  it('🔴 un WAITER no puede declarar, aunque la fila sea elegible', async () => {
+  it('🔴 sin el PIN de un gerente no se declara, aunque la fila sea elegible (F1: ni el WAITER ni el CAJERO)', async () => {
     const requestId = await sembrarFilaAtorada()
-    await expect(
-      reconcileUncharged(
-        { venueId, requestId, actorStaffId: staffMeseroId, source: 'MOBILE' },
-        { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
-      ),
-    ).rejects.toMatchObject({ statusCode: 403 })
+    for (const actorStaffId of [staffMeseroId, staffCajeroId]) {
+      await expect(
+        reconcileUncharged(
+          { venueId, requestId, actorStaffId, source: 'MOBILE' },
+          { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        ),
+      ).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED', statusCode: 403 })
+    }
 
     const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
     expect(fila?.status).toBe('UNKNOWN')
@@ -295,7 +303,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     const unaDeclaracion = () =>
       reconcileUncharged(
         { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-        { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
       )
 
     const resultados = await Promise.allSettled([unaDeclaracion(), unaDeclaracion()])
@@ -318,7 +326,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     const declararla = () =>
       reconcileUncharged(
         { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
       )
     await declararla()
 
@@ -366,7 +374,13 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       venueId,
       actor: { staffId: staffCajeroId, source: 'MOBILE' },
       reason: 'replay',
-      declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      declaration: {
+        requestId,
+        resolutionId: resolucionFija,
+        statement: 'UNCHARGED_VERIFIED',
+        statementVersion: 1,
+        supervisorPin: PIN_GERENTE,
+      },
     })
     expect(r.released).toBe(false)
     expect(r.status).toBe('COMPLETED')
@@ -378,7 +392,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     const declarar = () =>
       reconcileUncharged(
         { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
       )
     await declarar()
 
@@ -423,7 +437,13 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       venueId,
       actor: { staffId: staffCajeroId, source: 'MOBILE' },
       reason: 'replay',
-      declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      declaration: {
+        requestId,
+        resolutionId: resolucionFija,
+        statement: 'UNCHARGED_VERIFIED',
+        statementVersion: 1,
+        supervisorPin: PIN_GERENTE,
+      },
     })
     expect(r.released).toBe(false)
   })
@@ -435,7 +455,13 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     // ni el puntero de la fila se mueven: el replay respondía `released:true` y le decía al cajero
     // «vuelve a cobrar» con el cargo ya hecho. Una declaración NUEVA sí lo habría vetado.
     const requestId = await sembrarFilaAtorada()
-    const declaration = { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED' as const, statementVersion: 1 as const }
+    const declaration = {
+      requestId,
+      resolutionId: resolucionFija,
+      statement: 'UNCHARGED_VERIFIED' as const,
+      statementVersion: 1 as const,
+      supervisorPin: PIN_GERENTE,
+    }
     const attemptId = `att-cruce-${sufijo}-${Math.random().toString(36).slice(2, 8)}`
     await prisma.terminalPaymentAttemptLink.create({ data: { requestId, attemptId, venueId, terminalId } })
 
@@ -495,7 +521,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     const requestId = await sembrarFilaAtorada()
     await reconcileUncharged(
       { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-      { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
     )
     let emitidos = 0
     expect(await entregar(requestId, () => void emitidos++)).toBe(false)
@@ -564,7 +590,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     await expect(
       reconcileUncharged(
         { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
       ),
     ).rejects.toMatchObject({ code: expect.stringMatching(/POSITIVE_EVIDENCE_EXISTS|TERMINAL_NEVER_ANSWERED/) })
   })
@@ -576,6 +602,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       resolutionId: resolucionFija,
       statement: 'UNCHARGED_VERIFIED' as const,
       statementVersion: 1,
+      supervisorPin: PIN_GERENTE,
     }
     await reconcileUncharged({ venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' }, declaracion)
 
@@ -603,7 +630,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     })
     const r = await reconcileUncharged(
       { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
-      { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: PIN_GERENTE },
     )
     expect(r.kind).toBe('UNCHARGED_VERIFIED')
     await prisma.terminal.deleteMany({ where: { venueId } })
@@ -950,11 +977,13 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
   // ══════════════════════════════════════════════════════════════════════════════════════════
   describe('A5 · la declaración alcanza E2, E3, E5 y E7', () => {
     const svc = terminalPaymentService as any
+    /** F1 (17-nov): la firma SIEMPRE el PIN de un gerente; por default el de la suite (`supervisorPin: undefined` lo quita). */
     const cuerpo = (requestId: string, extra: Record<string, unknown> = {}) => ({
       requestId,
       resolutionId: randomUUID(),
       statement: 'UNCHARGED_VERIFIED' as const,
       statementVersion: 1,
+      supervisorPin: PIN_GERENTE,
       ...extra,
     })
     const comoCajero = (requestId: string) => ({ venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' })
@@ -1071,13 +1100,18 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       expect(lapida.id).toMatch(/^c[a-z0-9]{24}$/)
       expect(lapida.expiresAt.getTime()).toBeLessThanOrEqual(Date.now())
       expect(lapida.resultJson).toMatchObject({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED', tombstone: true })
-      expect(lapida.operatorReconciliation).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: staffCajeroId, by: 'SESSION' })
+      expect(lapida.operatorReconciliation).toMatchObject({
+        kind: 'UNCHARGED_VERIFIED',
+        staffId: staffGerenteId,
+        by: 'SUPERVISOR_PIN',
+        sessionStaffId: staffCajeroId,
+      })
       expect(r.resolution?.id).toBe((lapida.operatorReconciliation as { id: string }).id)
       const asientos = await prisma.activityLog.findMany({
         where: { venueId, action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: lapida.id },
       })
       expect(asientos).toHaveLength(1)
-      expect(asientos[0].staffId).toBe(staffCajeroId)
+      expect(asientos[0].staffId).toBe(staffGerenteId)
       expect(asientos[0].data).toMatchObject({ requestId, tombstone: true })
 
       // El GET del POS dice «no se cobró» (antes era un 404 eterno).
@@ -1193,7 +1227,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
 
     it('P1 E7: un mesero sin PIN recibe SUPERVISOR_AUTHORIZATION_REQUIRED; con el PIN de un gerente declara y la bitácora dice SUPERVISOR_PIN', async () => {
       const requestId = await sembrarFilaAtorada()
-      await expect(reconcileUncharged(comoMesero(requestId), cuerpo(requestId))).rejects.toMatchObject({
+      await expect(reconcileUncharged(comoMesero(requestId), cuerpo(requestId, { supervisorPin: undefined }))).rejects.toMatchObject({
         code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
         statusCode: 403,
       })
@@ -1224,7 +1258,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       // Ruling del controlador (pre-revisión): el PIN NUNCA se guarda, tampoco como hash (un hash de 4-6 dígitos se revierte por
       // fuerza bruta). Por eso no entra a `bodyHash`: la misma declaración autorizada por otro gerente es LA MISMA declaración.
       const requestId = await sembrarFilaAtorada()
-      const declaracion = cuerpo(requestId)
+      const declaracion = cuerpo(requestId, { supervisorPin: undefined })
       const primera = await reconcileUncharged(comoMesero(requestId), { ...declaracion, supervisorPin: PIN_GERENTE })
       const segunda = await reconcileUncharged(comoMesero(requestId), { ...declaracion, supervisorPin: PIN_GERENTE_2 })
       expect(segunda).toEqual(primera)
@@ -1324,7 +1358,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
 
     it('P1 E3: sin permiso ni PIN NO se crea lápida (403)', async () => {
       const requestId = randomUUID()
-      await expect(declararPorElPos(requestId, staffMeseroId)).rejects.toMatchObject({ statusCode: 403 })
+      await expect(declararPorElPos(requestId, staffMeseroId, { supervisorPin: undefined })).rejects.toMatchObject({ statusCode: 403 })
       expect(await filasDe(requestId)).toHaveLength(0)
     })
 

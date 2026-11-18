@@ -6,7 +6,8 @@
   y una prueba de servicio no demuestra:
 
     · un MESERO (WAITER: `payments:create`, sin `payments:reconcile-uncharged`) LLEGA al servicio y recibe el 403 con código
-      `SUPERVISOR_AUTHORIZATION_REQUIRED` —el mismo de «no presentó tarjeta»—, no el 403 genérico del middleware;
+      `SUPERVISOR_AUTHORIZATION_REQUIRED` —el mismo de «no presentó tarjeta»—, no el 403 genérico del middleware; 🔴 desde F1
+      (17-nov) también el CAJERO y quien trae el permiso de declarar: la firma siempre es el PIN de un gerente;
     · la cubeta del PIN sólo cuenta cuerpos CON `supervisorPin` y responde 429 por HTTP; sin PIN no cuenta (Codex plan-r1-3);
     · un error inesperado con el PIN en el cuerpo nunca saca el PIN ni en la respuesta ni en el log.
 */
@@ -158,16 +159,18 @@ describe('POST /mobile/venues/:venueId/terminal-payment/:requestId/release — l
       })
     }
 
-    it('P1 (a) SÓLO `payments:reconcile-uncharged`, sin `payments:create`: pasa la puerta Y la autorización del servicio', async () => {
+    it('P1 (a) SÓLO `payments:reconcile-uncharged`, sin `payments:create`: pasa la PUERTA, y el servicio le pide el PIN de un gerente (F1)', async () => {
       const token = sesionConLista(['payments:reconcile-uncharged'])
-      // Lo primero que hace el servicio DESPUÉS de autorizar es enumerar los vínculos: se corta ahí, a propósito, para fijar
-      // por HTTP que la puerta y la autorización dejaron pasar a esta persona (la aceptación entera, contra Postgres, vive en
-      // `terminalPaymentReleaseRuta.integration.test.ts`).
-      prismaMock.terminalPaymentAttemptLink.findMany.mockRejectedValueOnce(new Error('alto: ya pasó la autorización'))
       const res = await api().post(RUTA).set('Authorization', `Bearer ${token}`).send(cuerpo())
-      expect(res.status).toBe(500)
-      expect(prismaMock.terminalPaymentAttemptLink.findMany).toHaveBeenCalledTimes(1)
-      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_UNCHARGED_AUTH_DENIED' }))
+      // 🔴 F1 (17-nov): su sesión ya no firma. No es la negación de la puerta (no trae `required`): es el 403 del servicio con el
+      // código que las apps instaladas ya saben convertir en «pide el PIN del gerente».
+      expect({ status: res.status, code: res.body.code, required: res.body.required }).toEqual({
+        status: 403,
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        required: undefined,
+      })
+      expect(prismaMock.terminalPaymentAttemptLink.findMany).not.toHaveBeenCalled()
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_UNCHARGED_AUTH_DENIED' }))
     })
 
     it('P1 (b) SÓLO `payments:create` (el mesero) y sin PIN: llega al servicio y recibe SUPERVISOR_AUTHORIZATION_REQUIRED', async () => {

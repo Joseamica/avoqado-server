@@ -97,8 +97,8 @@ export const getRequestStatus = async (req: Request, res: Response) => {
  *
  * La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4), en UN paso. La identidad es la de la
  * terminal (`terminalSerialNumber`) y la de la SESIÓN (`authContext.userId`: el PIN con el que entró) — nunca la del
- * cuerpo. Sin PIN si la sesión tiene `payments:resolve-no-instrument`; el `supervisorPin` sólo eleva a un miembro
- * válido del venue que no lo tiene.
+ * cuerpo. 🔴 F1 (17-nov): las declaraciones de una persona las firma SIEMPRE el `supervisorPin` de un gerente de este local
+ * con el permiso; la sesión sólo tiene que ser miembro válido del venue.
  *
  *  · 403 `TERMINAL_IDENTITY_REQUIRED` si el token no es de una terminal (dashboard / POS móvil).
  *  · 403 `SUPERVISOR_AUTHORIZATION_REQUIRED` / `SESSION_NOT_IN_VENUE` (con rastro `TERMINAL_PAYMENT_NO_INSTRUMENT_AUTH_DENIED`).

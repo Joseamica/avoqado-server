@@ -125,10 +125,11 @@ const consultar = (requestId: string) => terminalPaymentService.getPaymentStatus
 const soltar = (requestId: string, now: Date, origen: 'TIMER' | 'WATCHDOG' = 'WATCHDOG') =>
   svc.soltarRanuraTrasCierre({ requestId, venueId: f.venueId }, now, origen) as Promise<string>
 const vigia = () => new TerminalPaymentWatchdogJob().run()
+/** F1 (17-nov): la firma SIEMPRE el PIN de un gerente; por default, el gerente de la fixture (`supervisorPin: undefined` lo quita). */
 const declarar = (requestId: string, actorStaffId: string, extra: Record<string, unknown> = {}) =>
   reconcileUncharged(
     { venueId: f.venueId, requestId, actorStaffId, source: 'MOBILE' },
-    { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, ...extra },
+    { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1, supervisorPin: f.gerente.pin, ...extra },
   )
 
 /** Las cuentas de la terminal (`assignedMerchantIds`) y cuáles tienen el aviso del banco comprobado. */
@@ -563,7 +564,7 @@ describe('S2 · con el cese acreditado se suelta la RANURA a los 10 s; la VENTA 
     const mesero = await persona('WAITER')
     const gerente = await persona('MANAGER', pinGerente)
     try {
-      // 1) El cajero (con el permiso) declara sobre la venta en duda de la ranura ya soltada: se acepta y la venta se libera.
+      // 1) En la caja del cajero, el gerente firma con su PIN (F1) sobre la venta en duda de la ranura ya soltada: se acepta y se libera.
       const uno = await soltadaTrasCierre()
       await expect(declarar(uno.solicitud.requestId, f.staffId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
       expect(await fila(uno.solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
@@ -571,7 +572,9 @@ describe('S2 · con el cese acreditado se suelta la RANURA a los 10 s; la VENTA 
 
       // 2) El mesero sin el permiso necesita el PIN de un gerente.
       const dos = await soltadaTrasCierre()
-      await expect(declarar(dos.solicitud.requestId, mesero.id)).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+      await expect(declarar(dos.solicitud.requestId, mesero.id, { supervisorPin: undefined })).rejects.toMatchObject({
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      })
       await expect(declarar(dos.solicitud.requestId, mesero.id, { supervisorPin: pinGerente })).resolves.toMatchObject({
         kind: 'UNCHARGED_VERIFIED',
         staffId: gerente.id,

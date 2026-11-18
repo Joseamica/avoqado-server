@@ -14,7 +14,7 @@
  *  | quién declara | la TERMINAL, con su JWT | el POS, con la sesión del cajero |
  *  | sobre qué | un INTENTO ligado (`TerminalPaymentAttemptLink`) | una SOLICITUD — las filas legacy no tienen intento |
  *  | qué afirma | nadie presentó tarjeta | una persona MIRÓ la pantalla y no hubo cobro |
- *  | permiso | `payments:resolve-no-instrument` (gerencia) | `payments:reconcile-uncharged` (el cajero) |
+ *  | permiso | `payments:resolve-no-instrument` (gerencia) | `payments:reconcile-uncharged` (desde F1, el PIN de un gerente) |
  *
  * Escriben el MISMO desenlace —`FAILED` + `OPERATOR_RECONCILED_NO_CHARGE`— porque es el que sale de los tres
  * candados: el bloqueo heredado, el estricto (el código está en `CODIGOS_SIN_COBRO`) y el índice único parcial,
@@ -27,9 +27,9 @@
  */
 import { createHash } from 'crypto'
 import { z } from 'zod'
-import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
+import { Prisma, StaffRole, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
+import { evaluatePermissionList, hasPermission, ROLE_HIERARCHY } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
@@ -140,7 +140,7 @@ async function miembroConPermiso(
   tx: Prisma.TransactionClient,
   venueId: string,
   staffId: string,
-): Promise<{ id: string; staffId: string; permitido: boolean } | null> {
+): Promise<{ id: string; staffId: string; role: StaffRole; permitido: boolean } | null> {
   const sv = await tx.staffVenue.findFirst({
     where: { venueId, staffId, active: true, staff: { active: true } },
     select: { id: true, staffId: true, role: true, permissionSetId: true, permissionSet: true },
@@ -156,32 +156,33 @@ async function miembroConPermiso(
     })
     permitido = hasPermission(sv.role, custom?.permissions ?? null, RECONCILE_UNCHARGED_PERMISSION, custom?.deniedPermissions ?? null)
   }
-  return { id: sv.id, staffId: sv.staffId, permitido }
+  return { id: sv.id, staffId: sv.staffId, role: sv.role, permitido }
 }
 
 /**
- * 🔴 A5 · E7 (founder, 20-oct): ¿quién responde por la declaración? La regla de `autorizarDeclaracion` de «no presentó
- * tarjeta», con ESTE permiso: la SESIÓN tiene que ser miembro válido del venue (si no, ningún PIN la rescata); si lo es y tiene
- * `payments:reconcile-uncharged`, responde ella; si no, hace falta el PIN de alguien de ESTE venue, activo y con el permiso —el
- * gerente—, y entonces responde él. El mesero LLEGA aquí porque la ruta sólo le pide `payments:create`: el permiso de la
- * declaración no se relaja, se exige a quien de verdad responde.
+ * 🔴 ¿Quién responde por la declaración? F1 (founder, 17-nov: «el sistema solo! lo que menos tenga que decidir»): la firma
+ * SIEMPRE un gerente con su PIN. La SESIÓN sólo tiene que ser miembro válido del venue (si no, ningún PIN la rescata); ya no
+ * responde ella, aunque tenga `payments:reconcile-uncharged` (antes, A5 · E7, bastaba). El PIN tiene que ser de alguien de ESTE
+ * venue, activo, con rol de gerencia (MANAGER o más: una lista propia o un comodín no convierten a un cajero en gerente) y con el
+ * permiso efectivo; entonces responde él, y queda también quién operaba. Sin eso, el MISMO 403 `SUPERVISOR_AUTHORIZATION_REQUIRED`
+ * que las apps instaladas ya saben pedir.
  */
 async function autorizar(
   tx: Prisma.TransactionClient,
   venueId: string,
   actorStaffId: string | null,
   supervisorPin: string | undefined,
-): Promise<{ actor: { id: string; staffId: string }; by: 'SESSION' | 'SUPERVISOR_PIN'; sessionStaffId: string }> {
+): Promise<{ actor: { id: string; staffId: string }; by: 'SUPERVISOR_PIN'; sessionStaffId: string }> {
   const sesion = actorStaffId ? await miembroConPermiso(tx, venueId, actorStaffId) : null
   if (!sesion) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
-  if (sesion.permitido) return { actor: sesion, by: 'SESSION', sessionStaffId: sesion.staffId }
   if (!supervisorPin) throw new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
   const porPin = await tx.staffVenue.findFirst({
     where: { venueId, pin: supervisorPin, active: true, staff: { active: true } },
     select: { staffId: true },
   })
   const gerente = porPin ? await miembroConPermiso(tx, venueId, porPin.staffId) : null
-  if (!gerente?.permitido) throw new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  if (!gerente?.permitido || ROLE_HIERARCHY[gerente.role] < ROLE_HIERARCHY[StaffRole.MANAGER])
+    throw new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
   return { actor: gerente, by: 'SUPERVISOR_PIN', sessionStaffId: sesion.staffId }
 }
 
@@ -770,7 +771,7 @@ export async function reconcileUncharged(
  *  | | cajero (`reconcileUncharged`) | banco (esto) |
  *  |---|---|---|
  *  | evidencia | una persona miró la pantalla | el webhook del procesador (AngelPay lo FIRMA; Blumon no, por eso Blumon no libera) |
- *  | permiso | `payments:reconcile-uncharged` | ninguno: no hay actor humano |
+ *  | permiso | `payments:reconcile-uncharged`, con el PIN de un gerente (F1) | ninguno: no hay actor humano |
  *  | ¿exige que la terminal contestara? | **sí** (`constaQueSalio`) | **también sí**: al entrar por el núcleo se hereda. ⚠️ P2 abierto de Codex — con el ACK perdido un rechazo legítimo queda sin liberar, y **la declaración del cajero TAMPOCO lo salva: comparte la misma guarda**. Se deja a propósito: relajarla toca el camino que ya está en producción |
  *  | lanza | sí (`UnchargedReconciliationError`) | **nunca**: un webhook que lanza provoca reintentos del procesador. Devuelve `{closed:false, reason}` |
  *

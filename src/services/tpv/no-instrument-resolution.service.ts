@@ -20,11 +20,11 @@
  */
 import { createHash } from 'crypto'
 import { z } from 'zod'
-import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
+import { Prisma, StaffRole, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
-import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
+import { evaluatePermissionList, hasPermission, ROLE_HIERARCHY } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { puertaDelDinero } from './avisosNoGuardados'
@@ -95,7 +95,7 @@ export class NoInstrumentResolutionError extends Error {
   ) {
     super(
       code === 'SUPERVISOR_AUTHORIZATION_REQUIRED'
-        ? 'Se requiere el código de alguien con permiso para confirmar que no se presentó tarjeta.'
+        ? 'Pide a un gerente que ingrese su PIN para confirmar que este cobro no pasó.'
         : code === 'SESSION_NOT_IN_VENUE'
           ? 'La sesión de esta terminal no pertenece a este negocio. Vuelve a iniciar sesión.'
           : code === 'WEBHOOK_NOT_CONFIRMED'
@@ -144,7 +144,7 @@ async function miembroDelVenue(
   staffId: string,
   // D22: el permiso depende de QUÉ se afirma: «no presentó tarjeta» es de gerencia; «revisé y no se cobró», del cajero.
   permiso: string = NO_INSTRUMENT_PERMISSION,
-): Promise<{ id: string; staffId: string; permitido: boolean } | null> {
+): Promise<{ id: string; staffId: string; role: StaffRole; permitido: boolean } | null> {
   const sv = await tx.staffVenue.findFirst({
     where: { venueId, staffId, active: true, staff: { active: true } },
     select: { id: true, staffId: true, role: true, permissionSetId: true, permissionSet: true },
@@ -160,7 +160,7 @@ async function miembroDelVenue(
     })
     permitido = hasPermission(sv.role, custom?.permissions ?? null, permiso, custom?.deniedPermissions ?? null)
   }
-  return { id: sv.id, staffId: sv.staffId, permitido }
+  return { id: sv.id, staffId: sv.staffId, role: sv.role, permitido }
 }
 
 /**
@@ -219,10 +219,13 @@ function afirmaCobro(claimedSuccess: unknown): boolean {
 }
 
 /**
- * AUTORIZACIÓN de la declaración, COMPARTIDA por el camino con solicitud y el local (22-sep). Extraída tal cual, sin
- * cambiarle una regla: la persona de la SESIÓN (el PIN con el que entró a la terminal) tiene que ser miembro VÁLIDO de
- * este venue — si no lo es, nadie la rescata con un PIN —; y si lo es pero no tiene el permiso, hace falta el PIN de
- * otra persona que sí lo tenga. Duplicarla habría sido la forma más fácil de que los dos caminos divergieran.
+ * AUTORIZACIÓN de las dos declaraciones HUMANAS, COMPARTIDA por el camino con solicitud y el local (22-sep). 🔴 F1 (founder,
+ * 17-nov: «el sistema solo! lo que menos tenga que decidir»): la firma SIEMPRE un gerente con su PIN. La persona de la SESIÓN (el
+ * PIN con el que entró a la terminal) sólo tiene que ser miembro VÁLIDO de este venue — si no lo es, nadie la rescata con un
+ * PIN —; ya no responde ella aunque tenga el permiso. El PIN tiene que ser de alguien de ESTE venue, activo, con rol de gerencia
+ * (MANAGER o más: una lista propia o un comodín no convierten a un cajero en gerente) y con el permiso efectivo. Sin eso, el MISMO
+ * 403 `SUPERVISOR_AUTHORIZATION_REQUIRED` que las terminales instaladas ya saben pedir. Una sola función para los dos caminos:
+ * duplicarla habría sido la forma más fácil de que divergieran.
  */
 async function autorizarDeclaracion(
   tx: Prisma.TransactionClient,
@@ -232,14 +235,14 @@ async function autorizarDeclaracion(
 ): Promise<{ actor: { id: string; staffId: string }; by: OperatorResolution['by'] }> {
   const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId, permiso) : null
   if (!sesion) throw new NoInstrumentResolutionError('SESSION_NOT_IN_VENUE', 403)
-  if (sesion.permitido) return { actor: sesion, by: 'SESSION' }
   if (!supervisorPin) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
   const porPin = await tx.staffVenue.findFirst({
     where: { venueId: identity.venueId, pin: supervisorPin, active: true, staff: { active: true } },
     select: { staffId: true },
   })
   const supervisor = porPin ? await miembroDelVenue(tx, identity.venueId, porPin.staffId, permiso) : null
-  if (!supervisor?.permitido) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  if (!supervisor?.permitido || ROLE_HIERARCHY[supervisor.role] < ROLE_HIERARCHY[StaffRole.MANAGER])
+    throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
   return { actor: supervisor, by: 'SUPERVISOR_PIN' }
 }
 

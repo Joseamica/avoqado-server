@@ -92,18 +92,30 @@ async function ventaEnDudaConLaRanuraSoltada() {
 }
 
 describe('POST /release con la declaración — la puerta acepta cualquiera de los dos permisos (Codex servidor r4)', () => {
-  it('P1 (a) SÓLO `payments:reconcile-uncharged`, sin `payments:create`, sobre TIMED_OUT/AUTO_RELEASED sin evidencia: se acepta', async () => {
+  it('P1 (a) SÓLO `payments:reconcile-uncharged`, sin `payments:create`, sobre TIMED_OUT/AUTO_RELEASED sin evidencia: pasa la puerta; 🔴 F1: firma el PIN del gerente', async () => {
     const { venta, solicitud } = await ventaEnDudaConLaRanuraSoltada()
     expect(await prisma.payment.count({ where: { venueId: f.venueId } })).toBe(0)
+    const ruta = `/api/v1/mobile/venues/${f.venueId}/terminal-payment/${solicitud.requestId}/release`
+    const cuerpo = { resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 }
+    // Su sesión ya no firma: el MISMO 403 con código que el POS instalado convierte en «pide el PIN del gerente».
+    const sinPin = await request(server).post(ruta).set('Authorization', `Bearer ${token()}`).send(cuerpo)
+    expect({ status: sinPin.status, code: sinPin.body.code }).toEqual({ status: 403, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: solicitud.requestId } })).toMatchObject({
+      status: 'TIMED_OUT',
+    })
     const res = await request(server)
-      .post(`/api/v1/mobile/venues/${f.venueId}/terminal-payment/${solicitud.requestId}/release`)
+      .post(ruta)
       .set('Authorization', `Bearer ${token()}`)
-      .send({ resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 })
+      .send({ ...cuerpo, supervisorPin: f.gerente.pin })
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ released: true })
     const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: solicitud.requestId } })
     expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
-    expect(fila.operatorReconciliation).toMatchObject({ staffId: declarante.staffId, by: 'SESSION' })
+    expect(fila.operatorReconciliation).toMatchObject({
+      staffId: f.gerente.staffId,
+      by: 'SUPERVISOR_PIN',
+      sessionStaffId: declarante.staffId,
+    })
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(false)
   })
 })

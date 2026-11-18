@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { DeviceFormFactor, Prisma, TerminalPaymentRequestStatus, TerminalStatus, TerminalType } from '@prisma/client'
@@ -637,9 +636,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         .boolean()
         .optional()
         .describe(
-          'Una PERSONA miró la pantalla de la terminal y confirma que ese cobro NO pasó. Es testimonio de un operador, ' +
-            'nunca evidencia del procesador: libera la venta y la terminal, queda auditado con su nombre, y si el dinero ' +
-            'aparece después el registro manda sobre la declaración. Sólo úsalo si alguien lo revisó de verdad.',
+          'Ya no se declara desde aquí: «no se cobró» lo firma siempre un gerente con su PIN en la app de Avoqado (la terminal ' +
+            'o el POS). Con true, la respuesta dice dónde hacerlo y no toca el cobro.',
         ),
       slotOnly: z
         .boolean()
@@ -656,9 +654,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       // which every cashier holds — a cashier must not be able to free a slot through the MCP
       // that they cannot free from the POS.
       //
-      // 🔴 18-sep: la SIMETRÍA con el POS se conserva, y por eso el permiso ahora depende de la acción. Desde el
-      // POS el cajero ya puede DECLARAR que un cobro no pasó (`payments:reconcile-uncharged`), pero sigue sin poder
-      // liberar una terminal a secas. Aquí igual: la declaración pide su permiso, la liberación pide el de gerencia.
+      // 🔴 18-sep: la SIMETRÍA con el POS se conserva, y por eso el permiso depende de la acción: pedir la declaración pide su
+      // permiso (`payments:reconcile-uncharged`), la liberación pide el de gerencia.
       guard.requirePermission(verifiedUncharged ? 'payments:reconcile-uncharged' : 'tpv:update', venueId)
       // 🔴 Freeing a terminal lets the cashier charge again on it: a read-only token must never do it.
       requireWriteScopeAlways(scope, 'tpv:update', 'cierra las sesiones abiertas de una terminal')
@@ -668,6 +665,16 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         if (!scope.isSuperAdmin) return text({ ok: false, error: 'Soltar sólo la terminal es una acción de soporte de Avoqado.' })
         if (verifiedUncharged) return text({ ok: false, error: 'Elige una: declarar que no se cobró, o soltar sólo la terminal.' })
         if (!motivo) return text({ ok: false, error: 'Falta el motivo: queda en la bitácora con tu nombre.' })
+      }
+      // 🔴 F1 (founder, 17-nov): «no se cobró» lo firma SIEMPRE un gerente con su PIN, y el PIN se teclea en la app, no aquí. El MCP
+      // ya no declara —ni sobre una fila ni dejando lápida—: dice dónde se firma y no toca el cobro.
+      if (verifiedUncharged) {
+        return text({
+          ok: false,
+          error:
+            '«No se cobró» ya no se declara desde aquí: lo firma un gerente con su PIN en la app de Avoqado (la terminal o el POS). ' +
+            'Mientras, no vuelvas a pasar la tarjeta de esa venta; si aparece el pago, se concilia solo.',
+        })
       }
 
       const row = await prisma.terminalPaymentRequest.findFirst({
@@ -690,55 +697,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           resultJson: true,
         },
       })
-      // 🔴 A5 · E3: con la declaración, una solicitud SIN fila (el POST del POS nunca llegó) ya no rebota aquí: pasa al núcleo,
-      // que autoriza primero y deja la lápida «no se cobró» si la llave es de un POS. El permiso y `confirm` son los mismos.
-      if (!row && verifiedUncharged) {
-        if (!confirm) {
-          return text({
-            ok: false,
-            requiresConfirmation: true,
-            message:
-              `El servidor no tiene registro del cobro ${requestId}: el POS lo intentó mandar y nunca llegó. Vas a DECLARAR que ` +
-              'alguien miró la terminal y ese cobro no pasó. Queda una constancia «no se cobró» a nombre de quien lo declara, para ' +
-              'que la venta pueda volver a cobrarse. Si el servidor encuentra cualquier señal de cobro, lo rechaza. Confirma sólo si se revisó de verdad.',
-          })
-        }
-        const r = await terminalPaymentService.releaseUnknownRequest({
-          requestId,
-          venueId,
-          actor: { staffId: scope.staffId, source: 'MCP' },
-          reason: reason ?? 'Declarada desde el MCP',
-          declaration: { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED' as const, statementVersion: 1 as const },
-        })
-        // La auditoría apunta a la fila que QUEDÓ (como la otra rama, `row.id`) y sólo dice «lápida» si lo es: si la admisión del
-        // POST ganó la llave, el núcleo siguió el camino normal sobre SU fila.
-        const quedo = await prisma.terminalPaymentRequest.findFirst({
-          where: { requestId, ...where },
-          select: { id: true, resultJson: true },
-        })
-        const sobre = quedo?.resultJson
-        const esLapida =
-          !!sobre && typeof sobre === 'object' && !Array.isArray(sobre) && (sobre as Record<string, unknown>).tombstone === true
-        await auditMcpWrite(scope, {
-          action: 'TERMINAL_PAYMENT_RELEASE_MCP',
-          entity: 'TerminalPaymentRequest',
-          entityId: quedo?.id ?? requestId,
-          venueId,
-          data: { requestId, released: r.released, status: r.status, reason: reason ?? null, tombstone: esLapida },
-        })
-        return text({
-          ok: r.released,
-          released: r.released,
-          status: r.status,
-          message: r.released
-            ? 'Quedó registrado que ese cobro no pasó. La venta ya puede volver a cobrarse.'
-            : 'No se registró: el servidor encontró señales de ese cobro. Consulta su resultado antes de volver a cobrar.',
-        })
-      }
       if (!row) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
-      // 🔴 La variante declarada se salta ESTE filtro —no el del servicio, que revalida todo— porque una fila
-      // TIMED_OUT todavía incierta también aparta la terminal: son justo las legacy que hay que poder limpiar.
-      if (!verifiedUncharged && row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
+      if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
         // Se informa TAMBIÉN el desenlace canónico: `terminal_payment_requests` muestra el status ya traducido, así
         // que sin esto una fila que ahí se ve «UNKNOWN» rebotaría aquí con «su estado es FAILED» y nadie entendería.
         const desenlace = desenlaceCanonico(row)
@@ -752,7 +712,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
             slotHeld: false,
             error:
               'La terminal ya está libre: puede cobrar otras ventas. Esa venta sigue pendiente de confirmar si se cobró: si alguien ' +
-              'revisó la terminal, decláralo con verifiedUncharged:true; si aparece el pago, se concilia solo.',
+              'revisó la terminal, un gerente lo firma con su PIN en la app; si aparece el pago, se concilia solo.',
           })
         }
         return text({
@@ -781,12 +741,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
               `${ageMinutes} min sin resultado. La terminal podrá cobrar otras ventas; esta venta sigue bloqueada hasta confirmar qué ` +
               'pasó, y si aparece el pago se concilia solo. Queda registrado a tu nombre con el motivo. Si ese cobro dejó rastro de ' +
               'dinero, no se suelta nada.'
-            : verifiedUncharged
-              ? `Vas a DECLARAR que alguien miró la terminal ${row.terminalId} y el cobro de $${(row.amountCents / 100).toFixed(2)} ` +
-                `(hace ${ageMinutes} min) no pasó. Eso libera la venta y la terminal, y queda registrado a nombre de quien lo declara. ` +
-                'Si el servidor encuentra cualquier señal de que sí se cobró, lo rechaza. Confirma sólo si se revisó de verdad.'
-              : `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
-                'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
+            : `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
+              'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
         })
       }
 
@@ -795,16 +751,6 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         venueId,
         actor: { staffId: scope.staffId, source: slotOnly ? 'SUPERADMIN' : 'MCP' },
         reason: motivo || 'Liberada desde el MCP',
-        ...(verifiedUncharged
-          ? {
-              declaration: {
-                requestId,
-                resolutionId: randomUUID(),
-                statement: 'UNCHARGED_VERIFIED' as const,
-                statementVersion: 1 as const,
-              },
-            }
-          : {}),
       })
       // The service writes its own ActivityLog; this adds the trace that it came through the MCP.
       await auditMcpWrite(scope, {
