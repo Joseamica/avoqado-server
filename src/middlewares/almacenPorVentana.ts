@@ -3,116 +3,118 @@ import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 /**
  * Almacén de un tope de intentos que sabe a qué VENTANA pertenece cada intento (tarjeta `hz:nube0000:na526456`, 17-nov-2026).
  *
- * Existe para devolver lo que salió bien SIN borrar nunca un fallo de otra ventana. El `MemoryStore` de express-rate-limit no sirve
- * para eso: reutiliza el mismo objeto `Date` y lo reescribe al reiniciar, así que una petición que entró en la ventana vieja podía
- * «ver» la nueva y, al salir bien, restar un fallo que no era suyo (Codex r2 #1 y r3 #1). Aquí:
- * - cada ventana es un registro NUEVO; un reinicio nunca toca el anterior. La identidad de la ventana es ESE registro, no su hora:
- *   cada intento recibe su propio `Date` (`resetTime`) atado al registro en el que se contó (`fichas`). Así la hora vence exacta, como
- *   en la librería (sin el «+1 ms» de antes, que alargaba ventanas y heredaba saltos del reloj: Codex r5 #1);
- * - `increment` es síncrono: suma y ata la ficha en el mismo tramo, sin `await` en medio;
- * - `devolverEnVentana` resta sólo si el registro de esa ficha sigue siendo el de la llave, aunque el reloj haya brincado (un acierto
- *   nunca se queda cobrado por un salto del reloj: Codex r5 #2), también en un tramo síncrono, y nunca lanza (Codex r3 #3).
+ * 🔴 Es una COPIA FIEL del `MemoryStore` de express-rate-limit 7.5.1 (`node_modules/express-rate-limit/dist/index.cjs`, ~410-565): los
+ * mismos dos mapas (`actual`/`anterior`), la misma rotación por temporizador, las MISMAS lecturas del reloj en el mismo orden (una al crear
+ * la llave, otra al contar) y el mismo `get`, `decrement`, `resetKey` y `resetAll`. Así, frente a cualquier brinco del reloj del servidor,
+ * cuenta los intentos IGUAL que la librería, por construcción: lo comprueba una prueba diferencial contra el `MemoryStore` real con miles
+ * de brincos al azar (`tests/unit/middlewares/almacenPorVentana.test.ts`). Codex r5-r7 encontraron, una y otra vez, casos del reloj en
+ * cada regla de tiempo propia; por la regla de parada del método se dejó de inventarlas (rediseño tras r7).
+ *
+ * Sólo cambian dos cosas, y ninguna lee el reloj:
+ * 1. Al vencer una ventana, la nueva es un registro NUEVO (la librería reescribe el mismo objeto y el mismo `Date`, así que una petición
+ *    de la ventana vieja podía «ver» la nueva y, al salir bien, restar un fallo que no era suyo: Codex r2 #1 y r3 #1).
+ * 2. Cada intento recibe su FICHA: un `Date` propio (`resetTime`) atado en un `WeakMap` al registro donde se contó. `devolverEnVentana`
+ *    resta sólo si ese registro sigue siendo el de la llave (aunque el reloj haya brincado: Codex r5 #2), una sola vez por ficha (r6 #3),
+ *    en un tramo síncrono y sin lanzar (r3 #3).
  *
  * Una sola instancia del servidor (sin Redis): la memoria del proceso es la fuente, como con el `MemoryStore`.
  */
 interface Registro {
   intentos: number
+  /** Milisegundos de pared en que vence la ventana (el `resetTime` de la librería). */
   vence: number
-  /** La limpieza anterior ya lo vio vencido (se borra hasta la siguiente, si lo sigue viendo así: Codex r6 #1). */
-  vencidoEnLaLimpiezaAnterior?: boolean
 }
 
 export class AlmacenPorVentana implements Store {
   /** Las llaves son de este proceso (express-rate-limit lo usa para sus validaciones). */
   localKeys = true
   private ventanaMs = 60_000
-  private registros = new Map<string, Registro>()
-  /**
-   * La ficha de cada intento (el `Date` que se le devolvió) → el registro en el que se contó. Débil: se va con la petición. Aunque se
-   * borre una llave (`resetKey`/`resetAll`) y se abra otra ventana en el mismo milisegundo, la ficha vieja apunta al registro viejo y
-   * nunca resta en el nuevo (Codex r4 #4).
-   */
+  /** Como `current`/`previous` del `MemoryStore`: una llave sin uso dura entre una y dos rotaciones. */
+  private actual = new Map<string, Registro>()
+  private anterior = new Map<string, Registro>()
+  /** La ficha de cada intento → el registro en el que se contó. Débil: se va con la petición. */
   private fichas = new WeakMap<Date, Registro>()
-  private limpieza?: ReturnType<typeof setInterval>
+  private rotacion?: ReturnType<typeof setInterval>
 
   init(options: Options): void {
     this.ventanaMs = options.windowMs
-    if (this.limpieza) clearInterval(this.limpieza)
-    // Sólo quita registros vistos vencidos en dos limpiezas seguidas: uno vigente nunca se borra (borrarlo regalaría intentos).
-    this.limpieza = setInterval(() => this.quitarVencidos(Date.now()), this.ventanaMs)
-    this.limpieza.unref?.()
+    if (this.rotacion) clearInterval(this.rotacion)
+    this.rotacion = setInterval(() => this.rotar(), this.ventanaMs)
+    this.rotacion.unref?.()
   }
 
-  private vigente(llave: string, ahora: number): Registro | undefined {
-    const r = this.registros.get(llave)
-    return r && r.vence > ahora ? r : undefined
-  }
-
+  /** Como `MemoryStore.get`: lee los dos mapas sin mirar la hora. */
   get(llave: string): ClientRateLimitInfo | undefined {
-    const r = this.vigente(llave, Date.now())
+    const r = this.actual.get(llave) ?? this.anterior.get(llave)
     return r ? { totalHits: r.intentos, resetTime: new Date(r.vence) } : undefined
   }
 
+  /** Como `MemoryStore.increment` (mismas lecturas del reloj), salvo que la ventana nueva es un registro nuevo y devuelve una ficha. */
   increment(llave: string): ClientRateLimitInfo {
+    let r = this.registroDe(llave)
     const ahora = Date.now()
-    let r = this.vigente(llave, ahora)
-    if (!r) {
+    if (r.vence <= ahora) {
       r = { intentos: 0, vence: ahora + this.ventanaMs }
-      this.registros.set(llave, r)
+      this.actual.set(llave, r)
     }
     r.intentos++
-    // La ficha de ESTE intento: un `Date` propio (una copia: cambiarlo no toca el almacén) atado a su registro.
     const ficha = new Date(r.vence)
     this.fichas.set(ficha, r)
     return { totalHits: r.intentos, resetTime: ficha }
   }
 
+  /** Como `MemoryStore.decrement`. El tope de PIN no la usa (devuelve con `devolverEnVentana`). */
   decrement(llave: string): void {
-    const r = this.vigente(llave, Date.now())
-    if (r && r.intentos > 0) r.intentos--
+    const r = this.registroDe(llave)
+    if (r.intentos > 0) r.intentos--
   }
 
   /**
-   * Resta uno sólo si el registro de esa ficha sigue siendo el de la llave (la misma ventana). Cada ficha devuelve UNA vez: después se
-   * olvida (Codex r6 #3). Síncrono y sin lanzar.
+   * Resta uno sólo si el registro de esa ficha sigue siendo el de la llave (la misma ventana). Cada ficha devuelve UNA vez. No lee el
+   * reloj ni mueve la llave entre mapas. Síncrono y sin lanzar.
    */
   devolverEnVentana(llave: string, ficha: Date | undefined): void {
     const suyo = ficha ? this.fichas.get(ficha) : undefined
     if (!suyo) return
     this.fichas.delete(ficha!)
-    const r = this.registros.get(llave)
+    const r = this.actual.get(llave) ?? this.anterior.get(llave)
     if (r === suyo && r.intentos > 0) r.intentos--
   }
 
   resetKey(llave: string): void {
-    this.registros.delete(llave)
+    this.actual.delete(llave)
+    this.anterior.delete(llave)
   }
 
   resetAll(): void {
-    this.registros.clear()
+    this.actual.clear()
+    this.anterior.clear()
   }
 
   shutdown(): void {
-    if (this.limpieza) clearInterval(this.limpieza)
-    this.registros.clear()
+    if (this.rotacion) clearInterval(this.rotacion)
+    this.resetAll()
   }
 
-  /**
-   * Borra un registro sólo si lo ve vencido en DOS limpiezas seguidas (una ventana entera de por medio, medida por el temporizador y no
-   * por el reloj de pared). Un brinco del reloj hacia adelante en UNA limpieza ya no borra los fallos de una ventana vigente: si el reloj
-   * vuelve, la siguiente limpieza la ve vigente y la conserva (Codex r6 #1). Es lo que hace la librería: su `MemoryStore` olvida por
-   * rotación de mapas, nunca por una sola lectura del reloj. Un registro vencido de verdad dura, a lo más, una ventana de más en memoria.
-   */
-  private quitarVencidos(ahora: number): void {
-    for (const [llave, r] of this.registros) {
-      if (r.vence > ahora) r.vencidoEnLaLimpiezaAnterior = false
-      else if (r.vencidoEnLaLimpiezaAnterior) this.registros.delete(llave)
-      else r.vencidoEnLaLimpiezaAnterior = true
-    }
+  /** Sólo para pruebas: una rotación como la del temporizador (la de la librería es `clearExpired`). */
+  rotarAhora(): void {
+    this.rotar()
   }
 
-  /** Sólo para pruebas: corre una limpieza como la del temporizador. */
-  limpiarAhora(): void {
-    this.quitarVencidos(Date.now())
+  /** Como `MemoryStore.clearExpired`: lo de la rotación pasada se olvida; lo de ésta pasa a «anterior». Nunca lee el reloj. */
+  private rotar(): void {
+    this.anterior = this.actual
+    this.actual = new Map()
+  }
+
+  /** Como `MemoryStore.getClient`: lo trae a «actual» o lo crea con UNA lectura del reloj (la librería: `resetClient(client)`). */
+  private registroDe(llave: string): Registro {
+    const enActual = this.actual.get(llave)
+    if (enActual) return enActual
+    let r = this.anterior.get(llave)
+    if (r) this.anterior.delete(llave)
+    else r = { intentos: 0, vence: Date.now() + this.ventanaMs }
+    this.actual.set(llave, r)
+    return r
   }
 }

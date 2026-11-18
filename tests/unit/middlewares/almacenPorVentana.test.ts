@@ -2,7 +2,9 @@
  * `AlmacenPorVentana` (tarjeta `hz:nube0000:na526456`, 17-nov-2026): el almacén del tope de PIN que sabe a qué ventana pertenece cada
  * intento, para que devolver lo que salió bien nunca borre un fallo de otra ventana (Codex r2 #1 y r3 #1). La identidad de la
  * ventana es su REGISTRO, no su hora: cada intento recibe su ficha (`resetTime`) atada al registro donde se contó (Codex r5 #1 y #2).
+ * Todo lo demás es una copia fiel del `MemoryStore` de la librería: la prueba diferencial de abajo lo compara contra el real (r7).
  */
+import { MemoryStore } from 'express-rate-limit'
 import { AlmacenPorVentana } from '../../../src/middlewares/almacenPorVentana'
 
 const VENTANA = 60_000
@@ -57,7 +59,7 @@ describe('AlmacenPorVentana', () => {
     expect(ip.resetTime!.getTime()).toBe(inicio + VENTANA)
     expect(negocio.resetTime!.getTime()).toBe(inicio + VENTANA) // antes: + 1 ms, heredado de la otra llave
     ahora = inicio + VENTANA
-    expect(a.get('negocio')).toBeUndefined() // a los 60 s exactos ya no bloquea
+    // a los 60 s exactos el siguiente intento ya abre una ventana nueva (la librería decide al contar, no al leer)
     expect(a.increment('negocio').totalHits).toBe(1)
   })
 
@@ -128,29 +130,100 @@ describe('AlmacenPorVentana', () => {
     expect(a.get('k')?.totalHits).toBe(1)
   })
 
-  it('🔴 Codex r6 #1: un brinco del reloj durante UNA limpieza no borra los fallos de una ventana vigente', () => {
+  it('🔴 Codex r6 #1: un brinco del reloj durante UNA rotación no borra los fallos de una ventana vigente', () => {
     const a = almacen()
     for (let i = 0; i < 10; i++) a.increment('k') // 10 fallos
-    ahora = inicio + VENTANA + 5 // el reloj se adelanta justo cuando pasa la limpieza…
-    a.limpiarAhora()
+    ahora = inicio + VENTANA + 5 // el reloj se adelanta justo cuando pasa la rotación…
+    a.rotarAhora()
     ahora = inicio + 10 // …y vuelve antes del vencimiento de verdad
 
-    expect(a.get('k')?.totalHits).toBe(10) // antes: el registro se borraba y el siguiente intento contaba 1
+    expect(a.get('k')?.totalHits).toBe(10)
     expect(a.increment('k').totalHits).toBe(11)
-    a.limpiarAhora() // la siguiente limpieza la ve vigente y la conserva
-    expect(a.get('k')?.totalHits).toBe(11)
   })
 
-  it('la limpieza sí quita lo vencido de verdad: a la segunda vez que lo ve vencido', () => {
+  it('🔴 Codex r7 #1: una petición entre dos rotaciones conserva los fallos, como la librería', () => {
+    const a = almacen()
+    for (let i = 0; i < 10; i++) a.increment('k')
+    ahora = inicio + VENTANA + 5
+    a.rotarAhora()
+    ahora = inicio + 10
+    a.increment('k') // la trae de vuelta a la rotación de ahora
+    ahora = inicio + VENTANA + 5
+    a.rotarAhora()
+    ahora = inicio + 20
+
+    expect(a.get('k')?.totalHits).toBe(11) // antes (limpieza en dos pasos): se borraba y el siguiente contaba 1
+  })
+
+  it('🔴 Codex r7 #2: si el reloj brinca entre las dos lecturas al crear la llave, la ventana vence donde la librería', () => {
+    const lecturas = [inicio, inicio + VENTANA + 5] // al crear la llave · al contar
+    reloj.mockImplementation(() => lecturas.shift() ?? ahora)
+    const a = almacen()
+
+    expect(a.increment('k').resetTime!.getTime()).toBe(inicio + 2 * VENTANA + 5)
+  })
+
+  it('una llave sin uso se olvida a la segunda rotación, como la librería', () => {
     const a = almacen()
     a.increment('k')
-    const tamano = () => (a as unknown as { registros: Map<string, unknown> }).registros.size
-    ahora = inicio + VENTANA + 1
-    a.limpiarAhora()
-    expect(tamano()).toBe(1) // primera vez: sólo lo marca
-    ahora = inicio + 2 * VENTANA + 1
-    a.limpiarAhora()
-    expect(tamano()).toBe(0)
+    a.rotarAhora()
+    expect(a.get('k')?.totalHits).toBe(1)
+    a.rotarAhora()
+    expect(a.get('k')).toBeUndefined()
+  })
+
+  it('🔴 Codex r7: frente a CUALQUIER brinco del reloj cuenta exactamente igual que el `MemoryStore` real (prueba diferencial)', async () => {
+    let semilla = 20261118
+    const azar = () => {
+      semilla = (semilla * 1103515245 + 12345) % 2147483648
+      return semilla / 2147483648
+    }
+    let lecturas: number[] = []
+    reloj.mockImplementation(() => lecturas.shift() ?? ahora)
+    const nuestro = almacen()
+    const base = new MemoryStore()
+    base.init({ windowMs: VENTANA } as never)
+    const llaves = ['pin-login:ip:a', 'pin-login:ip:b', 'pin-login:venue:x']
+    try {
+      for (let paso = 0; paso < 6000; paso++) {
+        const t = azar()
+        const k = llaves[Math.floor(azar() * llaves.length)]
+        if (t < 0.25) {
+          ahora += Math.floor((azar() - 0.45) * 3 * VENTANA) // brinco hacia adelante o hacia atrás, hasta ~1.6 ventanas
+        } else if (t < 0.33) {
+          nuestro.rotarAhora()
+          ;(base as unknown as { clearExpired(): void }).clearExpired()
+        } else if (t < 0.35) {
+          nuestro.resetKey(k)
+          await base.resetKey(k)
+        } else if (t < 0.37) {
+          nuestro.decrement(k)
+          await base.decrement(k)
+        } else {
+          // A veces el reloj brinca ENTRE las dos lecturas de un mismo incremento (Codex r7 #2).
+          const segunda = azar() < 0.2 ? ahora + Math.floor((azar() - 0.3) * 2 * VENTANA) : ahora
+          lecturas = [ahora, segunda]
+          const n = nuestro.increment(k)
+          lecturas = [ahora, segunda]
+          const b = await base.increment(k)
+          lecturas = []
+          ahora = segunda
+          expect([paso, n.totalHits, n.resetTime!.getTime()]).toEqual([paso, b.totalHits, b.resetTime!.getTime()])
+        }
+        for (const llave of llaves) {
+          const mio = nuestro.get(llave)
+          const suyo = await base.get(llave)
+          expect([paso, llave, mio?.totalHits, mio?.resetTime?.getTime()]).toEqual([
+            paso,
+            llave,
+            suyo?.totalHits,
+            suyo?.resetTime?.getTime(),
+          ])
+        }
+      }
+    } finally {
+      base.shutdown()
+    }
   })
 
   it('una ficha de una llave no resta en otra llave', () => {

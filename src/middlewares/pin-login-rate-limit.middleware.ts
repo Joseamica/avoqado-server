@@ -60,7 +60,8 @@ const RATE_LIMIT_CONFIG = {
  * Cómo cuenta ahora: express-rate-limit suma al ENTRAR, como siempre; al terminar, `devolverSiSalioBien` resta la petición que
  * contestó < 400, y SÓLO si su ventana sigue siendo la misma. No se usa `skipSuccessfulRequests` de la librería (resta por llave sin
  * mirar la ventana: Codex r1 #3 y r2 #1) ni su `MemoryStore` (reescribe el mismo `Date` al reiniciar, y una petición podía «ver» la
- * ventana de otra: Codex r3 #1): el almacén es `AlmacenPorVentana`, donde cada ventana es un registro nuevo con su número. Por eso:
+ * ventana de otra: Codex r3 #1): el almacén es `AlmacenPorVentana`, copia fiel del `MemoryStore` (cuenta igual frente a cualquier brinco del
+ * reloj) salvo que cada ventana es un registro nuevo y cada intento lleva su ficha. Por eso:
  * - un PIN equivocado (checador 401, TPV 404 «Pin Incorrecto») gasta igual que hoy: 10 por IP y 20 por negocio cada 15 min;
  * - un error con el PIN correcto (400 «ya tienes entrada») también gasta, como hoy;
  * - una petición cortada antes de contestar no se resta (cuenta);
