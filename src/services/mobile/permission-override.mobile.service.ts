@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto'
 import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
+import { evaluatePermissionList, hasPermission, ROLE_HIERARCHY } from '@/lib/permissions'
 import { llaveDelDescuentoDelCliente } from '@/services/shared/descuentoDelCliente.service'
 
 /** Vida del token. Suficiente para reintentar la request, corto para no dejar la terminal elevada. */
@@ -111,6 +111,9 @@ async function staffVenueCan(params: {
   )
 }
 
+/** Permisos cuya firma por PIN es de gerente o superior siempre, con o sin el switch del PIN de gerente (F1). */
+const PERMISOS_QUE_FIRMA_UN_GERENTE = new Set(['payments:reconcile-uncharged'])
+
 export async function createPermissionOverride(params: {
   venueId: string
   pin: string
@@ -123,10 +126,15 @@ export async function createPermissionOverride(params: {
   const { venueId, pin, permission, requestedById = null, operationKey = null } = params
   const now = params.now ?? new Date()
 
+  // 🔴 F1 (founder 17-nov; Codex android r1 #4): «no se cobró» lo firma SIEMPRE un gerente o superior con su PIN, como
+  // `reconcileUncharged`. No es una función que el negocio prenda: no depende del switch, y un cajero al que le agregaron el
+  // permiso no firma (abajo).
+  const firmaDeGerente = PERMISOS_QUE_FIRMA_UN_GERENTE.has(permission)
+
   // 🔴 La puerta va ANTES de mirar el PIN: si el negocio no activó la función,
   // ni siquiera se compara un código. Fail-closed — `isManagerPinOverrideEnabled`
   // ya devuelve false si la lectura truena.
-  if (!(await isManagerPinOverrideEnabled(venueId))) {
+  if (!firmaDeGerente && !(await isManagerPinOverrideEnabled(venueId))) {
     throw new OverrideDisabledError()
   }
 
@@ -158,7 +166,7 @@ export async function createPermissionOverride(params: {
     requiredPermission: permission,
   })
 
-  if (!can) {
+  if (!can || (firmaDeGerente && ROLE_HIERARCHY[staffVenue.role] < ROLE_HIERARCHY[StaffRole.MANAGER])) {
     // Auto-autorizarse es imposible por construcción: si TU PIN tuviera el
     // permiso, nunca habría habido 403 y este endpoint no se habría llamado.
     logger.warn('Override rechazado: ese PIN tampoco tiene el permiso', {

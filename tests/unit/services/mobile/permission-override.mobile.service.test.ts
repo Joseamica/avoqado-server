@@ -437,3 +437,45 @@ describe('isManagerPinOverrideEnabled', () => {
     await expect(isManagerPinOverrideEnabled(VENUE)).resolves.toBe(false)
   })
 })
+
+/**
+ * F1 (Codex android r1 #4): «no se cobró» en Mostrador entre cajas valida el PIN por este endpoint. La regla es la de la firma de
+ * F1 (`reconcileUncharged`): gerente o superior activo con el permiso, SIEMPRE, sin depender del switch del PIN de gerente.
+ */
+describe('F1 · el PIN que firma «no se cobró» es de un gerente, con o sin el switch', () => {
+  const NO_SE_COBRO = 'payments:reconcile-uncharged'
+  const cajeroConElPermiso = {
+    ...managerStaffVenue,
+    id: 'sv_cajero',
+    role: StaffRole.CASHIER,
+    staff: { firstName: 'Ana', lastName: 'Ruiz' },
+  }
+
+  it('con el switch APAGADO, el PIN de un gerente con el permiso SÍ firma', async () => {
+    ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
+
+    const r = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: NO_SE_COBRO, now: NOW })
+    expect(r.authorizedBy.id).toBe('sv_manager')
+    expect(prisma.permissionOverride.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('un cajero al que el negocio le agregó el permiso NO firma, aunque el switch esté encendido', async () => {
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(cajeroConElPermiso)
+    ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [NO_SE_COBRO], deniedPermissions: [] })
+
+    await expect(createPermissionOverride({ venueId: VENUE, pin: '1111', permission: NO_SE_COBRO, now: NOW })).rejects.toBeInstanceOf(
+      OverrideInsufficientError,
+    )
+    expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+  })
+
+  it('los demás permisos siguen detrás del switch', async () => {
+    ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
+
+    await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'orders:merge', now: NOW })).rejects.toBeInstanceOf(
+      OverrideDisabledError,
+    )
+  })
+})
