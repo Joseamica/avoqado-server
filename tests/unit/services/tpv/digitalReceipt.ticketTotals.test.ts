@@ -53,7 +53,11 @@ beforeEach(() => {
 
 describe('generateDigitalReceipt · ticketTotals', () => {
   it('D1 fotocopia (Codex plan r2 #3): este generador también congela la copia del ticket del cobro', async () => {
-    const copia = { lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 }], subtotalCents: 3000, descuentoCents: 300 }
+    const copia = {
+      lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 }],
+      subtotalCents: 3000,
+      descuentoCents: 300,
+    }
     prismaMock.payment.findUnique.mockResolvedValue({ ...cobro(), processorData: { lineasDelTicket: copia } })
     await generateDigitalReceipt('pay_1')
     expect(snapshotCreado().lineasDelTicket).toEqual(copia)
@@ -112,5 +116,117 @@ describe('generateDigitalReceipt · ticketTotals', () => {
     expect(snapshot.payment).toMatchObject({ id: 'pay_1', amount: 115, tipAmount: 10 })
     expect(snapshot.order).toMatchObject({ subtotal: 100, taxAmount: 0, total: 125 })
     expect(snapshot.receiptInfo.taxRate).toBe(0.16)
+  })
+})
+
+// D41 «C» (tarjeta `hz:nube0000:naec8c3f`): Coca $25 + Agua $20 de cortesía + Café $30, 10 % de cuenta, cobrado $49.50. Mesas guarda
+// la Agua en $0 (su regalo en el `discountAmount` del renglón); Mostrador, a precio lleno + descuento. El recibo dice lo mismo.
+describe('generateDigitalReceipt · la cortesía en $0 de Mesas (D41 «C»)', () => {
+  const renglon = (id: string, nombre: string, total: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    productName: nombre,
+    quantity: 1,
+    unitPrice: extra.unitPrice ?? total,
+    total,
+    discountAmount: 0,
+    isCortesia: false,
+    weightQuantity: null,
+    modifiers: [],
+    areaTicketLine: null,
+    releasedAreaTicketLineId: null,
+    fulfillmentArea: null,
+    product: { name: nombre },
+    ...extra,
+  })
+  const coca = renglon('i1', 'Coca', 25)
+  const cafe = renglon('i3', 'Café', 30)
+
+  it('Mesas congela $75 · −$25.50 y la Agua a su bruto: los renglones suman el subtotal', async () => {
+    const agua = renglon('i2', 'Agua', 0, { unitPrice: 20, discountAmount: 20, isCortesia: true })
+    prismaMock.payment.findUnique.mockResolvedValue(
+      cobro({
+        amount: 49.5,
+        tipAmount: 0,
+        order: { subtotal: 55, discountAmount: 5.5, serviceChargeAmount: 0, total: 49.5, items: [coca, agua, cafe] },
+      }),
+    )
+    await generateDigitalReceipt('pay_1')
+    const snapshot = snapshotCreado()
+    expect(snapshot.ticketTotals).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 75,
+      discount: 25.5,
+      cortesia: 20,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 49.5,
+    })
+    expect(snapshot.items.map((i: any) => i.total)).toEqual([25, 20, 30])
+    expect(snapshot.items.reduce((s: number, i: any) => s + i.total, 0)).toBe(snapshot.ticketTotals.subtotal)
+  })
+
+  it('Codex r1 #7: el recibo de una DEVOLUCIÓN de esa venta deja la Agua como se guardó ($0): no hay desglose que cuadrar', async () => {
+    const agua = renglon('i2', 'Agua', 0, { unitPrice: 20, discountAmount: 20, isCortesia: true })
+    prismaMock.payment.findUnique.mockResolvedValue({
+      ...cobro({
+        amount: -10,
+        tipAmount: 0,
+        order: { subtotal: 55, discountAmount: 5.5, serviceChargeAmount: 0, total: 49.5, items: [coca, agua, cafe] },
+      }),
+      type: 'REFUND',
+    })
+    await generateDigitalReceipt('pay_1')
+    const snapshot = snapshotCreado()
+    expect(snapshot.ticketTotals).toMatchObject({ kind: 'DEVOLUCION', desglosado: false, total: 10 })
+    expect(snapshot.ticketTotals).not.toHaveProperty('cortesia')
+    expect(snapshot.items.map((i: any) => i.total)).toEqual([25, 0, 30])
+  })
+
+  it('Codex r2 #2: con copia D1 (un «Monto personalizado» por toda la cuenta) el recibo se guarda como hoy', async () => {
+    const agua = renglon('i2', 'Agua', 0, { unitPrice: 20, discountAmount: 20, isCortesia: true })
+    const copia = {
+      lineas: [{ nombre: 'Pago parcial', cantidad: 1, unitarioCents: 4950, totalCents: 4950 }],
+      subtotalCents: 4950,
+      descuentoCents: 0,
+    }
+    prismaMock.payment.findUnique.mockResolvedValue({
+      ...cobro({
+        amount: 49.5,
+        tipAmount: 0,
+        order: { subtotal: 55, discountAmount: 5.5, serviceChargeAmount: 0, total: 49.5, items: [coca, agua, cafe] },
+      }),
+      processorData: { lineasDelTicket: copia },
+    })
+    await generateDigitalReceipt('pay_1')
+    const snapshot = snapshotCreado()
+    expect(snapshot.ticketTotals).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 55,
+      discount: 5.5,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 49.5,
+    })
+    expect(snapshot.items.map((i: any) => i.total)).toEqual([25, 0, 30])
+    expect(snapshot.lineasDelTicket).toEqual(copia)
+  })
+
+  it('Mostrador (a precio lleno + descuento) sigue igual: $75 · −$25.50 y la Agua en $20', async () => {
+    const agua = renglon('i2', 'Agua', 20, { discountAmount: 20, isCortesia: true })
+    prismaMock.payment.findUnique.mockResolvedValue(
+      cobro({
+        amount: 49.5,
+        tipAmount: 0,
+        order: { subtotal: 75, discountAmount: 25.5, serviceChargeAmount: 0, total: 49.5, items: [coca, agua, cafe] },
+      }),
+    )
+    await generateDigitalReceipt('pay_1')
+    const snapshot = snapshotCreado()
+    expect(snapshot.ticketTotals).toMatchObject({ desglosado: true, subtotal: 75, discount: 25.5, total: 49.5 })
+    expect(snapshot.items.map((i: any) => i.total)).toEqual([25, 20, 30])
   })
 })

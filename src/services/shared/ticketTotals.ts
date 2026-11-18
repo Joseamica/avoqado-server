@@ -39,6 +39,12 @@ export interface TicketTotals {
   tip: number
   total: number
   /**
+   * D41 «C» (16-nov), aditivo: sólo existe (y es > 0) cuando el desglose sumó al subtotal y al descuento la cortesía que la venta guardó
+   * en $0 (Mesas). Dice que los renglones de esa cortesía se pintan a su bruto para cuadrar con el subtotal; un recibo de antes no la
+   * trae y sus renglones siguen como se congelaron.
+   */
+  cortesia?: number
+  /**
    * D15 (28-oct), aditivo: sólo existe (y vale `true`) cuando este cobro es UNA PARTE de una venta dividida: un cobro de venta
    * (COMPLETED, > 0) de una orden que tiene más de un cobro de venta, o que paga menos de lo que la orden debe por más del centavo de
    * tolerancia. La reimpresión, el recibo digital y el correo pintan entonces un renglón «Pago parcial», como el papel del cobro.
@@ -57,6 +63,11 @@ export interface EntradaDelTicket {
     taxAmount: Monto
     contratoDePrecio: string | null | undefined
     status: string | null | undefined
+    /**
+     * D41 «C»: Σ de lo regalado en los renglones de cortesía guardados en $0 ([cortesiaEnCeroDe]). No está en `subtotal` ni en
+     * `discountAmount`. Ausente (llamador o recibo de antes) = 0, como hoy.
+     */
+    cortesiaEnCero?: Monto
   } | null
   /** Cuántos cobros de VENTA tiene la orden (`COBROS_DE_VENTA`), incluido éste. */
   cobrosDeVenta: number
@@ -119,17 +130,80 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
   // negativo), el subtotal pasa a ser lo cobrado sin cargo ni IVA y no hay descuento. Aquí lo cobrado ES lo que la cuenta debe,
   // así que el descuento es `min(subtotal, descuento guardado)`: una cortesía mayor que el subtotal no descuenta de más.
   const descuento = bruto.plus(cargo).plus(impuesto).minus(amount)
-  const subtotal = descuento.isNegative() ? amount.minus(cargo).minus(impuesto) : bruto
-  const discount = descuento.isNegative() ? 0 : descuento.toNumber()
+  const subtotalBase = descuento.isNegative() ? amount.minus(cargo).minus(impuesto) : bruto
+  const descuentoBase = descuento.isNegative() ? CERO_DEC : descuento
+  // D41 «C» (founder, 16-nov; Codex r1 #1): la cortesía que Mesas guardó en $0 vuelve al bruto y al descuento, como la de Mostrador
+  // (a precio lleno + su descuento) y como Square («Discounts & Comps» restan del bruto). Se suma DESPUÉS de decidir el desglose: lo
+  // que la cuenta debe y el parcial salen de los importes guardados. Suma lo mismo a los dos lados: el total no cambia.
+  const cortesiaGuardada = aDecimal(o.cortesiaEnCero)
+  const cortesia = cortesiaGuardada.isNegative() ? CERO_DEC : cortesiaGuardada
+  const subtotal = subtotalBase.plus(cortesia)
+  const discount = descuentoBase.plus(cortesia).toNumber()
   return {
     kind: 'COBRO',
     desglosado: true,
     subtotal: subtotal.toNumber(),
     ...(discount > 0 ? { discount } : {}),
+    ...(cortesia.gt(0) ? { cortesia: cortesia.toNumber() } : {}),
     serviceCharge: cargo.toNumber(),
     addedTax: impuesto.toNumber(),
     tip: tip.toNumber(),
     total: amount.plus(tip).toNumber(),
+  }
+}
+
+/**
+ * D41 «C»: un renglón de cortesía guardado en $0 (`isCortesia` y `total` 0: Mesas con «Dar de cortesía», la ronda de la terminal y el
+ * `ADD_ITEMS` sin red). Su regalo vive sólo en su `discountAmount`. La cortesía de Mostrador/«Cobrar» queda a precio lleno con su fila
+ * de descuento y ya está en `Order.subtotal`/`discountAmount`: no entra. El predicado del reporte de ventas
+ * (`HIDDEN_COMP_LINE_WHERE`, `dashboard/salesGiveaways.ts`), sin las piezas de combo.
+ */
+export const RENGLON_DE_CORTESIA_EN_CERO = { isCortesia: true, total: 0, orderPromotionId: null } as const
+
+type RenglonConCortesia = { isCortesia?: boolean | null; total: Monto; discountAmount: Monto; orderPromotionId?: string | null }
+
+/**
+ * Codex r4 #1: una pieza de COMBO dada de cortesía (`orderPromotionId`) no entra: las promociones quedan fuera de este arreglo y su
+ * ticket sigue como hoy.
+ */
+export function esCortesiaEnCero(r: RenglonConCortesia): boolean {
+  return r.isCortesia === true && aDecimal(r.total).isZero() && !r.orderPromotionId
+}
+
+/** Σ `discountAmount` (lo regalado, nunca negativo) de los renglones de cortesía guardados en $0. */
+export function cortesiaEnCeroDe(renglones: readonly RenglonConCortesia[]): Prisma.Decimal {
+  return renglones.filter(esCortesiaEnCero).reduce((s, r) => {
+    const regalo = aDecimal(r.discountAmount)
+    return regalo.isNegative() ? s : s.plus(regalo)
+  }, CERO_DEC)
+}
+
+/**
+ * Lo que pinta el renglón en un comprobante con estos totales: la cortesía en $0, a su bruto sólo si el desglose la sumó al subtotal
+ * (`totales.cortesia`); todo lo demás, su `total`. Así los renglones cuadran con el subtotal, como en Mostrador. Sólo es lo que se
+ * PINTA: `OrderItem.total` no cambia (lo leen las devoluciones).
+ */
+export function totalDelRenglonEnElTicket(r: RenglonConCortesia, totales: Pick<TicketTotals, 'cortesia'> | null | undefined): number {
+  return totales?.cortesia && esCortesiaEnCero(r) ? Math.max(0, aDecimal(r.discountAmount).toNumber()) : aDecimal(r.total).toNumber()
+}
+
+/**
+ * D41 «C» (Codex r2 #1): los totales como los leen las apps que no conocen la cortesía en $0 (iOS publicado, ANDROID viejo): sin ella
+ * en subtotal ni en descuento, porque sus renglones la pintan en $0 (`total`). Devuelve aparte cuánto era, para la app nueva. Sin
+ * `cortesia`, los mismos totales. Lo usa la reimpresión (`getTransactionDetail`); el recibo digital congela los totales con ella.
+ */
+export function totalesSinLaCortesia(t: TicketTotals | null): { totales: TicketTotals | null; cortesia: number } {
+  if (!t?.cortesia || t.cortesia <= 0) return { totales: t, cortesia: 0 }
+  const { cortesia, discount, ...resto } = t
+  const c = new Prisma.Decimal(String(cortesia))
+  const descuento = aDecimal(discount).minus(c)
+  return {
+    totales: {
+      ...resto,
+      subtotal: aDecimal(t.subtotal).minus(c).toNumber(),
+      ...(descuento.gt(0) ? { discount: descuento.toNumber() } : {}),
+    },
+    cortesia,
   }
 }
 
@@ -155,7 +229,10 @@ export async function contarCobrosDeVenta(db: Prisma.TransactionClient | PrismaC
   return orderId ? db.payment.count({ where: { orderId, ...COBROS_DE_VENTA } }) : 0
 }
 
-/** Una consulta acotada por id: el cobro, los importes de su orden y cuántos cobros de venta tiene. */
+/**
+ * Una consulta acotada por id: el cobro, los importes de su orden y cuántos cobros de venta tiene. D41 «C»: más, si el cobro puede
+ * desglosarse, la suma (en la base) de su cortesía en $0.
+ */
 export async function cargarTotalesDelTicket(db: Prisma.TransactionClient | PrismaClient, paymentId: string): Promise<TicketTotals | null> {
   const p = await db.payment.findUnique({
     where: { id: paymentId },
@@ -175,14 +252,28 @@ export async function cargarTotalesDelTicket(db: Prisma.TransactionClient | Pris
           _count: { select: { payments: { where: COBROS_DE_VENTA } } },
         },
       },
+      orderId: true,
     },
   })
   if (!p) return null
-  return ticketTotals({
+  const entrada: EntradaDelTicket = {
     payment: { amount: p.amount, tipAmount: p.tipAmount, type: p.type, status: p.status },
     order: p.order,
     cobrosDeVenta: p.order?._count.payments ?? 0,
+  }
+  const sinCortesia = ticketTotals(entrada)
+  // D41 «C» (Codex r2 #3, r3 #2 y r4 #2): la cortesía en $0 de ESTA orden se suma en la base (nunca se cargan sus renglones) y SÓLO si
+  // la MISMA regla ya desglosó este cobro; un parcial, una devolución o un intento fallido no consultan nada. `discountAmount > 0`, como
+  // `cortesiaEnCeroDe`, que ignora negativos.
+  if (!sinCortesia.desglosado || !p.order || !p.orderId) return sinCortesia
+  const suma = await db.orderItem.aggregate({
+    where: { orderId: p.orderId, ...RENGLON_DE_CORTESIA_EN_CERO, discountAmount: { gt: 0 } },
+    _sum: { discountAmount: true },
   })
+  const cortesiaEnCero = suma?._sum?.discountAmount
+  return cortesiaEnCero && aDecimal(cortesiaEnCero).gt(0)
+    ? ticketTotals({ ...entrada, order: { ...p.order, cortesiaEnCero } })
+    : sinCortesia
 }
 
 /**
@@ -192,6 +283,19 @@ export async function cargarTotalesDelTicket(db: Prisma.TransactionClient | Pris
  * `reciboCanonicoDelPago`: el más viejo por (createdAt, id), como `generateDigitalReceipt`).
  */
 export async function totalesDelComprobante(db: Prisma.TransactionClient | PrismaClient, paymentId: string): Promise<TicketTotals | null> {
+  return (await comprobanteDelPago(db, paymentId)).totales
+}
+
+/**
+ * Lo mismo que `totalesDelComprobante` y, si hay recibo, la orden para la que se emitió (`dataSnapshot.order.id`). La reimpresión lo
+ * usa para no mezclar el recibo de una orden con los renglones de otra (un cobro que Soporte movió de orden; Codex r5 y r6 #1 de D41).
+ */
+export async function comprobanteDelPago(
+  db: Prisma.TransactionClient | PrismaClient,
+  paymentId: string,
+): Promise<{ totales: TicketTotals | null; ordenDelRecibo: string | null | undefined }> {
   const recibo = await reciboCanonicoDelPago(db, paymentId, { select: { dataSnapshot: true } })
-  return recibo ? ticketTotalsDelSnapshot(recibo.dataSnapshot) : cargarTotalesDelTicket(db, paymentId)
+  if (!recibo) return { totales: await cargarTotalesDelTicket(db, paymentId), ordenDelRecibo: undefined }
+  const orden = (recibo.dataSnapshot as { order?: { id?: unknown } } | null)?.order?.id
+  return { totales: ticketTotalsDelSnapshot(recibo.dataSnapshot), ordenDelRecibo: typeof orden === 'string' ? orden : null }
 }

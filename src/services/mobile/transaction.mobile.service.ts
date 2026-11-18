@@ -6,14 +6,14 @@
  * returns a lighter payload suitable for mobile clients.
  */
 
-import { PaymentMethod, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, Prisma, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
-import { totalesDelComprobante } from '../shared/ticketTotals'
+import { comprobanteDelPago, cortesiaEnCeroDe, totalDelRenglonEnElTicket, totalesSinLaCortesia } from '../shared/ticketTotals'
 import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
@@ -230,6 +230,10 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
               quantity: true,
               unitPrice: true,
               total: true,
+              // D41 «C»: para pintar la cortesía en $0 a su bruto en la reimpresión (`totalEnElTicket`).
+              isCortesia: true,
+              discountAmount: true,
+              orderPromotionId: true,
               product: {
                 select: {
                   name: true,
@@ -263,7 +267,20 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
   // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
   // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
-  const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
+  const { totales: totalesDelTicket, ordenDelRecibo } = await comprobanteDelPago(prisma, paymentId)
+  // D41 «C» (Codex r2 #1): `ticketTotals` sigue diciendo lo que entienden las apps publicadas (sin la cortesía en $0, que sus renglones
+  // pintan en $0); la app nueva la suma con `cortesiaDelTicket` y pinta cada renglón con `totalEnElTicket`.
+  const { totales: totalesParaLasApps, cortesia: cortesiaDelComprobante } = totalesSinLaCortesia(totalesDelTicket)
+  // Codex r5 #1 y r6 #1: la cortesía del comprobante sólo viaja si su recibo se emitió para la MISMA orden que tiene hoy el cobro (y,
+  // además, si cuadra con sus renglones). Un cobro que Soporte movió a otra orden tras emitir su recibo trae la cortesía de la mesa
+  // original: la app nueva pintaba un subtotal o unos renglones distintos del digital. Así, se reimprime como antes.
+  const mismaOrden = ordenDelRecibo === undefined || ordenDelRecibo === payment.orderId
+  const cortesiaDelTicket =
+    cortesiaDelComprobante > 0 &&
+    mismaOrden &&
+    cortesiaEnCeroDe(payment.order?.items ?? []).equals(new Prisma.Decimal(String(cortesiaDelComprobante)))
+      ? cortesiaDelComprobante
+      : 0
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -350,7 +367,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
     // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
-    ticketTotals: totalesDelTicket,
+    ticketTotals: totalesParaLasApps,
+    // D41 «C», aditivo: la cortesía que Mesas guardó en $0 y que el comprobante suma a subtotal y descuento (como Mostrador). Sólo si > 0.
+    ...(cortesiaDelTicket > 0 ? { cortesiaDelTicket } : {}),
     // D1 «fotocopia del ticket», aditivo y APARTE de ticketTotals (las apps viejas no la ven): los renglones que imprimió el cobro de
     // esta parte. La reimpresión los pinta en vez de «Pago parcial». Sin copia, la llave no existe.
     lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
@@ -377,6 +396,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        // D41 «C» (aditivo): lo que pinta el renglón en la reimpresión de la app nueva, que suma `cortesiaDelTicket` al subtotal (la
+        // cortesía que Mesas guardó en $0, a su bruto). `total` no cambia: lo leen las devoluciones y las apps publicadas.
+        totalEnElTicket: totalDelRenglonEnElTicket(item, cortesiaDelTicket > 0 ? totalesDelTicket : null),
         // C2 A-R4 (aditivo, opcional): lo que cobró el renglón completo; se omite si la venta no es atribuible (A-R3).
         // Los POS usan `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor al devolver.
         ...(chargedTotal === undefined ? {} : { chargedTotal }),
