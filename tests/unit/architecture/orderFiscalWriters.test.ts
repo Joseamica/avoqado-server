@@ -471,6 +471,28 @@ const WRITERS: Record<string, Writer> = {
       'el renglón nuevo con descuento de artículo trae su fila ESPEJO',
     ),
   },
+  // Tarjeta na24531d: las filas ESPEJO marcadas del cobro de vales V7 (renglones de vale y sueltos de la caja), con la transacción de
+  // quien crea la venta (creación privada, sesión y vales bloqueados).
+  'src/services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosVales': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout'],
+    proof: proof(
+      'tests/unit/services/mobile/areaTicketV7.espejo-descuentos.test.ts',
+      'orderDiscount.create',
+      '🔴 un renglón del vale con 10 % ⇒ su fila espejo MARCADA, a nombre de quien emitió el vale',
+      '🔴 Codex r3 #5: la llave es (descuento, área, emisor): dos áreas ⇒ dos filas; la misma área con dos emisores ⇒ dos filas',
+    ),
+  },
+  'src/services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosSueltos': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout'],
+    proof: proof(
+      'tests/unit/services/mobile/areaTicketV7.espejo-descuentos.test.ts',
+      'orderDiscount.create',
+      '🔴 el producto suelto de la caja con descuento y motivo ⇒ su fila espejo marcada con el motivo, a nombre de la caja',
+      '🔴 Codex r3 #3: tres sueltos con el mismo descuento y sin motivo ⇒ UNA fila; motivos distintos ⇒ una fila por motivo',
+    ),
+  },
   // D19 (founder 10-nov «A»): el reembolso de un abono de una cuenta que todavía debía reescribe pagado/total/lo que falta. Lo
   // llaman sólo los dos núcleos que escriben un REFUND colgado de una cuenta, con la cuenta ya bloqueada.
   'src/services/shared/saldoReabiertoAlReembolsar.ts#fijarSaldoReabiertoEnTx': {

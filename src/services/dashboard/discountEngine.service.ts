@@ -20,9 +20,11 @@ import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
 import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas, tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
+import { rechazarSiQuitaUnDescuentoDeVale } from '../shared/cuentaConVales'
 import {
   aCentavos,
   comoJson,
+  esFilaDeValeV7,
   estaRegalado,
   importesDeLasFilas,
   nuevoRepartoDeCuenta,
@@ -221,14 +223,15 @@ export async function getEligibleDiscounts(
       }
     }
 
-    // Check customer-specific usage limit
+    // Check customer-specific usage limit. Tarjeta na24531d (fase 1): las filas que nacen al cobrar vales V7 (marcadas) son sólo
+    // reporte y no cuentan como uso: el conteo es el de antes del arreglo (filas del descuento en las ventas de la clienta).
     if (discount.maxUsesPerCustomer !== null && customerId) {
-      const customerUses = await db.orderDiscount.count({
-        where: {
-          discountId: discount.id,
-          order: { customerId },
-        },
-      })
+      const [usos] = await db.$queryRaw<Array<{ n: number }>>`
+        SELECT count(*)::int AS n FROM "OrderDiscount" od
+        JOIN "Order" o ON o.id = od."orderId"
+        WHERE od."discountId" = ${discount.id} AND o."customerId" = ${customerId}
+          AND (od."reparto"->>'deValeV7') IS DISTINCT FROM 'true'`
+      const customerUses = usos?.n ?? 0
       if (customerUses >= discount.maxUsesPerCustomer) {
         continue
       }
@@ -332,7 +335,8 @@ export async function getCustomerDiscounts(
       FROM "Order" o
       CROSS JOIN LATERAL (
         SELECT od."discountId" FROM "OrderDiscount" od
-        WHERE od."orderId" = o.id AND od."discountId" = ANY(${conTope}::text[]) OFFSET 0
+        WHERE od."orderId" = o.id AND od."discountId" = ANY(${conTope}::text[])
+          AND (od."reparto"->>'deValeV7') IS DISTINCT FROM 'true' OFFSET 0
       ) x
       WHERE o."customerId" = ${customerId} AND o."venueId" = ${venueId} AND o.status::text NOT IN ('CANCELLED', 'DELETED')
       GROUP BY x."discountId"`
@@ -845,17 +849,24 @@ async function evaluateOrderDiscounts(
             price: Number(m.modifier!.price),
           })),
       })),
-    appliedDiscounts: order.orderDiscounts.map(od => ({
-      discountId: od.discountId ?? '',
-      amount: Number(od.amount),
-      isAutomatic: od.isAutomatic,
-    })),
+    // Tarjeta na24531d (Codex r6 #1): una fila marcada de un cobro de vales es sólo reporte; no cuenta como «ya aplicado».
+    appliedDiscounts: order.orderDiscounts
+      .filter(od => !esFilaDeValeV7(od.reparto))
+      .map(od => ({
+        discountId: od.discountId ?? '',
+        amount: Number(od.amount),
+        isAutomatic: od.isAutomatic,
+      })),
   }
 
   // 🔴 S9 (P2-5; Codex r1 P1, ruling del controlador): la cuenta de un folio anulado y revivido conserva el precio que vio la clienta.
   // Su beneficio ya regresó y quedó como cortesía SIN `discountId`, así que «ya aplicado» (abajo) no lo reconoce: un automático o el
   // de la clienta lo volvería a dar (dos rebajas de $85 sobre $219). Ahí sólo entra lo que el personal elige a mano (`forceDiscountId`).
-  const conservaSuPrecio = order.orderDiscounts.some(od => od.isComp && od.compReason === MOTIVO_BENEFICIO_REGRESADO)
+  // Tarjeta na24531d (Codex r7 #1): una fila marcada de un cobro de vales (sólo reporte) nunca es esa cortesía de folio, aunque su
+  // descuento del catálogo se llame igual.
+  const conservaSuPrecio = order.orderDiscounts.some(
+    od => od.isComp && od.compReason === MOTIVO_BENEFICIO_REGRESADO && !esFilaDeValeV7(od.reparto),
+  )
 
   // Get eligible automatic discounts
   const eligibleDiscounts = await getEligibleDiscounts(order.venueId, order.customerId ?? undefined, context.subtotal, db)
@@ -974,7 +985,7 @@ export async function applyDiscountToOrder(
             select: { id: true },
           })
           if (!catalog) throw new NotFoundError('Discount not found or inactive')
-        } else if (order.orderDiscounts.some(od => od.discountId === discountId)) {
+        } else if (order.orderDiscounts.some(od => od.discountId === discountId && !esFilaDeValeV7(od.reparto))) {
           return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Discount already applied to this order' }
         }
 
@@ -1037,8 +1048,8 @@ async function applyEvaluatedDiscount(
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. (`order` ya viene releída bajo el candado del llamador.)
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
-  // Check if discount is already applied
-  if (order.orderDiscounts.some(od => od.discountId === discount.discountId)) {
+  // Check if discount is already applied (na24531d: la fila marcada de un cobro de vales es sólo reporte, no cuenta)
+  if (order.orderDiscounts.some(od => od.discountId === discount.discountId && !esFilaDeValeV7(od.reparto))) {
     return {
       success: false,
       amount: 0,
@@ -1225,6 +1236,8 @@ export async function removeDiscountFromOrder(
         if (!orderDiscount) {
           return { success: false, amount: 0, newOrderTotal: 0, error: 'Discount not found on this order' }
         }
+        // Tarjeta na24531d: la fila que nació al cobrar vales V7 (marcada) no se quita desde la caja (cancelar y volver a armar).
+        rechazarSiQuitaUnDescuentoDeVale(orderDiscount)
 
         // W7 A1, rediseño B (founder, 12-nov): quitar en la TPV recalcula IGUAL que quitar en el móvil (`removeOrderDiscountInTransaction`
         // → `recalculateOrderTotals`): la cabecera es Σ filas, con los % re-derivados y el tope de la cuenta. R7-1, como el móvil: el

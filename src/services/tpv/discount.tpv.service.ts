@@ -23,7 +23,7 @@ import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
-import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 
 // ==========================================
@@ -125,8 +125,12 @@ export async function getAvailableDiscounts(venueId: string, orderId: string, cu
   const allDiscounts = [...eligibleDiscounts, ...customerDiscounts]
   const uniqueDiscounts = allDiscounts.filter((d, i, arr) => arr.findIndex(x => x.id === d.id) === i)
 
-  // Filter out already applied discounts
-  const appliedDiscountIds = order.orderDiscounts.map(od => od.discountId).filter(Boolean)
+  // Filter out already applied discounts. Tarjeta na24531d (Codex r6 #1): la fila marcada de un cobro de vales V7 es sólo reporte y no
+  // esconde el descuento (la caja ofrece lo mismo que antes del arreglo).
+  const appliedDiscountIds = order.orderDiscounts
+    .filter(od => !esFilaDeValeV7(od.reparto))
+    .map(od => od.discountId)
+    .filter(Boolean)
   const availableDiscounts = uniqueDiscounts.filter(d => !appliedDiscountIds.includes(d.id))
 
   // Calculate estimated savings for each discount

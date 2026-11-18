@@ -59,11 +59,10 @@ describe('adjustInventoryStock — incremento atómico y corrección de negativo
 
     await adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')
 
-    expect(prismaMock.inventory.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ currentStock: { increment: 5 } }),
-      }),
-    )
+    // D2: la cantidad viaja como decimal exacto a 3 decimales (Codex r2 #2); sigue siendo un `increment`, nunca un absoluto.
+    const { currentStock } = prismaMock.inventory.update.mock.calls[0][0].data
+    expect(Object.keys(currentStock)).toEqual(['increment'])
+    expect(Number(currentStock.increment)).toBe(5)
   })
 
   it('el movimiento deriva previousStock/newStock del resultado atómico (no de la lectura vieja)', async () => {
@@ -141,5 +140,68 @@ describe('adjustInventoryStock — incremento atómico y corrección de negativo
     await expect(adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')).rejects.toMatchObject({
       statusCode: 400,
     })
+  })
+
+  // D2 (Codex r1 #5, r2 #1 y #5): dentro de la transacción se escribe la existencia y DESPUÉS se relee el producto (sin candado, para no
+  // cruzarse con el asistente). Si ya no cuenta piezas o lo archivaron, todo se revierte.
+  it.each([
+    ['apagó el control', { trackInventory: false, inventoryMethod: 'QUANTITY', deletedAt: null }],
+    ['lo pasó a receta', { trackInventory: true, inventoryMethod: 'RECIPE', deletedAt: null }],
+    ['lo archivó', { trackInventory: true, inventoryMethod: 'QUANTITY', deletedAt: new Date() }],
+    ['lo borró o es de otro negocio', null],
+  ])('si entre la primera lectura y la escritura otra persona %s → 400 y la transacción se revierte', async (_caso, vigente) => {
+    prismaMock.product.findFirst.mockResolvedValueOnce(mockProduct(10)).mockResolvedValueOnce(vigente)
+    prismaMock.inventory.update.mockResolvedValue(mockUpdatedInventory(15))
+    prismaMock.inventoryMovement.create.mockResolvedValue({})
+
+    await expect(adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')).rejects.toMatchObject({
+      statusCode: 400,
+    })
+  })
+
+  it('la relectura va DESPUÉS de tomar la fila de existencias, acotada al negocio y sin candado del producto (Codex r2 #1)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(mockProduct(10))
+    prismaMock.inventory.update.mockResolvedValue(mockUpdatedInventory(15))
+    prismaMock.inventoryMovement.create.mockResolvedValue({})
+
+    await adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')
+
+    expect(prismaMock.product.findFirst).toHaveBeenCalledTimes(2)
+    expect(prismaMock.product.findFirst.mock.calls[1][0]).toMatchObject({ where: { id: PRODUCT_ID, venueId: VENUE_ID } })
+    expect(prismaMock.inventory.update.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.product.findFirst.mock.invocationCallOrder[1])
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('un ajuste que no es conteo no vuelve a escribir la fecha del último conteo (Codex r2 #6)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(mockProduct(10))
+    prismaMock.inventory.update.mockResolvedValue(mockUpdatedInventory(15))
+    prismaMock.inventoryMovement.create.mockResolvedValue({})
+
+    await adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')
+
+    expect(prismaMock.inventory.update.mock.calls[0][0].data).not.toHaveProperty('lastCountedAt')
+  })
+
+  it('la cantidad se redondea a 3 decimales antes de sumar: una resta de 0 − 0.0004 no se cuela como «ya era negativo» (Codex r2 #2)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(mockProduct(0))
+    // Postgres redondea el saldo a 3 decimales: con −0.0006 guarda −0.001.
+    prismaMock.inventory.update.mockResolvedValue(mockUpdatedInventory(-0.001))
+    prismaMock.inventoryMovement.create.mockResolvedValue({})
+
+    await expect(
+      adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: -0.0006 } as any, 'staff-1'),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    expect(Number(prismaMock.inventory.update.mock.calls[0][0].data.currentStock.increment)).toBe(-0.001)
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+  })
+
+  it('si el asistente BORRÓ la fila (pasó el producto a receta) a la mitad: 400 «ya no cuenta piezas», no un 500 en duda (Codex r3 #6)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(mockProduct(10))
+    prismaMock.inventory.update.mockRejectedValue(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }))
+
+    await expect(adjustInventoryStock(VENUE_ID, PRODUCT_ID, { type: 'ADJUSTMENT', quantity: 5 } as any, 'staff-1')).rejects.toMatchObject({
+      statusCode: 400,
+    })
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
   })
 })

@@ -38,23 +38,40 @@ jest.mock('@/config/logger', () => ({
 // Cada middleware de permiso lleva el nombre del permiso: así se lee qué pide CADA ruta del router real.
 // Un permiso de `mockPermisosNegados` contesta 403, como lo haría el de verdad para un rol que no lo tiene.
 const mockPermisosNegados = new Set<string>()
+// D2 (Codex r2 #7): qué permisos se revisaron en cada petición — revisarlo gasta la autorización de un gerente.
+const mockPermisosRevisados: string[] = []
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   ...jest.requireActual('@/middlewares/checkPermission.middleware'),
   checkPermission: (permiso: string) =>
     Object.defineProperty(
-      (_req: any, res: any, next: any) => (mockPermisosNegados.has(permiso) ? res.status(403).json({ permisoFaltante: permiso }) : next()),
+      (_req: any, res: any, next: any) => {
+        mockPermisosRevisados.push(permiso)
+        return mockPermisosNegados.has(permiso) ? res.status(403).json({ permisoFaltante: permiso }) : next()
+      },
       'name',
       { value: `permiso:${permiso}` },
     ),
 }))
 
+// D2 (Codex r2 #3): la llave de un solo envío (`conClave`, la de Comisiones) se simula: anota la `Idempotency-Key` que vio.
+const mockLlavesVistas: Array<string | undefined> = []
+jest.mock('@/middlewares/simCustodyIdempotency.middleware', () => ({
+  ...jest.requireActual('@/middlewares/simCustodyIdempotency.middleware'),
+  conClave: (req: any, _res: any, next: any) => {
+    mockLlavesVistas.push(req.headers['idempotency-key'])
+    next()
+  },
+}))
+
 // El permiso EFECTIVO (con el filtro de marca blanca) se simula: `mockPermisoEfectivo` decide si `verifyAccess` deja pasar.
 // Un permiso de `mockPermisoEfectivo.negados` contesta 403 (p. ej., marca blanca con esa función apagada).
-const mockPermisoEfectivo = { negados: new Set<string>(), pedidos: [] as string[] }
+// Una función de `mockPermisoEfectivo.funcionesApagadas` contesta 403 aunque no se pida permiso (D2: sólo la función de marca blanca).
+const mockPermisoEfectivo = { negados: new Set<string>(), funcionesApagadas: new Set<string>(), pedidos: [] as string[] }
 jest.mock('@/middlewares/verifyAccess.middleware', () => ({
   verifyAccess: (opciones: { permission?: string; featureCode?: string }) => (_req: any, res: any, next: any) => {
     mockPermisoEfectivo.pedidos.push(`${opciones.permission}+${opciones.featureCode}`)
-    return !mockPermisoEfectivo.negados.has(String(opciones.permission))
+    return !mockPermisoEfectivo.negados.has(String(opciones.permission)) &&
+      !mockPermisoEfectivo.funcionesApagadas.has(String(opciones.featureCode))
       ? next()
       : res.status(403).json({ code: 'PERMISSION_DENIED', permisoEfectivo: opciones.permission })
   },
@@ -120,7 +137,10 @@ const RAW_MATERIALS_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/raw-ma
 beforeEach(() => {
   jest.clearAllMocks()
   mockPermisosNegados.clear()
+  mockPermisosRevisados.length = 0
+  mockLlavesVistas.length = 0
   mockPermisoEfectivo.negados.clear()
+  mockPermisoEfectivo.funcionesApagadas.clear()
   mockPermisoEfectivo.pedidos = []
   staffVenueFindFirst.mockResolvedValue(null) // requester is NOT a platform superadmin
   venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
@@ -447,14 +467,13 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
     })
   })
 
-  // REGRESSION TESTS — editar y ajustar piezas de un producto existente sigue siendo Premium
+  // REGRESSION TESTS — editar las piezas de un producto existente con el asistente sigue siendo Premium (ajustarlas no: D2, abajo)
   it.each([
     ['GET', 'products/prod_1/wizard/progress'],
     ['POST', 'products/prod_1/wizard/step2'],
     ['POST', 'products/prod_1/wizard/step3-simple'],
     ['POST', 'products/prod_1/wizard/step3-recipe'],
     ['POST', 'products/prod_1/switch-inventory-method'],
-    ['POST', 'products/prod_1/adjust-stock'],
     ['GET', 'products/prod_1/movements'],
     ['GET', 'products/prod_1/inventory-status'],
   ])('negocio Gratis: %s %s sigue detrás del candado → 403', async (metodo, ruta) => {
@@ -470,6 +489,127 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
 
     expect((await request(server).get(`${base}/should-use-inventory`)).status).toBe(200)
     expect((await request(server).get(`${base}/products/prod_1/wizard/progress`)).status).toBe(200)
+  })
+})
+
+// D2 (18-nov-2026): contar piezas es de todos los planes (founder, 29-sep, «B»), así que una tienda Gratis/Pro también corrige sus
+// piezas con «Ajustar existencias» de la lista de Artículos: un AJUSTE SIMPLE (ADJUSTMENT, sin costo ni proveedor). La merma (LOSS),
+// la compra con costo y los demás tipos siguen siendo Premium, igual que el historial (Codex r1 #1: trae compras y mermas de antes).
+describe('D2 — ajustar las piezas de un producto que ya existe, en todos los planes', () => {
+  const AJUSTE_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/products/prod_1/adjust-stock`
+  const ajuste = { type: 'ADJUSTMENT', quantity: 5, reason: 'receiving' }
+  const SIN_PREMIUM = [
+    ['Gratis', [] as unknown[]],
+    ['Pro', [PRO_PLAN_ROW]],
+  ] as const
+
+  // NEW FEATURE TESTS
+  it.each(SIN_PREMIUM)('negocio %s: el ajuste simple llega al controlador', async (_p, plan) => {
+    vfFindMany.mockResolvedValue(plan)
+
+    const res = await request(server).post(AJUSTE_URL).send(ajuste)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ handler: 'adjustInventoryStockHandler' })
+  })
+
+  it.each([['LOSS'], ['PURCHASE'], ['COUNT'], ['TRANSFER']])(
+    'negocio Pro: un ajuste de tipo %s sigue pidiendo el plan → 403 INVENTORY_TRACKING',
+    async tipo => {
+      vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+      const res = await request(server)
+        .post(AJUSTE_URL)
+        .send({ ...ajuste, type: tipo, quantity: -2 })
+
+      expect(res.status).toBe(403)
+      expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+      expect(res.body.subscriptionRequired).toBe(true)
+    },
+  )
+
+  it.each([
+    ['costo', { unitCost: 12 }],
+    ['proveedor', { supplier: 'Bimbo' }],
+  ])('negocio Pro: un ajuste con %s ya no es el simple → 403 INVENTORY_TRACKING (Codex r1 #4)', async (_c, extra) => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server)
+      .post(AJUSTE_URL)
+      .send({ ...ajuste, ...extra })
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+  })
+
+  it('un rechazo de plan llega ANTES de revisar el permiso: no gasta la autorización de un gerente (Codex r2 #7)', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await request(server)
+      .post(AJUSTE_URL)
+      .send({ ...ajuste, type: 'LOSS', quantity: -1 })
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+    expect(mockPermisosRevisados).toEqual([])
+  })
+
+  it('sin Premium y con Inventario apagado en marca blanca: tampoco se revisa (ni se gasta) el permiso', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+    mockPermisoEfectivo.funcionesApagadas.add('AVOQADO_INVENTORY')
+
+    expect((await request(server).post(AJUSTE_URL).send(ajuste)).status).toBe(403)
+    expect(mockPermisosRevisados).toEqual([])
+  })
+
+  it('la llave de un solo envío pasa por `conClave` (un reintento tras perder la respuesta no suma dos veces)', async () => {
+    const res = await request(server).post(AJUSTE_URL).set('Idempotency-Key', 'llave-1').send(ajuste)
+
+    expect(res.status).toBe(200)
+    expect(mockLlavesVistas).toEqual(['llave-1'])
+  })
+
+  it('sin `inventory:adjust` no entra, como siempre', async () => {
+    mockPermisosNegados.add('inventory:adjust')
+
+    const res = await request(server).post(AJUSTE_URL).send(ajuste)
+
+    expect(res.status).toBe(403)
+    expect(res.body.permisoFaltante).toBe('inventory:adjust')
+  })
+
+  it('sin Premium y con Inventario apagado en marca blanca: no pasa, y el permiso NO se vuelve a pedir (Codex r1 #3)', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+    mockPermisoEfectivo.funcionesApagadas.add('AVOQADO_INVENTORY')
+
+    const res = await request(server).post(AJUSTE_URL).send(ajuste)
+
+    expect(res.status).toBe(403)
+    expect(mockPermisoEfectivo.pedidos).toEqual(['undefined+AVOQADO_INVENTORY'])
+  })
+
+  // REGRESSION TESTS
+  it.each([['ADJUSTMENT'], ['LOSS'], ['PURCHASE']])(
+    'negocio Premium: %s pasa como hoy, sin pedir otra vez permiso ni función (la autorización de un gerente no se gasta de más)',
+    async tipo => {
+      vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
+      mockPermisoEfectivo.funcionesApagadas.add('AVOQADO_INVENTORY')
+
+      const res = await request(server)
+        .post(AJUSTE_URL)
+        .send({ ...ajuste, type: tipo, quantity: -2 })
+
+      expect(res.status).toBe(200)
+      expect(mockPermisoEfectivo.pedidos).toEqual([])
+    },
+  )
+
+  it('negocio exento o superadmin: cualquier tipo pasa, como el candado', async () => {
+    venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
+    expect((await request(server).post(AJUSTE_URL).send({ ...ajuste, type: 'PURCHASE', unitCost: 10 })).status).toBe(200)
+    venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
+    staffVenueFindFirst.mockResolvedValue({ id: 'sv_super' })
+    expect((await request(server).post(AJUSTE_URL).send(ajuste)).status).toBe(200)
   })
 })
 

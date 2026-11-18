@@ -78,7 +78,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
-import { aCentavos, comoJson, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
+import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
@@ -146,7 +146,7 @@ import {
 import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
-import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { rechazarSiLaCuentaTieneVales, rechazarSiQuitaUnDescuentoDeVale } from '../shared/cuentaConVales'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
@@ -1498,8 +1498,14 @@ export async function buildOrderItemsData(
     if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
     const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
+    // Tarjeta na24531d (Codex r6 #3): el «Otro importe» con descuento y motivo también lleva id propio, como el renglón de producto,
+    // para que su fila de descuento copie el motivo (antes salía «Sin motivo» aunque llegara).
+    const motivo = appliedDiscount ? motivoDelDescuento(item.discountReason, item.discountReasonComment) : {}
+    const id = Object.keys(motivo).length > 0 ? cuid() : null
+    if (id) motivosPorRenglon.set(id, motivo)
 
     return {
+      ...(id ? { id } : {}),
       productId: null,
       // La llave de línea también en la línea libre (la terminal correlaciona su venta guardada). Basura ⇒ sin llave, como hoy.
       ...(typeof item.externalId === 'string' && item.externalId.length >= 1 && item.externalId.length <= 256
@@ -3088,7 +3094,15 @@ export async function applyOrderDiscountInTransaction(
   }
 
   const dup = await tx.orderDiscount.findFirst({ where: { orderId, discountId } })
-  if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
+  // Tarjeta na24531d (Codex r6 #1, r7 #2): la fila marcada de un cobro de vales V7 es sólo reporte y no cuenta como «ya aplicado» (p. ej.
+  // el dueño cambió el alcance del descuento después de cobrar el vale). Si la primera que aparece es marcada, se cuenta exacto, bajo el
+  // candado de la cuenta: hay otra que sí cuenta si las del descuento son más que las marcadas.
+  const yaAplicado =
+    dup != null &&
+    (!esFilaDeValeV7(dup.reparto) ||
+      (await tx.orderDiscount.count({ where: { orderId, discountId } })) >
+        (await tx.orderDiscount.count({ where: { orderId, discountId, reparto: { path: ['deValeV7'], equals: true } } })))
+  if (yaAplicado) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
 
   const subtotal = Number(order.subtotal)
   const value = Number(discount.value)
@@ -3230,6 +3244,8 @@ export async function removeOrderDiscountInTransaction(
 
   const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
   if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+  // Tarjeta na24531d: la fila que nació al cobrar vales V7 (marcada) no se quita desde la caja (la anulación sólo regresa canjes).
+  if (!opciones.porAnulacion) rechazarSiQuitaUnDescuentoDeVale(row)
   // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
   // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -4206,6 +4222,13 @@ export interface CashPaymentInput {
    * la de aquí), se responde el 403 de mesa ajena y no se crea ningún pago.
    */
   soloRecuperarPago?: { ownerId: string | null; ownerName: string }
+  /**
+   * D20 (hz:72be07e6:D20): el reductor de la cola sólo quiere la RESPUESTA del cobro que ya tiene esta llave (su reserva quedó abierta
+   * tras una caída y la reenvía otra sesión del mismo aparato, o la misma sin el permiso de hoy). Nunca el camino del pago nuevo: sin
+   * un cobro completado de esta orden con esa llave ⇒ 409 `COBRO_DE_LA_LLAVE_NO_ENCONTRADO` y nada se escribe. Marca INTERNA del
+   * reductor, nunca el body.
+   */
+  soloDevolverElCobroDeLaLlave?: true
   /**
    * 🔴 R6-3 (Codex r5 #3): la propiedad de mesa estaba encendida cuando se autorizó la petición. El middleware (o el reducer) la revisó
    * ANTES del candado; si la cuenta cambia de dueño en esa ventana (una reasignación usa el mismo candado de la orden), el cobro la
@@ -5502,6 +5525,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // camino del pago nuevo.
   if (input.soloRecuperarPago && !(existingByKey && esCobroCompletadoDeLaOrden(existingByKey, orderId))) {
     throw new MesaAjenaSoloRecuperacion(input.soloRecuperarPago)
+  }
+  // D20: sólo devolver. Va antes de cualquier regla y de cualquier escritura: sin el cobro de la llave, un 409 y nada más.
+  if (input.soloDevolverElCobroDeLaLlave && !(existingByKey && esCobroCompletadoDeLaOrden(existingByKey, orderId))) {
+    throw new ConflictError('No hay un cobro registrado con esta llave en esta cuenta.', 'COBRO_DE_LA_LLAVE_NO_ENCONTRADO')
   }
   // 🛡️ IDEMPOTENCIA — defensa PRINCIPAL contra doble-cobro en reintentos del outbox/cola offline (el guard de venta cerrada sólo
   // protege pagos COMPLETOS; un abono re-encolado crearía un segundo Payment). Mismo patrón que recordFastPayment. R8: va ANTES de
