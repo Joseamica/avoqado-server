@@ -14,7 +14,7 @@ import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 import { logAction } from './activity-log.service'
 import { ROLE_HIERARCHY, canAssignRole, ungrantablePermissions } from '../../lib/permissions'
-import { assertCanAddSeat } from '../access/seatCap.service'
+import { assertCanAddSeat, lockSeatCap } from '../access/seatCap.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { isLiveSlotHold } from './appointmentStaffAssignment.service'
 import { AsignacionDto, asignacionesVigentes } from './rh/asignaciones.service'
@@ -563,36 +563,41 @@ export async function inviteTeamMember(
     if (existingInvitation) {
       throw new BadRequestError('A pending invitation already exists for this email')
     }
-
-    // Free-tier seat cap: block at SEND time. A full Free venue can't even create the email
-    // Invitation row (otherwise the invitee is only 403'd on accept — confusing). Throws the same
-    // SEAT_CAP_REACHED 403. No-op for exempt/paid (unlimited) venues and Free venues under the
-    // cap. Skipped when this invite adds no new seat at THIS venue (re-invite of an already-active
-    // member to add OTHER venues). The accept-time check (invitation.service / TPV path) stays as
-    // defense in depth.
-    if (addsNewSeatAtThisVenue) {
-      await assertCanAddSeat(venueId)
-    }
   }
 
   // Create invitation
   const expiresAt = new Date()
   expiresAt.setDate(expiresAt.getDate() + 7) // 7 days expiry
 
-  const invitation = await prisma.invitation.create({
-    data: {
-      email,
-      role: request.role,
-      type: InvitationType.VENUE_STAFF,
-      organizationId: venue.organizationId,
-      venueId,
-      expiresAt,
-      invitedById: inviterStaffId,
-      message: request.message,
-      // Store inviteToAllVenues flag in permissions JSON for email invitations
-      permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined,
-      requirePin: request.requirePin === true,
-    },
+  const invitation = await prisma.$transaction(async tx => {
+    // Free-tier seat cap: block at SEND time. A full Free venue can't even create the email
+    // Invitation row (otherwise the invitee is only 403'd on accept — confusing). Throws the same
+    // SEAT_CAP_REACHED 403. No-op for exempt/paid (unlimited) venues and Free venues under the
+    // cap. Skipped when this invite adds no new seat at THIS venue (re-invite of an already-active
+    // member to add OTHER venues). The accept-time check (invitation.service / TPV path) stays as
+    // defense in depth. Checked and inserted under the venue's seat-cap lock, shared with restoring
+    // seats and accepting invitations (final review #8): neither can take the seat this one counted.
+    // A TPV-only add is a brand-new person here too: its (PENDING) invitation row reserves the seat, so it is counted
+    // and inserted under the same lock (r2 #8); a full venue is refused before any row is left behind.
+    if (addsNewSeatAtThisVenue || isTPVOnly) {
+      await lockSeatCap(tx, [venueId])
+      await assertCanAddSeat(venueId)
+    }
+    return tx.invitation.create({
+      data: {
+        email,
+        role: request.role,
+        type: InvitationType.VENUE_STAFF,
+        organizationId: venue.organizationId,
+        venueId,
+        expiresAt,
+        invitedById: inviterStaffId,
+        message: request.message,
+        // Store inviteToAllVenues flag in permissions JSON for email invitations
+        permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined,
+        requirePin: request.requirePin === true,
+      },
+    })
   })
 
   // For TPV-only: Create staff and staffVenue directly (already active)
@@ -682,9 +687,6 @@ export async function inviteTeamMember(
           where: { staffId_venueId: { staffId: staff.id, venueId: v.id } },
           select: { id: true },
         }))
-      if (!alreadyAssigned) {
-        await assertCanAddSeat(v.id)
-      }
 
       // Only assign the requested role if it's >= the existing role (never downgrade)
       const effectiveRole =
@@ -692,25 +694,34 @@ export async function inviteTeamMember(
           ? existingStaffVenue.role
           : request.role
 
-      const staffVenue = await prisma.staffVenue.upsert({
-        where: {
-          staffId_venueId: {
-            staffId: staff.id,
-            venueId: v.id,
+      // A brand-new seat is counted and written under the venue's seat-cap lock (final review #8).
+      const tpvStaffId = staff.id
+      const staffVenue = await prisma.$transaction(async tx => {
+        if (!alreadyAssigned) {
+          await lockSeatCap(tx, [v.id])
+          // This add's own PENDING invitation already reserves the seat it is about to fill: never count it twice.
+          await assertCanAddSeat(v.id, { excludeInvitationId: invitation.id })
+        }
+        return tx.staffVenue.upsert({
+          where: {
+            staffId_venueId: {
+              staffId: tpvStaffId,
+              venueId: v.id,
+            },
           },
-        },
-        update: {
-          role: effectiveRole,
-          pin: pinForVenue,
-          active: true,
-        },
-        create: {
-          staffId: staff.id,
-          venueId: v.id,
-          role: effectiveRole,
-          pin: pinForVenue,
-          active: true,
-        },
+          update: {
+            role: effectiveRole,
+            pin: pinForVenue,
+            active: true,
+          },
+          create: {
+            staffId: tpvStaffId,
+            venueId: v.id,
+            role: effectiveRole,
+            pin: pinForVenue,
+            active: true,
+          },
+        })
       })
 
       // Update staffVenueId for conflicts

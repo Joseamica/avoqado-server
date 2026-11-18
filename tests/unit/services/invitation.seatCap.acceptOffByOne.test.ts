@@ -94,8 +94,10 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 // Spy on assertCanAddSeatsBulk so we can assert HOW the accept flow calls it (no-op so the accept
 // itself proceeds — proves a legit accept is not blocked).
 const assertCanAddSeatsBulk = jest.fn().mockResolvedValue(undefined)
+const lockSeatCap = jest.fn().mockResolvedValue(undefined)
 jest.mock('../../../src/services/access/seatCap.service', () => ({
   assertCanAddSeatsBulk,
+  lockSeatCap,
 }))
 
 import { acceptInvitation } from '../../../src/services/invitation.service'
@@ -131,6 +133,12 @@ describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
     expect(mockTxInvitationUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'inv-accept-1', status: InvitationStatus.PENDING } }),
     )
+  })
+
+  it('🔴 takes the venue seat-cap lock (shared with restoring seats and creating invites) inside the tx, before counting', async () => {
+    await acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Zorro-verde-42' })
+    expect(lockSeatCap).toHaveBeenCalledWith(expect.anything(), ['venue-1'])
+    expect(lockSeatCap.mock.invocationCallOrder[0]).toBeLessThan(assertCanAddSeatsBulk.mock.invocationCallOrder[0])
   })
 
   it('passes excludeInvitationId of the invite being accepted, so its own pending row never blocks the accept', async () => {

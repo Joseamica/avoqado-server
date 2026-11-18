@@ -4,6 +4,7 @@
  * Runs daily to:
  * 1. Hard-cancel Stripe subscriptions suspended for 14+ days (payment failure)
  * 2. Expire DB-only trials (superadmin-granted trials without Stripe)
+ * 3. Return lapsed Plan Básico venues to the Free seat cap (sweepLapsedBasicSeats)
  *
  * Dunning Flow (Stripe):
  * - Day 0-7: Grace period (emails + warnings)
@@ -26,6 +27,7 @@ import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import { sweepLapsedBasicSeats } from '@/services/launchCampaigns/hybridSeats'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -82,6 +84,14 @@ export class SubscriptionCancellationJob {
 
     // Task 2: Expire DB-only trials that have passed their end date
     await this.expireDbOnlyTrials()
+
+    // Task 3: a Plan Básico whose paid period ended without renewal goes back to the Free seat cap
+    // (its entry read is wrapped in retry inside the sweep, per cron-jobs.md).
+    try {
+      await sweepLapsedBasicSeats()
+    } catch (error) {
+      logger.error('❌ Lapsed Plan Básico seat sweep failed', { error })
+    }
 
     logger.info('✅ Daily subscription tasks complete')
   }

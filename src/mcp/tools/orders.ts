@@ -280,6 +280,8 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
               total: true,
               discountAmount: true,
               appliedDiscountId: true,
+              // Encargo 04edc5: el renglón fue regalado (en Mesas queda en $0; en Mostrador, a precio lleno).
+              isCortesia: true,
               course: true, // TABLE_SERVICE course/tiempo (null = inmediato)
               // Ata la línea al combo que la creó (null = línea suelta). Sin esto,
               // un combo se leía como "tres productos con descuento" sin nombre.
@@ -341,10 +343,25 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       // esto el reembolso sería invisible salvo leyendo los pagos uno por uno.
       // Sólo los COMPLETED devuelven dinero. Pesos, como todo el MCP.
       const refunds = summarizeRefunds((order.payments ?? []).filter(p => p.status === TransactionStatus.COMPLETED))
+      // 🔴 Encargo 04edc5 (founder «C»): la cortesía de Mesas (renglón en $0) no está en el descuento guardado de la orden; la de
+      // Mostrador sí. «Descuentos y cortesías», como los reportes (`salesGiveaways.ts`, Square): igual con las dos. Pesos.
+      const cortesiasFueraDeLaCabecera = (order.items ?? []).reduce(
+        (suma, item) => (item.isCortesia === true && Number(item.total ?? 0) === 0 ? suma + Number(item.discountAmount ?? 0) : suma),
+        0,
+      )
       return text({
         found: true,
         order: {
           ...order,
+          // Aditivo (pesos): lo descontado y lo regalado de la venta, con las dos formas de guardar la cortesía y el regalo de los
+          // combos (que tampoco vive en la cabecera), como `foldGiveawaysIntoSummary` (Codex p2 #4).
+          discountsAndComps: Number(
+            (
+              Number(order.discountAmount ?? 0) +
+              cortesiasFueraDeLaCabecera +
+              promotions.reduce((suma, p) => suma + Number(p.discount ?? 0), 0)
+            ).toFixed(2),
+          ),
           promotions,
           refundState: refunds.refundState,
           refundedAmount: Number(refunds.refundedAmount),

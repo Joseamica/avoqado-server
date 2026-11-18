@@ -28,11 +28,19 @@ import { InvitationStatus, StaffRole, type Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount, getPendingInvitationCount } from '@/services/access/seatCap.service'
+import {
+  FREE_TIER_SEAT_CAP,
+  getVenueSeatCap,
+  getActiveSeatCount,
+  getPendingInvitationCount,
+  lockSeatCap,
+} from '@/services/access/seatCap.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { cancelPlan, type CancelPlanInput, type PlanState } from './planState.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
+import { logAction } from './activity-log.service'
 import { retrievePlanSubscription } from '../stripe.service'
+import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 
 /** Persisted shape of Venue.pendingSeatReconciliation. */
 export interface PendingSeatReconciliation {
@@ -255,6 +263,9 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
   // alone: a late webhook of an OLDER subscription must not wipe the owner's choice for a later downgrade.
   const cap = await getVenueSeatCap(venueId)
   if (cap === null) return 0
+  // A paid Plan Básico covers the venue (final review #4): a late Pro→Free webhook trims to the Básico's cap, and the
+  // selection the owner made for THAT downgrade (fewer people) no longer applies. It is still cleared below.
+  const basicCovers = (await activeBasicSeatCaps([venueId], new Date())).has(venueId)
 
   // All or nothing, audit row included: separate writes used to leave people deactivated with no audit row, and the
   // retry then had nothing left to record. A failure propagates, so the webhook event stays FAILED and the cron replays it.
@@ -270,7 +281,7 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
     // An explicit choice (the one a hybrid checkout carried) wins over the pending one; empty means "none given".
     const keep = options.keepStaffVenueIds?.length
       ? options.keepStaffVenueIds
-      : Array.isArray(pending?.keepStaffVenueIds)
+      : !basicCovers && Array.isArray(pending?.keepStaffVenueIds)
         ? pending.keepStaffVenueIds
         : []
     const owners = rows.filter(r => r.role === StaffRole.OWNER)
@@ -355,20 +366,94 @@ export async function executeSeatReconciliation(venueId: string, options: { keep
  *
  * @returns the number of seats reactivated.
  */
-export async function reactivateSeatCapDeactivated(venueId: string): Promise<number> {
-  const result = await prisma.staffVenue.updateMany({
-    where: { venueId, deactivatedBySeatCap: true },
-    data: { active: true, endDate: null, deactivatedBySeatCap: false },
-  })
+export async function reactivateSeatCapDeactivated(venueId: string, audit?: { reason: 'BASIC_PLAN' }): Promise<number> {
+  const where = { venueId, deactivatedBySeatCap: true }
+  const data = { active: true, endDate: null, deactivatedBySeatCap: false }
+  // With `audit` (the Plan Básico path), who came back is read in the same statement and audited.
+  let count: number
+  if (audit) {
+    const rows = await prisma.staffVenue.updateManyAndReturn({ where, data, select: { id: true } })
+    count = rows.length
+    await auditSeatsRestored(
+      venueId,
+      rows.map(row => row.id),
+      null,
+      audit.reason,
+    )
+  } else {
+    count = (await prisma.staffVenue.updateMany({ where, data })).count
+  }
 
-  if (result.count > 0) {
+  if (count > 0) {
     logger.info('🪑 Seat-cap-deactivated seats reactivated on re-upgrade to paid plan', {
       venueId,
-      reactivated: result.count,
+      reactivated: count,
     })
   }
 
-  return result.count
+  return count
+}
+
+/**
+ * Finite-cap counterpart of {@link reactivateSeatCapDeactivated} (a Plan Básico with its own `seatCap` covering again):
+ * brings back ONLY people the seat cap turned off (deactivatedBySeatCap = true), most recently deactivated first, until
+ * active non-SUPERADMIN seats PLUS outstanding invitations reach `cap` (the count every seat gate uses). Never touches
+ * people who were fired/quit. Idempotent: at or over the cap, or nobody left to bring back → 0. Locks the venue's pending
+ * invitations like executeSeatReconciliation, plus a venue key so two concurrent restores cannot overshoot the cap.
+ *
+ * @returns the number of seats reactivated.
+ */
+export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: number): Promise<number> {
+  const reactivated = await prisma.$transaction(async tx => {
+    // Same lock as executeSeatReconciliation: a concurrent accept either committed before this point (its seat is counted
+    // below) or waits and finds its invitation counted as pending. Then the venue's seat-cap lock, shared with creating
+    // and accepting invitations (final review #8): two restores, or a restore and a new invitation, never both take the
+    // last seat.
+    await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "venueId" = ${venueId} AND "status" = 'PENDING' FOR UPDATE`
+    await lockSeatCap(tx, [venueId])
+    // Seats = active + outstanding invitations, the same count canAddSeat enforces (getPendingInvitationCount's predicate):
+    // bringing someone back must never strand an invite the owner already sent.
+    const [active, pending] = await Promise.all([
+      tx.staffVenue.count({ where: { venueId, active: true, role: { not: StaffRole.SUPERADMIN } } }),
+      tx.invitation.count({
+        where: { venueId, status: InvitationStatus.PENDING, expiresAt: { gt: new Date() }, role: { not: StaffRole.SUPERADMIN } },
+      }),
+    ])
+    const room = cap - active - pending
+    if (room <= 0) return []
+    const back = await tx.staffVenue.findMany({
+      where: { venueId, deactivatedBySeatCap: true },
+      orderBy: [{ endDate: 'desc' }, { id: 'asc' }],
+      take: room,
+      select: { id: true },
+    })
+    if (back.length === 0) return []
+    const restored = await tx.staffVenue.updateManyAndReturn({
+      where: { venueId, deactivatedBySeatCap: true, id: { in: back.map(r => r.id) } },
+      data: { active: true, endDate: null, deactivatedBySeatCap: false },
+      select: { id: true },
+    })
+    return restored.map(row => row.id)
+  })
+
+  // Only the Plan Básico restores up to a finite cap: audited after the commit, never failing the delivery.
+  await auditSeatsRestored(venueId, reactivated, cap, 'BASIC_PLAN')
+  if (reactivated.length > 0)
+    logger.info('🪑 Seat-cap-deactivated seats reactivated up to the plan cap', { venueId, cap, reactivated: reactivated.length })
+  return reactivated.length
+}
+
+/**
+ * Final review #9: bringing people back changes who can enter the venue, so it leaves its ActivityLog. Outside the
+ * transaction and best-effort (`logAction` never throws): a failed audit never undoes nor fails the restore.
+ */
+async function auditSeatsRestored(venueId: string, restored: string[], cap: number | null, reason: 'BASIC_PLAN') {
+  if (restored.length === 0) return
+  try {
+    await logAction({ venueId, action: 'SEAT_CAP_RESTORED', entity: 'Venue', entityId: venueId, data: { restored, cap, reason } })
+  } catch (error) {
+    logger.warn('🪑 SEAT_CAP_RESTORED audit failed; the restore stands', { venueId, error })
+  }
 }
 
 /**
@@ -430,6 +515,7 @@ export default {
   scheduleDowngradeToFree,
   executeSeatReconciliation,
   reactivateSeatCapDeactivated,
+  reactivateSeatCapDeactivatedUpTo,
   clearPendingReconciliation,
   getVenueSeatStatus,
   assertKeepSelection,

@@ -42,10 +42,16 @@ export async function provisionHybridPurchase(venueId: string, purchaseId: strin
     throw new ConflictError('No pudimos verificar los precios aceptados.', 'HYBRID_PRICE_MISMATCH')
   const metadata = { kind: 'HYBRID_PURCHASE', hybridPurchaseId: purchaseId, venueId, quoteHash: purchase.quoteHash }
   const credit = toStripeAmount(new Prisma.Decimal(quote.credit))
+  // The one-click Básico (Codex r4 #2): the card frozen in the stored snapshot, never re-read from the customer, so a
+  // retry after a lost response builds the SAME request and `recordedStripeWrite` recovers the earlier charge.
+  // 🔴 Creating the subscription never charges (final review #1): the invoice is certified against the accepted quote
+  // first, and only then paid with that card as its own journaled step (`PAY_INVOICE`).
+  const card = quote.lines.length === 1 ? quote.paymentMethodId : undefined
   const params: Stripe.SubscriptionCreateParams = {
     customer: purchase.stripeCustomerId,
     items: quote.lines.map(line => ({ price: publications.find(pub => pub.id === line.publicationId)!.stripePriceId!, quantity: 1 })),
     metadata,
+    ...(card ? { default_payment_method: card } : {}),
     payment_behavior: 'default_incomplete',
     payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
     automatic_tax: { enabled: false },
@@ -130,7 +136,8 @@ export async function provisionHybridPurchase(venueId: string, purchaseId: strin
       return matches[0] ? read(matches[0]) : null
     },
   )
-  const invoice = subscription.latest_invoice as Stripe.Invoice
+  let invoice = subscription.latest_invoice as Stripe.Invoice
+  if (card && invoice.status === 'open') invoice = await payWithFrozenCard(purchaseId, invoice.id, card)
   const status = invoice.status === 'paid' ? 'PAID' : 'PAYMENT_PENDING'
   await prisma.$transaction(async tx => {
     await tx.hybridContract.createMany({
@@ -189,4 +196,32 @@ export async function provisionHybridPurchase(venueId: string, purchaseId: strin
     status: status === 'PAID' ? 'ACTIVATION_PENDING' : 'PAYMENT_PENDING',
     paymentUrl: invoice.status === 'open' ? invoice.hosted_invoice_url : null,
   }
+}
+
+/** One charge attempt with the frozen card, after the invoice was certified. A decline or 3DS leaves the invoice open:
+ * the purchase falls back to today's «Pagar» link. The same key on retries; a recovered attempt is never repeated. */
+function payWithFrozenCard(purchaseId: string, invoiceId: string, card: string): Promise<Stripe.Invoice> {
+  const retrieve = () => stripe.invoices.retrieve(invoiceId, {}, STRIPE_DENTRO_DEL_CANDADO)
+  return recordedStripeWrite(
+    purchaseId,
+    'PAY_INVOICE',
+    { invoice: invoiceId, payment_method: card },
+    async (saved, idempotencyKey) => {
+      try {
+        return await stripe.invoices.pay(
+          saved.invoice,
+          { payment_method: saved.payment_method },
+          { ...STRIPE_DENTRO_DEL_CANDADO, idempotencyKey },
+        )
+      } catch (error) {
+        const type = (error as { type?: string } | null)?.type
+        if (type !== 'StripeCardError' && type !== 'card_error') throw error
+        return retrieve()
+      }
+    },
+    async () => {
+      const current = await retrieve()
+      return current.status === 'paid' || current.attempted ? current : null
+    },
+  )
 }

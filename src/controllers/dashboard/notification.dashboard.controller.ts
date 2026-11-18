@@ -8,6 +8,7 @@ import { resolveRequestVenueId } from '../../middlewares/checkPermission.middlew
 import asyncHandler from '../../utils/asyncHandler'
 import { AuthContext } from '../../security'
 import { isAnnouncementEmailOn, setAnnouncementEmailOn } from '../../services/announcements/announcementEmailPreference.service'
+import { MENSAJE_TIPO_RESERVADO, TIPO_AVISOS_SIN_COBRO } from '../../services/notifications/avisosSinCobro'
 
 // Extend Request type to include authContext
 interface AuthenticatedRequest extends Request {
@@ -25,10 +26,21 @@ function formatApiResponse(data: any, message?: string) {
 
 // ===== VALIDATION SCHEMAS =====
 
+/**
+ * Tipo de un aviso que manda una persona. El reservado para la preferencia de los avisos sin cobro del plan
+ * (`avisosSinCobro.ts`) se rechaza con un 400 en español (`asegurarTipoEnviable`, tras el `parse`): un `ZodError` lanzado
+ * aquí saldría como 500, porque estos controladores validan con `.parse` y no con el middleware.
+ */
+const tipoDeAvisoEnviable = z.nativeEnum(NotificationType)
+
+function asegurarTipoEnviable(type: NotificationType): void {
+  if (type === TIPO_AVISOS_SIN_COBRO) throw new BadRequestError(MENSAJE_TIPO_RESERVADO)
+}
+
 const createNotificationSchema = z.object({
   recipientId: z.string().cuid(),
   venueId: z.string().cuid().optional(),
-  type: z.nativeEnum(NotificationType),
+  type: tipoDeAvisoEnviable,
   title: z.string().min(1).max(200),
   message: z.string().min(1).max(1000),
   actionUrl: z.string().url().optional(),
@@ -79,7 +91,7 @@ const updatePreferencesBulkSchema = z.object({
 const bulkNotificationSchema = z.object({
   recipientIds: z.array(z.string().cuid()).min(1),
   venueId: z.string().cuid().optional(),
-  type: z.nativeEnum(NotificationType),
+  type: tipoDeAvisoEnviable,
   title: z.string().min(1).max(200),
   message: z.string().min(1).max(1000),
   actionUrl: z.string().url().optional(),
@@ -120,6 +132,7 @@ async function asegurarAvisoDeMiNegocio(req: AuthenticatedRequest, recipientIds:
  */
 export const createNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = createNotificationSchema.parse(req.body)
+  asegurarTipoEnviable(validatedData.type)
   // Procedencia reservada: sólo el reparto de anuncios de plataforma escribe este entityType (campana por negocio).
   if (validatedData.entityType === 'PlatformAnnouncement') throw new BadRequestError('entityType reservado para anuncios de plataforma')
   await asegurarAvisoDeMiNegocio(req, [validatedData.recipientId], validatedData.venueId)
@@ -322,6 +335,7 @@ export const updatePreferencesBulk = asyncHandler(async (req: AuthenticatedReque
  */
 export const sendBulkNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = bulkNotificationSchema.parse(req.body)
+  asegurarTipoEnviable(validatedData.type)
   await asegurarAvisoDeMiNegocio(req, validatedData.recipientIds, validatedData.venueId)
 
   const notifications = await notificationService.sendBulkNotification(validatedData.recipientIds, {
@@ -355,7 +369,7 @@ export const sendVenueNotification = asyncHandler(async (req: AuthenticatedReque
 
   const validatedData = z
     .object({
-      type: z.nativeEnum(NotificationType),
+      type: tipoDeAvisoEnviable,
       title: z.string().min(1).max(200),
       message: z.string().min(1).max(1000),
       actionUrl: z.string().url().optional(),
@@ -363,6 +377,7 @@ export const sendVenueNotification = asyncHandler(async (req: AuthenticatedReque
       priority: z.nativeEnum(NotificationPriority).optional(),
     })
     .parse(notificationData)
+  asegurarTipoEnviable(validatedData.type)
 
   const notifications = await notificationService.sendVenueNotification(venueId, validatedData, roles)
 

@@ -142,6 +142,17 @@ export interface V2PlanData {
   interval: 'monthly' | 'annual'
   payNow: boolean
   acceptedAt: string | null
+  /** Plan Básico: se eligió la prueba de Pro que termina sola sin cobrar. Sólo para el texto: la modalidad real es Stripe. */
+  basicPlan?: true
+}
+
+/** 🔴 Plan Básico: sólo es la prueba de 30 días de Pro mensual, sin pagar hoy. Con cualquier otra cosa no existe. */
+export const MENSAJE_BASIC_PLAN_INVALIDO = 'El Plan Básico sólo se elige con la prueba gratis de Pro mensual, sin pagar hoy.'
+
+/** ¿El `basicPlan` de este plan es válido? Sin `basicPlan` (o `false`) siempre lo es; tier e intervalo ausentes = PRO mensual. */
+export function basicPlanValido(plan: { basicPlan?: unknown; tier?: unknown; interval?: unknown; payNow?: unknown }): boolean {
+  if (plan.basicPlan === undefined || plan.basicPlan === false) return true
+  return plan.basicPlan === true && (plan.tier ?? 'PRO') === 'PRO' && (plan.interval ?? 'monthly') === 'monthly' && plan.payNow !== true
 }
 
 /**
@@ -171,6 +182,7 @@ export function parseV2Plan(v2SetupData: unknown): V2PlanData | null {
     interval: plan.interval === 'annual' ? 'annual' : 'monthly',
     payNow: plan.payNow === true,
     acceptedAt: typeof plan.acceptedAt === 'string' ? plan.acceptedAt : null,
+    ...(plan.basicPlan === true ? { basicPlan: true as const } : {}),
   }
 }
 

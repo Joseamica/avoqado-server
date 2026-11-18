@@ -1,7 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { DigitalReceipt, ReceiptStatus } from '@prisma/client'
-import { contarCobrosDeVenta, ticketTotals, type TicketTotals } from '../shared/ticketTotals'
+import { contarCobrosDeVenta, cortesiaEnCeroDe, ticketTotals, totalDelRenglonEnElTicket, type TicketTotals } from '../shared/ticketTotals'
 import { copiaGuardada, type LineasDelTicket } from '../shared/lineasDelTicket'
 import { reciboCanonicoDelPago } from '../shared/reciboCanonico'
 
@@ -202,6 +202,21 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
             ).map(linea => [linea.id, linea.areaTicket.code] as const),
       )
 
+      // IVA por producto, plan 7 (D3; r1 #4, r2 R2-10): los totales del comprobante de ESTE cobro, con la regla única de
+      // `ticketTotals`, armados con el MISMO `paymentData` (y su orden) que el resto del snapshot y dentro de la transacción
+      // que ya bloqueó el cobro. El visor, el HTML legado, el correo y la reimpresión los leen de aquí.
+      // D41 «C»: con la cortesía que la venta guardó en $0 (Mesas), como la de Mostrador. Con copia D1 no: la copia manda en todo lo que
+      // se pinta, y el recibo se guarda como hoy (Codex r2 #2).
+      const copiaDelCobro = copiaGuardada(paymentData.processorData)
+      const totalesDelCobro = ticketTotals({
+        payment: { amount: paymentData.amount, tipAmount: paymentData.tipAmount, type: paymentData.type, status: paymentData.status },
+        order: paymentData.order && {
+          ...paymentData.order,
+          cortesiaEnCero: copiaDelCobro ? null : cortesiaEnCeroDe(paymentData.order.items),
+        },
+        cobrosDeVenta: await contarCobrosDeVenta(tx, paymentData.orderId),
+      })
+
       // Create comprehensive data snapshot
       const dataSnapshot: ReceiptDataSnapshot = {
         payment: {
@@ -251,7 +266,8 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
           productName: item.productName || item.product?.name || 'Item',
           quantity: item.quantity,
           unitPrice: Number(item.unitPrice),
-          total: Number(item.total),
+          // D41 «C»: la cortesía en $0 se pinta a su bruto cuando el desglose la sumó (los renglones cuadran con el subtotal).
+          total: totalDelRenglonEnElTicket(item, totalesDelCobro),
           weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
           areaSourceLabel: (() => {
             const codigo =
@@ -271,16 +287,9 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
               lastName: paymentData.processedBy.lastName,
             }
           : undefined,
-        // IVA por producto, plan 7 (D3; r1 #4, r2 R2-10): los totales del comprobante de ESTE cobro, con la regla única de
-        // `ticketTotals`, armados con el MISMO `paymentData` (y su orden) que el resto del snapshot y dentro de la transacción
-        // que ya bloqueó el cobro. El visor, el HTML legado, el correo y la reimpresión los leen de aquí.
-        ticketTotals: ticketTotals({
-          payment: { amount: paymentData.amount, tipAmount: paymentData.tipAmount, type: paymentData.type, status: paymentData.status },
-          order: paymentData.order,
-          cobrosDeVenta: await contarCobrosDeVenta(tx, paymentData.orderId),
-        }),
+        ticketTotals: totalesDelCobro,
         // D1 «fotocopia del ticket»: también aquí, porque la recuperación de `getReceiptForPayment` usa este generador (Codex plan r2 #3).
-        lineasDelTicket: copiaGuardada(paymentData.processorData) ?? undefined,
+        lineasDelTicket: copiaDelCobro ?? undefined,
         receiptInfo: {
           generatedAt: new Date().toISOString(),
           currency: paymentData.venue.currency || 'MXN',

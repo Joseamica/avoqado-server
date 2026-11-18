@@ -44,7 +44,8 @@ import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../acces
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
-import { fusionarV2SetupData, parseV2Plan } from './onboardingProgress.service'
+import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
+import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -93,6 +94,8 @@ export interface ActivatePlanInput {
   paymentMethodId: string
   offer: ActivatePlanOffer
   language?: 'es' | 'en'
+  /** Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual y `payNow: false`. */
+  basicPlan?: boolean
 }
 
 export interface ActivatePlanResult {
@@ -103,6 +106,9 @@ export interface ActivatePlanResult {
   firstChargeCents: number
   nextChargeAt: string
   launchOffer?: { code: string; offerVersion: number; months: number; renewalMonthlyCents: number }
+  /** Plan Básico: cómo termina la prueba, leído de la suscripción REAL (nunca de lo pedido). Sin prueba, no viaja. */
+  trialModality?: TrialModality
+  trialEndsAt?: string
 }
 
 /** El 503 del resultado desconocido. NO es un fallo: es «no sé», y el cliente reintenta igual. */
@@ -750,6 +756,8 @@ export async function activatePlan(
   opciones: { soloRecuperar?: string; via?: ViaDelCierre } = {},
 ): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
+  // 🔴 Plan Básico: antes de leer o tocar nada. Con otra combinación no hay prueba que termine sola sin cobrar.
+  if (!basicPlanValido(input)) throw new BadRequestError(MENSAJE_BASIC_PLAN_INVALIDO, 'BASIC_PLAN_INVALID')
   const now = new Date()
   // 🔴 H0 (28-oct): con el plan confirmado el alta se termina AQUÍ, no cuando el navegador toca «Entrar». Un fallo no cambia
   // la respuesta (el dinero ya se movió): lo retoma el barrido. Promesa: Avoqado/docs/audit/2026-10-28-alta-pagada-se-termina-sola/.
@@ -839,6 +847,8 @@ export async function activatePlan(
       interval: input.interval,
       firstChargeCents: primerCobroDe(sub, redencion?.advertisedPriceCents ?? 0),
       nextChargeAt: siguienteCobro(sub),
+      // La modalidad de lo que YA existe: un reintento con otra elección no la cambia (nadie toca cancel_at_period_end).
+      ...modalidadDePrueba(sub),
       ...(redencion
         ? {
             launchOffer: {
@@ -1106,6 +1116,8 @@ export async function activatePlan(
             trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
             coupon: cuponEsperado ?? undefined,
             idempotencyKey: planActivationKey,
+            // Plan Básico: la prueba termina sola sin cobrar. Sólo en ESTE create; un reuso devuelve la suscripción tal cual.
+            ...(input.basicPlan ? { cancelAtTrialEnd: true } : {}),
             // 🔴 El rastro del cobro se guarda en el instante siguiente al cargo, no al final: entre
             // crear en Stripe y que esta función devuelva hay escrituras que pueden fallar, y sin el
             // id el reintento tiene que BUSCARLA — que es donde nacía el segundo cobro.
@@ -1281,6 +1293,9 @@ export async function activatePlan(
     throw pendiente(`la suscripción está en ${sub.status}, todavía sin cobrar`)
   }
   const nextChargeAt = siguienteCobro(sub)
+  // 🔴 Plan Básico: lo que se guarda, responde y manda por correo describe la modalidad REAL, no la pedida.
+  const modalidad = modalidadDePrueba(sub)
+  const terminaSinCobro = modalidad.trialModality === 'ENDS_FREE'
 
   // 🔴 Vigente y SIN conceder = la entrega la dejó en conflicto (otro plan vivo la ocupa). Cerrar el alta como ACTIVE
   // diría «tienes tu plan» sin que lo tenga; el conflicto quedó registrado para revisarse.
@@ -1322,6 +1337,7 @@ export async function activatePlan(
       acceptedAt: now.toISOString(),
       // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
       offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
+      ...(terminaSinCobro ? { basicPlan: true as const } : {}),
     }
     const cerrado = await tx.onboardingProgress.updateMany({
       where: {
@@ -1385,6 +1401,7 @@ export async function activatePlan(
       firstChargeCents,
       nextChargeAt,
       campaign: null,
+      terminaSinCobro,
     })
     void resolvePlanNotificationTarget(venue.id)
       .then(target =>
@@ -1422,6 +1439,7 @@ export async function activatePlan(
       interval: cobrado.interval,
       firstChargeCents,
       subscriptionId,
+      ...(modalidad.trialModality ? { trialModality: modalidad.trialModality } : {}),
       ...(campaign ? { code: campaign.code, offerVersion: campaign.offerVersion, redemptionId: redemption?.id ?? null } : {}),
     },
   })
@@ -1435,6 +1453,7 @@ export async function activatePlan(
     expected,
     nextChargeAt,
     timeZone: venueRecord?.timezone,
+    terminaSinCobro,
   }).catch(error =>
     logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
       organizationId,
@@ -1452,6 +1471,7 @@ export async function activatePlan(
     firstChargeCents,
     nextChargeAt,
     campaign,
+    terminaSinCobro,
   })
 
   await terminarElAlta()
@@ -1462,6 +1482,7 @@ export async function activatePlan(
     interval: cobrado.interval,
     firstChargeCents,
     nextChargeAt,
+    ...modalidad,
     ...(campaign
       ? {
           launchOffer: {
@@ -1591,12 +1612,16 @@ function avisarActivacion(a: {
   firstChargeCents: number
   nextChargeAt: string
   campaign: LaunchCampaignRow | null
+  /** Plan Básico (`ENDS_FREE`): la prueba termina sin cobrar, así que no hay «primer cobro» que calcular ni anunciar. */
+  terminaSinCobro?: boolean
 }): void {
-  const primerCobro = a.payNow
-    ? a.firstChargeCents
-    : a.campaign
-      ? (a.campaign.listPriceCentsSnapshot as number)
-      : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
+  const primerCobro = a.terminaSinCobro
+    ? 0
+    : a.payNow
+      ? a.firstChargeCents
+      : a.campaign
+        ? (a.campaign.listPriceCentsSnapshot as number)
+        : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
   void resolvePlanNotificationTarget(a.venueId)
     .then(target =>
       resendService.sendPlanActivatedNotice({
@@ -1608,6 +1633,7 @@ function avisarActivacion(a: {
         firstChargeCents: primerCobro,
         nextChargeAt: a.nextChargeAt,
         campaignCode: a.campaign?.code ?? null,
+        ...(a.terminaSinCobro ? { trialEndsFree: true } : {}),
       }),
     )
     .catch(error =>
@@ -1632,6 +1658,8 @@ async function enviarConfirmacion(args: {
   nextChargeAt: string
   /** Zona del negocio, para que el correo escriba el día del cobro en SU hora. */
   timeZone?: string
+  /** Plan Básico: la suscripción REAL termina sin cobrar. El correo no anuncia el cobro de Pro. */
+  terminaSinCobro?: boolean
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
@@ -1659,8 +1687,27 @@ async function enviarConfirmacion(args: {
       : legacyIntro
         ? { introAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents, nextChargeAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents }
         : {}),
+    ...(args.terminaSinCobro ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await precioDelBasicoSinIvaCents() } : {}),
     billingPortalUrl: billingPageUrl(args.venueSlug),
   })
+}
+
+/**
+ * Plan Básico: su precio sin IVA en CENTAVOS sólo para escribirlo en el correo (el precio vive en la publicación del
+ * SUPERADMIN, editable). `undefined` si no hay Básico vigente o no se pudo leer: el correo lo dice sin precio.
+ */
+export async function precioDelBasicoSinIvaCents(): Promise<number | undefined> {
+  try {
+    // Import diferido: el catálogo híbrido no tiene por qué cargarse en cada alta.
+    const { getPublicBasicPlan } = await import('../launchCampaigns/hybridCampaign.service')
+    const basico = await getPublicBasicPlan()
+    return basico ? Math.round(Number(basico.priceWithoutTax) * 100) : undefined
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo leer el precio del Plan Básico para el correo', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return undefined
+  }
 }
 
 export { BadRequestError }

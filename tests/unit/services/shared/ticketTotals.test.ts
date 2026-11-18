@@ -11,9 +11,12 @@ import {
   type EntradaDelTicket,
   cargarTotalesDelTicket,
   contarCobrosDeVenta,
+  cortesiaEnCeroDe,
+  totalDelRenglonEnElTicket,
   ticketTotals,
   ticketTotalsDelSnapshot,
   totalesDelComprobante,
+  totalesSinLaCortesia,
 } from '@/services/shared/ticketTotals'
 
 type Orden = NonNullable<EntradaDelTicket['order']>
@@ -261,6 +264,9 @@ describe('ticketTotals', () => {
       },
       { payment: cobro(15), order: orden({ subtotal: 100, discountAmount: 120, serviceChargeAmount: 15 }), cobrosDeVenta: 1 },
       { payment: cobro(-116, -10, 'REFUND'), order: orden(), cobrosDeVenta: 1 },
+      // D41 «C»: Mesas con cortesía en $0, con cargo y con una cortesía mayor que lo cobrado.
+      { payment: cobro(49.5, 5), order: orden({ subtotal: 55, discountAmount: 5.5, cortesiaEnCero: 20 }), cobrosDeVenta: 1 },
+      { payment: cobro(25, 0), order: orden({ subtotal: 20, serviceChargeAmount: 5, cortesiaEnCero: 80 }), cobrosDeVenta: 1 },
     ]
     for (const e of casos) {
       const t = ticketTotals(e)
@@ -421,11 +427,20 @@ describe('ticketTotals · parcial (D15)', () => {
   const o30 = orden({ subtotal: 30 })
 
   it('parte 1 de 2: un solo cobro que paga menos de lo que la orden debe', () => {
-    expect(ticketTotals({ payment: cobro(15), order: o30, cobrosDeVenta: 1 })).toMatchObject({ kind: 'COBRO', desglosado: false, parcial: true, total: 15 })
+    expect(ticketTotals({ payment: cobro(15), order: o30, cobrosDeVenta: 1 })).toMatchObject({
+      kind: 'COBRO',
+      desglosado: false,
+      parcial: true,
+      total: 15,
+    })
   })
 
   it('parte 2 de 2: la orden ya tiene dos cobros de venta', () => {
-    expect(ticketTotals({ payment: cobro(15, 2), order: o30, cobrosDeVenta: 2 })).toMatchObject({ desglosado: false, parcial: true, total: 17 })
+    expect(ticketTotals({ payment: cobro(15, 2), order: o30, cobrosDeVenta: 2 })).toMatchObject({
+      desglosado: false,
+      parcial: true,
+      total: 17,
+    })
   })
 
   it('venta pagada completa en un solo cobro: sin la llave', () => {
@@ -449,5 +464,197 @@ describe('ticketTotals · parcial (D15)', () => {
     expect(ticketTotals({ payment: cobro(15), order: null, cobrosDeVenta: 0 })).not.toHaveProperty('parcial')
     expect(ticketTotals({ payment: cobro(-15, 0, 'REFUND'), order: o30, cobrosDeVenta: 2 })).not.toHaveProperty('parcial')
     expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 0 }), cobrosDeVenta: 0 })).not.toHaveProperty('parcial')
+  })
+})
+
+// D41 «C» (founder, 16-nov; tarjeta `hz:nube0000:naec8c3f`): la MISMA venta con cortesía dice lo mismo en Mostrador y en Mesas, como
+// Square («Discounts & Comps» restan del bruto). Coca $25 + Agua $20 de cortesía + Café $30, 10 % de cuenta, cobrado $49.50.
+// Mostrador guarda la Agua a precio lleno + su descuento (subtotal $75, descuento $25.50); Mesas la guarda en $0 con su regalo en el
+// `discountAmount` del renglón (subtotal $55, descuento $5.50). El regalo en $0 vuelve al bruto y al descuento: el total no cambia.
+describe('ticketTotals · la cortesía en $0 de Mesas (D41 «C»)', () => {
+  const mostrador = orden({ subtotal: 75, discountAmount: 25.5 })
+  const mesas = orden({ subtotal: 55, discountAmount: 5.5, cortesiaEnCero: 20 })
+
+  it('Mesas da el MISMO ticket que Mostrador: $75 · −$25.50 · $49.50', () => {
+    const esperado = { kind: 'COBRO', desglosado: true, subtotal: 75, discount: 25.5, serviceCharge: 0, addedTax: 0, tip: 5, total: 54.5 }
+    expect(ticketTotals({ payment: cobro(49.5, 5), order: mostrador, cobrosDeVenta: 1 })).toEqual(esperado)
+    // Mesas además dice cuánto de su desglose es cortesía en $0: así sus renglones se pintan a su bruto y cuadran con el subtotal.
+    expect(ticketTotals({ payment: cobro(49.5, 5), order: mesas, cobrosDeVenta: 1 })).toEqual({ ...esperado, cortesia: 20 })
+  })
+
+  it('sólo cortesía, sin descuento de cuenta: el regalo es el descuento', () => {
+    expect(ticketTotals({ payment: cobro(55), order: orden({ subtotal: 55, cortesiaEnCero: 20 }), cobrosDeVenta: 1 })).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 75,
+      discount: 20,
+      cortesia: 20,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 55,
+    })
+  })
+
+  it('con cargo por servicio y con IVA aparte: el regalo sólo mueve bruto y descuento', () => {
+    expect(
+      ticketTotals({
+        payment: cobro(54.45),
+        order: orden({ subtotal: 55, discountAmount: 5.5, serviceChargeAmount: 4.95, cortesiaEnCero: 20 }),
+        cobrosDeVenta: 1,
+      }),
+    ).toMatchObject({ desglosado: true, subtotal: 75, discount: 25.5, serviceCharge: 4.95, total: 54.45 })
+    const aparte = orden({ subtotal: 55, discountAmount: 5.5, taxAmount: 7.92, contratoDePrecio: 'IVA_APARTE', cortesiaEnCero: 20 })
+    expect(ticketTotals({ payment: cobro(57.42), order: aparte, cobrosDeVenta: 1 })).toMatchObject({
+      desglosado: true,
+      subtotal: 75,
+      discount: 25.5,
+      addedTax: 7.92,
+      total: 57.42,
+    })
+  })
+
+  it('cuenta toda de cortesía cobrada en $0 o pagada en partes: nada se desglosa, como hoy', () => {
+    expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 0, cortesiaEnCero: 20 }), cobrosDeVenta: 0 })).toMatchObject({
+      desglosado: false,
+      subtotal: 0,
+    })
+    expect(ticketTotals({ payment: cobro(20), order: mesas, cobrosDeVenta: 1 })).toMatchObject({
+      desglosado: false,
+      parcial: true,
+      total: 20,
+    })
+    expect(ticketTotals({ payment: cobro(29.5), order: mesas, cobrosDeVenta: 2 })).toMatchObject({ desglosado: false, parcial: true })
+    expect(ticketTotals({ payment: cobro(-49.5, 0, 'REFUND'), order: mesas, cobrosDeVenta: 1 })).toMatchObject({
+      kind: 'DEVOLUCION',
+      desglosado: false,
+      subtotal: 49.5,
+    })
+  })
+
+  it('sin el dato (recibo de antes, llamador viejo), en 0 o negativo: igual que hoy', () => {
+    for (const cortesiaEnCero of [undefined, null, 0, -20, '']) {
+      expect(
+        ticketTotals({ payment: cobro(49.5), order: orden({ subtotal: 55, discountAmount: 5.5, cortesiaEnCero }), cobrosDeVenta: 1 }),
+      ).toEqual({
+        kind: 'COBRO',
+        desglosado: true,
+        subtotal: 55,
+        discount: 5.5,
+        serviceCharge: 0,
+        addedTax: 0,
+        tip: 0,
+        total: 49.5,
+      })
+    }
+  })
+
+  it('Codex r3 #1: un cobro ÚNICO que paga toda la cuenta es venta completa aunque se haya elegido «Monto personalizado» (sin copia D1)', () => {
+    // La regla no lee `splitType` (D15): un solo cobro de venta que cubre lo que la cuenta debe se desglosa, hoy ($55) y ahora ($75).
+    expect(ticketTotals({ payment: { ...cobro(49.5), splitType: 'CUSTOMAMOUNT' } as any, order: mesas, cobrosDeVenta: 1 })).toMatchObject({
+      desglosado: true,
+      subtotal: 75,
+      discount: 25.5,
+    })
+  })
+
+  it('cortesiaEnCeroDe: sólo los renglones de cortesía guardados en $0 (Mostrador ya la trae en su bruto)', () => {
+    const renglones = [
+      { isCortesia: false, total: 25, discountAmount: 0 },
+      { isCortesia: true, total: 0, discountAmount: new Prisma.Decimal('20') }, // Mesas
+      { isCortesia: true, total: new Prisma.Decimal('18'), discountAmount: 18 }, // Mostrador: bruto + descuento
+      { isCortesia: false, total: 0, discountAmount: 9 }, // renglón en $0 que no es cortesía
+      { isCortesia: true, total: '0.00', discountAmount: '12.50' },
+      { isCortesia: true, total: 0, discountAmount: null },
+      { isCortesia: null, total: 0, discountAmount: 7 },
+      // Codex r4 #1: una pieza de combo dada de cortesía no entra (las promociones quedan fuera; su ticket sigue como hoy).
+      { isCortesia: true, total: 0, discountAmount: 99, orderPromotionId: 'promo_1' },
+    ]
+    expect(cortesiaEnCeroDe(renglones).toNumber()).toBe(32.5)
+    expect(cortesiaEnCeroDe([]).toNumber()).toBe(0)
+  })
+
+  it('totalDelRenglonEnElTicket: la cortesía en $0 a su bruto sólo si el desglose la sumó; lo demás, su total', () => {
+    const agua = { isCortesia: true, total: 0, discountAmount: new Prisma.Decimal('20') }
+    expect(totalDelRenglonEnElTicket(agua, { cortesia: 20 })).toBe(20)
+    expect(totalDelRenglonEnElTicket(agua, {})).toBe(0) // recibo de antes, parcial o devolución: como se guardó
+    expect(totalDelRenglonEnElTicket(agua, null)).toBe(0)
+    expect(totalDelRenglonEnElTicket({ isCortesia: true, total: 20, discountAmount: 20 }, { cortesia: 20 })).toBe(20) // Mostrador
+    expect(totalDelRenglonEnElTicket({ isCortesia: false, total: '25.00', discountAmount: 0 }, { cortesia: 20 })).toBe(25)
+    expect(
+      totalDelRenglonEnElTicket({ isCortesia: true, total: 0, discountAmount: 99, orderPromotionId: 'promo_1' }, { cortesia: 20 }),
+    ).toBe(0)
+  })
+
+  it('cargarTotalesDelTicket suma la cortesía en $0 EN LA BASE, acotada a la orden del cobro (Codex r2 #3)', async () => {
+    const prismaMock = prisma as any
+    jest.clearAllMocks()
+    const cobroDeMesa = {
+      amount: new Prisma.Decimal('49.50'),
+      tipAmount: new Prisma.Decimal('0'),
+      type: 'REGULAR',
+      status: 'COMPLETED',
+      orderId: 'o1',
+      order: {
+        subtotal: new Prisma.Decimal('55'),
+        discountAmount: new Prisma.Decimal('5.50'),
+        serviceChargeAmount: new Prisma.Decimal('0'),
+        taxAmount: new Prisma.Decimal('0'),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        status: 'COMPLETED',
+        _count: { payments: 1 },
+      },
+    }
+    prismaMock.payment.findUnique.mockResolvedValue(cobroDeMesa)
+    prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { discountAmount: new Prisma.Decimal('20') } })
+    expect(await cargarTotalesDelTicket(prismaMock, 'pay_mesa')).toMatchObject({
+      desglosado: true,
+      subtotal: 75,
+      discount: 25.5,
+      cortesia: 20,
+      total: 49.5,
+    })
+    expect(prismaMock.payment.findUnique.mock.calls[0][0].select.order.select).not.toHaveProperty('items')
+    expect(prismaMock.orderItem.aggregate).toHaveBeenCalledWith({
+      where: { orderId: 'o1', isCortesia: true, total: 0, orderPromotionId: null, discountAmount: { gt: 0 } },
+      _sum: { discountAmount: true },
+    })
+    // Un intento fallido no se desglosa: ni siquiera se suma la cortesía.
+    jest.clearAllMocks()
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cobroDeMesa, status: 'FAILED' })
+    expect(await cargarTotalesDelTicket(prismaMock, 'pay_mesa')).toMatchObject({ desglosado: false, total: 49.5 })
+    expect(prismaMock.orderItem.aggregate).not.toHaveBeenCalled()
+    // Codex r4 #2: el PRIMER abono ($20 de $49.50, un solo cobro) ya es «parcial» con la misma regla: no se consulta.
+    jest.clearAllMocks()
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cobroDeMesa, amount: new Prisma.Decimal('20') })
+    expect(await cargarTotalesDelTicket(prismaMock, 'pay_mesa')).toMatchObject({ desglosado: false, parcial: true, total: 20 })
+    expect(prismaMock.orderItem.aggregate).not.toHaveBeenCalled()
+    // Codex r3 #2: un abono de una cuenta con dos cobros ya es «parcial»: tampoco se consulta.
+    jest.clearAllMocks()
+    prismaMock.payment.findUnique.mockResolvedValue({
+      ...cobroDeMesa,
+      amount: new Prisma.Decimal('20'),
+      order: { ...cobroDeMesa.order, _count: { payments: 2 } },
+    })
+    expect(await cargarTotalesDelTicket(prismaMock, 'pay_mesa')).toMatchObject({ desglosado: false, parcial: true, total: 20 })
+    expect(prismaMock.orderItem.aggregate).not.toHaveBeenCalled()
+  })
+
+  it('totalesSinLaCortesia: lo que leen las apps publicadas (sin la cortesía) y aparte cuánto era (Codex r2 #1)', () => {
+    const conCortesia = ticketTotals({
+      payment: cobro(49.5, 5),
+      order: orden({ subtotal: 55, discountAmount: 5.5, cortesiaEnCero: 20 }),
+      cobrosDeVenta: 1,
+    })
+    const viejo = ticketTotals({ payment: cobro(49.5, 5), order: orden({ subtotal: 55, discountAmount: 5.5 }), cobrosDeVenta: 1 })
+    expect(totalesSinLaCortesia(conCortesia)).toEqual({ totales: viejo, cortesia: 20 })
+    // Sólo cortesía: sin descuento que quede, la llave no existe (como hoy).
+    const soloCortesia = ticketTotals({ payment: cobro(55), order: orden({ subtotal: 55, cortesiaEnCero: 20 }), cobrosDeVenta: 1 })
+    expect(totalesSinLaCortesia(soloCortesia)).toEqual({
+      totales: ticketTotals({ payment: cobro(55), order: orden({ subtotal: 55 }), cobrosDeVenta: 1 }),
+      cortesia: 20,
+    })
+    expect(totalesSinLaCortesia(viejo)).toEqual({ totales: viejo, cortesia: 0 })
+    expect(totalesSinLaCortesia(null)).toEqual({ totales: null, cortesia: 0 })
   })
 })

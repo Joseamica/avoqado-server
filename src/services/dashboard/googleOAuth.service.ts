@@ -10,7 +10,7 @@ import { acceptInvitation } from '../invitation.service'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
-import { assertCanAddSeatsBulk } from '../access/seatCap.service'
+import { assertCanAddSeatsBulk, lockSeatCap } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
 import { createSession } from '@/services/auth/session.service'
 import { crearNegocioNuevo, resolverAtribucionDelAlta, type AtribucionDelAlta } from '../onboarding/nuevoNegocio'
@@ -344,13 +344,6 @@ export async function loginWithGoogle(
         venueIdsToAssign = orgVenues.map(v => v.id)
       }
 
-      // Free-tier seat cap: every venue here gets a BRAND-NEW seat. Checked BEFORE the transaction
-      // because seatCap.service runs on the global client. Cap usage counts pending invitations and
-      // this very invite is still PENDING, so exclude it for its own venue (off-by-one).
-      if (canAutoAccept) {
-        await assertCanAddSeatsBulk(venueIdsToAssign, { primaryVenueId, excludeInvitationId: invitation.id })
-      }
-
       // Parity with invitation.service.ts: an OWNER invitation must become an OWNER at the
       // ORGANIZATION level too. Hardcoding MEMBER here left every Google-signup owner unable to
       // administer their own org.
@@ -359,6 +352,15 @@ export async function loginWithGoogle(
       // One transaction: a half-applied signup leaves an orphan Staff row that owns the (globally
       // unique) email but has no org and no venue — the person can then never be invited again.
       const createdStaffId = await prisma.$transaction(async tx => {
+        // Free-tier seat cap: every venue here gets a BRAND-NEW seat. Cap usage counts pending invitations and this
+        // very invite is still PENDING, so exclude it for its own venue (off-by-one). Counted under the venue's
+        // seat-cap lock shared with restoring seats and creating invitations (final review #8), taken after this
+        // invitation's row — the same order as invitation.service and the restore, so they never deadlock.
+        if (canAutoAccept) {
+          await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "id" = ${invitation.id} AND "status" = 'PENDING' FOR UPDATE`
+          await lockSeatCap(tx, venueIdsToAssign)
+          await assertCanAddSeatsBulk(venueIdsToAssign, { primaryVenueId, excludeInvitationId: invitation.id })
+        }
         const created = await tx.staff.create({
           data: {
             email: googleUser.email.toLowerCase(),

@@ -1017,6 +1017,11 @@
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
     },
+    "src/services/tpv/table.tpv.service.ts#clearTableDeLaCuenta#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "naf9f31c: una captura completa de topología de la cuenta nombrada + la mesa (todas las Orders en una sentencia canónica antes de mesas). Después llama clearTableInTransaction en la MISMA transacción: su captura es un subconjunto (Orders de la mesa) de filas ya apartadas, así que no aparta nada nuevo ni cambia el orden. Cruce con «Mover mesa» probado en PostgreSQL (tests/integration/mesas/liberarMesaVieja.integration.test.ts)."
+    },
     "src/services/tpv/table.tpv.service.ts#releaseTableIfSettled#lockTableOrderScope": {
       "count": 1,
       "loops": 0,

@@ -711,7 +711,11 @@ export async function getDiscountStats(venueId: string): Promise<DiscountStatsRe
   const vivas = {
     order: { venueId, status: { notIn: ['CANCELLED', 'DELETED'] as OrderStatus[] } },
   } satisfies Prisma.OrderDiscountWhereInput
-  const [totalDiscounts, activeDiscounts, automaticDiscounts, totales, top] = await Promise.all([
+  // 🔴 Encargo 04edc5 (founder «C»): la cortesía de Mesas deja el renglón en $0 SIN fila (la de Mostrador/«Cobrar» sí tiene su
+  // fila COMP y ya cuenta). Mismo regalo, dos cifras: lo regalado en Mesas se suma al ahorro. Los canjes siguen siendo filas
+  // (acciones): una fila COMP puede llevar uno o varios renglones y Mesas no deja fila, así que no hay una unidad común (Codex p2 #2).
+  const cortesiaEnCero = { isCortesia: true, total: 0, discountAmount: { gt: 0 } } satisfies Prisma.OrderItemWhereInput
+  const [totalDiscounts, activeDiscounts, automaticDiscounts, totales, top, regaladoEnMesas] = await Promise.all([
     prisma.discount.count({ where: { venueId } }),
     prisma.discount.count({ where: { venueId, active: true } }),
     prisma.discount.count({ where: { venueId, isAutomatic: true, active: true } }),
@@ -724,6 +728,7 @@ export async function getDiscountStats(venueId: string): Promise<DiscountStatsRe
       orderBy: [{ _count: { discountId: 'desc' } }, { discountId: 'asc' }],
       take: 5,
     }),
+    prisma.orderItem.aggregate({ where: { ...cortesiaEnCero, order: vivas.order }, _sum: { discountAmount: true } }),
   ])
 
   const ids = top.map(t => t.discountId).filter((id): id is string => id !== null)
@@ -740,7 +745,7 @@ export async function getDiscountStats(venueId: string): Promise<DiscountStatsRe
     return d ? [{ id: d.id, name: d.name, type: d.type, redemptions: t._count._all, totalSaved: Number(t._sum.amount ?? 0) }] : []
   })
   const totalRedemptions = totales._count._all
-  const totalSaved = Number(totales._sum.amount ?? 0)
+  const totalSaved = Number((Number(totales._sum.amount ?? 0) + Number(regaladoEnMesas?._sum?.discountAmount ?? 0)).toFixed(2))
 
   return {
     totalDiscounts,

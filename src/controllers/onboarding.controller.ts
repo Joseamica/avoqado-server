@@ -22,6 +22,7 @@ import {
   createPlanSubscription,
   entregarSuscripcionDePlan,
   getOrCreateStripeCustomer,
+  modalidadDeLaSuscripcion,
   retrievePlanSubscription,
 } from '../services/stripe.service'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
@@ -280,6 +281,8 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
           status: progress.planActivationStatus,
           attempt: progress.planActivationAttempt,
           activatedAt: progress.planActivatedAt,
+          // Plan Básico: la modalidad REAL para la recarga y «Volver a comprobar». ADITIVO; sin prueba o sin Stripe, no viaja.
+          ...(await modalidadDelAlta(organizationId, progress)),
         },
         legal: legalConsentState(progress.termsVersion),
         planQuote: {
@@ -1082,6 +1085,13 @@ export async function saveV2Step(req: Request, res: Response, next: NextFunction
       }
     }
 
+    // Plan Básico: el plan guardado (en cualquier paso: su número cambia con los pasos opcionales) sólo lleva `basicPlan`
+    // con la prueba de Pro mensual sin pagar hoy.
+    const planDelPaso = stepData?.plan
+    if (planDelPaso && typeof planDelPaso === 'object' && !onboardingProgressService.basicPlanValido(planDelPaso)) {
+      throw new BadRequestError(onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO, 'BASIC_PLAN_INVALID')
+    }
+
     const progress = await onboardingProgressService.saveV2StepData(organizationId, step, stepData)
 
     logger.info(`V2 Step ${stepNumber} saved for organization: ${organizationId}`)
@@ -1178,6 +1188,32 @@ async function marcarPlanCobrado(organizationId: string, subscriptionId: string)
   })
 }
 
+/**
+ * Plan Básico: cómo termina la prueba del plan que el alta dejó cobrado, leído de Stripe ahora (nunca de lo pedido).
+ * Acotada y tolerante: sin plan cobrado, sin suscripción o si Stripe no contesta, `{}` y la respuesta sale igual.
+ */
+async function modalidadDelAlta(
+  organizationId: string,
+  progreso?: { planActivationStatus: string | null; planStripeSubscriptionId: string | null },
+): Promise<{ trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'; trialEndsAt?: string }> {
+  try {
+    const p =
+      progreso ??
+      (await prisma.onboardingProgress.findUnique({
+        where: { organizationId },
+        select: { planActivationStatus: true, planStripeSubscriptionId: true },
+      }))
+    if (p?.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE || !p.planStripeSubscriptionId) return {}
+    return await modalidadDeLaSuscripcion(p.planStripeSubscriptionId)
+  } catch (error) {
+    logger.warn('onboarding: no se pudo leer la modalidad de la prueba; se omite', {
+      organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return {}
+  }
+}
+
 /** El tier del negocio es el CONCEDIDO (sale del precio cobrado); sin dato, el pedido. */
 const tierDe = (featureCode: string, pedido: 'PRO' | 'PREMIUM'): 'PRO' | 'PREMIUM' =>
   featureCode === 'PLAN_PREMIUM' ? 'PREMIUM' : featureCode === 'PLAN_PRO' ? 'PRO' : pedido
@@ -1231,6 +1267,10 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     }
     if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
       throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
+    }
+    // 🔴 Plan Básico: sólo es la prueba de Pro mensual sin pagar hoy (el paso del plan ya lo valida al guardar).
+    if (planData?.basicPlan && (planData.tier !== 'PRO' || planData.interval !== 'monthly' || planData.payNow)) {
+      throw new BadRequestError(onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO, 'BASIC_PLAN_INVALID')
     }
 
     // 🔴 CONSENTIMIENTO OBLIGATORIO (spec § 3.7). Hasta hoy la finalización NO lo verificaba:
@@ -1295,6 +1335,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           success: true,
           message: cierre.estado === 'TERMINADA' ? 'Setup completed successfully' : 'Setup already completed',
           venue: cierre.venue,
+          ...(await modalidadDelAlta(organizationId)),
         })
         return
       }
@@ -1332,6 +1373,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           success: true,
           message: 'Setup already completed',
           venue: existingVenue,
+          ...(await modalidadDelAlta(organizationId)),
         })
         return
       }
@@ -1487,6 +1529,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
               // estable por organización a propósito — el reintento del MISMO alta tiene que reusar el
               // cobro, no estrenar uno. (Auditoría de Codex, 18-sep.)
               idempotencyKey: `onboarding-complete:${organizationId}`,
+              // Plan Básico: la prueba termina sola sin cobrar, sólo en ESTE create (un reuso devuelve la suscripción tal cual).
+              ...(planData.basicPlan ? { cancelAtTrialEnd: true } : {}),
               // 🔴 FUGA DE DINERO CERRADA (spec § 3.7). Sin esto, una tarjeta RECHAZADA crea la
               // suscripción `incomplete` y el `upsert` de `createPlanSubscription` deja igualmente
               // `VenueFeature.active = true`: el negocio se lleva el plan de pago sin haber pagado,
@@ -1534,7 +1578,10 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
               // 🔴 La fecha la da Stripe (`current_period_end`: fin de la prueba, o la siguiente renovación), no «hoy + 30
               // días» ni «+ 365»: un mensual pagado el 20-oct renueva el 20-nov y el correo decía 19-nov (20-oct-2026).
               // Sin la fecha de Stripe no se inventa una: el correo no sale (el alta ya terminó y el plan está cobrado).
-              const { currentPeriodEnd: firstChargeDate } = await retrievePlanSubscription(cobro.subscriptionId)
+              const real = await retrievePlanSubscription(cobro.subscriptionId)
+              const firstChargeDate = real.currentPeriodEnd
+              // 🔴 Plan Básico: el correo describe la modalidad REAL (de Stripe), no la pedida.
+              const terminaSinCobro = real.status === 'trialing' && real.cancelAtPeriodEnd === true
               if (!firstChargeDate) {
                 logger.warn('[ONBOARDING] V2 complete: plan confirmation email skipped (Stripe did not return current_period_end)', {
                   organizationId,
@@ -1557,6 +1604,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
                   // renovación, aunque §3.8 arregle el campo en la plantilla.
                   nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
                   billingPortalUrl: billingPageUrl(result.venue.slug),
+                  ...(terminaSinCobro
+                    ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await planActivationService.precioDelBasicoSinIvaCents() }
+                    : {}),
                 })
             } else {
               logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)
@@ -1643,6 +1693,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       success: true,
       message: 'Setup completed successfully',
       venue: result.venue,
+      ...(await modalidadDelAlta(organizationId)),
     })
   } catch (error) {
     logger.error('Error completing V2 onboarding:', error)
@@ -1712,22 +1763,35 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
  */
 export const ActivatePlanSchema = z.object({
   params: z.object({ organizationId: z.string().cuid() }),
-  body: z.object({
-    tier: z.enum(['PRO', 'PREMIUM']),
-    interval: z.enum(['monthly', 'annual']),
-    payNow: z.boolean(),
-    paymentMethodId: z.string().regex(/^pm_[A-Za-z0-9]+$/),
-    offer: z.discriminatedUnion('kind', [
-      z.object({
-        kind: z.literal('LAUNCH'),
-        code: z.string(),
-        offerVersion: z.number().int().min(1),
-        expectedFirstChargeCents: z.number().int().min(0),
-      }),
-      z.object({ kind: z.literal('STANDARD'), expectedFirstChargeCents: z.number().int().min(0) }),
-    ]),
-    language: z.enum(['es', 'en']).optional(),
-  }),
+  body: z
+    .object({
+      tier: z.enum(['PRO', 'PREMIUM']),
+      interval: z.enum(['monthly', 'annual']),
+      payNow: z.boolean(),
+      paymentMethodId: z.string().regex(/^pm_[A-Za-z0-9]+$/),
+      offer: z.discriminatedUnion('kind', [
+        z.object({
+          kind: z.literal('LAUNCH'),
+          code: z.string(),
+          offerVersion: z.number().int().min(1),
+          expectedFirstChargeCents: z.number().int().min(0),
+        }),
+        z.object({ kind: z.literal('STANDARD'), expectedFirstChargeCents: z.number().int().min(0) }),
+      ]),
+      language: z.enum(['es', 'en']).optional(),
+      // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
+      basicPlan: z.boolean({ invalid_type_error: 'basicPlan debe ser verdadero o falso' }).optional(),
+    })
+    .superRefine((body, ctx) => {
+      if (!onboardingProgressService.basicPlanValido(body)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['basicPlan'],
+          message: onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO,
+          params: { code: 'BASIC_PLAN_INVALID' },
+        })
+      }
+    }),
 })
 
 /** POST /api/v1/onboarding/organizations/:organizationId/v2/activate-plan */
@@ -1745,6 +1809,7 @@ export async function activatePlanController(req: Request, res: Response, next: 
       paymentMethodId: req.body.paymentMethodId,
       offer: req.body.offer,
       language: req.body.language,
+      ...(req.body.basicPlan === true ? { basicPlan: true } : {}),
     })
     res.status(200).json({ success: true, data })
   } catch (error) {

@@ -37,6 +37,56 @@ describe('Subscription lifecycle plan emails', () => {
       expect(html).not.toContain('21 de octubre de 2027')
     })
 
+    it('🔴 Plan Básico: la prueba que termina sin cobrar dice Básico y NO anuncia el cobro de Pro', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+        trialEndsFree: true,
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      const correo = JSON.stringify(spy.mock.calls.at(-1))
+      expect(correo).toContain(
+        '30 días gratis con todo Pro. Termina el 17 de diciembre de 2026 y no se te cobra nada; ese día podrás contratar el Básico por $499 + IVA al mes con un clic.',
+      )
+      expect(correo).toContain('Cámbialo en «Tu plan».')
+      expect(correo).not.toContain('1,158.84')
+      expect(correo).not.toContain('primer cobro')
+    })
+
+    it('Plan Básico sin precio vigente: el texto sale sin precio, nunca inventado', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+        trialEndsFree: true,
+      })
+      const correo = JSON.stringify(spy.mock.calls.at(-1))
+      expect(correo).toContain('ese día podrás contratar el Básico con un clic.')
+      expect(correo).not.toContain('1,158.84')
+    })
+
+    it('regresión: la prueba de Pro normal sigue anunciando su primer cobro', async () => {
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly',
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+      })
+      expect(JSON.stringify(spy.mock.calls.at(-1))).toContain('Tu primer cobro será de <strong>$1,158.84</strong>')
+    })
+
     it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
       const original = Intl.NumberFormat
       ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))
@@ -112,6 +162,140 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.subject).not.toMatch(EMOJI_RE)
       expect(arg.html).toContain('1,158.84')
       expect(arg.html).toContain('renovará')
+      // Regresión (Plan Básico): sin `basicOffer`, ni bloque ni asunto nuevo.
+      expect(arg.html).not.toContain('Prefieres el Básico')
+    })
+
+    it('🔴 Plan Básico «Tu Pro sube»: dice el monto REAL, ofrece el Básico a $499 + IVA y nunca su total', async () => {
+      await emailService.sendPlanRenewalReminderEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        interval: 'monthly',
+        renewalDate: new Date('2026-12-05T17:00:00Z'),
+        amountCents: 115884,
+        billingPortalUrl: 'https://app/tu-plan',
+        basicOffer: { priceWithoutTaxCents: 49900, reason: 'DISCOUNT_ENDS' },
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu descuento de Pro termina el 5 de diciembre de 2026')
+      expect(arg.html).toContain('$1,158.84')
+      expect(arg.html).toContain('¿Prefieres el Básico a $499 + IVA?')
+      expect(arg.html).toContain('Terminar mi Pro al acabar el descuento')
+      expect(arg.html).toContain('https://app/tu-plan')
+      expect(arg.html).not.toContain('578.84')
+      expect(arg.text).toContain('¿Prefieres el Básico a $499 + IVA?')
+    })
+
+    it('Plan Básico en el fin de prueba de un Pro normal: el cobro sigue anunciado y el bloque ofrece terminar la prueba', async () => {
+      await emailService.sendPlanRenewalReminderEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        interval: 'monthly',
+        renewalDate: new Date('2026-12-05T17:00:00Z'),
+        amountCents: 115884,
+        billingPortalUrl: 'u',
+        isTrialEnd: true,
+        basicOffer: { priceWithoutTaxCents: 49900, reason: 'TRIAL_ENDS' },
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu prueba de Avoqado Pro termina el 5 de diciembre de 2026')
+      expect(arg.html).toContain('cobraremos <strong>$1,158.84</strong>')
+      expect(arg.html).toContain('terminar tu prueba sin que se te cobre Pro')
+    })
+  })
+
+  describe('Plan Básico: sendPlanTrialEndsFreeEmail («Tu prueba termina»)', () => {
+    const baja = { url: 'https://api/api/v1/public/unsubscribe?token=t1', preferencesUrl: 'https://app/prefs' }
+
+    it('🔴 el texto literal del brief, sin cobro ni monto, con dos botones a «Tu plan» y la baja en un clic', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        timeZone: 'America/Mexico_City',
+        billingUrl: 'https://app/tu-plan',
+        basicPlanPriceWithoutTaxCents: 49900,
+        unsubscribe: baja,
+        idempotencyKey: 'k1',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu prueba de Avoqado Pro termina el 17 de diciembre de 2026')
+      expect(arg.subject).not.toMatch(EMOJI_RE)
+      expect(arg.text).toContain(
+        'Tu prueba de Pro termina el 17 de diciembre de 2026 y no se te cobrará nada. Ese día podrás contratar el Básico ($499 + IVA) con un clic, o quedarte en Pro desde hoy.',
+      )
+      expect(arg.html).not.toMatch(/cobraremos|1,158\.84|578\.84/)
+      expect(arg.html).toContain('Ver mi plan')
+      expect(arg.html).toContain('Quedarme en Pro')
+      expect(arg.html).toContain('Dejar de recibir estos avisos por correo')
+      expect(arg.html).toContain(baja.url)
+      expect(arg.html).toContain(baja.preferencesUrl)
+      expect(arg.headers).toEqual({ 'List-Unsubscribe': `<${baja.url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' })
+      expect(arg.idempotencyKey).toBe('k1')
+    })
+
+    it('sin Básico publicado: sin el bloque del Básico, y nunca un precio inventado', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        billingUrl: 'u',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.html).not.toContain('Básico')
+      expect(arg.html).toContain('no se te cobrará nada')
+      expect(arg.headers).toBeUndefined()
+    })
+  })
+
+  describe('Plan Básico: sendPlanEndedEmail («Tu prueba terminó» / «Tu Pro terminó»)', () => {
+    it('🔴 prueba: «Contratar Básico» y «Contratar Pro», sin cobro, con baja en un clic', async () => {
+      const baja = { url: 'https://api/unsub?token=t2', preferencesUrl: 'https://app/prefs' }
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        kind: 'TRIAL',
+        billingUrl: 'https://app/tu-plan',
+        basicPlanPriceWithoutTaxCents: 49900,
+        unsubscribe: baja,
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu prueba de Avoqado Pro terminó')
+      expect(arg.html).toContain('no se te cobró nada')
+      expect(arg.html).toContain('Puedes contratar el Básico ($499 + IVA) con un clic, o volver a Pro.')
+      expect(arg.html).toContain('Contratar Básico')
+      expect(arg.html).toContain('Contratar Pro')
+      expect(arg.headers?.['List-Unsubscribe']).toBe(`<${baja.url}>`)
+    })
+
+    it('«Tu Pro terminó» sin Básico publicado: sólo «Contratar Pro»', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', { locale: 'es', venueName: 'Bar', kind: 'PRO', billingUrl: 'u' })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu plan Avoqado Pro terminó')
+      expect(arg.html).toContain('Contratar Pro')
+      expect(arg.html).not.toContain('Contratar Básico')
+    })
+
+    it('🔴 revisión #3: «Tu Pro terminó» NO dice «no se te cobró nada» a quien pagó (es y en)', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+      })
+      const [es, en] = [spy.mock.calls[0][0], spy.mock.calls[1][0]]
+      expect(es.html).toContain('Tu plan Pro terminó.')
+      expect(`${es.html}${es.text}`).not.toMatch(/no se te cobró|sin cobro/)
+      expect(`${en.html}${en.text}`).not.toMatch(/didn.t charge/)
+      expect(en.html).toContain('Your Pro plan ended.')
     })
   })
 

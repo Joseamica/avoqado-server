@@ -606,6 +606,15 @@ describe('upsertOrgTpvDefaults — cada terminal se escribe dentro de su organiz
 
     expect(result.terminalsUpdated).toBe(1)
   })
+
+  // 🔴 Tarjeta na86c206 (Codex r2, 18-nov-2026): las terminales se escriben en el MISMO orden que toman los demás (por id:
+  // guardar los ajustes de un negocio, copiar el diseño, la limpieza de demos). En el orden en que las devolviera la base,
+  // con dos terminales cada uno podía quedarse con una y esperar la otra (`deadlock detected`, y el lote falla).
+  it('🔴 lee las terminales ordenadas por id, para escribirlas en el orden de los demás', async () => {
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+    expect(prismaMock.terminal.findMany).toHaveBeenCalledWith(expect.objectContaining({ orderBy: { id: 'asc' } }))
+  })
 })
 
 // 🔴 17-oct: el asiento ORG_TPV_DEFAULTS_UPDATED salía sin autor, sin organización y sin sucursal — ninguna

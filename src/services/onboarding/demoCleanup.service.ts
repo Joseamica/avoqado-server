@@ -98,6 +98,39 @@ interface CleanupResult {
   }
   /** ⭐ (C6 concern 1): por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo. Sin el campo, se limpió. */
   skippedReason?: 'GIFT_CARDS'
+  /** hz:nube0000:na4b2c82: canales en línea (de cualquier negocio) que el borrado dejó sin su tarifa o su costo. */
+  canalesEnLineaSinTarifa: CanalSinTarifa[]
+}
+
+/** Un canal en línea que perdió el enlace a la tarifa (`pricingStructureId`) o al costo (`costStructureId`) que se borró. */
+export interface CanalSinTarifa {
+  id: string
+  venueId: string
+  channelName: string
+  perdio: Array<'tarifa' | 'costo'>
+  pricingStructureId?: string
+  costStructureId?: string
+}
+
+const ESTRUCTURA = {
+  tarifa: { tabla: Prisma.raw('"VenuePricingStructure"'), columna: Prisma.raw('"pricingStructureId"'), campo: 'pricingStructureId' },
+  costo: { tabla: Prisma.raw('"ProviderCostStructure"'), columna: Prisma.raw('"costStructureId"'), campo: 'costStructureId' },
+} as const
+
+/**
+ * hz:nube0000:na4b2c82: los canales en línea que el `deleteMany` que sigue deja sin tarifa o costo (la llave es SET NULL y antes
+ * nadie se enteraba). Codex r1 #11: primero el candado de las estructuras que se van a borrar (un canal ya no puede ligarse a
+ * ellas: espera al commit y luego la llave lo rechaza) y luego el de los canales ligados (uno que se mueve a otra estructura al
+ * mismo tiempo se relee y ya no sale). Así la lista es lo que la llave pone en null. Una estructura NUEVA no puede colarse
+ * entre la lista y el borrado: la tarifa necesita la fila del negocio (ya tomada `FOR UPDATE` al empezar) y el costo la de su
+ * cuenta (se toma `FOR UPDATE` antes de llamar aquí; Codex r2 #7).
+ */
+async function canalesQuePierden(tx: Prisma.TransactionClient, que: 'tarifa' | 'costo', filtro: Prisma.Sql) {
+  const { tabla, columna } = ESTRUCTURA[que]
+  const ids = (await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM ${tabla} WHERE ${filtro} FOR UPDATE`).map(f => f.id)
+  if (ids.length === 0) return []
+  return tx.$queryRaw<Array<{ id: string; venueId: string; channelName: string; estructura: string }>>`
+    SELECT id, "venueId", "channelName", ${columna} AS estructura FROM "EcommerceMerchant" WHERE ${columna} = ANY(${ids}) FOR UPDATE`
 }
 
 /**
@@ -136,6 +169,20 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
         deletedCustomerGroups: 0,
         deletedLoyaltyConfig: 0,
         deletedRawMaterials: 0,
+        canalesEnLineaSinTarifa: [],
+      }
+      // Canales que pierden su tarifa o costo (na4b2c82), juntados por canal.
+      const canalesSinTarifa = new Map<string, CanalSinTarifa>()
+      const anotarCanales = (
+        que: 'tarifa' | 'costo',
+        filas: Array<{ id: string; venueId: string; channelName: string; estructura: string }>,
+      ) => {
+        for (const f of filas) {
+          const canal = canalesSinTarifa.get(f.id) ?? { id: f.id, venueId: f.venueId, channelName: f.channelName, perdio: [] }
+          canal.perdio.push(que)
+          canal[ESTRUCTURA[que].campo] = f.estructura
+          canalesSinTarifa.set(f.id, canal)
+        }
       }
       // ⭐ (C6 concern 1): con una sola tarjeta vendida no se borra nada (ver la cabecera). Dentro de la transacción, antes de borrar.
       // r1 (R2): primero la fila del negocio en FOR UPDATE (choca con el KEY SHARE que toma la llave foránea de un sobre que se está
@@ -251,6 +298,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
           // cambia: la cuenta REAL no se borra (sólo se borran demos) y la bitácora dice cuál quedó suelta y en qué posición.
           const cuentasRealesDesligadas = posiciones.filter(p => !demoAccountIds.includes(p.id)).map(p => ({ posicion: p.tipo, id: p.id }))
           await tx.venuePaymentConfig.delete({ where: { venueId } })
+          anotarCanales('tarifa', await canalesQuePierden(tx, 'tarifa', Prisma.sql`"venueId" = ${venueId}`))
           await tx.venuePricingStructure.deleteMany({ where: { venueId } })
           result.pagosDemo = { limpiadas: posiciones.map(p => p.tipo), configuracionBorrada: true, cuentasRealesDesligadas }
           logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures (PRIMARY was demo)`)
@@ -270,6 +318,10 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
               ...(limpiadas.includes('TERTIARY') ? { tertiaryAccountId: null } : {}),
             },
           })
+          anotarCanales(
+            'tarifa',
+            await canalesQuePierden(tx, 'tarifa', Prisma.sql`"venueId" = ${venueId} AND "accountType"::text = ANY(${limpiadas})`),
+          )
           await tx.venuePricingStructure.deleteMany({ where: { venueId, accountType: { in: limpiadas } } })
           result.pagosDemo = { limpiadas, configuracionBorrada: false, cuentasRealesDesligadas: [] }
           logger.info(`  ⚡ Preserved real merchant positions; cleaned demo positions: ${limpiadas.join(', ')}`)
@@ -299,6 +351,8 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
         ).map(m => m.id)
 
         if (safeToDeleteIds.length > 0) {
+          await tx.$queryRaw`SELECT id FROM "MerchantAccount" WHERE id = ANY(${safeToDeleteIds}) FOR UPDATE`
+          anotarCanales('costo', await canalesQuePierden(tx, 'costo', Prisma.sql`"merchantAccountId" = ANY(${safeToDeleteIds})`))
           await tx.providerCostStructure.deleteMany({
             where: { merchantAccountId: { in: safeToDeleteIds } },
           })
@@ -309,6 +363,24 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
           result.deletedMerchantAccounts = deletedMerchantAccounts.count
           logger.info(`  ✓ Deleted ${deletedMerchantAccounts.count} demo merchant accounts`)
         }
+      }
+
+      // na4b2c82 (Codex r1 #12): una fila de bitácora por canal, DENTRO de la transacción: si se perdiera, se perdería el único
+      // rastro de un enlace que ya no existe. Va con el negocio DEL CANAL (la bitácora por negocio filtra por venueId). Sin
+      // actor ni el negocio convertido (Codex r2 #9 y #10): el dueño de OTRO negocio no ve quién convirtió qué, y una llave de
+      // personal no puede tumbar la limpieza; quién convirtió queda en DEMO_PAYMENT_POSITIONS_CLEANED del negocio convertido.
+      result.canalesEnLineaSinTarifa = [...canalesSinTarifa.values()]
+      for (const canal of result.canalesEnLineaSinTarifa) {
+        await tx.activityLog.create({
+          data: {
+            staffId: null,
+            venueId: canal.venueId,
+            action: 'DEMO_CLEANUP_ECOMMERCE_CHANNEL_UNLINKED',
+            entity: 'EcommerceMerchant',
+            entityId: canal.id,
+            data: { ...canal, motivo: 'Se convirtió a real un negocio demo cuya tarifa o costo usaba este canal' },
+          },
+        })
       }
 
       // 8. Delete demo Customers (those created by seed)

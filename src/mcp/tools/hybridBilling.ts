@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { Prisma } from '@prisma/client'
 import type { McpScope } from '../scope'
 import { text } from '../respond'
 import { createGuard } from '../guard'
@@ -14,6 +15,7 @@ import {
   getCurrentHybridPurchase,
   getHybridReplacementOptions,
   hybridPurchaseView,
+  getQuotedPaymentCard,
 } from '@/services/launchCampaigns/hybridPurchase.service'
 import { provisionHybridPurchase } from '@/services/launchCampaigns/hybridProvision.service'
 import { getHybridFeatureGrid } from '@/services/launchCampaigns/hybridFeatureGrid.service'
@@ -136,9 +138,20 @@ export function registerHybridBillingTools(server: McpServer, scope: McpScope) {
   )
   server.tool(
     'hybrid_offers',
-    'Ofertas publicadas de planes, funciones y paquetes a elección. Importes en pesos MXN con IVA incluido. Devuelve el total y permite recorrer páginas; la elegibilidad final se comprueba al cotizar.',
+    'Ofertas publicadas de planes, funciones y paquetes a elección, empezando por el Plan Básico (con su precio con y sin IVA). Importes en pesos MXN. Devuelve el total y permite recorrer páginas; la elegibilidad final se comprueba al cotizar.',
     hybridCampaignListQuery.omit({ status: true }).shape,
-    async input => text(await listPublicHybridOffers(input)),
+    async input => {
+      const offers = await listPublicHybridOffers({ ...input, includeBasic: 'true' })
+      return text({
+        ...offers,
+        items: offers.items.map(item => {
+          const definition = item.definition as { basicPlan?: boolean; terms?: { price?: string | number } }
+          if (definition.basicPlan !== true || definition.terms?.price === undefined) return item
+          const withTax = new Prisma.Decimal(definition.terms.price)
+          return { ...item, priceWithTax: withTax.toFixed(2), priceWithoutTax: withTax.div('1.16').toDecimalPlaces(2).toFixed(2) }
+        }),
+      })
+    },
   )
   server.tool(
     'quote_hybrid_purchase',
@@ -163,17 +176,28 @@ export function registerHybridBillingTools(server: McpServer, scope: McpScope) {
   )
   server.tool(
     'accept_hybrid_purchase',
-    'Presenta la cotización para confirmación. Con confirm:true reserva el lugar y abre el enlace de pago del mismo intento; la persona confirma el pago en ese enlace. No paga automáticamente ni activa funciones antes del pago.',
+    'Presenta la cotización para confirmación. Con confirm:true reserva el lugar y abre el enlace de pago del mismo intento; la persona confirma el pago en ese enlace. No paga automáticamente ni activa funciones antes del pago. Excepción, el Plan Básico: si el negocio tiene una tarjeta guardada, con confirm:true se cobra en ese momento con esa tarjeta (la vista previa dice el importe y la terminación) y se renueva cada mes.',
     { venueId, purchaseId, quoteHash: z.string(), clientKey: z.string().describe('Misma llave estable al reintentar'), confirm },
     async ({ venueId: id, purchaseId: purchase, quoteHash, clientKey, confirm: approved }) => {
       write(id)
-      if (!approved)
+      if (!approved) {
+        const { quote } = await getHybridPurchaseStatus(id, purchase)
+        // Mirrors provisioning: one line + a frozen card = the one-click Básico, which charges now. The stored quote decides
+        // the wording, never the Stripe lookup (it only adds the last digits).
+        const stored = quote as unknown as { paymentMethodId?: string; lines?: unknown[]; dueNow: string }
+        const chargesNow = Boolean(stored.paymentMethodId) && stored.lines?.length === 1
+        const card = chargesNow ? await getQuotedPaymentCard(stored.paymentMethodId!) : null
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: (await getHybridPurchaseStatus(id, purchase)).quote,
-          mensaje: 'Revisa el importe, las funciones que dejas y la renovación. Confirma para reservar y abrir el pago.',
+          preview: quote,
+          mensaje: chargesNow
+            ? card?.last4
+              ? `Se cobrarán $${stored.dueNow} ahora con la tarjeta terminación ${card.last4} y se renueva cada mes. Confirma para cobrar.`
+              : `Se cobrarán $${stored.dueNow} ahora con la tarjeta guardada (terminación ····) y se renueva cada mes. Confirma para cobrar.`
+            : 'Revisa el importe, las funciones que dejas y la renovación. Confirma para reservar y abrir el pago.',
         })
+      }
       const accepted = await acceptHybridQuote(id, scope.staffId, purchase, { quoteHash, clientKey })
       await auditMcpWrite(scope, { venueId: id, action: 'MCP_HYBRID_ACCEPTED', entity: 'HybridPurchase', entityId: purchase })
       return text(

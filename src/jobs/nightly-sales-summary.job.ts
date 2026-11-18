@@ -19,7 +19,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
 import emailService from '../services/email.service'
-import { utcTs } from '../utils/sqlDates'
+import { sqlRangoHoraRealSql } from '../services/shared/horaRealDelAparato'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { lineModifiersSql, lineRevenueAsChargedSql } from '../services/dashboard/lineRevenue'
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
@@ -568,8 +568,7 @@ export async function getCategoryBreakdown(
       LEFT JOIN "Product" p ON oi."productId" = p.id
       LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
       WHERE o."venueId" = ${venueId}
-        AND o."createdAt" >= ${utcTs(startDate)}
-        AND o."createdAt" <= ${utcTs(endDate)}
+        AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
         -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
         -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
         AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
@@ -642,8 +641,7 @@ async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Da
         o.subtotal - o."discountAmount" as net_sales
       FROM "Order" o
       WHERE o."venueId" = ${venueId}
-        AND o."createdAt" >= ${utcTs(startDate)}
-        AND o."createdAt" <= ${utcTs(endDate)}
+        AND ${sqlRangoHoraRealSql('o', startDate, endDate)}
         AND o.status NOT IN ('CANCELLED')
         AND o."paymentStatus" NOT IN ('REFUNDED')
         -- D43: the same per-order net as getOrderSourcesBreakdown (a table cortesía is already out of the subtotal).
@@ -722,8 +720,7 @@ export async function getOrderSourcesBreakdown(
       + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
     GROUP BY o.source
@@ -746,8 +743,7 @@ export async function getOrderSourcesBreakdown(
     JOIN "Order" o ON o.id = p."orderId"
     WHERE p."venueId" = ${venueId}
       AND p.type = 'REFUND'
-      AND p."createdAt" >= ${utcTs(startDate)}
-      AND p."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('p', startDate, endDate)}
       AND o.status NOT IN ('CANCELLED', 'DELETED')
       AND ${sqlOrdenSinTarjetas('o.id')}
     GROUP BY COALESCE(o.source::text, 'TPV')

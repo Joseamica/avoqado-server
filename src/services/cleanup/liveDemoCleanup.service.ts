@@ -504,9 +504,8 @@ export async function deleteVenueDataTx(tx: TxConReintento, venueId: string): Pr
     }
   }
 
-  // 10. Features and settings
+  // 10. Features. Los ajustes del negocio (`VenueSettings`) se borran DESPUÉS de las terminales (paso 11.7): ver allí.
   await borrar(tx.venueFeature.deleteMany({ where: { venueId } }))
-  await borrar(tx.venueSettings.deleteMany({ where: { venueId } }))
 
   // 11. Webhook events
   await borrar(tx.webhookEvent.deleteMany({ where: { venueId } }))
@@ -549,7 +548,17 @@ export async function deleteVenueDataTx(tx: TxConReintento, venueId: string): Pr
   await borrar(tx.productOption.deleteMany({ where: { venueId } }))
   await borrar(tx.inventoryTransfer.deleteMany({ where: { venueId } }))
   await borrar(tx.posCommand.deleteMany({ where: { venueId } }))
+  // 🔴 Las terminales, por id (tarjeta na86c206): el borrado las toma en el orden en que Postgres las encuentra, y guardar
+  // los ajustes de terminal las toma ordenadas por id. Con dos terminales cada uno podía quedarse con una y esperar la otra.
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR UPDATE`)
   await borrar(tx.terminal.deleteMany({ where: { venueId } }))
+
+  // 11.7 🔴 Los ajustes del negocio, DESPUÉS de las terminales (tarjeta na86c206, 18-nov-2026). Guardar los ajustes de
+  // terminal del negocio (`updateVenueTpvSettings`, y el carril de la terminal PAX) toma las terminales y después
+  // `VenueSettings`; antes aquí se borraba `VenueSettings` en el paso 10 y las terminales al final, al revés, y si coincidían
+  // en la misma demo Postgres mataba a una con `deadlock detected` (el guardado no reintenta: 500). Con el mismo orden
+  // terminal → ajustes, uno espera al otro. Prueba: `tests/integration/cleanup/liveDemoCleanupTrabaAjustes.integration.test.ts`.
+  await borrar(tx.venueSettings.deleteMany({ where: { venueId } }))
 
   // 12. Finally, delete the venue
   await tx.venue.delete({ where: { id: venueId } })

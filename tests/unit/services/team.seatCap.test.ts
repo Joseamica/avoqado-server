@@ -90,6 +90,50 @@ describe('inviteTeamMember — Free-tier seat cap (TPV-only direct add)', () => 
     expect(prismaMock.staffVenue.upsert).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 a direct add counts and writes the new seat under the venue seat-cap lock (final review #8)', async () => {
+    prismaMock.staffVenue.count.mockResolvedValue(1)
+    prismaMock.staffVenue.upsert.mockResolvedValue({ id: 'sv-new' } as any)
+    prismaMock.invitation.update.mockResolvedValue({} as any)
+
+    await inviteTeamMember(VENUE_ID, INVITER_ID, {
+      firstName: 'New',
+      lastName: 'Cajero',
+      role: StaffRole.WAITER,
+      type: 'tpv-only',
+      pin: '4321',
+    })
+
+    const lock = prismaMock.$queryRaw.mock.calls.findIndex((c: any[]) => c[0].join('?').includes('pg_advisory_xact_lock'))
+    expect(prismaMock.$queryRaw.mock.calls[lock].slice(1)).toEqual([[`seat-cap:${VENUE_ID}`]])
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[lock]).toBeLessThan(prismaMock.staffVenue.upsert.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 r2 #8: the TPV add counts and INSERTS its reserving invitation under the lock; full → no row is left behind', async () => {
+    prismaMock.staffVenue.count.mockResolvedValue(1)
+    prismaMock.staffVenue.upsert.mockResolvedValue({ id: 'sv-new' } as any)
+    prismaMock.invitation.update.mockResolvedValue({} as any)
+    const tpv = { firstName: 'New', lastName: 'Cajero', role: StaffRole.WAITER, type: 'tpv-only', pin: '4321' } as const
+
+    await inviteTeamMember(VENUE_ID, INVITER_ID, tpv)
+
+    const lockAt =
+      prismaMock.$queryRaw.mock.invocationCallOrder[
+        prismaMock.$queryRaw.mock.calls.findIndex((c: any[]) => c[0].join('?').includes('pg_advisory_xact_lock'))
+      ]
+    expect(lockAt).toBeLessThan(prismaMock.staffVenue.count.mock.invocationCallOrder[0])
+    expect(lockAt).toBeLessThan(prismaMock.invitation.create.mock.invocationCallOrder[0])
+    // The later seat check never counts this add's own pending invitation as another seat.
+    expect(prismaMock.invitation.count).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { not: 'inv-1' } }) }),
+    )
+
+    // Full venue: refused BEFORE the invitation exists (the restore can never see a stray reservation).
+    jest.clearAllMocks()
+    prismaMock.staffVenue.count.mockResolvedValue(2)
+    await expect(inviteTeamMember(VENUE_ID, INVITER_ID, tpv)).rejects.toMatchObject({ code: SEAT_CAP_REACHED_CODE })
+    expect(prismaMock.invitation.create).not.toHaveBeenCalled()
+  })
+
   it('does NOT enforce the cap for a grandfathered (exempt) venue even at many seats', async () => {
     prismaMock.venue.findUnique.mockResolvedValue({ ...freeVenue, seatCapExempt: true } as any)
     prismaMock.staffVenue.count.mockResolvedValue(99)
@@ -148,6 +192,21 @@ describe('inviteTeamMember — Free-tier seat cap enforced at email invite SEND 
     await inviteTeamMember(VENUE_ID, INVITER_ID, emailRequest)
 
     expect(prismaMock.invitation.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 counts and inserts under the venue seat-cap lock shared with restoring seats and accepting (final review #8)', async () => {
+    prismaMock.staffVenue.count.mockResolvedValue(1)
+    prismaMock.invitation.count.mockResolvedValue(0)
+    prismaMock.staff.create.mockResolvedValue({ id: 'staff-new', email: emailRequest.email } as any)
+
+    await inviteTeamMember(VENUE_ID, INVITER_ID, emailRequest)
+
+    const lock = prismaMock.$queryRaw.mock.calls.findIndex((c: any[]) => c[0].join('?').includes('pg_advisory_xact_lock'))
+    expect(lock).toBeGreaterThanOrEqual(0)
+    expect(prismaMock.$queryRaw.mock.calls[lock].slice(1)).toEqual([[`seat-cap:${VENUE_ID}`]])
+    const lockedAt = prismaMock.$queryRaw.mock.invocationCallOrder[lock]
+    expect(lockedAt).toBeLessThan(prismaMock.staffVenue.count.mock.invocationCallOrder[0])
+    expect(lockedAt).toBeLessThan(prismaMock.invitation.create.mock.invocationCallOrder[0])
   })
 
   it('THROWS and creates NO Invitation row when the Free venue is full via 1 active + 1 PENDING invite (the founder bug)', async () => {

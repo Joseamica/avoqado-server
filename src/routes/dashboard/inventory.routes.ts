@@ -1,7 +1,8 @@
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
-import { checkFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
+import { checkFeatureAccess, requestIsSuperAdmin } from '../../middlewares/checkFeatureAccess.middleware'
+import { venueHasFeatureAccess } from '../../services/access/basePlan.service'
 import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
 import { checkInterVenueTransferCancelPermission } from '../../middlewares/interVenueTransferCancelPermission.middleware'
 import * as autoReorderController from '../../controllers/dashboard/auto-reorder.controller'
@@ -23,6 +24,8 @@ import {
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
+import { altaPideInventarioPremium, productoLlevaInventario } from '../../services/dashboard/productoLlevaInventario'
+import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
@@ -108,13 +111,86 @@ import {
 const router = Router({ mergeParams: true })
 
 // ===========================================
+// ALTA DE PRODUCTO POR EL ASISTENTE — antes del candado general, a propósito (D8, 16-nov-2026)
+// ===========================================
+// «Nuevo producto» y «Crear servicio» del DASHBOARD guardan SIEMPRE por aquí, también sin inventario. Con el candado
+// general delante, un negocio nuevo en Gratis o Pro (no exento ni demo) no podía dar de alta ni un producto: 403.
+// Dar de alta un producto SIN inventario es de todos los planes (D8). Y desde el 17-nov también CON inventario por PIEZAS: contar
+// piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta `hz:nube0000:na1d52b5`). Sólo el alta por RECETA (o
+// cualquier método que no sea piezas) pide INVENTORY_TRACKING (`altaPideInventarioPremium`, la misma regla con que el servicio decide).
+// El cuerpo se valida ANTES de decidir, para que el candado lea lo mismo que va a leer el servicio.
+// Editar o ajustar las piezas de un producto que ya existe (`wizard/progress`, `step3-simple`, `adjust-stock`…) sigue detrás del
+// candado general: abrirlo pide resolver antes recetas, ventas en medio y saldos negativos (Codex r1 de na1d52b5).
+const candadoSiPidePremium: RequestHandler = (req, res, next) =>
+  altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
+
+// Codex r9 #1 y r10 #1-#2 de na1d52b5: con marca blanca e Inventario apagado, `checkPermission` evalúa el rol sin ese filtro, y el
+// filtro deja pasar el comodín `inventory:*` de Admin y Dueño. Por eso se pide también la FUNCIÓN de marca blanca (`AVOQADO_INVENTORY`;
+// fuera de marca blanca siempre pasa), con la suplantación resuelta (`verifyAccess`). La usan el alta CON inventario y la recomendación,
+// para no ofrecer piezas que no se pueden guardar.
+const inventarioDeMarcaBlanca = (permission: string) => verifyAccess({ permission, featureCode: 'AVOQADO_INVENTORY' })
+const permisoEfectivoSiLlevaInventario: RequestHandler = (req, res, next) =>
+  productoLlevaInventario(req.body?.inventory) ? inventarioDeMarcaBlanca('inventory:update')(req, res, next) : next()
+
+// Codex r5 #1 de na1d52b5: donde el alta por el asistente era 403 (negocio SIN inventario Premium), ahora pasa; ahí pide también el
+// permiso del alta normal (`menu:create`), para no ampliar lo que puede un rol personalizado con sólo `inventory:update`. Con inventario
+// Premium (o exento, demo o superadmin) queda como siempre, con `inventory:update`: Recetas da de alta así (Codex r3 #4).
+const permisoDelAltaSinPremium: RequestHandler = async (req, res, next) => {
+  try {
+    const conPremium =
+      (await requestIsSuperAdmin((req as any).authContext)) || (await venueHasFeatureAccess(req.params.venueId, 'INVENTORY_TRACKING'))
+    // Con el filtro de marca blanca: Menú apagado no da de alta, aunque el rol tenga `menu:create` (Codex r11 #1).
+    return conPremium ? next() : verifyAccess({ permission: 'menu:create', featureCode: 'AVOQADO_MENU' })(req, res, next)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/wizard/complete:
+ *   post:
+ *     tags: [Inventory - Product Wizard]
+ *     summary: "All-in-one: Create product with inventory"
+ */
+router.post(
+  '/wizard/complete',
+  // El permiso de siempre (`inventory:update`) y, sin inventario Premium, también el del alta normal (`menu:create`, Codex r5 #1).
+  checkPermission('inventory:update'),
+  validateRequest(CreateProductWithInventorySchema),
+  candadoSiPidePremium,
+  permisoDelAltaSinPremium,
+  permisoEfectivoSiLlevaInventario,
+  productWizardController.createProductWithInventory,
+)
+
+/**
+ * La recomendación del asistente «Nuevo producto»: qué inventario puede elegir este negocio. De TODOS los planes (sólo lee el plan):
+ * detrás del candado general, Gratis y Pro recibían 403 y la sección se quedaba en «Cargando…» para siempre (na1d52b5).
+ *
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/should-use-inventory:
+ *   get:
+ *     tags: [Inventory - Product Wizard]
+ *     summary: Check if venue should use inventory (recommendations)
+ */
+router.get(
+  '/should-use-inventory',
+  checkPermission('inventory:read'),
+  inventarioDeMarcaBlanca('inventory:read'),
+  validateRequest(VenueIdParamsSchema),
+  productWizardController.shouldUseInventory,
+)
+
+// ===========================================
 // PLAN GATE — whole inventory namespace
 // ===========================================
 // INVENTORY_TRACKING is a PREMIUM-only differentiator (PREMIUM_ONLY_CODES ↔ plan-catalog.ts).
 // Grandfathered/demo venues, explicit VenueFeature grants and superadmins all pass inside
 // checkFeatureAccess. The auto-reorder routes below ADDITIONALLY gate on AUTO_REORDER (their
 // own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
-// the MCP's planGateMessage — this closes the server side of that same paywall.
+// the MCP's planGateMessage — this closes the server side of that same paywall. The only routes
+// registered above it are the product wizard's «complete» (its own conditional gate) and «should-use-inventory» (read-only).
 router.use(checkFeatureAccess('INVENTORY_TRACKING'))
 
 // ===========================================
@@ -1295,20 +1371,6 @@ router.get('/reports/valuation', checkPermission('inventory:read'), reportContro
 
 /**
  * @openapi
- * /api/v1/dashboard/venues/{venueId}/products/should-use-inventory:
- *   get:
- *     tags: [Inventory - Product Wizard]
- *     summary: Check if venue should use inventory (recommendations)
- */
-router.get(
-  '/should-use-inventory',
-  checkPermission('inventory:read'),
-  validateRequest(VenueIdParamsSchema),
-  productWizardController.shouldUseInventory,
-)
-
-/**
- * @openapi
  * /api/v1/dashboard/venues/{venueId}/products/wizard/step1:
  *   post:
  *     tags: [Inventory - Product Wizard]
@@ -1375,20 +1437,6 @@ router.get(
   checkPermission('inventory:read'),
   validateRequest(GetWizardProgressSchema),
   productWizardController.getWizardProgress,
-)
-
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/products/wizard/complete:
- *   post:
- *     tags: [Inventory - Product Wizard]
- *     summary: "All-in-one: Create product with inventory"
- */
-router.post(
-  '/wizard/complete',
-  checkPermission('inventory:update'),
-  validateRequest(CreateProductWithInventorySchema),
-  productWizardController.createProductWithInventory,
 )
 
 // ===========================================

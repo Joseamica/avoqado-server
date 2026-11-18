@@ -8,7 +8,14 @@ import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
 import { copiaGuardada, totalesConLaCopia } from '../shared/lineasDelTicket'
 import logger from '@/config/logger'
 import emailService from '../email.service'
-import { contarCobrosDeVenta, ticketTotals, ticketTotalsDelSnapshot, ticketTotalsSinDesglose } from '../shared/ticketTotals'
+import {
+  contarCobrosDeVenta,
+  cortesiaEnCeroDe,
+  ticketTotals,
+  ticketTotalsDelSnapshot,
+  ticketTotalsSinDesglose,
+  totalDelRenglonEnElTicket,
+} from '../shared/ticketTotals'
 import { ORDEN_RECIBO_CANONICO, reciboCanonicoDelPago } from '../shared/reciboCanonico'
 import { productosDelSnapshot } from '../shared/productosDelRecibo'
 
@@ -160,6 +167,16 @@ export async function generateAndStoreReceipt(
 
   // These variables were already declared above, removing duplicate declarations
 
+  // IVA por producto, plan 7 (D3; r2 R2-10): congelado al crear el recibo, del MISMO cobro y la MISMA orden que el resto del snapshot.
+  // D41 «C»: con la cortesía que la venta guardó en $0 (Mesas), como la de Mostrador. Con copia D1 no: la copia manda en todo lo que
+  // se pinta, y el recibo se guarda como hoy (Codex r2 #2).
+  const copiaDelCobro = copiaGuardada(payment.processorData)
+  const totalesDelCobro = ticketTotals({
+    payment: { amount: payment.amount, tipAmount: payment.tipAmount, type: payment.type, status: payment.status },
+    order: { ...order, cortesiaEnCero: copiaDelCobro ? null : cortesiaEnCeroDe(orderItems) },
+    cobrosDeVenta: await contarCobrosDeVenta(db, payment.orderId),
+  })
+
   // Create data snapshot with all information needed to render the receipt
   const baseAmount = parseFloat(payment.amount.toString())
   const tipAmount = parseFloat(payment.tipAmount.toString())
@@ -196,7 +213,8 @@ export async function generateAndStoreReceipt(
         // "Importe personalizado" for custom line items with no productId.
         const name = item.productName || item.product?.name || 'Importe personalizado'
         const unitPrice = parseFloat(item.unitPrice?.toString() || '0')
-        const totalPrice = parseFloat(item.total?.toString() || '0')
+        // D41 «C»: la cortesía en $0 se pinta a su bruto cuando el desglose la sumó (los renglones cuadran con el subtotal).
+        const totalPrice = totalDelRenglonEnElTicket(item, totalesDelCobro)
         return {
           name,
           quantity: item.quantity,
@@ -227,14 +245,9 @@ export async function generateAndStoreReceipt(
           email: (customer as any).email || undefined,
         }
       : undefined,
-    // IVA por producto, plan 7 (D3; r2 R2-10): congelado al crear el recibo, del MISMO cobro y la MISMA orden que el resto del snapshot.
-    ticketTotals: ticketTotals({
-      payment: { amount: payment.amount, tipAmount: payment.tipAmount, type: payment.type, status: payment.status },
-      order,
-      cobrosDeVenta: await contarCobrosDeVenta(db, payment.orderId),
-    }),
+    ticketTotals: totalesDelCobro,
     // D1 «fotocopia del ticket»: la copia que guardó ESTE cobro, congelada con el recibo.
-    lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
+    lineasDelTicket: copiaDelCobro ?? undefined,
   }
 
   // Create digital receipt

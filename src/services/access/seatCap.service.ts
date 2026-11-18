@@ -1,4 +1,4 @@
-import { InvitationStatus, StaffRole } from '@prisma/client'
+import { InvitationStatus, StaffRole, type Prisma } from '@prisma/client'
 import { ventanaDeAccesoWhere } from './ventanaDeAcceso'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
@@ -6,6 +6,7 @@ import { getVenueBaseTier, PAID_PLAN_TIER_CODES } from './basePlan.service'
 // Imported from the dependency-free module, NOT from basePlan.service: several suites mock
 // basePlan wholesale, and going through it would leave the resolver undefined inside the gate.
 import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
+import { activeBasicSeatCaps } from '@/services/launchCampaigns/basicPlanAccess'
 
 /**
  * Free-plan seat cap.
@@ -39,7 +40,9 @@ export const SEAT_CAP_REACHED_CODE = 'SEAT_CAP_REACHED'
  * The venue's active-user cap, or `null` for unlimited.
  *   - `seatCapExempt` venue (grandfathered) → null (never enforced).
  *   - Paid tier (PLAN_PRO / PLAN_PREMIUM)    → null (unlimited).
+ *   - Plan Básico vigente (a grant covers now) → its publication's `seatCap` (null = unlimited).
  *   - Free / no active paid plan             → {@link FREE_TIER_SEAT_CAP}.
+ * {@link assertCanAddSeatsBulk} applies the SAME precedence; keep both in step.
  *
  * Returns null (fail-open) when the venue can't be found — enforcement should never
  * block on a missing/ambiguous venue; the upstream flow will surface its own not-found.
@@ -59,7 +62,27 @@ export async function getVenueSeatCap(venueId: string): Promise<number | null> {
   // Otherwise the entitled base tier decides. A paid tier → unlimited; no paid tier → Free.
   const tier = await getVenueBaseTier(venueId)
   if (tier === 'PRO' || tier === 'PREMIUM') return null
-  return FREE_TIER_SEAT_CAP
+  const basic = (await activeBasicSeatCaps([venueId], new Date())).get(venueId)
+  return basic === undefined ? FREE_TIER_SEAT_CAP : basic
+}
+
+/**
+ * The ONE per-venue lock of the seat cap (final review #8): restoring seats, creating an invitation and accepting one
+ * take it before counting, so two of them never both see the last free seat. Transaction-scoped (released at commit);
+ * one round trip for any number of venues, in a fixed (sorted) order so two holders never wait on each other.
+ */
+export async function lockSeatCap(tx: Prisma.TransactionClient, venueIds: string[]): Promise<void> {
+  const keys = [...new Set(venueIds)].sort().map(id => `seat-cap:${id}`)
+  if (keys.length) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(k))::text FROM unnest(${keys}::text[]) AS k`
+}
+
+/**
+ * User-facing Spanish message when the cap is reached. A finite cap other than Free's can only come from a Plan Básico.
+ * ponytail: a Básico whose seatCap is exactly 2 reads «plan Gratis»; pass the source if that ever matters.
+ */
+function seatCapReachedMessage(cap: number | null): string {
+  const plan = cap === FREE_TIER_SEAT_CAP ? 'del plan Gratis' : 'de tu Plan Básico'
+  return `Llegaste al límite de ${cap} usuarios ${plan} (incluye invitaciones pendientes). Mejora a Pro para agregar usuarios ilimitados.`
 }
 
 /**
@@ -154,17 +177,8 @@ export async function canAddSeat(
 export async function assertCanAddSeat(venueId: string, opts: SeatCheckOptions = {}): Promise<void> {
   const { allowed, cap } = await canAddSeat(venueId, opts)
   if (allowed) return
-  throw new ForbiddenError(
-    `Llegaste al límite de ${cap} usuarios del plan Gratis (incluye invitaciones pendientes). ` +
-      `Mejora a Pro para agregar usuarios ilimitados.`,
-    SEAT_CAP_REACHED_CODE,
-  )
+  throw new ForbiddenError(seatCapReachedMessage(cap), SEAT_CAP_REACHED_CODE)
 }
-
-/** The Free-tier seat-cap exhaustion message (also used by the bulk path). */
-const seatCapReachedMessage =
-  `Llegaste al límite de ${FREE_TIER_SEAT_CAP} usuarios del plan Gratis (incluye invitaciones pendientes). ` +
-  `Mejora a Pro para agregar usuarios ilimitados.`
 
 /**
  * BATCH counterpart to {@link assertCanAddSeat}: throws a 403 {@link ForbiddenError}
@@ -173,7 +187,7 @@ const seatCapReachedMessage =
  * and paid (PLAN_PRO / PLAN_PREMIUM) venues, and for Free venues still under the cap.
  *
  * Mirrors {@link getVenueSeatCap} + {@link canAddSeat} semantics EXACTLY, but resolves the whole
- * set in a small CONSTANT number of queries (≤4 regardless of N) instead of ~4 per venue. This is
+ * set in a small CONSTANT number of queries (≤5 regardless of N) instead of ~4 per venue. This is
  * what lets an OWNER `inviteToAllVenues` fan-out across a large org (PlayTelecom, 40 venues) run
  * its accept transaction in O(1) round-trips instead of ~4N — the per-venue sequential reads blew
  * Prisma's interactive-transaction timeout and threw P2028 (prod incident 2026-06-30).
@@ -211,7 +225,13 @@ export async function assertCanAddSeatsBulk(
   capped = capped.filter(id => !paid.has(id))
   if (capped.length === 0) return // every remaining candidate has a paid plan → unlimited
 
-  // 3. Remaining candidates are Free-tier (cap = FREE_TIER_SEAT_CAP). Count active seats + pending
+  // 3. Plan Básico vigente → its own cap (null = unlimited, dropped here). Same precedence as getVenueSeatCap.
+  const basicCaps = await activeBasicSeatCaps(capped, now)
+  capped = capped.filter(id => basicCaps.get(id) !== null)
+  if (capped.length === 0) return
+  const capOf = (id: string) => basicCaps.get(id) ?? FREE_TIER_SEAT_CAP
+
+  // 4. Remaining candidates have a finite cap (the Básico's, or FREE_TIER_SEAT_CAP). Count active seats + pending
   //    invites per venue in two grouped queries (same predicates as getActiveSeatCount /
   //    getPendingInvitationCount), then enforce.
   const [activeRows, pendingRows] = await Promise.all([
@@ -231,7 +251,7 @@ export async function assertCanAddSeatsBulk(
 
   // Off-by-one: exclude the invite being accepted from its primary venue's pending count (only
   // that venue carries this invite's pending row). One extra count, ONLY when the primary venue
-  // is itself a Free-tier capped candidate (rare — owner fan-outs are usually paid/exempt orgs).
+  // is itself a capped candidate (rare — owner fan-outs are usually paid/exempt orgs).
   if (opts.primaryVenueId && opts.excludeInvitationId && capped.includes(opts.primaryVenueId)) {
     pendingByVenue.set(
       opts.primaryVenueId,
@@ -249,8 +269,8 @@ export async function assertCanAddSeatsBulk(
 
   for (const id of capped) {
     const current = (activeByVenue.get(id) ?? 0) + (pendingByVenue.get(id) ?? 0)
-    if (current >= FREE_TIER_SEAT_CAP) {
-      throw new ForbiddenError(seatCapReachedMessage, SEAT_CAP_REACHED_CODE)
+    if (current >= capOf(id)) {
+      throw new ForbiddenError(seatCapReachedMessage(capOf(id)), SEAT_CAP_REACHED_CODE)
     }
   }
 }

@@ -34,6 +34,8 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
+import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
+import { ForbiddenError } from '../../errors/AppError'
 
 export async function listVenues(req: Request<{}, any, any, ListVenuesQueryDto>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -167,22 +169,23 @@ export async function createEnhancedVenue(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const orgId = req.authContext?.orgId
-    if (!orgId) {
-      logger.error('Organization context not found in enhanced venue creation')
-      return next(new Error('Contexto de organización no encontrado'))
-    }
-
     const userId = req.authContext?.userId
     if (!userId) {
       logger.error('User context not found in enhanced venue creation')
       return next(new Error('Contexto de usuario no encontrado'))
     }
 
+    // na5adb84 (decisión «A»): sólo superadmin (guardia de la ruta). El negocio nuevo nace en la organización del negocio donde
+    // está parado (`x-venue-id` o el del token, como las rutas con `checkPermission`); ver `createEnhancedVenue`.
+    const venueDelPermisoId = resolveRequestVenueId(req, req.authContext!)
+    if (!venueDelPermisoId) {
+      return next(new ForbiddenError('Abre primero un negocio de la organización donde quieres crear el nuevo.'))
+    }
+
     const venueData: EnhancedCreateVenueBody = req.body
 
     logger.info('Creating enhanced venue', {
-      orgId,
+      venueDelPermisoId,
       userId,
       venueName: venueData.name,
       enablePaymentProcessing: venueData.enablePaymentProcessing,
@@ -191,7 +194,7 @@ export async function createEnhancedVenue(
     })
 
     // Create the venue with enhanced features
-    const newVenue = await venueDashboardService.createEnhancedVenue(orgId, userId, venueData)
+    const newVenue = await venueDashboardService.createEnhancedVenue({ userId, venueDelPermisoId }, venueData)
 
     res.status(201).json({
       success: true,
@@ -534,8 +537,9 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
   try {
     const { venueId } = req.params
     // `grantedFeatureCodes` es ADITIVO: un dashboard viejo lo ignora. Sólo códigos (#10, 21-sep).
-    const plan = await getVenuePlanInfo(venueId)
-    res.status(200).json({ success: true, data: plan })
+    const [plan, basico] = await Promise.all([getVenuePlanInfo(venueId), planStateService.basicPlanActive(venueId)])
+    // Plan Básico: el chip del negocio dice «Básico» y no «Free». ADITIVO y sólo cuando es verdad: sin Básico, la respuesta de siempre.
+    res.status(200).json({ success: true, data: basico ? { ...plan, basicPlanActive: true } : plan })
   } catch (error) {
     logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -550,14 +554,14 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
  * POST /api/v1/dashboard/venues/:venueId/plan/cancel
  */
 export async function cancelVenuePlan(
-  req: Request<{ venueId: string }, any, CancellationInput>,
+  req: Request<{ venueId: string }, any, CancellationInput & { purpose?: 'BASIC_PLAN' }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
-    const { reason, comment } = req.body ?? {}
-    const planState = await planStateService.cancelPlan(venueId, { reason, comment, staffId: (req as any).authContext?.userId })
+    const { reason, comment, purpose } = req.body ?? {}
+    const planState = await planStateService.cancelPlan(venueId, { reason, comment, purpose, staffId: (req as any).authContext?.userId })
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error canceling venue plan', {
@@ -638,17 +642,18 @@ export async function getVenueDowngradePreview(req: Request<{ venueId: string }>
  * POST /api/v1/dashboard/venues/:venueId/plan/downgrade
  */
 export async function downgradeVenueToFree(
-  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[] } & CancellationInput>,
+  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[]; purpose?: 'BASIC_PLAN' } & CancellationInput>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
     const keepStaffVenueIds = req.body.keepStaffVenueIds ?? []
-    const { reason, comment } = req.body
+    const { reason, comment, purpose } = req.body
     const planState = await seatReconciliationService.scheduleDowngradeToFree(venueId, keepStaffVenueIds, {
       reason,
       comment,
+      purpose,
       staffId: (req as any).authContext?.userId,
     })
     res.status(200).json({ success: true, data: planState })

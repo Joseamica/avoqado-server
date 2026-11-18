@@ -78,13 +78,20 @@ it('🔴 daily_sales: la venta de tarjetas sale de gross (va en giftCardLoads) y
   // byMerchantAccount es DINERO por comercio (cuadra con el depósito): la tarjeta vendida con tarjeta bancaria SÍ está.
   expect(out.byMerchantAccount).toEqual({ 'ma-1': 500 })
   expect(out.totalsByCurrency[0]).toMatchObject({ currency: 'MXN', gross: 500, giftCardLoads: 500, byMerchantAccount: { 'ma-1': 500 } })
-  expect(mockGroupBy.mock.calls[0][0].where.AND).toEqual([{ order: { items: { none: { giftCardId: { not: null } } } } }])
+  // D93: cada consulta es AND[rango por la hora real, lo propio]; lo propio sigue igual.
+  expect(mockGroupBy.mock.calls[0][0].where.AND[1]).toEqual({
+    status: 'COMPLETED',
+    order: { items: { none: { giftCardId: { not: null } } } },
+  })
   // r1 (M-1): las cargas son de cuentas de tarjetas PAGADAS (un abono a una venta sin pagar no carga nada).
-  expect(mockGroupBy.mock.calls[1][0].where.AND).toEqual([
-    { order: { AND: [{ items: { some: { giftCardId: { not: null } } } }, { paymentStatus: 'PAID' }] } },
-  ])
-  expect(mockGroupBy.mock.calls[2][0]).toMatchObject({
-    by: ['venueId', 'merchantAccountId'],
-    where: { merchantAccountId: { not: null }, AND: [{ order: { items: { some: { giftCardId: { not: null } } } } }] },
+  expect(mockGroupBy.mock.calls[1][0].where.AND[1]).toEqual({
+    status: 'COMPLETED',
+    order: { AND: [{ items: { some: { giftCardId: { not: null } } } }, { paymentStatus: 'PAID' }] },
+  })
+  expect(mockGroupBy.mock.calls[2][0]).toMatchObject({ by: ['venueId', 'merchantAccountId'] })
+  expect(mockGroupBy.mock.calls[2][0].where.AND[1]).toEqual({
+    status: 'COMPLETED',
+    merchantAccountId: { not: null },
+    order: { items: { some: { giftCardId: { not: null } } } },
   })
 })

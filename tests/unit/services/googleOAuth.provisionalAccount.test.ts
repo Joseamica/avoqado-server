@@ -52,7 +52,7 @@ jest.mock('../../../src/services/invitation.service', () => ({
   acceptInvitation: (...a: any[]) => acceptInvitation(...a),
 }))
 
-jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn() }))
+jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn(), lockSeatCap: jest.fn() }))
 jest.mock('@/services/auth/session.service', () => ({ createSession: jest.fn().mockResolvedValue({ id: 'sess_1' }) }))
 jest.mock('@/services/auth/refreshGrant.service', () => ({ issueGrant: jest.fn().mockResolvedValue(undefined) }))
 const logAction = jest.fn()
