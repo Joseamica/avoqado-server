@@ -30,7 +30,9 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/services/dashboard/product.dashboard.service.ts': { create: 1, update: 1, updateMany: 2 },
   'src/services/dashboard/productInventory.service.ts': { update: 1 },
   'src/services/dashboard/productInventoryIntegration.service.ts': { update: 1 },
-  'src/services/dashboard/productWizard.service.ts': { create: 1, update: 5, delete: 1 },
+  // na1d52b5 (17-nov): el 6.º update es el alta por piezas en UNA transacción (`altaPorPiezasEnUnSoloPaso`): marca «por piezas» el
+  // producto que esa MISMA transacción acaba de crear tras su cerco del catálogo (`crearProductoEnTx`); nunca `active` ni un campo gobernado.
+  'src/services/dashboard/productWizard.service.ts': { create: 1, update: 6, delete: 1 },
   'src/services/dashboard/venue.dashboard.service.ts': { deleteMany: 1 },
   // Rappi 2b (23-oct): el 2.º create es el producto «Envío» del venue (inactivo, sin inventario), tras el MISMO cerco del catálogo.
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': { create: 2 },
