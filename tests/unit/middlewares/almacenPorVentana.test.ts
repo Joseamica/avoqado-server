@@ -233,6 +233,31 @@ describe('AlmacenPorVentana', () => {
     }
   })
 
+  it('🔴 Codex r11 #1: la hora que express ya tomó en la mano se pone al día si la ventana se renueva antes de escribir el 429, como la librería', async () => {
+    const a = almacen()
+    const base = new MemoryStore()
+    base.init({ windowMs: VENTANA } as never)
+    try {
+      for (let i = 0; i < 10; i++) {
+        a.increment('k')
+        await base.increment('k')
+      }
+      ahora = inicio + VENTANA - 1
+      // express toma `resetTime` tras su `await` (index.cjs ~716) y lo lee DESPUÉS, al escribir el 429 (`getResetSeconds`)…
+      const horaMia = a.increment('k').resetTime!
+      const horaSuya = (await base.increment('k')).resetTime!
+      // …y entre medio otra petición renueva la ventana.
+      ahora = inicio + VENTANA
+      a.increment('k')
+      await base.increment('k')
+
+      expect(horaMia.getTime()).toBe(horaSuya.getTime())
+      expect(Math.ceil((horaMia.getTime() - Date.now()) / 1000)).toBe(VENTANA / 1000) // no 0 («reintenta ya»)
+    } finally {
+      base.shutdown()
+    }
+  })
+
   it('Codex r10: un acierto cuya llave se olvidó tras dos rotaciones y se recreó no resta en el registro nuevo', () => {
     const a = almacen()
     const acierto = a.increment('k')
@@ -310,6 +335,8 @@ describe('AlmacenPorVentana', () => {
     type Leido = { totalHits: number; resetTime?: Date }
     const enVuelo: Array<{ paso: number; mio: Leido; suyo: Leido }> = []
     // El total Y la hora, leídos tarde, como express (la hora da el Retry-After del 429: auditoría de apps viejas #3, 18-nov).
+    // Express toma `resetTime` en la mano al leer y su hora la lee DESPUÉS, al escribir el 429: con otros pasos entre medio (Codex r11 #1).
+    const porEscribir: Array<{ paso: number; mio?: Date; suyo?: Date }> = []
     const leer = (i: number) => {
       const e = enVuelo.splice(i, 1)[0]
       expect([e.paso, 'leído tarde', e.mio.totalHits, e.mio.resetTime?.getTime()]).toEqual([
@@ -318,6 +345,11 @@ describe('AlmacenPorVentana', () => {
         e.suyo.totalHits,
         e.suyo.resetTime?.getTime(),
       ])
+      porEscribir.push({ paso: e.paso, mio: e.mio.resetTime, suyo: e.suyo.resetTime })
+    }
+    const escribir = (i: number) => {
+      const e = porEscribir.splice(i, 1)[0]
+      expect([e.paso, 'hora al escribir el 429', e.mio?.getTime()]).toEqual([e.paso, 'hora al escribir el 429', e.suyo?.getTime()])
     }
     try {
       for (let paso = 0; paso < 8000; paso++) {
@@ -348,6 +380,8 @@ describe('AlmacenPorVentana', () => {
           )
         } else if (t < 0.5 && enVuelo.length > 0) {
           leer(Math.floor(azar() * enVuelo.length))
+        } else if (t < 0.58 && porEscribir.length > 0) {
+          escribir(Math.floor(azar() * porEscribir.length))
         } else {
           // A veces el reloj brinca ENTRE las dos lecturas de un mismo incremento (Codex r7 #2).
           const segunda = azar() < 0.2 ? ahora + Math.floor((azar() - 0.3) * 2 * VENTANA) : ahora
@@ -377,6 +411,7 @@ describe('AlmacenPorVentana', () => {
         }
       }
       while (enVuelo.length > 0) leer(0)
+      while (porEscribir.length > 0) escribir(0)
     } finally {
       base.shutdown()
     }
