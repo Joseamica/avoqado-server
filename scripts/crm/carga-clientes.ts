@@ -168,8 +168,13 @@ async function main() {
   // 5. Orders and payments, venue by venue in batches of LOTE.
   const ordenesDe = (v: VenueSpec, j: number) =>
     v.spec.kind === 'alta' || v.spec.kind === 'nunca' ? 0 : j === 0 ? 60 * factor : j % 21 === 3 ? 400 : 43
+  // `orderNumber` obligatorio aquí: la siembra pone su propio folio (en la base es opcional desde D30) y liga pagos por él.
   let pendientes: Array<
-    Prisma.OrderCreateManyInput & { pago: { source: PaymentSource; method: PaymentMethod; terminalId?: string } | null; reserva: boolean }
+    Prisma.OrderCreateManyInput & {
+      orderNumber: string
+      pago: { source: PaymentSource; method: PaymentMethod; terminalId?: string } | null
+      reserva: boolean
+    }
   > = []
   let ordenes = 0
   let pagos = 0

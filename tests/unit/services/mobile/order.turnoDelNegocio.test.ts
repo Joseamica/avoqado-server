@@ -169,6 +169,7 @@ describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () 
       if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')) return values[1].map((id: string) => ({ id }))
       if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 'mesa-1' }]
       if (sql.includes('pg_advisory_xact_lock')) return [] // D25: dividir toma el candado de comandas de la cuenta
+      if (sql.includes('order_number_next()')) return [{ folio: 'ORD-0000000000077' }] // D30: el tronco lo da la base
       throw new Error(`Unexpected raw statement: ${sql}`)
     })
   })
@@ -236,5 +237,93 @@ describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () 
 
     expect(datosDeLaOrden().shiftId).toBe('turno-de-la-comida')
     expect(prismaMock.shift.findFirst).not.toHaveBeenCalled()
+  })
+
+  // D30 (17-nov): el folio lo pone la base; el reloj y el azar ya no deciden nada.
+  describe('D30 · el folio de la cuenta nueva lo pone la base', () => {
+    let reloj: jest.SpyInstance
+    let azar: jest.SpyInstance
+    beforeEach(() => {
+      reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+      azar = jest.spyOn(Math, 'random').mockReturnValue(0.5)
+      prismaMock.orderItem.updateMany.mockResolvedValue({ count: 1 } as any)
+    })
+    afterEach(() => {
+      reloj.mockRestore()
+      azar.mockRestore()
+    })
+
+    it('splitOrderItems: la cuenta separada no manda folio y responde el insertado', async () => {
+      prismaMock.order.findFirst.mockResolvedValue(
+        cuentaOrigen('t', [
+          { id: 'it-1', orderPromotionId: null },
+          { id: 'it-2', orderPromotionId: null },
+        ]) as any,
+      )
+      prismaMock.order.create.mockResolvedValue({ id: 'order-hija', orderNumber: 'ORD-0000000000042', version: 1 } as any)
+
+      const r: any = await splitOrderItems(VENUE, 'order-origen', ['it-1'], 'staff-1')
+
+      expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+      expect(JSON.stringify(r)).toContain('ORD-0000000000042')
+    })
+
+    it('splitOrderBySeat: UN tronco de la base para toda la división, `-S<asiento>` por cuenta, sin azar', async () => {
+      prismaMock.order.findFirst.mockResolvedValue(
+        cuentaOrigen('t', [
+          { id: 'it-1', seat: 1 },
+          { id: 'it-2', seat: 2 },
+          { id: 'it-3', seat: 3 },
+        ]) as any,
+      )
+      prismaMock.order.create.mockImplementation(async (args: any) => ({ id: `hija-${args.data.orderNumber}`, ...args.data }))
+
+      const r = await splitOrderBySeat(VENUE, 'order-origen', 'staff-1')
+
+      const folios = (prismaMock.order.create as jest.Mock).mock.calls.map(([a]: any) => a.data.orderNumber)
+      expect(folios).toEqual(['ORD-0000000000077-S2', 'ORD-0000000000077-S3'])
+      const pedidos = (prismaMock.$queryRaw as jest.Mock).mock.calls.filter(([q]: any) =>
+        (Array.isArray(q) ? q.join('?') : q.sql).includes('order_number_next()'),
+      )
+      expect(pedidos).toHaveLength(1)
+      // Cada respuesta apunta a SU hija con lo realmente insertado.
+      expect(r.created.map((c: any) => [c.id, c.orderNumber])).toEqual([
+        ['hija-ORD-0000000000077-S2', 'ORD-0000000000077-S2'],
+        ['hija-ORD-0000000000077-S3', 'ORD-0000000000077-S3'],
+      ])
+    })
+  })
+})
+
+describe('D30 · la venta de mostrador del POS móvil no manda folio', () => {
+  it('con el reloj congelado, la orden nace sin folio propio y la respuesta trae el de la base', async () => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.order.create.mockImplementation(async (args: any) => ({
+      id: 'order-1',
+      orderNumber: 'ORD-0000000000042',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: args.data.subtotal ?? new Decimal(0),
+      discountAmount: new Decimal(0),
+      taxAmount: new Decimal(0),
+      total: args.data.total ?? new Decimal(0),
+      version: 1,
+      createdAt: new Date('2026-09-03T10:00:00.000Z'),
+      items: [],
+    }))
+    try {
+      const r: any = await createOrderWithItems(VENUE, {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-1', quantity: 1 }],
+        source: 'POS',
+      } as any)
+
+      expect(datosDeLaOrden()).not.toHaveProperty('orderNumber')
+      expect(JSON.stringify(r)).toContain('ORD-0000000000042')
+      expect(JSON.stringify(r)).not.toContain('1794963374538')
+    } finally {
+      reloj.mockRestore()
+    }
   })
 })

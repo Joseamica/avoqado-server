@@ -327,8 +327,7 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
 
   await assertVenueSalesEnabled(venueId)
 
-  // Create order from estimate
-  const orderNumber = `ORD-${Date.now()}`
+  // Create order from estimate. D30: el folio lo pone la base al insertar (`order_number_next()`), nunca el reloj.
 
   // 🔴 Convertir el presupuesto lo hace una persona en el mostrador AHORA: la orden nace en el
   // turno abierto de ese momento (`../shared/turnoDeCaja.ts`). La FECHA del presupuesto no manda
@@ -339,7 +338,6 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
     data: {
       venueId,
       shiftId: currentShift?.id ?? null,
-      orderNumber,
       createdById: staffId,
       status: 'PENDING',
       paymentStatus: 'PENDING',
@@ -395,7 +393,7 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
     data: {
       estimateNumber: estimate.estimateNumber,
       orderId: order.id,
-      orderNumber,
+      orderNumber: order.orderNumber,
       source: 'MOBILE',
     },
   })

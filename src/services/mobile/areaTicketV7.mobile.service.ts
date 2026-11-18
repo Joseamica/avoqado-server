@@ -2099,7 +2099,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
             data: {
               venueId,
               shiftId: currentShift?.id ?? null,
-              orderNumber: `ORD-${Date.now()}-${randomInt(0, 1_679_616).toString(36).padStart(4, '0').toUpperCase()}`,
+              // D30: el folio lo pone la base (`order_number_next()`); el `ORD-<ms>-<4 al azar>` de antes podía repetirse.
               terminalId: fresh.terminalId,
               createdById: staffId ?? fresh.staffId ?? null,
               servedById: staffId ?? fresh.staffId ?? null,

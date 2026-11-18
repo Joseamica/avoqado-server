@@ -178,3 +178,10 @@ describe('recordPaymentBodySchema shiftIdDeLaVenta', () => {
     ).toBeUndefined()
   })
 })
+
+// D30: el folio que pone la base (`ORD-0` + 12 cifras) sigue siendo una referencia válida del cobro rápido, junto a las de siempre.
+describe('recordPaymentBodySchema · orderReference con el folio de la base', () => {
+  it.each(['ORD-0000000000001', 'ORD-1794963374538', 'FAST-1765549860972'])('acepta %s', orderReference => {
+    expect(recordPaymentBodySchema.parse({ body: { ...cardPayment, orderReference } }).body.orderReference).toBe(orderReference)
+  })
+})

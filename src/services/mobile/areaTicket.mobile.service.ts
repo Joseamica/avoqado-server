@@ -577,7 +577,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
         data: {
           venueId,
           shiftId: currentShift?.id ?? null,
-          orderNumber: `ORD-${Date.now()}`,
+          // D30: sin `orderNumber` — el folio lo pone la base (`order_number_next()`).
           areaTicketCode: parsed.code,
           terminalId: terminal.id,
           servedById: staffId || null,

@@ -40,7 +40,8 @@ function armar() {
   })
   prismaMock.order.create.mockReset().mockImplementation(async ({ data }: any) => ({
     id: 'order-1',
-    orderNumber: data.orderNumber,
+    // D30: sin folio en el pedido, la base pone el suyo (`order_number_next()`).
+    orderNumber: data.orderNumber ?? 'ORD-0000000000042',
     total: data.total,
     status: data.status,
     createdAt: new Date(),
@@ -136,6 +137,18 @@ describe('createGiftCardOrder', () => {
       recipientPhone: '+525512345678',
       message: '¡Feliz cumpleaños!',
     })
+  })
+
+  it('D30: la cuenta no manda folio; la respuesta trae el que puso la base, no el reloj', async () => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_794_963_374_538)
+    try {
+      const r = await createGiftCardOrder(VENUE, 'staff-1', pedido())
+
+      expect(prismaMock.order.create.mock.calls[0][0].data).not.toHaveProperty('orderNumber')
+      expect(r.orderNumber).toBe('ORD-0000000000042')
+    } finally {
+      reloj.mockRestore()
+    }
   })
 
   it('🔴 C1 (cierre): la cuenta NUNCA nace POS — sin source (o con POS de una app vieja) es AVOQADO_ANDROID, autónoma', async () => {

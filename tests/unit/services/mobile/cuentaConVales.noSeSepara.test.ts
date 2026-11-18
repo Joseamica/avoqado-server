@@ -55,6 +55,7 @@ beforeEach(() => {
     // D25: juntar toma el candado de comandas del origen y pasa sus comandas al destino; aquí no hay comandas.
     if (sql.includes('pg_advisory_xact_lock')) return []
     if (sql.includes('"KdsOrderItem"')) return []
+    if (sql.includes('order_number_next()')) return [{ folio: 'ORD-0000000000077' }] // D30: el tronco de dividir por asiento
     throw new Error(`Unexpected raw statement: ${sql}`)
   })
   prismaMock.order.findMany.mockImplementation(async (args: any) =>
