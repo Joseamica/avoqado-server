@@ -11,8 +11,7 @@ import { fromZonedTime } from 'date-fns-tz'
  * Antes se usaba `new Date(raw)`, que lee la hora sin zona en la zona del proceso: en Render
  * no hay `TZ`, así que las 15:00 de un negocio en CDMX quedaban como 09:00 (encargo e781ce).
  */
-// Cualquier cantidad de decimales: con 4 o más, antes caía en `new Date` y se leía como UTC (Codex r2 #4, encargo 77f73a).
-const SIN_ZONA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/
+const SIN_ZONA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/
 
 /** `true` si es un texto de hora del negocio sin zona (`2026-11-12T15:00`). */
 export function esHoraSinZona(raw: unknown): boolean {
@@ -22,8 +21,7 @@ export function esHoraSinZona(raw: unknown): boolean {
 export function fechaHoraDelNegocio(raw: string | Date, timezone: string): Date {
   if (raw instanceof Date) return raw
   const texto = raw.trim()
-  // date-fns-tz entiende hasta milisegundos: lo demás se recorta (nadie agenda por microsegundos).
-  if (SIN_ZONA.test(texto)) return fromZonedTime(texto.replace(/(\.\d{3})\d+$/, '$1'), timezone)
+  if (SIN_ZONA.test(texto)) return fromZonedTime(texto, timezone)
   return new Date(texto)
 }
 
