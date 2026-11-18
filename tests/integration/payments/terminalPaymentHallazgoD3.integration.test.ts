@@ -241,14 +241,19 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
     spy.mockRestore()
     expect(selectors).toHaveLength(2)
     const nodes = (value: any): any[] => (value && typeof value === 'object' ? [value, ...Object.values(value).flatMap(nodes)] : [])
+    // `SET LOCAL` vive sólo dentro de su transacción. Tope propio (el de Prisma es 5 s): un runner pausado no la tumba.
     const explicar = (selector: Prisma.Sql, ajustes: string[]) =>
-      prisma.$transaction(async tx => {
-        for (const ajuste of ajustes) await tx.$executeRawUnsafe(`SET LOCAL ${ajuste} = off`)
-        return tx.$queryRaw(Prisma.sql`EXPLAIN (FORMAT JSON) ${selector}`)
-      })
+      prisma.$transaction(
+        async tx => {
+          for (const ajuste of ajustes) await tx.$executeRawUnsafe(`SET LOCAL ${ajuste} = off`)
+          return tx.$queryRaw(Prisma.sql`EXPLAIN (FORMAT JSON) ${selector}`)
+        },
+        { timeout: 30_000 },
+      )
     // Acceso a ProviderEventLog acotado por un índice SUYO, en cualquiera de las dos formas que el planeador elige según sus
     // estadísticas: «Index Scan»/«Index Only Scan» sobre la tabla, o «Bitmap Heap Scan» sobre la tabla alimentado por un
-    // «Bitmap Index Scan» de uno de sus índices. El nodo «Bitmap Index Scan» no trae «Relation Name», sólo «Index Name»: el
+    // «Bitmap Index Scan» de uno de sus índices. En las dos, el índice debe traer «Index Cond»: es lo que acota las filas
+    // (un índice recorrido entero, sólo para ordenar, no cuenta). El nodo «Bitmap Index Scan» no trae «Relation Name», sólo «Index Name»: el
     // criterio viejo (nodo con la tabla Y «Index» en el tipo) daba rojo cuando el CI elegía bitmap (corrida 43831430453, 16-nov).
     const indices = new Set(
       (
@@ -260,9 +265,12 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
     const accesosPorIndice = (plan: unknown) =>
       nodes(plan).filter(n => {
         if (n['Relation Name'] !== 'ProviderEventLog') return false
-        if (n['Node Type'] === 'Index Scan' || n['Node Type'] === 'Index Only Scan') return indices.has(n['Index Name'])
+        if (n['Node Type'] === 'Index Scan' || n['Node Type'] === 'Index Only Scan')
+          return indices.has(n['Index Name']) && Boolean(n['Index Cond'])
         if (n['Node Type'] === 'Bitmap Heap Scan')
-          return nodes(n.Plans).some(h => h['Node Type'] === 'Bitmap Index Scan' && indices.has(h['Index Name']))
+          return nodes(n.Plans).some(
+            h => h['Node Type'] === 'Bitmap Index Scan' && indices.has(h['Index Name']) && Boolean(h['Index Cond']),
+          )
         return false
       })
     for (const selector of selectors) {
@@ -275,6 +283,7 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
       expect(nodes(bitmap).some(n => n['Node Type'] === 'Bitmap Heap Scan' && n['Relation Name'] === 'ProviderEventLog')).toBe(true)
       expect(accesosPorIndice(bitmap)).not.toHaveLength(0)
       const directo = await explicar(selector, ['enable_seqscan', 'enable_bitmapscan'])
+      expect(nodes(directo).some(n => /^Index (Only )?Scan$/.test(n['Node Type']) && n['Relation Name'] === 'ProviderEventLog')).toBe(true)
       expect(accesosPorIndice(directo)).not.toHaveLength(0)
       // Control: el criterio NO acepta una lectura completa de la tabla.
       const completo = await explicar(selector, ['enable_indexscan', 'enable_indexonlyscan', 'enable_bitmapscan'])
