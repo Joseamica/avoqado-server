@@ -24,6 +24,7 @@ const RELOJ_DEL_ENSAYO = 1_794_963_374_538
 const fixture = `d30-${randomUUID().slice(0, 8)}`
 let venueId: string
 let mesera: string
+let cajera: string
 
 const numero = (folio: string) => Number(folio.slice('ORD-0'.length, 'ORD-0'.length + 12))
 const mesas = (n: number) =>
@@ -33,13 +34,20 @@ const mesas = (n: number) =>
     ),
   ).then(ms => ms.map(m => m.id))
 
-type Folio = { id: string; folio: string }
-/** Otro servidor: un Node aparte (`tsx`) con su propio cliente de Prisma que abre mesas con `assignTable`. */
+type Folio = { id: string; mesa: string; folio: string }
+type Paso = { mesa: string; staffId: string }
+/**
+ * Otro servidor: un Node aparte con su propio cliente de Prisma que abre mesas con `assignTable`. Se lanza `node --import tsx`
+ * (no el lanzador `tsx`, que reenvía señales a un Node hijo): así `pid` ES el escritor y un SIGKILL lo interrumpe de verdad.
+ */
 function lanzarProceso() {
   const hijo: ChildProcessWithoutNullStreams = spawn(
-    path.join(RAIZ, 'node_modules/.bin/tsx'),
-    [path.join(__dirname, 'folioDeOrden.proceso.ts')],
-    { cwd: RAIZ, env: { ...process.env } },
+    process.execPath,
+    ['--import', 'tsx', path.join(__dirname, 'folioDeOrden.proceso.ts')],
+    {
+      cwd: RAIZ,
+      env: { ...process.env },
+    },
   )
   let errores = ''
   hijo.stderr.on('data', d => (errores += d))
@@ -47,19 +55,24 @@ function lanzarProceso() {
   readline.createInterface({ input: hijo.stdout }).on('line', linea => {
     if (linea.startsWith('D30>')) esperando.shift()?.(linea.slice(4))
   })
-  const siguiente = (que: string) =>
-    new Promise<string>((ok, mal) => {
+  const siguiente = <T>(que: string) =>
+    new Promise<T>((ok, mal) => {
       const reloj = setTimeout(() => mal(new Error(`el proceso no contestó ${que}: ${errores.slice(-2000)}`)), 45_000)
-      esperando.push(linea => (clearTimeout(reloj), ok(linea)))
+      esperando.push(linea => (clearTimeout(reloj), ok(JSON.parse(linea))))
     })
-  const enviar = (ids: string[], t0: number) => hijo.stdin.write(`${JSON.stringify({ venueId, staffId: mesera, mesas: ids, t0 })}\n`)
+  const enviar = (pasos: Paso[], t0: number, serie = false) => hijo.stdin.write(`${JSON.stringify({ venueId, pasos, t0, serie })}\n`)
   return {
-    listo: siguiente('LISTO'),
+    pid: hijo.pid,
+    listo: siguiente<{ pid: number }>('LISTO'),
+    siguiente,
     enviar,
     async abrir(ids: string[], t0: number): Promise<Folio[]> {
-      const respuesta = siguiente('las mesas')
-      enviar(ids, t0)
-      return JSON.parse(await respuesta)
+      const respuesta = siguiente<Folio[]>('las mesas')
+      enviar(
+        ids.map(mesa => ({ mesa, staffId: mesera })),
+        t0,
+      )
+      return respuesta
     },
     matar: () =>
       new Promise<void>(ok => {
@@ -68,6 +81,15 @@ function lanzarProceso() {
         hijo.kill('SIGKILL')
       }),
   }
+}
+
+/** Espera (hasta 10 s) a que `cumple` sea verdad. */
+async function hasta(que: string, cumple: () => Promise<boolean>) {
+  for (let i = 0; i < 200; i++) {
+    if (await cumple()) return
+    await new Promise(r => setTimeout(r, 50))
+  }
+  throw new Error(`nunca pasó: ${que}`)
 }
 
 /**
@@ -104,7 +126,14 @@ beforeAll(async () => {
   await prisma.venueSettings.create({ data: { venueId, enableShifts: false, requirePinLogin: false } })
   mesera = (await prisma.staff.create({ data: { email: `m-${fixture}@staff.test`, firstName: 'Mesera', lastName: 'Uno', active: true } }))
     .id
-  await prisma.staffVenue.create({ data: { venueId, staffId: mesera, role: 'WAITER' } })
+  cajera = (await prisma.staff.create({ data: { email: `c-${fixture}@staff.test`, firstName: 'Cajera', lastName: 'Dos', active: true } }))
+    .id
+  await prisma.staffVenue.createMany({
+    data: [
+      { venueId, staffId: mesera, role: 'WAITER' },
+      { venueId, staffId: cajera, role: 'WAITER' },
+    ],
+  })
 })
 afterEach(() => jest.restoreAllMocks())
 afterAll(async () => {
@@ -135,41 +164,84 @@ describe('D30 · el folio de la orden lo pone la base', () => {
     }
   })
 
-  it('dos procesos Node independientes abren mesas a la vez, con el reloj congelado, sin repetir folio; también tras matar y relanzar uno', async () => {
+  it('dos procesos Node independientes abren mesas a la vez, con el reloj congelado, sin repetir folio; uno muere con una mesa escrita y otra en vuelo, y al relanzarlo tampoco repite', async () => {
     const libres = await mesas(40)
+    const [escrita, enVuelo] = [libres[20], libres[21]]
     let a = lanzarProceso()
     const b = lanzarProceso()
+    const candado = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    await candado.connect()
     try {
-      await Promise.all([a.listo, b.listo])
+      // El PID que se matará es el del Node que escribe, no el de un lanzador.
+      expect((await a.listo).pid).toBe(a.pid)
+      expect((await b.listo).pid).toBe(b.pid)
 
       // Ronda 1: los dos procesos escriben en el mismo instante.
       const t0 = Date.now() + 500
       const ronda1 = (await Promise.all([a.abrir(libres.slice(0, 10), t0), b.abrir(libres.slice(10, 20), t0)])).flat()
 
-      // A muere a media escritura (respuesta perdida) y se relanza; B sigue vivo con su pool.
-      a.enviar(libres.slice(20, 25), Date.now())
-      await new Promise(r => setTimeout(r, 40))
+      // A abre `escrita` (a nombre de la mesera) y después `enVuelo` (de la cajera). Este cliente aparta el renglón de la cajera:
+      // el INSERT de `enVuelo` ya tomó su folio de la secuencia y espera en la revisión de su llave foránea.
+      await candado.query('BEGIN')
+      await candado.query('SELECT id FROM "Staff" WHERE id = $1 FOR UPDATE', [cajera])
+      const miPid: number = (await candado.query('SELECT pg_backend_pid() AS p')).rows[0].p
+      const primera = a.siguiente<Folio[]>('la mesa escrita')
+      a.enviar(
+        [
+          { mesa: escrita, staffId: mesera },
+          { mesa: enVuelo, staffId: cajera },
+        ],
+        Date.now(),
+        true,
+      )
+      const [deEscrita] = await primera
+      expect(deEscrita.mesa).toBe(escrita)
+      expect((await prisma.order.findFirstOrThrow({ where: { venueId, tableId: escrita } })).orderNumber).toBe(deEscrita.folio)
+      let enEspera = 0
+      await hasta('que la cuenta en vuelo espere al candado', async () => {
+        const filas = await prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity WHERE ${miPid}::int = ANY(pg_blocking_pids(pid))`
+        enEspera = filas[0]?.pid ?? 0
+        return enEspera > 0
+      })
+      const tomados = Number((await candado.query('SELECT last_value FROM order_number_seq')).rows[0].last_value)
+      expect(tomados).toBe(numero(deEscrita.folio) + 1) // la cuenta en vuelo ya tiene su folio, sin confirmar
+
+      // Muere el escritor con esa cuenta en vuelo (su respuesta se pierde); se suelta el candado y su transacción se deshace.
       await a.matar()
+      await candado.query('COMMIT')
+      await hasta('que la conexión del escritor muerto termine', async () => {
+        const filas = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity WHERE pid = ${enEspera}::int`
+        return Number(filas[0].n) === 0
+      })
+      expect(await prisma.order.count({ where: { venueId, tableId: enVuelo } })).toBe(0)
+
+      // Se relanza A (B siguió vivo con su pool) y los dos escriben otra vez a la vez; `enVuelo` se vuelve a abrir.
       a = lanzarProceso()
-      await a.listo
-
+      expect((await a.listo).pid).toBe(a.pid)
       const t1 = Date.now() + 500
-      const ronda2 = (await Promise.all([a.abrir(libres.slice(25, 32), t1), b.abrir(libres.slice(32, 40), t1)])).flat()
+      const ronda2 = (await Promise.all([a.abrir([enVuelo, ...libres.slice(22, 30)], t1), b.abrir(libres.slice(30, 40), t1)])).flat()
 
-      const folios = [...ronda1, ...ronda2].map(o => o.folio)
+      const respuestas = [...ronda1, deEscrita, ...ronda2]
+      const folios = respuestas.map(o => o.folio)
       expect(folios.every(f => FOLIO.test(f))).toBe(true)
       expect(new Set(folios).size).toBe(folios.length)
-      // La secuencia vive en la base: lo del proceso relanzado va después de todo lo anterior.
-      expect(Math.min(...ronda2.map(o => numero(o.folio)))).toBeGreaterThan(Math.max(...ronda1.map(o => numero(o.folio))))
-      // Cada respuesta trae lo realmente insertado, y en la base no hay folio repetido (tampoco lo que dejó el proceso muerto).
+      // La secuencia vive en la base: lo del proceso relanzado va después de todo, también del folio que se llevó la cuenta en vuelo.
+      expect(Math.min(...ronda2.map(o => numero(o.folio)))).toBeGreaterThan(tomados)
+      // Cada respuesta trae lo realmente insertado; lo que dejó el escritor muerto no repite folio con nada de la base.
       const guardadas = await prisma.order.findMany({
         where: { venueId, tableId: { in: libres } },
         select: { id: true, orderNumber: true },
       })
+      expect(guardadas).toHaveLength(respuestas.length)
       const porId = new Map(guardadas.map(o => [o.id, o.orderNumber]))
-      for (const o of [...ronda1, ...ronda2]) expect(porId.get(o.id)).toBe(o.folio)
-      expect(new Set(guardadas.map(o => o.orderNumber)).size).toBe(guardadas.length)
+      for (const o of respuestas) expect(porId.get(o.id)).toBe(o.folio)
+      const repetidos = await prisma.$queryRaw<Array<{ orderNumber: string }>>`
+        SELECT "orderNumber" FROM "Order" WHERE "orderNumber" ~ '^ORD-0[0-9]{12}$' GROUP BY 1 HAVING count(*) > 1`
+      expect(repetidos).toEqual([])
     } finally {
+      await candado.query('ROLLBACK').catch(() => undefined)
+      await candado.end()
       await Promise.all([a.matar(), b.matar()])
     }
   }, 180_000)
@@ -184,10 +256,23 @@ describe('D30 · el folio de la orden lo pone la base', () => {
       expect(await migrarCon(['ORD-0999999999999A'])).toBe('ORD-0000000000001')
     })
 
-    it('sólo cuentan las dos formas que emite D30; las demás se ignoran', async () => {
-      const ajenas = ['ORD-0999999999999-X', 'ORD-0999999999999-S', 'ORD-09999999999990', 'ord-0999999999999', 'ORD-1794963374538']
+    it('sólo cuentan el folio completo y el tronco con `-S…`; las demás formas se ignoran', async () => {
+      const ajenas = ['ORD-0999999999999-X', 'ORD-0999999999999-s1', 'ORD-09999999999990', 'ord-0999999999999', 'ORD-1794963374538']
       expect(await migrarCon(ajenas)).toBe('ORD-0000000000001')
     })
+
+    // Codex D30 r2 (ROMPE): el SERVIDOR admite asientos negativos y emite `…-S-1`; si la migración no lo cuenta, la siguiente
+    // división por asiento repite ese folio histórico completo.
+    it('`ORD-0000000000001-S-1` (asiento negativo) cuenta: arranca en 2', async () => {
+      expect(await migrarCon(['ORD-0000000000001-S-1'])).toBe('ORD-0000000000002')
+    })
+
+    it.each(['ORD-0000000000009-S', 'ORD-0000000000009-S1.5', 'ORD-0000000000009-S-12'])(
+      'cualquier sufijo `-S` que el servidor pueda emitir cuenta (%s): arranca en 10',
+      async folio => {
+        expect(await migrarCon([folio])).toBe('ORD-0000000000010')
+      },
+    )
 
     it('arranca por encima del mayor folio D30, completo o de dividir por asiento', async () => {
       expect(await migrarCon(['ORD-0000000000007', 'ORD-0000500000000-S12', 'ORD-0999999999999A'])).toBe('ORD-0000500000001')
