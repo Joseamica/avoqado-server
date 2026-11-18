@@ -48,6 +48,15 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
     ),
 }))
 
+// El permiso EFECTIVO (con el filtro de marca blanca) se simula: `mockPermisoEfectivo` decide si `verifyAccess` deja pasar.
+const mockPermisoEfectivo = { ok: true, pedidos: [] as string[] }
+jest.mock('@/middlewares/verifyAccess.middleware', () => ({
+  verifyAccess: (opciones: { permission?: string }) => (_req: any, res: any, next: any) => {
+    mockPermisoEfectivo.pedidos.push(String(opciones.permission))
+    return mockPermisoEfectivo.ok ? next() : res.status(403).json({ code: 'PERMISSION_DENIED', permisoEfectivo: opciones.permission })
+  },
+}))
+
 // Body/param validation is not under test — passthrough.
 jest.mock('@/middlewares/validation', () => ({
   ...jest.requireActual('@/middlewares/validation'),
@@ -108,6 +117,8 @@ const RAW_MATERIALS_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/raw-ma
 beforeEach(() => {
   jest.clearAllMocks()
   mockPermisosNegados.clear()
+  mockPermisoEfectivo.ok = true
+  mockPermisoEfectivo.pedidos = []
   staffVenueFindFirst.mockResolvedValue(null) // requester is NOT a platform superadmin
   venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
   vfFindFirst.mockResolvedValue(null) // no own VenueFeature grant
@@ -392,6 +403,21 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
     it('negocio Gratis con `menu:create`: da de alta por piezas como en la tarjeta', async () => {
       const res = await request(server).post(WIZARD_URL).send(porPiezas)
       expect(res.status).toBe(200)
+    })
+
+    it('Codex r9 #1: marca blanca con Inventario apagado (sin el permiso EFECTIVO): el alta con piezas no pasa', async () => {
+      vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+      mockPermisoEfectivo.ok = false
+      const res = await request(server).post(WIZARD_URL).send(porPiezas)
+      expect(res.status).toBe(403)
+      expect(res.body.permisoEfectivo).toBe('inventory:update')
+    })
+
+    it('el alta SIN inventario no pide el permiso efectivo de inventario (como siempre)', async () => {
+      mockPermisoEfectivo.ok = false
+      const res = await request(server).post(WIZARD_URL).send(sinInventario)
+      expect(res.status).toBe(200)
+      expect(mockPermisoEfectivo.pedidos).toEqual([])
     })
 
     it('sin `inventory:update` no entra, como siempre', async () => {

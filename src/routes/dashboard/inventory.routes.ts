@@ -24,7 +24,8 @@ import {
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
-import { altaPideInventarioPremium } from '../../services/dashboard/productoLlevaInventario'
+import { altaPideInventarioPremium, productoLlevaInventario } from '../../services/dashboard/productoLlevaInventario'
+import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
@@ -123,6 +124,12 @@ const router = Router({ mergeParams: true })
 const candadoSiPidePremium: RequestHandler = (req, res, next) =>
   altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
 
+// Codex r9 #1 de na1d52b5: con marca blanca, el panel le quita los permisos de inventario a quien tiene Inventario apagado, pero
+// `checkPermission` evalúa el rol sin ese filtro. El alta CON inventario pide además el permiso EFECTIVO (`verifyAccess`, con el filtro
+// de marca blanca y la suplantación), el mismo que ve el panel.
+const permisoEfectivoSiLlevaInventario: RequestHandler = (req, res, next) =>
+  productoLlevaInventario(req.body?.inventory) ? verifyAccess({ permission: 'inventory:update' })(req, res, next) : next()
+
 // Codex r5 #1 de na1d52b5: donde el alta por el asistente era 403 (negocio SIN inventario Premium), ahora pasa; ahí pide también el
 // permiso del alta normal (`menu:create`), para no ampliar lo que puede un rol personalizado con sólo `inventory:update`. Con inventario
 // Premium (o exento, demo o superadmin) queda como siempre, con `inventory:update`: Recetas da de alta así (Codex r3 #4).
@@ -150,6 +157,7 @@ router.post(
   validateRequest(CreateProductWithInventorySchema),
   candadoSiPidePremium,
   permisoDelAltaSinPremium,
+  permisoEfectivoSiLlevaInventario,
   productWizardController.createProductWithInventory,
 )
 
