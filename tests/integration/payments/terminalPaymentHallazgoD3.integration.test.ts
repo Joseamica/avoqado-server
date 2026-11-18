@@ -253,8 +253,10 @@ describe('Hallazgo D3 · aprobado exacto, recuperación financiera real', () => 
     // Acceso a ProviderEventLog acotado por un índice SUYO, en cualquiera de las dos formas que el planeador elige según sus
     // estadísticas: «Index Scan»/«Index Only Scan» sobre la tabla, o «Bitmap Heap Scan» sobre la tabla alimentado por un
     // «Bitmap Index Scan» de uno de sus índices. En las dos, el índice debe traer «Index Cond»: es lo que acota las filas
-    // (un índice recorrido entero, sólo para ordenar, no cuenta). El nodo «Bitmap Index Scan» no trae «Relation Name», sólo «Index Name»: el
-    // criterio viejo (nodo con la tabla Y «Index» en el tipo) daba rojo cuando el CI elegía bitmap (corrida 43831430453, 16-nov).
+    // (un índice recorrido entero, sólo para ordenar, no cuenta). El nodo «Bitmap Index Scan» no trae «Relation Name», sólo
+    // «Index Name»: el criterio viejo (nodo con la tabla Y «Index» en el tipo) daba rojo cuando el CI elegía bitmap (corrida
+    // 43831430453, 16-nov). Límite declarado, igual que antes: no mide QUÉ tan selectiva es la condición (hoy el plan suele
+    // usar `type = 'send_transaction'` por ProviderEventLog_type_createdAt_idx, y así ya pasaba con el criterio viejo).
     const indices = new Set(
       (
         await prisma.$queryRaw<{ indexname: string }[]>`
