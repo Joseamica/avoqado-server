@@ -1331,7 +1331,12 @@ export class SharedQueryService {
           COUNT(DISTINCT o."id")::bigint as "totalOrders",
           COALESCE(SUM(p."amount"), 0) as "totalRevenue",
           COALESCE(SUM(p."tipAmount"), 0) as "totalTips",
-          COUNT(DISTINCT sh."id")::bigint as "shiftsWorked"
+          -- Codex r2 #1 (D2): los turnos se cuentan aparte; como LEFT JOIN multiplicaban cada cobro por el número de turnos.
+          (
+            SELECT COUNT(*) FROM "Shift" sh
+            WHERE sh."staffId" = s."id" AND sh."venueId" = ${venueId}
+              AND sh."startTime" >= ${utcTs(from)} AND sh."startTime" <= ${utcTs(to)}
+          )::bigint as "shiftsWorked"
         FROM "Staff" s
         INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}
         LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
@@ -1341,10 +1346,6 @@ export class SharedQueryService {
           AND ${sqlRangoHoraRealSql('o', from, to)}
           AND ${sqlOrdenSinTarjetas('o.id')}
         LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
-        LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
-          AND sh."venueId" = ${venueId}
-          AND sh."startTime" >= ${utcTs(from)}
-          AND sh."startTime" <= ${utcTs(to)}
         WHERE sv."venueId" = ${venueId}
         GROUP BY s."id", s."firstName", s."lastName", sv."role"
         HAVING COUNT(DISTINCT o."id") > 0

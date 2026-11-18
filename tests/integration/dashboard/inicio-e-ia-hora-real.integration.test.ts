@@ -19,6 +19,7 @@ import {
   getGeneralStatsData,
 } from '@/services/dashboard/generalStats.dashboard.service'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { registerSalesTools } from '@/mcp/tools/sales'
 import { registerProductTools } from '@/mcp/tools/products'
 import type { McpScope } from '@/mcp/scope'
@@ -138,6 +139,13 @@ beforeAll(async () => {
   ).id
   await prisma.staffVenue.create({ data: { venueId: otraVenueId, staffId, role: 'CASHIER' } })
   await venta({ producto: 'Torta', monto: 80, llegada: new Date('2026-11-11T20:00:00.000Z'), enVenue: otraVenueId })
+  // Dos turnos el 11 en esta sucursal: no duplican sus ventas (Codex r2 #1).
+  await prisma.shift.createMany({
+    data: [
+      { venueId, staffId, startTime: new Date('2026-11-11T14:00:00.000Z') },
+      { venueId, staffId, startTime: new Date('2026-11-11T22:00:00.000Z') },
+    ] as never,
+  })
   // En línea, el 11 a las 18:00.
   await venta({ producto: 'Café', monto: 100, llegada: new Date('2026-11-12T00:00:00.000Z') })
   // Sin internet: 23:50 del 11, subida a las 00:10 del 12, con $5 de propina.
@@ -169,6 +177,7 @@ afterAll(async () => {
   const venues = [venueId, otraVenueId].filter(Boolean)
   if (venues.length) {
     await prisma.payment.deleteMany({ where: { venueId: { in: venues } } })
+    await prisma.shift.deleteMany({ where: { venueId: { in: venues } } })
     await prisma.orderItem.deleteMany({ where: { order: { venueId: { in: venues } } } })
     await prisma.order.deleteMany({ where: { venueId: { in: venues } } })
     await prisma.product.deleteMany({ where: { venueId: { in: venues } } })
@@ -256,9 +265,16 @@ describe('D2 · el inicio del DASHBOARD cuenta lo vendido sin internet a su hora
     const rent = (await getExtendedMetrics(venueId, 'product-profitability', DIA_11)) as Array<{ name: string }>
     expect(rent.map(r => r.name).sort()).toEqual(['Café', 'Pan'])
     const personal = (await getExtendedMetrics(venueId, 'staff-performance', DIA_11)) as Array<{ totalSales: number; orderCount: number }>
-    // 2 y no 3: la Torta que vendió en la otra sucursal no se suma aquí (Codex r1 #1).
+    // 2 y no 3: la Torta que vendió en la otra sucursal no se suma aquí (Codex r1 #1). $150 y no $300 con sus dos turnos (r2 #1).
     expect(personal[0].orderCount).toBe(2)
     expect(personal[0].totalSales).toBeCloseTo(150, 2)
+    expect(personal[0].totalTips).toBeCloseTo(5, 2)
+    const asistente = await SharedQueryService.getStaffPerformance(venueId, {
+      from: new Date(DIA_11.fromDate),
+      to: new Date(DIA_11.toDate),
+    })
+    expect(asistente[0].totalRevenue).toBeCloseTo(150, 2)
+    expect(asistente[0].shiftsWorked).toBe(2)
   })
 
   it('las tarjetas de arriba suman el Pan el 11, con su día de la semana, y cuadran con el Resumen', async () => {
