@@ -597,6 +597,8 @@ export async function cuentaAparteParaRondaTardia(p: {
   cuentaPedida: string
   aparato: string
   dentroDeLaTx: (tx: Prisma.TransactionClient, nueva: { orderId: string; otrasCuentas: string[] }) => Promise<void>
+  /** D93: la hora del aparato de la ronda sin red, YA validada por el reducer (`horaRealDelAparato`), sólo para reportes. */
+  clientCreatedAt?: Date | null
 }): Promise<{ orderId: string; version: number; isNewOrder: boolean }> {
   const { venueId, tableId, staffId } = p
   const result = await prisma.$transaction(async tx => {
@@ -620,6 +622,8 @@ export async function cuentaAparteParaRondaTardia(p: {
     const nueva = await tx.order.create({
       data: {
         venueId,
+        // D93 («B»): la cuenta aparte nace de una ronda pedida sin red; lleva su hora del aparato, sólo para reportes.
+        ...(p.clientCreatedAt ? { clientCreatedAt: p.clientCreatedAt } : {}),
         shiftId: turnoVivo?.id ?? null,
         tableId: table.id,
         covers: p.covers,

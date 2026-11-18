@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { DateTime } from 'luxon'
 import prisma from '@/utils/prismaClient'
@@ -7,6 +8,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getVenueChartData } from '../chartData'
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import {
   aggregateGiftCardLoads,
   aggregatePaymentsByMethod,
@@ -408,10 +410,13 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         const end = venueEndOfDay(timezone, ref)
         return { venueId: v.id, timezone, start, end }
       })
-      const paymentWhere = venueId
-        ? { ...where, createdAt: { gte: windows[0].start, lte: windows[0].end } }
+      // D93 («B», como Square): un cobro hecho sin internet cuenta en el día de su hora REAL (la del aparato), no en el de su llegada,
+      // igual que el resumen de ventas. `dondeHoraRealEntre` envuelve en AND; los usos de abajo también (nunca se pisan las llaves).
+      const rangos = windows.map(w => dondeHoraRealEntre({ venueId: w.venueId }, w.start, w.end))
+      const paymentWhere: Prisma.PaymentWhereInput = venueId
+        ? { AND: [where, rangos[0]] }
         : windows.length
-          ? { ...where, OR: windows.map(w => ({ venueId: w.venueId, createdAt: { gte: w.start, lte: w.end } })) }
+          ? { AND: [where, { OR: rangos }] }
           : { venueId: { in: [] as string[] } }
       // Tarjetas de regalo (spec §7): lo cargado en tarjetas no es venta; va en `giftCardLoads`. Tres consultas en paralelo, nunca
       // una por sucursal: las ventas; las cargas (cuentas de tarjetas PAGADAS, r1 M-1); y el dinero de cuentas de tarjetas que cayó en
@@ -419,18 +424,18 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const [groups, cargas, dineroDeTarjetasPorComercio] = await Promise.all([
         prisma.payment.groupBy({
           by: ['venueId', 'method', 'type', 'merchantAccountId', 'tenderTypeId'],
-          where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] },
+          where: { AND: [paymentWhere, { status: 'COMPLETED', order: WHERE_ORDEN_SIN_TARJETAS }] },
           _sum: { amount: true, tipAmount: true },
           _count: { _all: true },
         }),
         prisma.payment.groupBy({
           by: ['venueId'],
-          where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_CUENTA_DE_TARJETAS_PAGADA }] },
+          where: { AND: [paymentWhere, { status: 'COMPLETED', order: WHERE_CUENTA_DE_TARJETAS_PAGADA }] },
           _sum: { amount: true },
         }),
         prisma.payment.groupBy({
           by: ['venueId', 'merchantAccountId'],
-          where: { ...paymentWhere, status: 'COMPLETED', merchantAccountId: { not: null }, AND: [{ order: WHERE_ORDEN_DE_TARJETAS }] },
+          where: { AND: [paymentWhere, { status: 'COMPLETED', merchantAccountId: { not: null }, order: WHERE_ORDEN_DE_TARJETAS }] },
           _sum: { amount: true, tipAmount: true },
         }),
       ])

@@ -18,6 +18,7 @@ import { DateTime } from 'luxon'
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
 import { WHERE_ORDEN_SIN_TARJETAS, sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
+import { sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -49,6 +50,13 @@ const ORDER_NOT_DISCARDED = Prisma.raw(`o."status" NOT IN ('PENDING','CANCELLED'
  */
 const orderScope = (venueId: string, fromDate: Date, toDate: Date) =>
   Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
+
+/**
+ * D93 («B», como Square): lo mismo, pero por la hora REAL de la orden (la del aparato si se vendió sin internet; si no, la llegada).
+ * Sólo lo usan las horas pico por ahora (el primer lector elegido); las demás gráficas siguen con `orderScope`.
+ */
+const orderScopeHoraReal = (venueId: string, fromDate: Date, toDate: Date) =>
+  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND ${sqlRangoHoraRealSql('o', fromDate, toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
 
 /** El instante en la zona del venue — réplica SQL de `DateTime.fromJSDate(x, { zone: 'utc' }).setZone(tz)`. */
 const localTs = (tz: string, col: Prisma.Sql = Prisma.raw('o."createdAt"')) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`
@@ -348,9 +356,9 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   const tz = timezone || DEFAULT_TIMEZONE
   // La hora se determina en la zona del venue (antes lo hacía Luxon fila por fila).
   const rows = await prisma.$queryRaw<Array<{ hour: number; sales: Prisma.Decimal; transactions: number }>>`
-    SELECT ${localHour(tz)} AS "hour", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
+    SELECT EXTRACT(HOUR FROM ${localTs(tz, Prisma.raw(sqlHoraReal('o')))})::int AS "hour", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
     FROM "Order" o
-    WHERE ${orderScope(venueId, fromDate, toDate)}
+    WHERE ${orderScopeHoraReal(venueId, fromDate, toDate)}
     GROUP BY 1
     ORDER BY 1
   `

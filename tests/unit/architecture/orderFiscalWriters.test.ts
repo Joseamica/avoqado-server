@@ -964,6 +964,12 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'D7: new empty late-round order (its round enters through addItemsToOrder); only points the table to it',
     markers: NEW_ORDER,
   },
+  // D93 (hz:8024bc1c:D93): la cuenta que assignTable ACABA de crear en la misma transacción guarda la hora del aparato (sólo reportes).
+  'src/services/mobile/sync.mobile.service.ts#applyOpenTable': {
+    class: 'METADATA',
+    why: 'D93: clientCreatedAt (device time, reports only) of the order assignTable just created in the same tx (isNewOrder)',
+    markers: ['admitida.isNewOrder && horaRealDeLaMesa', 'data: { clientCreatedAt: horaRealDeLaMesa }'],
+  },
   'src/services/kds/kitchenTicketAuthoring.service.ts#limpiarMarca': { class: 'METADATA', why: 'clears the kitchenPendingAt marker' },
   // Tienda híbrida T9: un folio que el cobro ya dejó COMPLETED se marca para la cocina aparte (la cuenta no se reescribe).
   'src/services/online-ordering/folios.service.ts#prepararFolioPagadoEnTx': {

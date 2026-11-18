@@ -56,6 +56,11 @@ export interface ExecutionContext {
   role?: string
   terminalSerial?: string
   /**
+   * D93: epoch ms en que la petición HTTP ENTRÓ al servidor (lo estampa `requestLogger`, antes de cualquier middleware o espera). Es la
+   * «llegada» contra la que se acota la hora del aparato de lo vendido sin internet (`horaRealDelAparato.llegadaDeLaPeticion`).
+   */
+  llegadaAt?: number
+  /**
    * La app que llama, como se presenta (`x-device-platform`, `x-app-version`), recortado. Lo lee la cuenta del renglón por peso
    * (`importePorPeso.ts`) para dejar a iOS < 1.15.2 con la cuenta vieja. Nunca se registra en el log (no está en la lista).
    */

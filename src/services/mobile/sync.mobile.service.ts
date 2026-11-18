@@ -51,6 +51,7 @@ import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
+import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -1046,6 +1047,9 @@ async function applyOpenTable(
   dejarHuella?: DejarHuella,
   deviceId?: string,
 ): Promise<SyncIntentAck> {
+  // D93: la hora del aparato al abrir la mesa, SIN el recorte al futuro de `abiertaSinRedEn` (Codex r2 #1), acotada a 24 h antes de
+  // ahora. Sólo para reportes: la cuenta que NACE la guarda en la misma transacción (`huellaYNota`).
+  const horaRealDeLaMesa = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   await assertTableService(venueId)
   const tableId = String(intent.payload.tableId ?? '')
   const covers = Number(intent.payload.covers ?? 1)
@@ -1105,6 +1109,9 @@ async function applyOpenTable(
   // después del commit no la pierde. D71: nombra cuáles de las otras cuentas son de otro mesero (Codex r2 #2 rechazaba aquí; ya no
   // hace falta: assignTable nunca adopta una cuenta ajena con `soloCuentasDe`).
   const huellaYNota: Parameters<typeof tableService.assignTable>[5] = async (tx, admitida) => {
+    if (admitida.isNewOrder && horaRealDeLaMesa) {
+      await tx.order.update({ where: { id: admitida.orderId }, data: { clientCreatedAt: horaRealDeLaMesa } })
+    }
     if (admitida.otrasCuentas?.length) {
       const cuentasDeOtroMesero = soloCuentasDe
         ? (
@@ -1491,6 +1498,7 @@ async function aplicarRondaTardia(p: {
   dejarHuella?: DejarHuella
 }): Promise<SyncIntentAck> {
   const { venueId, staffId, intent, original } = p
+  const horaRealDeLaRonda = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   const pedida = { orderId: original.id, version: original.version, total: Number(original.total ?? 0) }
   const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
@@ -1503,6 +1511,8 @@ async function aplicarRondaTardia(p: {
     covers: original.covers && original.covers > 0 ? original.covers : 1,
     cuentaPedida: original.id,
     aparato: aparatoDeLaRonda(p.deviceId, staffId),
+    // D93: la hora del aparato de la ronda (sólo reportes), validada contra la llegada de este intent; sin ella, la llamada de hoy.
+    ...(horaRealDeLaRonda ? { clientCreatedAt: horaRealDeLaRonda } : {}),
     dentroDeLaTx: (tx, nueva) =>
       writeLegacyActivityAuditTx(tx, {
         staffId,
@@ -1653,6 +1663,8 @@ async function applyPayCash(
   terminalSerialNumber?: string,
   deviceId?: string,
 ): Promise<SyncIntentAck> {
+  // D93: cuándo ENTRÓ la petición del lote (la cota de 24 h de la hora del aparato del cobro, sólo reportes).
+  const llegada = llegadaDeLaPeticion()
   let shiftIdDeLaVenta: string | undefined
   const declaredShift = intent.payload.shiftIdDeLaVenta
   // Old POS payloads keep their prior treatment; only an authenticated terminal opts into this reference.
@@ -1819,6 +1831,10 @@ async function applyPayCash(
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
     createdAtLocal: clampSoldAt(intent.createdAtLocal, new Date()).getTime(),
+    // D93 (Codex r2 #1): para el reporte, la hora del aparato SIN el piso de clampSoldAt (que fabricaría una hora) y sin inventarla
+    // si no vino; con la llegada de este intent como cota.
+    horaDelAparato: intent.createdAtLocal ?? null,
+    llegada,
     // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
     ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
     ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),

@@ -451,6 +451,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 import { horaDeLaVenta } from '../mobile/precioQueVioElCliente'
+import { conHoraRealDelAparato, horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -4254,6 +4255,9 @@ export async function recordOrderPayment(
           data: {
             venueId,
             orderId: activeOrder.id,
+            // D93 («B», como Square): la hora del aparato del cobro de la cola de la terminal, SÓLO para reportes. En línea: nada.
+            // (propiedad escrita, no `...`: la gramática cerrada del cobro, paymentShiftClaim.callers.guard)
+            clientCreatedAt: horaRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)),
             amount: totalAmount,
             tipAmount,
             method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum
@@ -5860,6 +5864,9 @@ export async function recordFastPayment(
             terminalId,
             status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
             completedAt: new Date(),
+            // D93 («B», como Square): la hora del aparato de la venta rápida de la cola (POS o TPV), SÓLO para reportes; `createdAt`
+            // sigue siendo la llegada (corte, turnos y demás reglas de dinero). En línea o sin hora: nada, como hoy.
+            ...conHoraRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)),
             // 🔴 La orden cae en el MISMO turno que su cobro (auditoría Codex, 2026-09-02).
             //
             // El `Payment` de abajo ya llevaba `shiftId`; la orden no. Y desde la fase 1 del
@@ -5928,6 +5935,7 @@ export async function recordFastPayment(
           data: {
             venueId,
             orderId: order.id, // Fast payment - no order association
+            clientCreatedAt: horaRealDelAparato(paymentData, llegadaDeLaPeticion(llegada)), // D93: la misma hora del aparato que su orden, sólo para reportes
             amount: totalAmount,
             tipAmount,
             method: effectiveMethod,

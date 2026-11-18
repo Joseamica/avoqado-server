@@ -197,10 +197,50 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
     expect((tableService.assignTable as jest.Mock).mock.calls[0][7]).toEqual(new Date(haceDosDias))
   })
 
+  it('D93 (Codex r2 #1): una hora del aparato en el FUTURO (recortada a «ahora» para D51) no se guarda como hora del reporte', async () => {
+    const tx = { activityLog: { create: jest.fn() }, posSyncIntent: { updateMany: jest.fn() }, order: { update: jest.fn() } }
+    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+      await args[5](tx, { orderId: 'cuenta-nueva', isNewOrder: true })
+      return { order: { id: 'cuenta-nueva', orderNumber: 'A-3', version: 1 }, isNewOrder: true }
+    })
+    await processIntents(
+      baseParams([
+        {
+          id: 'i-futuro',
+          type: 'OPEN_TABLE',
+          payload: { tableId: 't1', covers: 2, localOrderId: 'L-F' },
+          createdAtLocal: Date.now() + 3_600_000,
+        },
+      ]),
+    )
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('D93: una cuenta ADOPTADA (no nace) no cambia su hora', async () => {
+    const tx = { activityLog: { create: jest.fn() }, posSyncIntent: { updateMany: jest.fn() }, order: { update: jest.fn() } }
+    ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
+      await args[5](tx, { orderId: 'cuenta-viva', isNewOrder: false })
+      return { order: { id: 'cuenta-viva', orderNumber: 'A-4', version: 3 }, isNewOrder: false }
+    })
+    await processIntents(
+      baseParams([
+        {
+          id: 'i-adopta',
+          type: 'OPEN_TABLE',
+          payload: { tableId: 't1', covers: 2, localOrderId: 'L-A' },
+          createdAtLocal: Date.now() - 60_000,
+        },
+      ]),
+    )
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
   it('D51: si assignTable la deja junto a otras cuentas, la nota MESA_SIN_RED_EN_CUENTA_APARTE va DENTRO de su transacción', async () => {
     const tx = {
       activityLog: { create: jest.fn().mockResolvedValue({}) },
       posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      // D93: la cuenta que nace sin red guarda la hora del aparato (sólo reportes) en la misma transacción.
+      order: { update: jest.fn().mockResolvedValue({}) },
     }
     ;(tableService.assignTable as jest.Mock).mockImplementation(async (...args: any[]) => {
       await args[5](tx, { orderId: 'cuenta-propia', isNewOrder: true, otrasCuentas: ['cuenta-B'] })
@@ -217,6 +257,7 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
       ]),
     )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'cuenta-propia', localOrderId: 'L-1', isNewOrder: true } })
+    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: 'cuenta-propia' }, data: { clientCreatedAt: expect.any(Date) } })
     expect(tx.activityLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         action: 'MESA_SIN_RED_EN_CUENTA_APARTE',
@@ -238,7 +279,7 @@ describe('OPEN_TABLE — cashDrawerSessionId del payload', () => {
     const tx = () => ({
       activityLog: { create: jest.fn().mockResolvedValue({}) },
       posSyncIntent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      order: { findMany: jest.fn().mockResolvedValue([{ id: 'cuenta-de-pedro' }]) },
+      order: { findMany: jest.fn().mockResolvedValue([{ id: 'cuenta-de-pedro' }]), update: jest.fn().mockResolvedValue({}) },
     })
     beforeEach(() => {
       ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)

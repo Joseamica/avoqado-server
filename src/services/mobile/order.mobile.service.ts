@@ -202,6 +202,7 @@ import {
   ventanaDeLaLinea,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
+import { conHoraRealDelAparato, horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 /**
  * «Cobrar sin red» (S6): una venta de la cola de una TERMINAL que sube más de estos minutos después de cobrarse no manda comanda a
@@ -2105,6 +2106,9 @@ export async function crearVentaDeMostradorEnTx(
       customerPhone: resolvedCustomerPhone,
       specialRequests: input.note || input.specialRequests || null,
       version: 1,
+      // D93 («B», como Square): la hora del aparato de la venta de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
+      // En línea (`llegada` sólo viene de la cola) no se escribe: la llamada queda como hoy.
+      ...(precioMostrado.llegada ? conHoraRealDelAparato(input, llegadaDeLaPeticion(precioMostrado.llegada)) : {}),
       orderCustomers: normalizedCustomerId
         ? {
             create: [
@@ -3315,6 +3319,15 @@ async function vincularAlDuenoDelFiado(
  * rest; both orders' money is recomputed from their items. The table stays
  * OCCUPIED; currentOrderId keeps pointing at the source.
  */
+/**
+ * D93 («B», como Square): la cuenta hija de separar o dividir por asiento es la MISMA comida que su origen, como el turno: si el
+ * origen nació sin red con la hora del aparato, la hija la hereda (sólo para reportes; Codex r1 #2). Con la misma ventana de 24 h
+ * contada desde ahora: la hija nace hoy y los lectores la buscan por su `createdAt` ensanchado, así que una hora más vieja se pierde.
+ */
+function horaRealHeredada(horaDelOrigen: Date | null | undefined): { clientCreatedAt?: Date } {
+  return horaDelOrigen ? conHoraRealDelAparato({ isOfflineReplay: true, createdAtLocal: horaDelOrigen }, llegadaDeLaPeticion()) : {}
+}
+
 export async function splitOrderItemsInTransaction(
   tx: TxConReintento,
   venueId: string,
@@ -3346,6 +3359,7 @@ export async function splitOrderItemsInTransaction(
     select: {
       id: true,
       orderNumber: true,
+      clientCreatedAt: true,
       status: true,
       paymentStatus: true,
       tableId: true,
@@ -3431,6 +3445,7 @@ export async function splitOrderItemsInTransaction(
   const created = await tx.order.create({
     data: {
       venueId,
+      ...horaRealHeredada(source.clientCreatedAt),
       // 🔴 El cheque separado HEREDA el turno de su origen, no «el turno abierto ahora»:
       // es la MISMA comida, y separar la cuenta a caballo de un cambio de turno la partiría
       // entre dos cortes. Heredar es un hecho copiado; resolver sería una suposición.
@@ -3550,6 +3565,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     select: {
       id: true,
       orderNumber: true,
+      clientCreatedAt: true,
       status: true,
       paymentStatus: true,
       tableId: true,
@@ -3620,6 +3636,7 @@ export async function splitOrderBySeatInTransaction(tx: TxConReintento, venueId:
     const newOrder = await tx.order.create({
       data: {
         venueId,
+        ...horaRealHeredada(source.clientCreatedAt),
         // 🔴 Mismo criterio que separar cheque: el turno se HEREDA del origen (es la misma
         // comida), nunca se resuelve «el turno abierto ahora» — dividir por puesto a caballo
         // de un cambio de turno partiría una sola mesa entre dos cortes.
@@ -4211,6 +4228,13 @@ export interface CashPaymentInput {
   /** Epoch ms del aparato al COBRAR (número o texto de dígitos); sólo cuenta con `isOfflineReplay` (`horaDeLaVenta`). */
   createdAtLocal?: number | string | null
   /**
+   * D93: la hora del aparato TAL COMO LLEGÓ, para `Payment.clientCreatedAt` (sólo reportes). El intent `PAY_CASH` la pasa sin recortar
+   * (su `createdAtLocal` ya viene con el piso de `clampSoldAt`, que fabricaría una hora; Codex D93 r2 #1). Sin ella, `createdAtLocal`.
+   */
+  horaDelAparato?: number | string | null
+  /** D93: cuándo ENTRÓ la petición (la cota de las 24 h de `clientCreatedAt`, Codex D93 r2 #2). Sin ella, la hora de escribir. */
+  llegada?: Date
+  /**
    * S6: ms entre la venta y este envío, medidos por el aparato con su reloj MONÓTONO (inmune a un reloj de pared atrasado). Sólo con
    * `isOfflineReplay`; si es válido (finito, ≥ 0, ≤ 30 días) es la ÚNICA edad de la regla de la comanda tardía (sin él, la comanda
    * sale como hoy: Codex servidor r1 #8; `createdAtLocal` ya no cuenta para la comanda).
@@ -4565,6 +4589,9 @@ export interface AbonoEnTxEntrada {
   idempotencyKey?: string
   isOfflineReplay?: boolean
   createdAtLocal?: CashPaymentInput['createdAtLocal']
+  /** D93: ver `CashPaymentInput.horaDelAparato` y `.llegada`. */
+  horaDelAparato?: CashPaymentInput['horaDelAparato']
+  llegada?: Date
   externalSource?: string
   /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
   tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
@@ -5088,6 +5115,19 @@ export async function registrarAbonoEnTx(
       venueId,
       orderId,
       createdAt: entrada.createdAt,
+      // D93 («B», como Square): la hora del aparato del cobro de la cola, SÓLO para reportes; `createdAt` sigue siendo la llegada.
+      // Con una fecha contable explícita (operación compuesta, nunca de la cola) no se escribe: su `createdAt` ya es la que vale.
+      // La cota de 24 h se mide contra la LLEGADA de la petición (Codex D93 r2 #2), no contra el momento de escribir.
+      // (propiedad escrita, no `...`: la gramática cerrada del cobro, paymentShiftClaim.callers.guard)
+      clientCreatedAt: entrada.createdAt
+        ? null
+        : horaRealDelAparato(
+            {
+              isOfflineReplay: entrada.isOfflineReplay,
+              createdAtLocal: entrada.horaDelAparato !== undefined ? entrada.horaDelAparato : entrada.createdAtLocal,
+            },
+            llegadaDeLaPeticion(entrada.llegada),
+          ),
       processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
       tipAmount: tipDecimal,
@@ -5584,6 +5624,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               idempotencyKey: input.idempotencyKey,
               isOfflineReplay: input.isOfflineReplay,
               createdAtLocal: input.createdAtLocal,
+              ...(input.horaDelAparato !== undefined ? { horaDelAparato: input.horaDelAparato } : {}),
+              ...(input.llegada ? { llegada: input.llegada } : {}),
               externalSource: input.externalSource,
               tender: tenderRef,
               dentroDeLaTx: input.dentroDeLaTx,
