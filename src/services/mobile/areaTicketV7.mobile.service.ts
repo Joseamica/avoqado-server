@@ -56,8 +56,17 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { claseDeEstado, computeOrderBalance, esVentaCerrada, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada, devolverCanjesDeVentaAnuladaEnTx } from '../shared/orderCancelGuard'
+import { buildItemDiscountRow, calculateDiscountCents } from '../shared/discount.service'
+import { comoJson, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import type { MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
-import { buildOrderItemsData, CreateOrderItemInput, type CreateOrderInput } from './order.mobile.service'
+import {
+  buildOrderItemsData,
+  CreateOrderItemInput,
+  membresiaDeLaSesion,
+  pideAprobacionDeGerente,
+  type CreateOrderInput,
+} from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
 const DEFAULT_SESSION_MAX_AGE_MINUTES = 30
@@ -1689,6 +1698,201 @@ function orderItemFromSnapshot(line: any, fulfillmentAreaId: string) {
   }
 }
 
+/** Lo que hace falta del catálogo para nombrar la fila espejo de un renglón de vale (y comprobar que su monto sigue saliendo así). */
+const DESCUENTO_DEL_ESPEJO_SELECT = {
+  id: true,
+  type: true,
+  name: true,
+  value: true,
+  compReason: true,
+  maxDiscountAmount: true,
+} as const
+
+type DescuentoDelEspejo = Prisma.DiscountGetPayload<{ select: typeof DESCUENTO_DEL_ESPEJO_SELECT }>
+
+/** El renglón de venta que nació de un renglón de vale, con su área y quien emitió ese vale. */
+type RenglonDeValeCobrado = {
+  id: string
+  appliedDiscountId: string | null
+  discountAmount: Prisma.Decimal
+  total: Prisma.Decimal
+  area: string
+  emisor: string | null
+}
+
+/** Un renglón suelto de la caja, recién creado. */
+type RenglonSueltoCobrado = { id: string; appliedDiscountId: string | null; discountAmount: Prisma.Decimal }
+
+/** Rebaja > $0 con liga: el único renglón que deja fila espejo (Codex r1 #8: una rebaja de $0.00 no es un descuento dado). */
+const conRebaja = (r: { appliedDiscountId?: string | null; discountAmount?: unknown }): boolean =>
+  !!r.appliedDiscountId && new Prisma.Decimal(String(r.discountAmount ?? 0)).greaterThan(0)
+
+const centavos = (pesos: unknown): number => Math.round(new Prisma.Decimal(String(pesos ?? 0)).mul(100).toNumber())
+
+/**
+ * Tarjeta na24531d (17-nov): el catálogo de los descuentos que traen los renglones de los vales de la sesión. Se lee FUERA de la
+ * transacción Serializable del cobro (el vale ya congeló el MONTO; esto sólo nombra la fila), así no la ata al contador de usos que
+ * sube cada venta de Mostrador. Sin filtrar `active`: el descuento valía al emitir.
+ */
+async function descuentosDeLosVales(venueId: string, tickets: any[]): Promise<Map<string, DescuentoDelEspejo>> {
+  const ids = [
+    ...new Set<string>(
+      tickets.flatMap((ticket: any) =>
+        (ticket.lines ?? []).map((line: any) => line.appliedDiscountId).filter((id: unknown): id is string => typeof id === 'string'),
+      ),
+    ),
+  ]
+  if (ids.length === 0) return new Map()
+  const filas = await prisma.discount.findMany({
+    where: { venueId, id: { in: ids } },
+    select: DESCUENTO_DEL_ESPEJO_SELECT,
+    take: ids.length,
+  })
+  return new Map(filas.map(d => [d.id, d]))
+}
+
+/** `OrderDiscount.value` es `Decimal(10,4)`: un importe fijo más grande no cabe ahí (el `amount` sí). */
+const VALOR_FIJO_MAXIMO_CENTS = 99_999_999
+
+/** Una fila espejo de la venta de vales: lo que la describe y los centavos exactos de cada uno de sus renglones. */
+type FilaDeLaVenta = {
+  /** Lo que `buildItemDiscountRow` lee del descuento: el del catálogo, o su descripción como importe fijo (sin liga si se borró). */
+  discount: { id: string | null; [key: string]: any }
+  appliedById: string | null
+  authorizedById?: string
+  motivo: MotivoDeDescuento
+  renglones: Array<{ id: string; cents: number }>
+}
+
+/**
+ * Los datos de la fila espejo de UNA venta de vales: la de `buildItemDiscountRow`, dirigida a sus renglones con lo exacto de cada uno y
+ * con la marca `deValeV7` (no se quita desde la caja; no cuenta como «ya aplicado» ni en los topes por cliente). Puro: la escribe quien
+ * llama, en la transacción que crea la venta.
+ */
+function datosDeFilaDeLaVenta(orderId: string, f: FilaDeLaVenta): Prisma.OrderDiscountUncheckedCreateInput {
+  const renglones = [...f.renglones].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  const totalCents = renglones.reduce((s, r) => s + r.cents, 0)
+  return {
+    ...buildItemDiscountRow({
+      orderId,
+      itemId: renglones[0].id,
+      discount: f.discount,
+      discountAmountPesos: totalCents / 100,
+      appliedById: f.appliedById,
+    }),
+    ...f.motivo,
+    ...(f.authorizedById ? { authorizedById: f.authorizedById } : {}),
+    appliedToItemIds: renglones.map(r => r.id),
+    reparto: comoJson(
+      nuevoRepartoDirigido(totalCents / 100, Object.fromEntries(renglones.map(r => [r.id, r.cents / 100])), {
+        espejo: true,
+        deValeV7: true,
+      }),
+    ),
+  }
+}
+
+/**
+ * Tarjeta na24531d: los renglones de VALE con descuento ganan su fila espejo al cobrarse, UNA por (descuento, área, quien emitió el
+ * vale) (Codex r2 #2, r3 #5), dirigida a sus renglones con lo exacto de cada uno. Lo que el vale NO congeló no se inventa: quien lo dio es
+ * el emisor (su membresía); quién lo APROBÓ no se sabe al cobrar, así que la fila no lleva `authorizedById`; el monto es el congelado y, si
+ * el catálogo ya no lo reproduce en algún renglón (el dueño lo editó entre emitir y cobrar), la fila va como importe fijo por la suma,
+ * salvo que no quepa en `value` (Codex r2 #5). Un descuento borrado del catálogo deja la fila sin liga. Rebaja $0 ⇒ sin fila.
+ */
+async function crearEspejosDeLosVales(
+  tx: Prisma.TransactionClient,
+  p: { venueId: string; orderId: string; renglones: RenglonDeValeCobrado[]; descuentos: Map<string, DescuentoDelEspejo> },
+): Promise<void> {
+  const conDescuento = p.renglones.filter(conRebaja)
+  if (conDescuento.length === 0) return
+  const emisores = [...new Set(conDescuento.map(r => r.emisor).filter((id): id is string => !!id))]
+  const membresias = emisores.length
+    ? await tx.staffVenue.findMany({
+        where: { venueId: p.venueId, staffId: { in: emisores } },
+        select: { id: true, staffId: true },
+        take: emisores.length,
+      })
+    : []
+  const membresiaDe = new Map(membresias.map(m => [m.staffId, m.id]))
+  const grupos = new Map<
+    string,
+    { descuentoId: string; emisor: string | null; renglones: Array<{ id: string; cents: number; reproduce: boolean }> }
+  >()
+  for (const r of conDescuento) {
+    const cents = centavos(r.discountAmount)
+    const catalogo = p.descuentos.get(r.appliedDiscountId!)
+    const reproduce = catalogo != null && calculateDiscountCents(catalogo, centavos(r.total)) === cents
+    const llave = JSON.stringify([r.appliedDiscountId, r.area, r.emisor])
+    const grupo = grupos.get(llave) ?? { descuentoId: r.appliedDiscountId!, emisor: r.emisor, renglones: [] }
+    grupo.renglones.push({ id: r.id, cents, reproduce })
+    grupos.set(llave, grupo)
+  }
+  for (const [, grupo] of [...grupos.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const totalCents = grupo.renglones.reduce((s, r) => s + r.cents, 0)
+    const catalogo = p.descuentos.get(grupo.descuentoId)
+    const discount = !catalogo
+      ? { id: null, type: 'FIXED_AMOUNT', name: 'Descuento del artículo', value: new Prisma.Decimal(totalCents).div(100) }
+      : grupo.renglones.every(r => r.reproduce) || totalCents > VALOR_FIJO_MAXIMO_CENTS
+        ? catalogo
+        : { ...catalogo, type: 'FIXED_AMOUNT', value: new Prisma.Decimal(totalCents).div(100), compReason: null }
+    await tx.orderDiscount.create({
+      data: datosDeFilaDeLaVenta(p.orderId, {
+        discount,
+        appliedById: (grupo.emisor && membresiaDe.get(grupo.emisor)) || null,
+        motivo: {},
+        renglones: grupo.renglones,
+      }),
+    })
+  }
+}
+
+/**
+ * Tarjeta na24531d (Codex r3 #3): los productos SUELTOS de la caja con descuento ganan su fila espejo agrupada por (descuento, motivo y
+ * comentario, quien aprobó), como el «Ajuste de precio» de Mostrador (`agruparPorMotivo`): 200 sueltos con el mismo descuento dejan UNA
+ * fila y el reporte por motivo cuadra al centavo. Quien lo dio = la caja (su membresía); con «Requiere aprobación», la sesión que aprobó
+ * con su permiso propio (D4, igual que `crearEspejosDelVale`). Rebaja $0 ⇒ sin fila.
+ */
+async function crearEspejosDeLosSueltos(
+  tx: Prisma.TransactionClient,
+  p: {
+    venueId: string
+    orderId: string
+    staffId: string | null | undefined
+    renglones: RenglonSueltoCobrado[]
+    discounts: Array<{ id: string; [key: string]: any }>
+    apruebaLaSesion?: string
+    motivosPorRenglon?: Map<string, MotivoDeDescuento>
+  },
+): Promise<void> {
+  const conDescuento = p.renglones.filter(r => conRebaja(r) && p.discounts.some(d => d.id === r.appliedDiscountId))
+  if (conDescuento.length === 0) return
+  const otorgadoPor = p.staffId
+    ? ((await tx.staffVenue.findFirst({ where: { staffId: p.staffId, venueId: p.venueId }, select: { id: true } }))?.id ?? null)
+    : null
+  const aprobo = p.discounts.some(pideAprobacionDeGerente) ? await membresiaDeLaSesion(tx, p.venueId, p.apruebaLaSesion) : null
+  const grupos = new Map<string, FilaDeLaVenta>()
+  for (const r of conDescuento) {
+    const discount = p.discounts.find(d => d.id === r.appliedDiscountId)!
+    const motivo = p.motivosPorRenglon?.get(r.id) ?? {}
+    const aprobador = aprobo && pideAprobacionDeGerente(discount) ? aprobo : null
+    const llave = JSON.stringify([discount.id, motivo.reason ?? null, motivo.reasonComment ?? null, aprobador])
+    const grupo =
+      grupos.get(llave) ??
+      ({
+        discount,
+        appliedById: aprobador ?? otorgadoPor,
+        ...(aprobador ? { authorizedById: aprobador } : {}),
+        motivo,
+        renglones: [],
+      } as FilaDeLaVenta)
+    grupo.renglones.push({ id: r.id, cents: centavos(r.discountAmount) })
+    grupos.set(llave, grupo)
+  }
+  for (const [, grupo] of [...grupos.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    await tx.orderDiscount.create({ data: datosDeFilaDeLaVenta(p.orderId, grupo) })
+  }
+}
+
 /**
  * 🔴 D1 (21-oct-2026, tablero hz:11d84b54:D1; QA N86): un vale cuya venta se canceló DESPUÉS de armar su cuenta vuelve a ISSUED
  * (`liberarValesYCancelarSesion`), pero el renglón de esa cuenta cancelada conservaba `OrderItem.areaTicketLineId` (único) y el vale
@@ -1760,8 +1964,16 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   const normalBuild =
     normalItems.length > 0
       ? await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input)
-      : { itemsData: [] as any[], subtotal: 0, itemDiscountTotal: 0 }
+      : {
+          itemsData: [] as any[],
+          subtotal: 0,
+          itemDiscountTotal: 0,
+          discounts: [] as Array<{ id: string; [key: string]: any }>,
+          motivosPorRenglon: undefined,
+        }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+  // Tarjeta na24531d: el catálogo que nombra la fila espejo de cada renglón de vale con descuento (fuera de la transacción).
+  const descuentosDeValesDeLaSesion = await descuentosDeLosVales(venueId, session.tickets)
 
   const ticketSubtotal = session.tickets.reduce((sum: Prisma.Decimal, ticket: any) => sum.add(ticket.subtotal), new Prisma.Decimal(0))
   const ticketDiscount = session.tickets.reduce((sum: Prisma.Decimal, ticket: any) => sum.add(ticket.discountAmount), new Prisma.Decimal(0))
@@ -1855,19 +2067,47 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
             },
           })
 
+          const renglonesDeVale: RenglonDeValeCobrado[] = []
           for (const ticket of fresh.tickets) {
             for (const line of ticket.lines) {
-              await tx.orderItem.create({
+              const renglon = await tx.orderItem.create({
                 data: {
                   orderId: order.id,
                   ...orderItemFromSnapshot(line, ticket.fulfillmentAreaId),
                 },
+                select: { id: true, appliedDiscountId: true, discountAmount: true, total: true },
               })
+              renglonesDeVale.push({ ...renglon, area: ticket.fulfillmentAreaId, emisor: ticket.issuedByStaffId ?? null })
             }
           }
+          const sueltos: RenglonSueltoCobrado[] = []
           for (const item of normalBuild.itemsData) {
-            await tx.orderItem.create({ data: { orderId: order.id, ...item, fulfillmentAreaId: null } })
+            sueltos.push(
+              await tx.orderItem.create({
+                data: { orderId: order.id, ...item, fulfillmentAreaId: null },
+                select: { id: true, appliedDiscountId: true, discountAmount: true },
+              }),
+            )
           }
+          // 🔴 Tarjeta na24531d: cada renglón con descuento gana su fila ESPEJO MARCADA en ESTA transacción, como el vale viejo y
+          // Mostrador; sin ella el descuento no salía en «Descuentos» ni en las estadísticas. Un reintento deshace las filas con todo lo
+          // demás y una sesión ya cobrada sale arriba sin escribir: nunca nacen dos. Los usos del descuento no se tocan (fase 1).
+          await crearEspejosDeLosVales(tx, {
+            venueId,
+            orderId: order.id,
+            renglones: renglonesDeVale,
+            descuentos: descuentosDeValesDeLaSesion,
+          })
+          // Los sueltos de la caja: los dio la caja, con su motivo y la aprobación de esta sesión (como `addAreaTicketItems`).
+          await crearEspejosDeLosSueltos(tx, {
+            venueId,
+            orderId: order.id,
+            staffId,
+            renglones: sueltos,
+            discounts: normalBuild.discounts,
+            motivosPorRenglon: normalBuild.motivosPorRenglon,
+            ...(input.aprobacionDelDescuento && input.performedBy ? { apruebaLaSesion: input.performedBy } : {}),
+          })
 
           const linked = await tx.areaTicket.updateMany({
             where: {

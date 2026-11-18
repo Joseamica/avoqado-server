@@ -234,6 +234,12 @@
     "categoria": "ANULACION",
     "motivo": "Anulación y limpieza propia bajo la protección anterior; tiene que poder operar sobre la cuenta que está anulando."
   },
+  "services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosSueltos": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
+  "services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosVales": {
+    "clase": "AYUDANTE_HISTORICO"
+  },
   "services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",

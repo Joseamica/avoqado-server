@@ -617,6 +617,7 @@ const susUsos = Prisma.sql`COALESCE((SELECT u.n FROM usos u WHERE u."discountId"
  * hour asignado es suyo aunque hoy no sea su hora). El cursor lo aporta `Discount` (`createdAt`, `id`).
  *  - Agotado por clienta (codex-s13-r2 #2): la asignación con `maxUses` usa su propio contador (es el override del esquema); sin él,
  *    hereda `Discount.maxUsesPerCustomer`, igual que el de su grupo.
+ *  - Tarjeta na24531d (fase 1): las filas que nacen al cobrar vales V7 (`reparto.deValeV7`) son sólo reporte y no cuentan como uso.
  *  - Sus usos (`usos`) se cuentan UNA vez y desde SUS órdenes (`Order(customerId)` → `OrderDiscount(orderId)`; el `OFFSET 0` impide
  *    que Postgres lo cambie por un recorrido de las aplicaciones del descuento, que son de todas las clientas). Es `MATERIALIZED` y
  *    sólo se lee dentro del `CASE`: si ningún candidato tiene límite por clienta, no se calcula (R5', medido en
@@ -630,7 +631,8 @@ function cteDeDescuentos(venueId: string, customerId: string, ahora: Date): Pris
       SELECT x."discountId", count(*)::int AS n
       FROM "Order" o
       CROSS JOIN LATERAL (
-        SELECT od."discountId" FROM "OrderDiscount" od WHERE od."orderId" = o.id AND od."discountId" IS NOT NULL OFFSET 0
+        SELECT od."discountId" FROM "OrderDiscount" od WHERE od."orderId" = o.id AND od."discountId" IS NOT NULL
+          AND (od."reparto"->>'deValeV7') IS DISTINCT FROM 'true' OFFSET 0
       ) x
       WHERE o."customerId" = ${customerId} AND o."venueId" = ${venueId}
       GROUP BY x."discountId"

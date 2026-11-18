@@ -1,4 +1,5 @@
 import { BadRequestError } from '../../errors/AppError'
+import { esFilaDeValeV7 } from './repartoDescuento'
 import { esRenglonDeVale } from './renglonDeVale'
 
 /** R14-1 (founder, 17-oct): lo que ve el operador al intentar separar o juntar una cuenta con vales de mostrador. */
@@ -25,4 +26,24 @@ type Cuenta = {
 export function rechazarSiLaCuentaTieneVales(...cuentas: Cuenta[]): void {
   if (cuentas.some(c => c.areaTicketCheckoutSession != null || c.items?.some(esRenglonDeVale)))
     throw new BadRequestError(MENSAJE_CUENTA_CON_VALES, 'AREA_TICKET_ORDER_NOT_SPLITTABLE')
+}
+
+/** Tarjeta na24531d: lo que ve quien intenta quitar el descuento de un producto en una venta de vales. */
+export const MENSAJE_DESCUENTO_DE_VENTA_DE_VALES =
+  'Esta venta tiene vales de mostrador: el descuento de un producto no se quita desde la caja. Cancela la venta y vuelve a armarla sin ese descuento.'
+
+/**
+ * 🔴 Tarjeta na24531d (Codex r1 #1-#2, r2 #1, r3 #1-#2): la venta de vales V7 nace con la fila ESPEJO de cada descuento de producto
+ * (para que salga en «Descuentos») y TODAS esas filas llevan la marca `deValeV7` en su reparto. Una fila marcada no se puede QUITAR desde
+ * la caja (TPV) ni desde el POS: antes no había fila que quitar, y quitarla subiría el saldo de una venta con el cobro del vale ya
+ * preparado por el monto viejo y bajaría `Discount.currentUses` por un uso que la venta de vales nunca sumó. Se queda como hoy: para
+ * cambiar un descuento de una venta de vales se cancela y se vuelve a armar (el vale congeló su precio al emitirse).
+ *
+ * La marca decide, no se adivina: ni por `discountId` (una cortesía del catálogo que el dueño borró queda sin liga) ni por los renglones
+ * que queden en la cuenta (quitar el renglón de vale no libera la fila del suelto). Una fila SIN la marca se quita como siempre: la
+ * cortesía que la caja da después, un descuento de cuenta, un canje. No aplica a la anulación (`porAnulacion`, que sólo regresa canjes).
+ * Es un rechazo de negocio (400), antes de cualquier efecto, bajo el candado de la cuenta que ya tiene quien llama; no consulta nada.
+ */
+export function rechazarSiQuitaUnDescuentoDeVale(fila: { reparto: unknown }): void {
+  if (esFilaDeValeV7(fila.reparto)) throw new BadRequestError(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES, 'AREA_TICKET_DISCOUNT_FROZEN')
 }

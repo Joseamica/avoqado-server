@@ -187,6 +187,49 @@ describe('D4 · Mesas: aplicar un % o fijo que pide aprobación a la cuenta abie
   })
 })
 
+describe('na24531d · la fila marcada de un cobro de vales no cuenta como «ya aplicado» en la mesa (Codex r6 #1, r7 #2)', () => {
+  const MARCADA = { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones: {}, deValeV7: true }
+  const contar = (db: ReturnType<typeof baseEnMemoria>) =>
+    prismaMock.orderDiscount.count.mockImplementation(async ({ where }: any) => {
+      const { reparto, ...resto } = where
+      return db.descuentos.filter(
+        d => coincide(d, resto) && (!reparto || (reparto.path?.[0] === 'deValeV7' && d.reparto?.deValeV7 === reparto.equals)),
+      ).length
+    })
+
+  it('🔴 sólo la fila marcada del mismo descuento: el descuento se aplica como antes del arreglo', async () => {
+    const db = baseEnMemoria()
+    contar(db)
+    const cuenta = await cuentaAbierta(db)
+    db.descuentos.push({ id: 'od-vale', orderId: cuenta.id, discountId: LIBRE, amount: 0, reparto: MARCADA, appliedToItemIds: [] })
+
+    const r = await applyOrderDiscount(VENUE, cuenta.id, LIBRE, 'sesion-1')
+
+    expect(r.amount).toBe(10)
+    expect(cuenta.filas().filter(f => f.discountId === LIBRE)).toHaveLength(2)
+  })
+
+  it('🔴 Codex r7 #2: con la fila marcada Y una aplicación real del mismo descuento, el segundo intento se rechaza (como siempre)', async () => {
+    const db = baseEnMemoria()
+    contar(db)
+    const cuenta = await cuentaAbierta(db)
+    // 200 grupos marcados (sueltos con comentarios distintos y el alcance cambiado después) y DESPUÉS la aplicación real: una lectura
+    // con tope que no la alcanzara la dejaría pasar dos veces. El doble respeta `take` como Postgres.
+    for (let i = 0; i < 200; i++)
+      db.descuentos.push({ id: `od-vale-${i}`, orderId: cuenta.id, discountId: LIBRE, amount: 0, reparto: MARCADA, appliedToItemIds: [] })
+    db.descuentos.push({ id: 'od-real', orderId: cuenta.id, discountId: LIBRE, amount: 10, reparto: null, appliedToItemIds: [] })
+    const findMany = prismaMock.orderDiscount.findMany.getMockImplementation()!
+    prismaMock.orderDiscount.findMany.mockImplementation(async (args: any) => {
+      const filas = await findMany(args)
+      return args?.take ? filas.slice(0, args.take) : filas
+    })
+
+    await expect(applyOrderDiscount(VENUE, cuenta.id, LIBRE, 'sesion-1')).rejects.toMatchObject({
+      message: 'Ese descuento ya está aplicado a la cuenta',
+    })
+  })
+})
+
 describe('D4 · Mostrador: la venta nueva con un descuento que pide aprobación', () => {
   it('la etiqueta del descuento de cuenta (importe libre) sin acreditación: 403 y no nace la venta', async () => {
     const db = baseEnMemoria()

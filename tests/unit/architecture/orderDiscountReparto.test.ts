@@ -167,6 +167,9 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
   // B2c T5 (P5): cada descuento de artículo del vale gana su fila ESPEJO (abrir el vale y agregarle renglones la llaman).
   'src/services/mobile/areaTicket.mobile.service.ts#crearEspejosDelVale': { clase: 'ESCRIBE', marcas: ['buildItemDiscountRow('] },
+  // Tarjeta na24531d: al cobrar vales V7, cada grupo de renglones con rebaja (vale o suelto) gana su fila ESPEJO marcada `deValeV7`.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosVales': { clase: 'ESCRIBE', marcas: ['datosDeFilaDeLaVenta('] },
+  'src/services/mobile/areaTicketV7.mobile.service.ts#crearEspejosDeLosSueltos': { clase: 'ESCRIBE', marcas: ['datosDeFilaDeLaVenta('] },
   'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDirigido(', 'nuevoRepartoDeCuenta(', SYNC],
@@ -362,7 +365,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
   },
   'src/services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout': {
     origen: 'RENGLON',
-    nota: 'los vales V7 traen su descuento por renglón (residual, ver B2c)',
+    nota: 'los vales V7 traen su descuento por renglón; su fila espejo marcada la escriben crearEspejosDeLosVales y crearEspejosDeLosSueltos (na24531d)',
   },
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {
     origen: 'D8',
@@ -559,7 +562,8 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
   },
   'src/services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout': {
     clase: 'CREACION',
-    nota: 'residual R1: los vales V7 traen su descuento por renglón, sin fila espejo',
+    marcas: ['crearEspejosDeLosVales(', 'crearEspejosDeLosSueltos('],
+    nota: 'na24531d (cierra el residual R1 de B2c): la venta de vales nace con la fila espejo de cada renglón con descuento, vale o suelto',
   },
   'src/services/mobile/estimate.mobile.service.ts#convertToOrder': {
     clase: 'CREACION',
