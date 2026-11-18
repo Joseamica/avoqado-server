@@ -39,9 +39,18 @@ beforeAll(async () => {
     .id
 })
 
+// Tope PROPIO de la limpieza (no el de 60 s de `integration-setup.ts`): borrar las 5,001+ personas de la sede grande corre,
+// por cada una, las 122 llaves foráneas que apuntan a `Staff` (47 sin índice, que recorren su tabla entera). En local tarda
+// ~1.5 s, pero en el CI depende de lo que las otras pruebas dejaron en la base del proceso y de la carga del runner: la suite
+// midió 7.5 s, 17.6 s, 29.7 s y 45.5 s en corridas verdes de develop (17/18-nov) y 65.9 s en la roja 43828541196 (16-nov,
+// «Exceeded timeout of 60000 ms for a hook» con sus 9 pruebas en verde). El tope deja ~5× sobre la peor verde medida, y el
+// log de abajo dice cuánto tardó, para volver a medir si algún día se acerca.
+const TOPE_LIMPIEZA_MS = 240_000
+
 afterAll(async () => {
   // Guarda: si beforeAll falló, nunca correr deleteMany({ venueId: undefined }) contra toda la base de pruebas.
   if (!venueId || !venueGrandeId) return
+  const inicio = Date.now()
   for (const v of [venueId, venueGrandeId]) {
     await prisma.activityLog.deleteMany({ where: { venueId: v } })
     await prisma.staffAssignment.deleteMany({ where: { venueId: v } })
@@ -52,7 +61,8 @@ afterAll(async () => {
   await prisma.staff.deleteMany({ where: { email: { startsWith: `${key}-h-` } } })
   await prisma.venue.deleteMany({ where: { id: { in: [venueId, venueGrandeId] } } })
   if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
-})
+  console.log(`[rh/migracion] limpieza: ${Date.now() - inicio} ms (tope ${TOPE_LIMPIEZA_MS} ms)`)
+}, TOPE_LIMPIEZA_MS)
 
 describe('sede principal: dos corridas, edición humana y archivado', () => {
   let rolesAntes: string[] = []
