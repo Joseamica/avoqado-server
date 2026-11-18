@@ -534,8 +534,9 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
   try {
     const { venueId } = req.params
     // `grantedFeatureCodes` es ADITIVO: un dashboard viejo lo ignora. Sólo códigos (#10, 21-sep).
-    const plan = await getVenuePlanInfo(venueId)
-    res.status(200).json({ success: true, data: plan })
+    const [plan, basico] = await Promise.all([getVenuePlanInfo(venueId), planStateService.basicPlanActive(venueId)])
+    // Plan Básico: el chip del negocio dice «Básico» y no «Free». ADITIVO y sólo cuando es verdad: sin Básico, la respuesta de siempre.
+    res.status(200).json({ success: true, data: basico ? { ...plan, basicPlanActive: true } : plan })
   } catch (error) {
     logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',

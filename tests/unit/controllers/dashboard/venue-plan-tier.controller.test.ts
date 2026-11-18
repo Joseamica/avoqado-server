@@ -12,6 +12,11 @@
 jest.mock('@/services/access/basePlan.service', () => ({
   getVenuePlanInfo: jest.fn(),
 }))
+const mockBasicoActivo = jest.fn()
+jest.mock('@/services/dashboard/planState.service', () => ({
+  ...jest.requireActual('@/services/dashboard/planState.service'),
+  basicPlanActive: (...a: unknown[]) => mockBasicoActivo(...a),
+}))
 
 import type { NextFunction, Request, Response } from 'express'
 import { getVenuePlanInfo } from '@/services/access/basePlan.service'
@@ -30,6 +35,7 @@ const makeReq = (venueId: string) => ({ params: { venueId } }) as unknown as Req
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockBasicoActivo.mockResolvedValue(false)
 })
 
 describe('getVenuePlanTier controller', () => {
@@ -94,5 +100,30 @@ describe('getVenuePlanTier controller', () => {
     const body = (res.json as jest.Mock).mock.calls[0][0]
     expect(body.data.grantedFeatureCodes).toEqual(['INVENTORY_TRACKING'])
     expect(body.data).not.toHaveProperty('price')
+  })
+
+  // Plan Básico (full-testing 17-nov): el chip del negocio decía «Free» con un Básico vigente. El Básico no es un tier: el
+  // aviso viaja aparte, sólo cuando es verdad, para que un dashboard viejo y las respuestas de siempre no cambien.
+  it('🔴 Básico vigente → `basicPlanActive: true` (sin precio ni ids)', async () => {
+    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: false, exempt: false, grantedFeatureCodes: ['RESERVATIONS'] })
+    mockBasicoActivo.mockResolvedValue(true)
+    const res = makeRes()
+
+    await getVenuePlanTier(makeReq('venue-1'), res, jest.fn() as unknown as NextFunction)
+
+    expect(mockBasicoActivo).toHaveBeenCalledWith('venue-1')
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      data: { tier: 'FREE', grandfathered: false, exempt: false, grantedFeatureCodes: ['RESERVATIONS'], basicPlanActive: true },
+    })
+  })
+
+  it('sin Básico vigente → la respuesta de siempre, sin el campo', async () => {
+    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: false, exempt: false, grantedFeatureCodes: [] })
+    const res = makeRes()
+
+    await getVenuePlanTier(makeReq('venue-1'), res, jest.fn() as unknown as NextFunction)
+
+    expect((res.json as jest.Mock).mock.calls[0][0].data).not.toHaveProperty('basicPlanActive')
   })
 })

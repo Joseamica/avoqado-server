@@ -295,6 +295,22 @@ async function basicPlanOf(venueId: string, now: Date): Promise<PlanState['basic
   }
 }
 
+/**
+ * Plan Básico: ¿el Básico del negocio da acceso hoy? Para el chip del negocio, que lee `/plan-tier` (todos los roles): el
+ * Básico no es un tier y ahí decía «Free» (full-testing 17-nov). Tolerante: un fallo contesta `false` y nunca tumba esa señal.
+ */
+export async function basicPlanActive(venueId: string): Promise<boolean> {
+  try {
+    return (await basicPlanOf(venueId, new Date()))?.active === true
+  } catch (error) {
+    logger.warn('basicPlanActive: could not read the Básico contract; chip falls back to the tier', {
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return false
+  }
+}
+
 /** Plan Básico: la oferta del Básico publicado para este negocio (ver `PlanState.basicOffer`). Tolerante: nunca lanza. */
 async function basicOfferOf(
   basicPlan: PlanState['basicPlan'],
@@ -551,28 +567,44 @@ async function setCancelIntent(venueId: string, cancel: boolean, input: CancelPl
   if (!vf.stripeSubscriptionId) {
     throw new BadRequestError('No hay suscripción de Stripe que cancelar. Contacta a soporte.')
   }
+  const subscriptionId = vf.stripeSubscriptionId
 
-  // Read the prior Stripe state BEFORE flipping so the cancellation email only fires on a
-  // genuine transition (not a re-cancel of an already-canceling sub). Tolerant: if Stripe is
-  // unreachable we proceed and treat it as "was not canceling" so the flow never blocks.
-  let wasCanceling = false
-  let currentPeriodEnd: Date | null = null
-  try {
-    const prior = await retrievePlanSubscription(vf.stripeSubscriptionId)
-    wasCanceling = prior.cancelAtPeriodEnd
-    currentPeriodEnd = prior.currentPeriodEnd
-  } catch (error) {
-    logger.warn('setCancelIntent: failed to read prior Stripe state; proceeding', {
-      venueId,
-      subscriptionId: vf.stripeSubscriptionId,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    })
+  // 🔴 Read-then-flip under ONE lock per venue (full-testing 17-nov): a double click on «Terminar mi Pro» sent two
+  // `/plan/downgrade` at once; both read "not canceling" before either flipped it, so there were 2 PLAN_CANCEL_SCHEDULED,
+  // 2 emails and 2 promotion codes. The second request now waits and reads what the first one left.
+  // Tolerant read: if Stripe is unreachable we proceed and treat it as "was not canceling" so the flow never blocks.
+  const step = await prisma.$transaction(
+    async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`plan-cancel-intent:${venueId}`}, 0))::text`
+      let wasCanceling = false
+      let currentPeriodEnd: Date | null = null
+      try {
+        const prior = await retrievePlanSubscription(subscriptionId)
+        wasCanceling = prior.cancelAtPeriodEnd
+        currentPeriodEnd = prior.currentPeriodEnd
+      } catch (error) {
+        logger.warn('setCancelIntent: failed to read prior Stripe state; proceeding', {
+          venueId,
+          subscriptionId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+      }
+      // Already ending at period end: a repeated cancel/downgrade is a no-op (no Stripe write, no ActivityLog, no email).
+      if (cancel && wasCanceling) return { changed: false as const }
+      // The owner's reason rides in the SAME Stripe update as cancel_at_period_end (never on a reactivation).
+      const details = cancel ? toStripeCancellationDetails(input) : undefined
+      if (details) await setSubscriptionCancelAtPeriodEnd(subscriptionId, cancel, details)
+      else await setSubscriptionCancelAtPeriodEnd(subscriptionId, cancel)
+      return { changed: true as const, wasCanceling, currentPeriodEnd }
+    },
+    // Two Stripe calls run inside: Prisma's 5 s default is too tight. The waiter gives up after 15 s, never hangs.
+    { maxWait: 15_000, timeout: 30_000 },
+  )
+  if (!step.changed) {
+    logger.info('setCancelIntent: plan already ends at period end; returning current state', { venueId, purpose: input.purpose ?? null })
+    return getPlanState(venueId)
   }
-
-  // The owner's reason rides in the SAME Stripe update as cancel_at_period_end (never on a reactivation).
-  const details = cancel ? toStripeCancellationDetails(input) : undefined
-  if (details) await setSubscriptionCancelAtPeriodEnd(vf.stripeSubscriptionId, cancel, details)
-  else await setSubscriptionCancelAtPeriodEnd(vf.stripeSubscriptionId, cancel)
+  const { wasCanceling, currentPeriodEnd } = step
 
   logAction({
     venueId,

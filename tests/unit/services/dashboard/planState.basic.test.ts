@@ -15,7 +15,7 @@ jest.mock('@/services/launchCampaigns/hybridCampaign.service', () => ({
 }))
 jest.mock('stripe')
 import { prismaMock } from '../../../__helpers__/setup'
-import { getPlanState } from '@/services/dashboard/planState.service'
+import { basicPlanActive, getPlanState } from '@/services/dashboard/planState.service'
 import { isLastDiscountedPeriod } from '@/services/billing/ultimoPeriodoConDescuento'
 
 const FIN = new Date('2026-12-05T17:00:00Z')
@@ -120,6 +120,24 @@ describe('getPlanState — basicPlan (el contrato del Básico se ve como «Bási
       grants: [],
     } as never)
     expect((await getPlanState('v1')).basicPlan).toBeNull()
+  })
+})
+
+describe('basicPlanActive — el chip del negocio dice «Básico», no «Free» (full-testing 17-nov)', () => {
+  it('🔴 Básico con funciones vigentes hoy → true', async () => {
+    prismaMock.hybridContract.findFirst.mockResolvedValue(contratoBasico() as never)
+    await expect(basicPlanActive('v1')).resolves.toBe(true)
+  })
+
+  it('sin contrato del Básico, o con el Básico sin funciones vigentes → false', async () => {
+    await expect(basicPlanActive('v1')).resolves.toBe(false)
+    prismaMock.hybridContract.findFirst.mockResolvedValue(contratoBasico([]) as never)
+    await expect(basicPlanActive('v1')).resolves.toBe(false)
+  })
+
+  it('la base falla → false, nunca lanza (el chip no tumba la señal del tier que leen todos los roles)', async () => {
+    prismaMock.hybridContract.findFirst.mockRejectedValue(new Error('P1001'))
+    await expect(basicPlanActive('v1')).resolves.toBe(false)
   })
 })
 

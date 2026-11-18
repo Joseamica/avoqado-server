@@ -204,7 +204,8 @@ describe('planState.service', () => {
         .mockResolvedValueOnce([planProFeature()]) // initial fetch for the sub id
         .mockResolvedValueOnce([planProFeature()]) // re-fetch inside getPlanState
       mockStripe.setSubscriptionCancelAtPeriodEnd.mockResolvedValue({} as any)
-      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ cancelAtPeriodEnd: true }))
+      // Antes del flip todavía renueva (si ya terminaba, cancelar es un no-op: planState.cancelIdempotente.test.ts).
+      mockStripe.retrievePlanSubscription.mockResolvedValueOnce(subSummary()).mockResolvedValue(subSummary({ cancelAtPeriodEnd: true }))
       const result = await cancelPlan('venue_1')
       expect(mockStripe.setSubscriptionCancelAtPeriodEnd).toHaveBeenCalledWith('sub_123', true)
       expect(mockStripe.cancelSubscription).not.toHaveBeenCalled()
