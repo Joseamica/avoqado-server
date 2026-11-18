@@ -10,7 +10,7 @@
  * 🔴 La IP se lee del PORTERO (`ipDelCliente`: `CF-Connecting-IP`, que Cloudflare no deja inventar, o `req.ip`), nunca
  * del primer eslabón de `X-Forwarded-For`: ése lo escribe quien llama, y Cloudflare y el proxy de Render sólo AGREGAN
  * su eslabón al final (medido en producción el 21-oct-2026). Con el primer eslabón, cualquiera pasaba mandando
- * `X-Forwarded-For: 3.132.184.158`. El cambio se hizo después de comprobar en producción, del 22 al 29-oct, que los 12
+ * `X-Forwarded-For: 3.132.184.158`. El cambio se hizo después de comprobar en producción, del 22 al 29-oct, que los
  * avisos reales de Blumon traían esa misma IP en el portero (D1, `docs/audit/2026-10-21-limites-por-ip/` del workspace).
  */
 
