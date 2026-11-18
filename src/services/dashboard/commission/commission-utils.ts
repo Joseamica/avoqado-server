@@ -898,7 +898,11 @@ export async function findActiveCommissionConfigs(
  * Vale cualquiera de las formas reales, al centavo: bruto (Mostrador), sin extras (los escritores que no los suman al `total`),
  * neto de su descuento (cortesía de Mesas en $0, pieza de combo) o neto y sin extras.
  */
-function renglonCuadraConSuTotal(it: Parameters<typeof importeDelRenglon>[0]): boolean {
+function renglonCuadraConSuTotal(it: Parameters<typeof importeDelRenglon>[0] & { isCortesia?: boolean | null }): boolean {
+  // na741eab: una cortesía no entra al reparto de las filas de cuenta (se re-derivan sin lo regalado) y su base sale de lo que
+  // cobró (`loadOrderCommissionLines`), no del precio × cantidad: cuadra en cualquiera de sus formas (la de Mesas con un combo es total
+  // 0 y un regalo NETO de su promoción, que ninguna de las de abajo reconoce).
+  if (it.isCortesia) return true
   if (it.total == null) return false
   const c = (n: number) => Math.round(n * 100)
   const bruto = c(importeDelRenglon(it))
@@ -952,6 +956,7 @@ async function loadOrderCommissionLines(
         total: true,
         taxAmount: true,
         discountAmount: true,
+        isCortesia: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
@@ -961,21 +966,31 @@ async function loadOrderCommissionLines(
     db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
   ])
 
-  const lines: OrderLineForCommission[] = orderItems.map(item => ({
+  const lines: OrderLineForCommission[] = orderItems.map(item => {
     // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
-    gross: importeDelRenglon(item),
-    lineDiscount: decimalToNumber(item.discountAmount),
-    tax: decimalToNumber(item.taxAmount),
-    categoryId: item.product?.categoryId ?? null,
-    taxRate: tasaDelRenglon(item),
-  }))
+    const gross = importeDelRenglon(item)
+    return {
+      gross,
+      // 🔴 hz:nube0000:na741eab (founder «C» 16-nov y «a» 17-nov: lo cobrado, cortesía en $0): una cortesía comisiona lo que COBRÓ.
+      // Sus escritores guardan su regalo como `total` del renglón, que en un combo ya venía NETO de su promoción: precio × cantidad
+      // menos ese `discountAmount` dejaba comisionar $100 de un 2×1 regalado. Lo cobrado es `total − discountAmount` (Mostrador:
+      // total bruto y regalo = total ⇒ 0; Mesas: total 0 ⇒ 0; la TPV que luego le sube la cantidad: $200 − $100 ⇒ $100, Codex r1 #5).
+      lineDiscount: item.isCortesia
+        ? gross - Math.max(0, decimalToNumber(item.total) - decimalToNumber(item.discountAmount))
+        : decimalToNumber(item.discountAmount),
+      tax: decimalToNumber(item.taxAmount),
+      categoryId: item.product?.categoryId ?? null,
+      taxRate: tasaDelRenglon(item),
+    }
+  })
 
   return {
     lines,
     // Encargo 04edc5: con filas que explican la cabecera, las que no son espejo; si no (o cortadas), la regla de siempre.
     orderLevelDiscount: descuentoDeOrdenDeLaVenta(
       decimalToNumber(order?.discountAmount),
-      lines.map(line => line.lineDiscount),
+      // La regla de siempre resta de la cabecera los descuentos GUARDADOS (los que ella suma), no lo regalado según la comisión.
+      orderItems.map(item => decimalToNumber(item.discountAmount)),
       // Codex r5: las filas reparten sobre los `total` guardados y esta base parte del precio × cantidad. Si algún renglón no cuadra
       // (p. ej. precio cambiado a media cuenta: `total` nuevo, `unitPrice` viejo), la regla de siempre.
       filas.length <= TOPE_DE_FILAS && orderItems.every(renglonCuadraConSuTotal) ? filas : null,

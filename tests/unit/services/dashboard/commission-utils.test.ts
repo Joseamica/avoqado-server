@@ -325,6 +325,8 @@ describe('calculateCategoryFilteredAmount', () => {
         total: true,
         taxAmount: true,
         discountAmount: true,
+        // na741eab: la cortesía comisiona lo que cobró (`total − discountAmount`).
+        isCortesia: true,
         ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
         product: { select: { categoryId: true, taxRate: true, ivaTratamiento: true } },

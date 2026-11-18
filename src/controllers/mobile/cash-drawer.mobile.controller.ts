@@ -115,6 +115,9 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
       createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
       edadMs: typeof req.body.edadMs === 'number' ? req.body.edadMs : undefined,
       llegada,
+      // na7ab987: quién lo hizo en el aparato (la cola sin red) y la sesión que sube; quién firma lo decide el servicio.
+      autorDelAparato: req.body.staffId,
+      sid: req.authContext?.sid,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -192,6 +195,8 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       createdAt: typeof req.body.createdAt === 'string' || typeof req.body.createdAt === 'number' ? req.body.createdAt : null,
       edadMs: typeof req.body.edadMs === 'number' ? req.body.edadMs : undefined,
       llegada,
+      autorDelAparato: req.body.staffId, // na7ab987, como en pay-in
+      sid: req.authContext?.sid,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event, authorizedBy })
