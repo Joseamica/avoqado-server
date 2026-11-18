@@ -44,6 +44,7 @@ import {
 import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderProvisioning.service'
 import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
+import { cortesiaEnCeroDe } from '../shared/ticketTotals'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
@@ -581,6 +582,12 @@ export interface OrderDetailResponse {
   orderType: string
   /** Applied ORDER-level discounts (check panel Descuentos). */
   discounts: Array<{ id: string; name: string; amount: number }>
+  /**
+   * D6 (18-nov-2026, aditivo): lo regalado en los renglones de cortesía guardados en $0 (Mesas), con la MISMA regla que el recibo digital
+   * (`cortesiaEnCeroDe`: sin piezas de combo ni regalos negativos), en pesos. El papel del cobro de ANDROID la suma al subtotal y al
+   * descuento, como el digital. Sin cortesía en $0 no viene.
+   */
+  cortesiaEnCero?: number
   /** Cobros por servicio aplicados — SUMAN al total (ingreso gravable). */
   serviceChargeAmount: number
   serviceCharges: Array<{ id: string; serviceChargeId: string | null; name: string; amount: number; isAutomatic: boolean }>
@@ -2777,6 +2784,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás). Una venta ya
   // cerrada no vuelve a pedir nada a la caja (Codex código r1 #5): si se saldó con otro medio, la tarifa la concilia el gerente.
   const reparto = esVentaCerrada(flattenedOrder.paymentStatus) ? null : saldoDeCobroDeReparto(flattenedOrder, completados)
+  // D6: proyección pura de los renglones ya leídos (ninguna consulta más).
+  const cortesiaEnCero = cortesiaEnCeroDe(flattenedOrder.items ?? [])
 
   return {
     id: flattenedOrder.id,
@@ -2790,6 +2799,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     // Aditivo (IVA por producto, plan 7, r2 R2-13): el IVA que la orden de verdad suma aparte (0 con IVA_INCLUIDO o cancelada).
     addedTaxAmount: impuestoQueSeCobraAparte(flattenedOrder).toNumber(),
     discountAmount: Number(flattenedOrder.discountAmount),
+    ...(cortesiaEnCero.gt(0) ? { cortesiaEnCero: cortesiaEnCero.toNumber() } : {}),
     tipAmount: Number(flattenedOrder.tipAmount),
     total: Number(flattenedOrder.total),
     preBillBalance: {
