@@ -324,7 +324,8 @@ async function autorDelMovimiento(p: {
   declarado: unknown
   localId: string | null
   sid?: string
-  caja: { openedAt: Date; closedAt: Date | null }
+  /** `createdAt` = cuándo la creó el SERVIDOR: `openedAt` puede ser la hora del aparato (apertura sin red, Codex r4 #2). */
+  caja: { createdAt: Date; closedAt: Date | null }
   llegada: Date
 }): Promise<{ staffId: string; noAceptado?: string; visto?: string | null }> {
   const { declarado, sesion } = p
@@ -332,8 +333,10 @@ async function autorDelMovimiento(p: {
   if (declarado === undefined || declarado === null || (typeof declarado === 'string' && declarado.trim() === '')) {
     return { staffId: sesion }
   }
-  if (typeof declarado !== 'string' || declarado.length > 64) {
-    return { staffId: sesion, noAceptado: 'MALFORMADO', visto: typeof declarado === 'string' ? declarado.slice(0, 64) : null }
+  // Codex r4 #1: sólo un id con forma de id (un nulo `\u0000` truena en Postgres, en la consulta y en el jsonb de la bitácora). Lo demás
+  // no se guarda: MALFORMADO, sin el texto.
+  if (typeof declarado !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(declarado)) {
+    return { staffId: sesion, noAceptado: 'MALFORMADO', visto: null }
   }
   if (declarado === sesion) return { staffId: sesion }
   const no = (motivo: string) => ({ staffId: sesion, noAceptado: motivo, visto: declarado })
@@ -353,7 +356,7 @@ async function autorDelMovimiento(p: {
       staffId: declarado,
       deviceId: actual.deviceId,
       createdAt: { lte: actual.createdAt < finDeLaCaja ? actual.createdAt : finDeLaCaja },
-      OR: [{ revokedAt: null }, { revokedAt: { gte: p.caja.openedAt } }],
+      OR: [{ revokedAt: null }, { revokedAt: { gte: p.caja.createdAt } }],
     },
     select: { id: true },
   })
@@ -388,7 +391,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   const session = params.sessionId
     ? await prisma.cashDrawerSession.findFirst({
         where: { id: params.sessionId, venueId },
-        select: { id: true, status: true, openedAt: true, closedAt: true },
+        select: { id: true, status: true, openedAt: true, createdAt: true, closedAt: true },
       })
     : await getOpenSession(venueId)
   if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
@@ -424,7 +427,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
     declarado: params.autorDelAparato,
     localId,
     sid: params.sid,
-    caja: { openedAt: session.openedAt, closedAt: session.closedAt ?? null },
+    caja: { createdAt: session.createdAt, closedAt: session.closedAt ?? null },
     llegada,
   })
   const staffId = autor.staffId
@@ -489,12 +492,10 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       // turno. El borrado va turno → caja y esto va caja → turno: sin un candado común, Postgres aborta a uno de los dos (40P01).
       await lockShiftLifecycleForVenue(tx, venueId)
       await tx.cashDrawerSession.updateMany({ where: { id: session.id }, data: { updatedAt: new Date() } })
-      const inserted = localId
-        ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
-        : { count: (await tx.cashDrawerEvent.create({ data: row })) ? 1 : 0 }
-      const stored = localId
-        ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } })
-        : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
+      // Sin llave, la fila es la que devuelve el `create` (Codex r4 #3: releer «el último del mismo tipo por fecha» podía tomar otra).
+      const creado = localId ? null : await tx.cashDrawerEvent.create({ data: row })
+      const inserted = localId ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true }) : { count: 1 }
+      const stored = creado ?? (await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } }))
       if (!stored) throw new InternalServerError('No se pudo confirmar el movimiento de caja')
       if (inserted.count > 0 && conDeclaracion) await writeLegacyActivityAuditTx(tx, registroDelMovimiento(stored.id))
       let pendiente: { shiftId: string | null; reason: SyncShiftPendingReason } | null = null

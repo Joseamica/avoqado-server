@@ -20,11 +20,15 @@ const BETO = 'staff-beto'
 const ABIERTA = new Date('2026-11-17T15:00:00Z')
 /** Cuándo nació la sesión de Beto (la que sube): la de Ana tuvo que nacer antes (Codex r3 H1). */
 const BETO_ENTRO = new Date('2026-11-17T18:00:00Z')
+/** Cuándo creó la caja el SERVIDOR (`CashDrawerSession.createdAt`); `openedAt` puede ser la hora del aparato (Codex r4 #2). */
+const CAJA_CREADA = new Date('2026-11-17T15:05:00Z')
 
 let createMany: jest.Mock
 let sesionDeAna: jest.Mock
 
-function montar({ caja = { id: 'caja-1', status: 'OPEN', openedAt: ABIERTA, closedAt: null as Date | null } } = {}) {
+function montar({
+  caja = { id: 'caja-1', status: 'OPEN', openedAt: ABIERTA, createdAt: CAJA_CREADA, closedAt: null as Date | null },
+} = {}) {
   ;(prismaMock as any).$transaction = jest.fn((fn: any) => fn(prismaMock))
   ;(prismaMock as any).staff = {
     findUnique: jest.fn(async ({ where }: any) =>
@@ -99,7 +103,7 @@ it('🔴 el ingreso sin red de Ana que sube Beto queda a nombre de Ana, con su n
         staffId: ANA,
         deviceId: 'T-1',
         createdAt: { lte: BETO_ENTRO },
-        OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
+        OR: [{ revokedAt: null }, { revokedAt: { gte: CAJA_CREADA } }],
       }),
     }),
   )
@@ -107,13 +111,13 @@ it('🔴 el ingreso sin red de Ana que sube Beto queda a nombre de Ana, con su n
 
 it('🔴 Codex r3 H1: en una caja CERRADA antes de que entrara Beto, la sesión de Ana tuvo que nacer antes del cierre', async () => {
   const cerroAntes = new Date('2026-11-17T16:00:00Z')
-  montar({ caja: { id: 'caja-1', status: 'CLOSED', openedAt: ABIERTA, closedAt: cerroAntes } })
+  montar({ caja: { id: 'caja-1', status: 'CLOSED', openedAt: ABIERTA, createdAt: CAJA_CREADA, closedAt: cerroAntes } })
   ;(prismaMock as any).cashDrawerSession.findUnique.mockResolvedValue({ actualAmount: null })
   await subir({ autorDelAparato: ANA, sessionId: 'caja-1' })
   expect(filaGuardada().staffId).toBe(ANA)
   expect(sesionDeAna.mock.calls[0][0].where).toMatchObject({
     createdAt: { lte: cerroAntes },
-    OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
+    OR: [{ revokedAt: null }, { revokedAt: { gte: CAJA_CREADA } }],
   })
 })
 
@@ -126,7 +130,7 @@ it('🔴 Codex r3 H1: la hora que manda el aparato (createdAt / edadMs) no cambi
   })
   expect(sesionDeAna.mock.calls[0][0].where).toMatchObject({
     createdAt: { lte: BETO_ENTRO },
-    OR: [{ revokedAt: null }, { revokedAt: { gte: ABIERTA } }],
+    OR: [{ revokedAt: null }, { revokedAt: { gte: CAJA_CREADA } }],
   })
 })
 
@@ -183,7 +187,10 @@ it('sin `staffId` en el cuerpo, vacío, o igual a la sesión: exactamente como h
 it('🔴 Codex r3 H2: un `staffId` que no es texto o pasa de 64 caracteres NUNCA da 400: queda a nombre de quien sube, con su nota', async () => {
   for (const [autorDelAparato, visto] of [
     [42, null],
-    ['x'.repeat(65), 'x'.repeat(64)],
+    ['x'.repeat(65), null],
+    // Codex r4 #1: un carácter nulo truena en Postgres (en la consulta y en el jsonb de la bitácora): no es un id y no se guarda.
+    ['ana\u0000x', null],
+    ['ana; DROP', null],
   ] as const) {
     jest.clearAllMocks()
     montar()
@@ -205,4 +212,20 @@ it('🔴 el retiro sigue la misma regla', async () => {
     autorDelAparato: ANA,
   } as any)
   expect(filaGuardada().staffId).toBe(ANA)
+})
+
+it('🔴 Codex r4 #2: la vida de la caja se mide con el reloj del SERVIDOR (`createdAt`), no con `openedAt` (puede ser la del aparato)', async () => {
+  await subir({ autorDelAparato: ANA })
+  expect(sesionDeAna.mock.calls[0][0].where.OR).toEqual([{ revokedAt: null }, { revokedAt: { gte: CAJA_CREADA } }])
+})
+
+it('🔴 Codex r4 #3: en una caja CERRADA y sin llave, la nota va al movimiento que se acaba de crear (no al «último por fecha»)', async () => {
+  montar({
+    caja: { id: 'caja-1', status: 'CLOSED', openedAt: ABIERTA, createdAt: CAJA_CREADA, closedAt: new Date('2026-11-17T23:00:00Z') },
+  })
+  ;(prismaMock as any).cashDrawerSession.findUnique.mockResolvedValue({ actualAmount: null })
+  ;(prismaMock as any).cashDrawerEvent.findFirst.mockResolvedValue({ id: 'e-otro', sessionId: 'caja-1', venueId: VENUE, type: 'PAY_IN' })
+  const r = await subir({ autorDelAparato: ANA, localId: undefined })
+  expect(bitacoraEnLaTx('CASH_DRAWER_PAY_IN')).toMatchObject({ entityId: 'e-sin-llave' })
+  expect(r.event.id).toBe('e-sin-llave')
 })
