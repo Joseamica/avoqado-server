@@ -36,7 +36,6 @@ import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
 import { ForbiddenError } from '../../errors/AppError'
-import type { StaffRole } from '@prisma/client'
 
 export async function listVenues(req: Request<{}, any, any, ListVenuesQueryDto>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -176,12 +175,11 @@ export async function createEnhancedVenue(
       return next(new Error('Contexto de usuario no encontrado'))
     }
 
-    // na5adb84 (Codex r1 #1 y #2): el negocio y el rol que revisó `checkPermission('venues:manage')` en ESTA petición. El
-    // negocio nuevo nace en la organización de ese negocio y su creador queda con ese rol (ver `createEnhancedVenue`).
+    // na5adb84 (decisión «A»): sólo superadmin (guardia de la ruta). El negocio nuevo nace en la organización del negocio donde
+    // está parado (`x-venue-id` o el del token, como las rutas con `checkPermission`); ver `createEnhancedVenue`.
     const venueDelPermisoId = resolveRequestVenueId(req, req.authContext!)
-    const rol = (req as any).resolvedRole as StaffRole | undefined
-    if (!venueDelPermisoId || !rol) {
-      return next(new ForbiddenError('No pudimos confirmar tu permiso para crear negocios. Recarga la página e inténtalo otra vez.'))
+    if (!venueDelPermisoId) {
+      return next(new ForbiddenError('Abre primero un negocio de la organización donde quieres crear el nuevo.'))
     }
 
     const venueData: EnhancedCreateVenueBody = req.body
@@ -196,7 +194,7 @@ export async function createEnhancedVenue(
     })
 
     // Create the venue with enhanced features
-    const newVenue = await venueDashboardService.createEnhancedVenue({ userId, venueDelPermisoId, rol }, venueData)
+    const newVenue = await venueDashboardService.createEnhancedVenue({ userId, venueDelPermisoId }, venueData)
 
     res.status(201).json({
       success: true,

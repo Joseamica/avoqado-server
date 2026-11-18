@@ -765,19 +765,16 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 /**
  * Enhanced venue creation with payment processing and pricing configuration
  *
- * hz:nube0000:na5adb84 (Codex r1 #1 y #2): `quien` es lo que revisó `checkPermission('venues:manage')`: el negocio donde se
- * revisó el permiso (`resolveRequestVenueId`) y el rol que tiene ahí (`req.resolvedRole`). El negocio nuevo nace en la
- * organización de ESE negocio (antes: la del token, que con `x-venue-id` puede ser otra) y quien lo crea queda con ESE mismo
- * rol. No se sube a OWNER: una fila OWNER en una sucursal ya cuenta como «dueño de la organización» para las cuentas viejas
- * (`esDuenoDeLaOrganizacion`), y un ADMIN se volvería dueño de toda la cadena. El dueño de la organización resuelve OWNER,
- * como en el registro. Un superadmin no queda como personal (como al duplicar una tienda): entra a cualquier negocio.
+ * hz:nube0000:na5adb84 · decisión «A» del founder (17-nov): esta ruta es SÓLO de superadmin (`authorizeRole([SUPERADMIN])` en la
+ * ruta). Con eso se cerraron la cuenta de cobro de otro negocio (1b) y la tarifa propia desde 0 %: el superadmin elige cuentas y
+ * tarifa. El negocio nace en la organización del negocio donde está parado el superadmin (`resolveRequestVenueId`, leído
+ * `FOR SHARE`: un traslado espera). El superadmin no queda como personal; el dueño lo dice la petición (`ownerStaffId`) y tiene
+ * que ser dueño activo de ESA organización: queda OWNER del negocio nuevo (sin esa fila, activar cobros y el KYC dan 403 y el
+ * KYC no tiene contacto). Sólo un dueño de la organización: una fila OWNER a otro lo volvería dueño de toda la cadena (regla de
+ * cuentas viejas, `esDuenoDeLaOrganizacion`).
  */
-export async function createEnhancedVenue(
-  quien: { userId: string; venueDelPermisoId: string; rol: StaffRole },
-  venueData: EnhancedCreateVenueBody,
-) {
+export async function createEnhancedVenue(quien: { userId: string; venueDelPermisoId: string }, venueData: EnhancedCreateVenueBody) {
   const { userId } = quien
-  const esSuperadmin = quien.rol === StaffRole.SUPERADMIN
   logger.info('Creating enhanced venue', { venueDelPermisoId: quien.venueDelPermisoId, userId, venueName: venueData.name })
 
   // Start a transaction to ensure data consistency
@@ -787,19 +784,22 @@ export async function createEnhancedVenue(
       SELECT "organizationId" FROM "Venue" WHERE id = ${quien.venueDelPermisoId} FOR SHARE`
     if (!delPermiso) throw new NotFoundError('No encontramos el negocio desde donde creas el nuevo. Recarga la página.')
     const orgId = delPermiso.organizationId
-    // Codex r2 #1: el guardia resolvió OWNER antes de este candado. Si lo resolvió por ser dueño de la organización y el negocio
-    // se trasladó entre tanto, aquí ya no lo es: sin esto quedaría OWNER en la organización de destino.
-    if (quien.rol === StaffRole.OWNER) {
-      const sigueSiendoDueno =
-        (await tx.staffVenue.findFirst({
-          where: { staffId: userId, venueId: quien.venueDelPermisoId, role: StaffRole.OWNER, active: true },
-          select: { id: true },
-        })) ??
-        (await tx.staffOrganization.findFirst({
-          where: { staffId: userId, organizationId: orgId, role: 'OWNER', isActive: true },
-          select: { id: true },
-        }))
-      if (!sigueSiendoDueno) throw new ConflictError('Tu acceso a este negocio cambió. Recarga la página e inténtalo otra vez.')
+    // El superadmin no queda como personal, aunque además sea dueño de esa organización (Codex r8 #2).
+    if (venueData.ownerStaffId === userId) {
+      throw new BadRequestError('Elige como dueño a alguien de la organización, no a ti mismo.', 'DUENO_ES_QUIEN_CREA')
+    }
+    // `FOR SHARE` de su membresía: una baja de la organización a la vez (que primero la actualiza) espera a que el alta termine
+    // y después ya ve el negocio nuevo y le apaga la fila (Codex r8 #1).
+    const [dueno] = await tx.$queryRaw<Array<{ staffId: string }>>`
+      SELECT so."staffId" FROM "StaffOrganization" so JOIN "Staff" s ON s.id = so."staffId"
+      WHERE so."staffId" = ${venueData.ownerStaffId} AND so."organizationId" = ${orgId} AND so.role = 'OWNER'
+        AND so."isActive" AND s.active
+      FOR SHARE OF so`
+    if (!dueno) {
+      throw new BadRequestError(
+        'La persona que elegiste como dueña no es dueña activa de esta organización.',
+        'DUENO_NO_ES_DE_LA_ORGANIZACION',
+      )
     }
 
     // 1. Generate slug if not provided
@@ -857,7 +857,7 @@ export async function createEnhancedVenue(
 
     // 4. Setup payment processing if enabled
     if (venueData.enablePaymentProcessing) {
-      await setupPaymentProcessing(tx, newVenue.id, venueData, { organizationId: orgId, esSuperadmin })
+      await setupPaymentProcessing(tx, newVenue.id, venueData)
     }
 
     // 5. Setup pricing structure if enabled
@@ -865,11 +865,8 @@ export async function createEnhancedVenue(
       await setupPricingStructure(tx, newVenue.id, venueData)
     }
 
-    // 6. Quien lo crea queda como su personal, con el rol que tiene donde se revisó su permiso (ver arriba). Sin esta fila el
-    // negocio nacía sin nadie y su creador recibía 403 al abrirlo (activar cobros, KYC).
-    if (!esSuperadmin) {
-      await tx.staffVenue.create({ data: { staffId: userId, venueId: newVenue.id, role: quien.rol, active: true } })
-    }
+    // 6. El dueño de la organización que dijo el superadmin queda OWNER del negocio (antes nacía sin nadie: ver arriba).
+    await tx.staffVenue.create({ data: { staffId: dueno.staffId, venueId: newVenue.id, role: StaffRole.OWNER, active: true } })
 
     logger.info('Enhanced venue creation completed', {
       venueId: newVenue.id,
@@ -883,7 +880,7 @@ export async function createEnhancedVenue(
       action: 'VENUE_CREATED',
       entity: 'Venue',
       entityId: newVenue.id,
-      data: { name: newVenue.name, slug: newVenue.slug, rolDelCreador: esSuperadmin ? null : quien.rol },
+      data: { name: newVenue.name, slug: newVenue.slug, dueno: dueno.staffId },
     })
 
     return {
@@ -898,12 +895,7 @@ export async function createEnhancedVenue(
 /**
  * Setup payment processing configuration for venue
  */
-async function setupPaymentProcessing(
-  tx: any,
-  venueId: string,
-  venueData: EnhancedCreateVenueBody,
-  quien: { organizationId: string; esSuperadmin: boolean },
-) {
+async function setupPaymentProcessing(tx: any, venueId: string, venueData: EnhancedCreateVenueBody) {
   logger.info('Setting up payment processing', { venueId })
 
   // Default routing rules if not provided
@@ -920,8 +912,7 @@ async function setupPaymentProcessing(
   const routingRules = venueData.routingRules || defaultRoutingRules
 
   // D25: una cuenta de cobro que no existe es un 400 en español, no la llave foránea tronando como 500.
-  // na5adb84 (1b): y una cuenta de otra organización es 403 (salvo superadmin).
-  await asegurarCuentasDeCobroDelAlta(tx, venueData, quien)
+  await asegurarCuentasDeCobroDelAlta(tx, venueData)
 
   // Create venue payment configuration
   const paymentConfig = await tx.venuePaymentConfig.create({

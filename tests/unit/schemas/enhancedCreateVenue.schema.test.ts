@@ -16,6 +16,7 @@ const base = {
   zipCode: '76000',
   phone: '4421234567',
   email: 'luna@example.com',
+  ownerStaffId: 'cm0000000000000000000dueno',
 }
 
 const parse = (body: unknown) => enhancedCreateVenueSchema.safeParse({ body })
@@ -73,5 +74,17 @@ describe('enhancedCreateVenueSchema — cuenta principal con los cobros prendido
   it('control — un campo de forma inválido sigue dando su propio mensaje (no se tapa con el de la cuenta)', () => {
     const r = parse({ ...base, email: 'no-es-correo', primaryAccountId: 'cm0000000000000000000000a' })
     expect(mensajes(r)).toEqual(['Escribe un correo electrónico válido'])
+  })
+
+  // na5adb84 · decisión «A»: lo crea un superadmin, que no queda como personal; el negocio necesita su dueño.
+  it('🔴 sin dueño (`ownerStaffId`) ⇒ 400 en español', () => {
+    const { ownerStaffId: _sinDueno, ...sinDueno } = base
+    const r = parse({ ...sinDueno, enablePaymentProcessing: false })
+    expect(r.success).toBe(false)
+    if (!r.success)
+      expect(r.error.issues.map(i => [i.path, i.message])).toEqual([
+        [['body', 'ownerStaffId'], expect.stringMatching(/Elige quién es el dueño/)],
+      ])
+    expect(parse({ ...base, ownerStaffId: '   ', enablePaymentProcessing: false }).success).toBe(false)
   })
 })

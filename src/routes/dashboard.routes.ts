@@ -1809,7 +1809,7 @@ router.post(
  * /api/v1/dashboard/venues/enhanced:
  *   post:
  *     tags: [Venues]
- *     summary: Create a new venue with enhanced features (payment processing and pricing)
+ *     summary: Create a new venue with enhanced features (payment processing and pricing) — SUPERADMIN only; body.ownerStaffId = an active OWNER of the organization
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
  *       required: true
@@ -1827,7 +1827,9 @@ router.post(
  *               - zipCode
  *               - phone
  *               - email
+ *               - ownerStaffId
  *             properties:
+ *               ownerStaffId: { type: string, description: "Staff id of an ACTIVE OWNER of the organization; becomes the venue OWNER (the superadmin caller is not added)" }
  *               name: { type: string, description: "Venue name" }
  *               type: { type: string, description: "Venue type" }
  *               logo: { type: string, format: uri, description: "Logo URL" }
@@ -1868,10 +1870,12 @@ router.post(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
+// na5adb84 · decisión «A» del founder (17-nov): SÓLO superadmin. Con `venues:manage` un dueño podía ligar la cuenta de cobro de
+// otro negocio y fijarse su tarifa desde 0 %. Mismo guardia que las rutas de superadmin (relee el rol; 403 en español).
 router.post(
   '/venues/enhanced',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  authorizeRole([StaffRole.SUPERADMIN]),
   validateRequest(enhancedCreateVenueSchema),
   venueController.createEnhancedVenue,
 )

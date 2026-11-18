@@ -1,9 +1,9 @@
 // tests/unit/services/dashboard/createEnhancedVenue.creador.test.ts
-// hz:nube0000:na5adb84 (1a): el alta avanzada (`POST /dashboard/venues/enhanced`) tenía comentada la fila de personal de quien
-// crea el negocio. El negocio nacía sin ningún `StaffVenue` y su creador recibía 403 al abrirlo (activar cobros, KYC). Ahora
-// queda con el rol que tiene donde se revisó su permiso (el dueño de la organización resuelve OWNER, como en el registro), DENTRO
-// de la transacción del alta. Codex r1 #1: nunca se sube a OWNER (una fila OWNER cuenta como «dueño de la organización»).
-// Codex r1 #2: el negocio nace en la organización del negocio donde se revisó el permiso, no en la del token.
+// hz:nube0000:na5adb84 · decisión «A» del founder (17-nov): el alta avanzada (`POST /dashboard/venues/enhanced`) es SÓLO de
+// superadmin (el guardia lo prueba `tests/unit/routes/enhancedVenue.soloSuperadmin.routes.test.ts`). Antes el negocio nacía sin
+// ningún `StaffVenue` (la fila estaba comentada) y su dueño recibía 403 al activar cobros o el KYC. Ahora el superadmin no queda
+// como personal y el dueño lo dice la petición (`ownerStaffId`): tiene que ser dueño activo de la organización y queda OWNER,
+// DENTRO de la transacción del alta. Nunca otro: una fila OWNER a un miembro lo volvería dueño de toda la organización.
 import { prismaMock } from '@tests/__helpers__/setup'
 import { createEnhancedVenue } from '@/services/dashboard/venue.dashboard.service'
 
@@ -16,7 +16,8 @@ jest.mock('@/services/stripe.service', () => ({
 
 const ORG = 'cm00000000000000000000org1'
 const DEL_PERMISO = 'cm00000000000000000000vpe1'
-const CREADOR = 'cm00000000000000000000stf1'
+const SUPERADMIN = 'cm00000000000000000000sa01'
+const DUENO = 'cm00000000000000000000due1'
 const NUEVO = 'cm00000000000000000000vnu1'
 const CUENTA = 'cm00000000000000000000mac1'
 
@@ -34,99 +35,82 @@ const alta = (extra: Record<string, unknown> = {}) =>
     timezone: 'America/Mexico_City',
     enablePaymentProcessing: false,
     setupPricingStructure: false,
+    ownerStaffId: DUENO,
     ...extra,
   }) as any
 
-const quien = (rol: string) => ({ userId: CREADOR, venueDelPermisoId: DEL_PERMISO, rol: rol as any })
+const quien = { userId: SUPERADMIN, venueDelPermisoId: DEL_PERMISO }
 
-describe('createEnhancedVenue · quien crea el negocio queda como su personal (1a)', () => {
+const consultas: Array<{ sql: string; valores: unknown[] }> = []
+const conSql = (r: { negocio: unknown[]; dueno: unknown[] }) => {
+  consultas.length = 0
+  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: unknown[]) => {
+    const sql = strings.join('?')
+    consultas.push({ sql, valores })
+    return sql.includes('FROM "Venue"') ? r.negocio : sql.includes('FROM "StaffOrganization"') ? r.dueno : []
+  })
+}
+
+describe('createEnhancedVenue · sólo superadmin, con el dueño que dice la petición (na5adb84, «A»)', () => {
   beforeEach(() => {
-    // El negocio del permiso, leído `FOR SHARE` (un traslado espera), y el dueño sigue siéndolo.
-    prismaMock.$queryRaw.mockResolvedValue([{ organizationId: ORG }])
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-dueno' })
-    prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
+    // `FOR SHARE` del negocio del permiso (un traslado espera) y de la membresía del dueño (una baja espera).
+    conSql({ negocio: [{ organizationId: ORG }], dueno: [{ staffId: DUENO }] })
     prismaMock.venue.findFirst.mockResolvedValue(null)
     prismaMock.venue.create.mockResolvedValue({ id: NUEVO, name: 'Cafetería Nueva', slug: 'cafeteria-nueva' })
     prismaMock.staffVenue.create.mockResolvedValue({ id: 'sv-1' })
   })
 
-  it('🔴 el dueño (rol OWNER donde se revisó el permiso) queda OWNER activo del negocio nuevo, dentro de la transacción', async () => {
-    await createEnhancedVenue(quien('OWNER'), alta())
+  it('🔴 el dueño indicado queda OWNER activo del negocio nuevo, dentro de la transacción; el superadmin no queda como personal', async () => {
+    await createEnhancedVenue(quien, alta())
 
     expect(prismaMock.$transaction).toHaveBeenCalled()
     expect(prismaMock.staffVenue.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.staffVenue.create).toHaveBeenCalledWith({
-      data: { staffId: CREADOR, venueId: NUEVO, role: 'OWNER', active: true },
-    })
+    expect(prismaMock.staffVenue.create).toHaveBeenCalledWith({ data: { staffId: DUENO, venueId: NUEVO, role: 'OWNER', active: true } })
   })
 
-  it('🔴 Codex r1 #1: un ADMIN queda ADMIN, nunca OWNER (una fila OWNER lo haría dueño de toda la organización)', async () => {
-    await createEnhancedVenue(quien('ADMIN'), alta())
+  it('🔴 se revisa que sea dueño ACTIVO de la organización del negocio del permiso (persona activa incluida)', async () => {
+    await createEnhancedVenue(quien, alta())
 
-    expect(prismaMock.staffVenue.create).toHaveBeenCalledWith({
-      data: { staffId: CREADOR, venueId: NUEVO, role: 'ADMIN', active: true },
-    })
-  })
-
-  it('un superadmin no queda como personal del negocio de un cliente (entra a cualquiera)', async () => {
-    await createEnhancedVenue(quien('SUPERADMIN'), alta())
-
-    expect(prismaMock.staffVenue.create).not.toHaveBeenCalled()
-  })
-
-  it('🔴 Codex r1 #2: el negocio nace en la organización del negocio donde se revisó el permiso', async () => {
-    await createEnhancedVenue(quien('OWNER'), alta())
-
-    const [strings, ...valores] = prismaMock.$queryRaw.mock.calls[0]
-    expect(strings.join('?')).toMatch(/FROM "Venue" WHERE id = \? FOR SHARE/)
-    expect(valores).toEqual([DEL_PERMISO])
+    const negocio = consultas.find(c => c.sql.includes('FROM "Venue"'))!
+    expect(negocio.sql).toMatch(/FROM "Venue" WHERE id = \? FOR SHARE/)
+    expect(negocio.valores).toEqual([DEL_PERMISO])
+    const dueno = consultas.find(c => c.sql.includes('FROM "StaffOrganization"'))!
+    expect(dueno.sql).toMatch(/so\.role = 'OWNER'[\s\S]*so\."isActive" AND s\.active[\s\S]*FOR SHARE OF so/)
+    expect(dueno.valores).toEqual([DUENO, ORG])
     expect(prismaMock.venue.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ organizationId: ORG }) }),
     )
   })
 
-  it('🔴 Codex r2 #1: OWNER por ser dueño de la organización, pero el negocio se trasladó a otra ⇒ 409, sin crear nada', async () => {
-    prismaMock.staffVenue.findFirst.mockResolvedValue(null) // sin fila OWNER propia en el negocio del permiso
-    prismaMock.staffOrganization.findFirst.mockResolvedValue(null) // y ya no es dueña de la organización a la que pasó
+  it('🔴 un dueño que no es dueño activo de esa organización (un miembro, otra organización) ⇒ 400 en español, sin crear nada', async () => {
+    conSql({ negocio: [{ organizationId: ORG }], dueno: [] })
 
-    await expect(createEnhancedVenue(quien('OWNER'), alta())).rejects.toMatchObject({ statusCode: 409 })
+    await expect(createEnhancedVenue(quien, alta())).rejects.toMatchObject({ statusCode: 400, code: 'DUENO_NO_ES_DE_LA_ORGANIZACION' })
     expect(prismaMock.venue.create).not.toHaveBeenCalled()
-    expect(prismaMock.staffOrganization.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ staffId: CREADOR, organizationId: ORG, role: 'OWNER', isActive: true }) }),
-    )
+    expect(prismaMock.staffVenue.create).not.toHaveBeenCalled()
   })
 
-  it('control — dueño de la organización sin fila propia en el negocio del permiso: sigue pudiendo', async () => {
-    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
-    prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-1' })
-
-    await createEnhancedVenue(quien('OWNER'), alta())
-    expect(prismaMock.staffVenue.create).toHaveBeenCalledWith({ data: { staffId: CREADOR, venueId: NUEVO, role: 'OWNER', active: true } })
+  it('🔴 Codex r8 #2: el superadmin no puede ponerse a sí mismo como dueño (aunque sea dueño de la organización) ⇒ 400', async () => {
+    await expect(createEnhancedVenue(quien, alta({ ownerStaffId: SUPERADMIN }))).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'DUENO_ES_QUIEN_CREA',
+    })
+    expect(prismaMock.venue.create).not.toHaveBeenCalled()
   })
 
-  it('si la fila del creador truena, el alta entera falla (no queda un negocio sin nadie)', async () => {
+  it('si la fila del dueño truena, el alta entera falla (no queda un negocio sin dueño)', async () => {
     prismaMock.staffVenue.create.mockRejectedValue(new Error('boom'))
-    await expect(createEnhancedVenue(quien('OWNER'), alta())).rejects.toThrow('boom')
+    await expect(createEnhancedVenue(quien, alta())).rejects.toThrow('boom')
   })
 
-  it('1b: con cobros, la cuenta se revisa contra ESA organización; la de otra ⇒ 403 y no se crea la configuración', async () => {
-    prismaMock.merchantAccount.findMany.mockImplementation(async ({ where }: any) => (where.OR ? [] : [{ id: CUENTA }]))
-
-    await expect(
-      createEnhancedVenue(quien('OWNER'), alta({ enablePaymentProcessing: true, primaryAccountId: CUENTA })),
-    ).rejects.toMatchObject({ statusCode: 403, code: 'CUENTA_DE_COBRO_AJENA' })
-    expect(prismaMock.venuePaymentConfig.create).not.toHaveBeenCalled()
-    const pertenencia = prismaMock.merchantAccount.findMany.mock.calls.find(([a]: any) => a.where.OR)![0]
-    expect(pertenencia.where.OR).toContainEqual({ venueConfigsPrimary: { some: { venue: { organizationId: ORG } } } })
-  })
-
-  it('1b: el superadmin puede ligar una cuenta de cualquier organización', async () => {
-    prismaMock.merchantAccount.findMany.mockImplementation(async ({ where }: any) => (where.OR ? [] : [{ id: CUENTA }]))
+  it('el superadmin liga la cuenta de cobro que elija (sólo se revisa que exista, D25)', async () => {
+    prismaMock.merchantAccount.findMany.mockResolvedValue([{ id: CUENTA }])
     prismaMock.venuePaymentConfig.create.mockResolvedValue({ id: 'vpc-1' })
 
-    await expect(
-      createEnhancedVenue(quien('SUPERADMIN'), alta({ enablePaymentProcessing: true, primaryAccountId: CUENTA })),
-    ).resolves.toMatchObject({ venueId: NUEVO })
+    await expect(createEnhancedVenue(quien, alta({ enablePaymentProcessing: true, primaryAccountId: CUENTA }))).resolves.toMatchObject({
+      venueId: NUEVO,
+    })
+    expect(prismaMock.merchantAccount.findMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.venuePaymentConfig.create).toHaveBeenCalled()
   })
 })
