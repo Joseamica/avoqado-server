@@ -173,8 +173,8 @@ describe('si no se puede comprobar: a nombre de quien sube (como hoy) y la bitá
   })
 })
 
-it('sin `staffId` en el cuerpo, vacío, o igual a la sesión: exactamente como hoy, sin consultas de más', async () => {
-  for (const autorDelAparato of [undefined, null, '', '  ', BETO]) {
+it('sin `staffId` en el cuerpo, "" o igual a la sesión: exactamente como hoy, sin consultas de más', async () => {
+  for (const autorDelAparato of [undefined, null, '', BETO]) {
     jest.clearAllMocks()
     montar()
     await subir({ autorDelAparato })
@@ -191,6 +191,9 @@ it('🔴 Codex r3 H2: un `staffId` que no es texto o pasa de 64 caracteres NUNCA
     // Codex r4 #1: un carácter nulo truena en Postgres (en la consulta y en el jsonb de la bitácora): no es un id y no se guarda.
     ['ana\u0000x', null],
     ['ana; DROP', null],
+    // Codex r5: sólo `undefined`, `null` y "" son «no vino»; un texto de puros espacios es un dato malformado y deja su nota.
+    [' '.repeat(65), null],
+    ['  ', null],
   ] as const) {
     jest.clearAllMocks()
     montar()

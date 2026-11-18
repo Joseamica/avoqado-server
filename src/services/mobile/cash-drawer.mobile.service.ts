@@ -329,10 +329,8 @@ async function autorDelMovimiento(p: {
   llegada: Date
 }): Promise<{ staffId: string; noAceptado?: string; visto?: string | null }> {
   const { declarado, sesion } = p
-  // Ausente o en blanco: la sesión, como siempre, sin nota.
-  if (declarado === undefined || declarado === null || (typeof declarado === 'string' && declarado.trim() === '')) {
-    return { staffId: sesion }
-  }
+  // No vino (`undefined`, `null` o ""): la sesión, como siempre, sin nota. Cualquier otro texto que no sea un id es MALFORMADO (Codex r5).
+  if (declarado === undefined || declarado === null || declarado === '') return { staffId: sesion }
   // Codex r4 #1: sólo un id con forma de id (un nulo `\u0000` truena en Postgres, en la consulta y en el jsonb de la bitácora). Lo demás
   // no se guarda: MALFORMADO, sin el texto.
   if (typeof declarado !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(declarado)) {
