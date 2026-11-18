@@ -6,8 +6,10 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { MENSAJE_PADRE_FUERA_DEL_NEGOCIO, padreEsDelNegocio } from '../../services/menus/padreDeCategoria'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,6 +68,11 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
       return res.status(400).json({ success: false, message: 'name es requerido' })
     }
 
+    // na7522fd: el padre tiene que ser de ESTE negocio (antes se guardaba cualquier id).
+    if (parentId && !(await padreEsDelNegocio(venueId, parentId))) {
+      return res.status(400).json({ success: false, message: MENSAJE_PADRE_FUERA_DEL_NEGOCIO })
+    }
+
     // Generate slug, ensure uniqueness within venue
     let slug = slugify(name)
     const existing = await prisma.menuCategory.findUnique({
@@ -104,13 +111,24 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
 // PATCH /api/v1/mobile/venues/:venueId/categories/:categoryId
 // ---------------------------------------------------------------------------
 
+/** Lo que la app puede editar de una categoría (las apps de hoy mandan nombre, descripción y color). */
+const CAMPOS_EDITABLES = ['name', 'description', 'color', 'icon', 'imageUrl', 'displayOrder', 'active', 'parentId'] as const
+
 /**
  * Update an existing category.
  */
 export async function updateCategory(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, categoryId } = req.params
-    const data = req.body
+    // na7522fd (Codex r1 #7): sólo los campos que la app puede editar. Antes el cuerpo entero iba a Prisma: con `venueId` o
+    // una relación anidada (`parent: { connect }`) se movía la categoría a otro negocio o se colgaba de una ajena.
+    const data: Record<string, unknown> = {}
+    for (const campo of CAMPOS_EDITABLES) {
+      if (campo in (req.body ?? {})) data[campo] = req.body[campo]
+    }
+    if ('parentId' in data && data.parentId !== null && (typeof data.parentId !== 'string' || !data.parentId)) {
+      return res.status(400).json({ success: false, message: MENSAJE_PADRE_FUERA_DEL_NEGOCIO })
+    }
 
     // Verify category belongs to this venue
     const existing = await prisma.menuCategory.findFirst({
@@ -122,8 +140,13 @@ export async function updateCategory(req: Request, res: Response, next: NextFunc
       return res.status(404).json({ success: false, message: 'Categoría no encontrada' })
     }
 
+    // na7522fd: colgarla de otra categoría, sólo de una de ESTE negocio.
+    if (typeof data.parentId === 'string' && data.parentId && !(await padreEsDelNegocio(venueId, data.parentId))) {
+      return res.status(400).json({ success: false, message: MENSAJE_PADRE_FUERA_DEL_NEGOCIO })
+    }
+
     // If name changed, regenerate slug
-    if (data.name) {
+    if (typeof data.name === 'string' && data.name) {
       let slug = slugify(data.name)
       const slugConflict = await prisma.menuCategory.findFirst({
         where: { venueId, slug, id: { not: categoryId } },
@@ -137,7 +160,8 @@ export async function updateCategory(req: Request, res: Response, next: NextFunc
 
     const category = await prisma.menuCategory.update({
       where: { id: categoryId },
-      data,
+      // Sólo CAMPOS_EDITABLES (escalares de la categoría): la forma sin relaciones anidadas.
+      data: data as Prisma.MenuCategoryUncheckedUpdateInput,
     })
 
     return res.json({ success: true, data: category })
