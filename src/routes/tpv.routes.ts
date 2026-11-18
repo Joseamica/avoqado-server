@@ -59,6 +59,7 @@ import { requireVenueMembership, validateVenueAccess } from '../middlewares/vali
 import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
+import { intencionDeReversoSchema } from '../schemas/tpv/reverso.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
 import { recordPromoterPing } from '../services/promoters/promoterLocation.service'
@@ -3743,6 +3744,73 @@ router.post(
   validateVenueAccess,
   ...noInstrumentPinRateLimiter, // sólo cuenta los cuerpos CON supervisorPin
   terminalPaymentTpvController.resolveNoInstrument,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/terminal-payment/attempts/{attemptId}/reverso/intencion:
+ *   post:
+ *     tags: [TPV]
+ *     summary: La terminal pide permiso ANTES de reversar un cobro de Blumon (SDK propio, fase 1)
+ *     description: |
+ *       Antes de mandarle el reverso a Blumon, la TERMINAL avisa al servidor. Bajo el candado del intento —el mismo que toman
+ *       los registradores y el aviso del banco—: si el cobro de ESTE intento ya está registrado, contesta 409
+ *       `ATTEMPT_ALREADY_RECORDED` con su resumen (la terminal muestra «Aprobado» y NO reversa); si hay otro dinero con la llave
+ *       del intento, 409 `ATTEMPT_HAS_PENDING_EVIDENCE` (no reversa: «En duda»). Si no hay dinero, anota la lápida `reversing`:
+ *       mientras exista, ningún cobro de Blumon del intento nace y su aviso aprobado se queda en espera.
+ *
+ *       🔴 La terminal sólo reversa con `200` y `estado === 'reversing'`. Un permiso repetido sobre una lápida que ya tiene
+ *       desenlace contesta 200 con ESE estado y no la reescribe: `reversed` ⇒ «No se cobró», `reverse_failed` ⇒ cobrada,
+ *       `reverse_unconfirmed` / `contradiction` ⇒ «En duda»; con ninguno de ellos se reversa otra vez. Con `503` la terminal
+ *       puede reversar sin permiso (si el aviso ya registró el cobro, lo resuelve una persona).
+ *
+ *       La identidad es la de la terminal del JWT (`terminalSerialNumber`), nunca la del cuerpo (vacío y estricto: una llave
+ *       extra es 400). Un intento sin vínculo (cobro local), de otro venue o de otra terminal es 404, indistinguibles.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attemptId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *     responses:
+ *       200:
+ *         description: "{ success: true, attemptId, estado: reversing | reversed | reverse_failed | reverse_unconfirmed | contradiction, eventLogId }"
+ *       400:
+ *         description: El cuerpo trae llaves (debe ser `{}`)
+ *       403:
+ *         description: "{ success: false, code: TERMINAL_IDENTITY_REQUIRED } — o el venue no es el del token"
+ *       404:
+ *         description: "{ success: false, code: ATTEMPT_NOT_FOUND } — sin vínculo, de otra terminal o de otro venue"
+ *       409:
+ *         description: >
+ *           "{ success: false, code: ATTEMPT_ALREADY_RECORDED, payment: { paymentId, amountCents, tipCents, authorizationNumber } }"
+ *           · "{ success: false, code: ATTEMPT_HAS_PENDING_EVIDENCE, evidencia: { paymentStatus, tipo: POSSIBLE_SECOND_CAPTURE |
+ *           POSSIBLE_REFERENCE_COLLISION | null } }" · "{ success: false, code: ATTEMPT_NOT_BLUMON }" (el intento tiene aviso de AngelPay)
+ *       503:
+ *         description: "{ success: false, code: REVERSO_NO_DISPONIBLE } — la base no contesta; la terminal puede reversar igual"
+ *       401:
+ *         description: Unauthorized
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/intencion',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  validateRequest(intencionDeReversoSchema),
+  terminalPaymentTpvController.pedirPermisoDeReverso,
 )
 
 /**

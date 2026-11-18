@@ -4,10 +4,14 @@
  * La consulta durable POR INTENTO que hace la TERMINAL al reconectar: qué pasó con SU intento y en qué está la
  * solicitud. La identidad es la de la terminal del JWT (`terminalSerialNumber`), no el rol del cajero.
  */
-import { Request, Response } from 'express'
+import { NextFunction, Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import * as reverso from '../../services/tpv/reversoDeLaTerminal.service'
+import { llaveDeIntento } from '../../services/tpv/candadoDeIntento'
+import AppError from '../../errors/AppError'
+import { isTransientDbConnectionError } from '../../utils/retry'
 import logger from '../../config/logger'
 
 /**
@@ -150,5 +154,53 @@ export const resolveNoInstrument = async (req: Request, res: Response) => {
     return res
       .status(503)
       .json({ success: false, code: 'RESOLUTION_UNAVAILABLE', message: 'No se pudo confirmar el cierre. Conserva el intento pendiente.' })
+  }
+}
+
+/**
+ * Lo común a los endpoints del reverso (Tareas 9 y 10): un error de dominio sale con su `code` y sus datos al mismo nivel; si la
+ * base no contesta (conexión, pool agotado, no arranca), 503 `REVERSO_NO_DISPONIBLE` — la respuesta con la que la terminal sabe
+ * que puede reversar igual (spec §16.3); cualquier otro error sigue al manejador global (500).
+ */
+export function responderErrorDelReverso(error: unknown, req: Request, res: Response, next: NextFunction) {
+  if (error instanceof AppError) {
+    const datos =
+      error.details && typeof error.details === 'object' && !Array.isArray(error.details) ? (error.details as Record<string, unknown>) : {}
+    return res.status(error.statusCode).json({ ...datos, success: false, code: error.code, message: error.message })
+  }
+  if (isTransientDbConnectionError(error) || error instanceof Prisma.PrismaClientInitializationError) {
+    logger.error('❌ [Blumon reverso] La base no contestó — la terminal puede reversar sin permiso', {
+      venueId: req.params.venueId,
+      attemptId: req.params.attemptId,
+      errorName: error instanceof Error ? error.name : typeof error,
+      errorCode: (error as { code?: unknown; errorCode?: unknown }).code ?? (error as { errorCode?: unknown }).errorCode,
+    })
+    return res.status(503).json({ success: false, code: 'REVERSO_NO_DISPONIBLE', message: 'No se pudo confirmar el permiso.' })
+  }
+  return next(error)
+}
+
+/**
+ * POST /api/v1/tpv/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/intencion (SDK propio, Tarea 9)
+ *
+ * La terminal pide permiso ANTES de mandarle el reverso a Blumon. 🔴 Sólo reversa con `200` y `estado === 'reversing'`: con otro
+ * estado (una lápida que ya tiene desenlace) muestra ese desenlace y no reversa otra vez (H21).
+ *  · 403 `TERMINAL_IDENTITY_REQUIRED` si el token no es de una terminal.
+ *  · 404 `ATTEMPT_NOT_FOUND` (sin vínculo, de otro negocio o de otra terminal) · 409 `ATTEMPT_NOT_BLUMON`.
+ *  · 409 `ATTEMPT_ALREADY_RECORDED` + `payment` («Aprobado») · 409 `ATTEMPT_HAS_PENDING_EVIDENCE` + `evidencia` («En duda»).
+ *  · 503 `REVERSO_NO_DISPONIBLE` si la base no contesta.
+ */
+export const pedirPermisoDeReverso = async (req: Request, res: Response, next: NextFunction) => {
+  const terminalSerial = req.authContext?.terminalSerialNumber
+  if (!terminalSerial) return res.status(403).json({ success: false, code: 'TERMINAL_IDENTITY_REQUIRED' })
+  try {
+    const { estado, eventLogId } = await reverso.pedirPermisoDeReverso({
+      venueId: req.params.venueId,
+      attemptId: req.params.attemptId,
+      terminalSerial,
+    })
+    return res.status(200).json({ success: true, attemptId: llaveDeIntento(req.params.attemptId), estado, eventLogId })
+  } catch (error) {
+    return responderErrorDelReverso(error, req, res, next)
   }
 }

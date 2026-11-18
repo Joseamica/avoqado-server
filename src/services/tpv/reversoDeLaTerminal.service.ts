@@ -13,8 +13,12 @@
 import { EventStatus, Prisma, ProviderType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { ConflictError } from '@/errors/AppError'
+import { ConflictError, NotFoundError } from '@/errors/AppError'
+import { terminalIdentityKey } from '@/utils/terminalSerial'
+import { terminalPaymentService } from '../terminal-payment.service'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { hayDineroConEstaLlaveSql } from './evidenciaPositivaSql'
+import { tipoDeEvidencia } from './segundaCaptura'
 
 export const EVENTO_REVERSO = (attemptId: string) => `blumon-tpv-reverso-${attemptId}`
 export const TIPO_REVERSO = 'REVERSO_TERMINAL'
@@ -147,4 +151,135 @@ export async function vencerLapidasSinRespuesta(ahora: Date = new Date()): Promi
     }
   }
   return vencidas
+}
+
+/** Sin vínculo, de otro negocio o de otra terminal: indistinguibles (no se le dice a una terminal qué intentos tiene otra). */
+const intentoNoEncontrado = () => new NotFoundError('El servidor no conoce ese intento para esta terminal.', 'ATTEMPT_NOT_FOUND')
+
+/**
+ * Tarea 9: ¿este intento es de ESTA terminal y se puede reversar con lápida? En este orden: vínculo S1 (un cobro LOCAL no tiene,
+ * y no necesita lápida: el aviso nunca crea su cobro), mismo negocio, misma terminal (404 en los tres) y ningún aviso de AngelPay
+ * del intento (409 `ATTEMPT_NOT_BLUMON`: la lápida sólo detiene cobros de Blumon, así que sobre AngelPay no tendría efecto). Los
+ * dos procesadores comparten `provider PAYMENT_PROCESSOR`; los distingue el prefijo del `eventId`. No mira la marca del aparato
+ * ni sus afiliaciones. Corre SIEMPRE antes de mirar una lápida existente. Lo reusa el resultado del reverso (Tarea 10).
+ */
+export async function exigirPertenencia(
+  tx: Pick<Prisma.TransactionClient, 'terminalPaymentAttemptLink' | 'providerEventLog'>,
+  entrada: { venueId: string; attemptId: string; terminalSerial: string },
+): Promise<{ requestId: string; terminalKey: string }> {
+  const llave = llaveDeIntento(entrada.attemptId)
+  const terminalKey = terminalIdentityKey(entrada.terminalSerial)
+  if (!llave || !terminalKey) throw intentoNoEncontrado()
+  const vinculo = await tx.terminalPaymentAttemptLink.findUnique({
+    where: { attemptId: llave },
+    select: { requestId: true, venueId: true, terminalId: true },
+  })
+  if (!vinculo || vinculo.venueId !== entrada.venueId || terminalIdentityKey(vinculo.terminalId) !== terminalKey) {
+    throw intentoNoEncontrado()
+  }
+  const avisoDeAngelPay = await tx.providerEventLog.findFirst({
+    where: { provider: ProviderType.PAYMENT_PROCESSOR, attemptId: llave, eventId: { startsWith: 'angelpay-' } },
+    select: { id: true },
+  })
+  if (avisoDeAngelPay) {
+    throw new ConflictError('Este intento es de AngelPay: el reverso con permiso es sólo de Blumon.', 'ATTEMPT_NOT_BLUMON')
+  }
+  return { requestId: vinculo.requestId, terminalKey }
+}
+
+/** El cobro del intento ya está registrado: la terminal muestra «Aprobado» y NO reversa. */
+export class CobroYaRegistradoDelIntento extends ConflictError {
+  constructor(
+    readonly payment: { paymentId: string; amountCents: number | null; tipCents: number | null; authorizationNumber: string | null },
+  ) {
+    super('El cobro de este intento ya está registrado: no se reversa.', 'ATTEMPT_ALREADY_RECORDED', { payment })
+    this.name = 'CobroYaRegistradoDelIntento'
+  }
+}
+
+/**
+ * Hay dinero con la llave del intento que no es «el cobro registrado»: la terminal NO reversa y muestra «En duda». `tipo` y
+ * `paymentStatus` sólo se publican si ese dinero es atribuible a esta terminal (S6); de otro negocio, solicitud o terminal van
+ * en null — nada de un pago ajeno se publica, sólo que existe.
+ */
+export class EvidenciaPendienteDelIntento extends ConflictError {
+  constructor(
+    readonly evidencia: {
+      paymentStatus: string | null
+      tipo: 'POSSIBLE_SECOND_CAPTURE' | 'POSSIBLE_REFERENCE_COLLISION' | null
+    },
+  ) {
+    super('Hay dinero con la llave de este intento que falta conciliar: no se reversa.', 'ATTEMPT_HAS_PENDING_EVIDENCE', { evidencia })
+    this.name = 'EvidenciaPendienteDelIntento'
+  }
+}
+
+/**
+ * Tarea 9 · `POST …/attempts/:attemptId/reverso/intencion`: la terminal pide permiso ANTES de mandarle el reverso a Blumon
+ * (spec §16.1). Bajo el candado del intento —el mismo de los dos registradores y del aviso, así que nada de dinero del intento
+ * nace mientras se decide—: pertenencia → ¿S6 dice RECORDED? (409 «Aprobado») → ¿hay otro dinero con la llave? (409 «En duda»)
+ * → la lápida existente (su estado, sin reescribirla: H21) o una nueva `reversing`. En los dos 409 no se escribe lápida.
+ * H17: candado, lápida y consultas con la llave canónica (`llaveDeIntento`).
+ */
+export async function pedirPermisoDeReverso(entrada: {
+  venueId: string
+  attemptId: string
+  terminalSerial: string
+}): Promise<{ estado: EstadoDelReverso; eventLogId: string }> {
+  const llave = llaveDeIntento(entrada.attemptId)
+  if (!llave) throw intentoNoEncontrado()
+  return prisma.$transaction(async tx => {
+    await candadoDeIntento(tx, llave)
+    const { terminalKey } = await exigirPertenencia(tx, { ...entrada, attemptId: llave })
+
+    // S6 lee con su propia conexión: sigue siendo sano porque ningún registrador puede confirmar mientras este candado esté tomado.
+    const s6 = await terminalPaymentService.consultarIntentoDeTerminal({ ...entrada, attemptId: llave })
+    const propio = s6?.attempt.paymentId
+      ? await tx.payment.findUnique({
+          where: { id: s6.attempt.paymentId },
+          select: { id: true, status: true, processorData: true, authorizationNumber: true },
+        })
+      : null
+    if (s6?.attempt.outcome === 'RECORDED' && propio) {
+      throw new CobroYaRegistradoDelIntento({
+        paymentId: propio.id,
+        amountCents: s6.attempt.amountCents,
+        tipCents: s6.attempt.tipCents,
+        authorizationNumber: propio.authorizationNumber,
+      })
+    }
+    const [dinero] = await tx.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(llave)} AS "hay"`
+    if (dinero?.hay) {
+      throw new EvidenciaPendienteDelIntento({ paymentStatus: propio?.status ?? null, tipo: propio ? tipoDeEvidencia(propio) : null })
+    }
+
+    const lapida = await leerLapida(tx, llave)
+    if (lapida) return { estado: lapida.estado, eventLogId: lapida.id }
+    // H12: la columna es FK a `Terminal.id` (la del token, si se resuelve en este negocio); la identidad va en `terminalKey`.
+    const terminal = await tx.terminal.findFirst({
+      where: { venueId: entrada.venueId, serialNumber: entrada.terminalSerial },
+      select: { id: true },
+    })
+    const permisoEn = new Date()
+    const creada = await tx.providerEventLog.create({
+      data: {
+        provider: ProviderType.PAYMENT_PROCESSOR,
+        eventId: EVENTO_REVERSO(llave),
+        type: TIPO_REVERSO,
+        attemptId: llave,
+        venueId: entrada.venueId,
+        terminalId: terminal?.id ?? null,
+        status: EventStatus.PROCESSED,
+        processedAt: permisoEn,
+        payload: { estado: 'reversing', status: 'reversing', terminalKey, permisoEn: permisoEn.toISOString() },
+      },
+      select: { id: true },
+    })
+    logger.info('🔁 [Blumon reverso] La terminal pidió permiso para reversar — lápida reversing', {
+      attemptId: llave,
+      venueId: entrada.venueId,
+      eventLogId: creada.id,
+    })
+    return { estado: 'reversing', eventLogId: creada.id }
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 }
