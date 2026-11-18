@@ -108,7 +108,7 @@ const pagoLigadoSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql =
 const dineroConLaLlaveSql = (llave: Prisma.Sql): Prisma.Sql => Prisma.sql`
       SELECT p."id" FROM "Payment" p
       WHERE regexp_replace(p."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${llave}`
-const dineroConEstaLlaveSql = (attemptId: string): Prisma.Sql => dineroConLaLlaveSql(bind(attemptId.trim()))
+export const dineroConEstaLlaveSql = (attemptId: string): Prisma.Sql => dineroConLaLlaveSql(bind(attemptId.trim()))
 
 /**
  * 🔴 Codex r7 (P2-2, 22-sep): «consta dinero con la llave de ALGÚN intento vinculado HOY a la solicitud» — la MISMA regla de

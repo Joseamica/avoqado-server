@@ -204,3 +204,31 @@ export const pedirPermisoDeReverso = async (req: Request, res: Response, next: N
     return responderErrorDelReverso(error, req, res, next)
   }
 }
+
+/**
+ * POST /api/v1/tpv/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/resultado (SDK propio, Tarea 10)
+ *
+ * La terminal reporta cómo le fue al reverso con Blumon. 200 `{ estado, eventLogId, paymentId? }`: `reversed` («No se cobró»),
+ * `reverse_failed` (cobrada: el aviso crea el cobro) o `contradiction` (reversó, pero el cobro ya estaba registrado: «En duda»,
+ * lo resuelve una persona; trae `paymentId`). Un desenlace ya guardado no se reescribe: el mismo resultado contesta lo guardado,
+ * uno distinto 409 `REVERSAL_RESULT_CONFLICT` (con el `estado` guardado). 404/409 de pertenencia como el permiso; 503
+ * `REVERSO_NO_DISPONIBLE` si la base no contesta (la terminal lo reintenta desde su cola).
+ */
+export const registrarResultadoDelReverso = async (req: Request, res: Response, next: NextFunction) => {
+  const terminalSerial = req.authContext?.terminalSerialNumber
+  if (!terminalSerial) return res.status(403).json({ success: false, code: 'TERMINAL_IDENTITY_REQUIRED' })
+  try {
+    const { estado, eventLogId, paymentId } = await reverso.registrarResultadoDelReverso({
+      venueId: req.params.venueId,
+      attemptId: req.params.attemptId,
+      terminalSerial,
+      staffId: req.authContext?.userId,
+      resultado: req.body,
+    })
+    return res
+      .status(200)
+      .json({ success: true, attemptId: llaveDeIntento(req.params.attemptId), estado, eventLogId, ...(paymentId ? { paymentId } : {}) })
+  } catch (error) {
+    return responderErrorDelReverso(error, req, res, next)
+  }
+}

@@ -12,8 +12,10 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import * as avisoDeBlumon from '@/services/tpv/blumon-webhook.service'
 import { processBlumonPaymentWebhook } from '@/services/tpv/blumon-webhook.service'
-import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
+import { ingresarEventoDelIntento, processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
+import { claimPendingAngelPayEvents, runClaimedAngelPayEvent } from '@/services/tpv/angelpayEventWorker.service'
 import * as registrador from '@/services/tpv/payment.tpv.service'
 import { UNPROVEN_NEGATIVE_WINDOW_MS, terminalPaymentService } from '@/services/terminal-payment.service'
 import { candadoDeIntento } from '@/services/tpv/candadoDeIntento'
@@ -26,6 +28,7 @@ import {
   TIPO_REVERSO,
   VENTANA_DEL_REVERSO_MS,
   vencerLapidasSinRespuesta,
+  vencerReversoSinRespuesta,
   type EstadoDelReverso,
 } from '@/services/tpv/reversoDeLaTerminal.service'
 import { evidenciaDurableDelIngreso } from '@/services/tpv/evidenciaDeIngreso'
@@ -469,6 +472,74 @@ describe('regresión', () => {
   })
 })
 
+/** Lo común de los endpoints del reverso (Tareas 9 y 10): la ruta real con el token de la terminal, y las barreras. */
+const tokenDe = (serial: string | null, staffId = f.staffId) =>
+  jwt.sign(
+    { sub: staffId, orgId: f.fixture, venueId: f.venueId, role: 'CASHIER', ...(serial ? { terminalSerialNumber: serial } : {}) },
+    process.env.ACCESS_TOKEN_SECRET as string,
+    { expiresIn: '15m' },
+  )
+const ruta = (attemptId: string, final: string) =>
+  `/api/v1/tpv/venues/${f.venueId}/terminal-payment/attempts/${encodeURIComponent(attemptId)}/${final}`
+/** El POST del permiso; `.then` lo dispara en el momento (las carreras lo necesitan así). */
+const intencion = (attemptId: string, serial: string | null = f.serial, cuerpo: object = {}) =>
+  request(app)
+    .post(ruta(attemptId, 'reverso/intencion'))
+    .set('Authorization', `Bearer ${tokenDe(serial)}`)
+    .send(cuerpo)
+    .then(r => r)
+const vincular = async (requestId: string, attemptId: string, serial = f.serial) => {
+  const ack = await terminalPaymentService.handleAttemptOpenedFromSocket(
+    { requestId, attemptId },
+    { socketId: 's', terminalId: serial, venueId: f.venueId },
+  )
+  expect(ack.success).toBe(true)
+}
+const lapidaOpcional = (attemptId: string) =>
+  prisma.providerEventLog.findUnique({
+    where: { provider_eventId: { provider: 'PAYMENT_PROCESSOR', eventId: EVENTO_REVERSO(attemptId) } },
+  })
+const lapidasDel = (attemptId: string) => prisma.providerEventLog.count({ where: { attemptId, type: TIPO_REVERSO } })
+
+/** Sesiones de esta base esperando un candado consultivo (o, con `['transactionid', 'tuple']`, una fila bloqueada). */
+const enEspera = async (eventos: string[] = ['advisory']) =>
+  (
+    await prisma.$queryRawUnsafe<{ n: number }[]>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+       WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = ANY($1::text[])`,
+      eventos,
+    )
+  )[0].n
+/** La barrera: la prueba toma el candado del intento y lo suelta cuando los dos competidores ya están formados detrás. */
+async function retenerCandado(attemptId: string) {
+  let soltar!: () => void
+  let tomado!: () => void
+  const suelto = new Promise<void>(r => (soltar = r))
+  const listo = new Promise<void>(r => (tomado = r))
+  const tx = prisma.$transaction(
+    async t => {
+      await candadoDeIntento(t, attemptId)
+      tomado()
+      await suelto
+    },
+    { timeout: 30_000 },
+  )
+  await listo
+  const base = await enEspera()
+  return {
+    // Si nadie se forma, suelta antes de fallar: así la prueba no deja el candado tomado ni promesas colgando.
+    enFila: async (n: number) => {
+      const formados = await f.esperar(async () => (await enEspera()) >= base + n, 7000)
+      if (!formados) soltar()
+      expect(formados).toBe(true)
+    },
+    soltar: async () => {
+      soltar()
+      await tx
+    },
+  }
+}
+
 /**
  * Tarea 9: la terminal pide PERMISO antes de reversar (`POST …/attempts/:attemptId/reverso/intencion`), por la ruta real (app +
  * token de terminal). Sólo se da si el cobro del intento no está registrado ni hay dinero con su llave; entonces nace la lápida
@@ -476,67 +547,6 @@ describe('regresión', () => {
  * 409 ATTEMPT_NOT_BLUMON.
  */
 describe('el permiso para reversar (Tarea 9)', () => {
-  const tokenDe = (serial: string | null, staffId = f.staffId) =>
-    jwt.sign(
-      { sub: staffId, orgId: f.fixture, venueId: f.venueId, role: 'CASHIER', ...(serial ? { terminalSerialNumber: serial } : {}) },
-      process.env.ACCESS_TOKEN_SECRET as string,
-      { expiresIn: '15m' },
-    )
-  const ruta = (attemptId: string, final: string) =>
-    `/api/v1/tpv/venues/${f.venueId}/terminal-payment/attempts/${encodeURIComponent(attemptId)}/${final}`
-  /** El POST del permiso; `.then` lo dispara en el momento (las carreras lo necesitan así). */
-  const intencion = (attemptId: string, serial: string | null = f.serial, cuerpo: object = {}) =>
-    request(app)
-      .post(ruta(attemptId, 'reverso/intencion'))
-      .set('Authorization', `Bearer ${tokenDe(serial)}`)
-      .send(cuerpo)
-      .then(r => r)
-  const vincular = async (requestId: string, attemptId: string, serial = f.serial) => {
-    const ack = await terminalPaymentService.handleAttemptOpenedFromSocket(
-      { requestId, attemptId },
-      { socketId: 's', terminalId: serial, venueId: f.venueId },
-    )
-    expect(ack.success).toBe(true)
-  }
-  const lapidaOpcional = (attemptId: string) =>
-    prisma.providerEventLog.findUnique({
-      where: { provider_eventId: { provider: 'PAYMENT_PROCESSOR', eventId: EVENTO_REVERSO(attemptId) } },
-    })
-  const lapidasDel = (attemptId: string) => prisma.providerEventLog.count({ where: { attemptId, type: TIPO_REVERSO } })
-
-  /** Sesiones de esta base esperando un candado consultivo. */
-  const enEspera = async () =>
-    (
-      await prisma.$queryRawUnsafe<{ n: number }[]>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
-      )
-    )[0].n
-  /** La barrera: la prueba toma el candado del intento y lo suelta cuando los dos competidores ya están formados detrás. */
-  async function retenerCandado(attemptId: string) {
-    let soltar!: () => void
-    let tomado!: () => void
-    const suelto = new Promise<void>(r => (soltar = r))
-    const listo = new Promise<void>(r => (tomado = r))
-    const tx = prisma.$transaction(
-      async t => {
-        await candadoDeIntento(t, attemptId)
-        tomado()
-        await suelto
-      },
-      { timeout: 30_000 },
-    )
-    await listo
-    const base = await enEspera()
-    return {
-      enFila: async (n: number) => expect(await f.esperar(async () => (await enEspera()) >= base + n, 7000)).toBe(true),
-      soltar: async () => {
-        soltar()
-        await tx
-      },
-    }
-  }
-
   it('sin Payment ⇒ 200 reversing y una lápida', async () => {
     const { attemptId } = await intentoVinculado()
 
@@ -928,5 +938,472 @@ describe('el permiso para reversar (Tarea 9)', () => {
 
     expect(await estadoDe(attemptId)).toBe('reverse_unconfirmed')
     expect(await pagos()).toHaveLength(0)
+  })
+})
+
+/**
+ * Tarea 10: la terminal reporta cómo le fue al reverso (`POST …/attempts/:attemptId/reverso/resultado`), por la ruta real. Con
+ * REVERSADA (o TX_014/TX_013) y sin dinero del intento, la lápida queda `reversed` y los avisos de Blumon retenidos se sellan sin
+ * dinero; con el reverso rechazado, `reverse_failed` y el aviso retenido crea el cobro ya; con REVERSADA y dinero, `contradiction`
+ * (el dinero no se toca: alerta para una persona). Un desenlace final no se reescribe (H16). AngelPay nunca se toca desde aquí.
+ */
+describe('el resultado del reverso (Tarea 10)', () => {
+  const resultado = (attemptId: string, cuerpo: object, serial: string = f.serial) =>
+    request(app)
+      .post(ruta(attemptId, 'reverso/resultado'))
+      .set('Authorization', `Bearer ${tokenDe(serial)}`)
+      .send(cuerpo)
+      .then(r => r)
+  const reversada = (over: Record<string, unknown> = {}) => ({
+    descripcion: 'REVERSADA',
+    operationNumber: 4321,
+    reversadoEn: new Date().toISOString(),
+    ...over,
+  })
+  const rechazado = (codigo: string) => ({ descripcion: 'RECHAZADA', codigo, reversadoEn: new Date().toISOString() })
+  const cuerpoDe = (que: string) => (que === 'REVERSADA' ? reversada() : rechazado(que))
+  /** El ActivityLog del intento (el de contradicción apunta al Payment, así que se busca por `data.attemptId`). */
+  const bitacora = (attemptId: string) =>
+    prisma.activityLog.findMany({ where: { venueId: f.venueId, data: { path: ['attemptId'], equals: attemptId } } })
+  const contradicciones = () => (logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).startsWith('🚨 [Reverso]'))
+
+  /** Terminal de Blumon con permiso (`reversing`) y su aviso aprobado retenido. */
+  async function permisoConAvisoRetenido() {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { attemptId, requestId } = await intentoVinculado()
+    expect((await intencion(attemptId)).body).toMatchObject({ estado: 'reversing' })
+    const aviso = await avisoBlumon(attemptId)
+    expect(aviso.action).toBe('HELD_BY_REVERSAL')
+    return { attemptId, requestId, merchantAccountId, eventoId: aviso.eventLogId! }
+  }
+  /** Pasan 6 min desde el permiso: la lápida queda fuera de la ventana y el turno del aviso retenido ya llegó. */
+  async function pasaLaVentana(attemptId: string, eventoId?: string) {
+    const hace = new Date(Date.now() - 6 * MIN)
+    await prisma.providerEventLog.update({ where: { id: (await lapidaDe(attemptId)).id }, data: { createdAt: hace } })
+    if (eventoId) {
+      await prisma.providerEventLog.update({
+        where: { id: eventoId },
+        data: { nextAttemptAt: new Date(hace.getTime() + VENTANA_DEL_REVERSO_MS) },
+      })
+    }
+  }
+  /**
+   * Barrera DENTRO del candado: la prueba bloquea la FILA de la lápida; el primer resultado toma el candado del intento, lee y
+   * se queda esperando esa fila al escribir; el segundo se forma en el candado del intento. Prueba que el candado cubre hasta
+   * la escritura (si no, el segundo leería `reversing` y escribiría encima).
+   */
+  async function retenerLaEscrituraDeLaLapida(attemptId: string) {
+    const fila = ['transactionid', 'tuple']
+    let soltar!: () => void
+    let tomado!: () => void
+    const suelto = new Promise<void>(r => (soltar = r))
+    const listo = new Promise<void>(r => (tomado = r))
+    const id = (await lapidaDe(attemptId)).id
+    const tx = prisma.$transaction(
+      async t => {
+        await t.$queryRaw`SELECT "id" FROM "ProviderEventLog" WHERE "id" = ${id} FOR UPDATE`
+        tomado()
+        await suelto
+      },
+      { timeout: 30_000 },
+    )
+    await listo
+    const [baseFila, baseCandado] = [await enEspera(fila), await enEspera()]
+    const hasta = async (condicion: () => Promise<boolean>) => {
+      const ok = await f.esperar(condicion, 7000)
+      if (!ok) soltar()
+      expect(ok).toBe(true)
+    }
+    return {
+      escribiendo: () => hasta(async () => (await enEspera(fila)) >= baseFila + 1),
+      enFila: () => hasta(async () => (await enEspera()) >= baseCandado + 1),
+      soltar: async () => {
+        soltar()
+        await tx
+      },
+    }
+  }
+
+  it('reversing + REVERSADA ⇒ reversed; el aviso retenido queda REVERSED_BY_TERMINAL; ActivityLog; luego ni aviso ni REST crean', async () => {
+    const { attemptId, merchantAccountId, eventoId } = await permisoConAvisoRetenido()
+    const lapida = await lapidaDe(attemptId)
+    const cuerpo = reversada()
+
+    const res = await resultado(attemptId, cuerpo)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, attemptId, estado: 'reversed', eventLogId: lapida.id })
+    expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL', paymentId: null })
+    expect((await lapidaDe(attemptId)).payload).toEqual({
+      estado: 'reversed',
+      status: 'reversed',
+      terminalKey: f.llaveTerminal,
+      permisoEn: (lapida.payload as Record<string, unknown>).permisoEn,
+      resultado: { descripcion: 'REVERSADA', operationNumber: 4321, reversadoEn: cuerpo.reversadoEn },
+      staffId: f.staffId,
+      resultadoEn: expect.any(String),
+    })
+    expect(await bitacora(attemptId)).toEqual([
+      expect.objectContaining({
+        action: 'PAYMENT_REVERSED_BY_TERMINAL',
+        entity: 'PaymentAttempt',
+        entityId: attemptId,
+        staffId: f.staffId,
+      }),
+    ])
+    // Lo que llegue después: un aviso aprobado nuevo del intento y el REST de la terminal.
+    expect((await avisoBlumon(attemptId)).action).toBe('REVERSED_BY_TERMINAL')
+    await expect(registradores.recordFastPayment(restBlumon(merchantAccountId, attemptId))).rejects.toMatchObject({
+      code: 'ATTEMPT_REVERSED',
+    })
+    expect(await pagos()).toHaveLength(0)
+    expect(alarmas()).toHaveLength(0)
+  })
+
+  it.each(['TX_014', 'TX_013'])('reversing + %s ⇒ reversed', async codigo => {
+    const { attemptId, eventoId } = await permisoConAvisoRetenido()
+
+    const res = await resultado(attemptId, { codigo, reversadoEn: new Date().toISOString() })
+
+    expect(res.status).toBe(200)
+    expect(res.body.estado).toBe('reversed')
+    expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL' })
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  it.each(['TX_007', 'TX_009', 'RQ_006'])('reversing + %s ⇒ reverse_failed y el aviso retenido crea el cobro ya', async codigo => {
+    const { attemptId, requestId, eventoId } = await permisoConAvisoRetenido()
+
+    const res = await resultado(attemptId, rechazado(codigo))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, attemptId, estado: 'reverse_failed', eventLogId: (await lapidaDe(attemptId)).id })
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(todos[0]).toMatchObject({ status: 'COMPLETED', idempotencyKey: attemptId, terminalPaymentRequestId: requestId })
+    expect(todos[0].processorData).not.toHaveProperty('reversoIncierto')
+    expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+    expect((await lapidaDe(attemptId)).payload).toMatchObject({ estado: 'reverse_failed', resultado: { codigo } })
+    expect(await bitacora(attemptId)).toHaveLength(0)
+    expect(alarmas()).toHaveLength(0)
+  })
+
+  it('reverse_failed y la llamada al aviso falla ⇒ la red de 30 s lo crea en su siguiente pase', async () => {
+    const { attemptId, eventoId } = await permisoConAvisoRetenido()
+    const espia = jest.spyOn(avisoDeBlumon, 'reconcileBlumonEvent').mockRejectedValueOnce(new Error('se cayó la conexión'))
+    let llamadas: unknown[][] = []
+    const res = await resultado(attemptId, rechazado('TX_007')).finally(() => {
+      llamadas = [...espia.mock.calls]
+      espia.mockRestore()
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body.estado).toBe('reverse_failed')
+    expect(llamadas).toEqual([[eventoId, expect.anything()]])
+    expect(await pagos()).toHaveLength(0)
+    const retenido = await eventoDe(eventoId)
+    expect(retenido.status).toBe('PENDING')
+    expect(retenido.nextAttemptAt!.getTime()).toBeLessThanOrEqual(Date.now())
+
+    await pase()
+
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+  })
+
+  it('sin lápida (la terminal no pudo pedir permiso) y el aviso ya creó el cobro + REVERSADA ⇒ contradiction, dinero intacto, 🚨 y ActivityLog', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    expect((await avisoBlumon(attemptId)).action).toBe('CONFIRMED')
+    const [cobro] = await pagos()
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.status).toBe(200)
+    const lapida = await lapidaDe(attemptId)
+    expect(res.body).toEqual({ success: true, attemptId, estado: 'contradiction', eventLogId: lapida.id, paymentId: cobro.id })
+    // Nace en el estado final, con la forma de la Tarea 9 (H12).
+    expect(lapida).toMatchObject({ type: TIPO_REVERSO, status: 'PROCESSED', attemptId, venueId: f.venueId, terminalId: terminalDelFixture })
+    expect(lapida.payload).toMatchObject({ estado: 'contradiction', terminalKey: f.llaveTerminal, paymentId: cobro.id })
+    const despues = await pagos()
+    expect(despues).toHaveLength(1)
+    expect(despues[0]).toMatchObject({ id: cobro.id, status: 'COMPLETED', amount: cobro.amount, tipAmount: cobro.tipAmount })
+    expect(contradicciones()).toHaveLength(1)
+    expect(contradicciones()[0][1]).toMatchObject({ attemptId, paymentId: cobro.id })
+    expect(await bitacora(attemptId)).toEqual([
+      expect.objectContaining({ action: 'TERMINAL_REVERSAL_CONTRADICTION', entity: 'Payment', entityId: cobro.id }),
+    ])
+    // Repetirlo contesta lo mismo y no escribe otra vez.
+    expect((await resultado(attemptId, reversada())).body).toEqual(res.body)
+    expect(await bitacora(attemptId)).toHaveLength(1)
+  })
+
+  it('sin lápida y sin Payment + REVERSADA ⇒ reversed (bloquea lo que llegue)', async () => {
+    const { merchantAccountId } = await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.status).toBe(200)
+    expect(res.body.estado).toBe('reversed')
+    expect(await lapidaDe(attemptId)).toMatchObject({ id: res.body.eventLogId, terminalId: terminalDelFixture })
+    expect((await avisoBlumon(attemptId)).action).toBe('REVERSED_BY_TERMINAL')
+    await expect(registradores.recordFastPayment(restBlumon(merchantAccountId, attemptId))).rejects.toMatchObject({
+      code: 'ATTEMPT_REVERSED',
+    })
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  it('reverse_unconfirmed con el cobro incierto ya creado + REVERSADA ⇒ contradiction, dinero intacto', async () => {
+    await f.conAfiliacionBlumon()
+    const { attemptId } = await intentoVinculado()
+    await sembrarLapida(attemptId, 'reversing', 6 * MIN)
+    expect((await avisoBlumon(attemptId)).action).toBe('CONFIRMED')
+    expect(await estadoDe(attemptId)).toBe('reverse_unconfirmed')
+    const [cobro] = await pagos()
+    expect(cobro.processorData).toMatchObject({ reversoIncierto: true })
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.body).toMatchObject({ estado: 'contradiction', paymentId: cobro.id })
+    expect(await pagos()).toEqual([expect.objectContaining({ id: cobro.id, status: 'COMPLETED', amount: cobro.amount })])
+    expect(contradicciones()).toHaveLength(1)
+  })
+
+  it.each([
+    ['REVERSADA', 'TX_007', 'reversed'],
+    ['TX_007', 'REVERSADA', 'reverse_failed'],
+  ])(
+    'el mismo resultado dos veces ⇒ 200 igual; un resultado final distinto ⇒ 409 sin cambios (primero %s, luego %s)',
+    async (primero, distinto, estado) => {
+      const { attemptId } = await intentoVinculado()
+      expect((await intencion(attemptId)).status).toBe(200)
+
+      const uno = await resultado(attemptId, cuerpoDe(primero))
+      const dos = await resultado(attemptId, cuerpoDe(primero))
+      const guardada = await lapidaDe(attemptId)
+      const choque = await resultado(attemptId, cuerpoDe(distinto))
+
+      expect(uno.status).toBe(200)
+      expect(uno.body.estado).toBe(estado)
+      expect(dos.status).toBe(200)
+      expect(dos.body).toEqual(uno.body)
+      expect(choque.status).toBe(409)
+      expect(choque.body).toMatchObject({ success: false, code: 'REVERSAL_RESULT_CONFLICT', estado })
+      expect(await lapidaDe(attemptId)).toEqual(guardada)
+      expect(await bitacora(attemptId)).toHaveLength(estado === 'reversed' ? 1 : 0)
+    },
+  )
+
+  it('dos resultados iguales a la vez (barrera: el primero retenido dentro del candado) ⇒ los dos 200 con el mismo estado', async () => {
+    const { attemptId } = await intentoVinculado()
+    expect((await intencion(attemptId)).status).toBe(200)
+    const barrera = await retenerLaEscrituraDeLaLapida(attemptId)
+    const uno = resultado(attemptId, reversada())
+    await barrera.escribiendo()
+    const otro = resultado(attemptId, reversada())
+    await barrera.enFila()
+    await barrera.soltar()
+
+    const [a, b] = await Promise.all([uno, otro])
+
+    expect([a.status, b.status]).toEqual([200, 200])
+    expect(a.body).toEqual(b.body)
+    expect(a.body.estado).toBe('reversed')
+    expect(await lapidasDel(attemptId)).toBe(1)
+    expect(await bitacora(attemptId)).toHaveLength(1)
+  })
+
+  it('dos resultados distintos a la vez (REVERSADA y TX_007, con barrera) ⇒ uno 200 y el otro 409 REVERSAL_RESULT_CONFLICT; la lápida queda con el del primero', async () => {
+    const { attemptId } = await intentoVinculado()
+    expect((await intencion(attemptId)).status).toBe(200)
+    const barrera = await retenerLaEscrituraDeLaLapida(attemptId)
+    const uno = resultado(attemptId, reversada())
+    await barrera.escribiendo()
+    const otro = resultado(attemptId, rechazado('TX_007'))
+    await barrera.enFila()
+    await barrera.soltar()
+
+    const [a, b] = await Promise.all([uno, otro])
+
+    expect(a.status).toBe(200)
+    expect(a.body.estado).toBe('reversed')
+    expect(b.status).toBe(409)
+    expect(b.body).toMatchObject({ code: 'REVERSAL_RESULT_CONFLICT', estado: 'reversed' })
+    expect((await lapidaDe(attemptId)).payload).toMatchObject({ estado: 'reversed', resultado: { descripcion: 'REVERSADA' } })
+    expect((await lapidaDe(attemptId)).payload).not.toHaveProperty('resultado.codigo')
+  })
+
+  it('permiso ⇒ se desasigna la afiliación de la terminal ⇒ resultado REVERSADA entra y queda reversed', async () => {
+    const { attemptId } = await permisoConAvisoRetenido()
+    await prisma.terminal.update({ where: { serialNumber: f.serial }, data: { assignedMerchantIds: [] } })
+    await prisma.venuePaymentConfig.update({ where: { venueId: f.venueId }, data: { secondaryAccountId: null } })
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.status).toBe(200)
+    expect(res.body.estado).toBe('reversed')
+    expect(await pagos()).toHaveLength(0)
+  })
+
+  it('resultado con el token de otra terminal ⇒ 404 aunque exista la lápida', async () => {
+    const otra = await f.otraTerminal()
+    const { attemptId } = await intentoVinculado()
+    expect((await intencion(attemptId)).status).toBe(200)
+
+    const res = await resultado(attemptId, reversada(), otra.serial)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toMatchObject({ success: false, code: 'ATTEMPT_NOT_FOUND' })
+    expect(res.body).not.toHaveProperty('estado')
+    expect(await estadoDe(attemptId)).toBe('reversing')
+  })
+
+  it('sin lápida: intento con aviso de AngelPay ⇒ 409 ATTEMPT_NOT_BLUMON', async () => {
+    const { attemptId } = await intentoVinculado()
+    const r = await processAngelPayWebhook({
+      payload: f.eventoAngelPay(attemptId),
+      eventId: f.nuevoEventId(),
+      merchantAccount: { id: f.merchantId, externalMerchantId: f.merchantExternalId },
+      retryDelaysMs: [0],
+    })
+    expect(r.action).toBe('CONFIRMED')
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ success: false, code: 'ATTEMPT_NOT_BLUMON' })
+    expect(await lapidaOpcional(attemptId)).toBeNull()
+  })
+
+  it('permiso (Nexgo) ⇒ ingreso durable del aviso de AngelPay ⇒ el receptor cae ⇒ resultado REVERSADA ⇒ el evento de AngelPay sigue PENDING y su worker (claimPendingAngelPayEvents + runClaimedAngelPayEvent) crea UN cobro', async () => {
+    const { attemptId } = await intentoVinculado()
+    expect((await intencion(attemptId)).body).toMatchObject({ estado: 'reversing' })
+    // El receptor guarda el aviso bajo el candado del intento y muere antes de confirmarlo.
+    const eventoId = await ingresarEventoDelIntento(attemptId, tx =>
+      tx.providerEventLog.create({
+        data: {
+          provider: 'PAYMENT_PROCESSOR',
+          eventId: `angelpay-${f.nuevoEventId()}`,
+          type: 'send_transaction',
+          payload: { ...f.eventoAngelPay(attemptId), _avoqado: { receivedByMerchantAccountId: f.merchantId } },
+          venueId: f.venueId,
+          status: 'PENDING',
+          attemptId,
+          nextAttemptAt: new Date(Date.now() - 1_000),
+        },
+        select: { id: true },
+      }),
+    )
+    const antes = await eventoDe(eventoId)
+
+    const res = await resultado(attemptId, reversada())
+
+    expect(res.status).toBe(200)
+    expect(res.body.estado).toBe('reversed')
+    expect(await eventoDe(eventoId)).toEqual(antes)
+    const claims = (await claimPendingAngelPayEvents({ now: new Date(), limit: 25 })).filter(c => c.id === eventoId)
+    expect(claims).toHaveLength(1)
+    expect(await runClaimedAngelPayEvent(claims[0])).toBe('PROCESSED')
+    const todos = await pagos()
+    expect(todos).toHaveLength(1)
+    expect(todos[0]).toMatchObject({ idempotencyKey: attemptId, merchantAccountId: f.merchantId, status: 'COMPLETED' })
+  })
+
+  it.each([
+    ['sin descripción ni código', { reversadoEn: new Date().toISOString() }],
+    ['sin reversadoEn', { descripcion: 'REVERSADA' }],
+    ['reversadoEn que no es fecha', { descripcion: 'REVERSADA', reversadoEn: 'ayer' }],
+    ['una llave de más', { descripcion: 'REVERSADA', reversadoEn: new Date().toISOString(), terminalSerial: 'otra' }],
+  ])('cuerpo %s ⇒ 400, sin lápida', async (_, cuerpo) => {
+    const { attemptId } = await intentoVinculado()
+
+    const res = await resultado(attemptId, cuerpo)
+
+    expect(res.status).toBe(400)
+    expect(await lapidaOpcional(attemptId)).toBeNull()
+  })
+
+  describe('carreras entre el vencimiento de la lápida (la red), el resultado y el registro del aviso', () => {
+    it('vence ⇒ el aviso retenido registra (cobro incierto) ⇒ llega REVERSADA ⇒ contradiction, dinero intacto', async () => {
+      const { attemptId, eventoId } = await permisoConAvisoRetenido()
+      await pasaLaVentana(attemptId, eventoId)
+      await pase()
+      const [cobro] = await pagos()
+      expect(cobro.processorData).toMatchObject({ reversoIncierto: true })
+      expect(alarmas()).toHaveLength(1)
+
+      const res = await resultado(attemptId, reversada())
+
+      expect(res.body).toMatchObject({ estado: 'contradiction', paymentId: cobro.id })
+      expect(await pagos()).toEqual([expect.objectContaining({ id: cobro.id, status: 'COMPLETED', amount: cobro.amount })])
+      expect(contradicciones()).toHaveLength(1)
+    })
+
+    it('vence ⇒ llega REVERSADA antes del registro ⇒ reversed ⇒ el registro del aviso choca con la guarda: REVERSED_BY_TERMINAL, sin Payment', async () => {
+      const { attemptId, eventoId } = await permisoConAvisoRetenido()
+      await pasaLaVentana(attemptId, eventoId)
+      const payload = (await eventoDe(eventoId)).payload as unknown as Parameters<typeof avisoDeBlumon.reconcileBlumonEvent>[1]
+      // FIFO en el candado del intento: el aviso vence la lápida (1.º), el resultado entra (2.º) y el registro del aviso, que pide
+      // el candado DESPUÉS de vencer, queda detrás del resultado.
+      const candado = await retenerCandado(attemptId)
+      const registro = avisoDeBlumon.reconcileBlumonEvent(eventoId, payload).catch((e: Error) => e)
+      await candado.enFila(1)
+      const res = resultado(attemptId, reversada())
+      await candado.enFila(2)
+      await candado.soltar()
+
+      const [r, rr] = await Promise.all([registro, res])
+
+      expect(rr.body.estado).toBe('reversed')
+      expect(r).toMatchObject({ action: 'REVERSED_BY_TERMINAL' })
+      expect(await pagos()).toHaveLength(0)
+      expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL', paymentId: null })
+      // H15: la alarma «se registra el cobro» no sale por un cobro que nunca nació.
+      expect(alarmas()).toHaveLength(0)
+    })
+
+    it('REVERSADA gana al vencimiento ⇒ reversed; la red ya no vence nada y el aviso queda sellado', async () => {
+      const { attemptId, eventoId } = await permisoConAvisoRetenido()
+      await pasaLaVentana(attemptId, eventoId)
+      const candado = await retenerCandado(attemptId)
+      const res = resultado(attemptId, reversada())
+      await candado.enFila(1)
+      const red = vencerLapidasSinRespuesta(new Date()).catch((e: Error) => e)
+      await candado.enFila(2)
+      await candado.soltar()
+
+      const [rr] = await Promise.all([res, red])
+      await pase()
+
+      expect(rr.body.estado).toBe('reversed')
+      expect(await estadoDe(attemptId)).toBe('reversed')
+      expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', errorReason: 'REVERSED_BY_TERMINAL', paymentId: null })
+      expect(await pagos()).toHaveLength(0)
+      expect(alarmas()).toHaveLength(0)
+    })
+
+    it('el vencimiento gana a TX_007 ⇒ reverse_unconfirmed y luego reverse_failed; un solo Payment', async () => {
+      const { attemptId, eventoId } = await permisoConAvisoRetenido()
+      await pasaLaVentana(attemptId)
+      const candado = await retenerCandado(attemptId)
+      const vence = vencerReversoSinRespuesta(attemptId, new Date()).catch((e: Error) => e)
+      await candado.enFila(1)
+      const res = resultado(attemptId, rechazado('TX_007'))
+      await candado.enFila(2)
+      await candado.soltar()
+
+      const [vencio, rr] = await Promise.all([vence, res])
+      await pase()
+
+      expect(vencio).toBe(true)
+      expect(rr.body.estado).toBe('reverse_failed')
+      const todos = await pagos()
+      expect(todos).toHaveLength(1)
+      expect(await eventoDe(eventoId)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
+      expect(todos[0].processorData).not.toHaveProperty('reversoIncierto')
+      expect(alarmas()).toHaveLength(0)
+    })
   })
 })

@@ -59,7 +59,7 @@ import { requireVenueMembership, validateVenueAccess } from '../middlewares/vali
 import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
-import { intencionDeReversoSchema } from '../schemas/tpv/reverso.schema'
+import { intencionDeReversoSchema, resultadoDeReversoSchema } from '../schemas/tpv/reverso.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
 import { recordPromoterPing } from '../services/promoters/promoterLocation.service'
@@ -3811,6 +3811,88 @@ router.post(
   validateVenueAccess,
   validateRequest(intencionDeReversoSchema),
   terminalPaymentTpvController.pedirPermisoDeReverso,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/terminal-payment/attempts/{attemptId}/reverso/resultado:
+ *   post:
+ *     tags: [TPV]
+ *     summary: La terminal reporta cómo le fue al reverso de un cobro de Blumon (SDK propio, fase 1)
+ *     description: |
+ *       Bajo el candado del intento, el servidor decide con lo que dijo Blumon y con el dinero que ya existe con la llave del
+ *       intento. «REVERSADA» (o `TX_014` / `TX_013`) sin dinero ⇒ `reversed`: los avisos aprobados de Blumon del intento que
+ *       esperaban quedan sellados sin dinero y nada lo vuelve a cobrar. Reverso rechazado ⇒ `reverse_failed`: el aviso que
+ *       esperaba crea el cobro ya (el dinero sí existe). «REVERSADA» pero el cobro ya estaba registrado ⇒ `contradiction`: el
+ *       dinero no se toca y lo resuelve una persona (trae `paymentId`).
+ *
+ *       Un desenlace ya guardado no se reescribe: el mismo resultado contesta 200 con lo guardado; uno distinto, 409
+ *       `REVERSAL_RESULT_CONFLICT`. Con permiso previo, la identidad es la que quedó en la lápida (la terminal del permiso),
+ *       aunque después cambie la configuración; sin permiso, las mismas reglas de pertenencia que `reverso/intencion`.
+ *       Los avisos de AngelPay nunca se tocan desde aquí.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attemptId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [reversadoEn]
+ *             description: Al menos `descripcion` o `codigo`.
+ *             properties:
+ *               descripcion:
+ *                 type: string
+ *                 maxLength: 64
+ *                 example: REVERSADA
+ *               codigo:
+ *                 type: string
+ *                 maxLength: 16
+ *                 example: TX_007
+ *               operationNumber:
+ *                 oneOf:
+ *                   - type: integer
+ *                   - type: string
+ *                     maxLength: 32
+ *               reversadoEn:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       200:
+ *         description: "{ success: true, attemptId, estado: reversed | reverse_failed | contradiction, eventLogId, paymentId? }"
+ *       400:
+ *         description: Cuerpo inválido (sin descripcion ni codigo, fecha inválida o llaves de más)
+ *       403:
+ *         description: "{ success: false, code: TERMINAL_IDENTITY_REQUIRED } — o el venue no es el del token"
+ *       404:
+ *         description: "{ success: false, code: ATTEMPT_NOT_FOUND } — sin vínculo, de otra terminal o de otro venue"
+ *       409:
+ *         description: >
+ *           "{ success: false, code: REVERSAL_RESULT_CONFLICT, estado }" (ya tiene otro desenlace) · "{ success: false, code:
+ *           ATTEMPT_NOT_BLUMON }" (sin permiso previo y el intento tiene aviso de AngelPay)
+ *       503:
+ *         description: "{ success: false, code: REVERSO_NO_DISPONIBLE } — la base no contesta; la terminal lo reintenta"
+ *       401:
+ *         description: Unauthorized
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/attempts/:attemptId/reverso/resultado',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  validateRequest(resultadoDeReversoSchema),
+  terminalPaymentTpvController.registrarResultadoDelReverso,
 )
 
 /**
