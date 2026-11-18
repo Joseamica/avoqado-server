@@ -14,7 +14,10 @@ import {
   contextoGuardado,
   processBlumonPaymentWebhook,
   reconcileBlumonEvent,
+  reconcileWebhooksForPayment,
+  sinTitular,
 } from '@/services/tpv/blumon-webhook.service'
+import * as servicioBlumon from '@/services/tpv/blumon-webhook.service'
 import * as registrador from '@/services/tpv/payment.tpv.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { blumonPaymentAuditJob } from '@/jobs/blumon-payment-audit.job'
@@ -792,7 +795,8 @@ describe('la red de 30 s (hallazgo 7)', () => {
     const r2 = await aviso(f.eventoBlumon(undefined))
     await prisma.$executeRaw`UPDATE "ProviderEventLog" SET "createdAt" = now() - interval '25 hours' WHERE id = ${r2.eventLogId}`
 
-    await red.markOrphaned()
+    // R3-5 (brazo legado): el vencimiento sólo alcanza lo que el pase intentó; `run` lo intenta primero y luego lo vence.
+    await (red as unknown as { run: () => Promise<void> }).run()
 
     expect(await eventoDe(r2.eventLogId)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
   })
@@ -896,4 +900,118 @@ describe('la red de 30 s (hallazgo 7)', () => {
       expect(await eventoDe(ev.id)).toMatchObject({ status: 'PROCESSED', paymentId: todos[0].id })
     },
   )
+})
+
+// ─── Pasada de superficie (Codex r3): lo que la fase 1 deja alcanzable con la TPV de hoy ───
+describe('la red y la conciliación con avisos sin vínculo (Codex r3)', () => {
+  const HORA = 3_600_000
+  const correr = () => (red as unknown as { run: () => Promise<void> }).run()
+  /** Un aviso sin vínculo guardado tal como lo deja el receptor (PENDING, sin turno), con la fecha dada. */
+  const sembrarAviso = (p: Aviso, haceMs: number) =>
+    prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        eventId: `blumon-tpv-${p.operationNumber}-${p.reference}`,
+        type: 'VENTA',
+        payload: sinTitular(p as Parameters<typeof sinTitular>[0]) as unknown as Prisma.InputJsonValue,
+        venueId: f.venueId,
+        status: 'PENDING',
+        createdAt: new Date(Date.now() - haceMs),
+      },
+    })
+  /** La red ve `reconcileBlumonEvent` por el módulo: los avisos de `rotos` fallan con `falla`, los demás siguen igual. */
+  function romper(rotos: Set<string>, falla: () => Promise<never> | Promise<Record<string, unknown>>) {
+    const original = servicioBlumon.reconcileBlumonEvent
+    return jest
+      .spyOn(servicioBlumon, 'reconcileBlumonEvent')
+      .mockImplementation(((id: string, p: never, c: never) => (rotos.has(id) ? falla() : original(id, p, c))) as never)
+  }
+
+  it.each([
+    ['ORPHANED', 'ERROR', 'PROCESSED'],
+    ['REVERSED_BY_TERMINAL', 'PROCESSED', 'PROCESSED'],
+  ] as const)(
+    'R3-1: otro escribe %s entre el Payment y el sello de la conciliación REST ⇒ el huérfano se repara, un desenlace nunca se reabre',
+    async (motivo, estadoDeEnMedio, estadoFinal) => {
+      const { merchantAccountId } = await f.conAfiliacionBlumon()
+      const debil = f.eventoBlumon(undefined)
+      const r = await aviso(debil)
+      expect(await eventoDe(r.eventLogId)).toMatchObject({ status: 'PENDING', nextAttemptAt: null })
+      const rest = await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: debil.operationNumber })
+      // Barrera: justo antes del sello, la red (o el resultado del reverso) escribe su desenlace sobre la fila.
+      const sellar = prisma.providerEventLog.update.bind(prisma.providerEventLog)
+      let barreras = 0
+      const espia = jest.spyOn(prisma.providerEventLog, 'update').mockImplementation((async (args: { where?: { id?: string } }) => {
+        if (args?.where?.id === r.eventLogId && barreras++ === 0) {
+          await prisma.$executeRaw`
+            UPDATE "ProviderEventLog" SET status = ${estadoDeEnMedio}::"EventStatus", "errorReason" = ${motivo}, "processedAt" = now()
+            WHERE id = ${r.eventLogId}`
+        }
+        return sellar(args as never)
+      }) as never)
+      try {
+        await reconcileWebhooksForPayment({
+          id: rest.id,
+          processorId: String(debil.operationNumber),
+          referenceNumber: debil.reference,
+          venueId: f.venueId,
+        })
+      } finally {
+        espia.mockRestore()
+      }
+
+      expect(barreras).toBe(1)
+      const ev = await eventoDe(r.eventLogId)
+      if (motivo === 'ORPHANED') expect(ev).toMatchObject({ status: estadoFinal, paymentId: rest.id, errorReason: null })
+      else expect(ev).toMatchObject({ status: estadoFinal, paymentId: null, errorReason: motivo })
+    },
+  )
+
+  it.each([
+    ['lanza', () => Promise.reject(new Error('aviso roto'))],
+    [
+      'contesta PROCESSING_ERROR',
+      async () => ({ success: false, action: 'ERROR', errorReason: 'PROCESSING_ERROR', message: 'aviso roto' }),
+    ],
+  ] as const)(
+    'R3-6: más avisos que fallan siempre (%s) que el lote ⇒ el aviso sano de detrás se registra en a lo más 2 pases',
+    async (_caso, falla) => {
+      const { merchantAccountId } = await f.conAfiliacionBlumon()
+      const rotos: string[] = []
+      for (let i = 0; i < 3; i++) rotos.push((await sembrarAviso(f.eventoBlumon(undefined), (10 - i) * 60_000)).id)
+      const sano = f.eventoBlumon(undefined)
+      const filaSana = await sembrarAviso(sano, 60_000)
+      const rest = await restBlumon(merchantAccountId, { attemptId: randomUUID() }, { blumonOperationNumber: sano.operationNumber })
+      const lote = red as unknown as { BATCH_SIZE: number }
+      const original = lote.BATCH_SIZE
+      lote.BATCH_SIZE = 2
+      const espia = romper(new Set(rotos), falla as () => Promise<never>)
+      try {
+        await correr()
+        await correr()
+      } finally {
+        espia.mockRestore()
+        lote.BATCH_SIZE = original
+      }
+
+      expect(await eventoDe(filaSana.id)).toMatchObject({ status: 'PROCESSED', paymentId: rest.id })
+      for (const id of rotos) expect(await eventoDe(id)).toMatchObject({ status: 'PENDING', paymentId: null })
+    },
+  )
+
+  it('R3-5 (brazo legado): un aviso sin turno vencido cuya recuperación lanza no pasa a ORPHANED; con desenlace, el pase siguiente sí', async () => {
+    const fila = await sembrarAviso(f.eventoBlumon(undefined), 25 * HORA)
+    const espia = romper(new Set([fila.id]), () => Promise.reject(new Error('lectura caída')))
+    try {
+      await correr()
+    } finally {
+      espia.mockRestore()
+    }
+
+    expect(await eventoDe(fila.id)).toMatchObject({ status: 'PENDING', nextAttemptAt: null })
+
+    await correr()
+
+    expect(await eventoDe(fila.id)).toMatchObject({ status: 'ERROR', errorReason: 'ORPHANED' })
+  })
 })

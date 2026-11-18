@@ -84,7 +84,8 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
     })
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'evt_tip', status: 'PENDING' }, // Familia A: sólo un aviso que sigue PENDING
+        // Familia A + R3-1: un aviso PENDING, o el huérfano que la red escribió en medio (la conciliación ya tiene su Payment).
+        where: { id: 'evt_tip', OR: [{ status: 'PENDING' }, { status: 'ERROR', errorReason: 'ORPHANED' }] },
         data: expect.objectContaining({ status: 'PROCESSED' }),
       }),
     )

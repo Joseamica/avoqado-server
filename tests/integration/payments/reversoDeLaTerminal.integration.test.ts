@@ -337,6 +337,22 @@ describe('Familia B · la alarma del reverso en duda sale una vez y queda guarda
     },
   )
 
+  it.each(Object.keys(registradores) as (keyof typeof registradores)[])(
+    'R3-2: REST (%s) de un cobro FAILED con la lápida reverse_unconfirmed ⇒ sin marca, sin ActivityLog y sin 🚨',
+    async nombre => {
+      const { merchantAccountId } = await f.conAfiliacionBlumon()
+      const attemptId = randomUUID()
+      await sembrarLapida(attemptId, 'reverse_unconfirmed', 6 * MIN)
+
+      const pago = await registradores[nombre]({ ...restBlumon(merchantAccountId, attemptId), status: 'FAILED' })
+
+      expect(pago.status).toBe('FAILED')
+      expect(pago.processorData).not.toHaveProperty('reversoIncierto')
+      expect(alarmas()).toHaveLength(0)
+      expect(await asientos(attemptId)).toHaveLength(0)
+    },
+  )
+
   it('aviso primero y después el REST del mismo intento ⇒ 1 ActivityLog y 1 🚨', async () => {
     const { merchantAccountId } = await f.conAfiliacionBlumon()
     const { attemptId } = await intentoVinculado()

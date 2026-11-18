@@ -1,12 +1,14 @@
 import {
   buildBlumonEventId,
   centavosExactos,
+  paraElLog,
   processBlumonPaymentWebhook,
   reconcileBlumonEvent,
   sinTitular,
   validateBlumonWebhookPayload,
 } from '@/services/tpv/blumon-webhook.service'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -475,6 +477,82 @@ describe('R6 — la base no guarda el titular', () => {
     expect(copia).not.toHaveProperty('arqc')
     expect(conTitular.cardHolder).toBe('HOMER SIMPSON')
     expect(conTitular.arqc).toBe('A1B2C3D4E5F60718')
+  })
+
+  // R3-7 (Codex r3): la lista blanca también mira el VALOR. Un campo de forma fija que no la cumple no se copia; el texto libre
+  // lleva tope y toda racha de 12+ dígitos enmascarada; el receptor loguea sólo del cuerpo ya filtrado.
+  describe('R3-7 — los valores también', () => {
+    const PAN = '4111111111111111'
+    const ramas = [
+      ['UNKNOWN_TERMINAL', { serialNumber: '99999999999' }],
+      ['NOT_APPROVED', { codeResponse: '05' }],
+      ['PENDING', {}],
+    ] as const
+    let espias: jest.SpyInstance[] = []
+    beforeEach(() => {
+      espias = (['info', 'warn', 'error', 'debug'] as const).map(nivel => jest.spyOn(logger, nivel))
+    })
+    afterEach(() => espias.forEach(e => e.mockRestore()))
+    const loLogueado = () => JSON.stringify(espias.flatMap(e => e.mock.calls))
+    const guardado = () => mockedEventLogCreate.mock.calls[0][0].data
+
+    it.each(ramas)('un PAN en lastFour, bin o aid no va ni a la base ni al log; su nombre sí (%s)', async (_rama, cambios) => {
+      await processBlumonPaymentWebhook({ ...conTitular, ...cambios, lastFour: PAN, bin: PAN, aid: PAN })
+
+      const p = guardado().payload
+      expect(JSON.stringify(guardado())).not.toContain(PAN)
+      expect(p).not.toHaveProperty('lastFour')
+      expect(p).not.toHaveProperty('bin')
+      expect(p).not.toHaveProperty('aid')
+      expect(p.camposNoReconocidos).toEqual(expect.arrayContaining(['lastFour', 'bin', 'aid']))
+      expect(loLogueado()).not.toContain(PAN)
+    })
+
+    it.each(ramas)(
+      'descriptionResponse con una racha de 16 dígitos (también con espacios) ⇒ enmascarada en la base y en el log (%s)',
+      async (_rama, cambios) => {
+        await processBlumonPaymentWebhook({ ...conTitular, ...cambios, descriptionResponse: `TARJETA ${PAN} / 4111 1111 1111 1111 FIN` })
+
+        const d = guardado().payload.descriptionResponse
+        expect(d).toMatch(/^TARJETA .+ \/ .+ FIN$/)
+        expect(d).not.toMatch(/\d{12}/)
+        expect(JSON.stringify(guardado())).not.toContain('1111 1111')
+        expect(loLogueado()).not.toContain(PAN)
+        expect(loLogueado()).not.toContain('1111 1111')
+      },
+    )
+
+    it('un rechazo con descriptionResponse objeto ⇒ el log del receptor no lo lleva', async () => {
+      await processBlumonPaymentWebhook({ ...conTitular, codeResponse: '05', descriptionResponse: { pista: `${PAN}D2512` } } as any)
+
+      expect(guardado().errorReason).toBe('NOT_APPROVED')
+      const rechazo = espias[1].mock.calls.find(([m]) => String(m).includes('Non-approved'))
+      expect(rechazo).toBeDefined()
+      expect(rechazo![1].descriptionResponse).toBeUndefined()
+      expect(loLogueado()).not.toContain(PAN)
+    })
+
+    it('el nombre de un campo con dígitos de tarjeta no se guarda: sólo se cuenta', async () => {
+      await processBlumonPaymentWebhook({ ...conTitular, [PAN]: 'x', [`pan${PAN}`]: 'y', tvr: '1' } as any)
+
+      const p = guardado().payload
+      expect(JSON.stringify(p)).not.toContain(PAN)
+      expect(p.camposNoReconocidos).toEqual(['tvr'])
+      expect(p.camposNoReconocidosSinNombre).toBe(2)
+      expect(loLogueado()).not.toContain(PAN)
+    })
+
+    it('el texto libre lleva tope de largo; los valores normales pasan igual (paraElLog también enmascara)', () => {
+      const largo = sinTitular({ ...ventaPayload, descriptionResponse: 'A'.repeat(500), bank: 'BANCO' }) as any
+      expect(largo.descriptionResponse.length).toBeLessThanOrEqual(120)
+      expect(largo.bank).toBe('BANCO')
+      expect(sinTitular({ ...ventaPayload, lastFour: '1234', bin: '41111111', aid: 'A0000000031010' })).toMatchObject({
+        lastFour: '1234',
+        bin: '41111111',
+        aid: 'A0000000031010',
+      })
+      expect(JSON.stringify(paraElLog({ ...ventaPayload, descriptionResponse: `X ${PAN}` }))).not.toContain(PAN)
+    })
   })
 })
 

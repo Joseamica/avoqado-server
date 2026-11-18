@@ -391,8 +391,12 @@ export interface WebhookProcessingResult {
  * The webhook controller treats every case as 200 OK (Blumon must not retry —
  * we own the retry semantics now).
  */
-export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload): Promise<WebhookProcessingResult> {
+export async function processBlumonPaymentWebhook(crudo: BlumonWebhookPayload): Promise<WebhookProcessingResult> {
   const correlationId = `blumon-wh-${Date.now()}`
+  // R3-7: el receptor trabaja con la copia por lista BLANCA (valores validados y texto enmascarado), la misma que guarda y que
+  // la red relee: ningún log ni escritura de este camino lee el cuerpo CRUDO. Sólo la decisión de aprobado (abajo) mira el
+  // `codeResponse` crudo, para no cambiarla: un `codeResponse` ilegible que la copia descarta sigue sin aprobar.
+  const payload = sinTitular(crudo)
 
   try {
     const blumonAmount = parseFloat(payload.amount)
@@ -468,7 +472,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           provider: ProviderType.PAYMENT_PROCESSOR,
           eventId: eventIdString,
           type: payload.operationType ?? 'UNKNOWN',
-          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
+          payload: payload as unknown as Prisma.InputJsonValue,
           status: EventStatus.ERROR,
           errorReason: BLUMON_WEBHOOK_ERROR_REASONS.UNKNOWN_TERMINAL,
           processedAt: new Date(),
@@ -486,7 +490,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     }
 
     // ───────────── 3. Non-approved transactions: log + persist + return ─────────────
-    const isApproved = !payload.codeResponse || payload.codeResponse === '00'
+    const isApproved = !crudo.codeResponse || crudo.codeResponse === '00'
     if (!isApproved) {
       logger.warn('⚠️ [Blumon webhook] Non-approved transaction', {
         correlationId,
@@ -500,7 +504,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
           provider: ProviderType.PAYMENT_PROCESSOR,
           eventId: eventIdString,
           type: payload.operationType ?? 'UNKNOWN',
-          payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
+          payload: payload as unknown as Prisma.InputJsonValue,
           venueId: scopeVenueId,
           terminalId: terminal?.id ?? null,
           status: EventStatus.ERROR,
@@ -555,7 +559,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
               eventId: eventIdString,
               type: payload.operationType ?? 'VENTA',
               payload: {
-                ...sinTitular(payload),
+                ...payload,
                 _avoqado: {
                   receivedByMerchantAccountId: ctx.merchantAccountId,
                   contextoDelIngreso: ctx,
@@ -579,7 +583,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
             provider: ProviderType.PAYMENT_PROCESSOR,
             eventId: eventIdString,
             type: payload.operationType ?? 'VENTA',
-            payload: sinTitular(payload) as unknown as Prisma.InputJsonValue,
+            payload: payload as unknown as Prisma.InputJsonValue,
             venueId: scopeVenueId,
             terminalId: terminal?.id ?? null,
             status: EventStatus.PENDING,
@@ -832,8 +836,16 @@ async function updateEventLogFromMatchResult(eventLogId: string, result: Webhook
   }
 
   // Familia A: sólo un aviso que sigue PENDING (el receptor, la red, el respaldo del REST y el resultado del reverso lo pueden tocar):
-  // uno que otro ya resolvió no se reescribe; no aplicar no es error.
-  await prisma.providerEventLog.update({ where: { id: eventLogId, status: EventStatus.PENDING }, data }).catch(err => {
+  // uno que otro ya resolvió no se reescribe; no aplicar no es error. R3-1: la única excepción es una conciliación que YA tiene su
+  // Payment: puede reparar el huérfano que la red escribió en medio (ERROR/ORPHANED), nunca otro desenlace.
+  const reparaHuerfano = (result.action === 'MATCHED' || result.action === 'RECONCILED') && !!result.paymentId
+  const where: Prisma.ProviderEventLogWhereUniqueInput = reparaHuerfano
+    ? {
+        id: eventLogId,
+        OR: [{ status: EventStatus.PENDING }, { status: EventStatus.ERROR, errorReason: BLUMON_WEBHOOK_ERROR_REASONS.ORPHANED }],
+      }
+    : { id: eventLogId, status: EventStatus.PENDING }
+  await prisma.providerEventLog.update({ where, data }).catch(err => {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
       logger.info('🔒 [Blumon webhook] El aviso ya tenía desenlace: no se reescribe', { eventLogId, action: result.action })
       return
@@ -1309,24 +1321,70 @@ const CAMPOS_DEL_AVISO = [
 const SOLO_EN_LA_BASE = new Set(['bin', 'lastFour'])
 /** Lo que se quita a propósito y en silencio: no es «nuevo» (`_avoqado` lo escribe sólo el SERVIDOR). */
 const CAMPOS_QUE_NUNCA_SE_COPIAN = new Set(['cardHolder', 'arqc', '_avoqado'])
-/** Cuántos nombres de campos desconocidos se guardan (y de qué largo): basta para saber que Blumon agregó algo. */
+/** Cuántos nombres de campos desconocidos se guardan: basta para saber que Blumon agregó algo. */
 const TOPE_DE_CAMPOS_NO_RECONOCIDOS = 20
-const LARGO_DEL_NOMBRE = 64
+/**
+ * R3-7: un nombre desconocido sólo se guarda si tiene forma de identificador y ninguna racha de dígitos de tarjeta; los demás
+ * sólo se cuentan (`camposNoReconocidosSinNombre`): una llave también puede traer el PAN.
+ */
+const NOMBRE_GUARDABLE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
+/**
+ * R3-7: los campos con forma FIJA se validan por valor; uno que no la cumple no se copia y su nombre va a `camposNoReconocidos`.
+ * `aid` (EMV) empieza con la letra del RID: un PAN (sólo dígitos) nunca pasa por él.
+ */
+const FORMA_FIJA = new Map<string, RegExp>([
+  ['lastFour', /^\d{4}$/],
+  ['bin', /^\d{6,8}$/],
+  ['aid', /^[A-Fa-f][0-9A-Fa-f]{9,31}$/],
+])
+/**
+ * R3-7: el texto LIBRE (lo que Blumon describe, no las llaves del emparejamiento) lleva tope de largo y toda racha de 12+ dígitos
+ * —también separados por un espacio o un guion— enmascarada, antes de ir al log o a la base. Las llaves (`amount`, `reference`,
+ * `operationNumber`, `authorizationCode`, `codeResponse`, `serialNumber`, `membership`, `realCounter`) se copian tal cual: el
+ * emparejamiento y los lectores SQL comparan su valor exacto (`reference` es un timestamp de 14 dígitos).
+ */
+const TEXTO_LIBRE = new Set([
+  'business',
+  'businessRfc',
+  'cardType',
+  'brand',
+  'bank',
+  'operationType',
+  'descriptionResponse',
+  'dateTransaction',
+  'authentication',
+  'provideResponse',
+])
+const LARGO_DEL_TEXTO = 120
+const RACHA_DE_DIGITOS = /\d(?:[ -]?\d){11,}/g
+const MASCARA = '[enmascarado]'
+
+function enmascarar(valor: unknown): unknown {
+  if (valor === null) return valor
+  const texto = String(valor)
+  const limpio = texto.replace(RACHA_DE_DIGITOS, MASCARA).slice(0, LARGO_DEL_TEXTO)
+  return limpio === texto ? valor : limpio
+}
 
 function copiaPorListaBlanca(aviso: Record<string, unknown>, destino: 'base' | 'log'): Record<string, unknown> {
   const copia: Record<string, unknown> = {}
   const permitidos = new Set<string>(CAMPOS_DEL_AVISO)
   const noReconocidos: string[] = []
+  let sinNombre = 0
   for (const [campo, valor] of Object.entries(aviso)) {
     if (CAMPOS_QUE_NUNCA_SE_COPIAN.has(campo)) continue
     const primitivo = valor === null || ['string', 'number', 'boolean'].includes(typeof valor)
-    if (permitidos.has(campo) && primitivo) {
-      if (destino === 'base' || !SOLO_EN_LA_BASE.has(campo)) copia[campo] = valor
+    const conForma = FORMA_FIJA.get(campo)?.test(String(valor)) ?? true
+    if (permitidos.has(campo) && primitivo && conForma) {
+      if (destino === 'base' || !SOLO_EN_LA_BASE.has(campo)) copia[campo] = TEXTO_LIBRE.has(campo) ? enmascarar(valor) : valor
+    } else if (!NOMBRE_GUARDABLE.test(campo) || new RegExp(RACHA_DE_DIGITOS.source).test(campo)) {
+      sinNombre++
     } else if (noReconocidos.length < TOPE_DE_CAMPOS_NO_RECONOCIDOS) {
-      noReconocidos.push(campo.slice(0, LARGO_DEL_NOMBRE))
+      noReconocidos.push(campo)
     }
   }
   if (noReconocidos.length > 0) copia.camposNoReconocidos = noReconocidos
+  if (sinNombre > 0) copia.camposNoReconocidosSinNombre = sinNombre
   return copia
 }
 

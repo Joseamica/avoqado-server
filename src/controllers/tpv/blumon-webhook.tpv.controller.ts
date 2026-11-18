@@ -126,6 +126,8 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
   }
 
   const payload = body as BlumonWebhookPayload
+  // R3-7: los logs de abajo leen la copia filtrada, nunca el cuerpo crudo (una `reference` objeto podría traer la tarjeta).
+  const enElLog = paraElLog(body)
 
   try {
     // Process the payment confirmation
@@ -136,7 +138,7 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
       action: result.action,
       success: result.success,
       paymentId: result.paymentId,
-      reference: payload.reference,
+      reference: enElLog.reference,
     })
 
     // ACK contract: 200 ONLY when the event row is durably persisted
@@ -147,7 +149,7 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
       logger.error('🚨 Blumon webhook: result without eventLogId — asking Blumon to retry', {
         correlationId,
         action: result.action,
-        reference: payload.reference,
+        reference: enElLog.reference,
       })
 
       res.status(503).json({
@@ -168,8 +170,8 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
   } catch (error) {
     logger.error('❌ Blumon webhook: Unexpected error', {
       correlationId,
-      reference: payload.reference,
-      operationNumber: payload.operationNumber,
+      reference: enElLog.reference,
+      operationNumber: enElLog.operationNumber,
       error: error instanceof Error ? error.message : 'Unknown error',
       stack: error instanceof Error ? error.stack : undefined,
     })

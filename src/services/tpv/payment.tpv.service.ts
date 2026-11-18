@@ -4053,8 +4053,10 @@ export async function recordOrderPayment(
           // SDK propio (Tarea 7, H13): la lápida del reverso, bajo el MISMO candado que el permiso del reverso, y después del
           // atajo idempotente (si el cobro ya existe, la verdad es «Aprobado», no un 409). Sólo para cobros de Blumon.
           if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
-            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado.
-            paymentData.reversoIncierto = (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed'
+            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado. R3-2: sólo un
+            // cobro aprobado (no FAILED): la marca, su ActivityLog y la 🚨 («El banco aprobó…») hablan de dinero que sí entró.
+            paymentData.reversoIncierto =
+              (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed' && paymentStatusSnapshot !== 'FAILED'
           }
         }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
@@ -5785,8 +5787,10 @@ export async function recordFastPayment(
           await candadoDeIntento(tx, llaveDelIntento)
           // SDK propio (Tarea 7): la lápida del reverso, bajo el mismo candado que el permiso del reverso. Sólo cobros de Blumon.
           if (await esCobroDeBlumon(tx, { merchantAccountId, blumonOperationNumber: paymentData.blumonOperationNumber })) {
-            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado.
-            paymentData.reversoIncierto = (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed'
+            // F2: el cobro que nace con la lápida vencida sin respuesta lleva la marca, decidida aquí, bajo el candado. R3-2: sólo un
+            // cobro aprobado (no FAILED): la marca, su ActivityLog y la 🚨 («El banco aprobó…») hablan de dinero que sí entró.
+            paymentData.reversoIncierto =
+              (await exigirIntentoSinReverso(tx, llaveDelIntento)) === 'reverse_unconfirmed' && paymentStatusSnapshot !== 'FAILED'
           }
         }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) y vuelve a resolver ya con el candado.
