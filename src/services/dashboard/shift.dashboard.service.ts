@@ -317,6 +317,17 @@ export async function resolveShiftCashDrawer(
 
 /** Lo que el detalle del turno lee de cada orden: renglones para los productos, y sus cobros para la forma de pago y
  *  para saber si se cobró dentro del turno. */
+/**
+ * Lo regalado en cortesía que NO quedó en `Order.subtotal`: la cortesía de Mesas (renglón en $0, `HIDDEN_COMP_LINE_WHERE` de
+ * `salesGiveaways.ts`). La de Mostrador/«Cobrar» deja el renglón a precio lleno y ya está en el subtotal.
+ */
+function cortesiasFueraDelSubtotal(items: Array<{ isCortesia?: boolean | null; total?: unknown; discountAmount?: unknown }>): number {
+  return items.reduce(
+    (suma, item) => (item.isCortesia === true && Number(item.total ?? 0) === 0 ? suma + Number(item.discountAmount ?? 0) : suma),
+    0,
+  )
+}
+
 const ORDEN_DEL_DETALLE = {
   id: true,
   orderNumber: true,
@@ -335,6 +346,9 @@ const ORDEN_DEL_DETALLE = {
       quantity: true,
       unitPrice: true,
       discountAmount: true,
+      // Encargo 04edc5: la cortesía de Mesas deja el renglón en $0 y fuera del subtotal; la lista la suma de vuelta.
+      total: true,
+      isCortesia: true,
       // Both are REQUIRED by lineRevenue: without `modifiers` the
       // modifier revenue vanishes, without `weightQuantity` a weighing
       // is charged as a whole kilo.
@@ -607,7 +621,10 @@ export async function getShiftById(
       id: order.id,
       orderNumber: order.orderNumber,
       total: Number(order.total || 0),
-      subtotal: Number(order.subtotal || 0),
+      // 🔴 Encargo 04edc5 (founder «C»): la venta bruta lleva lo regalado (convención de `salesGiveaways.ts`, como Square). La
+      // cortesía de Mostrador ya está en `subtotal` (renglón a precio lleno); la de Mesas (renglón en $0) no: se suma aquí para
+      // que la misma venta diga lo mismo con las dos. El total cobrado no cambia.
+      subtotal: Number((Number(order.subtotal || 0) + cortesiasFueraDelSubtotal(order.items)).toFixed(2)),
       tableName: order.table?.number ? `${order.table.number}` : null,
       staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : null,
       staffId: order.servedById,
@@ -620,6 +637,8 @@ export async function getShiftById(
         name: item.productName || item.product?.name || 'Unknown Product',
         quantity: item.quantity,
         price: Number(item.unitPrice || 0),
+        // Aditivo (encargo 04edc5): el renglón fue regalado, en cualquiera de sus dos formas.
+        isCortesia: item.isCortesia === true,
       })),
     }
   })

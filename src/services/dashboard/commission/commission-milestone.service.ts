@@ -462,9 +462,12 @@ async function calculateMilestoneProgress(
 
     case MilestoneTargetType.CATEGORY_AMOUNT: {
       if (!categoryId) return 0
-      // Sum of items in category sold by staff
+      // Sum of items in category sold by staff.
+      // 🔴 Encargo 04edc5 (founder «C»): lo regalado no es venta. La cortesía de Mostrador/«Cobrar» deja el renglón a precio
+      // lleno y la de Mesas en $0; sin este filtro el mismo regalo sumaba $20 al bono en una pantalla y $0 en la otra.
       const items = await prisma.orderItem.aggregate({
         where: {
+          isCortesia: false,
           product: {
             categoryId,
           },

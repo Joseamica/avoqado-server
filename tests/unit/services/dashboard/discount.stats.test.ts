@@ -84,3 +84,24 @@ describe('getDiscountStats (S9)', () => {
     expect(r.topDiscounts.map(d => d.id)).toEqual(['d1'])
   })
 })
+
+/**
+ * 🔴 Encargo 04edc5 (hz:8024bc1c:D41, founder «C»): la cortesía de Mostrador/«Cobrar» deja su fila COMP (y suma al «ahorro» y a
+ * los canjes); la de Mesas deja el renglón en $0 SIN fila, así que era invisible aquí. Mismo regalo, dos cifras. Ahora las
+ * cortesías de Mesas suman al ahorro (lo regalado). Los canjes siguen contando filas (acciones): no hay una unidad común.
+ */
+describe('getDiscountStats · las cortesías de Mesas también cuentan (encargo 04edc5)', () => {
+  const ESCONDIDA = { isCortesia: true, total: 0, discountAmount: { gt: 0 } }
+
+  it('🔴 suma lo regalado en Mesas al ahorro; los canjes siguen siendo las filas', async () => {
+    prismaMock.discount.count.mockResolvedValue(0)
+    prismaMock.orderDiscount.aggregate.mockResolvedValue({ _count: { _all: 2 }, _sum: { amount: D(25.5) } })
+    prismaMock.orderDiscount.groupBy.mockResolvedValue([])
+    prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { discountAmount: D(20) } } as never)
+
+    const r = await getDiscountStats(VENUE)
+
+    expect(r).toMatchObject({ totalSaved: 45.5, totalRedemptions: 2 })
+    expect(prismaMock.orderItem.aggregate).toHaveBeenCalledWith({ where: { ...ESCONDIDA, order: VIVA }, _sum: { discountAmount: true } })
+  })
+})
