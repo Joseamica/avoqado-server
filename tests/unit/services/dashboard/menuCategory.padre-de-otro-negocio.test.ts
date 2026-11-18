@@ -64,9 +64,18 @@ describe('Panel · el padre de una categoría es del mismo negocio', () => {
   })
 
   it('el rechazo no dice si la categoría existe en otro negocio (mismo texto que un id inexistente)', async () => {
-    const ajena = await menuService.createMenuCategory(MIO, { name: 'A', parentId: AJENA } as any).catch(e => e.message)
-    const inexistente = await menuService.createMenuCategory(MIO, { name: 'B', parentId: 'cat-que-no-existe' } as any).catch(e => e.message)
+    const ajena = await menuService.createMenuCategory(MIO, { name: 'A', parentId: AJENA } as any).then(
+      () => 'no rechazó',
+      e => e.message,
+    )
+    const inexistente = await menuService.createMenuCategory(MIO, { name: 'B', parentId: 'cat-que-no-existe' } as any).then(
+      () => 'no rechazó',
+      e => e.message,
+    )
+    // Codex mac r1 #1: los dos tienen que RECHAZAR (sin rechazo, los dos daban lo mismo y la prueba pasaba).
+    expect(ajena).toMatch(/categoría padre/i)
     expect(ajena).toBe(inexistente)
+    expect(prismaMock.menuCategory.create).not.toHaveBeenCalled()
   })
 
   it('control: con un padre del mismo negocio crea y lo conecta', async () => {
@@ -151,6 +160,19 @@ describe('App (/mobile) · el padre de una categoría es del mismo negocio', () 
     )
     const data = prismaMock.menuCategory.update.mock.calls[0][0].data as Record<string, unknown>
     expect(data).toMatchObject({ name: 'Bebidas', description: 'Frías', color: '#fff', parentId: null })
+  })
+
+  it('control (Codex mac r1 #1): editar desde la app para moverla a un padre del MISMO negocio se guarda', async () => {
+    prismaMock.menuCategory.findFirst.mockImplementation(((args: any) => {
+      const where = args?.where ?? {}
+      if ((where.id === 'cat-001' || where.id === PROPIA) && where.venueId === MIO) return Promise.resolve({ id: where.id } as any)
+      return Promise.resolve(null)
+    }) as any)
+    const res = respuesta()
+    await updateCategory({ params: { venueId: MIO, categoryId: 'cat-001' }, body: { parentId: PROPIA } } as any, res, jest.fn())
+    expect(res.status).not.toHaveBeenCalledWith(400)
+    expect(prismaMock.menuCategory.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.menuCategory.update.mock.calls[0][0].data).toEqual({ parentId: PROPIA })
   })
 
   it('control: con un padre del mismo negocio crea con ese padre', async () => {
