@@ -4224,6 +4224,13 @@ export interface CashPaymentInput {
    */
   soloRecuperarPago?: { ownerId: string | null; ownerName: string }
   /**
+   * D20 (hz:72be07e6:D20): el reductor de la cola sólo quiere la RESPUESTA del cobro que ya tiene esta llave (su reserva quedó abierta
+   * tras una caída y la reenvía otra sesión del mismo aparato, o la misma sin el permiso de hoy). Nunca el camino del pago nuevo: sin
+   * un cobro completado de esta orden con esa llave ⇒ 409 `COBRO_DE_LA_LLAVE_NO_ENCONTRADO` y nada se escribe. Marca INTERNA del
+   * reductor, nunca el body.
+   */
+  soloDevolverElCobroDeLaLlave?: true
+  /**
    * 🔴 R6-3 (Codex r5 #3): la propiedad de mesa estaba encendida cuando se autorizó la petición. El middleware (o el reducer) la revisó
    * ANTES del candado; si la cuenta cambia de dueño en esa ventana (una reasignación usa el mismo candado de la orden), el cobro la
    * vuelve a revisar bajo el candado con la MISMA regla: `puedeCobrarAjena` = `staffCanManageAllTables` con los overrides de cobro
@@ -5519,6 +5526,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // camino del pago nuevo.
   if (input.soloRecuperarPago && !(existingByKey && esCobroCompletadoDeLaOrden(existingByKey, orderId))) {
     throw new MesaAjenaSoloRecuperacion(input.soloRecuperarPago)
+  }
+  // D20: sólo devolver. Va antes de cualquier regla y de cualquier escritura: sin el cobro de la llave, un 409 y nada más.
+  if (input.soloDevolverElCobroDeLaLlave && !(existingByKey && esCobroCompletadoDeLaOrden(existingByKey, orderId))) {
+    throw new ConflictError('No hay un cobro registrado con esta llave en esta cuenta.', 'COBRO_DE_LA_LLAVE_NO_ENCONTRADO')
   }
   // 🛡️ IDEMPOTENCIA — defensa PRINCIPAL contra doble-cobro en reintentos del outbox/cola offline (el guard de venta cerrada sólo
   // protege pagos COMPLETOS; un abono re-encolado crearía un segundo Payment). Mismo patrón que recordFastPayment. R8: va ANTES de

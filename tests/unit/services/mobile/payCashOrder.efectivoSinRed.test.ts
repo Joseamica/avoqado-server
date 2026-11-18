@@ -647,6 +647,50 @@ describe('R5-1: autorizada sólo a recuperar el pago de su llave', () => {
 })
 
 /**
+ * D20 (hz:72be07e6:D20): el reductor de la cola contesta un cobro que YA está en la base a otra sesión del mismo aparato (o sin el
+ * permiso de hoy). Pide SÓLO la respuesta de ese cobro: `soloDevolverElCobroDeLaLlave` nunca llega al camino del pago nuevo.
+ */
+describe('D20: sólo devolver el cobro que ya tiene esta llave', () => {
+  const soloDevolver = (amount: number, idempotencyKey: string) => ({
+    amount,
+    tip: 0,
+    staffId: 'staff-1',
+    idempotencyKey,
+    isOfflineReplay: true,
+    soloDevolverElCobroDeLaLlave: true as const,
+  })
+
+  it('con el cobro de la llave ⇒ devuelve ESE cobro, igual que un reintento, sin crear otro', async () => {
+    const { pagos, cas } = instalarBase({ paymentStatus: 'PAID', total: 50 }, [{ amount: 50, idempotencyKey: 'llave-K' }])
+
+    const r = await payCashOrder('venue-1', 'order-1', soloDevolver(5000, 'llave-K'))
+
+    expect([r.paymentId, r.amount, r.changeCents, r.status]).toEqual(['previo-1', 5000, 0, 'COMPLETED'])
+    expect(pagos).toHaveLength(1)
+    expect(cas).toHaveLength(0)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['no hay pago con la llave', [] as Array<Partial<Pago>>, null],
+    ['el pago de la llave no se completó', [{ amount: 50, status: 'FAILED' as const, idempotencyKey: 'llave-K' }], null],
+    ['la llave es de una devolución', [{ amount: -50, type: 'REFUND' as const, idempotencyKey: 'llave-K' }], null],
+    ['la llave es de OTRA cuenta', [] as Array<Partial<Pago>>, { id: 'otro', orderId: 'order-otra', status: 'COMPLETED', type: 'REGULAR' }],
+  ])('🔴 %s ⇒ 409 COBRO_DE_LA_LLAVE_NO_ENCONTRADO y nada se escribe', async (_caso, previos, deOtraCuenta) => {
+    const { pagos, cas } = instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, previos)
+    if (deOtraCuenta) prismaMock.payment.findUnique.mockResolvedValueOnce({ ...deOtraCuenta, receipts: [] } as any)
+
+    const error = await payCashOrder('venue-1', 'order-1', soloDevolver(5000, 'llave-K')).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 409, code: 'COBRO_DE_LA_LLAVE_NO_ENCONTRADO' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect([pagos.length, cas.length]).toEqual([previos.length, 0])
+  })
+})
+
+/**
  * 🔴 R5-2 (Codex r4, P2 E): el retorno idempotente respondía `status: 'COMPLETED'` fijo con lo que encontrara la llave. Un intento
  * FAILED de $100 se presentaba como cobro de $100 (la cuenta seguía debiendo $100) y una devolución de −$100 como cobro con $100 de
  * cambio. Sólo un cobro completado de esta orden es «la misma operación»; lo demás ⇒ 409 sin escribir nada.
@@ -1212,7 +1256,8 @@ describe('Task4: el primer cierre en cero espera el desenlace acreditado de la t
     expect([row.paymentStatus, Number(row.paidAmount)]).toEqual(['PAID', 200])
     // D10-B: la terminal no decide nada sobre dinero positivo. Sólo se le pregunta DESPUÉS del dinero, para dejar el rastro.
     const crearElPago = prismaMock.payment.create.mock.invocationCallOrder[0]
-    for (const consulta of prismaMock.terminalPaymentRequest.findFirst.mock.invocationCallOrder) expect(consulta).toBeGreaterThan(crearElPago)
+    for (const consulta of prismaMock.terminalPaymentRequest.findFirst.mock.invocationCallOrder)
+      expect(consulta).toBeGreaterThan(crearElPago)
     expect(postCashSaleToDrawer).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'payment-2', amount: 100 }))
     sinEfectosDeSaldar(cas)
   })
@@ -1229,7 +1274,9 @@ describe('Task4: el primer cierre en cero espera el desenlace acreditado de la t
     expect(pagos).toHaveLength(1)
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
     expect(createSalePostingInTx).toHaveBeenCalledTimes(1)
-    expect(prismaMock.payment.create.mock.invocationCallOrder[0]).toBeLessThan((createSalePostingInTx as jest.Mock).mock.invocationCallOrder[0])
+    expect(prismaMock.payment.create.mock.invocationCallOrder[0]).toBeLessThan(
+      (createSalePostingInTx as jest.Mock).mock.invocationCallOrder[0],
+    )
   })
 })
 
@@ -1271,7 +1318,13 @@ describe('D5 · bloque P: COBRO_SIN_RED_CON_DIFERENCIA', () => {
     const r = await payCashOrder('venue-1', 'order-1', conSaldo(5000, 'dif-2', 5000))
 
     expect(marcas()).toHaveLength(1)
-    expect(marcas()[0].data).toEqual({ paymentId: 'payment-1', saldoEsperado: 50, saldoDelServidor: 100, diferencia: -50, aparato: 'tablet-1' })
+    expect(marcas()[0].data).toEqual({
+      paymentId: 'payment-1',
+      saldoEsperado: 50,
+      saldoDelServidor: 100,
+      diferencia: -50,
+      aparato: 'tablet-1',
+    })
     expect(r).toMatchObject({ remainingBalanceCents: 5000, orderPaymentStatus: 'PARTIAL' })
   })
 
