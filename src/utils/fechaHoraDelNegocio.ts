@@ -11,7 +11,8 @@ import { fromZonedTime } from 'date-fns-tz'
  * Antes se usaba `new Date(raw)`, que lee la hora sin zona en la zona del proceso: en Render
  * no hay `TZ`, así que las 15:00 de un negocio en CDMX quedaban como 09:00 (encargo e781ce).
  */
-const SIN_ZONA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/
+// Cualquier cantidad de decimales: con 4 o más, antes caía en `new Date` y se leía como UTC (Codex r2 #4, encargo 77f73a).
+const SIN_ZONA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/
 
 /** `true` si es un texto de hora del negocio sin zona (`2026-11-12T15:00`). */
 export function esHoraSinZona(raw: unknown): boolean {
@@ -21,7 +22,8 @@ export function esHoraSinZona(raw: unknown): boolean {
 export function fechaHoraDelNegocio(raw: string | Date, timezone: string): Date {
   if (raw instanceof Date) return raw
   const texto = raw.trim()
-  if (SIN_ZONA.test(texto)) return fromZonedTime(texto, timezone)
+  // date-fns-tz entiende hasta milisegundos: lo demás se recorta (nadie agenda por microsegundos).
+  if (SIN_ZONA.test(texto)) return fromZonedTime(texto.replace(/(\.\d{3})\d+$/, '$1'), timezone)
   return new Date(texto)
 }
 
@@ -37,9 +39,10 @@ export function fechaHoraDelNegocio(raw: string | Date, timezone: string): Date 
 export function horaQueNoExiste(raw: string | Date, timezone: string): boolean {
   if (typeof raw !== 'string') return false
   const texto = raw.trim()
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(texto)
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(texto)
   if (!m || !SIN_ZONA.test(texto)) return false
-  const comoUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
+  // Hasta el segundo: hay zonas viejas con desfase de segundos (Asia/Colombo en 1906, Codex r2 #8).
+  const comoUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0))
   if (Number.isNaN(comoUtc)) return false
   try {
     // Desfase de la zona en el instante tentativo y, si cambia ahí, en el corregido.
@@ -53,7 +56,7 @@ export function horaQueNoExiste(raw: string | Date, timezone: string): boolean {
   }
 }
 
-/** La hora del reloj de `timezone` en el instante `ms`, escrita como si fuera UTC (minutos exactos). */
+/** La hora del reloj de `timezone` en el instante `ms`, escrita como si fuera UTC (al segundo). */
 function relojDeLaZonaComoUtc(ms: number, timezone: string): number {
   const partes = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
@@ -63,9 +66,10 @@ function relojDeLaZonaComoUtc(ms: number, timezone: string): number {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  }).formatToParts(new Date(ms))
+    second: '2-digit',
+  }).formatToParts(new Date(Math.floor(ms / 1000) * 1000))
   const v = (tipo: string) => Number(partes.find(p => p.type === tipo)?.value)
-  return Date.UTC(v('year'), v('month') - 1, v('day'), v('hour'), v('minute'))
+  return Date.UTC(v('year'), v('month') - 1, v('day'), v('hour'), v('minute'), v('second'))
 }
 
 /** Forma válida para el esquema: un Date válido o un texto que `fechaHoraDelNegocio` entiende. */

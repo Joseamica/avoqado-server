@@ -79,6 +79,16 @@ describe('horaQueNoExiste', () => {
     expect(horaQueNoExiste(new Date('2027-03-14T10:30:00.000Z'), TIJUANA)).toBe(false)
   })
 
+  it('con más de 3 decimales también es hora del negocio (antes se leía como UTC) y también se detecta', () => {
+    expect(horaQueNoExiste('2027-03-14T02:30:00.0000', TIJUANA)).toBe(true)
+    expect(fechaHoraDelNegocio('2026-11-12T15:00:00.1234', 'America/Mexico_City').toISOString()).toBe('2026-11-12T21:00:00.123Z')
+    expect(esFechaHoraValida('2026-11-12T15:00:00.1234')).toBe(true)
+  })
+
+  it('zona con desfase de segundos (Colombo, 1906): la hora existe', () => {
+    expect(horaQueNoExiste('1906-01-01T00:10:29', 'Asia/Colombo')).toBe(false)
+  })
+
   it('con segundos y milisegundos también', () => {
     expect(horaQueNoExiste('2027-03-14T02:30:15.250', TIJUANA)).toBe(true)
     expect(horaQueNoExiste('2027-03-14T03:30:15.250', TIJUANA)).toBe(false)
