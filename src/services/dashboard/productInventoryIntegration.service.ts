@@ -653,7 +653,21 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
  * Wizard step 1: Check if product should use inventory
  * Returns recommendation based on venue type and features
  */
-export async function shouldProductUseInventory(venueId: string) {
+export async function shouldProductUseInventory(
+  venueId: string,
+  /**
+   * Quien pregunta es superadmin de verdad (no suplantando): el candado de plan lo deja pasar (`checkFeatureAccess`), así que la
+   * recomendación contesta lo mismo (na1d52b5, Codex r3 #5). El DASHBOARD decide con esta respuesta, no con un cálculo propio.
+   */
+  opciones: {
+    quienPreguntaEsSuperadmin?: boolean
+    /**
+     * na1d52b5, Codex r11 #2: si quien pregunta puede GUARDAR un alta con piezas sin Premium (permiso efectivo de inventario y de alta
+     * de productos, con marca blanca). Sin dato (otro llamador), como antes: habilitada.
+     */
+    puedeGuardarPiezasSinPremium?: boolean
+  } = {},
+) {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
 
   if (!venue) {
@@ -662,7 +676,7 @@ export async function shouldProductUseInventory(venueId: string) {
 
   // D4 + D6 (5-nov-2026): el mismo resolver que el portero de inventario. Antes bastaba una fila `active` propia (una
   // prueba vencida o una gracia de cobranza vencida contaban) y un plan PREMIUM sin fila propia no contaba.
-  const hasInventoryFeature = await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING')
+  const hasInventoryFeature = opciones.quienPreguntaEsSuperadmin === true || (await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING'))
 
   return {
     hasInventoryFeature,
@@ -678,7 +692,8 @@ export async function shouldProductUseInventory(venueId: string) {
         type: 'QUANTITY' as const,
         label: 'wizard.step2.simpleStock',
         description: 'wizard.step2.simpleStockDesc',
-        enabled: hasInventoryFeature,
+        // Contar piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta na1d52b5, 17-nov). La receta, no.
+        enabled: hasInventoryFeature || opciones.puedeGuardarPiezasSinPremium !== false,
       },
       {
         type: 'RECIPE' as const,
