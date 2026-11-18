@@ -36,10 +36,16 @@ jest.mock('@/config/logger', () => ({
 // Permission gate is not under test — passthrough, but KEEP the real resolveRequestVenueId.
 // Cada permiso que pide una ruta queda anotado (al importar el router): así se comprueba la forma de la ruta sin probar el permiso.
 // Cada middleware de permiso lleva el nombre del permiso: así se lee qué pide CADA ruta del router real.
+// Un permiso de `mockPermisosNegados` contesta 403, como lo haría el de verdad para un rol que no lo tiene.
+const mockPermisosNegados = new Set<string>()
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   ...jest.requireActual('@/middlewares/checkPermission.middleware'),
   checkPermission: (permiso: string) =>
-    Object.defineProperty((_req: any, _res: any, next: any) => next(), 'name', { value: `permiso:${permiso}` }),
+    Object.defineProperty(
+      (_req: any, res: any, next: any) => (mockPermisosNegados.has(permiso) ? res.status(403).json({ permisoFaltante: permiso }) : next()),
+      'name',
+      { value: `permiso:${permiso}` },
+    ),
 }))
 
 // Body/param validation is not under test — passthrough.
@@ -101,6 +107,7 @@ const RAW_MATERIALS_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/raw-ma
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockPermisosNegados.clear()
   staffVenueFindFirst.mockResolvedValue(null) // requester is NOT a platform superadmin
   venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
   vfFindFirst.mockResolvedValue(null) // no own VenueFeature grant
@@ -333,10 +340,66 @@ describe('asistente de producto — contar piezas al dar de alta, en todos los p
     expect(res.status).toBe(200)
   })
 
-  it('el alta por el asistente pide el permiso de siempre (`inventory:update`) y nada más: no le quita el alta a nadie (Codex r3 #4)', () => {
+  it('la ruta del alta pide `inventory:update` de entrada (el de siempre); `menu:create` sólo se pide sin Premium (abajo)', () => {
     const capa = (inventoryRoutes as any).stack.find((l: any) => l.route?.path === '/wizard/complete' && l.route.methods.post)
     const permisos = capa.route.stack.map((h: any) => h.name).filter((n: string) => n.startsWith('permiso:'))
     expect(permisos).toEqual(['permiso:inventory:update'])
+  })
+
+  describe('Codex r5 #1: sin inventario Premium, el alta pide también `menu:create`', () => {
+    const WIZARD_URL = `/api/v1/dashboard/venues/${VENUE_ID}/inventory/wizard/complete`
+    const porPiezas = {
+      product: { name: 'Libreta', price: 85, categoryId: 'cat_1' },
+      inventory: { useInventory: true, inventoryMethod: 'QUANTITY' },
+      simpleStock: { initialStock: 10, reorderPoint: 2, costPerUnit: 5 },
+    }
+    const sinInventario = { product: { name: 'Pan', price: 25, categoryId: 'cat_1' }, inventory: { useInventory: false } }
+
+    it.each([
+      ['Gratis', [] as unknown[]],
+      ['Pro', [PRO_PLAN_ROW]],
+    ])(
+      'negocio %s: un rol con `inventory:update` y SIN `menu:create` no da de alta (piezas ni sin inventario): hoy era 403',
+      async (_p, plan) => {
+        vfFindMany.mockResolvedValue(plan)
+        mockPermisosNegados.add('menu:create')
+        for (const cuerpo of [porPiezas, sinInventario]) {
+          const res = await request(server).post(WIZARD_URL).send(cuerpo)
+          expect(res.status).toBe(403)
+          expect(res.body.permisoFaltante).toBe('menu:create')
+        }
+      },
+    )
+
+    // REGRESSION TESTS
+    it('negocio Premium: el mismo rol sigue dando de alta con sólo `inventory:update` (Recetas, Codex r3 #4)', async () => {
+      vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
+      mockPermisosNegados.add('menu:create')
+      const res = await request(server).post(WIZARD_URL).send(porPiezas)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ handler: 'createProductWithInventory' })
+    })
+
+    it('negocio exento o superadmin: tampoco lo necesita, como el candado', async () => {
+      mockPermisosNegados.add('menu:create')
+      venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
+      expect((await request(server).post(WIZARD_URL).send(porPiezas)).status).toBe(200)
+      venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
+      staffVenueFindFirst.mockResolvedValue({ id: 'sv_super' })
+      expect((await request(server).post(WIZARD_URL).send(porPiezas)).status).toBe(200)
+    })
+
+    it('negocio Gratis con `menu:create`: da de alta por piezas como en la tarjeta', async () => {
+      const res = await request(server).post(WIZARD_URL).send(porPiezas)
+      expect(res.status).toBe(200)
+    })
+
+    it('sin `inventory:update` no entra, como siempre', async () => {
+      mockPermisosNegados.add('inventory:update')
+      const res = await request(server).post(WIZARD_URL).send(porPiezas)
+      expect(res.status).toBe(403)
+      expect(res.body.permisoFaltante).toBe('inventory:update')
+    })
   })
 
   // REGRESSION TESTS — editar y ajustar piezas de un producto existente sigue siendo Premium

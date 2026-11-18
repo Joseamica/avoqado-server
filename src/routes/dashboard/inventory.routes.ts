@@ -1,7 +1,8 @@
 import { Router, type RequestHandler } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
-import { checkFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
+import { checkFeatureAccess, requestIsSuperAdmin } from '../../middlewares/checkFeatureAccess.middleware'
+import { venueHasFeatureAccess } from '../../services/access/basePlan.service'
 import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
 import { checkInterVenueTransferCancelPermission } from '../../middlewares/interVenueTransferCancelPermission.middleware'
 import * as autoReorderController from '../../controllers/dashboard/auto-reorder.controller'
@@ -122,6 +123,19 @@ const router = Router({ mergeParams: true })
 const candadoSiPidePremium: RequestHandler = (req, res, next) =>
   altaPideInventarioPremium(req.body?.inventory) ? checkFeatureAccess('INVENTORY_TRACKING')(req, res, next) : next()
 
+// Codex r5 #1 de na1d52b5: donde el alta por el asistente era 403 (negocio SIN inventario Premium), ahora pasa; ahí pide también el
+// permiso del alta normal (`menu:create`), para no ampliar lo que puede un rol personalizado con sólo `inventory:update`. Con inventario
+// Premium (o exento, demo o superadmin) queda como siempre, con `inventory:update`: Recetas da de alta así (Codex r3 #4).
+const permisoDelAltaSinPremium: RequestHandler = async (req, res, next) => {
+  try {
+    const conPremium =
+      (await requestIsSuperAdmin((req as any).authContext)) || (await venueHasFeatureAccess(req.params.venueId, 'INVENTORY_TRACKING'))
+    return conPremium ? next() : checkPermission('menu:create')(req, res, next)
+  } catch (error) {
+    next(error)
+  }
+}
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/wizard/complete:
@@ -131,11 +145,11 @@ const candadoSiPidePremium: RequestHandler = (req, res, next) =>
  */
 router.post(
   '/wizard/complete',
-  // El permiso de siempre (`inventory:update`). Pedir además `menu:create` le quitaba el alta desde Recetas a roles personalizados que
-  // hoy la tienen (Codex r3 #4); la diferencia con el alta normal ya existía y queda anotada como deuda (Codex r1 #3).
+  // El permiso de siempre (`inventory:update`) y, sin inventario Premium, también el del alta normal (`menu:create`, Codex r5 #1).
   checkPermission('inventory:update'),
   validateRequest(CreateProductWithInventorySchema),
   candadoSiPidePremium,
+  permisoDelAltaSinPremium,
   productWizardController.createProductWithInventory,
 )
 
