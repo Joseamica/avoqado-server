@@ -316,9 +316,17 @@
       "clase": "EN_TX",
       "etiqueta": "refundLoyaltyForOrderDiscount"
     },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction": {
+      "clase": "EN_TX",
+      "etiqueta": "applyOrderDiscountInTransaction"
+    },
     "src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx": {
       "clase": "EN_TX",
       "etiqueta": "crearVentaDeMostradorEnTx"
+    },
+    "src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction": {
+      "clase": "EN_TX",
+      "etiqueta": "removeOrderDiscountInTransaction"
     },
     "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
       "clase": "SENTENCIA",
@@ -889,6 +897,10 @@
     },
     "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder": {
       "etiqueta": "redeemPointsToOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscount": {
+      "etiqueta": "applyOrderDiscount",
       "cantidad": 1
     },
     "src/services/mobile/order.mobile.service.ts#cancelOrder": {

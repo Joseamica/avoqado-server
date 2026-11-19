@@ -123,6 +123,8 @@ function baseEnMemoria() {
     where.venueId === VENUE ? { id: `sv-${where.staffId}`, staffId: where.staffId, venueId: VENUE, active: true, staff: {} } : null,
   )
   prismaMock.shift.findFirst.mockResolvedValue(null)
+  // D19 (encargo 01765a): el descuento de cuenta de la mesa suma su uso (el tope lo prueba topeDeUsos.descuentoDeCuenta.test.ts).
+  prismaMock.discount.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) => {
     const d = catalogo[where.id]
     return d && d.venueId === where.venueId ? { ...d, value: new Prisma.Decimal(d.value) } : null

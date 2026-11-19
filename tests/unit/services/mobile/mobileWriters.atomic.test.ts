@@ -261,6 +261,8 @@ beforeEach(() => {
   tx.orderPromotion.updateMany.mockResolvedValue({ count: 0 })
   tx.promotion.findFirst.mockResolvedValue(PROMOTION)
   tx.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+  // D19 (encargo 01765a): el descuento de cuenta suma su uso en la misma transacción (con el tope dentro del UPDATE).
+  tx.discount.updateMany.mockResolvedValue({ count: 1 })
   tx.discount.findFirst.mockResolvedValue({
     id: 'disc',
     venueId: 'venue',
@@ -1143,12 +1145,18 @@ describe('createOrderWithItems writes the sale money inside its creation transac
 })
 
 describe('Task4 captured transaction results', () => {
-  it('apply helper returns original created row and totals without another transaction/audit or catalog usage write', async () => {
+  it('apply helper returns original created row and totals without another transaction/audit; its usage write rides the caller TX', async () => {
     const result = await applyOrderDiscountInTransaction(tx, 'venue', 'order', 'disc', 'staff')
     expect(result.row).toEqual({ id: 'od-new', name: 'Diez', amount: 15 })
     expect(result.totals).toMatchObject({ subtotal: 150, discountAmount: 0, total: 150, version: 2 })
+    // D19 (encargo 01765a): antes esta prueba fijaba que el POS NO sumaba el uso (el defecto). Ahora suma UNA vez, en la tx de quien llama.
     expect(tx.discount.update).not.toHaveBeenCalled()
-    expect(tx.discount.updateMany).not.toHaveBeenCalled()
+    expect(tx.discount.updateMany).toHaveBeenCalledTimes(1)
+    expect(tx.discount.updateMany).toHaveBeenCalledWith({
+      where: { id: 'disc', venueId: 'venue' },
+      data: { currentUses: { increment: 1 } },
+    })
+    expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })

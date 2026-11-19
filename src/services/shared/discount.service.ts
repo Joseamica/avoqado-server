@@ -118,6 +118,11 @@ export function calcularDescuentoExactoCents(
   return Prisma.Decimal.min(monto.toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP), base).toNumber()
 }
 
+/** El rechazo del tope de usos (el mismo texto de siempre: apps viejas y pruebas lo leen). */
+export function descuentoSinUsos(nombre: string): BadRequestError {
+  return new BadRequestError(`Discount "${nombre}" has reached its usage limit`)
+}
+
 /**
  * Validate that a `Discount` row is currently usable: active, within its
  * validity window, and under its total-use cap.
@@ -126,12 +131,17 @@ export function calcularDescuentoExactoCents(
  * VENDIÓ, no a la de llegada; «todavía no empieza» sigue midiéndose a la llegada, así un reloj del aparato atrasado nunca rechaza
  * más que hoy. Sin ella, todo a la llegada, como siempre.
  *
+ * `opciones.enLaCola` (hz:e82938e1:D19, encargo 01765a): lo que llega de la cola sin red YA pasó frente al cliente (la venta de
+ * Mostrador ya se cobró en efectivo; la mesa ya dio el descuento). El TOPE de usos no lo rechaza: rechazarlo dejaba el efectivo en el
+ * cajón sin venta (como el canje del cupón, que en la cola nunca rechaza). Su uso cuenta igual y puede pasar del tope. Apagado y
+ * vencido se siguen revisando como siempre.
+ *
  * 🔴 Va en un OBJETO a propósito: `discounts.forEach(validateDiscountActive)` le pasaba el ÍNDICE como segundo argumento, y un
  * `0` posicional como «hora» aceptaba en silencio un descuento vencido. Llámala siempre con una flecha.
  *
  * @throws BadRequestError on any failed check.
  */
-export function validateDiscountActive(discount: any, opciones?: { horaDeLaVenta?: Date }): void {
+export function validateDiscountActive(discount: any, opciones?: { horaDeLaVenta?: Date; enLaCola?: boolean }): void {
   const now = new Date()
   if (!discount.active) {
     throw new BadRequestError(`Discount "${discount.name}" is inactive`)
@@ -142,8 +152,8 @@ export function validateDiscountActive(discount: any, opciones?: { horaDeLaVenta
   if (discount.validUntil && discount.validUntil < (opciones?.horaDeLaVenta ?? now)) {
     throw new BadRequestError(`Discount "${discount.name}" has expired`)
   }
-  if (discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
-    throw new BadRequestError(`Discount "${discount.name}" has reached its usage limit`)
+  if (!opciones?.enLaCola && discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
+    throw descuentoSinUsos(discount.name)
   }
 }
 

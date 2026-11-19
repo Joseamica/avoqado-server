@@ -1117,7 +1117,7 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(
       baseParams([{ id: 'i12', type: 'APPLY_DISCOUNT', payload: { localOrderId: 'local-D', discountId: 'disc-1' } }]),
     )
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, true, {}, {})
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, true, {}, {}, { enLaCola: true })
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-10', version: 4 } })
   })
 
@@ -1127,7 +1127,16 @@ describe('sync.mobile.service processIntents', () => {
     params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'orders:comp')
     await processIntents(params)
     expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'APPLY_DISCOUNT' }), 'orders:comp')
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, false, {}, {})
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(
+      VENUE,
+      'order-10',
+      'disc-1',
+      STAFF,
+      false,
+      {},
+      {},
+      { enLaCola: true },
+    )
   })
 
   it('D4: APPLY_DISCOUNT le pasa la aprobación sólo si quien encoló tiene tpv-orders:discount (sin él, nada: el servicio falla cerrado)', async () => {
@@ -1136,7 +1145,16 @@ describe('sync.mobile.service processIntents', () => {
     params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'tpv-orders:discount')
     await processIntents(params)
     expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'APPLY_DISCOUNT' }), 'tpv-orders:discount')
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-gerente', STAFF, true, undefined, {})
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(
+      VENUE,
+      'order-10',
+      'disc-gerente',
+      STAFF,
+      true,
+      undefined,
+      {},
+      { enLaCola: true },
+    )
   })
 
   it('f998c8: APPLY_DISCOUNT pasa el motivo y comentario del payload, recortados (uno viejo sin motivo entra igual)', async () => {
@@ -1161,6 +1179,8 @@ describe('sync.mobile.service processIntents', () => {
         reason: 'Queja del cliente',
         reasonComment: 'tardó',
       },
+      // D19 (encargo 01765a): lo que reproduce la cola no se rechaza por el tope de usos.
+      { enLaCola: true },
     )
   })
 

@@ -148,6 +148,8 @@ function baseEnMemoria() {
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE, active: true, staff: {} })
   prismaMock.shift.findFirst.mockResolvedValue(null)
   prismaMock.customer.findUnique.mockResolvedValue({ id: CLIENTE, venueId: VENUE, firstName: 'Ana', lastName: 'López', phone: null })
+  // D19 (encargo 01765a): el descuento de cuenta de la mesa suma su uso (el tope lo prueba topeDeUsos.descuentoDeCuenta.test.ts).
+  prismaMock.discount.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
     where.id === DESCUENTO_10 && where.venueId === VENUE
       ? { id: DESCUENTO_10, venueId: VENUE, name: '10% cliente frecuente', type: 'PERCENTAGE', value: 10, scope: 'ORDER', active: true }
