@@ -274,3 +274,48 @@ describe('sendTerminalPayment — espera cerrada por la cancelación del cajero'
     expect(res.locals.requestEndLevel).toBeUndefined()
   })
 })
+
+/**
+ * 🔴 F1 · Codex android r2 #1: `expectedRemainingCents` (el saldo base que la caja cree que falta) viaja al servicio, que lo compara
+ * con el saldo real bajo el candado de la orden. Opcional y aditivo: ausente o `null` = la caja vieja, que no cambia.
+ */
+describe('sendTerminalPayment — F1 · expectedRemainingCents', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    sendPaymentToTerminalMock.mockResolvedValue({ requestId, status: 'success' })
+  })
+
+  it.each([
+    { caso: 'un entero', valor: 6000, esperado: 6000 },
+    { caso: 'cero', valor: 0, esperado: 0 },
+    { caso: '`null` (cliente viejo)', valor: null, esperado: undefined },
+    { caso: 'ausente (cliente viejo)', valor: undefined, esperado: undefined },
+  ])('$caso ⇒ el servicio recibe $esperado', async ({ valor, esperado }) => {
+    const res = buildRes()
+    await sendTerminalPayment(buildReq(valor === undefined ? {} : { expectedRemainingCents: valor }), res)
+    expect(res.statusCode).toBe(200)
+    expect(sendPaymentToTerminalMock).toHaveBeenCalledWith(expect.objectContaining({ expectedRemainingCents: esperado }))
+  })
+
+  it.each(['6000', 60.5, -1, 100_000_001])('un saldo esperado inválido (%p) ⇒ 400 y no se manda nada', async valor => {
+    const res = buildRes()
+    await sendTerminalPayment(buildReq({ expectedRemainingCents: valor }), res)
+    expect(res.statusCode).toBe(400)
+    expect(sendPaymentToTerminalMock).not.toHaveBeenCalled()
+  })
+
+  it('el saldo cambió ⇒ 412 REMAINING_BALANCE_MISMATCH con status/errorMessage y el saldo vigente', async () => {
+    const mensaje = 'El cobro no cuadra con lo que falta de la cuenta X: falta $60.00. Revisa el reparto y vuelve a intentar.'
+    const details = { requestId, remainingBalanceCents: 6000, expectedRemainingCents: 10000 }
+    const res = await responder(new AppError(mensaje, 412, true, 'REMAINING_BALANCE_MISMATCH', details))
+    expect(res.statusCode).toBe(412)
+    expect(res.payload).toEqual({
+      success: false,
+      status: 'failed',
+      code: 'REMAINING_BALANCE_MISMATCH',
+      message: mensaje,
+      errorMessage: mensaje,
+      details,
+    })
+  })
+})

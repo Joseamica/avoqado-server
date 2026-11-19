@@ -97,6 +97,12 @@ export interface TerminalPaymentRequest {
    * (3-5 días por la firma PAX) para un arreglo que es sólo del server.
    */
   customerId?: string | null
+  /**
+   * F1 (Codex android r2 #1): el saldo base (sin propina) que la caja cree que falta en `orderId`. Con él, la admisión exige
+   * `0 < amountCents ≤ saldo real` al centavo y que este número sea el saldo real; si no, 412 `REMAINING_BALANCE_MISMATCH` con el
+   * saldo vigente. Ausente o `null` = la caja vieja, con el margen de D7. Sin orden, o en la diferencia de un Cambio, se ignora.
+   */
+  expectedRemainingCents?: number | null
 }
 
 export interface TerminalPaymentResult {
@@ -1051,7 +1057,9 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
     // hz:ce654971:D7 (Codex r1 #2): el «falta $X» también sale aquí: si se perdió la respuesta del POST, la caja lo recupera con esta
     // consulta y sin él decía «El cobro fue rechazado» (suena al banco) y reintentaba con el importe viejo.
-    ...(row.failureCode === 'BANK_DECLINED' || row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+    ...(row.failureCode === 'BANK_DECLINED' ||
+    row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE' ||
+    row.failureCode === 'REJECTED_ORDER_BALANCE_MISMATCH'
       ? { errorMessage: mensajeDelServidor(row.resultJson) }
       : {}),
     createdAt: row.createdAt.toISOString(),
@@ -1308,6 +1316,8 @@ type MotivoDeRechazo =
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
   /** hz:ce654971:D7: la cuenta ya tiene un abono y el cobro (sin propina) pasa de lo que falta. */
   | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+  /** F1 (Codex android r2 #1): la caja mandó `expectedRemainingCents` y el saldo real no es ése, o el cobro no cabe en él. */
+  | 'REJECTED_ORDER_BALANCE_MISMATCH'
 
 /**
  * hz:ce654971:D7 · margen para los redondeos de la caja al repartir una cuenta (dividir «por producto» reparte su total local y
@@ -1317,6 +1327,8 @@ const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
 /** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
 const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
 const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
+/** F1 (Codex android r2 #1): el reparto de la caja ya no es el saldo real. Mismo 412 que D7; el saldo va en `remainingBalanceCents`. */
+const SALDO_DISTINTO_AL_ESPERADO = 'REMAINING_BALANCE_MISMATCH'
 /**
  * hz:5bda0b30:D1 · pedido que no se cobra en la terminal (Rappi en efectivo, pagado con tarjeta en línea). Las otras puertas los
  * rechazan con 409; aquí va 412 por la misma razón que el «falta $X»: con 409 las apps vivas consultan el estado y sólo dicen
@@ -1397,6 +1409,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         HTTP_COBRO_MAYOR_QUE_EL_SALDO,
         true,
         COBRO_MAYOR_QUE_EL_SALDO,
+        details,
+      )
+    case 'REJECTED_ORDER_BALANCE_MISMATCH':
+      return new AppError(
+        mensaje('El cobro no cuadra con lo que falta de la cuenta. Revisa el reparto y vuelve a intentar.'),
+        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+        true,
+        SALDO_DISTINTO_AL_ESPERADO,
         details,
       )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
@@ -2048,7 +2068,23 @@ class TerminalPaymentService {
           const cobrado = await cobradoQueCubreEnTx(tx, { venueId, orderId: request.orderId })
           const saldo = computeOrderBalance(order, [{ amount: cobrado.amount, tipAmount: cobrado.tipAmount }])
           const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
-          if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
+          const esperado = request.expectedRemainingCents
+          if (esperado != null) {
+            // 🔴 F1 · Codex android r2 #1: la caja nueva dice qué saldo vio. Sin margen y también SIN abono: el servidor pudo corregir
+            // el precio al crear la cuenta, u otra caja abonar entre la lectura y el envío. Un reparto viejo nunca llega al lector.
+            if (esperado !== faltaCents || request.amountCents <= 0 || request.amountCents > faltaCents) {
+              return rechazar(
+                'REJECTED_ORDER_BALANCE_MISMATCH',
+                new AppError(
+                  `El cobro no cuadra con lo que falta de la cuenta ${order.orderNumber ?? request.orderId}: falta $${(faltaCents / 100).toFixed(2)}. Revisa el reparto y vuelve a intentar.`,
+                  HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                  true,
+                  SALDO_DISTINTO_AL_ESPERADO,
+                  { ...detalles, remainingBalanceCents: faltaCents, expectedRemainingCents: esperado },
+                ),
+              )
+            }
+          } else if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
             const falta = (faltaCents / 100).toFixed(2)
             return rechazar(
               'REJECTED_ORDER_AMOUNT_OVER_BALANCE',

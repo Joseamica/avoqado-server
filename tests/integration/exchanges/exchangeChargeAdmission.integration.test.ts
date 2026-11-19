@@ -93,6 +93,17 @@ describe('exchange charge admission and durable replay', () => {
     expect(await prisma.terminalPaymentRequest.findUnique({ where: { requestId: b.requestId } })).toMatchObject({ status: 'PENDING' })
     expect(emit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId: b.requestId, amountCents: 10000 }))
   })
+  // F1 (Codex android r2 #1): `expectedRemainingCents` no toca la diferencia de un Cambio, que sigue exigiéndose exacta.
+  it('F1: a stale expectedRemainingCents changes nothing for an exact exchange difference', async () => {
+    const { order } = await s.pendingExchange(500)
+    const b = body(order.id, { expectedRemainingCents: 1 })
+    expect((await send(b)).status).toBe(504)
+    expect(await prisma.terminalPaymentRequest.findUnique({ where: { requestId: b.requestId } })).toMatchObject({ status: 'PENDING' })
+  })
+  it('F1: with expectedRemainingCents a wrong exchange difference is still EXCHANGE_CHARGE_MISMATCH', async () => {
+    const { order } = await s.pendingExchange(500)
+    await assertTombstone(body(order.id, { amountCents: 10001, expectedRemainingCents: 10001 }), 400, 'EXCHANGE_CHARGE_MISMATCH')
+  })
   it('admits an ordinary order with its existing contract', async () => {
     const order = await s.newOrder()
     const b = body(order.id, { amountCents: 5000, tipCents: 500 })

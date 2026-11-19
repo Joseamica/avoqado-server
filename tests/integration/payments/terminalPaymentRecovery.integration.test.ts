@@ -2660,6 +2660,171 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
     })
   })
 
+  /**
+   * 🔴 F1 · Codex android r2 #1: la caja nueva manda `expectedRemainingCents` (el saldo base que cree que falta). Con él, el servidor
+   * exige `0 < base ≤ saldo real` al centavo y que lo esperado sea lo real, también SIN abono. Sin él, el contrato de D7 intacto.
+   */
+  describe('🔴 F1 · expectedRemainingCents: el cobro remoto no pasa del saldo real, al centavo', () => {
+    const abonar = (orden: { id: string }, pesos: number) =>
+      prisma.payment.create({
+        data: {
+          venueId,
+          orderId: orden.id,
+          amount: new Prisma.Decimal(pesos),
+          method: 'CASH',
+          status: 'COMPLETED',
+          feePercentage: new Prisma.Decimal(0),
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: new Prisma.Decimal(pesos),
+        } as Prisma.PaymentUncheckedCreateInput,
+      })
+    const seMando = (requestId: string) =>
+      expect(directEmit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId }), expect.any(Function))
+
+    it('sinAbono_unCentavoSobreSaldo_noLlegaAlLector', async () => {
+      const orden = await nuevaOrden() // $100, sin abono
+      const requestId = nextRequest()
+      const envio = {
+        requestId,
+        venueId,
+        terminalId: terminalDe('f1-centavo'),
+        orderId: orden.id,
+        amountCents: 10001,
+        expectedRemainingCents: 10000,
+        requestedBy: fixture,
+      }
+      const primero = await enviar(envio)
+      const segundo = await enviar(envio)
+
+      expect(directEmit).not.toHaveBeenCalled()
+      const filas = await filasDe(requestId)
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_MISMATCH', orderId: orden.id })
+      expect(primero).toMatchObject({
+        statusCode: 412,
+        code: 'REMAINING_BALANCE_MISMATCH',
+        details: { requestId, remainingBalanceCents: 10000, expectedRemainingCents: 10000 },
+      })
+      expect((primero as Error).message).toContain('falta $100.00')
+      expect(segundo).toMatchObject({
+        statusCode: 412,
+        code: 'REMAINING_BALANCE_MISMATCH',
+        message: (primero as Error).message,
+        details: { requestId, remainingBalanceCents: 10000, expectedRemainingCents: 10000 },
+      })
+    })
+
+    // La caja leyó $100; otra caja cobra $40 en efectivo; llega el envío con lo leído. Aunque el importe quepa, el reparto ya no.
+    it.each([
+      { caso: 'el total que leyó', amountCents: 10000 },
+      { caso: 'una parte que todavía cabe', amountCents: 5000 },
+    ])('otra caja abona entre la lectura y el envío ($caso) ⇒ 412 con el saldo vigente', async ({ amountCents }) => {
+      const orden = await nuevaOrden()
+      await abonar(orden, 40)
+      const requestId = nextRequest()
+      const r = await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe(`f1-otra-caja-${amountCents}`),
+        orderId: orden.id,
+        amountCents,
+        expectedRemainingCents: 10000,
+        requestedBy: fixture,
+      })
+
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(r).toMatchObject({
+        statusCode: 412,
+        code: 'REMAINING_BALANCE_MISMATCH',
+        details: { requestId, remainingBalanceCents: 6000, expectedRemainingCents: 10000 },
+      })
+      expect((r as Error).message).toContain('falta $60.00')
+    })
+
+    it('el GET de la lápida dice que no se cobró y trae el texto (respuesta del POST perdida)', async () => {
+      const orden = await nuevaOrden()
+      const requestId = nextRequest()
+      await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe('f1-get'),
+        orderId: orden.id,
+        amountCents: 10001,
+        expectedRemainingCents: 10000,
+        requestedBy: fixture,
+      })
+
+      expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+        requestId,
+        status: 'FAILED',
+        failureCode: 'REJECTED_ORDER_BALANCE_MISMATCH',
+        outcome: 'NOT_CHARGED',
+        paymentId: null,
+        errorMessage: expect.stringContaining('falta $100.00'),
+      })
+    })
+
+    it.each([
+      { caso: 'exactamente el saldo', abono: 0, expected: 10000, amountCents: 10000, tipCents: 0 },
+      { caso: 'una parte del saldo', abono: 0, expected: 10000, amountCents: 5000, tipCents: 0 },
+      { caso: 'el saldo con propina (va aparte)', abono: 0, expected: 10000, amountCents: 10000, tipCents: 1500 },
+      { caso: 'lo que falta tras un abono', abono: 40, expected: 6000, amountCents: 6000, tipCents: 0 },
+    ])('control: $caso ⇒ se admite y se manda a la terminal', async ({ abono, expected, amountCents, tipCents }) => {
+      const orden = await nuevaOrden()
+      if (abono) await abonar(orden, abono)
+      const requestId = nextRequest()
+      await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe(`f1-ok-${abono}-${amountCents}-${tipCents}`),
+        orderId: orden.id,
+        amountCents,
+        tipCents,
+        expectedRemainingCents: expected,
+        requestedBy: fixture,
+      })
+      seMando(requestId)
+    })
+
+    it('control: con un cobro pendiente en la cuenta gana el 409 ORDER, aunque el saldo esperado no cuadre', async () => {
+      const orden = await nuevaOrden()
+      const pendiente = await auditRequest({ terminalId: terminalDe('f1-pendiente-a'), orderId: orden.id, status: 'UNKNOWN' })
+      const r = await enviar({
+        requestId: nextRequest(),
+        venueId,
+        terminalId: terminalDe('f1-pendiente-b'),
+        orderId: orden.id,
+        amountCents: 10001,
+        expectedRemainingCents: 1,
+        requestedBy: fixture,
+      })
+
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(r).toBeInstanceOf(TerminalBusyError)
+      expect((r as TerminalBusyError).details).toMatchObject({ scope: 'ORDER', blockingRequest: { requestId: pendiente.requestId } })
+    })
+
+    it.each([
+      { caso: 'sin el campo, sin abono: un centavo de más se admite como hoy', abono: 0, amountCents: 10001, extra: {} },
+      { caso: '`null` es cliente viejo', abono: 0, amountCents: 10001, extra: { expectedRemainingCents: null } },
+      { caso: 'sin el campo, con abono: el margen de $1 sigue', abono: 40, amountCents: 6050, extra: {} },
+    ])('control: el contrato anterior conserva su margen ($caso)', async ({ abono, amountCents, extra }) => {
+      const orden = await nuevaOrden()
+      if (abono) await abonar(orden, abono)
+      const requestId = nextRequest()
+      await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe(`f1-viejo-${abono}-${amountCents}-${'expectedRemainingCents' in extra}`),
+        orderId: orden.id,
+        amountCents,
+        requestedBy: fixture,
+        ...extra,
+      } as Parameters<typeof terminalPaymentService.sendPaymentToTerminal>[0])
+      seMando(requestId)
+    })
+  })
+
   it('(d) orden inexistente en el venue ⇒ 400 ORDER_NOT_FOUND con lápida; aunque la orden aparezca, el MISMO requestId repite el 400', async () => {
     const ordenId = `${fixture}-orden-${randomUUID().slice(0, 8)}`
     const terminalId = terminalDe('orden-ausente')

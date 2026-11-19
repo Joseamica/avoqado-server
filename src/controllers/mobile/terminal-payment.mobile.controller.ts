@@ -82,6 +82,18 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
+    // F1 (Codex android r2 #1): el saldo que la caja nueva cree que falta. `null` o ausente = la caja vieja (contrato de siempre).
+    const expectedRemainingCents: number | undefined = req.body.expectedRemainingCents ?? undefined
+    if (
+      expectedRemainingCents !== undefined &&
+      (!Number.isSafeInteger(expectedRemainingCents) || expectedRemainingCents < 0 || expectedRemainingCents > MAX_TERMINAL_PAYMENT_CENTS)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `El saldo esperado debe ser un entero entre 0 y ${MAX_TERMINAL_PAYMENT_CENTS} centavos`,
+      })
+    }
+
     if (rating !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
       return res.status(400).json({ success: false, message: 'La calificación debe ser un entero entre 1 y 5' })
     }
@@ -105,6 +117,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       amountCents,
       tipCents,
       orderId,
+      expectedRemainingCents,
       userId,
       processedByStaffId: validatedProcessedByStaffId,
       customerId: relayCustomerId,
@@ -124,6 +137,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       requestId, // Client-generated for cancel tracking
       // Se guarda en la fila; NUNCA se emite a la terminal (ver terminal-payment.service.ts).
       customerId: relayCustomerId,
+      expectedRemainingCents,
     })
 
     const { cancelRequested, ...resultado } = result
@@ -232,6 +246,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       error instanceof AppError &&
       (error.code === 'EXCHANGE_DIFFERENCE_ALREADY_CHARGED' ||
         error.code === 'AMOUNT_EXCEEDS_REMAINING_BALANCE' ||
+        error.code === 'REMAINING_BALANCE_MISMATCH' ||
         error.code === 'RAPPI_CASH_ORDER_CASH_ONLY' ||
         error.code === 'ONLINE_ORDER_PAID_BY_CARD')
     ) {
