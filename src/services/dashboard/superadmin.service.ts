@@ -9,7 +9,6 @@ import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import { exigirQueSePuedaConceder } from '@/services/access/concederPlan'
 import { utcTs } from '@/utils/sqlDates'
 import { terminarAltaPorPlanRegalado } from '@/services/onboarding/terminarAltaCobrada'
-import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
@@ -294,8 +293,11 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
     // Aggregate revenue and transaction counts at the database level (avoids loading 100K+ rows)
     const revenueByVenue = await prisma.payment.groupBy({
       by: ['venueId'],
-      // D4d: por la hora real del cobro (la del aparato si se hizo sin internet), como el Resumen.
-      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: 'COMPLETED' as const }, monthStart, null),
+      where: {
+        venueId: { in: venueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: monthStart },
+      },
       _sum: { amount: true },
       _count: true,
     })
