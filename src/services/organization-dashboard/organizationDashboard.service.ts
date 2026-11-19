@@ -322,8 +322,9 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
 }
 
 /**
- * ¿Es «AAAA-MM-DD» de un día que existe en el calendario? Por partes y sin `Date.UTC`, que lee los años 0–99 como 1900–1999
- * (Codex a1988b r3).
+ * ¿Es «AAAA-MM-DD» de un día que existe en el calendario, entre los años 2000 y 2099? Por partes y sin `Date.UTC`, que lee los
+ * años 0–99 como 1900–1999; el tope también deja seguro a `addCivilDays` (Codex a1988b r3 y r4). Un reporte de asistencia fuera de ese
+ * siglo no tiene datos que mostrar.
  */
 function esFechaCivil(valor: unknown): valor is string {
   if (typeof valor !== 'string') return false
@@ -332,7 +333,7 @@ function esFechaCivil(valor: unknown): valor is string {
   const [anio, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])]
   const bisiesto = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0
   const diasDelMes = [31, bisiesto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mes - 1]
-  return diasDelMes !== undefined && dia >= 1 && dia <= diasDelMes
+  return anio >= 2000 && anio <= 2099 && diasDelMes !== undefined && dia >= 1 && dia <= diasDelMes
 }
 
 export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
@@ -2217,7 +2218,8 @@ class OrganizationDashboardService {
     // Una lista (`?date=a&date=b`) también es un 400 (r3).
     for (const fecha of [dateStr, startDateStr, endDateStr] as unknown[]) {
       if (fecha !== undefined && fecha !== '' && !esFechaCivil(fecha)) {
-        throw new BadRequestError(`La fecha «${fecha}» no es válida: usa el formato AAAA-MM-DD con un día que exista.`)
+        // El mensaje no copia lo recibido: un objeto de la query no se puede convertir a texto (r4).
+        throw new BadRequestError('Una fecha no es válida: usa el formato AAAA-MM-DD con un día que exista (años 2000 a 2099).')
       }
     }
     const ahora = new Date()
