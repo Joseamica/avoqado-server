@@ -10,7 +10,7 @@ import {
 } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
-import { contarPedidoSinAtenderEnTx } from './autoPause'
+import { contarPedidoSinAtenderEnTx, reiniciarPedidosSinAtenderEnTx } from './autoPause'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
@@ -142,6 +142,11 @@ export interface CasArgs {
   extraWhere?: (now: Date, hasMoney: boolean) => Prisma.OnlineOrderWhereInput
   /** Fase 2: sólo la captura misma, que termina su propia aceptación o rechazo, corre con el cargo en `CAPTURING`. */
   allowCapturing?: true
+  /**
+   * D662: este ACCEPT o REJECT es una persona contestando a tiempo (su toque, con `staffId`). Si gana, la cuenta de pedidos sin
+   * atender vuelve a 0 en ESTA transacción. Nunca lo ponen Stripe, el conciliador, los barridos ni la captura que termina después.
+   */
+  respondeLaPersona?: true
 }
 
 /**
@@ -264,6 +269,10 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
       data: { status: OnlineOrderChargeStatus.RELEASING },
     })
     if (released.count === 1) releaseChargeId = charge.id
+  }
+  // D662: una persona contestó un pedido de «Mi equipo»: la cuenta vuelve a 0 con el candado de la fila, dentro de esta transacción.
+  if (a.respondeLaPersona && row.requiresAcceptance !== false && (a.kind === 'ACCEPT' || a.kind === 'REJECT')) {
+    await reiniciarPedidosSinAtenderEnTx(tx, a.venueId)
   }
   return {
     r: 'OK',
@@ -392,6 +401,7 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
       venueId: i.venueId,
       orderId: i.orderId,
       now: i.now,
+      ...(i.staffId ? { respondeLaPersona: true as const } : {}),
       // Sin dinero, sólo antes de la hora límite (compite con el vencimiento por el mismo CAS). Un pedido ya cobrado no vence:
       // el job no lo toca (R1) y queda en la bandeja para aceptarlo.
       extraWhere: (now, hasMoney) => (hasMoney ? {} : { acceptDeadlineAt: { gt: now } }),
@@ -476,6 +486,8 @@ export async function rejectOnlineOrder(i: {
       orderId: i.orderId,
       now: i.now,
       allowCapturing: i.allowCapturing,
+      // D662: una persona que rechaza; la captura fallida (`allowCapturing`) no: puede llegar tarde por el conciliador.
+      ...(i.staffId && !i.allowCapturing ? { respondeLaPersona: true as const } : {}),
       onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
     },
     i.afterCas,

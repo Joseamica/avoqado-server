@@ -18,7 +18,6 @@ import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } fro
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
-import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import { settingsView } from '@/services/online-ordering/settingsView.service'
 import {
   acceptOnlineOrder,
@@ -252,8 +251,6 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       }
 
       const staffId = scope.staffId
-      // D662: aceptar o rechazar es una persona contestando (la pausa sola deja de contar lo vencido antes).
-      if (action === 'ACCEPT' || action === 'REJECT') await marcarPedidoAtendido(venueId)
       const result =
         action === 'ACCEPT'
           ? await acceptOnlineOrder({ venueId, orderId, staffId, estimatedMinutes })

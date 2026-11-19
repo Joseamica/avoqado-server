@@ -14,7 +14,6 @@ import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.se
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import { getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
-import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -144,8 +143,6 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
-    // D662: una persona contestó; con la hora del TOQUE (aceptar con tarjeta espera a Stripe).
-    await marcarPedidoAtendido(venueId)
     const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
     if (r.outcome === 'PAYMENT_REQUIRED') {
@@ -163,7 +160,6 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
     const reason = req.body.reason as OnlineOrderRejectReason
     // Una nota de puros espacios no es nota: se guarda `null`, no `""`.
     const note = typeof req.body.note === 'string' ? req.body.note.trim() || null : null
-    await marcarPedidoAtendido(venueId) // D662: una persona contestó
     return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note }))
   } catch (e) {
     return next(e)

@@ -24,7 +24,6 @@ import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/onl
 import * as quoteModule from '@/services/online-ordering/quote.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
 import { pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
-import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByStaff,
@@ -582,17 +581,18 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 1_000) } })
       await expect(expireOnlineOrder({ venueId: venueId!, orderId })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
     }
-    const marca = async () => (await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).missedOrdersSince
-    await pauseOnlineOrdering(venueId!, null, null) // arranca sin pausa y contando desde ahora, pase lo que pase antes
+    const cuenta = async () => (await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).missedOrdersInARow
+    await pauseOnlineOrdering(venueId!, null, null) // arranca sin pausa y en 0, pase lo que pase en las pruebas de antes
     try {
       await vencer()
+      expect(await cuenta()).toBe(1)
       await beat()
-      const antes = await marca()
-      // Alguien contestó (como el controlador de la caja: primero la marca, luego aceptar): lo vencido antes ya no cuenta.
+      // Una PERSONA contesta a tiempo (con su staffId, como la caja): la cuenta vuelve a 0 en la transacción de su aceptación.
       const enMedio = await newOrder()
-      await marcarPedidoAtendido(venueId!)
-      await aceptar(enMedio.orderId)
-      expect((await marca())!.getTime()).toBeGreaterThan(antes!.getTime())
+      await expect(acceptOnlineOrder({ venueId: venueId!, orderId: enMedio.orderId, staffId: staffId! })).resolves.toMatchObject({
+        outcome: 'OK',
+      })
+      expect(await cuenta()).toBe(0)
       await vencer()
       await beat()
       expect((await getAcceptingStatus(venueId!)).status).toBe('OPEN')

@@ -12,7 +12,6 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
 jest.mock('@/services/online-ordering/folios.service', () => ({ __esModule: true, listFolios: jest.fn() }))
-jest.mock('@/services/online-ordering/autoPause', () => ({ __esModule: true, marcarPedidoAtendido: jest.fn(async () => undefined) }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   __esModule: true,
@@ -40,7 +39,6 @@ import {
   rejectOnlineOrder,
 } from '@/services/online-ordering/transitions.service'
 import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
-import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
@@ -182,21 +180,6 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.accept(b.req, b.res, b.next)
     expect(b.res.status).toHaveBeenCalledWith(409)
     expect(b.res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_STATE_CHANGED', status: 'EXPIRED' }))
-  })
-
-  it('D662: aceptar y rechazar desde la caja o el panel son una PERSONA contestando: se marca ANTES de la transición', async () => {
-    ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })
-    const a = mock({ body: { estimatedMinutes: 20 } })
-    await ctrl.accept(a.req, a.res, a.next)
-    expect(marcarPedidoAtendido).toHaveBeenCalledWith('v1')
-    expect((marcarPedidoAtendido as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-      (acceptOnlineOrder as jest.Mock).mock.invocationCallOrder[0],
-    )
-    ;(marcarPedidoAtendido as jest.Mock).mockClear()
-    ;(rejectOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'REJECTED' })
-    const r = mock({ body: { reason: 'CLOSED' } })
-    await ctrl.reject(r.req, r.res, r.next)
-    expect(marcarPedidoAtendido).toHaveBeenCalledWith('v1')
   })
 
   it('aceptar con PAYMENT_REQUIRED (un folio sin pagar) responde 409 «se cobra antes de prepararlo»', async () => {

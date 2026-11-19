@@ -204,7 +204,7 @@ export async function updateSettings(
     const cambiaDeModo = patch.requiresAcceptance !== undefined && patch.requiresAcceptance !== current.requiresAcceptance
     if (existing && (cambiaDeModo || (patch.enabled === true && !current.enabled))) {
       data.autoPausedAt = null
-      data.missedOrdersSince = new Date()
+      data.missedOrdersInARow = 0
     }
 
     const row = await tx.onlineOrderingSettings.upsert({
@@ -270,7 +270,7 @@ export async function updateSettings(
  * gerente (`manualPause`) sigue en ajustes, y la respuesta la incluye (M-8): reanudar con ella puesta deja la tienda frenada.
  * No crea la fila: pausar una tienda que nunca se configuró no tiene sentido (y crearla aquí se saltaría la precarga del horario).
  * D662: sólo «Reanudar» (`null`) quita la pausa SOLA; una pausa de 15/30/60 la deja (al vencer, la tienda sigue pausada hasta
- * «Reanudar»). Las dos son una persona atendiendo: lo vencido antes ya no cuenta para la siguiente pausa sola.
+ * «Reanudar»). Las dos son una persona atendiendo: la cuenta de pedidos sin atender vuelve a 0.
  */
 export async function pauseOnlineOrdering(
   venueId: string,
@@ -281,7 +281,7 @@ export async function pauseOnlineOrdering(
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
   const r = await prisma.onlineOrderingSettings.updateMany({
     where: { venueId },
-    data: { pausedUntil, missedOrdersSince: now, ...(minutes === null ? { autoPausedAt: null } : {}) },
+    data: { pausedUntil, missedOrdersInARow: 0, ...(minutes === null ? { autoPausedAt: null } : {}) },
   })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')

@@ -40,6 +40,7 @@ jest.mock('@/services/online-ordering/folios.service', () => ({
 jest.mock('@/services/online-ordering/autoPause', () => ({
   __esModule: true,
   contarPedidoSinAtenderEnTx: jest.fn(async () => false),
+  reiniciarPedidosSinAtenderEnTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -57,7 +58,7 @@ import { getSettings } from '@/services/online-ordering/settings.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { acceptCardOnlineOrder } from '@/services/online-ordering/card/capture.service'
 import { cerrarFolioEnCeroEnTx, trasCerrarFolioEnCero } from '@/services/online-ordering/folios.service'
-import { contarPedidoSinAtenderEnTx } from '@/services/online-ordering/autoPause'
+import { contarPedidoSinAtenderEnTx, reiniciarPedidosSinAtenderEnTx } from '@/services/online-ordering/autoPause'
 import {
   acceptOnlineOrder,
   announceAccepted,
@@ -428,15 +429,35 @@ describe('D662 · pausa sola tras 2 pedidos de «Mi equipo» sin atender', () =>
     expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
   })
 
-  it('Codex r2 #2: la máquina de estados no marca «alguien contestó» (Stripe, el conciliador y los barridos también pasan por aquí)', async () => {
-    // El simulacro de `autoPause` no trae `marcarPedidoAtendido`: si la máquina de estados lo llamara, estas llamadas tronarían.
+  it('una persona que acepta o rechaza a tiempo vuelve a 0 la cuenta EN SU transacción, después de su CAS', async () => {
     await acceptOnlineOrder(base)
+    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1')
+    expect((reiniciarPedidosSinAtenderEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    ;(reiniciarPedidosSinAtenderEnTx as jest.Mock).mockClear()
     await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS' as any })
+    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1')
+  })
+
+  it('Codex r2 #2 / r3 #1: lo del sistema no cuenta como respuesta (sin persona, captura fallida, folio de «Nadie», aceptar que no gana)', async () => {
+    await acceptOnlineOrder({ ...base, staffId: null })
+    await rejectOnlineOrder({ ...base, staffId: null, reason: 'PAYMENT_FAILED' as any }) // aviso de Stripe
+    await rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED' as any, allowCapturing: true }) // captura fallida / conciliador
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false, order: PAID }) as any)
+    ;(prismaMock.onlineOrder.count as jest.Mock).mockResolvedValueOnce(0).mockResolvedValueOnce(0)
+    await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS' as any }) // un folio no se rechaza (R46): STALE
+    prismaMock.onlineOrder.findFirst.mockReset()
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: new Date(NOW.getTime() + 60_000) } as any)
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+    await acceptOnlineOrder(base) // otro aparato ganó: STALE
     announceAccepted(
       { venueId: 'v1', orderId: 'ord1', staffId: null, minutes: 15, marcarCocina: false },
       { r: 'OK', now: NOW, onlineOrderId: 'oo1', orderNumber: 'WABCD', orderWritten: true, orderStatus: 'CONFIRMED' as any },
     )
-    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
+    expect(reiniciarPedidosSinAtenderEnTx).not.toHaveBeenCalled()
   })
 })
 

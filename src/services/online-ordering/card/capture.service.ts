@@ -38,6 +38,7 @@ import {
   type CasResult,
   type TransitionResult,
 } from '../transitions.service'
+import { reiniciarPedidosSinAtenderEnTx } from '../autoPause'
 import { captureKey, cardPaymentData } from './capturedPayment'
 import { chargeMerchant } from './merchant'
 import { releaseCharge } from './release.service'
@@ -67,6 +68,7 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       select: {
         status: true,
         acceptDeadlineAt: true,
+        requiresAcceptance: true,
         charge: true,
         order: { select: { status: true, total: true, paymentStatus: true, paidAmount: true } },
       },
@@ -121,6 +123,9 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       data: { status: OnlineOrderChargeStatus.CAPTURING, attempts: { increment: 1 } },
     })
     if (won.count !== 1) return { do: 'ANSWER', result: { outcome: 'CONFIRMING_PAYMENT' } }
+    // D662: la persona contestó a tiempo (su toque, antes de esperar a Stripe): la cuenta de pedidos sin atender vuelve a 0 aquí,
+    // no cuando termine la captura (que también puede terminar el conciliador, mucho después).
+    if (i.staffId && row.requiresAcceptance !== false) await reiniciarPedidosSinAtenderEnTx(tx, i.venueId)
     return { do: 'CAPTURE', charge, now }
   }, ORDER_LOCK_WAIT_BUDGET)
 
