@@ -1,3 +1,4 @@
+import { sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -71,8 +72,7 @@ export async function getPMIXReport(
     INNER JOIN "Product" p ON p.id = oi."productId"
     LEFT JOIN "Recipe" r ON r."productId" = p.id
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D4: la hora real de la venta, como el Resumen
       AND o.status = 'COMPLETED'
       AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY oi."productId", p.name, r."totalCost"
@@ -97,8 +97,7 @@ export async function getPMIXReport(
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D4: la hora real de la venta, como el Resumen
       AND o.status = 'COMPLETED'
       AND oi."removedAt" IS NULL
       AND ${sqlOrdenSinTarjetas('o.id')} -- la venta de tarjetas no es mercancía: no infla el total ni los porcentajes

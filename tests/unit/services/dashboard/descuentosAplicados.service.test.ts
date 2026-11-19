@@ -37,7 +37,7 @@ describe('listarDescuentosAplicados', () => {
     expect(r.from.toISOString()).toBe('2026-11-15T06:00:00.000Z')
     expect(r.to.toISOString()).toBe('2026-11-16T05:59:59.999Z')
     const where = db.orderDiscount.aggregate.mock.calls[0][0].where
-    expect(where.order).toMatchObject({ venueId: 'venue-1', status: { notIn: ['CANCELLED', 'DELETED'] } })
+    expect(where.order.AND[0]).toMatchObject({ venueId: 'venue-1', status: { notIn: ['CANCELLED', 'DELETED'] } })
   })
 
   it('totales y agrupado por motivo salen de la base (exactos), en pesos, con «Sin motivo» como null', async () => {

@@ -83,7 +83,7 @@ export function conHoraRealDelAparato(
  * propias llaves `OR`/`AND`, como las del filtro por tipo de tarjeta). El `createdAt` ensanchado deja que Postgres use el índice
  * `(venueId, createdAt)`; la condición exacta es la del `OR`.
  */
-export function dondeHoraRealEntre<W extends object>(where: W, desde: Date, hasta: Date): { AND: [W, Prisma.PaymentWhereInput] } {
+export function dondeHoraRealEntre<W extends object>(where: W, desde: Date, hasta: Date): { AND: [W, RangoDeHoraReal] } {
   return {
     AND: [
       where,
@@ -93,6 +93,16 @@ export function dondeHoraRealEntre<W extends object>(where: W, desde: Date, hast
       },
     ],
   }
+}
+
+/** Para un rango con un solo extremo: el otro, tan lejos que no recorta nada (ni lo fechado a futuro a mano). */
+export const SIN_TOPE_ANTES = new Date('2000-01-01T00:00:00.000Z')
+export const SIN_TOPE_DESPUES = new Date('9999-01-01T00:00:00.000Z')
+
+/** La forma del filtro de `dondeHoraRealEntre`: sólo `createdAt` y `clientCreatedAt`, que tienen `Order` y `Payment` (D4: también órdenes). */
+type RangoDeHoraReal = {
+  createdAt: { gte: Date; lte: Date }
+  OR: [{ clientCreatedAt: { gte: Date; lte: Date } }, { clientCreatedAt: null; createdAt: { gte: Date; lte: Date } }]
 }
 
 /** Texto SQL de la hora real de la fila (`alias` vacío = columnas sin calificar). */

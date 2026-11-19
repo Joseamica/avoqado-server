@@ -762,6 +762,10 @@ export async function updateOrder(
           ...(tableId !== undefined && { tableId: camposEditados.tableId }),
           ...(servedById !== undefined && { servedById: camposEditados.servedById }),
           ...(createdAt !== undefined && { createdAt: camposEditados.createdAt }),
+          // D4: quien CORRIGE la fecha decide el día de la venta; la hora del aparato deja de mandar en los reportes (si no, la
+          // venta sin red quedaba fuera del día viejo y del nuevo).
+          ...(camposEditados.createdAt &&
+            camposEditados.createdAt.getTime() !== currentOrder.createdAt.getTime() && { clientCreatedAt: null }),
           ...(orderNumber !== undefined && { orderNumber: camposEditados.orderNumber }),
           ...(type !== undefined && { type: camposEditados.type }),
           ...(status === 'COMPLETED' && { completedAt: new Date() }),

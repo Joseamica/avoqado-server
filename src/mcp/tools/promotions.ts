@@ -84,12 +84,19 @@ export function registerPromotionTools(server: McpServer, scope: McpScope) {
       // El día es el del NEGOCIO, no el del servidor.
       const soldTodayByPromotion = new Map<string, number>()
       if (active.length > 0) {
+        const inicioDeHoy = venueStartOfDay(tz)
+        const finDeHoy = venueEndOfDay(tz)
         const grouped = await prisma.orderPromotion.groupBy({
           by: ['promotionId'],
           where: {
             promotionId: { in: active.map(p => p.id) },
             order: { venueId, status: { not: 'CANCELLED' } },
-            createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+            // D4: lo vendido con red cuenta por la hora de su renglón, como siempre; lo vendido sin red, por la hora del aparato
+            // (su renglón nace con la llegada).
+            OR: [
+              { order: { clientCreatedAt: { gte: inicioDeHoy, lte: finDeHoy } } },
+              { order: { clientCreatedAt: null }, createdAt: { gte: inicioDeHoy, lte: finDeHoy } },
+            ],
           },
           _count: { _all: true },
         })

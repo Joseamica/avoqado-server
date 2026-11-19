@@ -5,6 +5,7 @@
  * Implements Toast/Square pattern for comprehensive modifier inventory management.
  */
 
+import { dondeHoraRealEntre, SIN_TOPE_ANTES, SIN_TOPE_DESPUES } from '@/services/shared/horaRealDelAparato'
 import { Prisma, ModifierInventoryMode } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 
@@ -105,20 +106,11 @@ export async function getModifierUsageStats(
 ): Promise<ModifierUsageStats[]> {
   const { startDate, endDate, modifierGroupId, limit = 50 } = options || {}
 
-  // Build date filter for orders
-  const createdAtFilter: Prisma.DateTimeFilter | undefined =
+  // D4: por la hora real de la venta. Con un solo extremo, el otro queda abierto, como antes.
+  const orderDateFilter: Prisma.OrderWhereInput =
     startDate || endDate
-      ? {
-          ...(startDate && { gte: startDate }),
-          ...(endDate && { lte: endDate }),
-        }
-      : undefined
-
-  const orderDateFilter: Prisma.OrderWhereInput = {
-    venueId,
-    status: 'COMPLETED',
-    ...(createdAtFilter && { createdAt: createdAtFilter }),
-  }
+      ? dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, startDate ?? SIN_TOPE_ANTES, endDate ?? SIN_TOPE_DESPUES)
+      : { venueId, status: 'COMPLETED' }
 
   const usageWhere = {
     orderItem: {
