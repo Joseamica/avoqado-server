@@ -46,6 +46,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage } from './qrPayments.legacy.service'
 import { WHERE_COBRO_NO_ES_SALDO_DE_REGALO, WHERE_CUENTA_DE_TARJETAS_PAGADA, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
+import { dondeHoraRealEntre } from '../shared/horaRealDelAparato'
 
 export interface AnalyticsPaymentFilters {
   fromDate: Date
@@ -91,14 +92,18 @@ function conAvisoLegacy<T>(rows: T[], puenteCaido: boolean): ConAvisoLegacy<T> {
 /** Filtros de analítica → `where` de Prisma. UNA sola definición para las filas y para las sumas. */
 function analyticsWhere(venueId: string, filters: AnalyticsPaymentFilters): Prisma.PaymentWhereInput {
   const { fromDate, toDate, includeRefunds = false, excludeCancelledOrders = true } = filters
-  return {
-    venueId,
-    status: TransactionStatus.COMPLETED,
-    createdAt: { gte: fromDate, lte: toDate },
-    AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
-    ...(includeRefunds ? {} : { type: { not: 'REFUND' } }),
-    ...(excludeCancelledOrders ? { order: { status: { not: 'CANCELLED' } } } : {}),
-  }
+  // D2 (hz:47b359b5:D2, tras D93 «B» como Square): por la hora REAL del cobro, como el Resumen; envuelto en AND.
+  return dondeHoraRealEntre(
+    {
+      venueId,
+      status: TransactionStatus.COMPLETED,
+      AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+      ...(includeRefunds ? {} : { type: { not: 'REFUND' } }),
+      ...(excludeCancelledOrders ? { order: { status: { not: 'CANCELLED' } } } : {}),
+    },
+    fromDate,
+    toDate,
+  )
 }
 
 /**
@@ -182,6 +187,7 @@ export async function fetchPaymentsForAnalytics(
       type: true,
       status: true,
       createdAt: true,
+      clientCreatedAt: true,
       processedById: true,
       processedBy: { select: { firstName: true, lastName: true } },
     },
@@ -195,7 +201,8 @@ export async function fetchPaymentsForAnalytics(
     method: String(p.method),
     type: String(p.type),
     status: String(p.status),
-    createdAt: p.createdAt,
+    // D2: la hora del aparato si se cobró sin internet: las gráficas del inicio y la IA agrupan por esta hora.
+    createdAt: p.clientCreatedAt ?? p.createdAt,
     processedById: p.processedById ?? null,
     processedByName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() || null : null,
   }))

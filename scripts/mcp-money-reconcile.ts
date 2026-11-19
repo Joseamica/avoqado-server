@@ -20,6 +20,9 @@ import { registerPaymentTools } from '@/mcp/tools/payments'
 import { registerSettlementReportTools } from '@/mcp/tools/settlementReport'
 import { registerGiftCardTools } from '@/mcp/tools/giftCards'
 import { utcTsParam } from '@/utils/sqlDates'
+// D2: métodos de pago, tarjetas cargadas y propinas van por la hora real del cobro (como las herramientas); list_payments y las
+// dispersiones siguen con la llegada.
+import { sqlRangoHoraReal } from '@/services/shared/horaRealDelAparato'
 import type { McpScope } from '@/mcp/scope'
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -119,7 +122,7 @@ async function main() {
   const grossDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
     `SELECT p.method::text AS method, count(*)::int c, COALESCE(sum(p.amount + COALESCE(p."tipAmount",0)),0)::float8 s
        FROM "Payment" p LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
-      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
         AND gt."systemKind" IS DISTINCT FROM 'GIFT_CARD' AND ${sinCreditoDeCambio}
       GROUP BY 1`,
     VENUE,
@@ -132,7 +135,7 @@ async function main() {
   const netDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
     `SELECT ${metodo} AS method, count(*)::int c, COALESCE(sum(p.amount),0)::float8 s
        FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
-      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
         AND ${sinCargas} AND ${sinCreditoDeCambio}
       GROUP BY 1`,
     VENUE,
@@ -146,7 +149,7 @@ async function main() {
       `SELECT (count(*) FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'))::int c, COALESCE(sum(p.amount),0)::float8 s
          FROM "Payment" p JOIN "Order" o ON o.id=p."orderId"
         WHERE p."venueId"=$1 AND p.status='COMPLETED' AND o.status!='CANCELLED' AND o."paymentStatus"='PAID'
-          AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)} AND ${esCarga}`,
+          AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))} AND ${esCarga}`,
       VENUE,
       start,
       end,
@@ -214,7 +217,7 @@ async function main() {
     `SELECT p."processedById" sid, trim(concat(st."firstName", ' ', st."lastName")) name, count(*)::int c, COALESCE(sum(p."tipAmount"),0)::float8 s
      FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "Staff" st ON st.id=p."processedById"
      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p.type!='REFUND' AND (o.status IS NULL OR o.status!='CANCELLED')
-       AND ${sinCreditoDeCambio} AND p."tipAmount">0 AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+       AND ${sinCreditoDeCambio} AND p."tipAmount">0 AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
      GROUP BY p."processedById", name ORDER BY s DESC`,
     VENUE,
     start,
