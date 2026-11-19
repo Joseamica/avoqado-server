@@ -2176,6 +2176,11 @@ class OrganizationDashboardService {
       break: boolean
       breakMinutes: number
       sales: number
+      /**
+       * D4c: las mismas ventas a la hora de LLEGADA (como antes de D4c). Sólo decide quién aparece: el panel filtra con ellas igual que
+       * antes y con `sales` (hora real), para no perder ni sumar filas con red. Opcional para clientes viejos.
+       */
+      salesAtArrival?: number
       attendancePercent: number
     }>
   }> {
@@ -2316,7 +2321,7 @@ class OrganizationDashboardService {
               AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
             GROUP BY 1, 2
           `
-    const vendioPorLlegada = new Set(salesDataPorLlegada.filter(s => Number(s.amount) !== 0).map(s => `${s.processedById}:${s.venueId}`))
+    const ventasPorLlegada = new Map(salesDataPorLlegada.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amount) || 0]))
 
     // Get CASH-only sales per staff (for deposit verification)
     const cashSalesData = await prisma.payment.groupBy({
@@ -2465,6 +2470,7 @@ class OrganizationDashboardService {
         break: mostRecentEntry?.status === 'ON_BREAK',
         breakMinutes,
         sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
+        salesAtArrival: ventasPorLlegada.get(`${sv.staffId}:${sv.venueId}`) ?? 0,
         cashSales: cashSalesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
         attendancePercent: attendanceByStaff[sv.staffId] || 0,
         // Lateness from first check-in of the day (oldest entry)
@@ -2479,9 +2485,7 @@ class OrganizationDashboardService {
       // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
       // D4c (Codex 4c r1 #1 y r2 #2): también quien vendió en el día a la hora de LLEGADA (la lista de antes): un cobro sin internet de
       // ayer subido hoy deja las ventas de hoy en 0 y su efectivo en hoy, y sin esto el cajero que no checó hoy desaparecía con su efectivo.
-      staff: staffData.filter(
-        s => s !== null && (s.checkInTime !== null || s.sales !== 0 || vendioPorLlegada.has(`${s.id}:${s.venueId}`)),
-      ) as any,
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0 || s.salesAtArrival !== 0)) as any,
     }
   }
 

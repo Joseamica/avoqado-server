@@ -405,11 +405,15 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     try {
       const day14 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-14')
       expect(day14.staff).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 0, cashSales: 15, checkInTime: null })]),
+        expect.arrayContaining([
+          expect.objectContaining({ id: staffB, venueId: venueB, sales: 0, salesAtArrival: 15, cashSales: 15, checkInTime: null }),
+        ]),
       )
       const day13 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-13')
       expect(day13.staff).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 15, cashSales: 0, checkInTime: null })]),
+        expect.arrayContaining([
+          expect.objectContaining({ id: staffB, venueId: venueB, sales: 15, salesAtArrival: 0, cashSales: 0, checkInTime: null }),
+        ]),
       )
     } finally {
       await prisma.order.deleteMany({ where: { id: tardia.id, venue: { organizationId: n.organizationId } } })
@@ -423,7 +427,9 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     try {
       const day16 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-16')
       expect(day16.staff).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: manager, venueId: venueB, sales: 0, cashSales: 0, checkInTime: null })]),
+        expect.arrayContaining([
+          expect.objectContaining({ id: manager, venueId: venueB, sales: 0, salesAtArrival: 15, cashSales: 0, checkInTime: null }),
+        ]),
       )
       const day15 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-15')
       expect(day15.staff).toEqual(
