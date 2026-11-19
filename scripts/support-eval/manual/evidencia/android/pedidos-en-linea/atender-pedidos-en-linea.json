@@ -1,8 +1,8 @@
 {
   "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
-  "version": "2.25.42",
+  "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f",
+  "version": "2.25.52",
   "pasos": [
     {
       "paso": 1,
@@ -37,7 +37,7 @@
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
-      "linea": 622,
+      "linea": 624,
       "cita": "TextosPedidosEnLinea.MINUTOS_ACEPTAR.forEach { minutos ->"
     },
     {
@@ -67,7 +67,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
-      "linea": 637,
+      "linea": 639,
       "cita": "TextosPedidosEnLinea.MOTIVOS.forEach { (texto, codigo) ->"
     },
     {
@@ -179,7 +179,13 @@
       "linea": 1201
     }
   ],
-  "plan": [],
+  "plan": [
+    {
+      "featureCode": "ONLINE_ORDERING",
+      "archivo": "avoqado-server/src/middlewares/requirePublicVenueFeatureStrict.middleware.ts",
+      "linea": 34
+    }
+  ],
   "sinInternet": [
     {
       "afirmacion": "Si aparece «Sin conexión: no llegan pedidos nuevos»",
@@ -195,6 +201,11 @@
       "afirmacion": "Si aparece: sin red «Pausar pedidos» se apaga",
       "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
       "linea": 164
+    },
+    {
+      "afirmacion": "Sin internet, a los 2 min la tienda queda fuera de línea (no hay latido)",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 24
     }
   ],
   "rutas": [
@@ -216,7 +227,7 @@
     {
       "ruta": "Antes: con la app en segundo plano el vigilante se detiene",
       "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/data/VigilanteDePedidosEnLinea.kt",
-      "linea": 234
+      "linea": 256
     },
     {
       "ruta": "Si aparece «Con tarjeta: se cobra al aceptar»",
@@ -266,7 +277,7 @@
     {
       "ruta": "Problema: el diálogo confirma con «Cancelar pedido»",
       "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
-      "linea": 654
+      "linea": 656
     },
     {
       "ruta": "Problema: texto del botón «Cancelar pedido»",
@@ -287,6 +298,46 @@
       "ruta": "Si aparece «Incluido en el Plan …» (teaser)",
       "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
       "linea": 617
+    },
+    {
+      "ruta": "Antes: el vigilante global late con la ventana a la vista, en cualquier pantalla (D662, desde 2.25.52)",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/data/VigilanteDePedidosEnLinea.kt",
+      "linea": 278
+    },
+    {
+      "ruta": "Antes: ANDROID late en cualquier pantalla mientras la app esté al frente",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/data/VentanaALaVista.kt",
+      "linea": 16
+    },
+    {
+      "ruta": "Antes: el latido sólo cuenta con la sesión de alguien con orders:update",
+      "archivo": "avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts",
+      "linea": 93
+    },
+    {
+      "ruta": "Antes: sin latido en 2 min la tienda de «Sí, alguien del personal lo acepta» queda fuera de línea",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 24
+    },
+    {
+      "ruta": "Antes: fuera de línea = OFFLINE/NO_DEVICE; vuelve a OPEN con el siguiente latido",
+      "archivo": "avoqado-server/src/services/online-ordering/presence.service.ts",
+      "linea": 93
+    },
+    {
+      "ruta": "Antes: la clienta ve «El negocio no está conectado. Intenta en unos minutos.» (avoqado-booking-widget main 14d991b7)",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 44
+    },
+    {
+      "ruta": "Antes: el ajuste se llama «Sí, alguien del personal lo acepta» (avoqado-web-dashboard develop cefead04)",
+      "archivo": "avoqado-web-dashboard/src/locales/es/onlineOrdering.json",
+      "linea": 112
+    },
+    {
+      "ruta": "Si la clienta ve «Este negocio no recibe pedidos en línea por el momento.» (403 PLAN_REQUIRED)",
+      "archivo": "avoqado-server/src/middlewares/requirePublicVenueFeatureStrict.middleware.ts",
+      "linea": 13
     }
   ],
   "aparato": {

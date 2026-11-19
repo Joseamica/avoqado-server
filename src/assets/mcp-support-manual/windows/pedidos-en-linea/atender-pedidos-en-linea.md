@@ -9,7 +9,7 @@ requiredPermissions:
 money: true
 versionMin: 2.25.32
 sourceRepo: avoqado-android
-sourceRef: c07a2bbebf453598963bf96f3208f66193dd5efb
+sourceRef: 212f9cf4f150b7770cf6e753e5e2dbd78451948f
 keywords:
   - pedidos en línea
   - tienda en línea
@@ -18,11 +18,17 @@ keywords:
   - pedido listo
   - pausar pedidos
   - alarma de pedido nuevo
+  - la tienda dice fuera de línea
+  - no me llegan pedidos
+  - se cierra sola la tienda
+  - no llegan pedidos en línea
 ---
 
 ## Antes de empezar
 
 En *Más*, toca *Pedidos en línea*. Aceptar, rechazar, *Listo*, *Entregado* y *Reimprimir* sólo aparecen con el permiso de actualizar pedidos. Con el POS abierto, un pedido nuevo sale arriba en «Nuevo pedido en línea #…»: toca *Ver* para abrir la bandeja. Si cierras el POS Windows, no avisa.
+
+Si en el panel el negocio eligió «Sí, alguien del personal lo acepta», la tienda recibe pedidos mientras el POS Windows esté abierto y sin minimizar en cualquier pantalla, con la sesión de alguien con el permiso de actualizar pedidos: no hace falta dejar abierta la bandeja (desde la versión 2.25.52; en versiones anteriores, sólo con la bandeja abierta). Minimizado, cerrado o sin internet, a los 2 min la tienda queda fuera de línea (la clienta ve «El negocio no está conectado. Intenta en unos minutos.»); al volver a abrir o mostrar la ventana se abre sola.
 
 ## Pasos
 
@@ -35,6 +41,7 @@ En *Más*, toca *Pedidos en línea*. Aceptar, rechazar, *Listo*, *Entregado* y *
 
 ## Problemas frecuentes
 
+- Si la tienda dice fuera de línea, no llegan pedidos o se cierra sola, revisa que el POS Windows esté abierto y sin minimizar, con internet y con la sesión de alguien que acepta pedidos. Basta un aparato a la vista: esta computadora, otra caja o la Bandeja del panel.
 - Si aparece en el pedido «Con tarjeta: se cobra al aceptar», no lo cobres en la caja: ese pedido no muestra *Cobrar*.
 - Si aparece «Cobra el pedido antes de entregarlo.», ese pedido todavía no está pagado.
 - Si aparece «No se pudo cobrar la tarjeta» en un pedido, quedó rechazado porque su tarjeta no se pudo cobrar.
@@ -43,6 +50,7 @@ En *Más*, toca *Pedidos en línea*. Aceptar, rechazar, *Listo*, *Entregado* y *
 - Si aparece «Ese pedido ya no está disponible», el pedido ya cambió (por ejemplo, otro aparato lo atendió o el cliente lo canceló).
 - Pausar pide el permiso de pausar pedidos en línea (de fábrica: gerente, administrador y dueño). Sin él, si el negocio tiene prendido el PIN de gerente, un gerente lo autoriza con su PIN.
 - Si aparece en *Más*, junto a *Pedidos en línea*, «Incluido en el Plan …», el plan del negocio no incluye los pedidos en línea.
+- Si la clienta ve «Este negocio no recibe pedidos en línea por el momento.» al pedir, la tienda está apagada en el panel o el plan del negocio no incluye los pedidos en línea.
 
 ## Sin internet
 
