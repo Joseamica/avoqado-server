@@ -1007,6 +1007,7 @@ describe('reservation availability controller boundaries', () => {
         productIds: ['product-1', 'product-2'],
         includeFull: false,
         windowSemantics: 'base',
+        ignoreMinNotice: true, // D110: el panel es el personal; el aviso mínimo es de las reservas en línea
       },
       settings,
       'UTC',
@@ -1057,6 +1058,7 @@ describe('reservation availability controller boundaries', () => {
         excludeReservationId: 'reservation-1',
         includeFull: true,
         windowSemantics: undefined,
+        ignoreMinNotice: true,
       },
       settings,
       'UTC',

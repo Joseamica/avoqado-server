@@ -131,13 +131,15 @@ export async function getStats(req: Request, res: Response, next: NextFunction) 
 export async function getCalendar(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
-    const { dateFrom, dateTo, groupBy } = req.query as any
+    const { dateFrom, dateTo, groupBy, allStatuses } = req.query as any
 
     const tz = await venueTimezoneOf(venueId)
     const from = expandirDiaCivil(new Date(dateFrom), tz, 'inicio')
     const to = expandirDiaCivil(new Date(dateTo), tz, 'fin')
 
-    const result = await reservationService.getReservationsCalendar(venueId, from, to, groupBy)
+    const result = await reservationService.getReservationsCalendar(venueId, from, to, groupBy, {
+      todosLosEstados: allStatuses === '1' || allStatuses === 'true',
+    })
     res.json(result)
   } catch (error) {
     next(error)
@@ -176,6 +178,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         excludeReservationId: reservation.id,
         includeFull,
         windowSemantics,
+        ignoreMinNotice: true, // D110: el panel es el personal
       }
     } else {
       const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
@@ -188,6 +191,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         productIds: canonicalProducts.productIds,
         includeFull,
         windowSemantics,
+        ignoreMinNotice: true, // D110: el panel es el personal
       }
     }
 
