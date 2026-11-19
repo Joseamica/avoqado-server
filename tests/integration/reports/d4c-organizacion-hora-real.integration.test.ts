@@ -408,13 +408,48 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     }
   })
 
+  it('R22 · con red, quien no checó ni vendió y sólo devolvió efectivo de otra venta no aparece, como antes (Codex 4c r2 #2)', async () => {
+    jest.setSystemTime(new Date('2026-11-14T18:00:00Z'))
+    const original = await prisma.payment.findFirstOrThrow({
+      where: { venueId: venueB, processedById: staffB, amount: 40 },
+      select: { id: true, orderId: true },
+    })
+    const devolucion = await prisma.payment.create({
+      data: {
+        venueId: venueB,
+        orderId: original.orderId,
+        processedById: manager,
+        amount: -15,
+        method: 'CASH',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -15,
+        processorData: { originalPaymentId: original.id },
+        createdAt: new Date('2026-11-14T17:00:00Z'),
+      },
+      select: { id: true },
+    })
+    try {
+      const day14 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-14')
+      expect(day14.staff.find(s => s.id === manager)).toBeUndefined()
+      // La devolución es de quien vendió (D2): la cajera B sí sale, con −15.
+      expect(day14.staff).toEqual(expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: -15 })]))
+    } finally {
+      await prisma.payment.deleteMany({ where: { id: devolucion.id, venueId: venueB } })
+    }
+  })
+
   it('R23/R25/R27 · una venta de hace 7 días subida hace 6 no cae en la barra de hoy y la semana cuadra con su gráfica (Codex 4c r1 #2 y #4)', async () => {
     // Jueves 5 a las 23:50 en CDMX, subida el viernes 6 a las 00:10. Hoy es el jueves 12: la semana es del viernes 6 al jueves 12.
     const vieja = await sale(venueB, staffB, 7, 1, '2026-11-06T06:10:00Z', '2026-11-06T05:50:00Z')
+    // El primer día de la semana (viernes 6, mediodía, con red) SÍ entra: una semana de 6 días no pasaría (Codex 4c r2 #4).
+    const primerDia = await sale(venueB, staffB, 3, 2, '2026-11-06T18:00:00Z')
     try {
       const b = await dashboard.getStaffSalesTrend(n.organizationId, staffB, TZ)
       expect(b.salesData).toEqual([
-        { day: 'Vie', sales: 0 },
+        { day: 'Vie', sales: 3 },
         { day: 'Sáb', sales: 0 },
         { day: 'Dom', sales: 0 },
         { day: 'Lun', sales: 0 },
@@ -427,11 +462,11 @@ describe('D4c · visión global, tiendas y vendedores', () => {
       const chartSales = chart.trend.reduce((sum, d) => sum + d.sales, 0)
       const chartUnits = chart.trend.reduce((sum, d) => sum + d.units, 0)
       expect(chart.trend).toHaveLength(7)
-      expect(summary).toMatchObject({ weekSales: 60, weekUnits: 3 })
+      expect(summary).toMatchObject({ weekSales: 63, weekUnits: 5 })
       expect(summary.weekSales).toBe(chartSales)
       expect(summary.weekUnits).toBe(chartUnits)
     } finally {
-      await prisma.order.deleteMany({ where: { id: vieja.id, venue: { organizationId: n.organizationId } } })
+      await prisma.order.deleteMany({ where: { id: { in: [vieja.id, primerDia.id] }, venue: { organizationId: n.organizationId } } })
     }
   })
 
@@ -540,6 +575,8 @@ describe('D4c · centro de mando y lista de promotores', () => {
       units: 0,
       commission: 0,
     })
+    // Lo vendido hoy con red sigue en la ficha (Codex 4c r2 #4).
+    expect((await promotersService.getPromoterDetail(venueB, staffB))?.todayMetrics).toMatchObject({ sales: 40, units: 1, commission: 1.2 })
     jest.setSystemTime(NOCHE_11)
     expect((await promotersService.getPromotersList(n.venueId)).promoters).toMatchObject([{ id: n.staffId, todaySales: 60, todayUnits: 1 }])
     expect((await promotersService.getPromoterDetail(n.venueId, n.staffId))?.todayMetrics).toMatchObject({

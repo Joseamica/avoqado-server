@@ -2297,6 +2297,27 @@ class OrganizationDashboardService {
             GROUP BY 1, 2
           `
 
+    // D4c (Codex 4c r2 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el día. Las
+    // mismas ventas a la hora de LLEGADA (como antes de D4c) deciden también quién aparece: así sigue la cajera sin checada cuya venta
+    // sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un gerente que sólo devolvió efectivo
+    // de la venta de otro).
+    const salesDataPorLlegada =
+      venueIds.length === 0
+        ? []
+        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
+            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
+                   p."venueId" AS "venueId",
+                   SUM(p."amount") AS "amount"
+            FROM "Payment" p
+            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+            WHERE p."venueId" IN (${Prisma.join(venueIds)})
+              AND p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}
+              AND p."status" = 'COMPLETED'
+              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
+            GROUP BY 1, 2
+          `
+    const vendioPorLlegada = new Set(salesDataPorLlegada.filter(s => Number(s.amount) !== 0).map(s => `${s.processedById}:${s.venueId}`))
+
     // Get CASH-only sales per staff (for deposit verification)
     const cashSalesData = await prisma.payment.groupBy({
       by: ['processedById', 'venueId'],
@@ -2456,9 +2477,11 @@ class OrganizationDashboardService {
     return {
       // Only return staff with actual activity (check-in or sales) for the day. Codex r1 de D2: también con ventas NEGATIVAS (una
       // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
-      // D4c (Codex 4c r1 #1): también con EFECTIVO del día, que sigue a la hora de llegada: un cobro sin internet de ayer subido hoy
-      // deja las ventas de hoy en 0 y su efectivo en hoy, y sin esto el cajero que no checó hoy desaparecía con su efectivo.
-      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0 || s.cashSales !== 0)) as any,
+      // D4c (Codex 4c r1 #1 y r2 #2): también quien vendió en el día a la hora de LLEGADA (la lista de antes): un cobro sin internet de
+      // ayer subido hoy deja las ventas de hoy en 0 y su efectivo en hoy, y sin esto el cajero que no checó hoy desaparecía con su efectivo.
+      staff: staffData.filter(
+        s => s !== null && (s.checkInTime !== null || s.sales !== 0 || vendioPorLlegada.has(`${s.id}:${s.venueId}`)),
+      ) as any,
     }
   }
 
