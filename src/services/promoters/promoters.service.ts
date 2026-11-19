@@ -259,13 +259,9 @@ class PromotersService {
     }
 
     // Get today's orders for this promoter
+    // D4c (Codex 4c r1 #5): la misma «hoy» que el listado (`getPromotersList`), a la hora real: si no, la fila decía $0 y la ficha $60.
     const todayOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-        createdById: promoterId,
-      },
+      where: dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED, createdById: promoterId }, todayStart, null),
       include: {
         items: true,
       },

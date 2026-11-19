@@ -141,7 +141,7 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     const d = await promotersService.getPromoterDetail('v1', 's1')
 
-    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z')
+    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findFirst.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findMany.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-10-17T06:00:00.000Z')
     // La llave de la meta del mes: la medianoche del día 1 en el negocio, la misma que lee getManagerDashboard.

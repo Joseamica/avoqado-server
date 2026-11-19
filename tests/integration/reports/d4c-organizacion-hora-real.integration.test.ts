@@ -390,6 +390,82 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     ])
   })
 
+  it('R22 · quien no checó conserva su efectivo de hoy aunque la venta sea de ayer (Codex 4c r1 #1)', async () => {
+    jest.setSystemTime(new Date('2026-11-14T18:00:00Z'))
+    // 23:50 del 13 en CDMX, subida a las 00:10 del 14; la cajera B no checa ni el 13 ni el 14.
+    const tardia = await sale(venueB, staffB, 15, 1, '2026-11-14T06:10:00Z', '2026-11-14T05:50:00Z')
+    try {
+      const day14 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-14')
+      expect(day14.staff).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 0, cashSales: 15, checkInTime: null })]),
+      )
+      const day13 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-13')
+      expect(day13.staff).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 15, cashSales: 0, checkInTime: null })]),
+      )
+    } finally {
+      await prisma.order.deleteMany({ where: { id: tardia.id, venue: { organizationId: n.organizationId } } })
+    }
+  })
+
+  it('R23/R25/R27 · una venta de hace 7 días subida hace 6 no cae en la barra de hoy y la semana cuadra con su gráfica (Codex 4c r1 #2 y #4)', async () => {
+    // Jueves 5 a las 23:50 en CDMX, subida el viernes 6 a las 00:10. Hoy es el jueves 12: la semana es del viernes 6 al jueves 12.
+    const vieja = await sale(venueB, staffB, 7, 1, '2026-11-06T06:10:00Z', '2026-11-06T05:50:00Z')
+    try {
+      const b = await dashboard.getStaffSalesTrend(n.organizationId, staffB, TZ)
+      expect(b.salesData).toEqual([
+        { day: 'Vie', sales: 0 },
+        { day: 'Sáb', sales: 0 },
+        { day: 'Dom', sales: 0 },
+        { day: 'Lun', sales: 0 },
+        { day: 'Mar', sales: 0 },
+        { day: 'Mié', sales: 20 },
+        { day: 'Jue', sales: 40 },
+      ])
+      const summary = await commandCenter.getSummary(venueB)
+      const chart = await commandCenter.getStockVsSales(venueB, { days: 7 })
+      const chartSales = chart.trend.reduce((sum, d) => sum + d.sales, 0)
+      const chartUnits = chart.trend.reduce((sum, d) => sum + d.units, 0)
+      expect(chart.trend).toHaveLength(7)
+      expect(summary).toMatchObject({ weekSales: 60, weekUnits: 3 })
+      expect(summary.weekSales).toBe(chartSales)
+      expect(summary.weekUnits).toBe(chartUnits)
+    } finally {
+      await prisma.order.deleteMany({ where: { id: vieja.id, venue: { organizationId: n.organizationId } } })
+    }
+  })
+
+  it('R24 · en una sucursal de Cancún el día del filtro es el mismo con el que se agrupa (Codex 4c r1 #3)', async () => {
+    const venueC = (
+      await prisma.venue.create({
+        data: {
+          organizationId: n.organizationId,
+          name: 'Sucursal Cancún',
+          slug: `d4c-c-${n.venueId}`,
+          status: 'ACTIVE',
+          timezone: 'America/Cancun',
+        },
+        select: { id: true },
+      })
+    ).id
+    try {
+      await prisma.staffVenue.create({ data: { staffId: staffB, venueId: venueC, role: 'CASHIER' } })
+      // 00:10 del 12 en Cancún (23:10 del 11 en CDMX), subida a la 01:10 del 12 en Cancún.
+      await sale(venueC, staffB, 25, 1, '2026-11-12T06:10:00Z', '2026-11-12T05:10:00Z')
+      const get = (from: string, to: string) => dashboard.getSalesHeatmap(n.organizationId, from, to, 'OWNER', n.staffId, venueC)
+      expect((await get(DIA_12, DIA_12)).summary.byDay).toEqual([{ date: DIA_12, totalCount: 1, totalAmount: 25 }])
+      expect((await get(DIA_11, DIA_11)).summary.byDay).toEqual([{ date: DIA_11, totalCount: 0, totalAmount: 0 }])
+      expect((await get(DIA_11, DIA_12)).summary.byDay).toEqual([
+        { date: DIA_11, totalCount: 0, totalAmount: 0 },
+        { date: DIA_12, totalCount: 1, totalAmount: 25 },
+      ])
+    } finally {
+      await prisma.order.deleteMany({ where: { venueId: venueC } })
+      await prisma.staffVenue.deleteMany({ where: { venueId: venueC } })
+      await prisma.venue.delete({ where: { id: venueC } })
+    }
+  })
+
   it('R24 · el mapa de calor usa el día real del cobro en el filtro y en el grupo por tienda', async () => {
     const get = (from: string, to: string) => dashboard.getSalesHeatmap(n.organizationId, from, to, 'OWNER', n.staffId)
     const both = await get(DIA_11, DIA_12)
@@ -458,7 +534,18 @@ describe('D4c · centro de mando y lista de promotores', () => {
     expect(a.summary).toMatchObject({ active: 1, todayTotalSales: 0 })
     expect(b.promoters).toMatchObject([{ id: staffB, todaySales: 40, todayUnits: 1, status: 'INACTIVE' }])
     expect(b.summary.todayTotalSales).toBe(40)
+    // D13 (Codex 4c r1 #5): la ficha dice lo mismo que su fila, también su comisión estimada.
+    expect((await promotersService.getPromoterDetail(n.venueId, n.staffId))?.todayMetrics).toMatchObject({
+      sales: 0,
+      units: 0,
+      commission: 0,
+    })
     jest.setSystemTime(NOCHE_11)
     expect((await promotersService.getPromotersList(n.venueId)).promoters).toMatchObject([{ id: n.staffId, todaySales: 60, todayUnits: 1 }])
+    expect((await promotersService.getPromoterDetail(n.venueId, n.staffId))?.todayMetrics).toMatchObject({
+      sales: 60,
+      units: 1,
+      commission: 1.8,
+    })
   })
 })

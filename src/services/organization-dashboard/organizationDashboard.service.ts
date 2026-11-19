@@ -2456,7 +2456,9 @@ class OrganizationDashboardService {
     return {
       // Only return staff with actual activity (check-in or sales) for the day. Codex r1 de D2: también con ventas NEGATIVAS (una
       // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
-      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0)) as any,
+      // D4c (Codex 4c r1 #1): también con EFECTIVO del día, que sigue a la hora de llegada: un cobro sin internet de ayer subido hoy
+      // deja las ventas de hoy en 0 y su efectivo en hoy, y sin esto el cajero que no checó hoy desaparecía con su efectivo.
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0 || s.cashSales !== 0)) as any,
     }
   }
 
@@ -2468,7 +2470,9 @@ class OrganizationDashboardService {
     // Ventana y día de la semana en la zona del VENUE (decisión de producto 2026-09-01).
     // Antes era la del host, que en producción es UTC: una venta de las 20:00 de México
     // caía en el día siguiente y la ventana arrancaba a las 18:00 de la víspera.
-    const sevenDaysAgo = venueStartOfDayOffset(timezone, -7)
+    // D4c (Codex 4c r1 #2): 7 días con hoy, uno por barra. Con -7 entraban 8 y el mismo día de la semana pasada se sumaba a la barra
+    // de hoy (agrupa por día de la semana).
+    const sevenDaysAgo = venueStartOfDayOffset(timezone, -6)
     const todayVenue = toZonedTime(new Date(), timezone)
 
     // Ventas de los últimos 7 días agrupadas por día de la semana (del venue) en Postgres.
@@ -3369,9 +3373,13 @@ class OrganizationDashboardService {
     const staffIds = [...new Set(staffVenues.map(sv => sv.staffId))]
     const venueIds = [...new Set(staffVenues.map(sv => sv.venueId))]
 
-    // Convert date range to UTC
-    const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
-    const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+    // D4c (Codex 4c r1 #3): el filtro es el MISMO día civil de la sucursal con el que se agrupa (`venueLocalDay`), no la medianoche de
+    // CDMX: en Cancún un cobro de las 00:10 del 12 (23:10 del 11 en CDMX) quedaba fuera del 12, y si se pedía el 11 entraba al filtro
+    // pero se agrupaba en el 12, que no se enseña. El rango en UTC sólo acota con el índice: se ensancha un día por lado y el día
+    // exacto lo decide `venueLocalDay` abajo.
+    const UN_DIA_MS = 24 * 60 * 60 * 1000
+    const rangeStart = new Date(fromZonedTime(`${startDateStr}T00:00:00.000`, DEFAULT_TIMEZONE).getTime() - UN_DIA_MS)
+    const rangeEnd = new Date(fromZonedTime(`${endDateStr}T23:59:59.999`, DEFAULT_TIMEZONE).getTime() + UN_DIA_MS)
 
     // Conteo e importe por vendedor × tienda × día del venue, agregados en Postgres
     // (antes: todos los pagos del rango materializados para sumarlos en Node).
@@ -3388,6 +3396,7 @@ class OrganizationDashboardService {
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
         AND ${sqlRangoHoraRealSql('p', rangeStart, rangeEnd)}
+        AND ${venueLocalDay(Prisma.raw(sqlHoraReal('p')))} BETWEEN ${startDateStr} AND ${endDateStr}
       GROUP BY 1, 2, 3
     `
 

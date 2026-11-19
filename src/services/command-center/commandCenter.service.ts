@@ -96,7 +96,9 @@ class CommandCenterService {
   async getSummary(venueId: string): Promise<CommandCenterSummary> {
     const timezone = await getVenueTimezone(venueId)
     const todayStart = venueStartOfDay(timezone)
-    const weekStart = venueStartOfDayOffset(timezone, -7)
+    // D4c (Codex 4c r1 #4): la semana son 7 días con hoy, los mismos que la gráfica de 7 días que la acompaña en TIENDAS
+    // (`getStockVsSales`, `days = 7`). Con -7 eran 8 días y una venta sin internet de hace 7 días quedaba en la tarjeta y no en la gráfica.
+    const weekStart = venueStartOfDayOffset(timezone, -6)
     const monthStart = venueStartOfMonth(timezone)
 
     // Get today's orders with lean item data (for category breakdown) and creator info
