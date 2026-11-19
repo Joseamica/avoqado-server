@@ -15,6 +15,8 @@ const DE_ORGANIZACION = 'lo escriben rutas de organización o de superadmin; el 
 
 /** Tabla de organización → por qué un prospecto en un demo no la escribe (o por qué se conserva a propósito). */
 const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
+  SupportConversation:
+    'conversación personal de ayuda por teléfono/staff/generación, no dato heredado de organización; sesiones demo no pueden vincular WhatsApp, las salidas releen acceso y aplican candado demo por fila; su contenido vence a30d',
   StaffOrganization: 'la membresía del usuario demo: se conserva a propósito (mismo usuario, misma organización)',
   ActivityLog: 'bitácora: la del negocio queda con el id viejo y no se ve en el nuevo; la de organización ' + DE_ORGANIZACION,
   IdempotencyRequest: 'llaves de idempotencia del sistema: no se muestran ni cambian nada',

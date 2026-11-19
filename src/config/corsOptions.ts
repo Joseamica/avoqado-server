@@ -143,6 +143,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     allowedHeaders: [
       'Content-Type',
       'X-Document-Token',
+      'X-Support-Staff-Id',
       'Authorization',
       'x-api-key',
       'x-client-type',

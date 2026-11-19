@@ -1,0 +1,228 @@
+{
+  "pagina": "windows/caja/faltante-o-sobrante-del-corte",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 695,
+      "cita": "if (viewModel.canManageCashDrawer && visible(PreferenciasDelMenu.CAJA)) {"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 699,
+      "cita": "label = \"Caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 32,
+      "cita": "HISTORY(\"Historial\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1273,
+      "cita": "onClick = { onSessionTap(session) },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 238,
+      "cita": "showDailyReport = true"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 164,
+      "cita": "text = if (isPartial) \"Corte parcial\" else \"Corte de caja\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 402,
+      "cita": "label = \"Conteo real\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 373,
+      "cita": "label = \"Ventas en efectivo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 357,
+      "cita": "label = \"Egresos (pay-out)\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 75,
+      "cita": "fun evaluar(actualCents: Int, retiros: List<RetiroDelDia>, efectivoCobradoCents: Int): SospechaDeConteo? {"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 465,
+      "cita": "text = if (isPrinting) \"Imprimiendo…\" else \"Imprimir corte\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3334
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: este corte sólo incluye lo registrado en este aparato…»: puede faltar lo del panel o la terminal",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CorteTicketBuilder.kt",
+      "linea": 36
+    },
+    {
+      "afirmacion": "Si aparece: el historial lo marca sin confirmar sin servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 236
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: el historial de la caja (payments:read)",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3332
+    },
+    {
+      "ruta": "Antes: «Caja» sólo cajero, gerente, administrador y dueño",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 125
+    },
+    {
+      "ruta": "Antes: el esperado = inicial + ventas en efectivo + ingresos − todos los egresos (reembolsos incluidos)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 139
+    },
+    {
+      "ruta": "Antes: la diferencia = conteo − esperado",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 141
+    },
+    {
+      "ruta": "Antes: Sobrante / Faltante",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 424
+    },
+    {
+      "ruta": "Antes: Sobrante / Faltante",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 425
+    },
+    {
+      "ruta": "Antes: renglones del corte",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 340
+    },
+    {
+      "ruta": "Antes: renglones del corte",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 348
+    },
+    {
+      "ruta": "Antes: renglones del corte",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 363
+    },
+    {
+      "ruta": "Antes: renglones del corte",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 384
+    },
+    {
+      "ruta": "Antes: lo de tarjeta no entra al esperado (sólo eventos del cajón)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 94
+    },
+    {
+      "ruta": "Si aparece: la pregunta al cerrar (conteo igual a retiros o al efectivo cobrado)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 48
+    },
+    {
+      "ruta": "Si aparece: la pregunta al cerrar — retiros",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 92
+    },
+    {
+      "ruta": "Si aparece: la pregunta al cerrar — efectivo cobrado",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 96
+    },
+    {
+      "ruta": "Si aparece: Volver a contar",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Si aparece: la hoja de cierre evalúa el conteo antes de cerrar",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CloseDrawerSheet.kt",
+      "linea": 159
+    },
+    {
+      "ruta": "Si aparece: la hoja de cierre pregunta con Volver a contar",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CloseDrawerSheet.kt",
+      "linea": 188
+    },
+    {
+      "ruta": "Si aparece: sólo pregunta si la suma de los retiros es mayor que cero",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 79
+    },
+    {
+      "ruta": "Si aparece: sólo pregunta si el efectivo cobrado es mayor que cero",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 83
+    },
+    {
+      "ruta": "Si aparece: el efectivo cobrado sale de los eventos de la sesión (el turno), no del día",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 67
+    },
+    {
+      "ruta": "Paso 3: la instrucción de la hoja de cierre",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 54
+    },
+    {
+      "ruta": "Problema: conteo ciego antes de cerrar",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 931
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el SERVIDOR local del 3000 de la Mac por Tailscale; sesión owner@owner.com (Propietario)",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/faltante-o-sobrante-del-corte/01-sw101-historial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/faltante-o-sobrante-del-corte/02-sw102-corte-historial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/faltante-o-sobrante-del-corte/03-sw97-contaste.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/faltante-o-sobrante-del-corte/04-sw99-corte-de-caja.png"
+    ],
+    "filasCreadas": [
+      "La misma caja cmwmkkros00xvwayddw0m81ue (Avoqado Empty), cerrada con faltante de $9.50 a propósito"
+    ],
+    "nota": "Más › Caja › Historial lista el turno («Conteo real $650.00 · Faltante $9.50») → al tocarlo abre Corte de caja con Monto inicial, Ingresos (pay-in), Egresos (pay-out), Reembolsos en efectivo, Ventas en efectivo, Efectivo esperado ($659.50 = 500 + 100 − 0 − 5 + 64.50), Conteo real y Faltante (Conteo real − Efectivo esperado), e Imprimir corte. El aviso «¿Contaste lo que quedó dentro del cajón?» salió al escribir el efectivo cobrado del turno ($64.50) y Volver a contar lo corrigió (fotos 3 y 4). Sin internet no recorrido."
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

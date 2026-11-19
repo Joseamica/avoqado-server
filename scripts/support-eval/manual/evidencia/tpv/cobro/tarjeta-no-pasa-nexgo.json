@@ -1,0 +1,186 @@
+{
+  "pagina": "tpv/cobro/tarjeta-no-pasa-nexgo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 20,
+      "cita": "const val VUELVE_A_ENVIAR = \"Vuelve a enviar el cobro desde el punto de venta.\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3352,
+      "cita": "message = TextosNoSeCobro.terminalEnCobroDelPos(codigo, result.message),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3353,
+      "cita": "canRetry = false,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1093,
+      "cita": "if (state.canRetry) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 24,
+      "cita": "\"E618\" -> \"Retira la tarjeta del lector: no se cobró nada.\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 19,
+      "cita": "const val INTENTAR_DE_NUEVO = \"Intentar de nuevo\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3335,
+      "cita": "message = TextosNoSeCobro.pagoRapido(codigo, result.message),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3336,
+      "cita": "canRetry = true,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1099,
+      "cita": "Text(if (state.noSeCobro) TextosNoSeCobro.INTENTAR_DE_NUEVO else \"Reintentar\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 23,
+      "cita": "\"U101\" -> \"Tiempo agotado: nadie acercó una tarjeta. No se cobró nada.\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 44,
+      "cita": "\"E622\" -> \"esta terminal no acepta tarjetas AMEX (E622).\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 26,
+      "cita": "else -> \"No se cobró nada: ${causa(codigoSdk, mensajeSdk)}\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayErrorMapper.kt",
+      "linea": 56,
+      "cita": "const val ACCION_INSERTAR_CHIP = \"Pide al cliente que inserte la tarjeta en el chip.\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3109,
+      "cita": "AngelPayErrorMapper.accionSugerida(result.message, result.code)?.let { accion ->"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1071,
+      "cita": "text = if (state.noSeCobro) TextosNoSeCobro.TITULO else \"Error en el pago\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3143,
+      "cita": "canRetry = true,"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3102,
+      "cita": "append(result.message ?: \"Pago rechazado\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1099,
+      "cita": "Text(if (state.noSeCobro) TextosNoSeCobro.INTENTAR_DE_NUEVO else \"Reintentar\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1108,
+      "cita": "Text(\"Regresar\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: *No cierres esta pantalla* mientras AngelPay lee la tarjeta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 711
+    },
+    {
+      "ruta": "Antes: el título *No se cobró*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 18
+    },
+    {
+      "ruta": "Si aparece el código E608: en el rechazo va como «SDK E608»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3115
+    },
+    {
+      "ruta": "Si aparece el código E608: en *No se cobró* va entre paréntesis",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/TextosNoSeCobro.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Si aparece el código E608: es el límite de contactless, un rechazo con Reintentar",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayOutcomeClassifier.kt",
+      "linea": 231
+    },
+    {
+      "ruta": "Si aparece *Cobro sin confirmar*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 958
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Nexgo N86 del laboratorio del Alien (terminal de Avoqado Full)",
+    "version": "2.16.0-nexgo (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), AngelPay QA (cuenta AvoqadoComercio (QA)), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "1e1d2be8a01c4850a4d82ead8ec3bbb4938377028a647ced09541a6fd02d9a54",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/1-monto-5-05-rechazo-controlado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/2-metodo-de-pago-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/3-angelpay-pide-la-tarjeta-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/4-leyendo-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/5-declinada-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/6-error-en-el-pago-reintentar-regresar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/tarjeta-no-pasa-nexgo/7-tras-regresar.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Rechazo controlado de AngelPay QA por monto: $5.05 (code 05). *Tarjeta* → pantalla de AngelPay que pide la tarjeta → «Leyendo…» → «DECLINADA» → la TPV muestra *Error en el pago* con «DECLINADA» y «SDK G500: Transaccion rechazada por el gateway», y los botones *Reintentar* y *Regresar* (paso 6) → *Regresar* vuelve al monto. No se creó ningún cobro. Los demás casos de la guía (*No se cobró* del punto de venta, «Retira la tarjeta del lector…», «Tiempo agotado…», AMEX, chip/E608) no se provocaron: piden otra tarjeta o quitar la tarjeta del lector."
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

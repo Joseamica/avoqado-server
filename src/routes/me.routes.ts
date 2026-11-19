@@ -11,8 +11,10 @@ import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.mid
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import logger from '@/config/logger'
 import { exigirSucursalDelToken } from '@/utils/sucursalDelToken'
+import supportWhatsappRoutes from './supportWhatsapp.routes'
 
 const router = Router()
+router.use('/support-whatsapp', supportWhatsappRoutes)
 
 /**
  * GET /api/v1/me/access

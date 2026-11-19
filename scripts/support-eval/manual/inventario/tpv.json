@@ -1,0 +1,1997 @@
+{
+  "app": "tpv",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "publicadoComo": "v2.16.0",
+  "generado": "2026-11-12",
+  "supuestos": [
+    "Ref documentada de Task 8, Paso 1: la etiqueta de la versión viva más nueva (versiones-vivas-2026-11-11.txt, 30 días, pasadas por normalizeAppVersion), no la etiqueta más nueva: el manual describe lo que el cliente tiene instalado.",
+    "La viva más nueva de la TPV, con PAX y Nexgo juntas, es 2.16.0 (24 aparatos): etiqueta v2.16.0 (git rev-list -n1 v2.16.0), que está dentro de origin/main y cuyo app/build.gradle.kts dice versionName \"2.16.0\". Sólo cuentan las etiquetas v*: build-* y nexgo-v* no son releases.",
+    "Ya existen v2.16.1, v2.16.2, v2.17.0, v2.18.0 y v2.19.0 (4 a 11-nov), sin aparatos vivos el 11-nov: si una de ellas llega a los negocios, la ref se vuelve a sacar.",
+    "La Nexgo más nueva viva es 2.13.2-nexgo-prod (13 aparatos): el código de v2.16.0 puede no ser lo que corre en la Nexgo. Cada fila con equipos se cubre por equipo y por versión viva (manual-inventory, R5-02).",
+    "Task 8b: las pantallas del modo simplificado de inventario serializado (módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow: Vender, Alta de Productos, Mis Ventas, Mis Comisiones, Mis SIMs, Corregir venta y «En revisión por administración») se marcan a-la-medida (PlayTelecom): el código las llama «Telecom»/«Promotor» (WelcomeScreen.kt:685-830). Si otro negocio usa ese modo, esas filas pasan a la cola."
+  ],
+  "versionesVivas": [
+    "2.16.0",
+    "2.13.2-nexgo-prod",
+    "2.13.0-nexgo-prod",
+    "2.12.5-nexgo-prod",
+    "2.12.2",
+    "2.11.1",
+    "2.10.0",
+    "2.9.1",
+    "2.7.1-demo",
+    "1.2.0"
+  ],
+  "filas": [
+    {
+      "id": "nav:Activation",
+      "superficie": "nav:Activation",
+      "tipo": "pantalla",
+      "nombre": "Activar Terminal",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt:119",
+      "quienLaVe": "Todos, antes del PIN, mientras la terminal no está activada; también si el servidor la retira (AppNavigation.kt:1035-1094, AppNavigation.kt:1109-1113)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/activar-la-terminal"]
+    },
+    {
+      "id": "accion:nav:Activation/activar-terminal",
+      "tipo": "accion",
+      "nombre": "Activar Terminal",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt:271",
+      "quienLaVe": "Quien tenga el código de 6 caracteres que se pide desde el dashboard (ActivationScreen.kt:212-224, ActivationScreen.kt:282)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/activar-la-terminal"]
+    },
+    {
+      "id": "accion:nav:Activation/escanear-qr-de-activacion",
+      "tipo": "accion",
+      "nombre": "Escanear código QR",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt:157",
+      "quienLaVe": "Todos en la pantalla de activación; abre el lector de QR de activación (AppNavigation.kt:1070-1081)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/activar-la-terminal"]
+    },
+    {
+      "id": "accion:nav:Activation/reintentar-configuracion",
+      "tipo": "accion",
+      "nombre": "Reintentar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt:94",
+      "quienLaVe": "Quien activa la terminal, cuando sale «Configuración Pendiente»: la terminal se activó pero no bajó su configuración (ActivationScreen.kt:74-97, ActivationViewModel.kt:136)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/activar-la-terminal"]
+    },
+    {
+      "id": "nav:AngelPayPayment",
+      "superficie": "nav:AngelPayPayment",
+      "tipo": "pantalla",
+      "nombre": "Cobro AngelPay",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:463",
+      "quienLaVe": "Todos los que cobran en una Nexgo: es la pantalla de cobro cuando ENABLE_PAX_SDK es false (AppNavigation.kt:3502-3510); el título cambia por paso (AngelPayPaymentScreen.kt:450-464)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-nexgo", "tpv/cobro/tarjeta-no-pasa-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/calificar",
+      "tipo": "accion",
+      "nombre": "Calificacion",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:451",
+      "quienLaVe": "Con tpvSettings.showReviewScreen («Pantalla de Calificación», SettingsScreen.kt:288)",
+      "equipos": ["NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/cambiar-cuenta-de-cobro",
+      "tipo": "accion",
+      "nombre": "Cambiar cuenta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:295",
+      "quienLaVe": "Todos en el cobro con más de una cuenta de cobro (AngelPayPaymentScreen.kt:631)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/cobrar-con-cripto",
+      "tipo": "accion",
+      "nombre": "Cripto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:514",
+      "quienLaVe": "Sólo si la terminal tiene tpvSettings.showCryptoOption (apagado por default, TpvSettings.kt:133; MerchantSelectionContent.kt:475-477)",
+      "equipos": ["NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/cobrar-con-tarjeta",
+      "tipo": "accion",
+      "nombre": "Tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:422",
+      "quienLaVe": "Todos en el cobro, en «Metodo de Pago» (AngelPayPaymentScreen.kt:453, AngelPayPaymentScreen.kt:631)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-nexgo", "tpv/cobro/tarjeta-no-pasa-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/reintentar",
+      "tipo": "accion",
+      "nombre": "Reintentar / Intentar de nuevo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:1099",
+      "quienLaVe": "Todos en «Error en el pago» o «No se cobró» cuando el error deja reintentar (AngelPayPaymentScreen.kt:1093, AngelPayPaymentState.Error.canRetry); en un cobro del POS que no se cobró no sale",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/tarjeta-no-pasa-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/cobrar-en-efectivo",
+      "tipo": "accion",
+      "nombre": "Efectivo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:464",
+      "quienLaVe": "Todos en el cobro, en «Metodo de Pago» (AngelPayPaymentScreen.kt:631); pide confirmar (MerchantSelectionContent.kt:555)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-en-efectivo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/confirmar-con-codigo-de-supervisor",
+      "tipo": "accion",
+      "nombre": "Confirmar con código",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:1014",
+      "quienLaVe": "Cuando el cobro queda «Cobro sin confirmar» (AngelPayPaymentScreen.kt:958); pide «Código de supervisor» (AngelPayPaymentScreen.kt:1004) y lo valida el servidor («Ese código no tiene permiso para confirmarlo.» AngelPayPaymentScreen.kt:1323)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobro-sin-confirmar-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/declarar-cliente-no-presento-tarjeta",
+      "tipo": "accion",
+      "nombre": "El cliente no presentó tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:1019",
+      "quienLaVe": "Cuando el cobro queda «Cobro sin confirmar» (AngelPayPaymentScreen.kt:958, AngelPayPaymentScreen.kt:1291)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/cobro-sin-confirmar-nexgo"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/dejar-propina",
+      "tipo": "accion",
+      "nombre": "Propina",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt:452",
+      "quienLaVe": "Con tpvSettings.showTipScreen («Pantalla de Propina», SettingsScreen.kt:296)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/cobro/agregar-propina", "tpv/cobro/no-sale-la-propina"]
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/enviar-recibo-por-correo",
+      "tipo": "accion",
+      "nombre": "Email",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt:623",
+      "quienLaVe": "Al aprobarse el cobro; diálogo «Enviar recibo» (AngelPaySuccessContent.kt:816)",
+      "equipos": ["NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/enviar-recibo-por-whatsapp",
+      "tipo": "accion",
+      "nombre": "WhatsApp",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt:659",
+      "quienLaVe": "Al aprobarse el cobro",
+      "equipos": ["NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:AngelPayPayment/imprimir-recibo",
+      "tipo": "accion",
+      "nombre": "Imprimir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt:583",
+      "quienLaVe": "Al aprobarse el cobro; sólo en el modelo N86, que es el que tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["NEXGO"],
+      "paginas": ["tpv/recibos/imprimir-y-reimprimir-recibo"]
+    },
+    {
+      "id": "nav:Checkout",
+      "superficie": "nav:Checkout",
+      "tipo": "pantalla",
+      "nombre": "Cobrar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt:108",
+      "quienLaVe": "Botón «Cobrar» del inicio: tpvSettings.showCheckout (WelcomeScreen.kt:912-928); se apaga sin caja abierta (si el negocio usa turnos de caja) o sin entrada registrada (si el negocio la exige) (WelcomeScreen.kt:671-679); no aparece en el modo simplificado de inventario serializado (WelcomeScreen.kt:685, WelcomeScreen.kt:831)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ventas/vender-con-cobrar"]
+    },
+    {
+      "id": "accion:nav:Checkout/agregar-cliente",
+      "tipo": "accion",
+      "nombre": "Agregar cliente",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:207",
+      "quienLaVe": "Todos en Cobrar, desde el detalle del carrito",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/agregar-impuesto",
+      "tipo": "accion",
+      "nombre": "Agregar impuesto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:157",
+      "quienLaVe": "Todos en Cobrar, desde el detalle del carrito",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/agregar-nota",
+      "tipo": "accion",
+      "nombre": "Agregar nota",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:144",
+      "quienLaVe": "Todos en Cobrar, desde el detalle del carrito",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/cobrar",
+      "tipo": "accion",
+      "nombre": "Cobrar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartPanelView.kt:66",
+      "quienLaVe": "Todos en Cobrar; sin red o con la venta guardada local va sólo en efectivo (AppNavigation.kt:1437-1455)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ventas/vender-con-cobrar"]
+    },
+    {
+      "id": "accion:nav:Checkout/codigo-de-referido",
+      "tipo": "accion",
+      "nombre": "¿Te recomendó alguien?",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt:116",
+      "quienLaVe": "Con un cliente elegido (ReferralCaptureSection.kt:145); pide plan REFERRAL_PROGRAM (Pro) (CheckoutScreen.kt:210); necesita internet (ReferralCaptureSection.kt:128); «Forzar atribución» todavía no funciona (CheckoutScreen.kt:477)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/configurar-favoritos",
+      "tipo": "accion",
+      "nombre": "Asignar producto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/MosaicConfigView.kt:210",
+      "quienLaVe": "Todos en Cobrar, en la pestaña «Configurar» (InputTab.kt:18); el producto sale en «Shortcuts» (MosaicConfigView.kt:94)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/cortesia",
+      "tipo": "accion",
+      "nombre": "Cortesía",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:208",
+      "quienLaVe": "Permiso tpv-orders:comp (CheckoutViewModel.kt:1447); sin él la casilla dice «Sin permiso» (ShortcutsGridView.kt:283)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/cupon",
+      "tipo": "accion",
+      "nombre": "Cupón",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:224",
+      "quienLaVe": "Todos en Cobrar; sin red dice «Necesita internet» (ShortcutsGridView.kt:282)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/descuento",
+      "tipo": "accion",
+      "nombre": "Descuento",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:216",
+      "quienLaVe": "Permiso discounts:apply (CheckoutViewModel.kt:1446; «Sin permiso» ShortcutsGridView.kt:284); el descuento escrito a mano pide plan PROMOTIONS (Pro) (CheckoutScreen.kt:209)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/eliminar-del-carrito",
+      "tipo": "accion",
+      "nombre": "Eliminar del carrito",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:234",
+      "quienLaVe": "Todos en Cobrar, con productos en el carrito",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/limpiar-carrito",
+      "tipo": "accion",
+      "nombre": "Limpiar carrito",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:181",
+      "quienLaVe": "Todos en Cobrar, desde el detalle del carrito",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/pagar-despues",
+      "tipo": "accion",
+      "nombre": "Pagar después",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:242",
+      "quienLaVe": "Todos en Cobrar; sin red dice «Necesita internet» (ShortcutsGridView.kt:282); también en el detalle del carrito (CartDetailsSheet.kt:171)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/agregar-monto-con-teclado",
+      "tipo": "accion",
+      "nombre": "+",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/NumericKeypadView.kt:149",
+      "quienLaVe": "Todos en Cobrar, pestaña «Teclado» (InputTab.kt:15); el monto se teclea con centavos («100» = $1.00) y entra al carrito como «Otro importe» (CheckoutScreen.kt:262-266)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ventas/vender-con-cobrar"]
+    },
+    {
+      "id": "accion:nav:Checkout/cambiar-cantidad-o-quitar",
+      "tipo": "accion",
+      "nombre": "Quitar uno / Agregar uno / Eliminar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:499",
+      "quienLaVe": "Todos en el carrito de Cobrar (se abre con el botón «Cobrar $…» de abajo, CheckoutScreen.kt:359)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ventas/vender-con-cobrar"]
+    },
+    {
+      "id": "accion:nav:Checkout/escanear-codigo",
+      "tipo": "accion",
+      "nombre": "Escanear código",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/SearchBarView.kt:94",
+      "quienLaVe": "Todos en Cobrar; abre el lector de código de barras para agregar el producto (CheckoutScreen.kt:239)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Checkout/buscar-producto",
+      "tipo": "accion",
+      "nombre": "Buscar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/SearchBarView.kt:66",
+      "quienLaVe": "Todos en Cobrar; abre la búsqueda de productos para agregarlos (CheckoutScreen.kt:237)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:FastPaymentEntry",
+      "superficie": "nav:FastPaymentEntry",
+      "tipo": "pantalla",
+      "nombre": "Pago Rápido",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/FastPaymentEntryScreen.kt:64",
+      "quienLaVe": "Quien terminó un cobro empezado en «Pago rápido» y toca «Nuevo Pago» (AppNavigation.kt:2090, AppNavigation.kt:3074)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/cobrar-con-tarjeta-nexgo"]
+    },
+    {
+      "id": "accion:nav:FastPaymentEntry/cobrar-monto",
+      "tipo": "accion",
+      "nombre": "Ingresa el monto del pago",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/FastPaymentEntryScreen.kt:89",
+      "quienLaVe": "Los mismos que llegan a la pantalla; al confirmar el monto lleva al cobro de la marca de la terminal (AppNavigation.kt:1413-1421)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/cobrar-con-tarjeta-nexgo"]
+    },
+    {
+      "id": "nav:FloorPlan",
+      "superficie": "nav:FloorPlan",
+      "tipo": "pantalla",
+      "nombre": "Plano de Piso",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/FloorPlanCanvasScreen.kt:265",
+      "quienLaVe": "Desde Órdenes → «Servicio de Mesa», sólo si el giro es RESTAURANT, BAR, CAFE o FAST_FOOD (OrderingWelcomeScreen.kt:197, SecureStorage.kt:727-729)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:FloorPlan/abrir-mesa",
+      "tipo": "accion",
+      "nombre": "Número de la mesa en el plano (table.number)",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/FloorPlanCanvasScreen.kt:180",
+      "quienLaVe": "Todos en el Plano de Piso; tocar una mesa crea su orden y abre el menú (FloorPlanCanvasScreen.kt:180-186, AppNavigation.kt:1541-1545)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:FloorPlan/agregar-elemento",
+      "tipo": "accion",
+      "nombre": "Agregar Elemento",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/FloorPlanCanvasScreen.kt:1728",
+      "quienLaVe": "Todos en modo edición; mesa, pared, barra, área de servicio, puerta o etiqueta (FloorPlanCanvasScreen.kt:1739-1786)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:FloorPlan/editar-plano",
+      "tipo": "accion",
+      "nombre": "Editar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/FloorPlanCanvasScreen.kt:284",
+      "quienLaVe": "Todos en el Plano de Piso; sin candado en la app: «Modo Edición: Arrastra las mesas» (FloorPlanCanvasScreen.kt:270)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:FloorPlan/eliminar-elemento",
+      "tipo": "accion",
+      "nombre": "Eliminar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/FloorPlanCanvasScreen.kt:1694",
+      "quienLaVe": "Todos en modo edición, al editar un elemento",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:HistoricalPeriodDetail",
+      "superficie": "nav:HistoricalPeriodDetail",
+      "tipo": "pantalla",
+      "nombre": "period.label",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/HistoricalPeriodDetailScreen.kt:68",
+      "quienLaVe": "Desde Reportes → Historial, al tocar un período (AppNavigation.kt:2221); el título es la etiqueta del período",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/reportes/ver-reportes-de-otros-dias"]
+    },
+    {
+      "id": "nav:Home",
+      "superficie": "nav:Home",
+      "tipo": "pantalla",
+      "nombre": "Hola, $staffName",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt:1033",
+      "quienLaVe": "Todos los que entran con su PIN. Cada botón lo prende o apaga la configuración de la terminal que se fija desde el dashboard (tpvSettings.show*, TpvSettings.kt:120-131); con el módulo SERIALIZED_INVENTORY en modo simplificado sólo salen los de PlayTelecom (WelcomeScreen.kt:685-830)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Home/activar-modo-kiosk",
+      "tipo": "accion",
+      "nombre": "Modo Kiosk",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt:128",
+      "quienLaVe": "Nadie hoy: sólo con MODO_KIOSCO_DISPONIBLE y tpvSettings.kioskModeEnabled, y con permiso tpv-terminal:settings (WelcomeScreen.kt:1207-1226)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "accion:nav:Home/cambiar-usuario",
+      "tipo": "accion",
+      "nombre": "Cambiar usuario",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt:108",
+      "quienLaVe": "Todos, desde el engrane de la barra superior (WelcomeScreen.kt:1034, WelcomeScreen.kt:1188-1194); cierra la sesión y vuelve al PIN (AppNavigation.kt:1365-1390)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/sesion/entrar-y-cambiar-usuario"]
+    },
+    {
+      "id": "accion:nav:Home/cobrar-pago-rapido",
+      "tipo": "accion",
+      "nombre": "Pago rápido",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt:850",
+      "quienLaVe": "tpvSettings.showQuickPayment (WelcomeScreen.kt:840); se apaga sin caja abierta (si el negocio usa turnos de caja) o sin entrada registrada (si el negocio la exige) (WelcomeScreen.kt:671-679); no aparece en el modo simplificado de inventario serializado (WelcomeScreen.kt:685, WelcomeScreen.kt:831). Abre «Cantidad personalizada» (AmountInputBottomSheet.kt:153) y lleva al cobro",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/cobrar-con-tarjeta-nexgo", "tpv/cobro/cobrar-en-efectivo"]
+    },
+    {
+      "id": "accion:nav:Home/declarar-no-se-cobro",
+      "tipo": "accion",
+      "nombre": "No se cobró",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt:210",
+      "quienLaVe": "Todos ven el aviso de cobros sin confirmar en Inicio, Pago Rápido y Cobrar (NavRoute.kt:420, AppNavigation.kt:920-998); el botón sale si hay un cobro que se puede declarar. El servidor decide: sin permiso pide «PIN de gerente» (NoSeCobroDesdeElAviso.kt:334-341, DeclaracionDesdeElAviso.kt:225); permisos payments:reconcile-uncharged y payments:resolve-no-instrument (BlumonAttemptResolver.kt:34-41)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/declarar-no-se-cobro-desde-el-aviso"]
+    },
+    {
+      "id": "accion:nav:Home/revisar-cobros-pendientes",
+      "tipo": "accion",
+      "nombre": "Revisar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt:214",
+      "quienLaVe": "Todos, en el aviso «Quedó un cobro de … sin confirmar» de Inicio, Pago Rápido y Cobrar (AppNavigation.kt:985-998); abre el historial de pagos (AppNavigation.kt:996)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Home/ayuda-del-aviso",
+      "tipo": "accion",
+      "nombre": "Ayuda",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt:217",
+      "quienLaVe": "Todos, en el aviso de cobros sin confirmar; abre Soporte (AppNavigation.kt:997)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Home/modo-oscuro",
+      "tipo": "accion",
+      "nombre": "Modo Oscuro",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt:139",
+      "quienLaVe": "Todos, desde el engrane de la barra superior",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Home/reconocer-cobro-registrado",
+      "tipo": "accion",
+      "nombre": "Entendido",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt:980",
+      "quienLaVe": "Todos, cuando Avoqado registró un cobro que se daba por perdido; queda quién lo confirmó (AppNavigation.kt:962-981)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/cobro-sin-confirmar-pax", "tpv/cobro/cobro-sin-confirmar-nexgo"]
+    },
+    {
+      "id": "accion:nav:Home/reiniciar-app",
+      "tipo": "accion",
+      "nombre": "Reiniciar App",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt:117",
+      "quienLaVe": "Todos, desde el engrane; pide confirmar en «Reiniciar Aplicación» (WelcomeScreen.kt:1240-1256)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ayuda/reiniciar-la-app"]
+    },
+    {
+      "id": "accion:nav:Home/reintentar-envio-de-cobros",
+      "tipo": "accion",
+      "nombre": "Reintentar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/DeviceAlertBanner.kt:294",
+      "quienLaVe": "Todos, en el aviso de la terminal cuando hay cobros sin enviar o falta conexión; reintenta la cola de cobros (AppNavigation.kt:878-909)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/cobrar-sin-internet"]
+    },
+    {
+      "id": "nav:KioskCart",
+      "superficie": "nav:KioskCart",
+      "tipo": "pantalla",
+      "nombre": "Tu Orden",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskCartScreen.kt:144",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "accion:nav:KioskCart/pagar-ahora",
+      "tipo": "accion",
+      "nombre": "Pagar Ahora",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskCartScreen.kt:374",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "nav:KioskMenu",
+      "superficie": "nav:KioskMenu",
+      "tipo": "pantalla",
+      "nombre": "Menu",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskMenuScreen.kt:173",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "accion:nav:KioskMenu/agregar-al-carrito",
+      "tipo": "accion",
+      "nombre": "Agregar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskMenuScreen.kt:802",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "nav:KioskSuccess",
+      "superficie": "nav:KioskSuccess",
+      "tipo": "pantalla",
+      "nombre": "Nueva Orden ($secondsRemaining)",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskSuccessScreen.kt:174",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "nav:KioskWelcome",
+      "superficie": "nav:KioskWelcome",
+      "tipo": "pantalla",
+      "nombre": "Toca para comenzar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskWelcomeScreen.kt:193",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "accion:nav:KioskWelcome/salir-del-kiosco",
+      "tipo": "accion",
+      "nombre": "Administrador",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/kiosk/presentation/screens/KioskWelcomeScreen.kt:125",
+      "quienLaVe": "Sólo en modo kiosco, que hoy no se puede encender; sale con el PIN de alguien con permiso de administrador (KioskAdminPinDialog.kt:145, 300)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "nav:Login",
+      "superficie": "nav:Login",
+      "tipo": "pantalla",
+      "nombre": "Ingresa tu PIN",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt:115",
+      "quienLaVe": "Todos con la terminal activada; si la terminal se desactiva vuelve a activación (AppNavigation.kt:1097-1117)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/sesion/entrar-y-cambiar-usuario", "tpv/sesion/pin-incorrecto"]
+    },
+    {
+      "id": "accion:nav:Login/entrar-con-pin",
+      "tipo": "accion",
+      "nombre": "Ir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt:184",
+      "quienLaVe": "Cualquier persona del equipo con su PIN; al entrar arranca la sincronización de cobros (AppNavigation.kt:1121-1166)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/sesion/entrar-y-cambiar-usuario", "tpv/sesion/pin-incorrecto"]
+    },
+    {
+      "id": "nav:Menu",
+      "superficie": "nav:Menu",
+      "tipo": "pantalla",
+      "nombre": "Nueva Orden",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/MenuScreen.kt:269",
+      "quienLaVe": "Desde Órdenes: «Pedido rápido», una mesa del Plano de Piso o una orden de la lista (AppNavigation.kt:1506-1508, AppNavigation.kt:1541-1544, AppNavigation.kt:1766-1768); el título cambia a «Cuenta por cobrar #…», el nombre de la mesa o «Pedido rápido #…» (MenuScreen.kt:258-268)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/anular-productos",
+      "tipo": "accion",
+      "nombre": "Void Items",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:303",
+      "quienLaVe": "Permiso tpv-orders:void (MenuViewModel.kt:311); sin él «Sin permisos para anular» (ActionsTab.kt:307)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/cortesia",
+      "tipo": "accion",
+      "nombre": "Cortesia",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:314",
+      "quienLaVe": "Permiso tpv-orders:comp (MenuViewModel.kt:310); sin él «Sin permisos para cortesía» (ActionsTab.kt:318)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/crear-cliente",
+      "tipo": "accion",
+      "nombre": "Crear Nuevo Cliente",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/GuestTab.kt:594",
+      "quienLaVe": "Todos en la orden, pestaña de clientes",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/cupones",
+      "tipo": "accion",
+      "nombre": "Cupones",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:280",
+      "quienLaVe": "Todos en la orden, pestaña de acciones",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/descuentos",
+      "tipo": "accion",
+      "nombre": "Descuentos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:269",
+      "quienLaVe": "Permiso discounts:apply (MenuViewModel.kt:309); sin él «Sin permisos para descuentos» (ActionsTab.kt:273)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/dividir-cuenta",
+      "tipo": "accion",
+      "nombre": "Dividir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/CheckTab.kt:204",
+      "quienLaVe": "Sólo PAX: en Nexgo dice «Pagos divididos aún no disponibles en esta terminal.» (AppNavigation.kt:1712-1717) y un monto parcial tampoco pasa (AppNavigation.kt:1681-1688). Opciones: Por Productos, Por Personas, Monto Personalizado (SplitOptionsOverlay.kt:192-239)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/enviar-a-cocina",
+      "tipo": "accion",
+      "nombre": "Cocina",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/CheckTab.kt:183",
+      "quienLaVe": "Todos en la orden",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/gift-card",
+      "tipo": "accion",
+      "nombre": "Gift Card",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:258",
+      "quienLaVe": "Nadie: la casilla sale con «Pronto»",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "apagada-o-sin-lanzar",
+        "detalle": "Casilla con badge «Pronto», sin acción todavía (ActionsTab.kt:258-262)"
+      }
+    },
+    {
+      "id": "accion:nav:Menu/guardar-datos-de-comensales",
+      "tipo": "accion",
+      "nombre": "Guardar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/GuestTab.kt:426",
+      "quienLaVe": "Todos en la orden, pestaña de clientes (comensales, alergias, instrucciones)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/imprimir-orden",
+      "tipo": "accion",
+      "nombre": "Imprimir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/CheckTab.kt:480",
+      "quienLaVe": "Todos en la orden; imprime en las dos marcas: PAX por su impresora y Nexgo por el SDK de AngelPay (PrinterManager.kt:141); en Nexgo sólo el modelo N86 tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/pagar",
+      "tipo": "accion",
+      "nombre": "Pagar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/CheckTab.kt:219",
+      "quienLaVe": "Todos en la orden; lleva al cobro de la marca de la terminal (AppNavigation.kt:1652-1673)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Menu/pagar-despues",
+      "tipo": "accion",
+      "nombre": "Pagar Despues",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:292",
+      "quienLaVe": "Todos en la orden, pestaña de acciones",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Messages",
+      "superficie": "nav:Messages",
+      "tipo": "pantalla",
+      "nombre": "Mensajes",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/MessagesScreen.kt:89",
+      "quienLaVe": "Botón «Mensajes»: tpvSettings.showMessages (WelcomeScreen.kt:977-990, WelcomeScreen.kt:782-795)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mensajes/leer-mensajes"]
+    },
+    {
+      "id": "accion:nav:Messages/confirmar-lectura",
+      "tipo": "accion",
+      "nombre": "Entendido",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt:289",
+      "quienLaVe": "Todos, al leer un mensaje",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mensajes/leer-mensajes"]
+    },
+    {
+      "id": "accion:nav:Messages/ejecutar-accion",
+      "tipo": "accion",
+      "nombre": "Ejecutar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt:274",
+      "quienLaVe": "Todos, en un mensaje de tipo «Accion» (el texto del botón lo pone quien manda el mensaje)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mensajes/leer-mensajes"]
+    },
+    {
+      "id": "accion:nav:Messages/responder-encuesta",
+      "tipo": "accion",
+      "nombre": "Enviar respuesta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt:263",
+      "quienLaVe": "Todos, en un mensaje de tipo «Encuesta»",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mensajes/leer-mensajes"]
+    },
+    {
+      "id": "nav:MisSims",
+      "superficie": "nav:MisSims",
+      "tipo": "pantalla",
+      "nombre": "Mis SIMs",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/sim_custody/presentation/MisSimsScreen.kt:102",
+      "quienLaVe": "Módulo SERIALIZED_INVENTORY activo, rol WAITER (el promotor) y permiso tpv-sim-custody:accept (WelcomeScreen.kt:766-778)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): custodia de SIMs del promotor (WelcomeScreen.kt:753-778)"
+      }
+    },
+    {
+      "id": "accion:nav:MisSims/aceptar-sim",
+      "tipo": "accion",
+      "nombre": "Aceptar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/sim_custody/presentation/MisSimsScreen.kt:548",
+      "quienLaVe": "Permiso tpv-sim-custody:accept (WelcomeScreen.kt:629)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): custodia de SIMs del promotor (WelcomeScreen.kt:753-778)"
+      }
+    },
+    {
+      "id": "accion:nav:MisSims/aceptar-todos",
+      "tipo": "accion",
+      "nombre": "Aceptar todos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/sim_custody/presentation/MisSimsScreen.kt:337",
+      "quienLaVe": "Permiso tpv-sim-custody:accept (WelcomeScreen.kt:629)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): custodia de SIMs del promotor (WelcomeScreen.kt:753-778)"
+      }
+    },
+    {
+      "id": "accion:nav:MisSims/rechazar-sim",
+      "tipo": "accion",
+      "nombre": "Rechazar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/sim_custody/presentation/MisSimsScreen.kt:565",
+      "quienLaVe": "Permiso tpv-sim-custody:accept (WelcomeScreen.kt:629)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): custodia de SIMs del promotor (WelcomeScreen.kt:753-778)"
+      }
+    },
+    {
+      "id": "nav:MyCommissions",
+      "superficie": "nav:MyCommissions",
+      "tipo": "pantalla",
+      "nombre": "Mis Comisiones",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/cash_out/presentation/MyCommissionsScreen.kt:64",
+      "quienLaVe": "Módulo SERIALIZED_INVENTORY activo y permiso cash-out:view_own (WelcomeScreen.kt:630, WelcomeScreen.kt:742-751)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): Cash Out de los promotores (WelcomeScreen.kt:740-751)"
+      }
+    },
+    {
+      "id": "accion:nav:MyCommissions/retirar",
+      "tipo": "accion",
+      "nombre": "Retirar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/cash_out/presentation/MyCommissionsScreen.kt:124",
+      "quienLaVe": "Permiso cash-out:view_own (WelcomeScreen.kt:630)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): Cash Out de los promotores (WelcomeScreen.kt:740-751)"
+      }
+    },
+    {
+      "id": "nav:MySales",
+      "superficie": "nav:MySales",
+      "tipo": "pantalla",
+      "nombre": "Mis Ventas",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_sale/presentation/MySalesScreen.kt:98",
+      "quienLaVe": "Permiso serialized-inventory:sell en el modo simplificado (WelcomeScreen.kt:628, WelcomeScreen.kt:729-738)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "nav:OrderList",
+      "superficie": "nav:OrderList",
+      "tipo": "pantalla",
+      "nombre": "Órdenes",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/OrderListScreen.kt:131",
+      "quienLaVe": "Desde Órdenes (avisos «Para Llevar sin Pagar» y «Pendientes de Pago», AppNavigation.kt:1519-1527) y tras cobrar una cuenta por cobrar (AppNavigation.kt:2147)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:OrderingWelcome",
+      "superficie": "nav:OrderingWelcome",
+      "tipo": "pantalla",
+      "nombre": "Sistema de Pedidos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/OrderingWelcomeScreen.kt:85",
+      "quienLaVe": "Botón «Órdenes»: tpvSettings.showOrderManagement, sin Modo Restaurante y sin «Cobrar» (TpvSettings.kt:190-191, WelcomeScreen.kt:888-907); se apaga sin caja abierta (si el negocio usa turnos de caja) o sin entrada registrada (si el negocio la exige) (WelcomeScreen.kt:671-679); no aparece en el modo simplificado de inventario serializado (WelcomeScreen.kt:685, WelcomeScreen.kt:831)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Payment",
+      "superficie": "nav:Payment",
+      "tipo": "pantalla",
+      "nombre": "Pago con Tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:313",
+      "quienLaVe": "Todos los que cobran en una PAX: es la pantalla de cobro cuando ENABLE_PAX_SDK es true (AppNavigation.kt:3502-3510); exige sesión iniciada (AppNavigation.kt:1788-1794)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/tarjeta-no-pasa-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/calificar",
+      "tipo": "accion",
+      "nombre": "Calificación",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:288",
+      "quienLaVe": "Con tpvSettings.showReviewScreen («Pantalla de Calificación», SettingsScreen.kt:288); se puede «Saltar» (ReviewScreen.kt:93)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Payment/cambiar-cuenta-de-cobro",
+      "tipo": "accion",
+      "nombre": "Cambiar cuenta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:295",
+      "quienLaVe": "Todos en el cobro, cuando el negocio tiene más de una cuenta de cobro",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/cancelar-cobro",
+      "tipo": "accion",
+      "nombre": "Cancelar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:1380",
+      "quienLaVe": "Todos, mientras la terminal espera la tarjeta",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/terminal-ocupada"]
+    },
+    {
+      "id": "accion:nav:Payment/reintentar",
+      "tipo": "accion",
+      "nombre": "Reintentar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:2756",
+      "quienLaVe": "Todos en «Error en el Pago» cuando el error deja reintentar (PaymentScreen.kt:2754, PaymentState.Error.canRetry); vuelve a pedir la tarjeta con el mismo cobro",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/tarjeta-no-pasa-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/cobrar-con-cripto",
+      "tipo": "accion",
+      "nombre": "Cripto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:514",
+      "quienLaVe": "Sólo si la terminal tiene tpvSettings.showCryptoOption (apagado por default, TpvSettings.kt:133; MerchantSelectionContent.kt:475-477)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Payment/cobrar-con-tarjeta",
+      "tipo": "accion",
+      "nombre": "Tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:422",
+      "quienLaVe": "Todos en el cobro; luego «Acerca o inserta la tarjeta» (PaymentScreen.kt:1356)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobrar-con-tarjeta-pax", "tpv/cobro/tarjeta-no-pasa-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/cobrar-en-efectivo",
+      "tipo": "accion",
+      "nombre": "Efectivo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt:464",
+      "quienLaVe": "Todos en el cobro; pide «Confirmar pago en efectivo» (MerchantSelectionContent.kt:555)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobrar-en-efectivo"]
+    },
+    {
+      "id": "accion:nav:Payment/declarar-cliente-no-presento-tarjeta",
+      "tipo": "accion",
+      "nombre": "El cliente no presentó tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt:86",
+      "quienLaVe": "Cuando un cobro queda sin confirmar; permiso payments:resolve-no-instrument (BlumonAttemptResolver.kt:34-36); sin él «debe entrar un gerente» (BlumonRecoveryContent.kt:92)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobro-sin-confirmar-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/declarar-revise-la-terminal",
+      "tipo": "accion",
+      "nombre": "Ya revisé la terminal: no se cobró",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt:80",
+      "quienLaVe": "Cuando un cobro queda sin confirmar (PaymentScreen.kt:947); permiso payments:reconcile-uncharged (BlumonAttemptResolver.kt:39-41); sin él lo dice la pantalla (BlumonRecoveryContent.kt:90)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/cobro-sin-confirmar-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/dejar-propina",
+      "tipo": "accion",
+      "nombre": "Propina",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:297",
+      "quienLaVe": "Con tpvSettings.showTipScreen («Pantalla de Propina», SettingsScreen.kt:296); opciones «Sin propina» y «Continuar» (TipScreen.kt:214, TipScreen.kt:227)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/cobro/agregar-propina", "tpv/cobro/no-sale-la-propina"]
+    },
+    {
+      "id": "accion:nav:Payment/enviar-recibo-por-correo",
+      "tipo": "accion",
+      "nombre": "Email",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:2312",
+      "quienLaVe": "Al aprobarse el cobro, cuando ya se sincronizó (PaymentScreen.kt:2362); diálogo «Enviar recibo» (PaymentScreen.kt:2889)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Payment/enviar-recibo-por-whatsapp",
+      "tipo": "accion",
+      "nombre": "WhatsApp",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:2348",
+      "quienLaVe": "Al aprobarse el cobro, cuando ya se sincronizó (PaymentScreen.kt:2362); diálogo «Enviar recibo por WhatsApp» (WhatsAppReceiptDialog.kt:192)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Payment/imprimir-comanda",
+      "tipo": "accion",
+      "nombre": "Imprimir Comanda",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:2608",
+      "quienLaVe": "Al ver los detalles de la orden en el recibo",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Payment/imprimir-recibo",
+      "tipo": "accion",
+      "nombre": "Imprimir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:2275",
+      "quienLaVe": "Al aprobarse el cobro, con tpvSettings.showReceiptScreen («Opciones de Recibo», SettingsScreen.kt:304)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/recibos/imprimir-y-reimprimir-recibo", "tpv/recibos/no-imprime-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/volver-al-recibo",
+      "tipo": "accion",
+      "nombre": "Volver al recibo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:1011",
+      "quienLaVe": "Todos, cuando sale «No se pudo imprimir» tras un cobro (PaymentScreen.kt:1004-1014)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/recibos/no-imprime-pax"]
+    },
+    {
+      "id": "accion:nav:Payment/verificar-venta",
+      "tipo": "accion",
+      "nombre": "Verificación",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt:308",
+      "quienLaVe": "Con tpvSettings.showVerificationScreen («Pantalla de Verificación», SettingsScreen.kt:376; PaymentFlowGate.kt:54): captura de fotos o códigos después del pago",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "nav:PaymentTransactions",
+      "superficie": "nav:PaymentTransactions",
+      "tipo": "pantalla",
+      "nombre": "Transacciones ${uiState.processorType.name}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/transactions/PaymentTransactionsScreen.kt:51",
+      "quienLaVe": "Sólo desde SuperAdmin («Reconciliación con el Procesador», SuperAdminScreen.kt:256; AppNavigation.kt:2191-2201)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo se abre desde SuperAdmin (AppNavigation.kt:2191-2201). Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "nav:Payments",
+      "superficie": "nav:Payments",
+      "tipo": "pantalla",
+      "nombre": "Historial de Pagos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt:127",
+      "quienLaVe": "Botón «Pagos»: tpvSettings.showPayments (WelcomeScreen.kt:954-963); también «Revisar» del aviso de cobros sin confirmar (AppNavigation.kt:995); no aparece en el modo simplificado de inventario serializado (WelcomeScreen.kt:685, WelcomeScreen.kt:831)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [
+        "tpv/reembolsos/reembolsar-cobro-pax",
+        "tpv/reembolsos/reembolsar-cobro-nexgo",
+        "tpv/recibos/imprimir-y-reimprimir-recibo"
+      ]
+    },
+    {
+      "id": "accion:nav:Payments/imprimir-pagos",
+      "tipo": "accion",
+      "nombre": "Imprimir pagos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt:884",
+      "quienLaVe": "Todos en el historial, al seleccionar pagos (máx. 20, PaymentsScreen.kt:395); imprime en las dos marcas: PAX por su impresora y Nexgo por el SDK de AngelPay (PrinterManager.kt:141); en Nexgo sólo el modelo N86 tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/recibos/imprimir-y-reimprimir-recibo"]
+    },
+    {
+      "id": "nav:RefundConfirmation",
+      "superficie": "nav:RefundConfirmation",
+      "tipo": "pantalla",
+      "nombre": "Confirmar Reembolso",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt:145",
+      "quienLaVe": "Permiso payments:refund: sin él, el detalle del pago dice «Solo administradores pueden procesar reembolsos» (PaymentsViewModel.kt:669-689, PaymentDetailBottomSheet.kt:336); el pago se reembolsa en el mismo tipo de terminal que lo cobró (PaymentsScreen.kt:758-761)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/reembolsos/reembolsar-cobro-pax", "tpv/reembolsos/reembolsar-cobro-nexgo"]
+    },
+    {
+      "id": "accion:nav:RefundConfirmation/procesar-reembolso",
+      "tipo": "accion",
+      "nombre": "Procesar Reembolso ${currencyFormatter.format(refundAmount)}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt:529",
+      "quienLaVe": "Permiso payments:refund (PaymentsViewModel.kt:671); en Nexgo no hay reembolso parcial ni se puede dejar fuera la propina (allowPartialRefund y supportsSaleOnlyRefund = ENABLE_PAX_SDK, AppNavigation.kt:2362, AppNavigation.kt:2365)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/reembolsos/reembolsar-cobro-pax", "tpv/reembolsos/reembolsar-cobro-nexgo"]
+    },
+    {
+      "id": "nav:Reports",
+      "superficie": "nav:Reports",
+      "tipo": "pantalla",
+      "nombre": "Reportes",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt:380",
+      "quienLaVe": "Botón «Reportes»: tpvSettings.showReports (WelcomeScreen.kt:931-940); sin candado de plan (ReportsScreen.kt:154-157); no aparece en el modo simplificado de inventario serializado (WelcomeScreen.kt:685, WelcomeScreen.kt:831)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/reportes/ver-reporte-del-dia", "tpv/reportes/ver-reportes-de-otros-dias"]
+    },
+    {
+      "id": "accion:nav:Reports/imprimir-reporte",
+      "tipo": "accion",
+      "nombre": "Imprimir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt:241",
+      "quienLaVe": "Todos en Reportes, desde «Opciones de impresion» (ReportsScreen.kt:175); imprime en las dos marcas: PAX por su impresora y Nexgo por el SDK de AngelPay (PrinterManager.kt:141); en Nexgo sólo el modelo N86 tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/reportes/ver-reporte-del-dia"]
+    },
+    {
+      "id": "accion:nav:Reports/imprimir-periodos",
+      "tipo": "accion",
+      "nombre": "Imprimir Períodos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt:1340",
+      "quienLaVe": "Todos en Reportes → Historial, tras «Seleccionar períodos para imprimir» (ReportsScreen.kt:432); modos «Individual» y «Resumen»",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:SaleCorrection",
+      "superficie": "nav:SaleCorrection",
+      "tipo": "pantalla",
+      "nombre": "Corregir venta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/SaleCorrectionScreen.kt:195",
+      "quienLaVe": "Desde «Mis Ventas» o «Mis SIMs», en una venta que administración pidió corregir (AppNavigation.kt:2858-2860, AppNavigation.kt:2888-2890)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "accion:nav:SaleCorrection/corregir-fotos",
+      "tipo": "accion",
+      "nombre": "Corrige las fotos y se reenviará a revisión automáticamente.",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/SaleCorrectionScreen.kt:354",
+      "quienLaVe": "Los mismos que llegan a la pantalla",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "nav:SelfUpdate",
+      "superficie": "nav:SelfUpdate",
+      "tipo": "pantalla",
+      "nombre": "Actualizaciones",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt:60",
+      "quienLaVe": "Todos desde el engrane «Buscar Actualizaciones» (SettingsBottomSheet.kt:159, WelcomeScreen.kt:1229-1232) o Configuración (SettingsScreen.kt:470); sólo PAX: en Nexgo la ruta sólo dice «Self-update no disponible en tutorialEmu» (AppNavigation.kt:2609-2628)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/ayuda/ver-version-de-la-app", "tpv/ayuda/actualizar-la-app-pax"]
+    },
+    {
+      "id": "accion:nav:SelfUpdate/buscar-actualizaciones",
+      "tipo": "accion",
+      "nombre": "Buscar actualizaciones",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt:187",
+      "quienLaVe": "Todos en una PAX",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/ayuda/actualizar-la-app-pax"]
+    },
+    {
+      "id": "accion:nav:SelfUpdate/actualizar",
+      "tipo": "accion",
+      "nombre": "Actualizar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt:614",
+      "quienLaVe": "Todos en una PAX, cuando sale «¡Nueva versión disponible!» con «Fuente: Avoqado» (SelfUpdateScreen.kt:476-483)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/ayuda/actualizar-la-app-pax"]
+    },
+    {
+      "id": "accion:nav:SelfUpdate/instalar-actualizacion",
+      "tipo": "accion",
+      "nombre": "Instalar Ahora",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt:769",
+      "quienLaVe": "Todos en una PAX, en «Listo para instalar» al terminar la descarga (SelfUpdateScreen.kt:720)",
+      "equipos": ["PAX"],
+      "paginas": ["tpv/ayuda/actualizar-la-app-pax"]
+    },
+    {
+      "id": "nav:SerializedInventoryRegister",
+      "superficie": "nav:SerializedInventoryRegister",
+      "tipo": "pantalla",
+      "nombre": "Alta de Productos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_inventory/presentation/SerializedInventoryScreen.kt:82",
+      "quienLaVe": "Permiso serialized-inventory:create en el modo simplificado (WelcomeScreen.kt:627, WelcomeScreen.kt:710-724); plan SERIALIZED_INVENTORY (Premium) salvo negocios exentos (WelcomeScreen.kt:594-600, WelcomeScreen.kt:715)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "accion:nav:SerializedInventoryRegister/registrar-articulos",
+      "tipo": "accion",
+      "nombre": "Registrar ${uiState.scannedCount} $itemLabelPlural",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_inventory/presentation/SerializedInventoryScreen.kt:809",
+      "quienLaVe": "Permiso serialized-inventory:create (WelcomeScreen.kt:627)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "nav:SerializedSale",
+      "superficie": "nav:SerializedSale",
+      "tipo": "pantalla",
+      "nombre": "Vender $itemLabel",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_sale/presentation/SerializedSaleScreen.kt:148",
+      "quienLaVe": "Botón «Vender» del modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691); apagado sin entrada registrada (WelcomeScreen.kt:693-701)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "accion:nav:SerializedSale/escanear-y-cobrar",
+      "tipo": "accion",
+      "nombre": "Escanear $barcodeLabel...",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_sale/presentation/SerializedSaleScreen.kt:228",
+      "quienLaVe": "Los mismos que llegan a la pantalla; cobra por la pantalla de la marca de la terminal (AppNavigation.kt:2805-2831)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "accion:nav:SerializedSale/regalar",
+      "tipo": "accion",
+      "nombre": "Sí, regalar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/serialized_sale/presentation/SerializedSaleScreen.kt:525",
+      "quienLaVe": "Los mismos que llegan a la pantalla; registra el artículo sin cobro",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): modo simplificado: módulo SERIALIZED_INVENTORY con ui.simplifiedOrderFlow (WelcomeScreen.kt:608-613, WelcomeScreen.kt:685-691)"
+      }
+    },
+    {
+      "id": "nav:Settings",
+      "superficie": "nav:Settings",
+      "tipo": "pantalla",
+      "nombre": "Configuración",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:163",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/actualizar-configuracion"]
+    },
+    {
+      "id": "accion:nav:Settings/actualizar-configuracion",
+      "tipo": "accion",
+      "nombre": "Actualizar Configuración",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:462",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); trae los ajustes del servidor",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/actualizar-configuracion"]
+    },
+    {
+      "id": "accion:nav:Settings/foto-al-registrar-entrada",
+      "tipo": "accion",
+      "nombre": "Foto al Registrar Entrada",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:416",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/foto-al-registrar-salida",
+      "tipo": "accion",
+      "nombre": "Foto al Registrar Salida",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:424",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/habilitar-kiosko",
+      "tipo": "accion",
+      "nombre": "Habilitar Kiosko",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:345",
+      "quienLaVe": "Nadie hoy: la sección «Modo Kiosko» no se dibuja",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Modo kiosco legacy desde el 2-nov-2026: MODO_KIOSCO_DISPONIBLE = false (KioskModeManager.kt:19); el engrane y Configuración no lo ofrecen (WelcomeScreen.kt:1210, SettingsScreen.kt:334-335)"
+      }
+    },
+    {
+      "id": "accion:nav:Settings/imprimir-prueba",
+      "tipo": "accion",
+      "nombre": "Imprimir Prueba",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:454",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); imprime en las dos marcas: PAX por su impresora y Nexgo por el SDK de AngelPay (PrinterManager.kt:141); en Nexgo sólo el modelo N86 tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/configuracion/actualizar-configuracion"]
+    },
+    {
+      "id": "accion:nav:Settings/modo-restaurante",
+      "tipo": "accion",
+      "nombre": "Modo Restaurante",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:267",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); muestra Mesas y oculta Órdenes",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/opciones-de-recibo",
+      "tipo": "accion",
+      "nombre": "Opciones de Recibo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:304",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/recibos/no-imprime-pax"]
+    },
+    {
+      "id": "accion:nav:Settings/pantalla-de-calificacion",
+      "tipo": "accion",
+      "nombre": "Pantalla de Calificación",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:288",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/pantalla-de-propina",
+      "tipo": "accion",
+      "nombre": "Pantalla de Propina",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:296",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/cobro/no-sale-la-propina"]
+    },
+    {
+      "id": "accion:nav:Settings/pantalla-de-verificacion",
+      "tipo": "accion",
+      "nombre": "Pantalla de Verificación",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:376",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/requiere-clock-in",
+      "tipo": "accion",
+      "nombre": "Requiere Clock-in para Iniciar Sesión",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:432",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/requiere-codigo-de-barras",
+      "tipo": "accion",
+      "nombre": "Requiere Código de Barras",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:394",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); sólo con «Pantalla de Verificación» prendida",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/requiere-foto",
+      "tipo": "accion",
+      "nombre": "Requiere Foto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:386",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); sólo con «Pantalla de Verificación» prendida",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/requiere-pin",
+      "tipo": "accion",
+      "nombre": "Requiere PIN",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:322",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Settings/usar-turnos-de-caja",
+      "tipo": "accion",
+      "nombre": "Usar turnos de caja",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt:246",
+      "quienLaVe": "Permiso tpv-terminal:settings: sin él, «Configuración» sale apagado en el engrane (WelcomeScreen.kt:641-649, WelcomeScreen.kt:1200-1205, SettingsBottomSheet.kt:149-150); no se apaga con una caja abierta (Settings «Turno de caja activo», SettingsScreen.kt:74)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Shifts",
+      "superficie": "nav:Shifts",
+      "tipo": "pantalla",
+      "nombre": "Caja",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt:140",
+      "quienLaVe": "Botón «Turnos de caja» del inicio, sólo si el negocio usa turnos de caja (WelcomeScreen.kt:942-952, WelcomeScreen.kt:1019-1021); también desde Configuración",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/caja/abrir-y-cerrar-caja", "tpv/caja/abrir-y-cerrar-caja-anterior"]
+    },
+    {
+      "id": "accion:nav:Shifts/abrir-caja",
+      "tipo": "accion",
+      "nombre": "Abrir caja",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt:484",
+      "quienLaVe": "Permiso tpv-shifts:create (ShiftViewModel.kt:1021); sin él «No tienes permiso para abrir la caja» (ShiftScreen.kt:490); sin red se guarda y se envía después (ShiftScreen.kt:468)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/caja/abrir-y-cerrar-caja", "tpv/caja/abrir-y-cerrar-caja-anterior"]
+    },
+    {
+      "id": "accion:nav:Shifts/cerrar-caja",
+      "tipo": "accion",
+      "nombre": "Cerrar caja",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt:401",
+      "quienLaVe": "Permiso tpv-shifts:close (ShiftViewModel.kt:1023); sin él «No tienes permiso para cerrar la caja» (ShiftScreen.kt:406); con arqueo «Cerrar y conciliar» (ShiftDialogs.kt:556)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/caja/abrir-y-cerrar-caja", "tpv/caja/abrir-y-cerrar-caja-anterior"]
+    },
+    {
+      "id": "accion:nav:Shifts/imprimir-resumen-provisional",
+      "tipo": "accion",
+      "nombre": "Imprimir resumen provisional",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt:104",
+      "quienLaVe": "Todos, con la caja guardada en este aparato sin confirmar; imprime en las dos marcas: PAX por su impresora y Nexgo por el SDK de AngelPay (PrinterManager.kt:141); en Nexgo sólo el modelo N86 tiene impresora (ImpresoraAngelPay.kt:79-80)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/caja/abrir-y-cerrar-caja"]
+    },
+    {
+      "id": "accion:nav:Shifts/usar-caja-vinculada",
+      "tipo": "accion",
+      "nombre": "Usar la caja vinculada para nuevas ventas",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt:71",
+      "quienLaVe": "Permiso tpv-shifts:create (el botón sale apagado sin él, LocalCajaContent.kt:70; ShiftViewModel.kt:784), sólo cuando la caja guardada en este aparato quedó vinculada a otra caja abierta del servidor: «Apertura vinculada a otra caja» (CajaLocalPresentation.kt:13, :19)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Shifts/revisar-efectivo-pendiente",
+      "tipo": "accion",
+      "nombre": "Efectivo: ya lo revisé",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt:153",
+      "quienLaVe": "Desde «Revisar registros pendientes» (LocalCajaContent.kt:74, :90) → «Registros de esta caja» (LocalCajaContent.kt:139); ver la lista pide shifts:read (ShiftViewModel.kt:829) y marcar el efectivo, tpv-shifts:close (ShiftViewModel.kt:854); sólo en ventas en efectivo de ese cierre que la terminal deja revisar (ShiftRepository.kt:284, :869)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Shifts/actualizar-enviar",
+      "tipo": "accion",
+      "nombre": "Actualizar / enviar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt:161",
+      "quienLaVe": "En «Registros de esta caja», que se abre con «Revisar registros pendientes» (LocalCajaContent.kt:74, :90, :139) y pide shifts:read (ShiftViewModel.kt:829); pide enviar lo pendiente y vuelve a leer la lista (ShiftScreen.kt:272-276)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Shifts/consultar-operacion-cripto",
+      "tipo": "accion",
+      "nombre": "Consultar esta operación",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt:154",
+      "quienLaVe": "En «Registros de esta caja», sólo en una operación cripto pendiente (LocalCajaContent.kt:154); pide payments:create (ShiftViewModel.kt:884) y consulta y guarda su resultado (ShiftRepository.kt:797-804)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:Shifts/liberar-cierre-devolucion",
+      "tipo": "accion",
+      "nombre": "Ya lo vi — liberar el cierre",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt:133",
+      "quienLaVe": "Al cerrar la caja con devoluciones rechazadas sin registrar (ShiftViewModel.kt:578, pantalla CloseBlockedByRefundsContent.kt); sólo en una devolución RECHAZADA y con el permiso de cerrar caja, tpv-shifts:close (ShiftViewModel.kt:689-698); deja quién y cuándo en la fila (:706-707)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Splash",
+      "superficie": "nav:Splash",
+      "tipo": "pantalla",
+      "nombre": "Avoqado TPV",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt:3192",
+      "quienLaVe": "Todos al abrir la app; decide sola si va a activación, al PIN o al inicio (AppNavigation.kt:1011-1031)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "sin-acciones",
+        "detalle": "Pantalla de arranque sin botones: sólo redirige (AppNavigation.kt:1016-1030); muestra el nombre y la versión (AppNavigation.kt:3246-3250)"
+      }
+    },
+    {
+      "id": "nav:SplitByPerson",
+      "superficie": "nav:SplitByPerson",
+      "tipo": "pantalla",
+      "nombre": "Queda por pagar: ${currencyFormatter.format(uiState.totalAmount)}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/split/SplitByPersonScreen.kt:93",
+      "quienLaVe": "Desde una orden → «Dividir» → «Por Personas» (SplitOptionsOverlay.kt:214); sólo PAX: en Nexgo la división se bloquea antes (AppNavigation.kt:1726-1731)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:SplitByPerson/pagar-partes",
+      "tipo": "accion",
+      "nombre": "Pagar $selectedCount $partLabel • ${currencyFormatter.format(selectedAmount)}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/split/SplitByPersonScreen.kt:276",
+      "quienLaVe": "Los mismos que llegan a la pantalla; cobra en la PAX (AppNavigation.kt:2697)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "nav:SplitByProduct",
+      "superficie": "nav:SplitByProduct",
+      "tipo": "pantalla",
+      "nombre": "Queda por pagar: ${currencyFormatter.format(uiState.remainingAmount)}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/split/SplitByProductScreen.kt:94",
+      "quienLaVe": "Desde una orden → «Dividir» → «Por Productos» (SplitOptionsOverlay.kt:192); sólo PAX: en Nexgo la división se bloquea antes (AppNavigation.kt:1712-1717)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:SplitByProduct/pagar-productos",
+      "tipo": "accion",
+      "nombre": "Pagar $selectedCount $productLabel • ${currencyFormatter.format(selectedAmount)}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/split/SplitByProductScreen.kt:245",
+      "quienLaVe": "Los mismos que llegan a la pantalla; cobra en la PAX (AppNavigation.kt:2660)",
+      "equipos": ["PAX"],
+      "paginas": []
+    },
+    {
+      "id": "nav:SuperAdmin",
+      "superficie": "nav:SuperAdmin",
+      "tipo": "pantalla",
+      "nombre": "SuperAdmin Tools",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/SuperAdminScreen.kt:158",
+      "quienLaVe": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "accion:nav:SuperAdmin/borrar-cache",
+      "tipo": "accion",
+      "nombre": "Clear Cache",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/SuperAdminScreen.kt:239",
+      "quienLaVe": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "accion:nav:SuperAdmin/pago-de-prueba",
+      "tipo": "accion",
+      "nombre": "Test Payment",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/SuperAdminScreen.kt:219",
+      "quienLaVe": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829); cobra $10.00 por la pantalla de PAX (AppNavigation.kt:2178-2181)",
+      "equipos": ["PAX"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "accion:nav:SuperAdmin/probar-conexion",
+      "tipo": "accion",
+      "nombre": "Test Backend Connection",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/SuperAdminScreen.kt:229",
+      "quienLaVe": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "accion:nav:SuperAdmin/probar-impresora",
+      "tipo": "accion",
+      "nombre": "Test Printer",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/SuperAdminScreen.kt:209",
+      "quienLaVe": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "superadmin",
+        "detalle": "Sólo rol SUPERADMIN: el botón «SuperAdmin» se agrega con StaffRole.SUPERADMIN (WelcomeScreen.kt:1006-1015, WelcomeScreen.kt:820-829)"
+      }
+    },
+    {
+      "id": "nav:Support",
+      "superficie": "nav:Support",
+      "tipo": "pantalla",
+      "nombre": "Soporte",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt:252",
+      "quienLaVe": "Botón «Soporte»: tpvSettings.showSupport (WelcomeScreen.kt:965-974); siempre en modo simplificado (WelcomeScreen.kt:809-817); también «Ayuda» del aviso de cobros (AppNavigation.kt:996)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ayuda/reportar-un-problema"]
+    },
+    {
+      "id": "accion:nav:Support/reportar-bug",
+      "tipo": "accion",
+      "nombre": "Reportar Bug",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt:393",
+      "quienLaVe": "Todos en Soporte; necesita conexión para enviarse",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ayuda/reportar-un-problema"]
+    },
+    {
+      "id": "accion:nav:Support/sugerir-funcion",
+      "tipo": "accion",
+      "nombre": "Sugerir Función",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt:430",
+      "quienLaVe": "Todos en Soporte; necesita conexión para enviarse",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/ayuda/reportar-un-problema"]
+    },
+    {
+      "id": "nav:TableCheckout",
+      "superficie": "nav:TableCheckout",
+      "tipo": "pantalla",
+      "nombre": "Cobrar · ${session.label}",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:325",
+      "quienLaVe": "Desde la cuenta de la mesa → «Pagar» (TableOrderScreen.kt:937, AppNavigation.kt:1576-1578); si el negocio exige dueño de mesa, la mesa de otro mesero queda «solo lectura» (TableOrderScreen.kt:765, TablesRepository.kt:166-175) y sólo se cobra con tables:pay-any (TablesRepository.kt:175)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/cobrar-cuenta-de-mesa"]
+    },
+    {
+      "id": "accion:nav:TableCheckout/agregar-cargo-por-servicio",
+      "tipo": "accion",
+      "nombre": "+ Agregar cargo por servicio",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:401",
+      "quienLaVe": "Todos en el cobro de la mesa",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableCheckout/agregar-descuento",
+      "tipo": "accion",
+      "nombre": "+ Agregar descuento",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:389",
+      "quienLaVe": "Todos en el cobro de la mesa; la app no revisa permiso aquí, lo valida el servidor",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableCheckout/cobrar-con-tarjeta",
+      "tipo": "accion",
+      "nombre": "Tarjeta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:827",
+      "quienLaVe": "Todos en el cobro de la mesa; necesita conexión (TableCheckoutScreen.kt:767); lleva al cobro de la marca de la terminal (AppNavigation.kt:1605-1624)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/cobrar-cuenta-de-mesa"]
+    },
+    {
+      "id": "accion:nav:TableCheckout/cobrar-en-efectivo",
+      "tipo": "accion",
+      "nombre": "Efectivo",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:818",
+      "quienLaVe": "Todos en el cobro de la mesa; funciona sin red",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/cobrar-cuenta-de-mesa"]
+    },
+    {
+      "id": "accion:nav:TableCheckout/compartir-recibo",
+      "tipo": "accion",
+      "nombre": "Compartir",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:1011",
+      "quienLaVe": "Todos, al terminar el cobro de la mesa (TableCheckoutScreen.kt:945-1011)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableCheckout/dividir-cobro",
+      "tipo": "accion",
+      "nombre": "Cómo dividir el cobro",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:410",
+      "quienLaVe": "Todos en el cobro de la mesa; en Nexgo la tarjeta sólo cobra el total (TableCheckoutScreen.kt:790, «División no disponible en este equipo» TableCheckoutScreen.kt:794) y el efectivo no divide por producto (TableCheckoutScreen.kt:800)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/cobrar-cuenta-de-mesa"]
+    },
+    {
+      "id": "accion:nav:TableCheckout/quitar-descuento-o-cargo",
+      "tipo": "accion",
+      "nombre": "Quitar $label",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:603",
+      "quienLaVe": "Todos en el cobro de la mesa, junto a un descuento o un cargo por servicio ya aplicado; sólo con conexión (TableCheckoutScreen.kt:119-139); la app no revisa permiso aquí, lo valida el servidor",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:TableMenu",
+      "superficie": "nav:TableMenu",
+      "tipo": "pantalla",
+      "nombre": "Agregar productos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt:123",
+      "quienLaVe": "Desde la cuenta de la mesa → «Agregar productos» (AppNavigation.kt:1573-1575)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:TableMenu/agregar-producto",
+      "tipo": "accion",
+      "nombre": "Agregar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt:574",
+      "quienLaVe": "Todos los que llegan; agrega el producto con sus modificadores a la ronda",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "nav:TableOrder",
+      "superficie": "nav:TableOrder",
+      "tipo": "pantalla",
+      "nombre": "Mesa ${tableNumber ?: tableId} · $areaName",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:470",
+      "quienLaVe": "Quien abre o ve una mesa en Mesas (TablesScreen.kt:148-158); el título es la mesa y su área (TableSession.kt:62); si el negocio exige dueño de mesa, la mesa de otro mesero queda «solo lectura» (TableOrderScreen.kt:765, TablesRepository.kt:166-175) y sólo se cobra con tables:pay-any (TablesRepository.kt:175)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:TableOrder/agregar-productos",
+      "tipo": "accion",
+      "nombre": "Agregar productos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:605",
+      "quienLaVe": "Todos con la mesa abierta, salvo «solo lectura» (TableOrderScreen.kt:603)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:TableOrder/cancelar-cuenta",
+      "tipo": "accion",
+      "nombre": "Cancelar cuenta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:854",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/cancelar-cuenta"]
+    },
+    {
+      "id": "accion:nav:TableOrder/cortesia",
+      "tipo": "accion",
+      "nombre": "Cortesía",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:829",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482); con productos ya enviados (TableOrderScreen.kt:478); la app no revisa permiso aquí, lo valida el servidor",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableOrder/dividir-por-puesto",
+      "tipo": "accion",
+      "nombre": "Dividir por puesto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:823",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482); con productos ya enviados (TableOrderScreen.kt:459)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableOrder/editar-detalles",
+      "tipo": "accion",
+      "nombre": "Editar detalles",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:811",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TableOrder/enviar-ronda",
+      "tipo": "accion",
+      "nombre": "Enviar ronda",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:917",
+      "quienLaVe": "Todos con la mesa abierta; si el negocio exige dueño de mesa, la mesa de otro mesero queda «solo lectura» (TableOrderScreen.kt:765, TablesRepository.kt:166-175) y sólo se cobra con tables:pay-any (TablesRepository.kt:175)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:TableOrder/fusionar-cuentas",
+      "tipo": "accion",
+      "nombre": "Fusionar cuentas",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:841",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482); no con la mesa abierta sin red (TableOrderScreen.kt:453)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/fusionar-cuentas"]
+    },
+    {
+      "id": "accion:nav:TableOrder/mover-mesa",
+      "tipo": "accion",
+      "nombre": "Mover mesa",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:835",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/mover-mesa"]
+    },
+    {
+      "id": "accion:nav:TableOrder/reasignar-mesero",
+      "tipo": "accion",
+      "nombre": "Reasignar mesero",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:847",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/reasignar-mesero"]
+    },
+    {
+      "id": "accion:nav:TableOrder/separar-cuenta",
+      "tipo": "accion",
+      "nombre": "Separar cuenta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt:817",
+      "quienLaVe": "Todos con la mesa abierta, en el menú de tres puntos, salvo «solo lectura» (TableOrderScreen.kt:453-482); con productos ya enviados (TableOrderScreen.kt:476)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Tables",
+      "superficie": "nav:Tables",
+      "tipo": "pantalla",
+      "nombre": "Mesas",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesScreen.kt:181",
+      "quienLaVe": "Botón «Mesas» con Modo Restaurante (TpvSettings.kt:179, WelcomeScreen.kt:869-886); plan TABLE_SERVICE (Pro): sin plan se ve apagado con «Plan Pro» (WelcomeScreen.kt:603, WelcomeScreen.kt:870-872); se apaga sin caja abierta (si el negocio usa turnos de caja) o sin entrada registrada (si el negocio la exige) (WelcomeScreen.kt:671-679)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:Tables/abrir-mesa",
+      "tipo": "accion",
+      "nombre": "Abrir mesa y ordenar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt:216",
+      "quienLaVe": "Todos en Mesas, al tocar una mesa libre e indicar comensales (TablesScreen.kt:140-158)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/mesas/abrir-mesa-y-enviar-ronda"]
+    },
+    {
+      "id": "accion:nav:Tables/marcar-accion-resuelta",
+      "tipo": "accion",
+      "nombre": "Marcar resuelta",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/QuarantineSheet.kt:194",
+      "quienLaVe": "Permiso payments:refund (QuarantineViewModel.kt:102); sin él «Pide a un gerente que la marque como resuelta» (QuarantineSheet.kt:203)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Timeclock",
+      "superficie": "nav:Timeclock",
+      "tipo": "pantalla",
+      "nombre": "ENTRADA / SALIDA",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt:54",
+      "quienLaVe": "Desde la tarjeta de asistencia del inicio, que se ve si el negocio exige registrar entrada o hay una entrada abierta (WelcomeScreen.kt:1088-1095; «Toca para registrar» TimeclockStatusCard.kt:171, «Registrar Salida» TimeclockStatusCard.kt:195)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/asistencia/registrar-entrada-y-salida"]
+    },
+    {
+      "id": "accion:nav:Timeclock/registrar-entrada",
+      "tipo": "accion",
+      "nombre": "ENTRADA",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt:522",
+      "quienLaVe": "Todos con su PIN; con «Foto al Registrar Entrada» pide selfie (TimeclockScreen.kt:613)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/asistencia/registrar-entrada-y-salida"]
+    },
+    {
+      "id": "accion:nav:Timeclock/registrar-salida",
+      "tipo": "accion",
+      "nombre": "SALIDA",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt:531",
+      "quienLaVe": "Todos con una entrada abierta; con «Foto al Registrar Salida» pide selfie",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/asistencia/registrar-entrada-y-salida"]
+    },
+    {
+      "id": "accion:nav:Timeclock/tomar-foto",
+      "tipo": "accion",
+      "nombre": "Tomar Foto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt:709",
+      "quienLaVe": "Al registrar entrada o salida cuando la terminal pide foto («Foto al Registrar Entrada/Salida», SettingsScreen.kt:416, :424; requireClockInPhoto/requireClockOutPhoto, TimeclockViewModel.kt:244-246, :298-300); «Omitir (Admin)» sólo ADMIN, OWNER o SUPERADMIN (TimeclockViewModel.kt:330-334)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": ["tpv/asistencia/registrar-entrada-y-salida"]
+    },
+    {
+      "id": "nav:TrainingViewer",
+      "superficie": "nav:TrainingViewer",
+      "tipo": "pantalla",
+      "nombre": "Paso ${state.currentStepIndex + 1} de $totalSteps",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/training/presentation/TrainingStepViewer.kt:73",
+      "quienLaVe": "Desde Entrenamientos, al tocar uno (AppNavigation.kt:2577); el título es el del entrenamiento (TrainingStepViewer.kt:69)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TrainingViewer/enviar-quiz",
+      "tipo": "accion",
+      "nombre": "Enviar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/training/presentation/TrainingQuizScreen.kt:119",
+      "quienLaVe": "Todos, en la última pregunta del quiz",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "accion:nav:TrainingViewer/finalizar-entrenamiento",
+      "tipo": "accion",
+      "nombre": "Finalizar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/training/presentation/TrainingStepViewer.kt:305",
+      "quienLaVe": "Todos, en el último paso de un entrenamiento sin quiz",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:Trainings",
+      "superficie": "nav:Trainings",
+      "tipo": "pantalla",
+      "nombre": "Entrenamientos",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/training/presentation/TrainingsListScreen.kt:57",
+      "quienLaVe": "Botón «Entrenamientos»: tpvSettings.showTrainings (WelcomeScreen.kt:992-1002, WelcomeScreen.kt:797-807)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": []
+    },
+    {
+      "id": "nav:pending_verifications",
+      "superficie": "nav:pending_verifications",
+      "tipo": "pantalla",
+      "nombre": "En revisión por administración",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PendingVerificationsScreen.kt:246",
+      "quienLaVe": "Tarjeta del inicio «En revisión por administración», sólo con ventas pendientes del módulo SERIALIZED_INVENTORY (WelcomeScreen.kt:1097-1107, HomeViewModel.kt:616)",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): fotos de prueba de venta del módulo SERIALIZED_INVENTORY (HomeViewModel.kt:616)"
+      }
+    },
+    {
+      "id": "accion:nav:pending_verifications/descartar",
+      "tipo": "accion",
+      "nombre": "Descartar",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PendingVerificationsScreen.kt:720",
+      "quienLaVe": "Los mismos que llegan a la pantalla",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): fotos de prueba de venta (HomeViewModel.kt:616)"
+      }
+    },
+    {
+      "id": "accion:nav:pending_verifications/tomar-foto",
+      "tipo": "accion",
+      "nombre": "Toca para foto",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PendingVerificationsScreen.kt:863",
+      "quienLaVe": "Los mismos que llegan a la pantalla",
+      "equipos": ["PAX", "NEXGO"],
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo a la medida de PlayTelecom (promotores, SIMs, Cash Out): fotos de prueba de venta (HomeViewModel.kt:616)"
+      }
+    },
+    {
+      "id": "extra:campo",
+      "tipo": "pantalla",
+      "nombre": "Avoqado Campo",
+      "origen": "campo/src/main/java/com/jaac/avoqado_campo/auth/LoginScreen.kt:23",
+      "quienLaVe": "El promotor en su celular, con su correo y su contraseña («Correo», «Contraseña», «Entrar»: campo/src/main/java/com/jaac/avoqado_campo/auth/LoginScreen.kt:25-37). Es otra app del repo, no la terminal: settings.gradle.kts:32 include(\":campo\"), applicationId com.jaac.avoqado_tpv.campo y versionName 0.1.0 (campo/build.gradle.kts:14,18), para «Celulares modernos» (campo/build.gradle.kts:20). Por eso no lleva equipos (ni PAX ni Nexgo). El extractor no la ve: sólo lee app/.",
+      "paginas": [],
+      "sinPagina": {
+        "razon": "a-la-medida",
+        "detalle": "Módulo campo/ (Task 8, Paso 4): la app de campo para promotores, que venden SIMs desde su celular en vez de la PAX (docs/proyectos/app-de-campo-para-promotores-celular-en-vez-de-pax.md del workspace). En v2.16.0 su única pantalla es el inicio de sesión (campo/src/main/java/com/jaac/avoqado_campo/auth/LoginScreen.kt:15; MainActivity.kt:22 la muestra hasta entrar y después sólo «Dentro. Venue: …», :24)."
+      }
+    }
+  ]
+}

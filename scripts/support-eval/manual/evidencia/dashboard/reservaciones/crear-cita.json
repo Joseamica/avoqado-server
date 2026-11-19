@@ -1,0 +1,368 @@
+{
+  "pagina": "dashboard/reservaciones/crear-cita",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1254,
+      "cita": "title: t('sidebar:routes.reservations'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 176,
+      "cita": "\"reservations\": \"Reservaciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 608,
+      "cita": "{ title: t('sidebar:reservationsMenu.overview'), url: 'reservations', permission: 'reservations:read' },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 246,
+      "cita": "\"overview\": \"Resumen\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 279,
+      "cita": "{t('actions.create', { defaultValue: 'Crear' })}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 285,
+      "cita": "{t('actions.newAppointment', { defaultValue: 'Cita' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 498,
+      "cita": "<h3 className=\"text-base font-semibold\">{t('form.sections.customer', { defaultValue: 'Cliente' })}</h3>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 521,
+      "cita": "placeholder={t('form.searchCustomer', { defaultValue: 'Buscar cliente por nombre, teléfono o email...' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 534,
+      "cita": "createNewLabel={() => `+ ${t('form.createCustomer', { defaultValue: 'Crear cliente' })}`}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 913,
+      "cita": "queryClient.invalidateQueries({ queryKey: ['customers-search', venueId] })"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 527,
+      "cita": "setGuestMode('existing')"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 115,
+      "cita": "const [guestMode, setGuestMode] = useState<'existing' | 'new'>('new')"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 862,
+      "cita": "<Label className=\"text-xs text-muted-foreground\">{t('form.fields.guestName', { defaultValue: 'Nombre' })}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 94,
+      "cita": "\"guestName\": \"Nombre del invitado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 544,
+      "cita": "<h3 className=\"text-base font-semibold\">{t('form.sections.service', { defaultValue: 'Servicios y artículos' })}</h3>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 127,
+      "cita": "\"service\": \"Servicios y artículos\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 221,
+      "cita": "setValue('duration', selectedProduct.duration)"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 90,
+      "cita": "\"duration\": \"Duración\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 620,
+      "cita": "<h3 className=\"text-base font-semibold\">{t('form.sections.dateTime', { defaultValue: 'Fecha y hora' })}</h3>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 128,
+      "cita": "\"dateTime\": \"Fecha y hora\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 707,
+      "cita": "{t('form.availableSlots', { defaultValue: 'Horarios disponibles' })}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 724,
+      "cita": "onClick={() => handleSlotSelect(slot)}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 719,
+      "cita": "const isFull = slot.available === false && slot.reason === 'FULL'"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 147,
+      "cita": "\"slotFull\": \"Lleno\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 434,
+      "cita": "actions={<Button onClick={() => createFormSubmitRef.current?.()}>{t('actions.save')}</Button>}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 78,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 413,
+      "cita": "toast({ title: t('toasts.createSuccess') })"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 745,
+      "cita": "\"createSuccess\": \"Reservación creada exitosamente\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 626
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 274
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 150
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7742
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10287
+    },
+    {
+      "permiso": "customers:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10427
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1259
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 266
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: los servicios salen de GET products (menu:read en el SERVIDOR)",
+      "archivo": "src/services/menu.service.ts",
+      "linea": 139
+    },
+    {
+      "ruta": "Antes: buscar cliente llama a GET customers",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 265
+    },
+    {
+      "ruta": "Antes: crear cliente abre el formulario de clientes",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 533
+    },
+    {
+      "ruta": "Paso 5: crear la cita llama a POST reservations",
+      "archivo": "src/services/reservation.service.ts",
+      "linea": 82
+    },
+    {
+      "ruta": "Paso 5: la hora se manda en la zona del negocio",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 369
+    },
+    {
+      "ruta": "Problema: horario al límite pide confirmar",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 430
+    },
+    {
+      "ruta": "Problema: título del aviso",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 152
+    },
+    {
+      "ruta": "Problema: botón del aviso",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 155
+    },
+    {
+      "ruta": "Problema: el servidor vuelve a validar",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 153
+    },
+    {
+      "ruta": "Problema: cambió la duración borra la hora",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 434
+    },
+    {
+      "ruta": "Problema: se borra la hora",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 436
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 156
+    },
+    {
+      "ruta": "Problema: sin cliente elegido, el invitado necesita nombre",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 81
+    },
+    {
+      "ruta": "Problema: los avisos de nombre y de profesionistas salen antes de mandar (handleSubmit)",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 467
+    },
+    {
+      "ruta": "Problema: profesionistas: se corta antes del envío",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 468
+    },
+    {
+      "ruta": "T11-10: el panel reintenta solo ante error de red",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: confirmar sobre-agendado manda otra alta",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 961
+    },
+    {
+      "ruta": "Problema: texto bajo el campo",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 867
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 122
+    },
+    {
+      "ruta": "Problema: servicio sin profesionistas",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 471
+    },
+    {
+      "ruta": "Problema: cualquier otro error sólo muestra el aviso, sin revisar si se creó",
+      "archivo": "src/pages/Reservations/CreateReservation.tsx",
+      "linea": 460
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 756
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 151
+    },
+    {
+      "ruta": "Problema: crear el cliente usa el formulario de clientes, que en error sólo muestra el aviso",
+      "archivo": "src/pages/Customers/components/CustomerForm.tsx",
+      "linea": 181
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

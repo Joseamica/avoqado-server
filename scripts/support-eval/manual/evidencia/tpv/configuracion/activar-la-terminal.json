@@ -1,0 +1,141 @@
+{
+  "pagina": "tpv/configuracion/activar-la-terminal",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 212,
+      "cita": "label = { Text(\"Código de Activación\") },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 224,
+      "cita": "Text(\"6 caracteres alfanuméricos\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 208,
+      "cita": "if (newValue.length <= 6 && newValue.all { it.isLetterOrDigit() }) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 271,
+      "cita": "text = \"Activar Terminal\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 258,
+      "cita": "enabled = activationCode.length == 6 && !isLoading,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1046,
+      "cita": "is ActivationState.AlreadyActivated -> {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 115,
+      "cita": "text = \"Ingresa tu PIN\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 157,
+      "cita": "contentDescription = \"Escanear código QR\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/components/ActivationQrScannerScreen.kt",
+      "linea": 505,
+      "cita": "text = \"Apunta al código QR del dashboard\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 229,
+      "cita": "activate(activationCode)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 79,
+      "cita": "text = \"⚠️ Configuración Pendiente\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 94,
+      "cita": "Text(\"Reintentar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 138,
+      "cita": "\"Verifique su conexión a internet e intente nuevamente.\""
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el título *Activar Terminal*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 119
+    },
+    {
+      "ruta": "Antes: el código se pide desde el panel",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 282
+    },
+    {
+      "ruta": "Antes: *Número de Serie*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt",
+      "linea": 183
+    },
+    {
+      "ruta": "Si aparece «Código de activación expirado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 407
+    },
+    {
+      "ruta": "Si aparece «Código de activación incorrecto…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 424
+    },
+    {
+      "ruta": "Si aparece «Este código QR es para otro terminal.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 219
+    },
+    {
+      "ruta": "Si aparece «Terminal no registrado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 428
+    },
+    {
+      "ruta": "Si aparece «Terminal bloqueado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationViewModel.kt",
+      "linea": 419
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

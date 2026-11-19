@@ -1,0 +1,212 @@
+{
+  "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1340,
+      "cita": "title: t('sidebar:settingsMenu.title', { defaultValue: 'Configuración' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 36,
+      "cita": "\"title\": \"Configuración\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 87,
+      "cita": "? [{ to: 'billing', label: t('hub.items.billing'), icon: CreditCard, dataTour: 'settings-nav-billing' }]"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/settings.json",
+      "linea": 18,
+      "cita": "\"billing\": \"Plan y facturación\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/BillingLayout.tsx",
+      "linea": 29,
+      "cita": "{ to: `${basePath}/subscriptions`, label: t('tabs.plan') },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 6,
+      "cita": "\"plan\": \"Plan\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 220,
+      "cita": "{t('currentPlan.actions.updatePayment')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 369,
+      "cita": "\"updatePayment\": \"Actualizar método de pago\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 368,
+      "cita": "onUpdatePayment={() => ops.portal.mutate()}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/usePlanOperations.ts",
+      "linea": 110,
+      "cita": "const { url } = await getBillingPortalUrl(venueId)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "billing:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 887
+    },
+    {
+      "permiso": "billing:read",
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 86
+    },
+    {
+      "permiso": "billing:subscriptions:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 895
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 224
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 2264
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Plan y facturación sólo para administrador o dueño",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 884
+    },
+    {
+      "ruta": "Antes: texto sin permiso de suscripciones",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 787
+    },
+    {
+      "ruta": "Paso 1: la página de pagos se abre fuera del panel",
+      "archivo": "src/pages/Settings/Billing/plan/usePlanOperations.ts",
+      "linea": 116
+    },
+    {
+      "ruta": "Problema: pago pendiente con fecha (sólo plan clásico)",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 51
+    },
+    {
+      "ruta": "Problema: texto con fecha",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 230
+    },
+    {
+      "ruta": "Problema: texto sin fecha",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 231
+    },
+    {
+      "ruta": "Problema: suspendido",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 50
+    },
+    {
+      "ruta": "Problema: texto suspendido",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 229
+    },
+    {
+      "ruta": "Problema: Actualizar método de pago sólo en plan clásico",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 217
+    },
+    {
+      "ruta": "Problema: en Gratis no hay renglón de estado",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 175
+    },
+    {
+      "ruta": "Problema: fundador sin botones",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 173
+    },
+    {
+      "ruta": "Problema: pestaña Métodos de pago",
+      "archivo": "src/pages/Settings/Billing/BillingLayout.tsx",
+      "linea": 31
+    },
+    {
+      "ruta": "Problema: texto Métodos de pago",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 9
+    },
+    {
+      "ruta": "Problema: texto Predeterminado",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 486
+    },
+    {
+      "ruta": "Problema: Predeterminado sólo cambia la tarjeta del cliente",
+      "archivo": "avoqado-server/src/services/stripe.service.ts",
+      "linea": 2258
+    },
+    {
+      "ruta": "Problema: la del cliente va en invoice_settings",
+      "archivo": "avoqado-server/src/services/stripe.service.ts",
+      "linea": 2261
+    },
+    {
+      "ruta": "Problema: la suscripción del plan nace con su propia tarjeta",
+      "archivo": "avoqado-server/src/services/stripe.service.ts",
+      "linea": 995
+    },
+    {
+      "ruta": "Problema: agregar tarjeta pasa por setup-intent",
+      "archivo": "src/components/AddPaymentMethodDialog.tsx",
+      "linea": 107
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-tarjeta-del-plan/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-tarjeta-del-plan/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-tarjeta-del-plan/3.png"
+    ],
+    "filasCreadas": ["Stripe en modo de prueba: una sesión del portal de pagos de Cafetería Prueba QA (no se cambió nada en el portal)"],
+    "nota": "Cafetería Prueba QA (SUPERADMIN del seed; plan Pro clásico). *Actualizar método de pago* (POST /billing-portal 200) llevó al portal de pagos del plan de Stripe, con la marca «Entorno de prueba» (el guion se detenía si no): «SUSCRIPCIÓN ACTUAL Plan Avoqado Pro», *MÉTODO DE PAGO* con *Agregar método de pago* (foto 3). No se cambió la tarjeta. En Avoqado Full, con plan de cortesía, el botón no sale (foto 1 de cancelar-o-reanudar-plan). La pestaña *Métodos de pago* truena en este panel local por la llave pública de Stripe (panel sin `.env`); el paso no la usa."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

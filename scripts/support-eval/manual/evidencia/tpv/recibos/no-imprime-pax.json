@@ -1,0 +1,122 @@
+{
+  "pagina": "tpv/recibos/no-imprime-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 8170,
+      "cita": "message = \"Sin papel en la impresora. Por favor recarga el papel e intenta de nuevo.\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1011,
+      "cita": "cancelText = \"Volver al recibo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1013,
+      "cita": "onCancel = viewModel::dismissPrintError  // Return to success screen"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2275,
+      "cita": "text = if (isPrinting) \"...\" else \"Imprimir\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/printer/PrinterManager.kt",
+      "linea": 2078,
+      "cita": "message = \"Impresora ocupada\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/printer/PrinterManager.kt",
+      "linea": 2109,
+      "cita": "message = \"Cabezal caliente\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 8179,
+      "cita": "message = printerStatus.message,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 149,
+      "cita": "label = \"Configuración\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 281,
+      "cita": "title = \"Configuración de Pago\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 304,
+      "cita": "label = \"Opciones de Recibo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 305,
+      "cita": "description = \"Mostrar QR y botón de imprimir\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 845,
+      "cita": "showReceiptOptions = viewModel.showReceiptScreen,"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 454,
+      "cita": "label = \"Imprimir Prueba\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-terminal:settings",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 644
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: título *No se pudo imprimir*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1009
+    },
+    {
+      "ruta": "Antes: el cobro sí quedó aprobado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1005
+    },
+    {
+      "ruta": "Paso 4: *Configuración* apagado sin permiso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 644
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,227 @@
+[
+  {
+    "id": "q01",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "oye ayer vendi como 8 mil pero en el saldo disponible me sale bien poquito, ta mal o q onda??",
+    "esperado": {
+      "accion": "contestar",
+      "guias": [
+        "dashboard/reportes/ver-saldo-disponible",
+        "dashboard/inicio/entender-inicio-dashboard",
+        "dashboard/reportes/revisar-reportes-ventas"
+      ],
+      "debeDecir": [
+        {
+          "texto": "tiempos de liquidación"
+        },
+        {
+          "texto": "no necesariamente indica error"
+        }
+      ],
+      "noDebeDecir": ["siguiente día hábil", "en 24 horas", "es un error del sistema"]
+    },
+    "nota": "Reportes/saldo. ver-saldo-disponible («Diferencia entre venta y depósito») lo contesta directo: una venta aprobada puede no estar disponible todavía; el saldo depende de tiempos de liquidación y ajustes, y la diferencia no necesariamente indica error. entender-inicio-dashboard y revisar-reportes-ventas dicen lo mismo en corto. La biblioteca no da plazos de depósito: inventar «al día siguiente» o «24 horas» es alucinación."
+  },
+  {
+    "id": "q02",
+    "tipo": "directa",
+    "app": "android",
+    "mensaje": "tengo una cafeteria y cuando vendo un latte en la tablet no se me descuenta la leche del inventario, xq??",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/inventario/gestionar-inventario"],
+      "debeDecir": [
+        {
+          "texto": "tenga receta asignada"
+        },
+        {
+          "texto": "sus ingredientes existan"
+        }
+      ],
+      "noDebeDecir": ["Descontar automáticamente", "sincroniza cada", "reinstala la app"]
+    },
+    "nota": "Inventario, preguntado desde ANDROID. gestionar-inventario: «Si una receta no descuenta inventario, confirma que el producto tenga receta asignada y que sus ingredientes existan». La respuesta sale de la guía del Dashboard; no hay guía de ANDROID, así que no debe inventar pasos dentro de la tablet."
+  },
+  {
+    "id": "q03",
+    "tipo": "ambigua",
+    "app": "dashboard",
+    "mensaje": "oye y como le hago para cancelar?",
+    "esperado": {
+      "accion": "aclarar",
+      "guias": [
+        "dashboard/reservaciones/gestionar-reservaciones",
+        "dashboard/reservaciones/configurar-reservaciones-avanzadas",
+        "dashboard/clientes/configurar-promociones",
+        "dashboard/configuracion/comprar-addons-suscripciones",
+        "dashboard/configuracion/revisar-billing-detallado",
+        "general/facturacion-y-contabilidad",
+        "dashboard/ventas/ver-pedidos",
+        "dashboard/reportes/revisar-reportes-avanzados"
+      ],
+      "debeDecir": [
+        {
+          "texto": "reservación"
+        },
+        {
+          "texto": "factura"
+        }
+      ],
+      "noDebeDecir": ["Cancelar venta", "no se puede cancelar"]
+    },
+    "nota": "Sin historial, «cancelar» puede ser una reservación, una promoción (desactivar la regla), una suscripción o add-on, una factura CFDI (motivo SAT) o un pedido. Debe preguntar qué quiere cancelar, nombrando opciones (las palabras de debeDecir son las opciones más comunes), sin elegir una ni inventar un botón."
+  },
+  {
+    "id": "q04",
+    "tipo": "directa",
+    "app": "tpv",
+    "mensaje": "una clienta dice q no le cayeron sus puntos de la compra q hizo ayer, q checo o q le digo",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/clientes/configurar-lealtad"],
+      "debeDecir": [
+        {
+          "texto": "si el programa está activo"
+        },
+        {
+          "texto": "la compra cumple condiciones"
+        }
+      ],
+      "noDebeDecir": ["24 horas", "Clientes > Puntos", "escanear el QR"]
+    },
+    "nota": "Clientes/lealtad, preguntado por una cajera desde la TPV. configurar-lealtad: «Si un cliente no acumula puntos, revisa si el programa está activo y si la compra cumple condiciones». Un buen extra: si siguen sin aparecer tras una compra aprobada, escalar con cliente, fecha y compra. La guía no da plazos ni una ruta «Puntos»."
+  },
+  {
+    "id": "q05",
+    "tipo": "seguimiento",
+    "app": "dashboard",
+    "historial": [
+      {
+        "role": "user",
+        "text": "no me estan llegando los avisos de las reservaciones al correo"
+      },
+      {
+        "role": "assistant",
+        "text": "Revisa primero tu perfil: que tu correo esté bien escrito. Luego abre Configuración > Notificaciones > Preferencias y activa la categoría de reservaciones. Guarda y revisa después de la siguiente reserva. (Guía: Gestionar notificaciones)"
+      }
+    ],
+    "mensaje": "ya me llegan gracias 🙏 pero ahora son un chorro jaja, los apago todos o q me recomiendas",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/configuracion/gestionar-notificaciones"],
+      "debeDecir": [
+        {
+          "texto": "desactiva categorías no operativas"
+        },
+        {
+          "texto": "en vez de silenciar todo"
+        }
+      ],
+      "noDebeDecir": ["modo No molestar", "resumen diario"]
+    },
+    "nota": "Configuración/notificaciones. «los» = los avisos del turno anterior: sin el historial el mensaje no se entiende. gestionar-notificaciones: «Si recibes demasiados avisos, desactiva categorías no operativas en vez de silenciar todo», en Configuración > Notificaciones > Preferencias. La biblioteca no menciona «No molestar» ni resúmenes."
+  },
+  {
+    "id": "q06",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "ocupo darle acceso al dashboard a mi nueva gerente pero no quiero q vea todo lo de pagos y facturacion, como le hago",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/equipo/gestionar-miembros", "dashboard/configuracion/asignar-permisos-roles"],
+      "debeDecir": [
+        {
+          "texto": "RH > Personas"
+        },
+        {
+          "texto": "OWNER y ADMIN deben reservarse"
+        }
+      ],
+      "noDebeDecir": ["código de invitación", "Configuración > Usuarios"]
+    },
+    "nota": "Equipo/permisos. Se agrega en RH > Personas con correo y rol inicial; OWNER y ADMIN se reservan para quien administra pagos o configuración, y MANAGER «suele servir para supervisión operativa». El permiso exacto se ajusta en Configuración > Permisos y roles. Las dos guías contestan."
+  },
+  {
+    "id": "q07",
+    "tipo": "sin-respuesta",
+    "app": "android",
+    "mensaje": "en la tablet como divido la cuenta de una mesa entre 3? cada quien quiere pagar lo suyo",
+    "esperado": {
+      "accion": "no-se",
+      "guias": [],
+      "debeDecir": [],
+      "noDebeDecir": ["Dividir cuenta", "Separar cuenta", "por partes iguales"]
+    },
+    "nota": "Comprobado con grep: ninguna guía de la biblioteca (Dashboard ni general) habla de dividir o separar una cuenta. Las guías de ANDROID son marcadores vacíos fuera de la biblioteca. Debe decir que no tiene esa guía y ofrecer pasar con una persona, sin inventar botones."
+  },
+  {
+    "id": "q08",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "en mi estetica las clientas no pueden agendar en linea, dicen q no les salen horarios 😩 q reviso",
+    "esperado": {
+      "accion": "contestar",
+      "guias": [
+        "dashboard/reservaciones/gestionar-reservaciones",
+        "dashboard/reservaciones/configurar-reservaciones-avanzadas",
+        "dashboard/configuracion/comprar-addons-suscripciones"
+      ],
+      "debeDecir": [
+        {
+          "texto": "valida disponibilidad, horarios y enlace publicado"
+        },
+        {
+          "texto": "Reservaciones > Ajustes"
+        }
+      ],
+      "noDebeDecir": ["Google Calendar", "Agenda > Horarios"]
+    },
+    "nota": "Reservaciones en una estética (giro no restaurantero). gestionar-reservaciones: «Si un cliente no puede reservar en línea, valida disponibilidad, horarios y enlace publicado»; configurar-reservaciones-avanzadas: «Si el widget no muestra horarios, valida reglas de disponibilidad y reservas online»; comprar-addons-suscripciones manda a Reservaciones > Ajustes y Reservas online. Las tres sirven."
+  },
+  {
+    "id": "q09",
+    "tipo": "ambigua",
+    "app": "dashboard",
+    "mensaje": "como agrego a alguien nuevo?",
+    "esperado": {
+      "accion": "aclarar",
+      "guias": [
+        "dashboard/equipo/gestionar-miembros",
+        "dashboard/configuracion/asignar-permisos-roles",
+        "dashboard/clientes/gestionar-clientes",
+        "dashboard/reservaciones/gestionar-reservaciones"
+      ],
+      "debeDecir": [
+        {
+          "texto": "equipo"
+        },
+        {
+          "texto": "cliente"
+        }
+      ],
+      "noDebeDecir": ["código de invitación", "Configuración > Usuarios"]
+    },
+    "nota": "«Alguien» puede ser alguien del equipo (RH > Personas, con rol) o un cliente (Clientes > Todos); con menos probabilidad, alguien en la lista de espera de reservaciones. Debe preguntar si es del equipo o un cliente antes de dar pasos."
+  },
+  {
+    "id": "q10",
+    "tipo": "directa",
+    "app": "windows",
+    "mensaje": "un cliente me jura q ya pago con tarjeta pero yo no lo veo x ningun lado, donde lo busco??",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/ventas/ver-pagos", "dashboard/terminales/gestionar-terminales"],
+      "debeDecir": [
+        {
+          "texto": "Ventas > Transacciones"
+        },
+        {
+          "texto": "amplía el rango de fechas"
+        }
+      ],
+      "noDebeDecir": ["Ventas > Historial de cobros", "reembolso automático"]
+    },
+    "nota": "Pagos, preguntado desde el POS de WINDOWS. ver-pagos: en Ventas > Transacciones, «Si no aparece un pago, amplía el rango de fechas y revisa si estás filtrando por método o estado»; gestionar-terminales: «Si el cobro se realizó pero no aparece, busca en Ventas > Transacciones por hora y monto». No hay guía de WINDOWS: no debe inventar una pantalla del POS."
+  }
+]

@@ -25,7 +25,26 @@ export async function handleWhatsappInbound(req: Request, res: Response) {
     await processWhatsappWebhook(payload)
     return res.sendStatus(200)
   } catch (err) {
-    logger.error('WhatsApp webhook processing failed', { err: (err as Error).message })
+    const e = err as { code?: unknown; httpStatus?: unknown; cloudApiErrorCode?: unknown; cause?: { code?: unknown } } | null
+    const code = e?.code
+    // T-F25 (W11): the cause, never the error's text nor a phone: Meta's HTTP status and code, or the network's (ECONNREFUSED…).
+    const number = (value: unknown) => (Number.isSafeInteger(value) ? (value as number) : undefined)
+    const status = number(e?.httpStatus)
+    const metaCode = number(e?.cloudApiErrorCode)
+    const cause = [e?.cause?.code, code].find(
+      (value): value is string => typeof value === 'string' && /^(E[A-Z0-9_]{2,40}|UND_ERR_[A-Z_]{1,40})$/.test(value),
+    )
+    logger.error('WhatsApp webhook processing failed', {
+      code:
+        err instanceof SyntaxError
+          ? 'INVALID_JSON'
+          : typeof code === 'string' && /^(SUPPORT_[A-Z_]{1,80}|P\d{4})$/.test(code)
+            ? code
+            : 'DELIVERY_FAILED',
+      ...(status !== undefined ? { status } : {}),
+      ...(metaCode !== undefined ? { metaCode } : {}),
+      ...(cause ? { cause } : {}),
+    })
     return res.sendStatus(500)
   }
 }

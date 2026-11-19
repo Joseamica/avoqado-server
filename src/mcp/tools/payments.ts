@@ -1,8 +1,15 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { PaymentMethod, PaymentSource, PaymentType, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, PaymentSource, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
+import { fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
+import { venueDayKey } from '@/utils/venueDateKeys'
+import { findPaymentsByAmount, invoiceStateOfOrders } from '@/services/dashboard/paymentByAmount.dashboard.service'
+import { sumsLegacyQrPayments } from '@/services/legacy/qrPayments.legacy.service'
+import { fmtTime } from '@/services/support/data/format'
+import { planGateMessage } from '../planGate'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -371,6 +378,80 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           orderNumber: p.order?.orderNumber ?? null,
           at: p.createdAt.toISOString(),
         })),
+      })
+    },
+  )
+
+  // Task 12 de la B (MCP en sync): C2 «buscar un cobro por su monto» + C7 «si la venta de ese cobro tiene factura». Sólo modo libre.
+  server.tool(
+    'find_payment_by_amount',
+    'Find the payments of an exact amount in one day for a venue you can access: it matches the sale amount, or the sale plus tip, to the cent. Returns time, amount, tip, method, card brand and status, and whether the sale of each payment is invoiced when you can see invoices; never references or card digits. Answers "¿entró un cobro de $850 hoy?" and "¿ya tiene factura?". Pass venueId and amount; optionally date (YYYY-MM-DD, default today in the venue timezone).',
+    {
+      venueId: z.string().describe('Venue whose payments to search (must be in your scope)'),
+      amount: z
+        .number()
+        .positive()
+        .multipleOf(0.01)
+        .max(9_999_999.99)
+        .describe('Exact amount in pesos, up to 2 decimals: the sale, or the sale plus tip (e.g. 850 or 850.50)'),
+      date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'Usa el formato AAAA-MM-DD')
+        // 2026-02-30 pasa el patrón y no es un día (se correría a marzo).
+        .refine(d => {
+          const t = new Date(`${d}T00:00:00Z`)
+          return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d
+        }, 'Esa fecha no existe')
+        .optional()
+        .describe('Day YYYY-MM-DD (default: today in the venue timezone)'),
+    },
+    async ({ venueId, amount, date }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payments:read', venueId) // the panel's Pagos gate
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      // El día civil de la sucursal escrito como texto en su zona, como `wholeDayBounds` (D19): nunca la zona del proceso, y 23 o 25 h
+      // el día que cambia la hora.
+      const day = date ?? venueDayKey(new Date(), tz)
+      const exact = new Prisma.Decimal(amount).toDecimalPlaces(2)
+      const found = await findPaymentsByAmount(venueId, {
+        amount: exact,
+        windows: [{ from: fromZonedTime(`${day}T00:00:00.000`, tz), to: fromZonedTime(`${day}T23:59:59.999`, tz) }],
+        take: 5,
+      })
+      // La factura, sólo con los candados de la lista de ventas del panel (`orders:read`, `cfdi:view`, la función CFDI) y con 5 cobros
+      // o menos (C7). Sin alguno, el campo no viene y no se lee ninguna factura. Si el plan no se puede resolver, falla cerrado como el
+      // panel (`puedeVerFacturas`): los cobros salen sin la factura, y el log lleva sólo el nombre del error.
+      const cfdiEntitled = async () => {
+        try {
+          return (await planGateMessage(venueId, 'CFDI', 'La facturación (CFDI)')) === null
+        } catch (error) {
+          logger.warn('[MCP] find_payment_by_amount: no se pudo resolver la función CFDI; los cobros salen sin la factura', {
+            errorName: error instanceof Error ? error.name : typeof error,
+          })
+          return false
+        }
+      }
+      const invoices =
+        found.total <= 5 && guard.tienePermiso('orders:read', venueId) && guard.tienePermiso('cfdi:view', venueId) && (await cfdiEntitled())
+          ? await invoiceStateOfOrders(venueId, [...new Set(found.rows.flatMap(r => (r.orderId ? [r.orderId] : [])))])
+          : null
+      return text({
+        amount: exact.toNumber(),
+        date: day,
+        total: found.total,
+        payments: found.rows.map(r => ({
+          time: fmtTime(r.createdAt, tz), // HH:mm in the venue timezone
+          amount: num(r.amount),
+          tip: num(r.tipAmount),
+          method: r.method,
+          cardBrand: r.cardBrand, // la marca sí, ningún dígito de la tarjeta: como `list_payments` (maskedPan va en SENSITIVE_PAYMENT_FIELDS)
+          status: r.status,
+          // NONE = la venta no tiene factura que cuente (`Payment.orderId` es obligatorio; el `?` sólo es del tipo de la lectura).
+          ...(invoices ? { invoice: (r.orderId && invoices.get(r.orderId)) || 'NONE' } : {}),
+        })),
+        // La lectura no ve los cobros QR del sistema anterior (`findPaymentsByAmount`: quien llama lo dice), como C2 y C7.
+        ...(sumsLegacyQrPayments(venueId) ? { note: 'No incluye los cobros QR del sistema anterior.' } : {}),
       })
     },
   )

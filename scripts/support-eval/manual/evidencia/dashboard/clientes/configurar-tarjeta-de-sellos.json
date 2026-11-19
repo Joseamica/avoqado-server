@@ -1,0 +1,217 @@
+{
+  "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1277,
+      "cita": "title: t('sidebar:customersMenu.title'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 13,
+      "cita": "\"title\": \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 758,
+      "cita": "title: t('sidebar:customersMenu.walletCard'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 18,
+      "cita": "\"walletCard\": \"Tarjeta digital\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 303,
+      "cita": "<SectionHeader icon={Gift} title={t('card.program.title')} description={t('card.program.description')} />"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 204,
+      "cita": "\"title\": \"Tu programa de sellos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 322,
+      "cita": "aria-label={t('card.program.enabled')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 206,
+      "cita": "\"enabled\": \"Tarjeta de sellos activa\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 328,
+      "cita": "<Label className=\"text-sm\">{t('card.program.required')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 208,
+      "cita": "\"required\": \"Sellos para llenar la cartilla\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 344,
+      "cita": "<Label className=\"text-sm\">{t('card.program.rewardLabel')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 210,
+      "cita": "\"rewardLabel\": \"Cómo se lee el premio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 356,
+      "cita": "<Label className=\"text-sm\">{t('card.program.rewardType')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 213,
+      "cita": "\"rewardType\": \"Qué se gana\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 215,
+      "cita": "\"FREE_PRODUCT\": \"Un producto gratis\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 217,
+      "cita": "\"PERCENTAGE\": \"Un porcentaje\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 216,
+      "cita": "\"FIXED_AMOUNT\": \"Un monto fijo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 374,
+      "cita": "{programa.stampRewardType === 'FREE_PRODUCT' ? ("
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 397,
+      "cita": "<Button size=\"sm\" onClick={() => guardarPrograma.mutate()} disabled={guardarPrograma.isPending}>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 222,
+      "cita": "\"save\": \"Guardar programa\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 206,
+      "cita": "toast({ title: t('card.program.saved') })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 223,
+      "cita": "\"saved\": \"Programa de sellos guardado\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "loyalty:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 693
+    },
+    {
+      "permiso": "loyalty:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11243
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 237
+    },
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11004
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Paso 4: el programa se guarda en la configuración de lealtad",
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 195
+    },
+    {
+      "ruta": "Problema: el botón de arriba guarda el diseño",
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 151
+    },
+    {
+      "ruta": "Problema: su texto",
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 128
+    },
+    {
+      "ruta": "Problema: sellos dependen del programa activo",
+      "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
+      "linea": 317
+    },
+    {
+      "ruta": "Problema: el sello se da dentro de earnPoints",
+      "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
+      "linea": 349
+    },
+    {
+      "ruta": "Problema: error con la razón del SERVIDOR",
+      "archivo": "src/pages/Loyalty/WalletCardDesigner.tsx",
+      "linea": 214
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/loyalty.json",
+      "linea": 172
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

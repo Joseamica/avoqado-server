@@ -1,0 +1,113 @@
+{
+  "pagina": "tpv/cobro/agregar-propina",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 150,
+      "cita": "TipPercentageCard("
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 315,
+      "cita": "text = \"$$amount\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 195,
+      "cita": "\"Monto personalizado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TipInputBottomSheet.kt",
+      "linea": 75,
+      "cita": "text = \"Propina personalizada\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/CustomKeyboard.kt",
+      "linea": 124,
+      "cita": "text = \"$/%\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TipInputBottomSheet.kt",
+      "linea": 99,
+      "cita": "text = if (isPercentageMode) \"Porcentaje\" else \"Monto fijo\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/CustomKeyboard.kt",
+      "linea": 143,
+      "cita": "icon = Icons.Default.Check"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 227,
+      "cita": "text = \"Continuar\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 214,
+      "cita": "text = \"Sin propina\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Configuración → Configuración de Pago → Pantalla de Propina",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 296
+    },
+    {
+      "ruta": "PAX: la pantalla Propina sólo con showTipScreen",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 1967
+    },
+    {
+      "ruta": "Nexgo: la pantalla Propina sólo con showTipScreen",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 4798
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/1-propina-porcentajes.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/2-toca-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/3-porcentaje.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/4-monto-fijo-3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/5-continuar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/6-total-con-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/agregar-propina/7-recibo-con-propina.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwmk7vej00uxwayddxwfvz9z — el mismo cobro de cobrar-en-efectivo (propina $3.00)"
+    ],
+    "nota": "Mismo cobro de $25 de cobrar-en-efectivo: en *Propina* se ven 10 %, 15 % y 20 % con su monto en pesos; se tocó 10 % y luego *Monto personalizado* → *Propina personalizada* (con *$/%* cambia entre *Monto fijo* y *Porcentaje*, foto 3) → $3 → palomita → *Monto personalizado: $3* → *Continuar* con Total $28.00 → cobro en efectivo."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,235 @@
+{
+  "pagina": "android/reservas/cancelar-o-reagendar-cita",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 64,
+      "cita": "label = \"Calendario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/calendar/CalendarTabHost.kt",
+      "linea": 170,
+      "cita": "onReservationClick = { onOpenReservation(it.id) },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 214,
+      "cita": "ActionPill(\"Reagendar\", state.isAllowed(ReservationAction.RESCHEDULE)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 169,
+      "cita": "Text(\"Reagendar reserva\", style = MaterialTheme.typography.headlineSmall)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 184,
+      "cita": "Text(\"Fecha: ${date.format(DateTimeFormatter.ofPattern(\"EEE, dd MMM yyyy\"))}\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 195,
+      "cita": "Text(\"Inicio: ${startTime.format(DateTimeFormatter.ofPattern(\"HH:mm\"))}\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 201,
+      "cita": "Text(\"Fin: ${endTime.format(DateTimeFormatter.ofPattern(\"HH:mm\"))}\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 222,
+      "cita": "Text(\"Continuar\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleConfirmSheet.kt",
+      "linea": 273,
+      "cita": "\"Tipo de notificación\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleConfirmSheet.kt",
+      "linea": 185,
+      "cita": "label = { Text(\"Mensaje de notificación (opcional)\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleConfirmSheet.kt",
+      "linea": 122,
+      "cita": "text = \"Reprogramar cita\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 216,
+      "cita": "ActionPill(\"Cancelar\", state.isAllowed(ReservationAction.CANCEL)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/CancelReservationSheet.kt",
+      "linea": 64,
+      "cita": "label = { Text(\"Motivo (opcional)\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/CancelReservationSheet.kt",
+      "linea": 92,
+      "cita": "if (state.pendingAction == ReservationAction.CANCEL) \"Cancelando...\" else \"Confirmar cancelación\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 182
+    },
+    {
+      "permiso": "reservations:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt",
+      "linea": 127
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 218
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt",
+      "linea": 138
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 191
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt",
+      "linea": 143
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 37
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red la acción se guarda en la cola del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 108
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión: se cancelará al volver el internet.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 277
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión: se reagendará al volver el internet.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 278
+    },
+    {
+      "afirmacion": "Si aparece el aviso de encolado: se encola con isOnline() = red del aparato Y servidor alcanzable",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 71
+    },
+    {
+      "afirmacion": "Si aparece el aviso: el reintentador sólo escucha la red del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt",
+      "linea": 52
+    },
+    {
+      "afirmacion": "Si aparece el aviso: isOnlineFlow es sólo la red del aparato, no el servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 74
+    },
+    {
+      "afirmacion": "Si aparece el aviso: al arrancar la app el reintentador lee el estado actual y vacía si hay red",
+      "archivo": "app/src/main/java/com/avoqado/pos/AvoqadoApp.kt",
+      "linea": 65
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: el interruptor de reservas es de ESTE aparato (SharedPreferences), no del negocio",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsViewModel.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "Antes: sin activar, «Más» ofrece «Reservaciones»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 677
+    },
+    {
+      "ruta": "Antes: el botón «Activar reservas»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsScreen.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Antes: interruptor local Y plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabHostViewModel.kt",
+      "linea": 48
+    },
+    {
+      "ruta": "Problema: Reagendar sólo en cita pendiente o confirmada",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 16
+    },
+    {
+      "ruta": "Problema: Cancelar hasta antes de completarla",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 15
+    },
+    {
+      "ruta": "Problema: Cancelar pide reservations:cancel",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailUiState.kt",
+      "linea": 38
+    },
+    {
+      "ruta": "Problema: cancelar no se deshace",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/CancelReservationSheet.kt",
+      "linea": 56
+    },
+    {
+      "ruta": "Problema: fin antes del inicio",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleSheet.kt",
+      "linea": 207
+    },
+    {
+      "ruta": "Problema: cliente sin teléfono",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/RescheduleConfirmSheet.kt",
+      "linea": 148
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

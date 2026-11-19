@@ -1,0 +1,304 @@
+{
+  "pagina": "android/cobro/agregar-propina",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 457,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 3070,
+      "cita": "text = \"Ver carrito\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 665,
+      "cita": "upsellViewModel.offer(cartViewModel.cartState.value, upsellContext) != null) return"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 133,
+      "cita": "text = \"¿Algo más?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 202,
+      "cita": "onClick = if (selected.isEmpty()) onSkip else onConfirm,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 211,
+      "cita": "text = if (selected.isEmpty()) \"No, gracias\" else"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2136,
+      "cita": "onSkip = { resolveUpsell(accept = false) },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 624,
+      "cita": "proceedToPayment(result.cart)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/domain/UpsellAcceptor.kt",
+      "linea": 66,
+      "cita": "if (product == null || product.isOutOfStock || product.active == false) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/domain/UpsellAcceptor.kt",
+      "linea": 77,
+      "cita": "if (card.linkedDiscount != null && descuento == null) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 91,
+      "cita": "text = \"¿Cómo fue tu experiencia?\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 113,
+      "cita": "text = \"Continuar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 121,
+      "cita": "Text(\"Omitir\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 138,
+      "cita": "text = \"Propina\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 193,
+      "cita": "text = \"$percent%\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 199,
+      "cita": "text = formatMoney(tipAmount / 100.0),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 351,
+      "cita": "text = \"Otra cantidad\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 103,
+      "cita": "var isPercentageMode by remember { mutableStateOf(true) }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 261,
+      "cita": "isPercentageMode = !isPercentageMode"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 267,
+      "cita": "text = if (isPercentageMode) \"% \\u2192 $\" else \"$ \\u2192 %\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 305,
+      "cita": "val newVal = customTipCents.toLong() * 10 + digit"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 245,
+      "cita": "else String.format(\"%.2f\", customTipCents / 100.0)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 236,
+      "cita": "text = if (isPercentageMode) \"%\" else \"$\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 334,
+      "cita": "showCustomInput = true"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 183,
+      "cita": "showCustomInput = false"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 377,
+      "cita": "text = \"Continuar (${String.format(\"$%.2f\", (amountCents + tipCents) / 100.0)})\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 391,
+      "cita": "text = \"Sin propina\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2414,
+      "cita": "_state.value = PaymentFlowState.SelectingPaymentMethod(amount + tipCents)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 232,
+      "cita": "text = \"Efectivo\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 309,
+      "cita": "text = \"Cobrar con terminal\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la propina se pide sólo con showTipScreen",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2384
+    },
+    {
+      "ruta": "Antes: «Pedir propina» prende showTipScreen",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/SetupWizardScreen.kt",
+      "linea": 226
+    },
+    {
+      "ruta": "Antes: «Pedir propina» enlazado a mostrarPropina = settings.showTipScreen",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/SetupWizardScreen.kt",
+      "linea": 112
+    },
+    {
+      "ruta": "Problema: Continuar sólo con selección",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 367
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente califica",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 268
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin calificación",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 270
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente elige la propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 289
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 291
+    },
+    {
+      "ruta": "Pantalla del cliente: la salida aparece a los 8 segundos (nadie cambia el valor por omisión)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 54
+    },
+    {
+      "ruta": "Pantalla del cliente: el botón de salida sólo con canSkip",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 112
+    },
+    {
+      "ruta": "La espera del cliente sólo con customerDisplayActive = customerCapturesInput",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 310
+    },
+    {
+      "ruta": "customerCapturesInput = pantalla montada Y ajuste prendido Y pantalla que se puede tocar",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayState.kt",
+      "linea": 223
+    },
+    {
+      "ruta": "El ajuste es por aparato (SharedPreferences) y viene apagado",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPrefs.kt",
+      "linea": 27
+    },
+    {
+      "ruta": "El nombre del ajuste",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 118
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/1-como-fue-tu-experiencia-omitir.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/2-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/3-otra-cantidad.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/4-pesos-500-es-5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/5-total-con-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/agregar-propina/6-cobrado-con-propina.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwmn6v1w0161wayd36tidzen — el mismo cobro (propina $5.00)"
+    ],
+    "nota": "Mismo cobro de cobrar-en-efectivo: *Omitir* en la experiencia → *Propina* con 10 %, 15 %, 20 % y su monto → *Otra cantidad* (viene en %, con «% → $») → cambiar a $ y teclear 5, 00 = «$ 5.00» → *Continuar ($55.00)* → el cobro trae la propina (Desglose: Propina $5.00, Total $55.00) → efectivo."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

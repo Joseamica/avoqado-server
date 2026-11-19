@@ -15,6 +15,7 @@ export async function createSession(input: {
   deviceId?: string | null
   authMethod: AuthMethod
   parentSessionId?: string | null
+  strongAuthAt?: Date | null
 }): Promise<Session> {
   return prisma.session.create({
     data: {
@@ -27,6 +28,7 @@ export async function createSession(input: {
       deviceId: input.deviceId?.trim() || null,
       authMethod: input.authMethod,
       parentSessionId: input.parentSessionId ?? null,
+      strongAuthAt: input.strongAuthAt ?? null,
     },
   })
 }

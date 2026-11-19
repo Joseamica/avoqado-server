@@ -16,6 +16,7 @@ export const loginSchema = z.object({
     fcmToken: z.string().optional(),
     // rememberMe extends token expiration time
     rememberMe: z.boolean().optional(),
+    purpose: z.literal('support-whatsapp').optional(),
   }),
 })
 

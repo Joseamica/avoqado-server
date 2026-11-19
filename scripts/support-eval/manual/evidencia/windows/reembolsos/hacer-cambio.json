@@ -1,0 +1,304 @@
+{
+  "pagina": "windows/reembolsos/hacer-cambio",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 43,
+      "cita": "label = \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsScreen.kt",
+      "linea": 485,
+      "cita": "onClick = { viewModel.selectTransaction(transaction.id) },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 384,
+      "cita": "ActionButton(label = TextosCambio.CAMBIO, modifier = Modifier.weight(1f),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 21,
+      "cita": "const val CAMBIO = \"Cambio\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeTakenPicker.kt",
+      "linea": 74,
+      "cita": "Column(Modifier.fillMaxWidth().clickable(enabled = enabled) { viewModel.addTaken(product) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 59,
+      "cita": "val isTablet = maxWidth >= 600.dp"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 106,
+      "cita": ".clickable { showCart = true }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 180,
+      "cita": "ExchangeReturnedList(state, viewModel)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 65,
+      "cita": "const val REGRESA = \"REGRESA\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeReturnedList.kt",
+      "linea": 23,
+      "cita": "Checkbox(checked = row.quantity > 0, enabled = row.blockedReason == null,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeViewModel.kt",
+      "linea": 158,
+      "cita": "remaining else 1) else it"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeReturnedList.kt",
+      "linea": 38,
+      "cita": "Icon(Icons.Filled.Add, TextosCambio.AUMENTAR_CANTIDAD)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 34,
+      "cita": "const val AUMENTAR_CANTIDAD = \"Aumentar cantidad\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 68,
+      "cita": "const val MOTIVO = \"Motivo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeReturnedList.kt",
+      "linea": 41,
+      "cita": "if (row.item.restockable == true) {"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 72,
+      "cita": "const val VUELVE_AL_INVENTARIO = \"Vuelve al inventario\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeViewModel.kt",
+      "linea": 23,
+      "cita": "val restock: Boolean = item.restockable == true,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeViewModel.kt",
+      "linea": 170,
+      "cita": "restock = if (reason == ExchangeReason.DEFECT) false else it.restock"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 71,
+      "cita": "const val DEFECTO = \"Defecto\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 67,
+      "cita": "const val SE_LLEVA = \"SE LLEVA\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 192,
+      "cita": "IconButton(onClick = { viewModel.removeTaken(index) }) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeBottomBar.kt",
+      "linea": 20,
+      "cita": "PrimaryButton(text = state.bar.action, onClick = onConfirm, enabled = state.blockedReason == null, fullWidth = true)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 81,
+      "cita": "const val COBRAR = \"Cobrar {precio}\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 83,
+      "cita": "const val DEVOLVER = \"Devolver {precio}\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 79,
+      "cita": "const val HACER_CAMBIO_PAREJO = \"Hacer cambio parejo\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 121,
+      "cita": "else if (draft!!.settlement.kind == \"PAYOUT\") TextosCambio.ELIGE_DEVOLUCION else TextosCambio.ELIGE_METODO,"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 84,
+      "cita": "const val CAMBIO_HECHO = \"¡Cambio hecho!\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 88,
+      "cita": "if (send.phase == ExchangeSendPhase.COMPLETED) PrimaryButton(TextosCambio.IMPRIMIR, payments::print, fullWidth = true)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 227
+    },
+    {
+      "permiso": "payments:refund",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3769
+    },
+    {
+      "permiso": "payments:refund-to-cash",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3766
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin conexión, la entrada a Cambio trae la razón SIN_CONEXION",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeEntry.kt",
+      "linea": 15
+    },
+    {
+      "afirmacion": "Texto «El cambio necesita conexión»",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 49
+    },
+    {
+      "afirmacion": "Con razón, el botón no se puede usar (available = enabled && blockedReason == null)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 605
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Problema: «Transferencia» es una de las formas de devolver la diferencia",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeSettlement.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "Problema: texto «Transferencia»",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 87
+    },
+    {
+      "ruta": "Problema: con «COMPLETED» del servidor la app da el cambio por hecho (la transferencia no la hace nadie más)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeSubmission.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: efectivo de otro medio sin payments:refund-to-cash",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeSettlement.kt",
+      "linea": 28
+    },
+    {
+      "ruta": "Problema: con el código de encargado apagado, «Efectivo» apagado con su razón",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeSettlement.kt",
+      "linea": 31
+    },
+    {
+      "ruta": "Problema: texto de la razón",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 11
+    },
+    {
+      "ruta": "Problema: con el código de encargado prendido, el aviso del código",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 128
+    },
+    {
+      "ruta": "Problema: texto del aviso del código",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 10
+    },
+    {
+      "ruta": "Problema: una opción con razón no se puede tocar",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeScreen.kt",
+      "linea": 129
+    },
+    {
+      "ruta": "Antes: Cambio sólo con exchangesEnabled y permiso de reembolso (o código de encargado)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeEntry.kt",
+      "linea": 11
+    },
+    {
+      "ruta": "Antes: sin permiso ni código de encargado no sale",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/ExchangeEntry.kt",
+      "linea": 13
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el segundo SERVIDOR de QA del 3005 (base desechable avoqado_jornada_vuelta2, llaves de tarjetas de regalo de prueba) por Tailscale; sesión owner@owner.com (Propietario) en Avoqado Full de esa base. Terminal: PAX con la copia de QA com.jaac.avoqado_tpv.sandbox.soportewin 2.22.0-sandbox (avoqado-tpv 8db3c1d3, sha256 dba5dd4d…ac8f), Blumon de pruebas",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/01-v2-36-venta-agua-detalle.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/02-v2-37-cambio.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/03-v2-38-buscar-coca.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/04-v2-39-regresa-se-lleva.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/05-v2-40-motivo-gusto.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/06-v2-41-tras-cobrar-diferencia.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/reembolsos/hacer-cambio/07-v2-42-cambio-hecho.png"
+    ],
+    "filasCreadas": [
+      "Base desechable: Order cmwmu9sa4002gwavsd0qcj195 ORD-1795049745705 (Agua Mineral 1L $20, efectivo) y su cambio por Coca-Cola 600ml cobrando $5.00 en efectivo; Order cmwmud6hn0038wavsb27htcyi ORD-1795049904153 $25 (la venta que deja el cambio)",
+      "VenueSettings de Avoqado Full (base desechable): exchangesEnabled null → true → false (la API no acepta null; false es lo mismo para un RESTAURANT)"
+    ],
+    "nota": "Vuelta 2, con los cambios prendidos por la API del panel en Avoqado Full de la base desechable. Ventas → venta de $20 (Agua Mineral 1L) → salen *Emitir reembolso* y *Cambio* → *Cambio* abre «Cambio · Venta ORD-… · Hoy» con la lista de productos (y *Buscar productos*) a la izquierda y el resumen a la derecha (ventana ancha: no hizo falta el botón de abajo). Se buscó y tocó Coca-Cola 600ml → *SE LLEVA* «Coca-Cola 600ml +$25.00» con su X. En *REGRESA* se marcó Agua Mineral 1L (−$20.00, con − 1 +), *Vuelve al inventario* marcada y *Motivo*: Talla / Gusto / Defecto → Gusto. Abajo: «La clienta paga $5.00» (antes de elegir motivo: «Elige un motivo para cada artículo que regresa», botón apagado; sin nada: «Diferencia $0.00 · no se cobra ni se devuelve nada» con *Hacer cambio parejo*) → *Cobrar $5.00* → «Elige cómo se paga la diferencia» con *Efectivo* y *Tarjeta* → *Efectivo* → «¡Cambio hecho!» con *Imprimir* y *Cerrar*. No se vieron *Devolver …*, *Transferencia* ni el aviso del permiso de efectivo."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

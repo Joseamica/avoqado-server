@@ -1,0 +1,275 @@
+{
+  "pagina": "windows/mesas/abrir-mesa-y-ordenar",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 73,
+      "cita": "label = \"Mesas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 199,
+      "cita": "viewModel.selectTable(t.id)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 749,
+      "cita": "Text(\"Comensales\", modifier = Modifier.weight(1f))"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 755,
+      "cita": "text = if (actionState is TableActionState.Working) \"Abriendo...\" else \"Abrir mesa y ordenar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 766,
+      "cita": ") { Text(\"Sin comensales\") }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 327,
+      "cita": "if (product.hasModifiers) selectedProduct = product else viewModel.addProduct(product)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 759,
+      "cita": "ProductDetailPanel("
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 581,
+      "cita": "text = \"Agregar al carrito\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1667,
+      "cita": "text = if (isSending) \"Enviando...\" else \"Enviar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 591,
+      "cita": "text = \"Ver cheque\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 774,
+      "cita": "fun sendRound(alTerminar: (Boolean, String) -> Unit = { _, _ -> }) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1721,
+      "cita": ") { Text(\"Guardar\") }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1434,
+      "cita": "contentDescription = \"Volver al plano\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 197,
+      "cita": "viewModel.startOrdering(t, onReady = onOpenTableOrder)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tables:update",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2918
+    },
+    {
+      "permiso": "tables:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 310
+    },
+    {
+      "permiso": "orders:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2983
+    },
+    {
+      "permiso": "orders:create",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 339
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 143
+    },
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2917
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red la mesa se abre en el aparato (provisional) y se encola OPEN_TABLE",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 338
+    },
+    {
+      "afirmacion": "La apertura sin red va a la cola del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 374
+    },
+    {
+      "afirmacion": "WINDOWS: la base Room vive en la carpeta de datos de la computadora (BundledSQLiteDriver)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt",
+      "linea": 46
+    },
+    {
+      "afirmacion": "La sesión arranca la cola (outbox) del negocio, también en Windows",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt",
+      "linea": 182
+    },
+    {
+      "afirmacion": "La cola reintenta sola cuando vuelve la conexión con el servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/sync/SyncOutbox.kt",
+      "linea": 222
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión — ronda guardada; se sincronizará sola»: la ronda quedó en la cola (ADD_ITEMS)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 386
+    },
+    {
+      "afirmacion": "Si aparece el aviso: la ronda se encola en el outbox",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1036
+    },
+    {
+      "afirmacion": "Si aparece «No se pudo confirmar la ronda — se guardó; se reintentará sola»: con red, la ronda quedó suelta en la cola",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 394
+    },
+    {
+      "afirmacion": "Si aparece cualquiera de los dos avisos: lo pendiente se vacía (no queda para recapturar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1099
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: Mesas sólo en el modo Mesas del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 38
+    },
+    {
+      "ruta": "Antes: el modo se llama «Mesas»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt",
+      "linea": 14
+    },
+    {
+      "ruta": "Antes: sin el plan, la pantalla de Mesas pide el plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 144
+    },
+    {
+      "ruta": "Antes: la pestaña no depende del plan (sólo del rol)",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 68
+    },
+    {
+      "ruta": "Antes: el texto del candado",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt",
+      "linea": 231
+    },
+    {
+      "ruta": "Antes WINDOWS: el modo se guarda en las preferencias de esta computadora",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PosModeManager.kt",
+      "linea": 18
+    },
+    {
+      "ruta": "WINDOWS: las preferencias del equipo se guardan en la carpeta de datos de esta computadora (shared_prefs)",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 30
+    },
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Diseño de tableta desde el ancho Medium (600 dp); más angosta, el de teléfono",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 159
+    },
+    {
+      "ruta": "Problema: «Pagar» apagado con productos sin enviar",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1655
+    },
+    {
+      "ruta": "Problema: salir con productos sin enviar",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1351
+    },
+    {
+      "ruta": "Problema: «Descartar y salir» borra lo no enviado",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1357
+    },
+    {
+      "ruta": "Problema: mesa reservada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 915
+    },
+    {
+      "ruta": "Si aparece «… está atendiendo esta mesa en otro dispositivo»: el Hub LAN la tiene apartada para otro aparato y no se abre",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 305
+    },
+    {
+      "ruta": "Si aparece el aviso: su texto",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 307
+    },
+    {
+      "ruta": "Si aparece «Mesa de … — solo lectura»: la cuenta es de otro mesero (propiedad de mesa)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 304
+    },
+    {
+      "ruta": "Si aparece el aviso: la regla de propiedad de mesa",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 172
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "pagina": "tpv/reportes/ver-reporte-del-dia",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 935,
+      "cita": "label = \"Reportes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 461,
+      "cita": "text = \"Resumen\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/PeriodFilterChips.kt",
+      "linea": 62,
+      "cita": "label = \"Hoy\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 637,
+      "cita": "label = \"Ventas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 647,
+      "cita": "label = \"Órdenes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 677,
+      "cita": "label = \"Ticket Promedio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 601,
+      "cita": "if (summary.staffSales.size > 1) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/StaffFilterChips.kt",
+      "linea": 61,
+      "cita": "label = { Text(\"Limpiar\", style = MaterialTheme.typography.bodyMedium) },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 411,
+      "cita": "contentDescription = \"Imprimir reporte\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 175,
+      "cita": "title = { Text(\"Opciones de impresion\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 191,
+      "cita": "Text(\"Propinas por mesero\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 241,
+      "cita": "Text(\"Imprimir\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "shifts:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1748
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la tarjeta Reportes la apaga la configuración de la terminal (showReports)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 931
+    },
+    {
+      "ruta": "El período de inicio es Hoy",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsViewModel.kt",
+      "linea": 109
+    },
+    {
+      "ruta": "Si aparece «No se pudo imprimir el reporte.», no salió en papel",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsViewModel.kt",
+      "linea": 824
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

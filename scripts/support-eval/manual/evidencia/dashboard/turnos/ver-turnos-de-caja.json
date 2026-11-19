@@ -1,0 +1,272 @@
+{
+  "pagina": "dashboard/turnos/ver-turnos-de-caja",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 501,
+      "cita": "title: t('sidebar:routes.shifts'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 158,
+      "cita": "\"shifts\": \"Turnos de caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1226,
+      "cita": "title: t('sidebar:salesMenu.title', { defaultValue: 'Ventas' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 245,
+      "cita": "return row.endTime ? t('closed') : t('open')"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 3,
+      "cita": "\"open\": \"Abierto\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 4,
+      "cita": "\"closed\": \"Cerrado\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 278,
+      "cita": "<span>{t('columns.openTime')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 8,
+      "cita": "\"openTime\": \"Apertura\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 303,
+      "cita": "<span>{t('columns.closeTime')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 9,
+      "cita": "\"closeTime\": \"Cierre\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 421,
+      "cita": "header: t('columns.total'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 13,
+      "cita": "\"total\": \"Total\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 512,
+      "cita": "clickableRow={row => ({"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 902,
+      "cita": "<p className=\"text-[10px] text-muted-foreground\">{t('detail.stats.subtotal')}</p>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 59,
+      "cita": "\"subtotal\": \"Subtotal\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 60,
+      "cita": "\"tips\": \"Propinas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 61,
+      "cita": "\"payments\": \"Pagos\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 62,
+      "cita": "\"orders\": \"Ordenes\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 64,
+      "cita": "\"avgOrder\": \"Ticket Promedio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 933,
+      "cita": "title={t('detail.sections.paymentMethods')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 76,
+      "cita": "\"paymentMethods\": \"Metodos de Pago\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 951,
+      "cita": "title={t('detail.sections.staff')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 82,
+      "cita": "\"staff\": \"Ventas por Empleado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 969,
+      "cita": "title={t('detail.sections.orders')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 84,
+      "cita": "\"orders\": \"Ordenes\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 994,
+      "cita": "title={t('detail.sections.products')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 86,
+      "cita": "\"products\": \"Productos Vendidos\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1012,
+      "cita": "title={t('detail.sections.payments')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 74,
+      "cita": "\"payments\": \"Pagos\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1060,
+      "cita": "{shiftStatus === 'CLOSED' && ("
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 32,
+      "cita": "if (cashDeclared === null && cashDifference === null) return null"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 76,
+      "cita": "<CardTitle className=\"text-sm font-medium\">{t('detail.cashReconciliation.title')}</CardTitle>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 128,
+      "cita": "\"title\": \"Arqueo de caja\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 131,
+      "cita": "\"balanced\": \"Caja cuadrada\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 133,
+      "cita": "\"shortage\": \"Faltante\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 135,
+      "cita": "\"overage\": \"Sobrante\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 129,
+      "cita": "\"notCounted\": \"Sin conteo\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "shifts:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 237
+    },
+    {
+      "permiso": "shifts:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 503
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Turnos de caja sólo sale con turnos prendidos",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 498
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

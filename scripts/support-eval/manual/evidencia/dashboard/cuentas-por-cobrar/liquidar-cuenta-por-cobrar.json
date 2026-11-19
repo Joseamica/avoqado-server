@@ -1,0 +1,237 @@
+{
+  "pagina": "dashboard/cuentas-por-cobrar/liquidar-cuenta-por-cobrar",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 112,
+      "cita": "\"title\": \"Reportes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 113,
+      "cita": "\"payLaterAging\": \"Cuentas por Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 401,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 421,
+      "cita": "\"settle\": \"Liquidar Orden\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 415,
+      "cita": "<DropdownMenuItem onClick={() => handleSettleClick(row.original)}>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 443,
+      "cita": "\"balance\": \"Saldo pendiente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 445,
+      "cita": "\"notesLabel\": \"Notas (opcional)\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 449,
+      "cita": "\"confirm\": \"Liquidar Orden\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 436,
+      "cita": "\"successTitle\": \"Orden Liquidada\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 194,
+      "cita": "title: t('payLaterAging.settle.successTitle'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 422,
+      "cita": "\"cancel\": \"Cancelar orden\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 455,
+      "cita": "\"reasonLabel\": \"Motivo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 459,
+      "cita": "\"confirm\": \"Cancelar orden\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 702,
+      "cita": "cancelOrderMutation.mutate({ orderId: orderToCancel.id, reason: cancelReason.trim() })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-reports:pay-later-aging",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 295
+    },
+    {
+      "permiso": "tpv-reports:pay-later-aging",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 883
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3571
+    },
+    {
+      "permiso": "orders:cancel-unpaid",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 419
+    },
+    {
+      "permiso": "orders:cancel-unpaid",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3582
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: liquidar crea un pago en EFECTIVO por el saldo",
+      "archivo": "avoqado-server/src/services/dashboard/order.dashboard.service.ts",
+      "linea": 1058
+    },
+    {
+      "ruta": "Antes: y entra como efectivo del cajón",
+      "archivo": "avoqado-server/src/services/dashboard/order.dashboard.service.ts",
+      "linea": 1061
+    },
+    {
+      "ruta": "Antes: la nota sólo queda anotada",
+      "archivo": "avoqado-server/src/services/dashboard/order.dashboard.service.ts",
+      "linea": 1067
+    },
+    {
+      "ruta": "Antes: la ayuda de la nota",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 447
+    },
+    {
+      "ruta": "Problema: Cancelar orden sólo con permiso, sin pagos y sin mesa",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 419
+    },
+    {
+      "ruta": "Problema: no se puede deshacer",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 454
+    },
+    {
+      "ruta": "Problema: motivo de 3 o más",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 698
+    },
+    {
+      "ruta": "Problema: ya estaba cancelada",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 222
+    },
+    {
+      "ruta": "Problema: texto «Ya estaba cancelada»",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 463
+    },
+    {
+      "ruta": "Antes: el SERVIDOR pide orders:update para liquidar (el renglón no tiene candado propio)",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 415
+    },
+    {
+      "ruta": "Problema: error al liquidar",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 205
+    },
+    {
+      "ruta": "Problema: texto «Error» al liquidar",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 438
+    },
+    {
+      "ruta": "Problema: la razón del SERVIDOR al liquidar",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 206
+    },
+    {
+      "ruta": "Problema: error al cancelar",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 224
+    },
+    {
+      "ruta": "Problema: texto «No se canceló»",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 465
+    },
+    {
+      "ruta": "Problema: la razón al cancelar",
+      "archivo": "src/pages/Reports/PayLaterAging.tsx",
+      "linea": 225
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-cuenta-por-cobrar/7.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwe4ebao01blwaldhwjifpg4 — $20.00 CASH que liquida ORD-1793193490209 (la orden cmvs53sc900lmwash1anszirz pasó a PAID)",
+      "PaymentEffect cmwe4ef3y01bqwaldcuxps0jp",
+      "CommissionCalculation cmwe4exs701bywaldk4b5h7k3",
+      "ActivityLog cmwe4ec3901bnwald0swsttem — PAYMENT_WITHOUT_SHIFT",
+      "ActivityLog cmwe4ehe301bwwaldv5ey4utv — ORDER_SETTLED",
+      "ActivityLog cmwe4gc7o01c0waldo5nuco6g — ORDER_CANCELLED (la orden cmvrt5hcp00j8washrtlxoff3, ORD-1793173413871, pasó a CANCELLED)"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. Liquidar: un POST /settle (200). Cancelar: un POST /cancel (200); con 2 letras de motivo el botón sigue apagado (foto 5). La parte de cancelar se corrió en una segunda pasada (fotos 5-7) porque el menú ⋯ no abrió en el guion justo después del aviso."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

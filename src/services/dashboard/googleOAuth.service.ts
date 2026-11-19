@@ -13,6 +13,7 @@ import { getPrimaryOrganizationId } from '../staffOrganization.service'
 import { assertCanAddSeatsBulk, lockSeatCap } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
 import { createSession } from '@/services/auth/session.service'
+import { createSupportPersonalLogin } from '@/services/support/personalLogin.service'
 import { crearNegocioNuevo, resolverAtribucionDelAlta, type AtribucionDelAlta } from '../onboarding/nuevoNegocio'
 import { avisarRegistroDirecto } from '../onboarding/avisoRegistroDirecto'
 
@@ -194,6 +195,7 @@ export async function loginWithGoogle(
   codeOrToken: string,
   isCode: boolean = true,
   signup?: GoogleSignupIntent,
+  purpose?: 'support-whatsapp',
 ): Promise<{
   accessToken: string
   refreshToken: string
@@ -215,6 +217,7 @@ export async function loginWithGoogle(
     expiresAt: string
   }[]
 }> {
+  const strongAuthAt = new Date()
   // Get user info from Google
   const googleUser = isCode ? await getGoogleUserFromCode(codeOrToken) : await verifyGoogleToken(codeOrToken)
 
@@ -549,6 +552,8 @@ export async function loginWithGoogle(
   // World-Class Pattern (Stripe/Shopify): Allow OWNER login without venues if onboarding incomplete
   // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (staff.venues.length === 0) {
+    if (purpose === 'support-whatsapp' && !signup)
+      return { ...(await createSupportPersonalLogin(staff, strongAuthAt)), isNewUser, businessCreated }
     // Check if user has OWNER role (primary owner created during signup)
     const organization = staff.organizations[0]?.organization
     const hasOwnerRole = organization ? staff.email === organization.email : false
@@ -661,6 +666,7 @@ export async function loginWithGoogle(
   const session = await createSession({
     staffId: staff.id,
     venueId: selectedVenue.venueId,
+    strongAuthAt,
     // ⚠️ [Auditoría 2026-08-30, P2 — DECLARADO, no arreglado] Entrar con Google NO es entrar con
     // contraseña, y `Session.authMethod` es justo el campo que alguien lee en una revisión de
     // seguridad. El enum `AuthMethod` sólo tiene PASSWORD/PIN/BIOMETRIC: corregirlo pide agregar

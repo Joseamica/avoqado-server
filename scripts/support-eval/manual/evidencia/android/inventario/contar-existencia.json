@@ -1,0 +1,303 @@
+{
+  "pagina": "android/inventario/contar-existencia",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 36,
+      "cita": "label = \"Inventario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 63,
+      "cita": "MainTab.INVENTORY -> canAccessInventory"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 70,
+      "cita": "COUNTS(\"Conteos\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 1018,
+      "cita": "text = \"Contar existencia\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountTypeSheet.kt",
+      "linea": 48,
+      "cita": "text = \"Tipo de conteo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/model/InventoryModels.kt",
+      "linea": 93,
+      "cita": "FULL(\"Conteo completo\", \"Contar todos los productos\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/model/InventoryModels.kt",
+      "linea": 94,
+      "cita": "CYCLE(\"Conteo cíclico\", \"Contar productos seleccionados\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountingView.kt",
+      "linea": 880,
+      "cita": "text = \"Agregar artículos\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountingView.kt",
+      "linea": 294,
+      "cita": "text = if (esUltimoArticulo) \"Revisar conteo\" else \"Siguiente artículo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 114,
+      "cita": "text = \"Revisar conteo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 176,
+      "cita": "text = \"Esperado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 183,
+      "cita": "text = \"Contado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 190,
+      "cita": "text = \"Diferencia\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 234,
+      "cita": "Text(\"Agregar nota\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountReviewView.kt",
+      "linea": 240,
+      "cita": "text = if (isSaving) \"Confirmando...\" else \"Confirmar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 2049,
+      "cita": "fun confirmCount() {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 2224,
+      "cita": "// El conteo YA movió el stock: sin esto la descripción"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "inventory:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3117
+    },
+    {
+      "permiso": "inventory:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3140
+    },
+    {
+      "permiso": "inventory:update",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3151
+    },
+    {
+      "permiso": "inventory:adjust",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3162
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 125
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: el conteo quedó guardado en este aparato. Confirma cuando vuelva la red.»: confirmar es sólo con red",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 129
+    },
+    {
+      "afirmacion": "Si aparece: sin red no se intenta, se guarda el borrador",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 2072
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: Inventario sólo gerente, administrador y dueño (MANAGER_UP)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 16
+    },
+    {
+      "ruta": "Antes: Conteos va con candado de plan (sección avanzada)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 555
+    },
+    {
+      "ruta": "Antes: el completo se crea al empezar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 1192
+    },
+    {
+      "ruta": "Antes: el cíclico se crea al confirmar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 2102
+    },
+    {
+      "ruta": "Problema: salir a media captura → «¿Qué hacemos con este conteo?»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 94
+    },
+    {
+      "ruta": "Problema: Guardar el avance",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 95
+    },
+    {
+      "ruta": "Problema: Guardar el avance guarda el borrador y cierra",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 1904
+    },
+    {
+      "ruta": "Problema: Descartar el conteo (en la pregunta al salir)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountingView.kt",
+      "linea": 484
+    },
+    {
+      "ruta": "Problema: Descartar el conteo (texto)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 96
+    },
+    {
+      "ruta": "Problema: con líneas contadas pide confirmar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 166
+    },
+    {
+      "ruta": "Problema: título de la confirmación",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 169
+    },
+    {
+      "ruta": "Problema: no se puede deshacer",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 100
+    },
+    {
+      "ruta": "Problema: el botón de la confirmación",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountingView.kt",
+      "linea": 505
+    },
+    {
+      "ruta": "Problema: sin líneas contadas descarta sin preguntar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 1841
+    },
+    {
+      "ruta": "Problema: descartar borra lo local y cancela en el servidor (con cola sin red)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 1913
+    },
+    {
+      "ruta": "Problema: Continuar (el borrador vive en este aparato)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 109
+    },
+    {
+      "ruta": "Si aparece: un solo borrador por aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 118
+    },
+    {
+      "ruta": "Si aparece: un artículo «no entró al conteo» (no se cuenta en inventario)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 157
+    },
+    {
+      "ruta": "Si aparece: el aviso de líneas no incluidas",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryViewModel.kt",
+      "linea": 2164
+    },
+    {
+      "ruta": "Si aparece: «No se aplicó» junto al producto",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoNoAplicado.kt",
+      "linea": 99
+    },
+    {
+      "ruta": "Si aparece: motivo «vuelve a contarlo cuando termine»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoNoAplicado.kt",
+      "linea": 101
+    },
+    {
+      "ruta": "Si aparece: motivo «pídele al dueño que la resuelva en el dashboard»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoNoAplicado.kt",
+      "linea": 103
+    },
+    {
+      "ruta": "Si aparece: la tarjeta tras confirmar lista los productos con su motivo",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 976
+    },
+    {
+      "ruta": "Si aparece: «No se pudo comprobar si todo se aplicó…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoNoAplicado.kt",
+      "linea": 79
+    },
+    {
+      "ruta": "Si aparece: la tarjeta «sin comprobar» tras confirmar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 980
+    },
+    {
+      "ruta": "Si aparece: el detalle del conteo marca «No se aplicó» por producto",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/StockCountDetailView.kt",
+      "linea": 328
+    },
+    {
+      "ruta": "Si aparece: el detalle se abre desde la lista de Conteos",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 1044
+    },
+    {
+      "ruta": "Si aparece: cerrado desde otro aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/data/ConteoEnCurso.kt",
+      "linea": 110
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

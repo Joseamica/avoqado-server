@@ -1,0 +1,416 @@
+{
+  "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1290,
+      "cita": "title: t('sidebar:reportsMenu.title', { defaultValue: 'Reportes' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 112,
+      "cita": "\"title\": \"Reportes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 870,
+      "cita": "title: t('sidebar:availableBalance'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 5,
+      "cita": "\"availableBalance\": \"Saldo Disponible\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/AvailableBalance/NextDepositHero.tsx",
+      "linea": 51,
+      "cita": "<p className=\"text-xs uppercase tracking-wider text-muted-foreground\">{t('hero.title')}</p>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 6,
+      "cita": "\"title\": \"Tu próximo depósito\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/AvailableBalance/NextDepositHero.tsx",
+      "linea": 44,
+      "cita": "{t('hero.inTransit', { amount: formatCurrency(pendingAmount) })}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 10,
+      "cita": "\"inTransit\": \"En camino: {{amount}}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 554,
+      "cita": "pendingAmount={filteredSummary.pendingSettlement}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 562,
+      "cita": "{activeTab !== 'cash' && venueId && <SettlementWeekStrip venueId={venueId} venueTimezone={venueTimezone} />}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/settlement/SettlementWeekStrip.tsx",
+      "linea": 79,
+      "cita": "<h3 className=\"text-sm font-semibold tracking-tight\">{t('salesSummary.settlementWeek.title')}</h3>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 871,
+      "cita": "\"title\": \"Cuándo cae (semana)\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/settlement/SettlementWeekStrip.tsx",
+      "linea": 85,
+      "cita": "onClick={() => { setWeekStart(w => addWeeks(w, -1)); setOpenDate(null) }}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/settlement/SettlementWeekStrip.tsx",
+      "linea": 131,
+      "cita": "onClick={() => day && setOpenDate(prev => (prev === dateKey ? null : dateKey))}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/settlement/SettlementWeekStrip.tsx",
+      "linea": 158,
+      "cita": "{t('salesSummary.settlementWeek.merchantLine', { commission: Currency(m.commission), net: Currency(m.net) })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 875,
+      "cita": "\"merchantLine\": \"comisión {{commission}} · recibes {{net}}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 579,
+      "cita": "title={t('breakdown.title')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 60,
+      "cita": "\"title\": \"Desglose por Tipo de Tarjeta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/AvailableBalance/CardTypeBreakdownStrip.tsx",
+      "linea": 134,
+      "cita": "<th className=\"py-2 pl-2 text-right font-medium\">Liquidación</th>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/AvailableBalance/CardTypeBreakdownStrip.tsx",
+      "linea": 166,
+      "cita": "? 'Inmediato'"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/AvailableBalance/CardTypeBreakdownStrip.tsx",
+      "linea": 168,
+      "cita": "? `${card.settlementDays} ${card.settlementDays === 1 ? 'día háb.' : 'días háb.'}`"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 409,
+      "cita": "{t('simulate.button')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 126,
+      "cita": "\"button\": \"Simular Transacción\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 130,
+      "cita": "\"amount\": \"Monto de Transacción\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 132,
+      "cita": "\"cardType\": \"Tipo de Tarjeta\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 134,
+      "cita": "\"transactionDate\": \"Fecha de Transacción\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 793,
+      "cita": "{simulationLoading ? t('simulate.form.submit') + '...' : t('simulate.form.submit')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 137,
+      "cita": "\"submit\": \"Calcular Liquidación\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 732,
+      "cita": "<p className=\"text-xs text-muted-foreground\">{t('simulate.result.settlementDate')}</p>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 403,
+      "cita": "<Button variant=\"outline\" onClick={() => setShowReportDialog(true)} className=\"gap-2\" data-tour=\"settlement-report-btn\">"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 405,
+      "cita": "{t('settlementReport.button')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 177,
+      "cita": "\"button\": \"Descargar reporte\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/SettlementReportDialog.tsx",
+      "linea": 270,
+      "cita": "title={t('settlementReport.report.transactions')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 183,
+      "cita": "\"transactions\": \"Transacciones\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/SettlementReportDialog.tsx",
+      "linea": 278,
+      "cita": "title={t('settlementReport.report.deposits')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 185,
+      "cita": "\"deposits\": \"Dispersiones\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 186,
+      "cita": "\"depositsHint\": \"Un renglón por día de depósito\""
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/SettlementReportDialog.tsx",
+      "linea": 284,
+      "cita": "<Section title={t('settlementReport.dates.title')} tour=\"settlement-report-dates\">"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/SettlementReportDialog.tsx",
+      "linea": 448,
+      "cita": "<Section title={t('settlementReport.format.title')} tour=\"settlement-report-format\">"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/AvailableBalance/SettlementReportDialog.tsx",
+      "linea": 507,
+      "cita": "{t('settlementReport.download')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 271,
+      "cita": "\"download\": \"Descargar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "settlements:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 479
+    },
+    {
+      "permiso": "settlements:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 873
+    },
+    {
+      "permiso": "settlements:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4109
+    },
+    {
+      "permiso": "settlements:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4208
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "ADVANCED_REPORTS",
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 819
+    },
+    {
+      "featureCode": "ADVANCED_REPORTS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4110
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: se abre sólo con la verificación aprobada (o negocio demo)",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 482
+    },
+    {
+      "ruta": "Antes: sin verificación manda a la pantalla de verificación",
+      "archivo": "src/routes/KYCProtectedRoute.tsx",
+      "linea": 75
+    },
+    {
+      "ruta": "Antes: verificación aprobada = VERIFIED",
+      "archivo": "src/lib/kyc-utils.ts",
+      "linea": 42
+    },
+    {
+      "ruta": "Antes: sin el plan, contenido borroso y cartel",
+      "archivo": "src/components/billing/FeatureGate.tsx",
+      "linea": 60
+    },
+    {
+      "ruta": "Antes: texto del cartel",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 320
+    },
+    {
+      "ruta": "Antes: todo es estimado (insignia del próximo depósito)",
+      "archivo": "src/pages/AvailableBalance/NextDepositHero.tsx",
+      "linea": 62
+    },
+    {
+      "ruta": "Antes: nada es un depósito confirmado",
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 116
+    },
+    {
+      "ruta": "Antes: comentario, todo es una estimación por fecha",
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 10
+    },
+    {
+      "ruta": "Paso 2: la semana es por fecha de liquidación y estimada",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 877
+    },
+    {
+      "ruta": "Paso 3: el desglose sólo fuera de la pestaña Efectivo y con datos",
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 565
+    },
+    {
+      "ruta": "Problema: el efectivo no sale en la semana (pestaña Efectivo)",
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 451
+    },
+    {
+      "ruta": "Problema: texto de la pestaña Efectivo",
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 80
+    },
+    {
+      "ruta": "Problema: sólo lo procesado por Avoqado",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 178
+    },
+    {
+      "ruta": "Problema: filtro de lo procesado por Avoqado",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 248
+    },
+    {
+      "ruta": "Problema: comisiones del simulador son porcentajes fijos",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 783
+    },
+    {
+      "ruta": "Problema: texto Comisiones Estimadas",
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 145
+    },
+    {
+      "ruta": "Problema: columna Comisiones (sólo pantalla ancha)",
+      "archivo": "src/pages/AvailableBalance/CardTypeBreakdownStrip.tsx",
+      "linea": 130
+    },
+    {
+      "ruta": "Problema: la comisión del desglose sale de los costos de cada cobro",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 435
+    },
+    {
+      "ruta": "Problema: sin configuración devuelve fecha nula",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 759
+    },
+    {
+      "ruta": "Problema: sin configuración del negocio, 404",
+      "archivo": "avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts",
+      "linea": 750
+    },
+    {
+      "ruta": "Problema: el 404 sale como resultado sin configuración",
+      "archivo": "src/pages/AvailableBalance/AvailableBalance.tsx",
+      "linea": 274
+    },
+    {
+      "ruta": "Problema: texto sin configuración",
+      "archivo": "src/locales/es/availableBalance.json",
+      "linea": 155
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "pagina": "tpv/mesas/mover-mesa",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 807,
+      "cita": "Icon(Icons.Default.MoreVert, contentDescription = \"Más acciones\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 835,
+      "cita": "text = { Text(\"Mover mesa\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 76,
+      "cita": "text = \"Elige la mesa libre a la que se mueve esta cuenta.\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 111,
+      "cita": "MoveTargetRow(table = table, enabled = !isMoving, onClick = { onSelect(table) })"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 588,
+      "cita": "\"Cuenta movida a Mesa ${target.number}\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tables:update",
+      "archivo": "avoqado-server/src/services/mobile/sync.mobile.service.ts",
+      "linea": 262
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Mover siempre viaja por la cola (MOVE_ORDER) y se intenta enviar de inmediato",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 984
+    },
+    {
+      "afirmacion": "Sin respuesta queda en la cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 993
+    },
+    {
+      "afirmacion": "Mensaje del movimiento guardado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 586
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Ver cuenta» desde la mesa",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt",
+      "linea": 280
+    },
+    {
+      "ruta": "Sólo mesas libres en la lista",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 539
+    },
+    {
+      "ruta": "Problema: sin mesas libres",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: la lista no cargó",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 91
+    },
+    {
+      "ruta": "Problema: Reintentar del selector",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 193
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

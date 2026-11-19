@@ -1,0 +1,240 @@
+{
+  "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 738,
+      "cita": "{ title: t('sidebar:customersMenu.groups'), url: 'customers/groups', permission: 'customer-groups:read', keywords: ['segmentos'] },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 15,
+      "cita": "\"groups\": \"Grupos de Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 205,
+      "cita": "{t('groups.form.createTitle')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 208,
+      "cita": "\"createTitle\": \"Nuevo Grupo de Clientes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 516,
+      "cita": "<Label htmlFor=\"name\">{t('groups.form.fields.name')} *</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 211,
+      "cita": "\"name\": \"Nombre del Grupo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 212,
+      "cita": "\"description\": \"Descripción\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 527,
+      "cita": "<Label>{t('groups.form.fields.color')} *</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 213,
+      "cita": "\"color\": \"Color\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 352,
+      "cita": "color: group?.color || GROUP_COLORS[0],"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 546,
+      "cita": "<Label>{t('groups.form.fields.customers', { defaultValue: 'Clientes' })}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 555,
+      "cita": ": t('groups.form.selectCustomers', { defaultValue: 'Seleccionar clientes...' })}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 623,
+      "cita": "t('groups.form.buttons.create')"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 225,
+      "cita": "\"create\": \"Crear Grupo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 401,
+      "cita": "toast({ title: t('toasts.groupCreateSuccess') })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 254,
+      "cita": "\"groupCreateSuccess\": \"Grupo de clientes creado exitosamente\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 161,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 168,
+      "cita": "{tCommon('common.edit')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/common.json",
+      "linea": 509,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 621,
+      "cita": "t('groups.form.buttons.save')"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 226,
+      "cita": "\"save\": \"Guardar Cambios\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 605
+    },
+    {
+      "permiso": "customer-groups:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 738
+    },
+    {
+      "permiso": "customer-groups:create",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 200
+    },
+    {
+      "permiso": "customer-groups:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10834
+    },
+    {
+      "permiso": "customer-groups:update",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 165
+    },
+    {
+      "permiso": "customer-groups:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10878
+    },
+    {
+      "permiso": "customer-groups:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10950
+    },
+    {
+      "permiso": "customer-groups:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10991
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: nombre requerido",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 332
+    },
+    {
+      "ruta": "Problema: texto del nombre",
+      "archivo": "src/locales/es/customers.json",
+      "linea": 221
+    },
+    {
+      "ruta": "Problema: primero crea el grupo y después mete a los clientes",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 390
+    },
+    {
+      "ruta": "Problema: cualquier falla sale como Error",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 408
+    },
+    {
+      "ruta": "Problema: título del error",
+      "archivo": "src/locales/es/common.json",
+      "linea": 513
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: el servidor rechaza un nombre repetido (puede ser el del primer intento)",
+      "archivo": "avoqado-server/src/services/dashboard/customerGroup.dashboard.service.ts",
+      "linea": 171
+    },
+    {
+      "ruta": "T11-10: el error al crear",
+      "archivo": "src/pages/Customers/CustomerGroups.tsx",
+      "linea": 94
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

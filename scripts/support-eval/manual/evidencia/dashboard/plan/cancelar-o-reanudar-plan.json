@@ -1,0 +1,448 @@
+{
+  "pagina": "dashboard/plan/cancelar-o-reanudar-plan",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1340,
+      "cita": "title: t('sidebar:settingsMenu.title', { defaultValue: 'Configuración' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 36,
+      "cita": "\"title\": \"Configuración\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 87,
+      "cita": "? [{ to: 'billing', label: t('hub.items.billing'), icon: CreditCard, dataTour: 'settings-nav-billing' }]"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/settings.json",
+      "linea": 18,
+      "cita": "\"billing\": \"Plan y facturación\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/BillingLayout.tsx",
+      "linea": 29,
+      "cita": "{ to: `${basePath}/subscriptions`, label: t('tabs.plan') },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 6,
+      "cita": "\"plan\": \"Plan\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 209,
+      "cita": "{t('currentPlan.actions.cancel')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 367,
+      "cita": "\"cancel\": \"Cancelar plan\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 223,
+      "cita": "{origin.kind === 'CONTRACT' && !origin.cancelAt && ("
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 225,
+      "cita": "{t('hybrid.cancelContract')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 783,
+      "cita": "\"cancelContract\": \"Cancelar renovación\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 97,
+      "cita": "<DialogTitle>{t('plan.cancel.reason.title')}</DialogTitle>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 15,
+      "cita": "\"title\": \"Antes de irte, ¿por qué cancelas?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 112,
+      "cita": "{t(`plan.cancel.reason.options.${id}`)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 131,
+      "cita": "placeholder={t('plan.cancel.reason.otherPlaceholder')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 25,
+      "cita": "\"otherPlaceholder\": \"Cuéntanos más (opcional)\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 432,
+      "cita": "kind: 'PLAN',"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 156,
+      "cita": ": t(isPlan ? 'plan.cancel.confirm.cancelCta' : 'plan.cancel.reason.confirmContractCta')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 45,
+      "cita": "\"cancelCta\": \"Sí, cancelar mi plan\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 282,
+      "cita": "if (preview.required) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/billing/DowngradeReconcileDialog.tsx",
+      "linea": 72,
+      "cita": "title={t('plan.downgrade.title')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 52,
+      "cita": "\"title\": \"Elige quién se queda\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 54,
+      "cita": "\"explainBody\": \"El plan Gratis permite {{cap}} usuarios y tienes {{currentActive}} activos. Elige quién se queda; los demás se desactivarán cuando termine tu periodo pagado (no se borran — se reactivan si vuelves a Pro).\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/billing/DowngradeReconcileDialog.tsx",
+      "linea": 63,
+      "cita": "{pending ? t('plan.downgrade.confirming') : (confirmLabel ?? t('plan.downgrade.confirmCta'))}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 60,
+      "cita": "\"confirmCta\": \"Confirmar y cambiar a Gratis\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 85,
+      "cita": "? t(origin.kind === 'CONTRACT' ? 'plan.row.endsContract' : 'plan.row.endsClassic', { tier: originTier, date: untilText })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 224,
+      "cita": "\"endsClassic\": \"Tu plan {{tier}} sigue activo hasta el {{date}}; después pasas a Gratis.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 225,
+      "cita": "\"endsContract\": \"Tu plan {{tier}} deja de renovarse el {{date}}.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 204,
+      "cita": "<Button size=\"sm\" disabled={!canManage || busy} onClick={props.onReactivate} data-tour=\"plan-reactivate\">"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 205,
+      "cita": "{t('plan.row.resume')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 232,
+      "cita": "\"resume\": \"Reanudar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "billing:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 887
+    },
+    {
+      "permiso": "billing:read",
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 86
+    },
+    {
+      "permiso": "billing:subscriptions:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 895
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 61
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 208
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 2446
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 2346
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Plan y facturación sólo para administrador o dueño",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 884
+    },
+    {
+      "ruta": "Antes: el plan sigue hasta el final del periodo pagado",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 27
+    },
+    {
+      "ruta": "Antes: sin fecha, hasta el final del periodo pagado",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 28
+    },
+    {
+      "ruta": "Antes: aviso al terminar",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 63
+    },
+    {
+      "ruta": "Antes: con el cobro suspendido sale el aviso, no la fecha",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 177
+    },
+    {
+      "ruta": "Antes: con el cobro pendiente también",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 182
+    },
+    {
+      "ruta": "Antes: la fecha sólo en el último caso",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 194
+    },
+    {
+      "ruta": "Antes: texto suspendido (el acceso en pausa)",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 229
+    },
+    {
+      "ruta": "Antes: texto pendiente",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 230
+    },
+    {
+      "ruta": "Paso 4: Reanudar sale aunque el cobro esté pendiente (fuera del bloque de la fecha)",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 203
+    },
+    {
+      "ruta": "Paso 1: Cancelar plan sólo en un plan clásico sin cancelación pedida",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 202
+    },
+    {
+      "ruta": "Paso 2: la razón es opcional",
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 90
+    },
+    {
+      "ruta": "Paso 2: con Cancelar renovación se cancela la contratación",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 268
+    },
+    {
+      "ruta": "Paso 3: el plan clásico pide la vista previa antes de bajar",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 259
+    },
+    {
+      "ruta": "Paso 3: los dueños vienen marcados",
+      "archivo": "src/components/billing/DowngradeReconcileDialog.tsx",
+      "linea": 43
+    },
+    {
+      "ruta": "Paso 4: Reanudar llama a reactivar",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 367
+    },
+    {
+      "ruta": "Paso 4: aviso al reanudar",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 380
+    },
+    {
+      "ruta": "Problema: Reanudar sólo en un plan clásico con cancelación pedida",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 203
+    },
+    {
+      "ruta": "Problema: la oferta sólo en plan clásico y con la razón",
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 82
+    },
+    {
+      "ruta": "Problema: la oferta de pausa",
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 84
+    },
+    {
+      "ruta": "Problema: botones de la oferta",
+      "archivo": "src/components/billing/CancelPlanDialog.tsx",
+      "linea": 122
+    },
+    {
+      "ruta": "Problema: texto Aceptar y quedarme",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 36
+    },
+    {
+      "ruta": "Problema: texto Pausar mi plan",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 38
+    },
+    {
+      "ruta": "Problema: razones con oferta",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 17
+    },
+    {
+      "ruta": "Problema: razones con oferta (pausa)",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 21
+    },
+    {
+      "ruta": "Problema: los no elegidos no se borran",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 59
+    },
+    {
+      "ruta": "Problema: se desactivan (no se borran)",
+      "archivo": "avoqado-server/src/services/dashboard/seatReconciliation.service.ts",
+      "linea": 297
+    },
+    {
+      "ruta": "Problema: al volver a un plan de pago, reactivarlos puede fallar sin frenar el plan",
+      "archivo": "avoqado-server/src/services/stripe.webhook.service.ts",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: cortesía sin botones",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 54
+    },
+    {
+      "ruta": "Problema: texto cortesía",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 226
+    },
+    {
+      "ruta": "Problema: fundador sin botones",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 173
+    },
+    {
+      "ruta": "Problema: texto fundador",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 228
+    },
+    {
+      "ruta": "Problema: error en rojo con el texto del servidor",
+      "archivo": "src/pages/Settings/Billing/plan/usePlanOperations.ts",
+      "linea": 48
+    },
+    {
+      "ruta": "Problema: bajar a Gratis no lleva llave de idempotencia",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 328
+    },
+    {
+      "ruta": "Problema: si Stripe no contesta, Plan sale con datos incompletos",
+      "archivo": "avoqado-server/src/services/dashboard/planState.service.ts",
+      "linea": 311
+    },
+    {
+      "ruta": "Problema: reanudar también avisa con el texto del servidor",
+      "archivo": "src/pages/Settings/Billing/plan/usePlanOperations.ts",
+      "linea": 106
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cancelar-o-reanudar-plan/8.png"
+    ],
+    "filasCreadas": [
+      "ActivityLog cmwegxuog01exwald9t33mkx4 — PLAN_CANCEL_SCHEDULED (Cafetería Prueba QA)",
+      "ActivityLog cmwegxzyr01ezwaldjf9m0fx4 — PLAN_REACTIVATED (Cafetería Prueba QA)",
+      "Venue cmvbcs5ut0009wazgtvjw0xnu (Cafetería Prueba QA) — pendingSeatReconciliation se llenó al cancelar y volvió a null al reanudar",
+      "Stripe en modo de prueba: la suscripción del plan de Cafetería Prueba QA pasó a cancelar al final del periodo y volvió a renovarse"
+    ],
+    "nota": "Avoqado Full (OWNER): plan de cortesía sin *Cancelar plan* (foto 1). Cafetería Prueba QA (SUPERADMIN del seed; plan Pro clásico, Stripe EN MODO DE PRUEBA): pasos 1 y 2 hasta «Antes de irte, ¿por qué cancelas?» (fotos 2-6); *Sí, cancelar mi plan* (POST /plan/downgrade 200) dejó junto al plan «Tu plan Pro sigue activo hasta el 16 nov 2026; después pasas a Gratis.» con *Reanudar* (foto 7); *Reanudar* (POST /plan/reactivate 200) lo regresó a «Se renueva el 16 nov 2026» con *Cancelar plan* (foto 8). El paso 3 es condicional y no salió: el negocio tiene 1 usuario y Gratis admite 2, así que *Elige quién se queda* no aparece (el diálogo sí avisa «En Gratis caben 2 usuarios… Puedes elegir quién se queda.»). Su texto viene del código (DowngradeReconcileDialog), no del navegador. Con «Es muy caro» y «Cierre o pausa temporal» no salió oferta: ese plan no es elegible."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}
