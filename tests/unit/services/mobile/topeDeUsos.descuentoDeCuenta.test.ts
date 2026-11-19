@@ -28,7 +28,7 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
-import { devolverCanjesDeVentaAnuladaEnTx, devolverUsosDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
+import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
 import {
   applyOrderDiscount,
   createOrderWithItems,
@@ -640,25 +640,18 @@ describe('🔴 hz:e82938e1:D24: ANULAR la cuenta sin cobrar devuelve el uso que 
     expect(cuenta.filas()).toEqual([expect.objectContaining({ id: 'od-huerfana', usoContado: false })])
   })
 
-  it('«Regresar saldo y cancelar» (usosDespuesDeLosAbonos): aquí no se devuelve; lo hace quien llama después de sus reembolsos', async () => {
+  it('Codex D24 r2 #4: un contador que otro camino dejó abajo de 0 queda en 0 (el piso de siempre), sin decir que devolvió', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
     filasDe = () => db.descuentos
     sinCanjes()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
+    db.catalogo[PROMO].currentUses = -1
 
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, {
-      venueId: VENUE,
-      orderId: cuenta.id,
-      camino: 'returnGiftBalance',
-      usosDespuesDeLosAbonos: true,
-    })
-    expect(db.catalogo[PROMO].currentUses).toBe(4)
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
-    expect(
-      await devolverUsosDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'returnGiftBalance' }),
-    ).toBe(1)
-    expect(db.catalogo[PROMO].currentUses).toBe(3)
+    expect(db.catalogo[PROMO].currentUses).toBe(0)
+    expect(r.usosDevueltos).toBe(0)
   })
 
   it('🔴 orden de candados: la fila Discount se toma ANTES de leer los canjes (Order → Discount → Customer/StampReward, como quitar)', async () => {

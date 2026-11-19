@@ -540,7 +540,8 @@ describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
 
     const sinBeneficios = estado()
     await devolver(sinBeneficios)
-    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'leer'])
+    // D24: después del sello, la fila cuyo descuento se borró del catálogo suelta su marca (aquí no hay ninguna: `marca:0`).
+    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'marca:0', 'leer'])
   })
 
   it('S9: una cuenta que no es de folio no se sella', async () => {

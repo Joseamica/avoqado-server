@@ -6,7 +6,7 @@ import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
-import { devolverUsosDeCuentaAnuladaEnTx } from './usoDelDescuento'
+import { devolverUsosDeCuentaAnuladaEnTx, soltarMarcaDeFilasSinDescuentoEnTx } from './usoDelDescuento'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
@@ -256,26 +256,28 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     camino: string
     /** Sólo «Regresar saldo y cancelar»: la venta trae abonos que se regresan en esta misma transacción (`PAID` se sigue rechazando). */
     abonosDeSaldoSeRegresanEnEstaTx?: boolean
-    /**
-     * Sólo «Regresar saldo y cancelar» (D24): el uso del descuento de cuenta NO se devuelve aquí; quien llama lo devuelve con
-     * `devolverUsosDeVentaAnuladaEnTx` después de sus reembolsos (Turno → Discount).
-     */
-    usosDespuesDeLosAbonos?: boolean
   },
 ): Promise<CanjesDevueltos> {
   const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] }
+  // D24 (Codex r1 #4a y r2 #5): una fila del POS cuyo descuento se borró del catálogo (`discountId` en null) ya no tiene uso que
+  // devolver; en la cuenta anulada (de folio o no) tampoco se queda marcada como si lo ocupara. Sólo escribe filas sin enlace a un
+  // `Discount`, así que no se cruza con borrar un descuento del catálogo.
   if (await esCuentaDeFolioEnTx(tx, input)) {
     // S9 (v5, B1): el sello va ANTES de convertir y también sin beneficios: es lo que dice después «este folio se anuló».
     await sellarFolioAnuladoEnTx(tx, input)
+    await soltarMarcaDeFilasSinDescuentoEnTx(tx, input.venueId, input.orderId)
     const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
     return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
   }
   // 🔴 hz:e82938e1:D24 (DINERO, tope de usos): el descuento de cuenta del POS sumó su uso al aplicarse (D19); anular la cuenta sin
-  // cobrar lo devuelve, igual que quitar la fila o borrar la cuenta vacía. Va ANTES de los canjes: la fila `Discount` se toma antes
-  // que Customer/StampReward y antes de escribir cualquier fila de la cuenta, el mismo orden que `removeOrderDiscountInTransaction`.
-  // «Regresar saldo y cancelar» lo pide DESPUÉS de sus reembolsos (`usosDespuesDeLosAbonos`): ahí el turno se toma antes, y el cobro de
-  // $0 de la TPV toma Turno → Discount (Codex D24 r1 #2).
-  if (!input.usosDespuesDeLosAbonos) devuelto.usosDevueltos = await devolverUsosDeVentaAnuladaEnTx(tx, input)
+  // cobrar lo devuelve, igual que quitar la fila o borrar la cuenta vacía. Va ANTES de los canjes y de todo lo demás (también en
+  // «Regresar saldo y cancelar», antes de sus cobros, sobres y turno): la fila `Discount` se toma antes que Customer/StampReward,
+  // Payment, GiftCard y Shift y antes de escribir cualquier fila de la cuenta, el mismo orden que `removeOrderDiscountInTransaction` y
+  // que la cortesía de un folio (`convertirBeneficiosEnCortesiaEnTx`). Codex D24 r2: tomarla después de los reembolsos abría tres
+  // ciclos (con Customer, GiftCard y el borrado del catálogo). Queda el cruce que el folio ya tenía con el cobro de $0 de la TPV
+  // (Turno → Discount): deuda anotada, la transacción se reintenta entera (`withDeadlockRetry`).
+  devuelto.usosDevueltos = await devolverUsosDeVentaAnuladaEnTx(tx, input)
+  await soltarMarcaDeFilasSinDescuentoEnTx(tx, input.venueId, input.orderId)
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
   for (;;) {

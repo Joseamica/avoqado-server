@@ -235,7 +235,12 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   // marca `usoContado`: ni importe, ni IVA, ni reparto cambian (la fila se queda como historia de la anulada).
   'src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx': {
     clase: 'SOLO_MARCA',
-    marcas: ['data: { usoContado: false }'],
+    marcas: ['data: { usoContado: false, usoDevueltoAlAnular: true }'],
+  },
+  // D24 (Codex r1 #4a, r2 #5): en la cuenta que se anula, la fila cuyo descuento se borró del catálogo sólo pierde la marca.
+  'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
+    clase: 'SOLO_MARCA',
+    marcas: ['data: { usoContado: false },'],
   },
   'src/services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones': {
     clase: 'RECORTA',

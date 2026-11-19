@@ -188,23 +188,28 @@ async function devolverUsosMarcadosEnTx(
     despues = pagina[pagina.length - 1].id
   }
   const devueltos = new Map<string, number>()
-  // Un descuento que ya no está en el catálogo (o es de otro negocio) no tiene contador que bajar.
+  // Un descuento que ya no está en el catálogo (o es de otro negocio) no tiene contador que bajar. El piso es 0, como siempre: un
+  // contador que otro camino dejó abajo de 0 queda en 0 (Codex D24 r2 #4), y lo devuelto es sólo lo que de verdad bajó (r1 #3).
   for (const d of await tomarFilas(tx, venueId, [...usos.keys()].sort())) {
-    const baja = Math.min(d.currentUses, usos.get(d.id) ?? 0)
-    if (baja <= 0) continue
-    await tx.discount.update({ where: { id: d.id }, data: { currentUses: d.currentUses - baja } })
-    devueltos.set(d.id, baja)
+    const nuevo = Math.max(0, d.currentUses - (usos.get(d.id) ?? 0))
+    if (nuevo !== d.currentUses) await tx.discount.update({ where: { id: d.id }, data: { currentUses: nuevo } })
+    if (d.currentUses > nuevo) devueltos.set(d.id, d.currentUses - nuevo)
   }
-  if (opciones.soltarMarca) {
-    if (usos.size > 0) await tx.orderDiscount.updateMany({ where: marcadas, data: { usoContado: false, usoDevueltoAlAnular: true } })
-    // Codex D24 r1 #4: la fila cuyo descuento se borró del catálogo (`discountId` en null) ya no tiene uso que devolver; tampoco se
-    // queda marcada como si lo tuviera.
-    await tx.orderDiscount.updateMany({
-      where: { orderId, order: { venueId }, usoContado: true, discountId: null },
-      data: { usoContado: false },
-    })
+  if (opciones.soltarMarca && usos.size > 0) {
+    await tx.orderDiscount.updateMany({ where: marcadas, data: { usoContado: false, usoDevueltoAlAnular: true } })
   }
   return devueltos
+}
+
+/**
+ * D24 (Codex r1 #4a, r2 #5): en una cuenta que se anula, la fila del POS cuyo descuento se borró del catálogo (`discountId` en null)
+ * ya no ocupa un uso (el contador se fue con el descuento): pierde la marca. Sólo escribe filas sin enlace a `Discount`.
+ */
+export async function soltarMarcaDeFilasSinDescuentoEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
+  await tx.orderDiscount.updateMany({
+    where: { orderId, order: { venueId }, usoContado: true, discountId: null },
+    data: { usoContado: false },
+  })
 }
 
 const sumar = (usos: Map<string, number>) => [...usos.values()].reduce((s, n) => s + n, 0)
