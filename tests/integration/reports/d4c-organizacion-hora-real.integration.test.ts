@@ -667,6 +667,14 @@ describe('D4c · visión global, tiendas y vendedores', () => {
         hoy.staff.map(s => `${s.id}:${s.venueId}:${s.sales}`).sort(),
       )
       expect(hoy.staff).toEqual(expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 40 })]))
+
+      // Una fecha que no existe es un 400, no otro día por desbordamiento (Codex a1988b r2).
+      await expect(
+        dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, DIA_12, '2026-11-32'),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+      })
+      await expect(dashboard.getStaffAttendance(n.organizationId, '2026-02-30')).rejects.toMatchObject({ statusCode: 400 })
     } finally {
       await prisma.order.deleteMany({ where: { venueId: venueS } })
       await prisma.staffVenue.deleteMany({ where: { venueId: venueS } })

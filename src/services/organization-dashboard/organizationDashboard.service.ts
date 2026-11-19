@@ -2199,6 +2199,12 @@ class OrganizationDashboardService {
     // antes (Codex r1 #5). El día va de su primer instante al primer instante del siguiente, menos 1 ms: en una zona cuya medianoche no
     // existe o se repite (Santiago) los días no se enciman ni dejan hueco (Codex r1 #3, el mismo cálculo que el correo nocturno).
     // Las fechas son cadenas civiles: nunca pasan por la zona del host.
+    // Una fecha que no existe en el calendario (2026-11-32, 2026-02-30) es un 400, nunca otro día por desbordamiento (Codex a1988b r2).
+    for (const fecha of [dateStr, startDateStr, endDateStr]) {
+      if (fecha && (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || addCivilDays(fecha, 0) !== fecha)) {
+        throw new BadRequestError(`La fecha «${fecha}» no es válida: usa el formato AAAA-MM-DD con un día que exista.`)
+      }
+    }
     const ahora = new Date()
     const rangoDelDia = (tz: string): { dayStart: Date; dayEnd: Date } => {
       const desde = startDateStr && endDateStr ? startDateStr : dateStr || venueDayKey(ahora, tz)
