@@ -1161,6 +1161,21 @@ export async function buildOrderItemsData(
   const ajustesDePrecio: Array<{ itemId: string; pesos: number }> = []
   const motivosPorRenglon = new Map<string, MotivoDeDescuento>()
 
+  // Los descuentos se leen PRIMERO (una sola lectura, la misma que calcula la rebaja). 🔴 D11: en una venta con vales, el aviso del
+  // descuento con tope sale antes que cualquier otro error del carrito (un producto, un extra o un descuento que ya no está; Codex D11
+  // r5 #1) y antes de `validateDiscountActive` (un descuento ya agotado recibe este texto). Sin la opción, el orden de los errores es
+  // el de siempre: los que no están se rechazan más abajo.
+  const discountIds = [...new Set(items.map(item => item.discountId).filter((id): id is string => !!id))]
+  const discounts = discountIds.length
+    ? await cliente.discount.findMany({
+        where: {
+          id: { in: discountIds },
+          venueId,
+        },
+      })
+    : []
+  if (opciones?.sinDescuentosConTope) rechazarSiAlgunoTieneTope(discounts, opciones.sinDescuentosConTope)
+
   const productInputs = items.filter(
     (item): item is CreateOrderItemInput & { productId: string } => typeof item.productId === 'string' && item.productId.length > 0,
   )
@@ -1216,24 +1231,13 @@ export async function buildOrderItemsData(
   // discount must exist, belong to this venue, and be active/within its validity window +
   // usage cap — see src/services/shared/discount.service.ts). TPV rejects the whole order
   // on any invalid/foreign discountId rather than silently ignoring it; mobile mirrors that.
-  const discountIds = [...new Set(items.map(item => item.discountId).filter((id): id is string => !!id))]
-  const discounts = discountIds.length
-    ? await cliente.discount.findMany({
-        where: {
-          id: { in: discountIds },
-          venueId,
-        },
-      })
-    : []
-
+  // (La lectura vive arriba, antes de los productos: D11 r5 #1.)
   if (discounts.length !== discountIds.length) {
     const foundIds = discounts.map(discount => discount.id)
     const missingIds = discountIds.filter(id => !foundIds.includes(id))
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${missingIds.join(', ')}`)
   }
 
-  // 🔴 D11: con la MISMA lectura que calcula la rebaja y antes de `validateDiscountActive` (un descuento ya agotado recibe este texto).
-  if (opciones?.sinDescuentosConTope) rechazarSiAlgunoTieneTope(discounts, opciones.sinDescuentosConTope)
   // De la cola (`llegada` sólo viene de ahí), el vencimiento se mide a la hora de la venta (S6); en línea, como siempre.
   const horaDeVigencia = precioMostrado?.llegada ? precioMostrado.horaDeLaVenta : undefined
   discounts.forEach(discount => validateDiscountActive(discount, { horaDeLaVenta: horaDeVigencia }))
@@ -6673,8 +6677,10 @@ function llaveDeLaCuentaConSaldo(idempotencyKey: string): string {
 }
 
 /** S2b (Q58): `POST …/gift-cards/pay-new-order` — la venta de mostrador (como `createOrderWithItems`) y su cobro con saldo. */
-export interface PayGiftCardOnNewOrderInput
-  extends Omit<CreateOrderInput, 'externalId' | 'isOfflineReplay' | 'tableId' | 'tip' | 'splitType'> {
+export interface PayGiftCardOnNewOrderInput extends Omit<
+  CreateOrderInput,
+  'externalId' | 'isOfflineReplay' | 'tableId' | 'tip' | 'splitType'
+> {
   /** 8–64 [A-Za-z0-9_-]: la del `Payment` y, con `giftpay:`, la de la cuenta. */
   idempotencyKey: string
   proof: PruebaDePosesion
