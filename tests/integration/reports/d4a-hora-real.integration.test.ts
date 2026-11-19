@@ -320,7 +320,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  const venues = [n?.venueId, venueB].filter(Boolean) as string[]
+  jest.useRealTimers()
+  if (!n?.venueId) return await prisma.$disconnect() // sin negocio no se borra nada (un filtro vacío borraría toda la base)
+  const venues = [n.venueId, venueB].filter(Boolean) as string[]
   await prisma.orderItemModifier.deleteMany({ where: { orderItem: { order: { venueId: { in: venues } } } } })
   await prisma.orderDiscount.deleteMany({ where: { order: { venueId: { in: venues } } } })
   await prisma.orderItem.updateMany({ where: { order: { venueId: { in: venues } } }, data: { orderPromotionId: null } })
@@ -334,7 +336,6 @@ afterAll(async () => {
   if (venueB) await prisma.venue.deleteMany({ where: { id: venueB } })
   await n?.limpiar()
   await prisma.$disconnect()
-  jest.useRealTimers()
 })
 
 describe('D4a · reportes del negocio a la hora real', () => {
@@ -413,6 +414,10 @@ describe('D4a · reportes del negocio a la hora real', () => {
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toEqual(new Date('2026-11-14T05:50:00.000Z'))
     await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T18:00:00.000Z') } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toBeNull()
+    // Su cobro no se toca: la corrección mueve la orden, nunca el dinero (como antes de D93).
+    expect((await prisma.payment.findFirstOrThrow({ where: { orderId: ed } })).clientCreatedAt).toEqual(
+      new Date('2026-11-14T05:50:00.000Z'),
+    )
     const r = await getHistoricalSummaries(
       n.venueId,
       HistoricalGrouping.DAILY,
