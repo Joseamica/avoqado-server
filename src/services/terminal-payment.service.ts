@@ -2104,12 +2104,14 @@ class TerminalPaymentService {
               )
             }
           }
-          // 🔴 hz:bdd815fd:D5 · «Pedidos → Cobrar» de una cuenta abierta: la pantalla leyó que faltaban `expectedRemainingCents`. Si un
-          // abono (panel, otra caja, un reembolso que reabre) o un cambio de productos movió lo que falta, el importe ya no es el que
-          // vio la pantalla: hasta $1 de más cabe en el margen de D7. Misma cuenta que la pantalla (`saldoPorCobrar` = `faltaCents`
-          // aquí: Rappi en efectivo ya se rechazó arriba), nunca la columna guardada. Sin el dato no cambia nada.
+          // 🔴 hz:bdd815fd:D5 · «Pedidos → Cobrar» de una cuenta abierta: la pantalla leyó que faltaban `expectedRemainingCents`. Si
+          // desde entonces lo que falta BAJÓ (un abono del panel, otra caja) y el importe ya pasa de lo que falta, el importe salió de
+          // una lectura vieja: es cobrar de más, y hasta $1 cabía en el margen de D7, que existe para redondeos de una cuenta que NO
+          // cambió. Si lo que falta subió (otra caja agregó productos) o el importe sigue cabiendo (una parte), no hay cobro de más:
+          // pasa como hoy y la pantalla ofrece el resto al releer (Codex D5 r2). Misma cuenta que la pantalla (`saldoPorCobrar` =
+          // `faltaCents` aquí: Rappi en efectivo ya se rechazó arriba), nunca la columna guardada. Sin el dato no cambia nada.
           const loQueVioLaPantalla = request.expectedRemainingCents
-          if (loQueVioLaPantalla !== undefined && faltaCents !== loQueVioLaPantalla) {
+          if (loQueVioLaPantalla !== undefined && faltaCents < loQueVioLaPantalla && request.amountCents > faltaCents) {
             return rechazar(
               'REJECTED_ORDER_BALANCE_CHANGED',
               new AppError(
