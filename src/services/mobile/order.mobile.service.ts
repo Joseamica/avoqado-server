@@ -1650,10 +1650,10 @@ export type VentaDeMostradorEnTx =
       /** D652: el cupón sin identificar ya quedó en la bitácora de la transacción; esto es su aviso, después del commit. */
       cuponSinIdentificar?: Omit<DatosDelAviso, 'terminalSerial'>
       /**
-       * D19 (encargo 5b78aa): los descuentos de catálogo cuyo uso gasta esta venta. Quien llama los suma con `sumarUsosDeLaVentaEnTx`
-       * como lo ÚLTIMO de su transacción (después del turno y del cobro): la fila `Discount` siempre al final (Codex r3 #5).
+       * D19 (encargo 5b78aa): los descuentos de catálogo cuyo uso gasta esta venta y quién la subió. Se suman DESPUÉS del commit, en su
+       * propia transacción corta (`terminarVentaDeMostrador`): la venta nunca toma la fila `Discount` (Codex r3 #3–#5, r4 #4–#6).
        */
-      usosPorSumar: string[]
+      usosPorSumar: { ids: string[]; quien: string | null }
     }
 /** La venta recién creada (no la de una llave que ya existía). */
 export type VentaDeMostradorCreada = Exclude<VentaDeMostradorEnTx, { existente: OrdenCreada }>
@@ -2076,15 +2076,21 @@ export async function crearVentaDeMostradorEnTx(
   }
   // 🔴 D19 (hz:e82938e1:D19, encargos 01765a y 5b78aa; Codex r3 #1): el uso de cada descuento de catálogo de la venta — por renglón, el
   // de la cuenta, el del cliente y la ETIQUETA del importe libre que manda ANDROID (`descuentoDeCatalogoId`), que antes nunca contaba —
-  // se devuelve en `usosPorSumar` y quien llama lo suma al final de su transacción (`sumarUsosDeLaVentaEnTx`). Decisión «A» del founder:
-  // aquí ya no se rechaza por tope (la validación de arriba sigue como siempre); el choque del mismo segundo queda arriba con aviso.
-  // El del cliente cuenta con la misma condición de siempre (`terminarVentaDeMostrador`); la etiqueta, sólo si su importe libre quedó
-  // registrado como descuento de la cuenta (sin catálogo ni cupón que manden sobre él). Un id ajeno al negocio no cuenta nada.
-  const usosDeLaVenta = (conDelCliente: boolean, importeLibreRegistrado: boolean): string[] => [
-    ...venta.discounts.map(d => d.id),
-    ...(conDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
-    ...(importeLibreRegistrado && !orderDiscount && !cupon && input.descuentoDeCatalogoId ? [input.descuentoDeCatalogoId] : []),
-  ]
+  // se devuelve en `usosPorSumar` y se suma DESPUÉS del commit (`terminarVentaDeMostrador`). Decisión «A» del founder: aquí no se
+  // rechaza por tope (la validación de arriba sigue como siempre); el choque del mismo segundo queda un uso arriba, con aviso.
+  // El del cliente cuenta con la misma condición de siempre; la etiqueta, sólo si su importe libre quedó registrado como descuento de la
+  // cuenta (sin catálogo, cupón ni descuento del cliente que manden sobre él: una rebaja = un uso, Codex r4 #2). Un id ajeno al negocio
+  // no cuenta nada (la suma filtra por `venueId`).
+  const usosDeLaVenta = (conDelCliente: boolean, importeLibreRegistrado: boolean): VentaDeMostradorCreada['usosPorSumar'] => ({
+    ids: [
+      ...venta.discounts.map(d => d.id),
+      ...(conDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
+      ...(importeLibreRegistrado && !orderDiscount && !cupon && !prep.descuentoDelCliente && input.descuentoDeCatalogoId
+        ? [input.descuentoDeCatalogoId]
+        : []),
+    ],
+    quien: input.performedBy ?? validatedStaffId ?? null,
+  })
 
   if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
   // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
@@ -2441,29 +2447,8 @@ export async function crearVentaDeMostradorEnTx(
 }
 
 /**
- * 🔴 D19 (hz:e82938e1:D19, encargo 5b78aa): el uso de los descuentos de catálogo de una venta de Mostrador nueva, como lo ÚLTIMO de la
- * transacción de quien la creó (después del turno y del cobro, así la fila `Discount` es siempre el último candado: Codex r3 #5). Nunca
- * rechaza (decisión «A»: lo ya cobrado no se rechaza por el tope); si el contador queda arriba, deja `DESCUENTO_SOBRE_TOPE`.
- */
-export async function sumarUsosDeLaVentaEnTx(
-  tx: TxConReintento,
-  venueId: string,
-  creada: VentaDeMostradorCreada,
-  input: CreateOrderInput,
-  prep: PreparacionDeVenta,
-): Promise<void> {
-  await sumarUsosDeVentaEnTx(tx, {
-    venueId,
-    orderId: creada.order.id,
-    discountIds: creada.usosPorSumar,
-    enLaCola: prep.enLaCola,
-    quien: input.performedBy ?? prep.validatedStaffId ?? null,
-  })
-}
-
-/**
- * Lo de DESPUÉS del commit de una venta de mostrador nueva (sin el premio ni el aviso, que van después): la bitácora del alta y la
- * bitácora de las promociones. El contador de usos ya se sumó en la transacción (`sumarUsosDeLaVentaEnTx`).
+ * Lo de DESPUÉS del commit de una venta de mostrador nueva (sin el premio ni el aviso, que van después): la bitácora del alta, el
+ * contador de usos de sus descuentos y la bitácora de las promociones.
  */
 export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeMostradorCreada, prep: PreparacionDeVenta): Promise<void> {
   const { order, promotionTotals } = creada
@@ -2496,7 +2481,33 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
     })
   }
 
-  // D19 (encargos 01765a y 5b78aa): el contador de usos ya se sumó DENTRO de la transacción de la venta (`sumarUsosDeLaVentaEnTx`).
+  // 🔴 D19 (hz:e82938e1:D19, encargos 01765a y 5b78aa): el uso de cada descuento de catálogo de la venta, en su PROPIA transacción corta
+  // después del commit. Decisión «A» del founder: lo ya cobrado nunca se rechaza por el tope, así que aquí no hay nada que decidir antes
+  // de guardar la venta; si el contador queda arriba, `DESCUENTO_SOBRE_TOPE` va en la MISMA transacción que la suma. Fuera de la venta a
+  // propósito: tomar la fila `Discount` dentro de ella la cruzaba con el turno, el premio de sellos, la tarjeta de regalo y otras filas
+  // `Discount` (Codex r3 #3–#5, r4 #4–#6). Residuo aceptado (como antes): si el proceso muere entre el commit y esta suma, ese uso no se
+  // cuenta y el reintento con la misma llave tampoco lo suma.
+  if (creada.usosPorSumar.ids.length > 0) {
+    try {
+      await withDeadlockRetry(
+        tx =>
+          sumarUsosDeVentaEnTx(tx, {
+            venueId,
+            orderId: order.id,
+            discountIds: creada.usosPorSumar.ids,
+            enLaCola: prep.enLaCola,
+            quien: creada.usosPorSumar.quien,
+          }),
+        { etiqueta: 'terminarVentaDeMostrador' },
+      )
+    } catch (error) {
+      logger.error('❌ [ORDER.MOBILE] No se pudo sumar el uso de los descuentos de la venta', {
+        orderId: order.id,
+        discountIds: creada.usosPorSumar.ids,
+        error: (error as Error).message,
+      })
+    }
+  }
 
   if (promotionTotals) {
     logger.info(
@@ -2561,18 +2572,14 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     created = await withDeadlockRetry(
       async tx => {
         const venta = await crearVentaDeMostradorEnTx(tx, venueId, input, prep)
-        if ('existente' in venta) return venta
         // D652: sólo la venta NUEVA de la cola de una terminal; la de una llave que ya existía no vuelve a anotar nada.
-        const conCupon =
-          !input.cuponSinIdentificar || input.isOfflineReplay !== true || !input.terminalSerialNumber
-            ? venta
-            : {
-                ...venta,
-                cuponSinIdentificar: await anotarCuponSinIdentificarEnTx(tx, venueId, input, venta.order.id, prep.validatedStaffId || null),
-              }
-        // D19 (encargo 5b78aa): lo último de la transacción, el uso de sus descuentos (nunca rechaza).
-        await sumarUsosDeLaVentaEnTx(tx, venueId, venta, input, prep)
-        return conCupon
+        if ('existente' in venta || !input.cuponSinIdentificar || input.isOfflineReplay !== true || !input.terminalSerialNumber) {
+          return venta
+        }
+        return {
+          ...venta,
+          cuponSinIdentificar: await anotarCuponSinIdentificarEnTx(tx, venueId, input, venta.order.id, prep.validatedStaffId || null),
+        }
       },
       {
         etiqueta: 'createOrderWithItems',
@@ -6928,8 +6935,6 @@ export async function payGiftCardOnNewOrder(
           }
           const cobro = await prepararAbonoConSaldoEnTx(tx, ctx, tomada.ahora)
           const abono = await registrarAbonoEnTx(tx, cobro.contexto, cobro.entrada, reconciliationEnabled)
-          // D19 (encargo 5b78aa, Codex r3 #5): el uso de los descuentos, DESPUÉS del turno y del cobro (Shift → Discount, como la TPV).
-          await sumarUsosDeLaVentaEnTx(tx, venueId, creada, venta, prep)
           return { creada, premio, ctx, cobrado: { abono, canje: cobro.canje } }
         } catch (e) {
           // Q91/Q94: se sella con el candado de la llave puesto; sólo lo definitivo.

@@ -358,18 +358,22 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
     })
   })
 
-  it('🔴 Codex r3 #5: el uso se suma como lo ÚLTIMO de la transacción de la venta (la fila `Discount` es el último candado)', async () => {
+  it('🔴 Codex r3 #3–#5 / r4 #4–#6: el uso se suma DESPUÉS de guardar la venta, en su propia transacción y sin el candado del cupón', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
+    const transacciones = prismaMock.$transaction as jest.Mock
     await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))
     expect(db.catalogo[PROMO].currentUses).toBe(4)
     const ultimo = (m: jest.Mock) => Math.max(0, ...m.mock.invocationCallOrder)
     const suma = (prismaMock.discount.update as jest.Mock).mock.invocationCallOrder[0]
     expect(suma).toBeGreaterThan(ultimo(prismaMock.order.create as jest.Mock))
     expect(suma).toBeGreaterThan(ultimo(prismaMock.orderDiscount.create as jest.Mock))
-    // Sin el candado consultivo del cupón (Codex r3 #3 y #4): sólo la pasada de filas `Discount`.
+    // Dos transacciones: la venta y, después, la suma.
+    expect(transacciones.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(suma).toBeGreaterThan(transacciones.mock.invocationCallOrder[0])
     const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([q]) => (Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)))
     expect(consultas.some(q => q.includes('pg_advisory_xact_lock'))).toBe(false)
   })
+
   it('regresión: Mostrador EN LÍNEA con el tope lleno se sigue rechazando', async () => {
     baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 100 }) })
     await expect(createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))).rejects.toThrow(/usage limit/)

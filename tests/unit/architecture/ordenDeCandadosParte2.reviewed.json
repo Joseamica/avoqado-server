@@ -955,6 +955,11 @@
       "etiqueta": "splitOrderItems",
       "cantidad": 1
     },
+    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
+      "etiqueta": "terminarVentaDeMostrador",
+      "cantidad": 1,
+      "nota": "D19 (encargo 5b78aa): la suma del uso de los descuentos de la venta, después del commit; su transacción sólo toma filas Discount ascendentes."
+    },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",
       "cantidad": 1,

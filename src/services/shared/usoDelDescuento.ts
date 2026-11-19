@@ -10,13 +10,14 @@
  *
  * - `apartarUsoDeMesaEnTx` — Mesas pone el descuento en una cuenta abierta, ANTES de cobrar: ahí sí se puede decir «ya no hay» (en
  *   línea), contando los usos que un cupón apartó en una venta sin pagar. De la cola (la mesa ya lo dio sin red) nunca rechaza.
- * - `sumarUsosDeVentaEnTx` — la venta de Mostrador (ya cobrada o por cobrar en la misma petición): suma y avisa, nunca rechaza. La
- *   validación de antes de crear la venta (`validateDiscountActive`, como siempre) sigue diciendo «ya no hay» cuando el tope YA estaba
- *   lleno; lo que esta función absorbe es el choque de dos cajas en el mismo segundo.
+ * - `sumarUsosDeVentaEnTx` — la venta de Mostrador (ya cobrada o por cobrar en la misma petición): suma y avisa, nunca rechaza, en su
+ *   PROPIA transacción corta después del commit de la venta (`terminarVentaDeMostrador`). La validación de antes de crear la venta
+ *   (`validateDiscountActive`, como siempre) sigue diciendo «ya no hay» cuando el tope YA estaba lleno; lo que esto absorbe es el choque
+ *   de dos cajas en el mismo segundo.
  *
- * 🔴 Orden de candados (Codex r3 #3, #4, #5, #8): ninguna de las dos toma el candado consultivo del cupón. La fila `Discount` es SIEMPRE
- * lo último que se toma: Mesas ya tiene la cuenta (Order → Discount); el Mostrador suma al FINAL de la transacción de su llamador, después
- * del turno y del cobro (Order → Shift → Discount, como el motor de la TPV), en una pasada por id ascendente.
+ * 🔴 Candados (Codex r3 #3, #4, #5, #8 y r4 #4, #5, #6): ninguna de las dos toma el candado consultivo del cupón. Mesas toma la fila
+ * `Discount` con la cuenta ya tomada (Order → Discount). La suma del Mostrador no vive dentro de la venta: su transacción sólo toma filas
+ * `Discount`, en una pasada por id ascendente, así que no se cruza con el turno, el premio de sellos, la tarjeta de regalo ni la cuenta.
  *
  * Las filas de Mesas que sumaron quedan con `OrderDiscount.usoContado`; sólo ésas devuelven su uso (al quitarlas, al borrarse su cuenta
  * vacía o al convertirse en cortesía en un folio). El motor de la TPV y el canje del cupón cuentan por su lado.
@@ -124,8 +125,8 @@ export async function apartarUsoDeMesaEnTx(
 
 /**
  * La venta de Mostrador gasta UN uso de cada descuento de catálogo que lleva (uno por venta aunque se repita en varios renglones), y
- * NUNCA la rechaza (decisión «A»): si el contador queda arriba del tope, deja `DESCUENTO_SOBRE_TOPE`. Se llama como lo ÚLTIMO de la
- * transacción de la venta (después del turno y del cobro). Un id que no es del negocio o que ya no existe no cuenta nada.
+ * NUNCA la rechaza (decisión «A»): si el contador queda arriba del tope, deja `DESCUENTO_SOBRE_TOPE` en la misma transacción. Corre
+ * en su propia transacción después del commit de la venta. Un id que no es del negocio o que ya no existe no cuenta nada.
  */
 export async function sumarUsosDeVentaEnTx(
   tx: TxConReintento,
