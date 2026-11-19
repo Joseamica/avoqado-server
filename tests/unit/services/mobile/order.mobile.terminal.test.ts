@@ -497,6 +497,18 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
       })
 
+      // Codex r4: SoftRestaurant borró la cuenta; el dinero entra y la cuenta SIGUE borrada (no se reabre) ⇒ avisa como antes.
+      it('la cuenta estaba borrada en el sistema externo y sigue borrada ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, status: 'DELETED', originSystem: 'POS_SOFTRESTAURANT' } as any)
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+
+        await conSaldoEsperado(5000, 9000)
+
+        expect(prismaMock.order.update).not.toHaveBeenCalled() // no se reabrió: sigue borrada
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
       it('un centavo de redondeo entre lo esperado y lo que queda ⇒ sin aviso (la misma tolerancia de siempre)', async () => {
         await conSaldoEsperado(5000, 9001)
 

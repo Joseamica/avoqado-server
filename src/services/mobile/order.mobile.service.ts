@@ -4721,6 +4721,8 @@ export interface AbonoEnTx {
   ventaCerrada: boolean
   /** Pedidos en línea 1c (S1): la cuenta estaba CANCELADA y este dinero capturado la reabrió ⇒ quien llama no arma la comanda. */
   reabiertaDeCancelada: boolean
+  /** hz:bdd815fd:D2: la cuenta estaba VIVA (ni anulada ni borrada) al leerla bajo el candado de este cobro. */
+  cuentaVivaAlCobrar: boolean
   areaTicketOrder: boolean
   areaTicketSessionId?: string
   tableId?: string | null
@@ -5425,6 +5427,7 @@ export async function registrarAbonoEnTx(
     isFullyPaid: efectosDeSaldar,
     ventaCerrada: cobro.cerrada,
     reabiertaDeCancelada,
+    cuentaVivaAlCobrar: claseDeEstado(fresh.status) === 'VIVA',
     aplicadoCents,
     cambioCents,
     saldoAntesCents: pesosToCents(saldoAntes.remainingBalance.toNumber()),
@@ -5550,10 +5553,17 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
    * (Codex r1 #3). Sólo decide el cobro NUEVO: el reintento no conoce el saldo de antes y el de ahora pudo moverlo otro abono, un
    * cupón o un pago confirmado tarde (Codex r1 #1, r2 #1-#3), así que avisa como antes, aunque sea de más en ese caso raro.
    */
-  const abonoEsperadoAlCobrar = (cobro: { saldoAntesCents: number; reabiertaDeCancelada: boolean; avisoRappi: string | null }): boolean =>
+  const abonoEsperadoAlCobrar = (cobro: {
+    saldoAntesCents: number
+    cuentaVivaAlCobrar: boolean
+    reabiertaDeCancelada: boolean
+    avisoRappi: string | null
+  }): boolean =>
     order.thirdPartyCashDue == null &&
-    // Codex r3: si otra caja anuló la cuenta mientras la terminal estaba sin red, el dinero la reabre y su saldo vuelve a ser el que
-    // la terminal vio, pero el dueño debe saberlo: avisa como antes. Lo mismo un pedido de Rappi que llega con dinero.
+    // Codex r3 y r4 (una sola regla para la familia): si otra caja anuló o borró la cuenta mientras la terminal estaba sin red
+    // (Avoqado la reabre con el dinero; SoftRestaurant la deja borrada), su saldo puede ser el que la terminal vio, pero el dueño
+    // debe saberlo: sólo una cuenta VIVA al cobrar puede callar. Lo mismo un pedido de Rappi que llega con dinero.
+    cobro.cuentaVivaAlCobrar &&
     !cobro.reabiertaDeCancelada &&
     cobro.avisoRappi == null &&
     input.saldoEsperadoSinRed !== undefined &&
