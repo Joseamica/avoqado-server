@@ -98,6 +98,8 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
       res.status(200).json({
         success: true,
         data: {
+          // D16 (hz:e82938e1:D16): la fila creada, para que la TPV la pueda quitar en seguida. Opcional; lo demás no cambia.
+          orderDiscountId: result.orderDiscountId,
           amount: result.amount,
           newOrderTotal: result.newOrderTotal,
         },
@@ -156,6 +158,8 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
       res.status(200).json({
         success: true,
         data: {
+          // D16: la fila creada (cortesía o descuento manual); antes la TPV inventaba `manual_…` y no la podía quitar.
+          orderDiscountId: result.orderDiscountId,
           amount: result.amount,
           newOrderTotal: result.newOrderTotal,
         },
@@ -202,6 +206,8 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
       res.status(200).json({
         success: true,
         data: {
+          // D16: la fila creada; `couponId` sigue siendo el id del cupón.
+          orderDiscountId: result.orderDiscountId,
           couponId: result.couponId,
           discountName: result.discountName,
           amount: result.amount,

@@ -227,7 +227,7 @@ export async function applyPredefinedDiscount(
   discountId: string,
   staffVenueId: string | undefined,
   cortesia?: { porPin?: string },
-): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
+): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
 
   // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
@@ -266,7 +266,7 @@ export async function applyManualDiscount(
   authorizedById?: string,
   cortesia?: { porPin?: string },
   quienLlama?: string,
-): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
+): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).

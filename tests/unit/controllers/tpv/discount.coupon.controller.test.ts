@@ -268,3 +268,70 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     expect(manualMock.mock.calls[0][8]).toBe('staff-1')
   })
 })
+
+// D16 (hz:e82938e1:D16): la TPV necesita el id de la fila recién creada para poder quitarla en seguida. Antes inventaba uno
+// (`manual_…`, el id del catálogo o el del cupón) y «Eliminar descuento» fallaba hasta releer la cuenta. El motor ya lo devolvía y
+// el controlador lo tiraba. Campo agregado y opcional: lo que ya iba en `data` sigue igual (TPV vieja lo ignora).
+describe('D16: aplicar un descuento en la TPV devuelve el id de la fila creada', () => {
+  const manualMock = discountTpvService.applyManualDiscount as jest.Mock
+  const predefinidoMock = discountTpvService.applyPredefinedDiscount as jest.Mock
+  function app() {
+    const a = express()
+    a.use(express.json())
+    a.use((req, _res, next) => {
+      ;(req as any).authContext = { venueId: 'v1', userId: 'staff-1' }
+      next()
+    })
+    a.post('/venues/:venueId/orders/:orderId/discounts/manual', controller.applyManualDiscount)
+    a.post('/venues/:venueId/orders/:orderId/discounts/apply', controller.applyPredefinedDiscount)
+    a.use(globalErrorHandler)
+    return a
+  }
+
+  it('cortesía / manual: `data.orderDiscountId` es la fila creada', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    manualMock.mockResolvedValue({ success: true, orderDiscountId: 'od-manual', amount: 100, newOrderTotal: 0 })
+    const res = await request(app()).post('/venues/v1/orders/o1/discounts/manual').send({ type: 'PERCENTAGE', value: 100, reason: 'x' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      success: true,
+      data: { orderDiscountId: 'od-manual', amount: 100, newOrderTotal: 0 },
+      message: 'Manual discount applied successfully',
+    })
+  })
+
+  it('del catálogo: `data.orderDiscountId` es la fila creada, no el id del catálogo', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    predefinidoMock.mockResolvedValue({ success: true, orderDiscountId: 'od-catalogo', amount: 15, newOrderTotal: 85 })
+    const res = await request(app()).post('/venues/v1/orders/o1/discounts/apply').send({ discountId: 'd-catalogo' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      success: true,
+      data: { orderDiscountId: 'od-catalogo', amount: 15, newOrderTotal: 85 },
+      message: 'Discount applied successfully',
+    })
+  })
+
+  it('cupón: `data.orderDiscountId` es la fila creada y `couponId` sigue siendo el del cupón', async () => {
+    applyCouponMock.mockResolvedValue({
+      success: true,
+      orderDiscountId: 'od-cupon',
+      couponId: 'c1',
+      discountName: 'Promo 10',
+      amount: 10,
+      newOrderTotal: 90,
+    })
+    const res = await aplicar()
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ orderDiscountId: 'od-cupon', couponId: 'c1', discountName: 'Promo 10', amount: 10, newOrderTotal: 90 })
+  })
+
+  // Regresión: un rechazo del servicio sigue sin `data` (sólo `success:false` + `error`).
+  it('el rechazo del servicio no trae `data` ni id', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    manualMock.mockResolvedValue({ success: false, amount: 0, newOrderTotal: 0, error: 'Order is already paid' })
+    const res = await request(app()).post('/venues/v1/orders/o1/discounts/manual').send({ type: 'PERCENTAGE', value: 10, reason: 'x' })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ success: false, error: 'Order is already paid' })
+  })
+})
