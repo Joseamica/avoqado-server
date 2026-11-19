@@ -245,6 +245,8 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect((await getEligibleDiscounts(venueId, customerId)).map(d => d.id)).toContain(d10Id)
     expect((await getCustomerDiscounts(venueId, customerId)).map(d => d.id)).toContain(d10Id)
     expect((await listarMisDescuentos(venueId, customerId, {})).items.map(d => d.nombre)).toContain('10 % producto')
+    // D11 (18-nov): un descuento con tope de usos ya no entra a un vale; se le quita el tope para que las pruebas siguientes emitan con él.
+    await prisma.discount.update({ where: { id: d10Id }, data: { maxUsesPerCustomer: null } })
 
     // «Ya aplicado» tampoco las cuenta: la TPV sigue ofreciendo el 10 % en esta cuenta, como antes del arreglo.
     expect((await getAvailableDiscounts(venueId, orderId)).map(d => d.id)).toContain(d10Id)
