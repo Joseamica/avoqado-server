@@ -29,6 +29,7 @@ import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { puertaDelDinero } from './avisosNoGuardados'
 import { avisoDelBancoComprobado } from './avisoDelBancoComprobado'
+import { comprobanteDeDeclaracion } from './comprobanteDeDeclaracion'
 import {
   exigeAcreditacionDeLaTerminal,
   TERMINAL_CONFIRMATION_PENDING,
@@ -334,7 +335,7 @@ export async function resolveNoInstrument(
       const existenteLocal = readOperatorResolution(declaracionLocalPrevia.resolution)
       if (!existenteLocal || existenteLocal.id !== declaration.resolutionId || existenteLocal.bodyHash !== bodyHash)
         throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
-      return { resolution: existenteLocal, requestId: null }
+      return { resolution: existenteLocal, requestId: null, yaGuardada: true }
     }
 
     // ─── Camino LOCAL (22-sep, «ninguna terminal muerta»): un Pago rápido, sin solicitud del POS ───
@@ -355,7 +356,7 @@ export async function resolveNoInstrument(
         // Replay idempotente sólo si es LA MISMA declaración; otra es un conflicto, nunca un segundo testimonio.
         if (!existente || existente.id !== declaration.resolutionId || existente.bodyHash !== bodyHash)
           throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
-        return { resolution: existente, requestId: null }
+        return { resolution: existente, requestId: null, yaGuardada: true }
       }
 
       const actorLocal = automatica
@@ -445,7 +446,7 @@ export async function resolveNoInstrument(
           },
         },
       })
-      return { resolution: savedLocal, requestId: null }
+      return { resolution: savedLocal, requestId: null, yaGuardada: false }
     }
 
     const inicial = await tx.terminalPaymentRequest.findFirst({
@@ -479,7 +480,7 @@ export async function resolveNoInstrument(
     if (existing) {
       if (existing.id !== declaration.resolutionId || existing.bodyHash !== bodyHash)
         throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
-      return { resolution: existing, requestId } // replay idempotente: nada se reescribe
+      return { resolution: existing, requestId, yaGuardada: true } // replay idempotente: nada se reescribe
     }
 
     // AUTORIZACIÓN: la persona de la SESIÓN (el PIN con el que entró a la terminal) tiene que ser miembro VÁLIDO de este venue —
@@ -608,7 +609,7 @@ export async function resolveNoInstrument(
         },
       },
     })
-    return { resolution: saved, requestId }
+    return { resolution: saved, requestId, yaGuardada: false }
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // La respuesta es la MISMA proyección durable de S6 (contrato con las apps publicadas: nada se quita) más la resolución.
@@ -638,5 +639,15 @@ export async function resolveNoInstrument(
   })
   if (!current) throw new NoInstrumentResolutionError('RESOLUTION_UNAVAILABLE', 503)
   const declarada = resolution.resolution
-  return { ...current, resolution: { id: declarada.id, acceptedAt: declarada.acceptedAt, by: declarada.by } }
+  return {
+    ...current,
+    resolution: { id: declarada.id, acceptedAt: declarada.acceptedAt, by: declarada.by },
+    // F1 · bloque 7: el comprobante de S6, pero diciendo si ESTE envío escribió la declaración o Avoqado ya la tenía (repetición o
+    // segundo gerente con el mismo `resolutionId`): firmante y hora son siempre los del guardado.
+    declarationReceipt: comprobanteDeDeclaracion(
+      declarada,
+      { scope: 'ATTEMPT', attemptId, requestId: resolution.requestId },
+      resolution.yaGuardada,
+    ),
+  }
 }

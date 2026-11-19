@@ -69,6 +69,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
 import { sendOpsAlert } from './alerts/opsAlert.service'
 import { getVenuesEstrictos } from './terminal-payment-strictness'
+import { comprobanteDeDeclaracion, type DeclarationReceipt } from './tpv/comprobanteDeDeclaracion'
 import {
   procedenciaDelPagoDeSolicitud,
   whereElegibleComoCobroDeSolicitud,
@@ -239,6 +240,11 @@ export interface TerminalAttemptStatus {
   }
   /** `null` en un cobro LOCAL: no hay solicitud que proyectar. */
   request: (TerminalPaymentStatus & { closedVia: string | null; winnerAttemptId: string | null }) | null
+  /**
+   * F1 · bloque 7: el comprobante de la declaración que consta para este intento — la suya (`attempt.resolution`) o, si no tiene,
+   * la de su solicitud (`operatorReconciliation`). La MISMA forma que el POST y el GET por solicitud. `null` = nadie declaró.
+   */
+  declarationReceipt: DeclarationReceipt | null
 }
 
 /**
@@ -6294,6 +6300,8 @@ class TerminalPaymentService {
     status: TerminalPaymentRequestStatus | null
     paymentId?: string
     resolution?: { id: string; acceptedAt: string }
+    /** F1 · bloque 7: el comprobante, con `alreadyStored` de ESTA llamada (repetición o segundo gerente ⇒ `true`). */
+    declarationReceipt?: DeclarationReceipt | null
     outcome?: string
     outcomeEvidence?: string | null
     /** S6 (A6): soporte pidió soltar la terminal y hay rastro de dinero de ese cobro: no se soltó nada. */
@@ -6313,9 +6321,11 @@ class TerminalPaymentService {
       const { reconcileUncharged, hayContradiccionDeProcedencia, UnchargedReconciliationError } = await import(
         './tpv/uncharged-reconciliation.service'
       )
+      const salida: { yaGuardada?: boolean } = {}
       const resolution = await reconcileUncharged(
         { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
         input.declaration,
+        salida,
       ).catch(err => {
         // F1 · bloque 1: sin el certificado de la PAX v2 se le vuelve a preguntar a esa terminal por ESTA solicitud (la ranura ya
         // suelta no la sondea el vigía), para que el siguiente intento del gerente lo encuentre. Sin esperarlo: el rechazo sale igual.
@@ -6423,6 +6433,11 @@ class TerminalPaymentService {
             : { outcome: 'UNRESOLVED', outcomeEvidence: null }
           : {}),
         resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
+        declarationReceipt: comprobanteDeDeclaracion(
+          resolution,
+          { scope: 'REQUEST', attemptId: null, requestId },
+          salida.yaGuardada !== false,
+        ),
       }
     }
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
@@ -7184,11 +7199,11 @@ class TerminalPaymentService {
    * desenlace, aquí también lo dice. Nunca acredita por sí sola ausencia de cobro — eso lo dicen `outcome` y
    * `outcomeEvidence` de la proyección, igual que siempre.
    */
-  async consultarSolicitudDeTerminal(input: {
-    requestId: string
-    venueId: string
-    terminalSerial: string
-  }): Promise<{ request: TerminalPaymentStatus & { closedVia: string | null }; resuelta: boolean } | null> {
+  async consultarSolicitudDeTerminal(input: { requestId: string; venueId: string; terminalSerial: string }): Promise<{
+    request: TerminalPaymentStatus & { closedVia: string | null }
+    resuelta: boolean
+    declarationReceipt: DeclarationReceipt | null
+  } | null> {
     const terminalKey = typeof input.terminalSerial === 'string' ? normalizeTerminalId(input.terminalSerial) : ''
     const requestId = typeof input.requestId === 'string' ? input.requestId.trim() : ''
     if (!requestId || !terminalKey || !input.venueId) return null
@@ -7215,9 +7230,25 @@ class TerminalPaymentService {
       SELECT (${hayAprobadoVinculadoSql(requestId, input.venueId)} OR ${hayPagoLigadoSql(requestId, input.venueId)}
            OR ${hayDineroDeSusIntentosSql(requestId, input.venueId)}
            OR ${hayEvidenciaDeConciliacionSql(requestId, input.venueId)}) AS "hay"`
+    // F1 · bloque 7: quién declaró, con la MISMA forma que el POST y S6. La de la solicitud; si no hay, la de su intento («no
+    // presentó tarjeta» vinculado: la solicitud sólo tiene UN intento cuando se acepta). Antes sólo salía `OPERATOR_RECONCILED`, sin autor.
+    let declarationReceipt = comprobanteDeDeclaracion(row.operatorReconciliation, { scope: 'REQUEST', attemptId: null, requestId })
+    if (!declarationReceipt) {
+      const vinculos = await prisma.terminalPaymentAttemptLink.findMany({
+        where: { requestId, venueId: input.venueId },
+        select: { attemptId: true, operatorResolution: true },
+        orderBy: { createdAt: 'asc' },
+        take: 20,
+      })
+      for (const v of vinculos) {
+        declarationReceipt = comprobanteDeDeclaracion(v.operatorResolution, { scope: 'ATTEMPT', attemptId: v.attemptId, requestId })
+        if (declarationReceipt) break
+      }
+    }
     return {
       request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null },
       resuelta: sinDesenlace === 0 && evidencia?.hay !== true,
+      declarationReceipt,
     }
   }
 
@@ -7517,6 +7548,13 @@ class TerminalPaymentService {
         resolution,
       },
       request: solicitud ? { ...proyectarEstado(solicitud), closedVia: solicitud.closedVia ?? null, winnerAttemptId } : null,
+      declarationReceipt:
+        comprobanteDeDeclaracion(resolution, { scope: 'ATTEMPT', attemptId, requestId: link?.requestId ?? null }) ??
+        comprobanteDeDeclaracion(solicitud?.operatorReconciliation, {
+          scope: 'REQUEST',
+          attemptId: null,
+          requestId: solicitud?.requestId ?? null,
+        }),
     }
   }
 

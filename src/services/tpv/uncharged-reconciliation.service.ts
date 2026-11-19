@@ -254,6 +254,16 @@ async function hayPagoDeLaSolicitud(
 }
 
 /**
+ * F1 · cierre bloque 7: el texto que se persiste y que pintan los POS. Decía «El cajero revisó la terminal y confirmó…», falso desde
+ * F1 (firma un gerente) y ambiguo antes (firmaba la sesión). Neutro y cierto para las dos épocas, con quien firmó si consta.
+ */
+async function textoDeLaDeclaracion(tx: Prisma.TransactionClient, staffId: string | null): Promise<string> {
+  const persona = staffId ? await tx.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } }) : null
+  const nombre = persona ? `${persona.firstName ?? ''} ${persona.lastName ?? ''}`.trim() : ''
+  return `Se declaró que este cobro no pasó.${nombre ? ` Lo firmó ${nombre}.` : ''} Se puede volver a cobrar.`
+}
+
+/**
  * 🔴 A5 · E3, la LÁPIDA: el POST del POS nunca llegó (502, corte, muerte entre guardar la llave y enviar) y el GET da 404 para
  * siempre. Una declaración YA AUTORIZADA sobre una llave sin fila la crea con el MISMO desenlace que deja hoy una declaración
  * aceptada —`FAILED / OPERATOR_RECONCILED_NO_CHARGE`, que los POS viejos ya leen como «no se cobró»— y el POST tardío con esa
@@ -288,7 +298,7 @@ async function dejarLapida(
     status: 'failed',
     outcomeEvidence: 'OPERATOR_RECONCILED',
     tombstone: true,
-    errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+    errorMessage: await textoDeLaDeclaracion(tx, p.saved.staffId),
     operatorReconciliation: p.saved,
   }
   const { count } = await tx.terminalPaymentRequest.createMany({
@@ -447,6 +457,11 @@ async function contradiccionDeProcedencia(
 export async function reconcileUncharged(
   identity: { venueId: string; requestId: string; actorStaffId: string | null; source: string },
   raw: unknown,
+  /**
+   * F1 · bloque 7: quien llama se entera de si ESTA llamada escribió la declaración (`false`) o Avoqado ya la tenía guardada (`true`:
+   * repetición o un segundo gerente con el mismo `resolutionId`). Aparte del resultado, que sigue siendo la declaración guardada tal cual.
+   */
+  salida?: { yaGuardada?: boolean },
 ): Promise<UnchargedReconciliation> {
   const parsed = schema.safeParse(raw)
   if (!parsed.success) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
@@ -515,7 +530,10 @@ export async function reconcileUncharged(
           tombstone: true,
         },
       })
-      if (lapida) return lapida
+      if (lapida) {
+        if (salida) salida.yaGuardada = false
+        return lapida
+      }
       // Otra escritura ganó la llave (la admisión del POST): se relee y se sigue el camino normal sobre SU fila.
       inicial = await tx.terminalPaymentRequest.findFirst({
         where: { requestId: declaration.requestId, venueId: identity.venueId },
@@ -548,6 +566,7 @@ export async function reconcileUncharged(
     if (existente) {
       if (existente.id !== declaration.resolutionId || existente.bodyHash !== bodyHash)
         throw new UnchargedReconciliationError('RESOLUTION_CONFLICT')
+      if (salida) salida.yaGuardada = true
       return existente
     }
 
@@ -707,7 +726,7 @@ export async function reconcileUncharged(
       // presentó la tarjeta; lo que no hubo fue cobro. Los POS pintan ESTE texto, no uno hardcodeado.
       errorMessage: porElBanco
         ? `El banco rechazó este cobro.${motivo ? ` ${motivo}` : ''} No se cobró nada: puedes volver a cobrar.`
-        : 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+        : await textoDeLaDeclaracion(tx, saved.staffId),
       ...(porElBanco && declaration.bank
         ? {
             bankDeclined: {
@@ -759,6 +778,7 @@ export async function reconcileUncharged(
         },
       },
     })
+    if (salida) salida.yaGuardada = false
     return saved
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 }

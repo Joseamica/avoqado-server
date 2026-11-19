@@ -471,6 +471,8 @@ async function liberarCobro(req: Request, res: Response, source: 'MOBILE' | 'TPV
       paymentId: r.paymentId ?? null,
       ...(r.outcome ? { outcome: r.outcome, outcomeEvidence: r.outcomeEvidence ?? null } : {}),
       ...(r.resolution ? { resolution: r.resolution } : {}),
+      // F1 · bloque 7: el comprobante (quién firmó y cuándo, y si Avoqado ya la tenía guardada). Aditivo: los POS de hoy no lo leen.
+      ...(r.declarationReceipt ? { declarationReceipt: r.declarationReceipt } : {}),
       message: r.released
         ? 'Terminal liberada. Ya puedes volver a mandarle cobros.'
         : r.status === 'COMPLETED'

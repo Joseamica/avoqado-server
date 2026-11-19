@@ -447,6 +447,25 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     nadaEscrito()
   })
 
+  it('9b. 🔴 F1 bloque 7 · dos_gerentes_mismo_id_se_muestra_el_acuse_del_primero: el segundo recibe la firma guardada, no la suya', async () => {
+    const primera = await resolveNoInstrument(identidad, declaracion('1234'))
+    expect(primera.declarationReceipt).toMatchObject({
+      id: resolutionId,
+      kind: 'NO_INSTRUMENT_PRESENTED',
+      by: 'SUPERVISOR_PIN',
+      staffId: 'staff-owner',
+      scope: 'ATTEMPT',
+      attemptId,
+      requestId,
+      humanSignature: true,
+      alreadyStored: false,
+    })
+    // El segundo gerente (otro PIN, mismo `resolutionId` y cuerpo) o la respuesta perdida y repetida: Avoqado ya la tenía.
+    const segunda = await resolveNoInstrument(identidad, declaracion('2222'))
+    expect(segunda.declarationReceipt).toEqual({ ...primera.declarationReceipt, alreadyStored: true })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+  })
+
   it('9. replay con el mismo resolutionId y el mismo cuerpo → la misma resolución, sin segunda escritura ni segunda bitácora; distinto cuerpo → 409 RESOLUTION_CONFLICT', async () => {
     const primera = await resolveNoInstrument(identidad, declaracion())
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
