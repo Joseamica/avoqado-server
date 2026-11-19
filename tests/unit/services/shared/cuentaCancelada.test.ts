@@ -88,8 +88,9 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
       },
     })
   })
-  it('🔴 D26 (Codex r1 #1): al revivir busca los usos que la anulación devolvió; con `usosDelDescuentoDespues` (el POS) los deja para después de su turno', async () => {
-    const base = {
+  it('🔴 D26: al revivir busca, en la misma transacción, los usos que la anulación devolvió; sin filas, sólo la bitácora de la reapertura', async () => {
+    const tx = txDoble()
+    await reabrirSiRecibeDinero(tx as any, {
       venueId: 'v',
       orderId: 'o',
       status: 'CANCELLED',
@@ -97,17 +98,11 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
       cobrado: 90,
       cubreComoCancelada: false,
       canal: 'payCashOrder:cola',
-    } as const
-    const aqui = txDoble()
-    await reabrirSiRecibeDinero(aqui as any, base)
-    expect(aqui.orderDiscount.findMany).toHaveBeenCalledWith(
+    })
+    expect(tx.orderDiscount.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ orderId: 'o', usoDevueltoAlAnular: true }) }),
     )
-    const despues = txDoble()
-    await reabrirSiRecibeDinero(despues as any, { ...base, usosDelDescuentoDespues: true })
-    expect(despues.orderDiscount.findMany).not.toHaveBeenCalled()
-    // Sin filas devueltas no hay bitácora de usos: sólo la de la reapertura.
-    expect(aqui.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
   })
   it('control: una viva, una cancelada sin dinero, o una cancelada EXTERNA que no cubre lo que debía (Codex r12 #5) no escriben nada', async () => {
     for (const [status, originSystem, cobrado] of [

@@ -12,6 +12,7 @@
  */
 import prisma from '@/utils/prismaClient'
 import { applyOrderDiscount, cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { voidItems } from '@/services/tpv/order.tpv.service'
 import { cancelarCuentaSinCobrar } from '@/services/dashboard/order.dashboard.service'
 import { removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
@@ -254,6 +255,46 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
 
     // La cola reenvía el mismo cobro (la respuesta se perdió): la llave lo devuelve como ya hecho y no gasta otro uso.
     await payCashOrder(venueId, orderId, { amount: 9000, tip: 0, staffId, idempotencyKey: `cola-${orderId}`, isOfflineReplay: true } as any)
+    expect(await usos()).toBe(antes + 1)
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
+  })
+
+  it('TPV: el efectivo ya capturado de la terminal (`recordOrderPayment`) revive la cuenta y vuelve a gastar el uso en su misma transacción', async () => {
+    const { orderId, antes } = await anuladaConDescuento()
+    const llave = `tpv-${orderId}`
+    const cobrar = () =>
+      recordOrderPayment(
+        venueId,
+        orderId,
+        {
+          venueId,
+          amount: 9000,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: `d26-${sufijo}`,
+          staffId,
+          paidProductsId: [],
+          idempotencyKey: llave,
+          currency: 'MXN',
+          isInternational: false,
+        } as never,
+        staffId,
+      )
+
+    await cobrar()
+
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
+    expect(await usos()).toBe(antes + 1)
+    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: true, usoDevueltoAlAnular: false }])
+    expect(await respentidos(orderId)).toEqual([
+      { staffId, data: expect.objectContaining({ canal: 'recordOrderPayment', usosGastados: 1, porDescuento: { [promoId]: 1 } }) },
+    ])
+
+    // La terminal reenvía el mismo cobro (no le llegó la respuesta): la llave lo devuelve y no gasta otro uso.
+    await cobrar()
     expect(await usos()).toBe(antes + 1)
     expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
   })

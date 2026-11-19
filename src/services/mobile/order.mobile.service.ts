@@ -181,7 +181,6 @@ import {
   esCobroNuevo,
   notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
-  volverAGastarUsosAlRevivirEnTx,
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
@@ -4992,8 +4991,6 @@ export async function registrarAbonoEnTx(
           canal: canalDeReapertura,
           idempotencyKey: input.idempotencyKey ?? null,
           staffId: effectiveStaffId ?? null,
-          // D26: los usos del descuento se vuelven a gastar después del turno (abajo): Shift → Discount, como la TPV.
-          usosDelDescuentoDespues: true,
         })
       : fresh.status
   // 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): una cuenta CANCELADA que se reabre por dinero ya capturado no vuelve a la
@@ -5176,16 +5173,6 @@ export async function registrarAbonoEnTx(
     // sin turno que se relee tras el claim. Todo por `entradaDelClaim` (Codex r5 código #1).
     ...entradaDelClaim(ventaDeLaCola),
   })
-  // 🔴 hz:e82938e1:D26: la cuenta anulada que este dinero revivió vuelve a gastar los usos de su descuento que la anulación devolvió.
-  // Aquí, ya con el turno: Order → Shift → Discount, el orden de la TPV y del panel (Codex r1 #1).
-  if (reabiertaDeCancelada) {
-    await volverAGastarUsosAlRevivirEnTx(tx, {
-      venueId,
-      orderId,
-      canal: canalDeReapertura,
-      staffId: effectiveStaffId ?? null,
-    })
-  }
 
   // Rappi 2b: el tipo de pago del canal (lo creó la ingesta) para congelar su comisión en el cobro en efectivo.
   // Codex código r1 #4: también cuando el cobro llega con el «Efectivo» del catálogo (método CASH); un vale que cuenta como efectivo

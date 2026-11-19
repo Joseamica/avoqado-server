@@ -240,6 +240,40 @@ export async function devolverUsosDeCuentaAnuladaEnTx(
   return { usos: sumar(usos), porDescuento: Object.fromEntries(usos) }
 }
 
+/** Las filas de la cuenta que devolvieron su uso al anular (D24), contadas por descuento (por páginas, sin tope que deje usos fuera). */
+async function usosDevueltosAlAnular(tx: TxConReintento, venueId: string, orderId: string): Promise<Map<string, number>> {
+  const usos = new Map<string, number>()
+  for (let despues: string | null = null; ; ) {
+    // `?? []` como en `tomarFilas`: un doble de prueba sin la tabla contesta `undefined`, que es «ninguna fila».
+    const pagina: Array<{ id: string; discountId: string | null }> =
+      (await tx.orderDiscount.findMany({
+        where: { ...devueltasAlAnular(venueId, orderId), ...(despues ? { id: { gt: despues } } : {}) },
+        select: { id: true, discountId: true },
+        orderBy: { id: 'asc' },
+        take: PAGINA,
+      })) ?? []
+    for (const f of pagina) usos.set(f.discountId!, (usos.get(f.discountId!) ?? 0) + 1)
+    if (pagina.length < PAGINA) break
+    despues = pagina[pagina.length - 1].id
+  }
+  return usos
+}
+
+const devueltasAlAnular = (venueId: string, orderId: string) =>
+  ({ orderId, order: { venueId }, usoDevueltoAlAnular: true, discountId: { not: null } }) satisfies Prisma.OrderDiscountWhereInput
+
+/**
+ * hz:e82938e1:D26 (Codex r2 #1, r3): la TPV (`recordOrderPayment`, cuya transacción no se reintenta) APARTA aquí, recién tomada la cuenta y
+ * ANTES del turno, las filas `Discount` que una reapertura de esta cuenta va a volver a gastar. Sin escribir nada: si el cobro no la reabre,
+ * el candado sólo dura lo que la transacción. Así el gasto de después (`volverAGastarUsosDeCuentaRevividaEnTx`, dentro de su cierre, ya con
+ * el turno) no espera ninguna fila nueva, y todos los caminos quedan Order → Discount → … → Shift, el orden de la anulación (D24). Una
+ * cuenta viva no tiene filas marcadas: sólo cuesta una consulta por el índice de la cuenta.
+ */
+export async function apartarDescuentosQueVolveriaAGastarEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
+  const usos = await usosDevueltosAlAnular(tx, venueId, orderId)
+  if (usos.size > 0) await tomarFilas(tx, venueId, [...usos.keys()].sort())
+}
+
 /**
  * 🔴 hz:e82938e1:D26 (encargo 2f1901): la cuenta ANULADA revive porque llegó dinero ya capturado (`reabrirSiRecibeDinero`: la cola sin red
  * del POS, la TPV, el pago manual del panel). Su anulación devolvió el uso de cada fila que lo había sumado (`usoDevueltoAlAnular`, D24);
@@ -258,26 +292,7 @@ export async function volverAGastarUsosDeCuentaRevividaEnTx(
   tx: TxConReintento,
   v: { venueId: string; orderId: string; canal: string; quien?: string | null },
 ): Promise<{ usos: number; porDescuento: Record<string, number> }> {
-  const devueltas = {
-    orderId: v.orderId,
-    order: { venueId: v.venueId },
-    usoDevueltoAlAnular: true,
-    discountId: { not: null },
-  } satisfies Prisma.OrderDiscountWhereInput
-  const usos = new Map<string, number>()
-  for (let despues: string | null = null; ; ) {
-    // `?? []` como en `tomarFilas`: un doble de prueba sin la tabla contesta `undefined`, que es «ninguna fila».
-    const pagina: Array<{ id: string; discountId: string | null }> =
-      (await tx.orderDiscount.findMany({
-        where: { ...devueltas, ...(despues ? { id: { gt: despues } } : {}) },
-        select: { id: true, discountId: true },
-        orderBy: { id: 'asc' },
-        take: PAGINA,
-      })) ?? []
-    for (const f of pagina) usos.set(f.discountId!, (usos.get(f.discountId!) ?? 0) + 1)
-    if (pagina.length < PAGINA) break
-    despues = pagina[pagina.length - 1].id
-  }
+  const usos = await usosDevueltosAlAnular(tx, v.venueId, v.orderId)
   if (usos.size === 0) return { usos: 0, porDescuento: {} }
 
   const gastados = new Map<string, number>()
@@ -300,7 +315,7 @@ export async function volverAGastarUsosDeCuentaRevividaEnTx(
   }
   if (gastados.size > 0) {
     await tx.orderDiscount.updateMany({
-      where: { ...devueltas, discountId: { in: [...gastados.keys()] } },
+      where: { ...devueltasAlAnular(v.venueId, v.orderId), discountId: { in: [...gastados.keys()] } },
       data: { usoContado: true, usoDevueltoAlAnular: false },
     })
   }

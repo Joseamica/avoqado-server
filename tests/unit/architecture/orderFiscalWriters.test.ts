@@ -805,7 +805,7 @@ const WRITERS: Record<string, Writer> = {
     reason:
       'only flips the bookkeeping flags usoContado/usoDevueltoAlAnular of account discount rows (and raises Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
     residual:
-      'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment) or of volverAGastarUsosTrasElCobro',
+      'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment)',
   },
   // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
@@ -1423,8 +1423,6 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#splitOrderItems': 1,
   'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': 1,
   'src/services/promotions/promotion.service.ts#applyPromotionToOrder': 1,
-  // hz:e82938e1:D26: tras el commit del cobro de la TPV, la cuenta revivida vuelve a gastar los usos de su descuento (Order → Discount).
-  'src/services/shared/cuentaCancelada.ts#volverAGastarUsosTrasElCobro': 1,
   'src/services/promotions/promotion.service.ts#removePromotionFromOrder': 1,
   'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': 1,
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': 1,
