@@ -460,6 +460,31 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$30.00') })]])
       })
 
+      // Codex r1 #3: en Rappi 2b el saldo no es el de la venta (terceros y propina contractual): avisa como antes.
+      it('pedido de Rappi con efectivo de terceros ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        prismaMock.order.findUnique.mockResolvedValue({
+          id: 'order-1',
+          orderNumber: 'ORD-1',
+          paymentStatus: 'PENDING',
+          subtotal: new Decimal(90),
+          discountAmount: new Decimal(0),
+          serviceChargeAmount: new Decimal(0),
+          total: new Decimal(90),
+          remainingBalance: new Decimal(90),
+          thirdPartyCashDue: new Decimal(0),
+          version: 1,
+          venueId: VENUE,
+          tableId: null,
+          areaTicketCheckoutSession: null,
+          customerId: null,
+          customer: null,
+        } as any)
+
+        await conSaldoEsperado(5000, 9000).catch(() => undefined)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
       it('un centavo de redondeo entre lo esperado y lo que queda ⇒ sin aviso (la misma tolerancia de siempre)', async () => {
         await conSaldoEsperado(5000, 9001)
 
@@ -576,50 +601,16 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         expect(avisos()).toHaveLength(0)
       })
 
-      // hz:bdd815fd:D2: el reintento del abono parcial de Mesas responde igual que la primera vez (lo cobrado es lo GUARDADO, $50).
-      it('abono parcial que la terminal esperaba ($90 − $50 = $40) ⇒ sin aviso, igual que la primera vez', async () => {
+      // hz:bdd815fd:D2: el reintento NO decide si el abono era el esperado: el saldo de ahora pudo moverlo otro abono, un cupón o un
+      // pago confirmado tarde (Codex r1 #1, r2 #1-#3). Avisa como antes y no hace consultas nuevas (r2 #3).
+      it('reintento de un abono parcial que la terminal esperaba ⇒ avisa como antes, sin consultar otros cobros', async () => {
         pagoGuardado(null)
         ordenTrasElPago(50, 40)
-        prismaMock.payment.count.mockResolvedValue(0)
-
-        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' } })
-
-        expect(avisos()).toHaveLength(0)
-      })
-
-      // Codex r1 #1: otro abono después de éste mueve el saldo de ahora; el reintento ya no puede saber si éste cuadró ⇒ como antes.
-      it('otra caja cobró algo después de este abono ⇒ avisa como antes (el saldo de ahora ya no es el de este cobro)', async () => {
-        pagoGuardado(null)
-        ordenTrasElPago(50, 40)
-        prismaMock.payment.count.mockResolvedValue(1)
 
         await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' } })
 
         expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
-        expect(prismaMock.payment.count).toHaveBeenCalledWith({
-          where: expect.objectContaining({ venueId: VENUE, orderId: 'order-1', status: 'COMPLETED', id: { not: 'payment-1' } }),
-        })
-      })
-
-      // Codex r1 #3: en Rappi 2b el saldo no es el de la venta (terceros y propina contractual): avisa como antes.
-      it('pedido de Rappi con efectivo de terceros ⇒ avisa como antes aunque cuadre con lo esperado', async () => {
-        pagoGuardado(null)
-        prismaMock.order.findUnique.mockResolvedValue({
-          id: 'order-1',
-          orderNumber: 'ORD-1',
-          paymentStatus: 'PARTIAL',
-          total: new Decimal(90),
-          paidAmount: new Decimal(50),
-          remainingBalance: new Decimal(40),
-          thirdPartyCashDue: new Decimal(20),
-          tableId: null,
-          areaTicketCheckoutSession: null,
-        } as any)
-        prismaMock.payment.count.mockResolvedValue(0)
-
-        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' } }).catch(() => undefined)
-
-        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
+        expect(prismaMock.payment.count).not.toHaveBeenCalled()
       })
 
       it('la terminal esperaba $70 y quedan $40 ⇒ PRECIO_CAMBIADO, igual que la primera vez', async () => {
