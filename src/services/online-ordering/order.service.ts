@@ -849,21 +849,14 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
           const again = await findReplay(tx, input.venueId, externalId, requestHash)
           if (again) return { r: again }
 
-          // D662 (Codex r2 #3): la pausa (a mano, del piso o la sola) se vuelve a leer bajo este candado; la pausa sola lo toma antes
-          // de escribirse, así que un pedido que se estaba cotizando cuando venció el segundo sin atender ya no entra.
-          const pausa = await tx.onlineOrderingSettings.findUnique({
-            where: { venueId: input.venueId },
-            select: { manualPause: true, pausedUntil: true, autoPausedAt: true, requiresAcceptance: true },
-          })
-          if (
-            pausa &&
-            (pausa.manualPause ||
-              (pausa.pausedUntil && pausa.pausedUntil > now) ||
-              (pausa.autoPausedAt && pausa.requiresAcceptance !== false))
-          ) {
-            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
-              status: 'PAUSED',
-              reason: 'MANUAL_PAUSE',
+          // D662 (Codex r2 #3, r7 #4): la tienda se vuelve a leer ENTERA bajo este candado y con el reloj de AHORA: si mientras se
+          // cotizaba se pausó (a mano, del piso o sola), quedó fuera de línea o cerró, el pedido ya no entra. La pausa sola toma la fila
+          // de ajustes al final de su transacción; lo que ya está DENTRO de esta admisión cuando se confirma, entra (regla declarada).
+          const otraVez = await getAcceptingStatus(input.venueId, reloj(), undefined, tx)
+          if (otraVez.status !== 'OPEN') {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${otraVez.status}`, {
+              status: otraVez.status,
+              reason: otraVez.reason,
             })
           }
 

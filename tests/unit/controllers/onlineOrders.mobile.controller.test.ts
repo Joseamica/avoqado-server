@@ -81,7 +81,7 @@ describe('onlineOrders.mobile.controller', () => {
     const { req, res, next } = mock({ query: { status: 'pending' }, headers: { 'x-online-orders-tray': '1' } })
     await ctrl.inbox(req, res, next)
     expect(listInbox).toHaveBeenCalledWith({ venueId: 'v1', filter: 'pending' })
-    expect(touchInboxPoll).toHaveBeenCalledWith('v1')
+    expect(touchInboxPoll).toHaveBeenCalledWith('v1', expect.any(Date)) // D662: con la hora de llegada
     expect((listInbox as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan((touchInboxPoll as jest.Mock).mock.invocationCallOrder[0])
     expect((touchInboxPoll as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       (getAcceptingStatus as jest.Mock).mock.invocationCallOrder[0],
@@ -142,7 +142,7 @@ describe('onlineOrders.mobile.controller', () => {
     prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['orders:update'], deniedPermissions: [] } as any)
     const { req, res, next } = mock({ headers: { 'x-online-orders-tray': '1' } })
     await ctrl.inbox(req, res, next)
-    expect(touchInboxPoll).toHaveBeenCalledWith('v1')
+    expect(touchInboxPoll).toHaveBeenCalledWith('v1', expect.any(Date)) // D662: con la hora de llegada
   })
 
   it('soporte suplantando (aunque el suplantado sea cajera) mira la bandeja pero NO mantiene abierta la tienda: no puede contestar', async () => {

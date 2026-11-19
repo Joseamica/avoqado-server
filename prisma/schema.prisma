@@ -21107,6 +21107,9 @@ model OnlineOrderingSettings {
   /// rechaza a tiempo (en la transacción de su toque), al «Reanudar», al pausar desde el piso, al cambiar de modo o al volver a
   /// encender. Al llegar a 2 la tienda se pausa sola (`autoPausedAt`) y vuelve a 0.
   missedOrdersInARow Int       @default(0)
+  /// D662 (Codex r7 #5): hora de la última respuesta de una persona («Reanudar», pausar, cambiar de modo o encender también cuentan).
+  /// Un pedido cuya hora LÍMITE fue antes de esta hora no suma a la racha nueva aunque el barrido lo vença después. Sólo avanza.
+  lastAnsweredAt     DateTime?
   /// D662: la tienda se pausó sola a esta hora (no nulo = pausada). Sólo la quita una persona: «Reanudar» o una pausa del piso
   /// (`pauseOnlineOrdering`). Aparte de `manualPause` (la del gerente), que el «Reanudar» del piso no quita a propósito (M-8).
   autoPausedAt       DateTime?

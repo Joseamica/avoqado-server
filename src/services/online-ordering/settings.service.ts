@@ -43,14 +43,20 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
   }
 }
 
-/** Ajustes del venue; sin fila devuelve los defaults (apagado). */
-export async function getSettings(venueId: string): Promise<OnlineOrderingSettingsRead> {
-  return (await getSettingsWithSaved(venueId)).settings
+/** Ajustes del venue; sin fila devuelve los defaults (apagado). `db`: la transacción abierta de quien llama (una conexión a la vez). */
+export async function getSettings(
+  venueId: string,
+  db: Pick<Prisma.TransactionClient, 'onlineOrderingSettings'> = prisma,
+): Promise<OnlineOrderingSettingsRead> {
+  return (await getSettingsWithSaved(venueId, db)).settings
 }
 
 /** Igual que `getSettings` y además dice si la fila existe (R66: `saved` false = siguen los ajustes de fábrica), en UNA sola lectura. */
-export async function getSettingsWithSaved(venueId: string): Promise<{ settings: OnlineOrderingSettingsRead; saved: boolean }> {
-  const row = await prisma.onlineOrderingSettings.findUnique({ where: { venueId } })
+export async function getSettingsWithSaved(
+  venueId: string,
+  db: Pick<Prisma.TransactionClient, 'onlineOrderingSettings'> = prisma,
+): Promise<{ settings: OnlineOrderingSettingsRead; saved: boolean }> {
+  const row = await db.onlineOrderingSettings.findUnique({ where: { venueId } })
   return {
     settings: row ? rowToConfig(row) : { ...DEFAULT_CONFIG, lastInboxPollAt: null, lastToPayPollAt: null },
     saved: !!row,
@@ -205,6 +211,7 @@ export async function updateSettings(
     if (existing && (cambiaDeModo || (patch.enabled === true && !current.enabled))) {
       data.autoPausedAt = null
       data.missedOrdersInARow = 0
+      data.lastAnsweredAt = new Date()
     }
 
     const row = await tx.onlineOrderingSettings.upsert({
@@ -281,7 +288,7 @@ export async function pauseOnlineOrdering(
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
   const r = await prisma.onlineOrderingSettings.updateMany({
     where: { venueId },
-    data: { pausedUntil, missedOrdersInARow: 0, ...(minutes === null ? { autoPausedAt: null } : {}) },
+    data: { pausedUntil, missedOrdersInARow: 0, lastAnsweredAt: now, ...(minutes === null ? { autoPausedAt: null } : {}) },
   })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')

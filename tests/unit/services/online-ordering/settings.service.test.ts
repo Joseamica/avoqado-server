@@ -278,6 +278,7 @@ describe('settings.service', () => {
       enabled: true,
       autoPausedAt: null,
       missedOrdersInARow: 0,
+      lastAnsweredAt: expect.any(Date),
     })
   })
 
@@ -359,7 +360,7 @@ describe('settings.service', () => {
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
       where: { venueId: 'v1' },
       // D662 (Codex r1 #4): pausar 15/30/60 NO quita la pausa sola; sí vuelve a 0 la cuenta (hay alguien).
-      data: { pausedUntil: new Date('2026-10-14T19:00:00.000Z'), missedOrdersInARow: 0 },
+      data: { pausedUntil: new Date('2026-10-14T19:00:00.000Z'), missedOrdersInARow: 0, lastAnsweredAt: now },
     })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_PAUSED', staffId: 'staff1', venueId: 'v1' }))
   })
@@ -371,7 +372,7 @@ describe('settings.service', () => {
     // D662: «Reanudar» es lo único que quita la pausa sola, y la cuenta vuelve a empezar.
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
       where: { venueId: 'v1' },
-      data: { pausedUntil: null, missedOrdersInARow: 0, autoPausedAt: null },
+      data: { pausedUntil: null, missedOrdersInARow: 0, lastAnsweredAt: expect.any(Date), autoPausedAt: null },
     })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_RESUMED' }))
   })
@@ -587,6 +588,7 @@ describe('tienda híbrida T5: «¿Quién confirma?» y sus candados', () => {
       // D662: cambiar de modo limpia la pausa sola (en «Nadie» no aplica) y su cuenta empieza de cero.
       autoPausedAt: null,
       missedOrdersInARow: 0,
+      lastAnsweredAt: expect.any(Date),
     })
   })
 

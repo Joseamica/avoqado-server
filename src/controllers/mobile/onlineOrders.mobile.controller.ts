@@ -81,6 +81,8 @@ async function canDo(req: Request, venueId: string, permission: string): Promise
 const canAnswerOrders = (req: Request, venueId: string) => canDo(req, venueId, 'orders:update')
 
 export const inbox = async (req: Request, res: Response, next: NextFunction) => {
+  // D662 (Codex r7 #1): el latido lleva la hora en que LLEGÓ la consulta (cuando la caja se veía), no la de terminar de listar.
+  const llegada = new Date()
   try {
     const { venueId } = req.params
     const filter = ((req.query.status as InboxFilter | undefined) ?? 'all') as InboxFilter
@@ -91,7 +93,7 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // (D662: cualquier pantalla). H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
     // cuesta la lista al restaurante.
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
-    if (latido) await touchInboxPoll(venueId).catch(() => false)
+    if (latido) await touchInboxPoll(venueId, llegada).catch(() => false)
     // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato; 1b: y hasta cuándo, o si la
     // pausa es la del gerente (`manualPause`, que no se va sola).
     const state = await getAcceptingStatus(venueId).catch(() => null)

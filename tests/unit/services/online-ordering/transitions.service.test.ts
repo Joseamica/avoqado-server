@@ -397,7 +397,7 @@ describe('rejectOnlineOrder', () => {
 describe('D662 · pausa sola tras 2 pedidos de «Mi equipo» sin atender', () => {
   it('vencer un pedido de «Mi equipo» lo cuenta en la MISMA transacción, después del CAS', async () => {
     await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
-    expect(contarPedidoSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', NOW)
+    expect(contarPedidoSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', { acceptDeadlineAt: expect.any(Date) }, NOW)
     expect((contarPedidoSinAtenderEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
       prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
     )
@@ -431,13 +431,43 @@ describe('D662 · pausa sola tras 2 pedidos de «Mi equipo» sin atender', () =>
 
   it('una persona que acepta o rechaza a tiempo vuelve a 0 la cuenta EN SU transacción, después de su CAS', async () => {
     await acceptOnlineOrder(base)
-    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1')
+    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', NOW)
     expect((reiniciarPedidosSinAtenderEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
       prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
     )
     ;(reiniciarPedidosSinAtenderEnTx as jest.Mock).mockClear()
     await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS' as any })
-    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1')
+    expect(reiniciarPedidosSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', NOW)
+  })
+
+  it('Codex r4 #3 / r5 #1: rechazar un pedido que ya pasó su hora límite es un pedido SIN atender (+1), no una respuesta', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1_000) }) as any)
+    ;(contarPedidoSinAtenderEnTx as jest.Mock).mockResolvedValueOnce(true)
+    await expect(rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS' as any })).resolves.toMatchObject({ outcome: 'OK' })
+    expect(reiniciarPedidosSinAtenderEnTx).not.toHaveBeenCalled()
+    expect(contarPedidoSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', { acceptDeadlineAt: expect.any(Date) }, NOW)
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_AUTO_PAUSED', staffId: null }))
+  })
+
+  it('Codex r6 #2: el aviso de Stripe que rechaza tarde (sin persona) tampoco cuenta como pedido sin atender', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1_000) }) as any)
+    await rejectOnlineOrder({ ...base, staffId: null, reason: 'PAYMENT_FAILED' as any })
+    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
+    expect(reiniciarPedidosSinAtenderEnTx).not.toHaveBeenCalled()
+  })
+
+  it('la captura fallida que se rechaza tarde no cuenta: su aceptación sí llegó a tiempo', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1_000) }) as any)
+    await rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED' as any, allowCapturing: true })
+    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
+    expect(reiniciarPedidosSinAtenderEnTx).not.toHaveBeenCalled()
+  })
+
+  it('Codex r4 #2: el 0 es la ÚLTIMA escritura de la aceptación (después del cierre en $0, con sus candados de cupón y lealtad)', async () => {
+    await acceptOnlineOrder(base)
+    expect((reiniciarPedidosSinAtenderEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      (cerrarFolioEnCeroEnTx as jest.Mock).mock.invocationCallOrder[0],
+    )
   })
 
   it('Codex r2 #2 / r3 #1: lo del sistema no cuenta como respuesta (sin persona, captura fallida, folio de «Nadie», aceptar que no gana)', async () => {

@@ -225,6 +225,9 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expireSpy.mockResolvedValue(undefined)
     delete process.env.STRIPE_MIN_CHARGE_MXN_CENTS
     await expireLiveDrafts()
+    // D662: cada prueba arranca sin la pausa sola. Los pedidos que vencen en las pruebas de antes (sin que una persona conteste)
+    // la suman a propósito; la pausa sola se prueba en lifecycle.integration.test.ts.
+    await prisma.onlineOrderingSettings.updateMany({ where: { venueId: venueId! }, data: { autoPausedAt: null, missedOrdersInARow: 0 } })
     await beat()
   })
 

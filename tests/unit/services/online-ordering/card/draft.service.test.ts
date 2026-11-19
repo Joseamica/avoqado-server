@@ -288,6 +288,18 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
     await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 400, 'CART_INVALID')
   })
 
+  it('D662 (Codex r5 #2, r7 #3): si la tienda se pausó o quedó fuera de línea mientras se cotizaba, bajo el candado no se abre Stripe', async () => {
+    ;(getAcceptingStatus as jest.Mock)
+      .mockResolvedValueOnce(OPEN)
+      .mockResolvedValueOnce({ ...OPEN, status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+    await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 409, 'ORDERING_PAUSED')
+    ;(getAcceptingStatus as jest.Mock)
+      .mockResolvedValueOnce(OPEN)
+      .mockResolvedValueOnce({ ...OPEN, status: 'OFFLINE', reason: 'NO_DEVICE' })
+    await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 409, 'ORDERING_OFFLINE')
+    expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
+  })
+
   it('el tope por teléfono cuenta pedidos por aceptar MÁS borradores vigentes', async () => {
     prismaMock.onlineOrder.count.mockResolvedValue(1)
     prismaMock.onlineOrderCharge.count.mockResolvedValue(2)

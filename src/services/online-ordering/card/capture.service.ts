@@ -125,7 +125,7 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
     if (won.count !== 1) return { do: 'ANSWER', result: { outcome: 'CONFIRMING_PAYMENT' } }
     // D662: la persona contestó a tiempo (su toque, antes de esperar a Stripe): la cuenta de pedidos sin atender vuelve a 0 aquí,
     // no cuando termine la captura (que también puede terminar el conciliador, mucho después).
-    if (i.staffId && row.requiresAcceptance !== false) await reiniciarPedidosSinAtenderEnTx(tx, i.venueId)
+    if (i.staffId && row.requiresAcceptance !== false) await reiniciarPedidosSinAtenderEnTx(tx, i.venueId, now)
     return { do: 'CAPTURE', charge, now }
   }, ORDER_LOCK_WAIT_BUDGET)
 

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { closesAt, isWithinHours } from './hours'
 import {
@@ -30,7 +31,10 @@ export function __resetPresenceDebounceForTests(): void {
 export async function touchInboxPoll(venueId: string, now: Date = new Date()): Promise<boolean> {
   const last = lastWrite.get(venueId) ?? 0
   if (now.getTime() - last < PRESENCE_WRITE_DEBOUNCE_MS) return false
-  await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { lastInboxPollAt: now } })
+  // D662 (Codex r6 #3, r7 #2): sólo con la tienda ENCENDIDA. Un latido de cuando estaba apagada no puede abrirla al encender; y el
+  // amortiguador sólo se mueve si de verdad escribió, así el primer sondeo después de encender late de inmediato.
+  const escrito = await prisma.onlineOrderingSettings.updateMany({ where: { venueId, enabled: true }, data: { lastInboxPollAt: now } })
+  if (!escrito?.count) return false
   lastWrite.set(venueId, now.getTime())
   return true
 }
@@ -66,8 +70,12 @@ export function storeView(state: AcceptingState) {
     pausedUntil: state.config.pausedUntil,
     manualPause: state.config.manualPause,
     // D662 (aditivo): se pausó sola por 2 pedidos sin atender. Un cliente viejo no lo lee y dice «Pausada» por el `reason`. Sólo
-    // cuando APLICA: en «Nadie» la tienda vende aunque la marca siga guardada, y la caja no puede decir «pausada».
-    autoPausedAt: state.config.requiresAcceptance !== false ? (state.config.autoPausedAt ?? null) : null,
+    // cuando APLICA y su «Reanudar» la abriría: pausada, en «Mi equipo» y sin la pausa del gerente. En «Nadie» la tienda vende,
+    // apagada (Codex r4 #6) no abre, y con la del gerente (r5 #5) la caja diría «reanudados» con la tienda frenada.
+    autoPausedAt:
+      state.status === 'PAUSED' && state.config.requiresAcceptance !== false && !state.config.manualPause
+        ? (state.config.autoPausedAt ?? null)
+        : null,
   }
 }
 
@@ -76,11 +84,11 @@ export async function getAcceptingStatus(
   venueId: string,
   now: Date = new Date(),
   preloaded?: Awaited<ReturnType<typeof getSettings>>,
+  /** D662: la transacción abierta de quien llama (bajo el candado de admisión: una conexión a la vez, Codex r4 de 1b). */
+  db: Pick<Prisma.TransactionClient, 'onlineOrderingSettings' | 'venue' | 'onlineOrder' | 'onlineOrderCharge'> = prisma,
 ): Promise<AcceptingState> {
-  const [settings, venue] = await Promise.all([
-    preloaded ?? getSettings(venueId),
-    prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
-  ])
+  const settings = preloaded ?? (await getSettings(venueId, db))
+  const venue = await db.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const { lastInboxPollAt, lastToPayPollAt, ...config } = settings
   const timezone = venue?.timezone || 'America/Mexico_City'
   const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({ status, reason, config })
@@ -104,8 +112,8 @@ export async function getAcceptingStatus(
 
   // Fase 2: los borradores de tarjeta vigentes también ocupan lugar (el tope de admisión los cuenta igual).
   const pending =
-    (await prisma.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
-    (await prisma.onlineOrderCharge.count({ where: liveCardDraftsWhere(venueId, now) }))
+    (await db.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
+    (await db.onlineOrderCharge.count({ where: liveCardDraftsWhere(venueId, now) }))
   if (pending >= MAX_PENDING_PER_VENUE) return done('PAUSED', 'TOO_BUSY')
 
   return done('OPEN', null)

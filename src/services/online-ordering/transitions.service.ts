@@ -105,6 +105,12 @@ export type CasResult =
       clientasConPremio?: string[]
       /** D662: el pedido era de «Mi equipo» (alguien tenía que aceptarlo); un folio de «Nadie» es `false`. */
       requiresAcceptance?: boolean
+      /** D662: la transición ganó ANTES de la hora límite del pedido (una respuesta a tiempo; un rechazo tardío no lo es). */
+      aTiempo?: boolean
+      /** D662: la hora límite del pedido (la racha cuenta por ella, no por la hora en que el barrido lo procesa). */
+      acceptDeadlineAt?: Date
+      /** D662: con esta transición (un vencimiento o un rechazo tardío) la tienda se pausó sola. Sólo del intento que hizo commit. */
+      pausoLaTienda?: boolean
     }
   | {
       r: 'STALE'
@@ -270,10 +276,6 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     })
     if (released.count === 1) releaseChargeId = charge.id
   }
-  // D662: una persona contestó un pedido de «Mi equipo»: la cuenta vuelve a 0 con el candado de la fila, dentro de esta transacción.
-  if (a.respondeLaPersona && row.requiresAcceptance !== false && (a.kind === 'ACCEPT' || a.kind === 'REJECT')) {
-    await reiniciarPedidosSinAtenderEnTx(tx, a.venueId)
-  }
   return {
     r: 'OK',
     now,
@@ -282,6 +284,8 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     orderWritten,
     orderStatus: orderWritten ? rule.order.to : null,
     requiresAcceptance: row.requiresAcceptance !== false,
+    aTiempo: row.acceptDeadlineAt.getTime() > now.getTime(),
+    acceptDeadlineAt: row.acceptDeadlineAt,
     ...(releaseChargeId ? { releaseChargeId } : {}),
     ...(canjes?.clientasConPremio.length ? { clientasConPremio: canjes.clientasConPremio } : {}),
   }
@@ -319,6 +323,20 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx, alConfirmar?: 
       async tx => {
         const r = await casTransitionInTx(tx, a)
         const valor = afterCas ? await afterCas(tx, r) : undefined
+        // D662: la cuenta de pedidos de «Mi equipo» sin atender, como la ÚLTIMA escritura de esta transacción (después del cierre en
+        // $0 y sus candados de cupón y lealtad: la fila de ajustes siempre se toma al final, sin ciclos):
+        // - vence, o una PERSONA lo rechaza DESPUÉS de su hora límite (Codex r5 #1: el barrido ya no lo vencería) ⇒ +1 (un pedido sin
+        //   atender). Los rechazos del sistema (aviso de Stripe, captura fallida) no cuentan ni para un lado ni para el otro (r6 #2);
+        // - una persona acepta o rechaza A TIEMPO ⇒ 0.
+        if (r.r === 'OK' && r.requiresAcceptance) {
+          const sinAtender = a.kind === 'EXPIRE' || (a.kind === 'REJECT' && !r.aTiempo && !!a.respondeLaPersona)
+          if (sinAtender) {
+            const pedido = { acceptDeadlineAt: r.acceptDeadlineAt ?? r.now }
+            if (await contarPedidoSinAtenderEnTx(tx, a.venueId, pedido, r.now)) r.pausoLaTienda = true
+          } else if (a.respondeLaPersona && r.aTiempo && (a.kind === 'ACCEPT' || a.kind === 'REJECT')) {
+            await reiniciarPedidosSinAtenderEnTx(tx, a.venueId, r.now)
+          }
+        }
         return { r, valor }
       },
       { etiqueta: 'casTransition', ...ORDER_LOCK_WAIT_BUDGET },
@@ -494,6 +512,7 @@ export async function rejectOnlineOrder(i: {
     i.alConfirmar,
   )
   if (r.r !== 'OK') return settled(r)
+  if (r.pausoLaTienda) anunciarPausaSola(i.venueId, r.orderNumber) // D662: un rechazo tardío también es un pedido sin atender
   if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({
@@ -516,36 +535,32 @@ export async function rejectOnlineOrder(i: {
   return { outcome: 'OK', status: OnlineOrderStatus.REJECTED }
 }
 
+/** D662: la tienda se pausó sola: queda en la bitácora con actor de sistema (después del commit). */
+function anunciarPausaSola(venueId: string, lastOrderNumber: string): void {
+  void logAction({
+    staffId: null,
+    venueId,
+    action: 'ONLINE_ORDERING_AUTO_PAUSED',
+    entity: 'OnlineOrderingSettings',
+    entityId: venueId,
+    data: { lastOrderNumber },
+  })
+}
+
 export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date; reloj?: Reloj }): Promise<TransitionResult> {
-  let pausoLaTienda = false
-  const r = await casTransition(
-    {
-      kind: 'EXPIRE',
-      venueId: i.venueId,
-      orderId: i.orderId,
-      now: i.now,
-      reloj: i.reloj,
-      extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
-      onlineData: now => ({ expiredAt: now }),
-    },
-    // D662: un pedido de «Mi equipo» vencido cuenta en la MISMA transacción (todos los que vencen pasan por aquí: el job, aceptar
-    // tarde y la captura de tarjeta); el segundo seguido pausa la tienda sola.
-    async (tx, cas) => (cas.r === 'OK' && cas.requiresAcceptance ? contarPedidoSinAtenderEnTx(tx, i.venueId, cas.now) : false),
-    valor => {
-      pausoLaTienda = valor === true
-    },
-  )
+  // D662: un pedido de «Mi equipo» vencido cuenta en la MISMA transacción (`casTransition`; todos los que vencen pasan por aquí: el
+  // job, aceptar tarde y la captura de tarjeta); el segundo seguido pausa la tienda sola.
+  const r = await casTransition({
+    kind: 'EXPIRE',
+    venueId: i.venueId,
+    orderId: i.orderId,
+    now: i.now,
+    reloj: i.reloj,
+    extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
+    onlineData: now => ({ expiredAt: now }),
+  })
   if (r.r !== 'OK') return settled(r)
-  if (pausoLaTienda) {
-    void logAction({
-      staffId: null,
-      venueId: i.venueId,
-      action: 'ONLINE_ORDERING_AUTO_PAUSED',
-      entity: 'OnlineOrderingSettings',
-      entityId: i.venueId,
-      data: { lastOrderNumber: r.orderNumber },
-    })
-  }
+  if (r.pausoLaTienda) anunciarPausaSola(i.venueId, r.orderNumber)
   if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({

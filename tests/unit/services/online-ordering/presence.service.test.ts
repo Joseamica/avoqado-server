@@ -39,6 +39,16 @@ describe('touchInboxPoll', () => {
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledTimes(2)
   })
 
+  it('D662 (Codex r6 #3, r7 #2): con la tienda apagada no escribe ni mueve el amortiguador; el primero tras encender sí late', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 })
+    await expect(touchInboxPoll('v1', NOW)).resolves.toBe(false)
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', enabled: true },
+      data: { lastInboxPollAt: NOW },
+    })
+    await expect(touchInboxPoll('v1', new Date(NOW.getTime() + 5_000))).resolves.toBe(true)
+  })
+
   it('si la escritura falla, el debounce no se mueve: el siguiente sondeo vuelve a intentar (R13)', async () => {
     prismaMock.onlineOrderingSettings.updateMany.mockRejectedValueOnce(new Error('db')).mockResolvedValueOnce({ count: 1 })
     await expect(touchInboxPoll('v1', NOW)).rejects.toThrow('db')
@@ -105,7 +115,10 @@ describe('touchToPayPoll (tienda híbrida: el latido de quien puede cobrar folio
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
     await expect(touchInboxPoll('v1', NOW)).resolves.toBe(true)
     await expect(touchToPayPoll('v1', NOW)).resolves.toBe(true)
-    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { lastInboxPollAt: NOW } })
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', enabled: true },
+      data: { lastInboxPollAt: NOW },
+    })
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { lastToPayPollAt: NOW } })
   })
 })
@@ -204,6 +217,24 @@ describe('getAcceptingStatus', () => {
     const st = await getAcceptingStatus('v1', NOW)
     expect(st).toMatchObject({ status: 'OPEN' })
     // Codex r1 #8: y la caja no puede decir «pausada» mientras la tienda vende.
+    expect(storeView(st).autoPausedAt).toBeNull()
+  })
+
+  it('Codex r5 #5: con la pausa del gerente encima, la marca no se enseña (su «Reanudar» no abriría la tienda)', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ manualPause: true, autoPausedAt: new Date(NOW.getTime() - 60_000) }) as any,
+    )
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st.status).toBe('PAUSED')
+    expect(storeView(st).autoPausedAt).toBeNull()
+  })
+
+  it('Codex r4 #6: apagada, la marca guardada no se enseña (la caja no ofrece «Reanudar» de una tienda apagada)', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ enabled: false, autoPausedAt: new Date(NOW.getTime() - 60_000) }) as any,
+    )
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st.status).toBe('DISABLED')
     expect(storeView(st).autoPausedAt).toBeNull()
   })
 

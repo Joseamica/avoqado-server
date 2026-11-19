@@ -188,6 +188,17 @@ const toResult = (charge: OnlineOrderCharge, replay: boolean, status: PublicTrac
 const findCharge = (db: Prisma.TransactionClient, venueId: string, idempotencyKey: string) =>
   db.onlineOrderCharge.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } } })
 
+/** D662: la misma regla de apertura que al empezar, con el reloj de ahora (pausada, fuera de línea, cerrada o apagada ⇒ 409). */
+async function tiendaAbiertaOLanza(venueId: string, db?: Parameters<typeof getAcceptingStatus>[3]): Promise<void> {
+  const st = await getAcceptingStatus(venueId, new Date(), undefined, db)
+  if (st.status !== 'OPEN') {
+    throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${st.status}`, {
+      status: st.status,
+      reason: st.reason,
+    })
+  }
+}
+
 export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: CreateOnlineOrderOptions): Promise<CardDraftResult> {
   const now = input.now ?? new Date()
   const { venueId, idempotencyKey } = input
@@ -342,6 +353,9 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
       if (!f) throw new Error('Borrador de tarjeta sin validar y sin repetición') // inalcanzable: no se borran borradores
 
       await lockAdmission(tx, venueId)
+      // D662 (Codex r5 #2, r7 #3): la tienda se vuelve a leer ENTERA bajo el candado y con el reloj de ahora; lo que se cotizaba
+      // cuando se pausó, quedó fuera de línea o cerró no abre Stripe.
+      await tiendaAbiertaOLanza(venueId, tx)
       // Topes: pedidos por aceptar MÁS borradores con su sesión vigente.
       const liveDrafts = liveCardDraftsWhere(venueId, now)
       const byPhone =
@@ -402,6 +416,8 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
   if ('rechazo' in decided) throw decided.rechazo
 
   const { charge, replay } = decided
+  // D662 (Codex r6 #1, r7 #3): un reintento de un borrador cuya sesión de Stripe nunca se abrió no la abre con la tienda cerrada.
+  if (replay && !charge.checkoutUrl && charge.status === OnlineOrderChargeStatus.PENDING_AUTH) await tiendaAbiertaOLanza(venueId)
   const ready =
     charge.checkoutUrl || charge.status !== OnlineOrderChargeStatus.PENDING_AUTH ? charge : await requestCardCheckout(charge, now)
   return toResult(ready, replay, replay ? await trackingStatus(ready) : 'AWAITING_PAYMENT', now)

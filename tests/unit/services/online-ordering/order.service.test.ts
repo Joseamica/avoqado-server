@@ -523,35 +523,24 @@ describe('createOnlineOrder', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2) // dos intentos, cada uno con su espera corta del candado
   })
 
-  it('D662 (Codex r2 #3): si la tienda se pausó (sola, a mano o desde el piso) mientras el pedido se cotizaba, bajo el candado ya no entra', async () => {
-    for (const pausa of [
-      { autoPausedAt: new Date(), manualPause: false, pausedUntil: null, requiresAcceptance: true },
-      { autoPausedAt: null, manualPause: true, pausedUntil: null, requiresAcceptance: true },
-      { autoPausedAt: null, manualPause: false, pausedUntil: new Date(Date.now() + 600_000), requiresAcceptance: true },
-    ]) {
-      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValueOnce(pausa as any)
-      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
-    }
+  it('D662 (Codex r2 #3, r7 #4): si la tienda se pausó o quedó fuera de línea mientras el pedido se cotizaba, bajo el candado ya no entra', async () => {
+    const abierta = OPEN
+    ;(getAcceptingStatus as jest.Mock)
+      .mockResolvedValueOnce(abierta)
+      .mockResolvedValueOnce({ ...abierta, status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+    ;(getAcceptingStatus as jest.Mock)
+      .mockResolvedValueOnce(abierta)
+      .mockResolvedValueOnce({ ...abierta, status: 'OFFLINE', reason: 'NO_DEVICE' })
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_OFFLINE' })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
-    // En «Nadie» la pausa sola no aplica: el pedido sí entra.
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValueOnce({
-      autoPausedAt: new Date(),
-      manualPause: false,
-      pausedUntil: null,
-      requiresAcceptance: false,
-    } as any)
-    await expect(createOnlineOrder(input(), PUEDE_CREAR)).resolves.toBeDefined()
   })
 
   it('con sesión probada no se lee el modo aparte: lo trae la lectura de la tienda (una sola vez)', async () => {
     await createOnlineOrder(input(), PUEDE_CREAR)
-    // D662: la única lectura directa de los ajustes es la de la PAUSA bajo el candado de admisión; el modo lo trae la tienda.
-    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
-    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledWith({
-      where: { venueId: 'v1' },
-      select: { manualPause: true, pausedUntil: true, autoPausedAt: true, requiresAcceptance: true },
-    })
-    expect(getAcceptingStatus).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
+    // D662: la tienda se lee al empezar y otra vez bajo el candado de admisión (reloj de ese momento).
+    expect(getAcceptingStatus).toHaveBeenCalledTimes(2)
   })
 
   it('una sesión sin teléfono verificado por WhatsApp (correo, contraseña, token viejo) es 401 (R6)', async () => {
@@ -710,14 +699,14 @@ describe('createOnlineOrder', () => {
       customer: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() }, // S3: el nombre se completa en la misma transacción
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() }, // Codex r3
       onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) }, // Codex r2 #5 y topes
-      onlineOrderingSettings: { findUnique: jest.fn().mockResolvedValue(null) }, // D662: la pausa se relee bajo el candado
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 
     await createOnlineOrder(input(), PUEDE_CREAR)
 
     expect(tx.$executeRaw.mock.calls.map(([, key]: any[]) => key)).toEqual([KEY_LOCK, ADMISSION_LOCK])
-    expect(tx.$executeRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.onlineOrderingSettings.findUnique.mock.invocationCallOrder[0])
+    // D662: la segunda lectura de la tienda va DESPUÉS del candado de admisión.
+    expect(tx.$executeRaw.mock.invocationCallOrder[1]).toBeLessThan((getAcceptingStatus as jest.Mock).mock.invocationCallOrder[1])
     const [keyAt, lockAt] = tx.$executeRaw.mock.invocationCallOrder
     // Codex r4: plan, tienda y cotización ANTES de abrir la transacción; dentro, la llave antes que todo y el negocio antes de topes,
     // folio y escrituras.
@@ -1098,8 +1087,9 @@ describe('Codex r4: una sola conexión por envío, y la decisión durable sale m
       }
     })
     const lectura = (nombre: string, valor: unknown) =>
-      jest.fn(async () => {
-        if (abierta) leidasDentro.push(nombre)
+      jest.fn(async (...args: unknown[]) => {
+        // D662: la tienda se puede volver a leer DENTRO, pero sólo con la transacción (4.º argumento), nunca con el cliente raíz.
+        if (abierta && !(nombre === 'tienda' && args[3] === prismaMock)) leidasDentro.push(nombre)
         return valor
       }) as any
     return { leidasDentro, lectura }
