@@ -1,5 +1,5 @@
 // Inventario del manual (R1-10): cada pantalla de cada app tiene su fila, y cada fila su página que carga o su razón.
-// Roja a propósito hasta el último lote de Task 11: su mensaje es la cola de lo que falta escribir.
+// Lo que falta escribir vive en scripts/support-eval/manual/faltantes.json y sólo puede bajar (trinquete, founder 19-nov «a»).
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -11,6 +11,7 @@ import {
   inventorySchema,
   readInventory,
   readSurfaces,
+  MANUAL_EVAL_DIRECTORY,
   type ManualInventory,
   type ManualSurfaces,
 } from '../../../../scripts/support-eval/manual/esquema'
@@ -59,24 +60,41 @@ function rowGaps(row: Row, app: HelpApp, versionesVivas: string[], library: Page
   return gaps
 }
 
-/** Las filas sin cubrir por app y, aparte, las que sólo tienen páginas fuera por no estar probadas. '' = todas cubiertas. */
-function inventoryReport(inventories: ManualInventory[], library: Page[], outOf: Map<string, string>): string {
-  const uncovered: string[] = []
-  const onlyOut: string[] = []
-  for (const inventory of inventories) {
-    const rows: string[] = []
+/** Una línea por fila sin cubrir («<app> <fila>: <huecos>») y por fila con sólo páginas fuera («fuera <app> <fila>: …»). */
+function inventoryGaps(inventories: ManualInventory[], library: Page[], outOf: Map<string, string>): string[] {
+  const lines: string[] = []
+  for (const inventory of inventories)
     for (const row of inventory.filas) {
       if (row.sinPagina) continue
       const gaps = row.paginas.length ? rowGaps(row, inventory.app, inventory.versionesVivas, library) : ['sin página']
       if (!gaps.length) continue
       const out = row.paginas.filter(id => outOf.has(id))
-      if (out.length && out.length === row.paginas.length)
-        onlyOut.push(`${inventory.app} ${row.id}: ${out.map(id => `${id} (${outOf.get(id)})`).join(', ')}`)
-      else rows.push(`  ${row.id}: ${gaps.join(', ')}`)
+      lines.push(
+        out.length && out.length === row.paginas.length
+          ? `fuera ${inventory.app} ${row.id}: ${out.map(id => `${id} (${outOf.get(id)})`).join(', ')}`
+          : `${inventory.app} ${row.id}: ${gaps.join(', ')}`,
+      )
     }
-    if (rows.length) uncovered.push(`${inventory.app} (${rows.length} filas sin cubrir):\n${rows.join('\n')}`)
-  }
-  return [...uncovered, ...(onlyOut.length ? [`Sólo con páginas fuera (${onlyOut.length}):\n  ${onlyOut.join('\n  ')}`] : [])].join('\n')
+  return lines
+}
+
+/** Las filas sin cubrir por app y, aparte, las que sólo tienen páginas fuera por no estar probadas. '' = todas cubiertas. */
+function inventoryReport(inventories: ManualInventory[], library: Page[], outOf: Map<string, string>): string {
+  const lines = inventoryGaps(inventories, library, outOf)
+  const blocks = inventories.flatMap(({ app }) => {
+    const rows = lines.filter(l => l.startsWith(`${app} `)).map(l => `  ${l.slice(app.length + 1)}`)
+    return rows.length ? [`${app} (${rows.length} filas sin cubrir):\n${rows.join('\n')}`] : []
+  })
+  const out = lines.filter(l => l.startsWith('fuera ')).map(l => l.slice('fuera '.length))
+  return [...blocks, ...(out.length ? [`Sólo con páginas fuera (${out.length}):\n  ${out.join('\n  ')}`] : [])].join('\n')
+}
+
+/** La lista de lo que falta escribir (founder, 19-nov «a»): sólo puede bajar. */
+const FALTANTES = path.join(MANUAL_EVAL_DIRECTORY, 'faltantes.json')
+/** Un hueco que no está en la lista, o una fila de la lista que ya quedó cubierta: las dos la ponen roja. */
+function ratchet(gaps: string[], listed: string[]) {
+  const [now, before] = [new Set(gaps), new Set(listed)]
+  return { nuevos: gaps.filter(g => !before.has(g)), tachados: listed.filter(l => !now.has(l)) }
 }
 
 describe('manual inventory (scripts/support-eval/manual)', () => {
@@ -124,15 +142,30 @@ describe('manual inventory (scripts/support-eval/manual)', () => {
     }
   })
 
-  it('every row has pages that LOAD (loadSupportLibrary({ allowDraft: true })) or a reason from SIN_PAGINA_RAZONES with a detail', () => {
+  it('every row has pages that LOAD (loadSupportLibrary({ allowDraft: true })) or a reason, or is listed in faltantes.json, which only goes down', () => {
     const outOf = new Map<string, string>()
     readLibrarySources(undefined, undefined, undefined, (id, reason) => UNTESTED_LABELS[reason] && outOf.set(id, UNTESTED_LABELS[reason]))
-    const report = inventoryReport(
+    const gaps = inventoryGaps(
       APPS.map(app => readInventory(app)),
       loadSupportLibrary({ allowDraft: true }),
       outOf,
     )
-    if (report) throw new Error(`Filas del inventario sin página que cargue ni razón:\n${report}`)
+    const { nuevos, tachados } = ratchet(gaps, JSON.parse(fs.readFileSync(FALTANTES, 'utf8')).filas)
+    const report = [
+      ...(nuevos.length
+        ? [
+            `Filas sin página que cargue ni razón (escribe su página o ponle sinPagina; sólo si es a propósito, agrégala a faltantes.json):\n+ ${nuevos.join('\n+ ')}`,
+          ]
+        : []),
+      ...(tachados.length ? [`Ya cubiertas: quítalas de faltantes.json:\n- ${tachados.join('\n- ')}`] : []),
+    ].join('\n')
+    if (report) throw new Error(report)
+  })
+
+  it('the ratchet: a new gap and a listed row that is now covered both turn it red', () => {
+    expect(ratchet(['a', 'b'], ['b', 'a'])).toEqual({ nuevos: [], tachados: [] })
+    expect(ratchet(['a', 'b', 'c'], ['a', 'b'])).toEqual({ nuevos: ['c'], tachados: [] })
+    expect(ratchet(['a'], ['a', 'b'])).toEqual({ nuevos: [], tachados: ['b'] })
   })
 
   describe('within the row scope: each device and each live version (R5-02)', () => {
