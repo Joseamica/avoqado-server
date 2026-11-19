@@ -9,10 +9,12 @@ jest.mock('@/services/shared/tableOrderLock', () => ({
   lockTableOrderScope: jest.fn().mockResolvedValue({ tables: [] }),
 }))
 const devolverCanjesMock = jest.fn()
+const devolverUsosMock = jest.fn()
 jest.mock('@/services/shared/orderCancelGuard', () => ({
   ...jest.requireActual('@/services/shared/orderCancelGuard'),
   assertNoLiveTerminalCharge: jest.fn().mockResolvedValue(undefined),
   devolverCanjesDeVentaAnuladaEnTx: (...a: unknown[]) => devolverCanjesMock(...a),
+  devolverUsosDeVentaAnuladaEnTx: (...a: unknown[]) => devolverUsosMock(...a),
 }))
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   ...jest.requireActual('@/services/kds/kitchenTicketAuthoring.service'),
@@ -86,6 +88,7 @@ beforeEach(() => {
   }))
   revertirMock.mockResolvedValue([])
   devolverCanjesMock.mockResolvedValue({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] })
+  devolverUsosMock.mockResolvedValue(0)
 })
 
 describe('returnGiftBalanceAndCancelOrder', () => {
@@ -136,10 +139,27 @@ describe('returnGiftBalanceAndCancelOrder', () => {
       staffId: 'staff-1',
       camino: 'returnGiftBalance',
       abonosDeSaldoSeRegresanEnEstaTx: true,
+      usosDespuesDeLosAbonos: true,
     })
     const canjes = devolverCanjesMock.mock.invocationCallOrder[0]
     expect(canjes).toBeLessThan(Math.min(...bloquearMock.mock.invocationCallOrder))
     expect(canjes).toBeLessThan(Math.min(...reembolsoMock.mock.invocationCallOrder))
+  })
+
+  it('🔴 D24 (Codex r1 #2): el uso del descuento de cuenta se devuelve DESPUÉS de los reembolsos (Turno → Discount) y antes de cancelar', async () => {
+    await returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
+
+    expect(devolverUsosMock).toHaveBeenCalledTimes(1)
+    expect(devolverUsosMock).toHaveBeenCalledWith(prismaMock, {
+      venueId: 'venue-1',
+      orderId: 'order-1',
+      staffId: 'staff-1',
+      camino: 'returnGiftBalance',
+    })
+    const usos = devolverUsosMock.mock.invocationCallOrder[0]
+    expect(usos).toBeGreaterThan(Math.max(...reembolsoMock.mock.invocationCallOrder))
+    const cancelar = (prismaMock.order.update as jest.Mock).mock.calls.findIndex(([a]) => a?.data?.status === 'CANCELLED')
+    expect(usos).toBeLessThan((prismaMock.order.update as jest.Mock).mock.invocationCallOrder[cancelar])
   })
 
   it('un cobro que no es de saldo se rechaza antes de tocar los canjes', async () => {

@@ -161,10 +161,12 @@ const PAGINA = 200
 
 /**
  * Todas las filas de la cuenta con `usoContado` devuelven su uso en esta transacción (por páginas, sin tope que deje usos ocupados).
- * Las filas `Discount` se toman en una pasada ascendente y cada una baja lo suyo de una vez, sin bajar de 0. Con `soltarMarca`, las
- * filas se quedan (historia de la cuenta anulada) pero sin la marca, en la MISMA transacción: un reintento de la anulación, el barrido
- * de vacías o quitar la fila después ya no devuelven otra vez. La marca se suelta DESPUÉS de tomar las filas `Discount` (como quitar
- * la fila: Discount antes que escribir cualquier fila de la cuenta, Codex r1 #6 de D19). Devuelve cuántos usos regresó.
+ * Las filas `Discount` se toman en una pasada ascendente y cada una baja lo suyo de una vez, sin bajar de 0. Con `soltarMarca` (la
+ * anulación), las filas se quedan (historia de la cuenta anulada) sin `usoContado` y con `usoDevueltoAlAnular`, en la MISMA
+ * transacción: un reintento de la anulación, el barrido de vacías, quitar la fila desde el POS o la TPV después (la cuenta revivió por
+ * dinero tardío) ya no devuelven otra vez. La marca se suelta DESPUÉS de tomar las filas `Discount` (como quitar la fila: Discount
+ * antes que escribir cualquier fila de la cuenta, Codex r1 #6 de D19). Devuelve lo que de verdad bajó cada contador (Codex D24 r1 #3:
+ * un contador que ya estaba en 0 no «devuelve» nada).
  */
 async function devolverUsosMarcadosEnTx(
   tx: TxConReintento,
@@ -186,13 +188,22 @@ async function devolverUsosMarcadosEnTx(
     despues = pagina[pagina.length - 1].id
   }
   const devueltos = new Map<string, number>()
-  if (usos.size === 0) return devueltos
   // Un descuento que ya no está en el catálogo (o es de otro negocio) no tiene contador que bajar.
   for (const d of await tomarFilas(tx, venueId, [...usos.keys()].sort())) {
-    await tx.discount.update({ where: { id: d.id }, data: { currentUses: Math.max(0, d.currentUses - (usos.get(d.id) ?? 0)) } })
-    devueltos.set(d.id, usos.get(d.id) ?? 0)
+    const baja = Math.min(d.currentUses, usos.get(d.id) ?? 0)
+    if (baja <= 0) continue
+    await tx.discount.update({ where: { id: d.id }, data: { currentUses: d.currentUses - baja } })
+    devueltos.set(d.id, baja)
   }
-  if (opciones.soltarMarca) await tx.orderDiscount.updateMany({ where: marcadas, data: { usoContado: false } })
+  if (opciones.soltarMarca) {
+    if (usos.size > 0) await tx.orderDiscount.updateMany({ where: marcadas, data: { usoContado: false, usoDevueltoAlAnular: true } })
+    // Codex D24 r1 #4: la fila cuyo descuento se borró del catálogo (`discountId` en null) ya no tiene uso que devolver; tampoco se
+    // queda marcada como si lo tuviera.
+    await tx.orderDiscount.updateMany({
+      where: { orderId, order: { venueId }, usoContado: true, discountId: null },
+      data: { usoContado: false },
+    })
+  }
   return devueltos
 }
 

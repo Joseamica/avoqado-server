@@ -256,6 +256,11 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     camino: string
     /** Sólo «Regresar saldo y cancelar»: la venta trae abonos que se regresan en esta misma transacción (`PAID` se sigue rechazando). */
     abonosDeSaldoSeRegresanEnEstaTx?: boolean
+    /**
+     * Sólo «Regresar saldo y cancelar» (D24): el uso del descuento de cuenta NO se devuelve aquí; quien llama lo devuelve con
+     * `devolverUsosDeVentaAnuladaEnTx` después de sus reembolsos (Turno → Discount).
+     */
+    usosDespuesDeLosAbonos?: boolean
   },
 ): Promise<CanjesDevueltos> {
   const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0, clientasConPremio: [] }
@@ -268,21 +273,9 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
   // 🔴 hz:e82938e1:D24 (DINERO, tope de usos): el descuento de cuenta del POS sumó su uso al aplicarse (D19); anular la cuenta sin
   // cobrar lo devuelve, igual que quitar la fila o borrar la cuenta vacía. Va ANTES de los canjes: la fila `Discount` se toma antes
   // que Customer/StampReward y antes de escribir cualquier fila de la cuenta, el mismo orden que `removeOrderDiscountInTransaction`.
-  // La fila se queda sin su marca, así que un canje que también la tuviera ya no devuelve otra vez al quitarse abajo.
-  const usos = await devolverUsosDeCuentaAnuladaEnTx(tx, input.venueId, input.orderId)
-  devuelto.usosDevueltos = usos.usos
-  if (usos.usos > 0) {
-    await tx.activityLog.create({
-      data: {
-        action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED',
-        entity: 'Order',
-        entityId: input.orderId,
-        venueId: input.venueId,
-        staffId: input.staffId ?? null,
-        data: { camino: input.camino, usosDevueltos: usos.usos, porDescuento: usos.porDescuento },
-      },
-    })
-  }
+  // «Regresar saldo y cancelar» lo pide DESPUÉS de sus reembolsos (`usosDespuesDeLosAbonos`): ahí el turno se toma antes, y el cobro de
+  // $0 de la TPV toma Turno → Discount (Codex D24 r1 #2).
+  if (!input.usosDespuesDeLosAbonos) devuelto.usosDevueltos = await devolverUsosDeVentaAnuladaEnTx(tx, input)
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
   for (;;) {
@@ -323,6 +316,33 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
   })
   logger.info('🎁 [Anular] la venta anulada le devolvió al cliente sus canjes', { ...input, ...devuelto })
   return devuelto
+}
+
+/**
+ * 🔴 hz:e82938e1:D24: la venta que se anula sin cobrar devuelve los usos que su descuento de cuenta del POS sumó al tope del catálogo
+ * (`usoContado`, D19), en la transacción del que anula y con la cuenta ya tomada. Las filas se quedan como historia, marcadas
+ * (`usoDevueltoAlAnular`): nadie lo vuelve a devolver. Deja `ORDER_CANCEL_DISCOUNT_USES_RETURNED` si de verdad bajó un contador. Una
+ * cuenta de folio no pasa por aquí: su cortesía ya devuelve el uso (`convertirBeneficiosEnCortesiaEnTx`). Devuelve cuántos usos bajaron.
+ */
+export async function devolverUsosDeVentaAnuladaEnTx(
+  tx: TxConReintento,
+  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
+): Promise<number> {
+  const usos = await devolverUsosDeCuentaAnuladaEnTx(tx, input.venueId, input.orderId)
+  if (usos.usos > 0) {
+    await tx.activityLog.create({
+      data: {
+        action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED',
+        entity: 'Order',
+        entityId: input.orderId,
+        venueId: input.venueId,
+        staffId: input.staffId ?? null,
+        data: { camino: input.camino, usosDevueltos: usos.usos, porDescuento: usos.porDescuento },
+      },
+    })
+    logger.info('🏷️ [Anular] la venta anulada devolvió los usos de su descuento de cuenta', { ...input, ...usos })
+  }
+  return usos.usos
 }
 
 /**

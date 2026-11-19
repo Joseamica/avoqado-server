@@ -157,7 +157,10 @@ function txSobre(e: Estado): TxConReintento {
       // D24: la anulación que no es de folio suelta la marca `usoContado` de sus filas.
       updateMany: jest.fn(async ({ where, data }: any) => {
         const filas = e.filas.filter(
-          f => f.orderId === where.orderId && (f.usoContado ?? false) === where.usoContado && f.discountId != null,
+          f =>
+            f.orderId === where.orderId &&
+            (f.usoContado ?? false) === where.usoContado &&
+            (where.discountId === null ? f.discountId == null : f.discountId != null),
         )
         for (const f of filas) Object.assign(f, data)
         e.llamadas.push(`marca:${filas.length}`)

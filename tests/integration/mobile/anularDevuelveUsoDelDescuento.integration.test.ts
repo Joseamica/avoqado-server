@@ -14,6 +14,7 @@ import prisma from '@/utils/prismaClient'
 import { applyOrderDiscount, cancelOrder, createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { voidItems } from '@/services/tpv/order.tpv.service'
 import { cancelarCuentaSinCobrar } from '@/services/dashboard/order.dashboard.service'
+import { removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
 
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
@@ -39,7 +40,12 @@ async function cuentaAbierta(): Promise<string> {
 
 const usos = async () => (await prisma.discount.findUniqueOrThrow({ where: { id: promoId }, select: { currentUses: true } })).currentUses
 const filas = (orderId: string) =>
-  prisma.orderDiscount.findMany({ where: { orderId }, select: { discountId: true, usoContado: true }, orderBy: { id: 'asc' }, take: 10 })
+  prisma.orderDiscount.findMany({
+    where: { orderId },
+    select: { discountId: true, usoContado: true, usoDevueltoAlAnular: true },
+    orderBy: { id: 'asc' },
+    take: 10,
+  })
 const bitacora = (orderId: string) =>
   prisma.activityLog.findMany({
     where: { venueId, entityId: orderId, action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED' },
@@ -102,7 +108,7 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
 
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
     expect(await usos()).toBe(antes)
-    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: false }])
+    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: false, usoDevueltoAlAnular: true }])
     expect(await bitacora(orderId)).toEqual([
       { staffId, data: expect.objectContaining({ camino: 'cancelOrder', usosDevueltos: 1, porDescuento: { [promoId]: 1 } }) },
     ])
@@ -144,6 +150,36 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
 
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
     expect(await usos()).toBe(antes)
+  })
+
+  it('🔴 Codex r1 #1: la cuenta anulada revive por dinero tardío y la TPV le quita el descuento: no se resta otro uso', async () => {
+    const orderId = await cuentaAbierta()
+    const antes = await usos()
+    await applyOrderDiscount(venueId, orderId, promoId, staffId)
+    await cancelOrder(venueId, orderId, 'anulada en otra caja', staffId)
+    expect(await usos()).toBe(antes)
+    // Lo que deja `reabrirSiRecibeDinero` cuando llega un abono sin red de otra caja: la cuenta vuelve a estar viva y debe.
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'CONFIRMED' } })
+    const [fila] = await prisma.orderDiscount.findMany({ where: { orderId }, select: { id: true }, take: 1 })
+
+    await removeDiscountFromOrder(orderId, fila.id, staffId, venueId)
+
+    expect(await prisma.orderDiscount.count({ where: { orderId } })).toBe(0)
+    expect(await usos()).toBe(antes)
+  })
+
+  it('regresión: la TPV sigue restando el uso de un descuento que su motor sí sumó (sin marca de anulación)', async () => {
+    const orderId = await cuentaAbierta()
+    await prisma.discount.update({ where: { id: promoId }, data: { currentUses: { increment: 1 } } })
+    const fila = await prisma.orderDiscount.create({
+      data: { orderId, discountId: promoId, type: 'PERCENTAGE', name: 'Primeros 100', value: 10, amount: 0 },
+      select: { id: true },
+    })
+    const antes = await usos()
+
+    await removeDiscountFromOrder(orderId, fila.id, staffId, venueId)
+
+    expect(await usos()).toBe(antes - 1)
   })
 
   it('regresión: una fila vieja sin marca (de antes de D19) no resta lo que nunca sumó', async () => {

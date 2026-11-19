@@ -100,6 +100,7 @@ import {
   assertOrderCancellableUnderLock,
   avisarOrdenCancelada,
   devolverCanjesDeVentaAnuladaEnTx,
+  devolverUsosDeVentaAnuladaEnTx,
   rechazarCancelacionLocalDeRappi,
   type OrderCancelGuardOptions,
 } from '../shared/orderCancelGuard'
@@ -7147,6 +7148,8 @@ export async function returnGiftBalanceAndCancelOrder(
         staffId,
         camino: 'returnGiftBalance',
         abonosDeSaldoSeRegresanEnEstaTx: true,
+        // D24 (Codex r1 #2): el uso del descuento de cuenta se devuelve abajo, después de los reembolsos (Turno → Discount).
+        usosDespuesDeLosAbonos: true,
       })
 
       // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
@@ -7206,6 +7209,10 @@ export async function returnGiftBalanceAndCancelOrder(
           staffId: staffId ?? null,
         })
       }
+
+      // 🔴 D24: el uso que el descuento de cuenta sumó regresa al tope del catálogo, ya con el turno tomado por los reembolsos de arriba
+      // (Turno → Discount, el orden del cobro de $0 de la TPV; Codex r1 #2).
+      await devolverUsosDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId, camino: 'returnGiftBalance' })
 
       const cancelada = await tx.order.update({
         where: { id: orderId, venueId },

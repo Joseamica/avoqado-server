@@ -28,7 +28,7 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
-import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
+import { devolverCanjesDeVentaAnuladaEnTx, devolverUsosDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
 import {
   applyOrderDiscount,
   createOrderWithItems,
@@ -517,7 +517,8 @@ describe('Codex r1 #4 / r2 #6: la cuenta vacía que se borra devuelve TODOS los 
 
     const n = await devolverUsosDeCuentaQueSeBorraEnTx(prismaMock as any, VENUE, 'orden-vacia')
 
-    expect(n).toBe(202)
+    // D24 (Codex r1 #3): cuenta lo que de verdad bajó; el contador que ya estaba en 0 no suma.
+    expect(n).toBe(201)
     expect(db.catalogo[PROMO].currentUses).toBe(49)
     expect(db.catalogo[SIN_TOPE].currentUses).toBe(0)
   })
@@ -552,7 +553,7 @@ describe('🔴 hz:e82938e1:D24: ANULAR la cuenta sin cobrar devuelve el uso que 
     const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
     expect(db.catalogo[PROMO].currentUses).toBe(99)
-    expect(cuenta.filas()).toEqual([expect.objectContaining({ discountId: PROMO, usoContado: false })])
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ discountId: PROMO, usoContado: false, usoDevueltoAlAnular: true })])
     // No es un canje: no cuenta como fila quitada (el barrido de vacías sigue borrando en vez de anular).
     expect(r.filasQuitadas).toBe(0)
     expect(r.usosDevueltos).toBe(1)
@@ -607,9 +608,57 @@ describe('🔴 hz:e82938e1:D24: ANULAR la cuenta sin cobrar devuelve el uso que 
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
     db.catalogo[PROMO].currentUses = 0
 
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
     expect(db.catalogo[PROMO].currentUses).toBe(0)
+    // Codex D24 r1 #3: un contador que ya estaba en 0 no «devuelve» nada: ni cuenta ni bitácora; la fila igual queda marcada.
+    expect(r.usosDevueltos).toBe(0)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED' }),
+    })
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ usoContado: false, usoDevueltoAlAnular: true })])
+  })
+
+  it('Codex D24 r1 #4: la fila cuyo descuento se borró del catálogo pierde la marca sin tocar ningún contador', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 7 }) })
+    filasDe = () => db.descuentos
+    sinCanjes()
+    const cuenta = await cuentaAbierta(db)
+    db.descuentos.push({
+      id: 'od-huerfana',
+      orderId: cuenta.id,
+      discountId: null,
+      amount: 10,
+      usoContado: true,
+      loyaltyTransactionId: null,
+    })
+
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
+
+    expect(r.usosDevueltos).toBe(0)
+    expect(db.catalogo[PROMO].currentUses).toBe(7)
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ id: 'od-huerfana', usoContado: false })])
+  })
+
+  it('«Regresar saldo y cancelar» (usosDespuesDeLosAbonos): aquí no se devuelve; lo hace quien llama después de sus reembolsos', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
+    filasDe = () => db.descuentos
+    sinCanjes()
+    const cuenta = await cuentaAbierta(db)
+    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
+
+    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: cuenta.id,
+      camino: 'returnGiftBalance',
+      usosDespuesDeLosAbonos: true,
+    })
+    expect(db.catalogo[PROMO].currentUses).toBe(4)
+
+    expect(
+      await devolverUsosDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'returnGiftBalance' }),
+    ).toBe(1)
+    expect(db.catalogo[PROMO].currentUses).toBe(3)
   })
 
   it('🔴 orden de candados: la fila Discount se toma ANTES de leer los canjes (Order → Discount → Customer/StampReward, como quitar)', async () => {

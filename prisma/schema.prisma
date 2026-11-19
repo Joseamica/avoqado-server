@@ -9903,12 +9903,15 @@ model OrderDiscount {
   reparto          Json?
 
   // Flags
-  isComp      Boolean @default(false) // Was this a comp?
-  isAutomatic Boolean @default(false) // Applied automatically?
-  isManual    Boolean @default(false) // Applied manually at checkout?
+  isComp              Boolean @default(false) // Was this a comp?
+  isAutomatic         Boolean @default(false) // Applied automatically?
+  isManual            Boolean @default(false) // Applied manually at checkout?
   // D19 (hz:e82938e1:D19): esta fila SUMÓ un uso a `Discount.currentUses` al aplicarse (descuento de cuenta del POS, Mesas). Quitarla
   // lo devuelve. false = filas de antes del arreglo o de caminos que cuentan aparte (motor de la TPV, Mostrador): no se resta aquí.
-  usoContado  Boolean @default(false)
+  usoContado          Boolean @default(false)
+  // D24 (hz:e82938e1:D24): la cuenta se ANULÓ sin cobrar y esta fila ya devolvió su uso (entonces `usoContado` pasa a false). Si la
+  // cuenta revive por dinero tardío, nadie lo vuelve a restar (ni la TPV al quitar el descuento, que resta por `discountId`).
+  usoDevueltoAlAnular Boolean @default(false)
 
   // Comp-specific
   compReason String? @db.Text
