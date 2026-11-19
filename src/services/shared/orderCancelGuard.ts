@@ -6,6 +6,7 @@ import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
+import { devolverUsosDeCuentaAnuladaEnTx } from './usoDelDescuento'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
@@ -218,6 +219,11 @@ export interface CanjesDevueltos {
   filasQuitadas: number
   /** S9: las clientas con premio regresado en una cuenta de folio; quien anula despierta su pase después del commit. */
   clientasConPremio: string[]
+  /**
+   * hz:e82938e1:D24: usos del tope del catálogo que regresaron las filas del POS que los sumaron (`usoContado`). No son canjes: no
+   * cuentan en `filasQuitadas` (la fila se queda como historia). En una cuenta de folio los regresa la cortesía y aquí va `undefined`.
+   */
+  usosDevueltos?: number
 }
 
 /** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
@@ -258,6 +264,24 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     await sellarFolioAnuladoEnTx(tx, input)
     const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
     return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
+  }
+  // 🔴 hz:e82938e1:D24 (DINERO, tope de usos): el descuento de cuenta del POS sumó su uso al aplicarse (D19); anular la cuenta sin
+  // cobrar lo devuelve, igual que quitar la fila o borrar la cuenta vacía. Va ANTES de los canjes: la fila `Discount` se toma antes
+  // que Customer/StampReward y antes de escribir cualquier fila de la cuenta, el mismo orden que `removeOrderDiscountInTransaction`.
+  // La fila se queda sin su marca, así que un canje que también la tuviera ya no devuelve otra vez al quitarse abajo.
+  const usos = await devolverUsosDeCuentaAnuladaEnTx(tx, input.venueId, input.orderId)
+  devuelto.usosDevueltos = usos.usos
+  if (usos.usos > 0) {
+    await tx.activityLog.create({
+      data: {
+        action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED',
+        entity: 'Order',
+        entityId: input.orderId,
+        venueId: input.venueId,
+        staffId: input.staffId ?? null,
+        data: { camino: input.camino, usosDevueltos: usos.usos, porDescuento: usos.porDescuento },
+      },
+    })
   }
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.

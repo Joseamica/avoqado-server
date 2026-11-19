@@ -127,27 +127,41 @@ function txSobre(e: Estado): TxConReintento {
       findMany: jest.fn(async ({ where, take }: any) => {
         e.llamadas.push('leer')
         expect(where.order).toEqual({ venueId: VENUE })
-        return e.filas
-          .filter(f => f.orderId === where.orderId && (!where.id?.gt || f.id > where.id.gt))
-          .sort(porId)
-          .slice(0, take)
-          .map(f => {
-            const d = e.descuentos.find(x => x.id === f.discountId)
-            return {
-              id: f.id,
-              amount: f.amount,
-              discountId: f.discountId,
-              couponCodeId: f.couponCodeId,
-              loyaltyTransactionId: f.loyaltyTransactionId,
-              usoContado: f.usoContado ?? false,
-              discount: d ? { maxTotalUses: d.maxTotalUses, maxUsesPerCustomer: d.maxUsesPerCustomer } : null,
-            }
-          })
+        return (
+          e.filas
+            .filter(f => f.orderId === where.orderId && (!where.id?.gt || f.id > where.id.gt))
+            // D24: la anulación que no es de folio lee sólo las filas que sumaron su uso (`usoContado`, con su descuento).
+            .filter(f => where.usoContado === undefined || (f.usoContado ?? false) === where.usoContado)
+            .filter(f => where.discountId?.not !== null || f.discountId != null)
+            .sort(porId)
+            .slice(0, take)
+            .map(f => {
+              const d = e.descuentos.find(x => x.id === f.discountId)
+              return {
+                id: f.id,
+                amount: f.amount,
+                discountId: f.discountId,
+                couponCodeId: f.couponCodeId,
+                loyaltyTransactionId: f.loyaltyTransactionId,
+                usoContado: f.usoContado ?? false,
+                discount: d ? { maxTotalUses: d.maxTotalUses, maxUsesPerCustomer: d.maxUsesPerCustomer } : null,
+              }
+            })
+        )
       }),
       update: jest.fn(async ({ where, data }: any) => {
         e.llamadas.push(`fila:${where.id}`)
         Object.assign(e.filas.find(f => f.id === where.id)!, data)
         return {}
+      }),
+      // D24: la anulación que no es de folio suelta la marca `usoContado` de sus filas.
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const filas = e.filas.filter(
+          f => f.orderId === where.orderId && (f.usoContado ?? false) === where.usoContado && f.discountId != null,
+        )
+        for (const f of filas) Object.assign(f, data)
+        e.llamadas.push(`marca:${filas.length}`)
+        return { count: filas.length }
       }),
     },
     stampReward: {

@@ -415,9 +415,9 @@
       "clase": "EN_TX",
       "etiqueta": "devolverUsoDelDescuentoEnTx"
     },
-    "src/services/shared/usoDelDescuento.ts#devolverUsosDeCuentaQueSeBorraEnTx": {
+    "src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx": {
       "clase": "EN_TX",
-      "etiqueta": "devolverUsosDeCuentaQueSeBorraEnTx"
+      "etiqueta": "devolverUsosMarcadosEnTx"
     },
     "src/services/shared/usoDelDescuento.ts#sumarUsosDeVentaEnTx": {
       "clase": "EN_TX",
