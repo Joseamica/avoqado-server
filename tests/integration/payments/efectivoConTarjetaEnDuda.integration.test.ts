@@ -13,7 +13,7 @@ import prisma from '@/utils/prismaClient'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { getOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
@@ -541,5 +541,35 @@ describe('D10-B · si después la tarjeta SÍ pasó', () => {
     expect(await sobrepagos(exacta.id)).toEqual([])
     // El cierre tardío de la fila sí se grita: la duda se resolvió por dinero, no por sobrepago.
     expect(gritos('Payment recorded for an already-UNKNOWN request').length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+/**
+ * F1 · plan ANDROID r4, ajuste 3: la caja que reabre la cuenta ve, en `GET /mobile/…/orders/:orderId`, la tarjeta que HOY bloquea
+ * cobrarla con otra tarjeta, para avisar «Tarjeta por confirmar · $X» sin quitar el efectivo (D10-B). Sale del MISMO filtro que la
+ * admisión del cobro (`findChargeBlockingOrderCancel`), con el importe y la propina de su `409 ORDER`.
+ */
+describe('F1 · `order.pendingCardPayment`: la tarjeta que bloquea cobrar la cuenta', () => {
+  it('sin tarjeta: null, y el saldo de siempre intacto', async () => {
+    const venta = await f.nuevaVenta(100)
+    expect(await getOrder(f.venueId, venta.id)).toMatchObject({
+      pendingCardPayment: null,
+      preBillBalance: { remainingBalanceCents: 10000 },
+    })
+  })
+
+  it('con una tarjeta en duda: su importe y su propina en centavos, los del 409 ORDER', async () => {
+    const venta = await f.nuevaVenta(100)
+    await tarjetaEnDuda(venta.id, { amountCents: 8000, tipCents: 1200 })
+    expect(await getOrder(f.venueId, venta.id)).toMatchObject({ pendingCardPayment: { amountCents: 8000, tipCents: 1200 } })
+  })
+
+  it.each([
+    ['lápida de la admisión (FAILED REJECTED_ORDER_BUSY)', { status: 'FAILED', failureCode: 'REJECTED_ORDER_BUSY' }],
+    ['cancelada con la aceptación de la terminal', { status: 'CANCELLED', failureCode: null, cancelDisposition: 'ACCEPTED' }],
+  ])('con una ya resuelta (%s): null, no bloquea ni avisa', async (_nombre, estado) => {
+    const venta = await f.nuevaVenta(100)
+    await tarjetaEnDuda(venta.id, estado)
+    expect(await getOrder(f.venueId, venta.id)).toMatchObject({ pendingCardPayment: null })
   })
 })

@@ -98,6 +98,7 @@ import {
   assertOrderCancellableUnderLock,
   avisarOrdenCancelada,
   devolverCanjesDeVentaAnuladaEnTx,
+  findLiveTerminalCharge,
   rechazarCancelacionLocalDeRappi,
   type OrderCancelGuardOptions,
 } from '../shared/orderCancelGuard'
@@ -668,6 +669,11 @@ export interface OrderDetailResponse {
   esCuentaDeTarjetas?: boolean
   cobrosConSaldo?: number
   esDeMesa?: boolean
+  /**
+   * F1 (aditivo): la tarjeta que HOY impide cobrar esta cuenta con otra tarjeta (su `409 ORDER`, mismo filtro y mismos importes), en
+   * CENTAVOS; `null` si no hay. Sólo avisa: el efectivo sigue permitido (D10-B). `tipCents` siempre viene (la columna no es nula).
+   */
+  pendingCardPayment?: { amountCents: number; tipCents: number | null } | null
 }
 
 /**
@@ -2767,6 +2773,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   if (!order) {
     throw new NotFoundError('Order not found')
   }
+  // F1: la tarjeta que bloquea cobrar esta cuenta, con la MISMA consulta que la admisión del cobro (una fila, por índice).
+  const tarjetaQueBloquea = await findLiveTerminalCharge(prisma, { venueId, orderId })
 
   // Flatten modifiers for mobile response
   const flattenedOrder = flattenOrderModifiers(order)
@@ -2900,6 +2908,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     esCuentaDeTarjetas: tieneRenglonDeTarjeta(flattenedOrder.items),
     cobrosConSaldo: cobrosConSaldoVivos(flattenedOrder, flattenedOrder.payments || []),
     esDeMesa: flattenedOrder.tableId != null,
+    pendingCardPayment: tarjetaQueBloquea ? { amountCents: tarjetaQueBloquea.amountCents, tipCents: tarjetaQueBloquea.tipCents } : null,
   }
 }
 

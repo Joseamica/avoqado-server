@@ -2054,17 +2054,10 @@ class TerminalPaymentService {
             )
           }
         }
-        const blocker = await tx.terminalPaymentRequest.findFirst({
-          where: {
-            venueId,
-            orderId: request.orderId,
-            // 🔴 La ORDEN se juzga SIEMPRE con la lista blanca estricta, apagado el interruptor o no (decisión del
-            // founder, 11-sep, tras la auditoría de Codex). El interruptor existe para destrabar APARATOS, no para
-            // permitir un segundo cobro de la MISMA venta: el riesgo de que el primero sí haya cobrado no caduca.
-            ...UNRESOLVED_FINANCIAL_OUTCOME,
-          },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        })
+        // 🔴 La ORDEN se juzga SIEMPRE con la lista blanca estricta, apagado el interruptor o no (decisión del founder, 11-sep, tras
+        // la auditoría de Codex). El interruptor existe para destrabar APARATOS, no para permitir un segundo cobro de la MISMA venta:
+        // el riesgo de que el primero sí haya cobrado no caduca. La misma consulta que cancelar y que el aviso del POS (F1).
+        const blocker = await this.findChargeBlockingOrderCancel(venueId, request.orderId, tx)
         if (blocker) return rechazarPorOrdenOcupada(blocker)
         if (exchange?.status !== 'PENDING_PAYMENT') {
           // 🔴 hz:ce654971:D7 · una cuenta con un ABONO (efectivo, saldo, otra tarjeta) no se cobra por su total viejo: la caja que
@@ -3840,21 +3833,24 @@ class TerminalPaymentService {
     return (await this.findChargeBlockingOrderCancel(venueId, orderId, client)) !== null
   }
 
-  /** El cobro que impide cancelar la orden (el más reciente), o `null`. Con `client` corre dentro de la transacción del llamador. */
+  /**
+   * El cobro de terminal que impide cobrar otra vez o cancelar la orden (el más reciente), o `null`. UNA consulta para la admisión
+   * del cobro (su `409 ORDER` describe esta fila), cancelar la orden y el aviso del POS (`order.pendingCardPayment`, F1).
+   * Con `client` corre dentro de la transacción del llamador.
+   */
   async findChargeBlockingOrderCancel(
     venueId: string,
     orderId: string,
     client: Prisma.TransactionClient = prisma,
-  ): Promise<{ requestId: string } | null> {
+  ): Promise<{ requestId: string; amountCents: number; tipCents: number; senderDevice: string | null; createdAt: Date } | null> {
     return client.terminalPaymentRequest.findFirst({
       where: {
         venueId,
         orderId,
-        // 🔴 Estricto SIEMPRE: ver el bloqueador de orden de la admisión. Cancelar la orden es la otra forma de
-        // eludir la protección del cobro incierto, así que comparte su régimen.
+        // 🔴 Estricto SIEMPRE: cobrar otra vez y cancelar la orden son las dos formas de eludir la protección del cobro incierto.
         ...UNRESOLVED_FINANCIAL_OUTCOME,
       },
-      select: { requestId: true },
+      select: { requestId: true, amountCents: true, tipCents: true, senderDevice: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     })
   }

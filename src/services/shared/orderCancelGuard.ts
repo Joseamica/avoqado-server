@@ -86,7 +86,7 @@ export async function lockAndReadOrderForCancel(
 export async function findLiveTerminalCharge(
   tx: GuardTx,
   input: { venueId: string; orderId: string },
-): Promise<{ requestId: string } | null> {
+): Promise<{ requestId: string; amountCents: number; tipCents: number } | null> {
   const { terminalPaymentService } = await import('../terminal-payment.service')
   return terminalPaymentService.findChargeBlockingOrderCancel(input.venueId, input.orderId, tx as Prisma.TransactionClient)
 }
