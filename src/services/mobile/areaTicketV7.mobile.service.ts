@@ -1011,10 +1011,7 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
     )
   } catch (error) {
     if (!esRechazoPorTopeEnVales(error)) throw error
-    const ganador = await prisma.areaTicket.findUnique({
-      where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
-      include: ticketInclude,
-    })
+    const ganador = await prisma.areaTicket.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } }, include: ticketInclude })
     if (!ganador) throw error
     assertIssueIdempotencyMatch(ganador, input.lines)
     return mapTicket(ganador)
@@ -2049,15 +2046,16 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   }
   const construidoSueltos = normalItems.length > 0 ? await sueltos() : null
   if (construidoSueltos && 'orderId' in construidoSueltos) return mapCheckout(construidoSueltos)
-  const normalBuild = construidoSueltos
-    ? construidoSueltos
-    : {
-        itemsData: [] as any[],
-        subtotal: 0,
-        itemDiscountTotal: 0,
-        discounts: [] as Array<{ id: string; [key: string]: any }>,
-        motivosPorRenglon: undefined,
-      }
+  const normalBuild =
+    construidoSueltos
+      ? construidoSueltos
+      : {
+          itemsData: [] as any[],
+          subtotal: 0,
+          itemDiscountTotal: 0,
+          discounts: [] as Array<{ id: string; [key: string]: any }>,
+          motivosPorRenglon: undefined,
+        }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   // Tarjeta na24531d: el catálogo que nombra la fila espejo de cada renglón de vale con descuento (fuera de la transacción).
   const descuentosDeValesDeLaSesion = await descuentosDeLosVales(venueId, session.tickets)
@@ -2414,7 +2412,7 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
 
   // Las pantallas abiertas se enteran de que la orden de la venta ya no es una cuenta viva (auditoría Fable 11-sep,
   // P3-7). Sólo si ESTA llamada la canceló: un reintento idempotente sobre una venta ya cancelada no vuelve a avisar.
-  if (ordenCancelada) await avisarOrdenCancelada(venueId, ordenCancelada, 'CANCELLED', { staffId, camino: 'cancelAreaTicketCheckout' })
+  if (ordenCancelada) await avisarOrdenCancelada(venueId, ordenCancelada, 'CANCELLED')
 
   void logAction({
     staffId,

@@ -15,8 +15,7 @@ import { applyOrderDiscount, cancelOrder, createOrderWithItems } from '@/service
 import { voidItems } from '@/services/tpv/order.tpv.service'
 import { cancelarCuentaSinCobrar } from '@/services/dashboard/order.dashboard.service'
 import { removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
-import { devolverUsosDeCuentaQueSeBorraEnTx, devolverUsosTrasAnular } from '@/services/shared/usoDelDescuento'
-import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
+import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
 
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
@@ -111,7 +110,7 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
     expect(await usos()).toBe(antes)
     expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: false, usoDevueltoAlAnular: true }])
     expect(await bitacora(orderId)).toEqual([
-      { staffId, data: expect.objectContaining({ camino: 'anularCuenta', usosDevueltos: 1, porDescuento: { [promoId]: 1 } }) },
+      { staffId, data: expect.objectContaining({ camino: 'cancelOrder', usosDevueltos: 1, porDescuento: { [promoId]: 1 } }) },
     ])
     // El barrido de cuentas vacías (o cualquier otro que devuelva por la marca) ya no devuelve otra vez.
     expect(await prisma.$transaction(tx => devolverUsosDeCuentaQueSeBorraEnTx(tx as any, venueId, orderId))).toBe(0)
@@ -167,24 +166,6 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
 
     expect(await prisma.orderDiscount.count({ where: { orderId } })).toBe(0)
     expect(await usos()).toBe(antes)
-  })
-
-  it('🔴 rediseño D24: la cuenta revive por dinero tardío ANTES del paso 2: se queda con su uso y la fila lo vuelve a ocupar', async () => {
-    const orderId = await cuentaAbierta()
-    const antes = await usos()
-    await applyOrderDiscount(venueId, orderId, promoId, staffId)
-    // Paso 1 (dentro de la anulación) sin su paso 2 todavía; luego `reabrirSiRecibeDinero` la deja viva.
-    await prisma.$transaction(async tx => {
-      await devolverCanjesDeVentaAnuladaEnTx(tx as any, { venueId, orderId, camino: 'prueba' })
-      await tx.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } })
-    })
-    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: true, usoDevueltoAlAnular: true }])
-    await prisma.order.update({ where: { id: orderId }, data: { status: 'CONFIRMED' } })
-
-    expect(await devolverUsosTrasAnular({ venueId, orderId, camino: 'prueba' })).toBe(0)
-
-    expect(await usos()).toBe(antes + 1)
-    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: true, usoDevueltoAlAnular: false }])
   })
 
   it('regresión: la TPV sigue restando el uso de un descuento que su motor sí sumó (sin marca de anulación)', async () => {

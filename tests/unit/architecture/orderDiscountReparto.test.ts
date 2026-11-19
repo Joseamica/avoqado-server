@@ -231,15 +231,11 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'CONGELA',
     marcas: ["type: 'FIXED_AMOUNT'", 'value: f.amount', 'compReason: MOTIVO_BENEFICIO_REGRESADO'],
   },
-  // hz:e82938e1:D24: al anular la cuenta sin cobrar, las filas que sumaron su uso al tope del catálogo quedan «por devolver» y, tras el
-  // commit, lo devuelven: sólo cambian sus marcas (`usoDevueltoAlAnular`, `usoContado`); ni importe, ni IVA, ni reparto.
-  'src/services/shared/usoDelDescuento.ts#marcarUsosPorDevolverEnTx': {
+  // hz:e82938e1:D24: al anular la cuenta sin cobrar, las filas que sumaron su uso al tope del catálogo lo devuelven y sólo pierden la
+  // marca `usoContado`: ni importe, ni IVA, ni reparto cambian (la fila se queda como historia de la anulada).
+  'src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx': {
     clase: 'SOLO_MARCA',
-    marcas: ['data: { usoDevueltoAlAnular: true }'],
-  },
-  'src/services/shared/usoDelDescuento.ts#devolverUsosTrasAnular': {
-    clase: 'SOLO_MARCA',
-    marcas: ['data: { usoDevueltoAlAnular: false }', 'data: { usoContado: false }'],
+    marcas: ['data: { usoContado: false, usoDevueltoAlAnular: true }'],
   },
   // D24 (Codex r1 #4a, r2 #5): en la cuenta que se anula, la fila cuyo descuento se borró del catálogo sólo pierde la marca.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {

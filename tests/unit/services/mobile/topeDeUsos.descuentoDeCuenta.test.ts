@@ -27,7 +27,7 @@ jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
-import { devolverUsosDeCuentaQueSeBorraEnTx, devolverUsosTrasAnular } from '@/services/shared/usoDelDescuento'
+import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
 import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
 import {
   applyOrderDiscount,
@@ -57,8 +57,6 @@ function coincide(fila: Fila, where: Fila = {}): boolean {
       if (typeof v.gt === 'number') return fila[k] > v.gt
       throw new Error(`doble en memoria: operador no soportado en where.${k}`)
     }
-    // Una marca booleana que la fila no trae vale su default de la base (false).
-    if (typeof v === 'boolean') return (fila[k] ?? false) === v
     return fila[k] === v
   })
 }
@@ -528,170 +526,103 @@ describe('Codex r1 #4 / r2 #6: la cuenta vacía que se borra devuelve TODOS los 
 
 describe('🔴 hz:e82938e1:D24: ANULAR la cuenta sin cobrar devuelve el uso que su descuento de cuenta sumó', () => {
   /** La anulación lee los canjes con SQL crudo; aquí no hay canjes (ni puntos ni premio de sellos). */
-  function sinCanjes(db: ReturnType<typeof baseEnMemoria>) {
+  function sinCanjes() {
     const antes = prismaMock.$queryRaw.getMockImplementation()!
     prismaMock.$queryRaw.mockImplementation(async (strings: any, ...valores: any[]) => {
       const sql = Array.isArray(strings) ? strings.join('?') : String(strings?.sql ?? strings)
       if (sql.includes('FROM "OrderDiscount" od')) return [] as any
       return antes(strings, ...valores)
     })
+    // La marca se suelta con `updateMany` sobre las filas de la cuenta.
     prismaMock.orderDiscount.updateMany.mockImplementation(async ({ where, data }: any) => {
-      const filas = db.descuentos.filter(d => coincide(d, where))
+      const filas = filasDe!().filter(d => coincide(d, where))
       for (const f of filas) Object.assign(f, data)
       return { count: filas.length }
     })
   }
-  /** Paso 1: la transacción que anula (marca); paso 2: después del commit, con la cuenta ya CANCELLED. */
-  async function anular(db: ReturnType<typeof baseEnMemoria>, orderId: string, camino = 'cancelOrder') {
-    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId, camino })
-    await prismaMock.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } } as any)
-    const devueltos = await devolverUsosTrasAnular({ venueId: VENUE, orderId, staffId: 'sesion-1', camino })
-    return { r, devueltos }
-  }
-  const fila = (db: ReturnType<typeof baseEnMemoria>, orderId: string) => db.descuentos.filter(d => d.orderId === orderId)
+  let filasDe: (() => Fila[]) | null = null
 
-  it('🔴 aplicar y anular deja el contador como estaba; la fila se queda como historia, devuelta', async () => {
+  it('🔴 aplicar y anular deja el contador como estaba; la fila se queda como historia, sin marca', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 99 }) })
-    sinCanjes(db)
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
     expect(db.catalogo[PROMO].currentUses).toBe(100)
 
-    const { r, devueltos } = await anular(db, cuenta.id)
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
-    // Paso 1 sólo marca (no toma la fila Discount); paso 2 devuelve.
-    expect(r.usosPorDevolver).toBe(1)
-    expect(r.filasQuitadas).toBe(0)
-    expect(devueltos).toBe(1)
     expect(db.catalogo[PROMO].currentUses).toBe(99)
-    expect(fila(db, cuenta.id)).toEqual([expect.objectContaining({ discountId: PROMO, usoContado: false, usoDevueltoAlAnular: true })])
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ discountId: PROMO, usoContado: false, usoDevueltoAlAnular: true })])
+    // No es un canje: no cuenta como fila quitada (el barrido de vacías sigue borrando en vez de anular).
+    expect(r.filasQuitadas).toBe(0)
+    expect(r.usosDevueltos).toBe(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED',
+        entity: 'Order',
         entityId: cuenta.id,
-        staffId: 'sesion-1',
-        data: expect.objectContaining({ camino: 'cancelOrder', usosDevueltos: 1, porDescuento: { [PROMO]: 1 } }),
+        venueId: VENUE,
+        data: expect.objectContaining({ camino: 'cancelOrder', usosDevueltos: 1 }),
       }),
     })
   })
 
-  it('🔴 Codex D24 r1–r3: la transacción que anula NO toma la fila Discount (ni la escribe)', async () => {
-    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 5 }) })
-    sinCanjes(db)
-    const cuenta = await cuentaAbierta(db)
-    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
-    ;(prismaMock.$queryRaw as jest.Mock).mockClear()
-    ;(prismaMock.discount.update as jest.Mock).mockClear()
-
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
-
-    const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([q]) => (Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)))
-    expect(consultas.some(q => q.includes('FROM "Discount"'))).toBe(false)
-    expect(prismaMock.discount.update).not.toHaveBeenCalled()
-    expect(db.catalogo[PROMO].currentUses).toBe(6)
-  })
-
-  it('🔴 paso 2: cuenta (FOR UPDATE) → Discount, como quitar la fila; y no toma turno, clienta ni tarjeta', async () => {
-    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 5 }) })
-    sinCanjes(db)
-    const cuenta = await cuentaAbierta(db)
-    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
-    await prismaMock.order.update({ where: { id: cuenta.id }, data: { status: 'CANCELLED' } } as any)
-    ;(prismaMock.$queryRaw as jest.Mock).mockClear()
-
-    await devolverUsosTrasAnular({ venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
-
-    const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([q]) => (Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)))
-    const cuentaTomada = consultas.findIndex(q => q.includes('FOR UPDATE') && !q.includes('"Discount"'))
-    const descuentoTomado = consultas.findIndex(q => q.includes('FROM "Discount"'))
-    expect(cuentaTomada).toBeGreaterThanOrEqual(0)
-    expect(descuentoTomado).toBeGreaterThan(cuentaTomada)
-    expect(consultas.some(q => /"Shift"|"Customer"|"GiftCard"/.test(q))).toBe(false)
-  })
-
-  it('🔴 un reintento de la anulación, otro paso 2 o el barrido de vacías después no devuelven otra vez', async () => {
+  it('🔴 una segunda anulación (reintento) o el barrido de vacías después no devuelven otra vez', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 10 }) })
-    sinCanjes(db)
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
+    expect(db.catalogo[PROMO].currentUses).toBe(11)
 
-    await anular(db, cuenta.id)
-    const otra = await anular(db, cuenta.id)
+    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
+    const otra = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
     await devolverUsosDeCuentaQueSeBorraEnTx(prismaMock as any, VENUE, cuenta.id)
 
-    expect(otra.r.usosPorDevolver).toBe(0)
-    expect(otra.devueltos).toBe(0)
-    expect(db.catalogo[PROMO].currentUses).toBe(10)
-  })
-
-  it('🔴 la cuenta revivió (dinero tardío) antes del paso 2: se queda con su uso y la fila vuelve a ocuparlo', async () => {
-    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 10 }) })
-    sinCanjes(db)
-    const cuenta = await cuentaAbierta(db)
-    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
-    // `reabrirSiRecibeDinero` la dejó viva otra vez (la cuenta nunca llegó a CANCELLED en este doble, o volvió).
-    await prismaMock.order.update({ where: { id: cuenta.id }, data: { status: 'CONFIRMED' } } as any)
-
-    expect(await devolverUsosTrasAnular({ venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })).toBe(0)
-
-    expect(db.catalogo[PROMO].currentUses).toBe(11)
-    expect(fila(db, cuenta.id)).toEqual([expect.objectContaining({ usoContado: true, usoDevueltoAlAnular: false })])
-    // Y quitarla desde el POS lo devuelve una sola vez, como siempre.
-    await removeOrderDiscount(VENUE, cuenta.id, fila(db, cuenta.id)[0].id, 'sesion-1')
+    expect(otra.usosDevueltos).toBe(0)
     expect(db.catalogo[PROMO].currentUses).toBe(10)
   })
 
   it('regresión: una fila vieja (sin marca) no resta lo que nunca sumó, y sin usos no queda bitácora', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 40 }) })
-    sinCanjes(db)
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     db.descuentos.push({ id: 'od-vieja', orderId: cuenta.id, discountId: PROMO, amount: 10, usoContado: false, loyaltyTransactionId: null })
 
-    const { r, devueltos } = await anular(db, cuenta.id)
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
-    expect(r.usosPorDevolver).toBe(0)
-    expect(devueltos).toBe(0)
+    expect(r.usosDevueltos).toBe(0)
     expect(db.catalogo[PROMO].currentUses).toBe(40)
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({
       data: expect.objectContaining({ action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED' }),
     })
   })
 
-  it('Codex D24 r1 #3: un contador ya en 0 no «devuelve» nada (ni cuenta ni bitácora); la fila igual queda devuelta', async () => {
+  it('nunca baja de 0 (el dueño reinició el contador a mano mientras la cuenta seguía abierta)', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 0 }) })
-    sinCanjes(db)
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
     db.catalogo[PROMO].currentUses = 0
 
-    const { devueltos } = await anular(db, cuenta.id)
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
-    expect(devueltos).toBe(0)
     expect(db.catalogo[PROMO].currentUses).toBe(0)
+    // Codex D24 r1 #3: un contador que ya estaba en 0 no «devuelve» nada: ni cuenta ni bitácora; la fila igual queda marcada.
+    expect(r.usosDevueltos).toBe(0)
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({
       data: expect.objectContaining({ action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED' }),
     })
-    expect(fila(db, cuenta.id)).toEqual([expect.objectContaining({ usoContado: false, usoDevueltoAlAnular: true })])
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ usoContado: false, usoDevueltoAlAnular: true })])
   })
 
-  it('Codex D24 r2 #4: un contador que otro camino dejó abajo de 0 queda en 0 (el piso de siempre)', async () => {
-    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
-    sinCanjes(db)
-    const cuenta = await cuentaAbierta(db)
-    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
-    db.catalogo[PROMO].currentUses = -1
-
-    const { devueltos } = await anular(db, cuenta.id)
-
-    expect(db.catalogo[PROMO].currentUses).toBe(0)
-    expect(devueltos).toBe(0)
-  })
-
-  it('Codex D24 r1 #4a: la fila cuyo descuento se borró del catálogo pierde la marca sin tocar ningún contador', async () => {
+  it('Codex D24 r1 #4: la fila cuyo descuento se borró del catálogo pierde la marca sin tocar ningún contador', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 7 }) })
-    sinCanjes(db)
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     db.descuentos.push({
       id: 'od-huerfana',
@@ -702,22 +633,41 @@ describe('🔴 hz:e82938e1:D24: ANULAR la cuenta sin cobrar devuelve el uso que 
       loyaltyTransactionId: null,
     })
 
-    const { devueltos } = await anular(db, cuenta.id)
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
 
-    expect(devueltos).toBe(0)
+    expect(r.usosDevueltos).toBe(0)
     expect(db.catalogo[PROMO].currentUses).toBe(7)
-    expect(fila(db, cuenta.id)).toEqual([expect.objectContaining({ id: 'od-huerfana', usoContado: false })])
+    expect(cuenta.filas()).toEqual([expect.objectContaining({ id: 'od-huerfana', usoContado: false })])
   })
 
-  it('el paso 2 nunca lanza: si la base falla, la anulación sigue firme y las filas quedan por devolver', async () => {
-    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 5 }) })
-    sinCanjes(db)
+  it('Codex D24 r2 #4: un contador que otro camino dejó abajo de 0 queda en 0 (el piso de siempre), sin decir que devolvió', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
+    filasDe = () => db.descuentos
+    sinCanjes()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
-    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
-    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('la base no contesta'))
+    db.catalogo[PROMO].currentUses = -1
 
-    await expect(devolverUsosTrasAnular({ venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })).resolves.toBe(0)
-    expect(fila(db, cuenta.id)).toEqual([expect.objectContaining({ usoContado: true, usoDevueltoAlAnular: true })])
+    const r = await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
+
+    expect(db.catalogo[PROMO].currentUses).toBe(0)
+    expect(r.usosDevueltos).toBe(0)
+  })
+
+  it('🔴 orden de candados: la fila Discount se toma ANTES de leer los canjes (Order → Discount → Customer/StampReward, como quitar)', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 5 }) })
+    filasDe = () => db.descuentos
+    sinCanjes()
+    const cuenta = await cuentaAbierta(db)
+    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')
+    ;(prismaMock.$queryRaw as jest.Mock).mockClear()
+
+    await devolverCanjesDeVentaAnuladaEnTx(prismaMock as any, { venueId: VENUE, orderId: cuenta.id, camino: 'cancelOrder' })
+
+    const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([q]) => (Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)))
+    const discount = consultas.findIndex(q => q.includes('FROM "Discount"') && q.includes('FOR NO KEY UPDATE'))
+    const canjes = consultas.findIndex(q => q.includes('FROM "OrderDiscount" od'))
+    expect(discount).toBeGreaterThanOrEqual(0)
+    expect(canjes).toBeGreaterThan(discount)
   })
 })

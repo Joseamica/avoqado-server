@@ -232,11 +232,6 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
-    "src/services/shared/usoDelDescuento.ts#devolverUsosTrasAnular#lockExistingOrderForPayment": {
-      "count": 1,
-      "loops": 0,
-      "reason": "D24: una sola Order (la cuenta recién anulada) en su propia transacción, antes de las filas Discount; nunca Payments ni GiftCards, nunca en bucle."
-    },
     "src/jobs/giftCardReconciliation.job.ts#activarCuentaEnDb#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,

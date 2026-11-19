@@ -415,9 +415,9 @@
       "clase": "EN_TX",
       "etiqueta": "devolverUsoDelDescuentoEnTx"
     },
-    "src/services/shared/usoDelDescuento.ts#bajarContadores": {
+    "src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx": {
       "clase": "EN_TX",
-      "etiqueta": "bajarContadores"
+      "etiqueta": "devolverUsosMarcadosEnTx"
     },
     "src/services/shared/usoDelDescuento.ts#sumarUsosDeVentaEnTx": {
       "clase": "EN_TX",
@@ -959,11 +959,6 @@
       "etiqueta": "terminarVentaDeMostrador",
       "cantidad": 1,
       "nota": "D19 (encargo 5b78aa): la suma del uso de los descuentos de la venta, después del commit; su transacción sólo toma filas Discount ascendentes."
-    },
-    "src/services/shared/usoDelDescuento.ts#devolverUsosTrasAnular": {
-      "etiqueta": "devolverUsosTrasAnular",
-      "cantidad": 1,
-      "nota": "D24 (encargo ea1827): devuelve el uso del descuento de cuenta de una cuenta anulada, después del commit de la anulación; su transacción toma la cuenta y luego filas Discount ascendentes (el orden de quitar el descuento), sin turno, clienta ni tarjeta."
     },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",

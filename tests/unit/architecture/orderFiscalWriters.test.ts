@@ -791,19 +791,13 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
   },
-  // hz:e82938e1:D24: la anulación sin cobro deja «por devolver» el uso que su descuento de cuenta sumó; se devuelve tras el commit.
-  'src/services/shared/usoDelDescuento.ts#marcarUsosPorDevolverEnTx': {
+  // hz:e82938e1:D24: la anulación sin cobro devuelve el uso que su descuento de cuenta sumó y le quita la marca a la fila.
+  'src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx': {
     class: 'EXCLUDED',
     reason:
-      'only sets the bookkeeping flag usoDevueltoAlAnular on account discount rows: amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
+      'only flips the bookkeeping flag usoContado of the account discount rows (and lowers Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
     residual:
-      'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
-  },
-  'src/services/shared/usoDelDescuento.ts#devolverUsosTrasAnular': {
-    class: 'EXCLUDED',
-    reason:
-      'after the cancellation commits, lowers Discount.currentUses and flips the bookkeeping flags of the cancelled account discount rows: amount, taxReduction and reparto are untouched',
-    residual: 'its own transaction takes the Order lock first (lockExistingOrderForPayment) and rereads the status before writing',
+      'with soltarMarca runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA); without it (the empty-order sweep) it writes no OrderDiscount row',
   },
   // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
@@ -1422,8 +1416,6 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': 1,
   'src/services/promotions/promotion.service.ts#applyPromotionToOrder': 1,
   'src/services/promotions/promotion.service.ts#removePromotionFromOrder': 1,
-  // D24: la devolución del uso del descuento de cuenta tras anular (su propia transacción, después del commit).
-  'src/services/shared/usoDelDescuento.ts#devolverUsosTrasAnular': 1,
   'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': 1,
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': 1,
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems': 1,

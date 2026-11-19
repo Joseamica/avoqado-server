@@ -855,10 +855,7 @@ export async function updateOrder(
     const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
     await onOrderCancelled({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
     // Las pantallas abiertas se enteran como con `cancelOrder` (auditoría Fable 11-sep, P3-7).
-    await avisarOrdenCancelada(updatedOrder.venueId, updatedOrder.id, updatedOrder.status === 'DELETED' ? 'DELETED' : 'CANCELLED', {
-      staffId: opciones.staffId ?? null,
-      camino: 'updateOrder',
-    })
+    await avisarOrdenCancelada(updatedOrder.venueId, updatedOrder.id, updatedOrder.status === 'DELETED' ? 'DELETED' : 'CANCELLED')
   }
 
   return updatedOrder
@@ -933,10 +930,7 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
   }
 
   // Las pantallas abiertas se enteran como con `cancelOrder` (auditoría Fable 11-sep, P3-7).
-  await avisarOrdenCancelada(cancelledOrder.venueId, cancelledOrder.id, 'CANCELLED', {
-    staffId: performedBy ?? null,
-    camino: 'deleteOrder',
-  })
+  await avisarOrdenCancelada(cancelledOrder.venueId, cancelledOrder.id, 'CANCELLED')
 
   return cancelledOrder
 }
