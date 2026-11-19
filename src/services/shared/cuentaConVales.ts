@@ -53,3 +53,14 @@ export const MENSAJE_DESCUENTO_DE_VENTA_DE_VALES =
 export function rechazarSiQuitaUnDescuentoDeVale(fila: { reparto: unknown }): void {
   if (esFilaDeValeV7(fila.reparto)) throw new BadRequestError(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES, 'AREA_TICKET_DISCOUNT_FROZEN')
 }
+
+/**
+ * D15 (pizarrón hz:e82938e1:D15, 18-nov): cada descuento de la cuenta que se manda a la caja dice si quedó FIJO al cobrar los vales,
+ * con la MISMA marca que usa el candado de arriba (`esFilaDeValeV7` sobre el reparto). Mesas de la TPV y de ANDROID/WINDOWS pintan su
+ * «Quitar» en gris y explican por qué; una app vieja ignora el campo y sigue con el 400 de siempre. El `reparto` es interno: no viaja.
+ * No dice «se puede quitar»: los demás candados (abono, saldo, sin red) los sigue decidiendo el servidor al tocar.
+ */
+export function conMarcaDeVales<T extends { reparto?: unknown }>(fila: T): Omit<T, 'reparto'> & { congeladoPorVales: boolean } {
+  const { reparto, ...resto } = fila
+  return { ...resto, congeladoPorVales: esFilaDeValeV7(reparto) }
+}

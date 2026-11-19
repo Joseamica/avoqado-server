@@ -271,6 +271,9 @@ export const getCalendarQuerySchema = z.object({
   dateFrom: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
   dateTo: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
   groupBy: z.enum(['table', 'staff']).optional(),
+  // D112: el DASHBOARD pide también terminadas, «no llegó» y canceladas. Las apps del POS (ANDROID, WINDOWS, iOS) no lo
+  // mandan y siguen recibiendo sólo las activas: su agenda no reparte encimadas ni deja de ofrecer arrastrar esas.
+  allStatuses: z.enum(['1', 'true']).optional(),
 })
 
 // ---- Body Schemas ----
