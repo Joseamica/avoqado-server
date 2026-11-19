@@ -1,4 +1,4 @@
-import { dondeHoraRealEntre, SIN_TOPE_DESPUES } from '@/services/shared/horaRealDelAparato'
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { TransactionStatus } from '@prisma/client'
@@ -167,7 +167,7 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
           where: dondeHoraRealEntre(
             { ...base, status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS },
             start,
-            SIN_TOPE_DESPUES,
+            null, // como antes: sólo «desde»
           ),
           _sum: { amount: true },
           _count: { _all: true },

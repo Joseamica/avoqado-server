@@ -93,7 +93,8 @@ export async function listarDescuentosAplicados(
     prisma.orderDiscount.count({ where: dondeLista }),
     prisma.orderDiscount.findMany({
       where: dondeLista,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      // La lista va por la llegada de la cuenta (como las listas); sin red, a lo más lo que tardó en subir.
+      orderBy: [{ order: { createdAt: 'desc' } }, { createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {
@@ -105,7 +106,7 @@ export async function listarDescuentosAplicados(
         amount: true,
         reason: true,
         reasonComment: true,
-        order: { select: { orderNumber: true, clientCreatedAt: true } },
+        order: { select: { orderNumber: true, createdAt: true, clientCreatedAt: true } },
         appliedBy: { select: { staff: { select: { firstName: true, lastName: true } } } },
         authorizedBy: { select: { staff: { select: { firstName: true, lastName: true } } } },
       },
@@ -124,8 +125,8 @@ export async function listarDescuentosAplicados(
     motivosRecortados: grupos.length > MOTIVOS_MAXIMOS,
     rows: filas.map(f => ({
       id: f.id,
-      // D4: la fecha de la venta, la misma que filtra el periodo (sin red, la del aparato; su renglón nace con la llegada).
-      createdAt: f.order?.clientCreatedAt ?? f.createdAt,
+      // D4: la fecha de la VENTA, la misma que filtra el periodo (sin red, la del aparato).
+      createdAt: f.order ? (f.order.clientCreatedAt ?? f.order.createdAt) : f.createdAt,
       orderId: f.orderId,
       orderNumber: f.order?.orderNumber ?? null,
       name: f.name,

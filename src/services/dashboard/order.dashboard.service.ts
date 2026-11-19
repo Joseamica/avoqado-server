@@ -763,9 +763,12 @@ export async function updateOrder(
           ...(servedById !== undefined && { servedById: camposEditados.servedById }),
           ...(createdAt !== undefined && { createdAt: camposEditados.createdAt }),
           // D4: quien CORRIGE la fecha decide el día de la venta; la hora del aparato deja de mandar en los reportes (si no, la
-          // venta sin red quedaba fuera del día viejo y del nuevo).
+          // venta sin red quedaba fuera del día viejo y del nuevo). Se compara por MINUTO: el formulario del DASHBOARD reenvía la
+          // fecha recortada a minutos en cada guardado, y eso no es corregirla.
           ...(camposEditados.createdAt &&
-            camposEditados.createdAt.getTime() !== currentOrder.createdAt.getTime() && { clientCreatedAt: null }),
+            Math.floor(camposEditados.createdAt.getTime() / 60_000) !== Math.floor(currentOrder.createdAt.getTime() / 60_000) && {
+              clientCreatedAt: null,
+            }),
           ...(orderNumber !== undefined && { orderNumber: camposEditados.orderNumber }),
           ...(type !== undefined && { type: camposEditados.type }),
           ...(status === 'COMPLETED' && { completedAt: new Date() }),

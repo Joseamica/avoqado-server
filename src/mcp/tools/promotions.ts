@@ -1,3 +1,4 @@
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
@@ -84,19 +85,13 @@ export function registerPromotionTools(server: McpServer, scope: McpScope) {
       // El día es el del NEGOCIO, no el del servidor.
       const soldTodayByPromotion = new Map<string, number>()
       if (active.length > 0) {
-        const inicioDeHoy = venueStartOfDay(tz)
-        const finDeHoy = venueEndOfDay(tz)
         const grouped = await prisma.orderPromotion.groupBy({
           by: ['promotionId'],
           where: {
             promotionId: { in: active.map(p => p.id) },
-            order: { venueId, status: { not: 'CANCELLED' } },
-            // D4: lo vendido con red cuenta por la hora de su renglón, como siempre; lo vendido sin red, por la hora del aparato
-            // (su renglón nace con la llegada).
-            OR: [
-              { order: { clientCreatedAt: { gte: inicioDeHoy, lte: finDeHoy } } },
-              { order: { clientCreatedAt: null }, createdAt: { gte: inicioDeHoy, lte: finDeHoy } },
-            ],
+            // D4: el día de la CUENTA (su hora real), como el reporte de Promociones, PMIX y Ventas por artículo. Antes contaba la hora
+            // de su renglón, que nace con la llegada: lo vendido sin internet caía en el día en que se subió.
+            order: dondeHoraRealEntre({ venueId, status: { not: 'CANCELLED' as const } }, venueStartOfDay(tz), venueEndOfDay(tz)),
           },
           _count: { _all: true },
         })

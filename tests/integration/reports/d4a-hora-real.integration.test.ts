@@ -5,7 +5,9 @@
  * Negocio A (fechas fijas, CDMX): la Playera S vendida sin internet a las 23:50 del 11 y subida a las 00:10 del 12 guarda `createdAt` =
  * 00:10 (la llegada) y `clientCreatedAt` = 23:50, en la orden y en su cobro. Lleva un combo, un descuento y un extra: sale el 11 en
  * Promociones, Descuentos aplicados, PMIX, uso de extras, los reportes históricos de la TPV y `product_variants`; el 12 no.
- * Negocio B (relativo a «ahora»): `today_overview`, `sales_comparison`, `revenue_by_venue` y `promotion_status`.
+ * Negocio B (relativo a «ahora», que la prueba fija a las 12:00 del 18 en CDMX para no depender de la hora en que corre):
+ * `today_overview`, `sales_comparison`, `revenue_by_venue` y `promotion_status`. Regla de toda la fase: lo de una cuenta cuenta en el día
+ * de la cuenta (su hora real), como Promociones, PMIX y Ventas por artículo.
  * Variación de costo se queda a propósito con la llegada: su lado real son movimientos de inventario fechados a la llegada.
  *
  *   TEST_DATABASE_URL='postgresql://…/<base desechable>' npx jest --selectProjects integration --testPathPattern d4a-hora-real
@@ -38,6 +40,7 @@ const PLAYERA_DEL_APARATO = new Date('2026-11-12T05:50:00.000Z') // 23:50 del 11
 const PLAYERA_LLEGADA = new Date('2026-11-12T06:10:00.000Z') // 00:10 del 12
 const JUGO = new Date('2026-11-12T16:00:00.000Z') // 10:00 del 12, con red
 const HORA = 60 * 60 * 1000
+const AHORA = new Date('2026-11-18T18:00:00.000Z') // 12:00 del 18 en CDMX: sólo el reloj (Date) es falso, los timers son reales
 const dia = (d: Date | string) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(d))
 
@@ -50,6 +53,7 @@ let venueB: string
 let tallaS: string
 let promoA: string
 let promoB: string
+let promoC: string
 let extra: string
 let ed: string
 let seq = 0
@@ -139,6 +143,22 @@ async function venta(p: {
 }
 
 beforeAll(async () => {
+  jest.useFakeTimers({
+    now: AHORA,
+    advanceTimers: true,
+    doNotFake: [
+      'hrtime',
+      'nextTick',
+      'performance',
+      'queueMicrotask',
+      'setImmediate',
+      'clearImmediate',
+      'setInterval',
+      'clearInterval',
+      'setTimeout',
+      'clearTimeout',
+    ],
+  })
   n = await crearNegocio('d4a-hora-real')
   await prisma.venue.update({ where: { id: n.venueId }, data: { timezone: TZ } })
   venueB = (
@@ -196,19 +216,31 @@ beforeAll(async () => {
     conExtra: true,
   })
   await venta({ venueId: n.venueId, productId: jugo.id, nombre: 'Jugo', monto: 30, llegada: JUGO })
-  // Ed: sin internet a las 23:50 del 13, subida a las 00:10 del 14; luego un superadmin corrige su fecha al 15.
+  // Ed: sin internet a las 23:50 del 13, subida a las 00:10:43 del 14; luego un superadmin corrige su fecha al 15.
   ed = await venta({
     venueId: n.venueId,
     productId: null,
     nombre: 'Ed',
     monto: 20,
-    llegada: new Date('2026-11-14T06:10:00.000Z'),
+    llegada: new Date('2026-11-14T06:10:43.252Z'),
     delAparato: new Date('2026-11-14T05:50:00.000Z'),
   })
+  // Borde del comparativo histórico: Té con red en el ÚLTIMO milisegundo del 9; Pan con red el 10.
+  await venta({ venueId: n.venueId, productId: null, nombre: 'Té', monto: 2, llegada: new Date('2026-11-10T05:59:59.999Z') })
+  await venta({ venueId: n.venueId, productId: null, nombre: 'Pan', monto: 4, llegada: new Date('2026-11-10T18:00:00.000Z') })
+  // Una venta fechada a futuro (a mano), con el extra: un rango con sólo «desde» la alcanza, como antes.
+  await venta({
+    venueId: n.venueId,
+    productId: null,
+    nombre: 'Futuro',
+    monto: 3,
+    llegada: new Date('2030-01-01T18:00:00.000Z'),
+    conExtra: true,
+  })
 
-  // Negocio B, relativo a ahora: X con red hace 2 h; Y sin internet hace 25 h, subida hace 23 h; Z sin internet poco antes de que
-  // empezara HOY (y dentro de las últimas 24 h, aunque la prueba corra a las 23:59), subida 1 s después (con la llegada, Z era de
-  // hoy); W con red, una mesa abierta ayer a la misma hora que Z a la que HOY le agregaron el combo, sin cobrar todavía.
+  // Negocio B, relativo a ahora: X con red hace 2 h; Y sin internet hace 25 h, subida hace 23 h; Z sin internet 10 min antes de que
+  // empezara HOY, subida 1 s después (con la llegada, Z era de hoy); W con red, una mesa abierta ayer a la misma hora que Z a la que
+  // HOY le agregaron el combo B; V con red, una cuenta de hoy con el combo C. W y V sin cobrar todavía.
   promoB = (
     await prisma.promotion.create({
       data: { venueId: venueB, name: 'Combo B', type: 'COMBO', pricingMode: 'FIXED_TOTAL', status: 'PUBLISHED' } as never,
@@ -217,7 +249,7 @@ beforeAll(async () => {
   ).id
   const ahora = Date.now()
   const inicioDeHoy = venueStartOfDay(TZ).getTime()
-  const antesDeHoy = Math.min(10 * 60 * 1000, (24 * HORA - (ahora - inicioDeHoy)) / 2)
+  const antesDeHoy = 10 * 60 * 1000
   await venta({ venueId: venueB, productId: null, nombre: 'X', monto: 10, llegada: new Date(ahora - 2 * HORA) })
   await venta({
     venueId: venueB,
@@ -244,6 +276,21 @@ beforeAll(async () => {
     llegada: new Date(inicioDeHoy - antesDeHoy),
     renglonDelCombo: new Date(inicioDeHoy + 1000),
     promocion: promoB,
+    sinCobro: true,
+  })
+  promoC = (
+    await prisma.promotion.create({
+      data: { venueId: venueB, name: 'Combo C', type: 'COMBO', pricingMode: 'FIXED_TOTAL', status: 'PUBLISHED' } as never,
+      select: { id: true },
+    })
+  ).id
+  await venta({
+    venueId: venueB,
+    productId: null,
+    nombre: 'V',
+    monto: 8,
+    llegada: new Date(ahora - HORA),
+    promocion: promoC,
     sinCobro: true,
   })
 
@@ -279,6 +326,7 @@ afterAll(async () => {
   if (venueB) await prisma.venue.deleteMany({ where: { id: venueB } })
   await n?.limpiar()
   await prisma.$disconnect()
+  jest.useRealTimers()
 })
 
 describe('D4a · reportes del negocio a la hora real', () => {
@@ -320,8 +368,9 @@ describe('D4a · reportes del negocio a la hora real', () => {
     expect(u11.find(u => u.modifierId === extra)?.timesUsed).toBe(1)
     const u12 = await getModifierUsageStats(n.venueId, { startDate: DIA_12.from, endDate: DIA_12.to })
     expect(u12.find(u => u.modifierId === extra)).toBeUndefined()
-    // Con un solo extremo también: desde el 12 ya no está.
-    expect((await getModifierUsageStats(n.venueId, { startDate: DIA_12.from })).find(u => u.modifierId === extra)).toBeUndefined()
+    // Con sólo «desde» el 12: la Playera ya no (es del 11) y el otro extremo sigue abierto, como antes: entra la de 2030.
+    // Con la llegada serían 2; con un tope en «ahora», ninguna.
+    expect((await getModifierUsageStats(n.venueId, { startDate: DIA_12.from })).find(u => u.modifierId === extra)?.timesUsed).toBe(1)
   })
 
   it('reportes históricos de la TPV: el 11 suma $150 en 2 órdenes; el 12, $30', async () => {
@@ -333,12 +382,21 @@ describe('D4a · reportes del negocio a la hora real', () => {
     // Pidiendo sólo el 12, su comparativo es el 11 completo ($150, con la Playera): -80 %. Con la llegada, $100 y -70 %.
     const s12 = await getHistoricalSummaries(n.venueId, HistoricalGrouping.DAILY, DIA_12.from, DIA_12.to, undefined, 10)
     expect(s12.periods[0].salesChange).toBeCloseTo(-80, 5)
+    // El comparativo del 10 incluye el último milisegundo del 9 (Té, $2): +100 %. Sin él, no habría con qué comparar (null).
+    const s10 = await getHistoricalSummaries(
+      n.venueId,
+      HistoricalGrouping.DAILY,
+      new Date('2026-11-10T06:00:00.000Z'),
+      new Date('2026-11-11T05:59:59.999Z'),
+      undefined,
+      10,
+    )
+    expect(s10.periods.map(p => [dia(p.periodStart), p.totalSales, p.salesChange])).toEqual([['2026-11-10', 4, 100]])
   })
 
   it('corregir la fecha a mano manda: la venta sin red pasa al día nuevo (antes no salía en ninguno)', async () => {
-    const llegada = new Date('2026-11-14T06:10:00.000Z')
-    // Reenviar la MISMA fecha (D70) no toca la hora del aparato.
-    await updateOrder(n.venueId, ed, { createdAt: llegada } as never)
+    // Reenviarla recortada a minutos, como el formulario del DASHBOARD en cada guardado, no es corregirla: no toca la hora del aparato.
+    await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10:00.000Z', customerName: 'Ed' } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toEqual(new Date('2026-11-14T05:50:00.000Z'))
     await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T18:00:00.000Z') } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toBeNull()
@@ -395,13 +453,15 @@ describe('D4a · herramientas de IA relativas a hoy', () => {
     const r = await ia('revenue_by_venue', { days: 1 })
     const filaB = r.venues.find((v: { venueId: string }) => v.venueId === venueB)
     expect(filaB.gross).toBeCloseTo(10 + 7, 2) // con la llegada, 67
+    // Sólo «desde», como antes: lo fechado a futuro también entra (negocio A: la de 2030, $3; con un tope en «ahora», 0).
+    expect(r.venues.find((v: { venueId: string }) => v.venueId === n.venueId).gross).toBeCloseTo(3, 2)
   })
 
-  it('promotion_status: el combo de Z (de ayer, subido hoy) no cuenta hoy; el de W (con red, agregado hoy a una mesa de ayer) sí', async () => {
+  it('promotion_status cuenta en el día de la cuenta: Z y W (cuentas de ayer) no son de hoy; V sí', async () => {
     const r = await ia('promotion_status', { venueId: venueB })
-    const combo = r.activeNow.find((p: { id: string }) => p.id === promoB)
-    expect(combo).toBeDefined()
-    // Con la llegada contaban los dos (2); con el día de la orden, ninguno (0). Lo hecho con red no cambia: W cuenta por su renglón.
-    expect(combo.soldToday).toBe(1)
+    const vendidos = (id: string) => r.activeNow.find((p: { id: string }) => p.id === id)?.soldToday
+    // Por la hora del renglón (antes): B = 2 (Z y W se subieron o agregaron hoy). Por el día de la cuenta, como Promociones: 0.
+    expect(vendidos(promoB)).toBe(0)
+    expect(vendidos(promoC)).toBe(1)
   })
 })
