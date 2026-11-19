@@ -32,6 +32,8 @@ const CIERRE = 'cierreAutomaticoPermitido('
 const PROPIA = '.order.create('
 // S9 v5 (R12, B3): todo escritor que deja dinero en la cuenta de un folio deja la NOTA (aviso una vez por folio y renovación).
 const NOTA = 'notarDineroEnFolioCerradoEnTx('
+// hz:e82938e1:D26: quien reabre con `usosDelDescuentoDespues` (el POS, que reclama su turno después) vuelve a gastar él los usos.
+const USOS = 'volverAGastarUsosAlRevivirEnTx('
 const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, string]> }> = {
   // Tarea A7: el `payment.create` vive en el núcleo extraído; las reglas de cuenta cancelada se movieron con él, intactas.
   'services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
@@ -43,6 +45,7 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
       ['registrarAbonoEnTx', REABRE],
       ['registrarAbonoEnTx', CIERRE],
       ['registrarAbonoEnTx', NOTA],
+      ['registrarAbonoEnTx', USOS],
     ],
   },
   'services/tpv/payment.tpv.service.ts#recordOrderPayment': {

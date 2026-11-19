@@ -427,6 +427,10 @@
       "clase": "EN_TX",
       "etiqueta": "tomarFilas"
     },
+    "src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "volverAGastarUsosDeCuentaRevividaEnTx"
+    },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",
       "etiqueta": "deleteOrRetainStaffWithH1ProvenanceTx"
@@ -1037,6 +1041,10 @@
     },
     "src/services/shared/cuponDeLaVenta.ts#finalizeCouponsForOrder": {
       "etiqueta": "finalizeCouponsForOrder",
+      "cantidad": 1
+    },
+    "src/services/shared/cuentaCancelada.ts#volverAGastarUsosTrasElCobro": {
+      "etiqueta": "volverAGastarUsosTrasElCobro",
       "cantidad": 1
     },
     "src/services/shared/puntosAlReembolsar.ts#quitarPuntosPorReembolso": {

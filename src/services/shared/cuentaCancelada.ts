@@ -12,9 +12,11 @@ import logger from '@/config/logger'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES } from '@/services/online-ordering/constants'
 import { FOLIO_PAID_STATUSES, claseDeEstado, estadoAlRecibirDinero, impuestoQueSeCobraAparte } from './orderBalance'
-import { lockExistingOrderForPayment } from './paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from './paymentShiftClaim'
 import { bloquearVentaParaLiga } from './ligaDeClienteEnVenta'
 import { MOTIVO_BENEFICIO_REGRESADO, sellarFolioAnuladoEnTx } from '@/services/online-ordering/cortesiaDeFolio'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
+import { volverAGastarUsosDeCuentaRevividaEnTx } from './usoDelDescuento'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
 export const MENSAJE_CUENTA_CANCELADA = 'Esta cuenta está cancelada, abre una nueva.'
@@ -222,10 +224,12 @@ const LO_QUE_LEE_LA_CONCILIACION = {
  * llama, y deja rastro: cambia un resultado firmado. Devuelve el estado con el que quien llama calcula y guarda. CALLER_LOCKED.
  * La bitácora va con el `tx` a propósito (preflight R-6): auditoría atómica de un resultado firmado, no `logAction`.
  * Pedidos en línea 1c (S1): si la cuenta es de un pedido web, también lo concilia, con el MISMO `tx` (`conciliarPedidoEnLinea`).
- * La firma y el retorno no cambian (Codex plan r1 #13: la TPV usa el retorno como estado).
+ * El retorno no cambia (Codex plan r1 #13: la TPV usa el retorno como estado).
+ * 🔴 hz:e82938e1:D26: al revivir, las filas que devolvieron su uso al anular (D24) lo vuelven a gastar en esta misma transacción
+ * (`volverAGastarUsosDeCuentaRevividaEnTx`): por eso pide el `tx` con reintento por trabas (escribe `Discount`).
  */
 export async function reabrirSiRecibeDinero(
-  tx: Pick<Prisma.TransactionClient, 'order' | 'activityLog' | 'onlineOrder' | 'staffVenue' | 'notification'>,
+  tx: TxConReintento,
   a: {
     venueId: string
     orderId: string
@@ -239,6 +243,11 @@ export async function reabrirSiRecibeDinero(
     paymentId?: string | null
     idempotencyKey?: string | null
     staffId?: string | null
+    /**
+     * D26 (Codex r1 #1): `true` ⇒ quien llama vuelve a gastar los usos del descuento DESPUÉS de reclamar su turno
+     * (`volverAGastarUsosAlRevivirEnTx`), porque el orden de candados del cobro es … → Shift → Discount. El POS reabre antes del turno.
+     */
+    usosDelDescuentoDespues?: boolean
   },
 ): Promise<OrderStatus> {
   const estado = estadoParaCobrar(a, a.cobrado, a.cubreComoCancelada)
@@ -273,8 +282,47 @@ export async function reabrirSiRecibeDinero(
     orderId: a.orderId,
     ...datos,
   })
+  // D26: la TPV y el panel ya reclamaron su turno (… → Shift → Discount); el POS lo hace él después del suyo.
+  if (!a.usosDelDescuentoDespues) await volverAGastarUsosAlRevivirEnTx(tx, a)
   if (reabierta?.onlineOrder) await conciliarPedidoEnLinea(tx, a, estado, reabierta)
   return estado
+}
+
+/**
+ * 🔴 hz:e82938e1:D26 (encargo 2f1901): la cuenta que `reabrirSiRecibeDinero` acaba de sacar de CANCELADA vuelve a gastar los usos que su
+ * anulación devolvió (D24), en la transacción del dinero, y deja `ORDER_REOPENED_DISCOUNT_USES_RESPENT` si gastó alguno. Lo llama
+ * `reabrirSiRecibeDinero`, o quien la llamó con `usosDelDescuentoDespues` en cuanto tiene su turno: Order → … → Shift → Discount, el
+ * mismo orden en el POS, la TPV y el panel (Codex r1 #1: el POS tomaba Discount antes del turno y la TPV al revés). Sólo después de
+ * una reapertura: la marca se suelta, así que llamarla otra vez no gasta nada.
+ */
+export async function volverAGastarUsosAlRevivirEnTx(
+  tx: TxConReintento,
+  a: { venueId: string; orderId: string; canal: string; paymentId?: string | null; staffId?: string | null },
+): Promise<number> {
+  const gastados = await volverAGastarUsosDeCuentaRevividaEnTx(tx, {
+    venueId: a.venueId,
+    orderId: a.orderId,
+    canal: a.canal,
+    quien: a.staffId ?? null,
+  })
+  if (gastados.usos === 0) return 0
+  await tx.activityLog.create({
+    data: {
+      action: 'ORDER_REOPENED_DISCOUNT_USES_RESPENT',
+      entity: 'Order',
+      entityId: a.orderId,
+      venueId: a.venueId,
+      staffId: a.staffId ?? null,
+      data: { canal: a.canal, paymentId: a.paymentId ?? null, usosGastados: gastados.usos, porDescuento: gastados.porDescuento },
+    },
+  })
+  logger.info('🏷️ [Cobro capturado] la cuenta revivida volvió a gastar los usos de su descuento de cuenta', {
+    venueId: a.venueId,
+    orderId: a.orderId,
+    canal: a.canal,
+    ...gastados,
+  })
+  return gastados.usos
 }
 
 /**
@@ -691,4 +739,37 @@ export async function notarDineroEnFolioCerradoEnTx(
     cortesia,
     sigueCancelada: claseDeEstado(cuenta?.status ?? '') === 'CANCELADA',
   })
+}
+
+/**
+ * hz:e82938e1:D26: lo mismo que `volverAGastarUsosAlRevivirEnTx`, en su propia transacción corta DESPUÉS del commit del cobro, para la
+ * TPV (`recordOrderPayment`): su transacción no se reintenta y ya tiene el turno, y tomar `Discount` ahí (Shift → Discount) se cruzaba con
+ * la anulación (Discount → … → Shift). Aquí: Order → Discount, con reintento por trabas, como el cupón (`finalizeCouponsForOrder`) y el
+ * Mostrador (D19). Idempotente (la marca se suelta en la misma escritura) y nunca lanza: el cobro ya quedó. Si el proceso muere entre los
+ * dos commits, el contador queda como antes de D26 (uno abajo), lo mismo que el Mostrador acepta en D19.
+ */
+export async function volverAGastarUsosTrasElCobro(a: {
+  venueId: string
+  orderId: string
+  canal: string
+  paymentId?: string | null
+  staffId?: string | null
+}): Promise<void> {
+  try {
+    await withDeadlockRetry(
+      async tx => {
+        if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return
+        await volverAGastarUsosAlRevivirEnTx(tx, a)
+      },
+      { etiqueta: 'volverAGastarUsosTrasElCobro', ...ORDER_LOCK_WAIT_BUDGET },
+    )
+  } catch (error) {
+    logger.error('🚨 [D26] No se volvieron a gastar los usos del descuento de una cuenta revivida (el cobro sí quedó)', {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      canal: a.canal,
+      paymentId: a.paymentId ?? null,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }

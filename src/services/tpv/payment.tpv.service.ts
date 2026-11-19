@@ -417,6 +417,7 @@ import {
   estadoParaCobrar,
   notarDineroEnFolioCerradoEnTx,
   reabrirSiRecibeDinero,
+  volverAGastarUsosTrasElCobro,
   rechazarCobroNuevoSobreCancelada,
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
@@ -1441,6 +1442,12 @@ export async function settleStandalonePaymentInTx(
   efectosDeCierre = true,
   /** La hora capturada del cobro de la cola (`horaDeLaVentaDeLaCola`); si salda, `loyaltySaleAt` junto con `loyaltyEligibleAt`. */
   horaCapturada?: Date,
+  /**
+   * hz:e82938e1:D26: `true` ⇒ esta transacción NO toca `Discount`; si reabre una anulada, quien llama vuelve a gastar los usos de su
+   * descuento después del commit (`volverAGastarUsosTrasElCobro`). Lo usa `recordOrderPayment`, cuya transacción no se reintenta y ya
+   * tiene el turno (Codex D26 r1 #1 y r2 #1: Shift → Discount ahí se cruzaba con la anulación, que toma Discount antes del turno).
+   */
+  usosDelDescuentoDespues = false,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1477,6 +1484,7 @@ export async function settleStandalonePaymentInTx(
           canal: 'recordOrderPayment',
           paymentId: payment.id ?? null,
           staffId: staffId ?? null,
+          usosDelDescuentoDespues,
         })
   // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
   // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
@@ -4485,6 +4493,8 @@ export async function recordOrderPayment(
             marcarCocina,
             true,
             horaCapturada,
+            // D26: los usos del descuento de una cuenta revivida se gastan después del commit (esta transacción no se reintenta).
+            true,
           )
         }
 
@@ -4742,6 +4752,18 @@ export async function recordOrderPayment(
     })
     // D10-B: el efectivo de la terminal sobre una venta con otra tarjeta en duda. Con tarjeta sale sin consultar nada.
     void avisarEfectivoConTarjetaEnDuda(payment)
+  }
+
+  // 🔴 hz:e82938e1:D26: la cuenta anulada que este cobro revivió vuelve a gastar los usos de su descuento que la anulación devolvió, en
+  // su propia transacción corta (Order → Discount, con reintento), como el cupón y el Mostrador. Nunca tumba ni demora el cobro: ya quedó.
+  if (committedStandaloneSettlement?.reabiertaDeCancelada) {
+    await volverAGastarUsosTrasElCobro({
+      venueId,
+      orderId: activeOrder.id,
+      canal: 'recordOrderPayment',
+      paymentId: payment.id,
+      staffId: validatedStaffId ?? null,
+    })
   }
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).

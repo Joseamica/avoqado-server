@@ -251,6 +251,11 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
       { staffId, data: expect.objectContaining({ canal: 'payCashOrder:cola', usosGastados: 1, porDescuento: { [promoId]: 1 } }) },
     ])
     expect(await sobreTope(orderId)).toEqual([])
+
+    // La cola reenvía el mismo cobro (la respuesta se perdió): la llave lo devuelve como ya hecho y no gasta otro uso.
+    await payCashOrder(venueId, orderId, { amount: 9000, tip: 0, staffId, idempotencyKey: `cola-${orderId}`, isOfflineReplay: true } as any)
+    expect(await usos()).toBe(antes + 1)
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
   })
 
   it('el punto único (`reabrirSiRecibeDinero`, el mismo de la TPV y del panel): revive y vuelve a gastar; otra anulación lo devuelve otra vez', async () => {
