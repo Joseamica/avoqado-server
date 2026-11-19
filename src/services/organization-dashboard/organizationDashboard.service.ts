@@ -32,7 +32,13 @@ import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
-import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
+import {
+  dondeHoraRealEntre,
+  MARGEN_DE_LECTURA_ANTES_MS,
+  MARGEN_DE_LECTURA_MS,
+  sqlHoraReal,
+  sqlRangoHoraRealSql,
+} from '../shared/horaRealDelAparato'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
 import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
@@ -2286,42 +2292,32 @@ class OrganizationDashboardService {
     // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
     // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web, liga)
     // no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
+    // D4c (Codex 4c r2 #2 y r5 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el
+    // día. Las mismas ventas a la hora de LLEGADA (como antes de D4c, `amountAtArrival`) deciden también quién aparece: así sigue la cajera
+    // sin checada cuya venta sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un gerente que sólo
+    // devolvió efectivo de la venta de otro). Las dos sumas salen de UNA consulta: un cobro que se confirma a media petición cae en las dos
+    // o en ninguna. El rango de llegada [inicio, fin] cabe dentro del ensanchado de la hora real.
+    const horaReal = Prisma.raw(sqlHoraReal('p'))
     const salesData =
       venueIds.length === 0
         ? []
-        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
+        : await prisma.$queryRaw<
+            Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null; amountAtArrival: Prisma.Decimal | null }>
+          >`
             SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
                    p."venueId" AS "venueId",
-                   SUM(p."amount") AS "amount"
+                   SUM(p."amount") FILTER (WHERE ${horaReal} >= ${utcTs(dayStart)} AND ${horaReal} <= ${utcTs(dayEnd)}) AS "amount",
+                   SUM(p."amount") FILTER (WHERE p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}) AS "amountAtArrival"
             FROM "Payment" p
             ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
             WHERE p."venueId" IN (${Prisma.join(venueIds)})
-              AND ${sqlRangoHoraRealSql('p', dayStart, dayEnd)}
+              AND p."createdAt" >= ${utcTs(dayStart)} - ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_ANTES_MS / 3600000} hours'`)}
+              AND p."createdAt" <= ${utcTs(dayEnd)} + ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_MS / 3600000} hours'`)}
               AND p."status" = 'COMPLETED'
               AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
             GROUP BY 1, 2
           `
-
-    // D4c (Codex 4c r2 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el día. Las
-    // mismas ventas a la hora de LLEGADA (como antes de D4c) deciden también quién aparece: así sigue la cajera sin checada cuya venta
-    // sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un gerente que sólo devolvió efectivo
-    // de la venta de otro).
-    const salesDataPorLlegada =
-      venueIds.length === 0
-        ? []
-        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
-            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
-                   p."venueId" AS "venueId",
-                   SUM(p."amount") AS "amount"
-            FROM "Payment" p
-            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
-            WHERE p."venueId" IN (${Prisma.join(venueIds)})
-              AND p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}
-              AND p."status" = 'COMPLETED'
-              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
-            GROUP BY 1, 2
-          `
-    const ventasPorLlegada = new Map(salesDataPorLlegada.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amount) || 0]))
+    const ventasPorLlegada = new Map(salesData.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amountAtArrival) || 0]))
 
     // Get CASH-only sales per staff (for deposit verification)
     const cashSalesData = await prisma.payment.groupBy({
