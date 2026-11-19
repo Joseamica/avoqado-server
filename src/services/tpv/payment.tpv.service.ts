@@ -421,6 +421,7 @@ import {
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
+import { apartarDescuentosQueVolveriaAGastarEnTx } from '../shared/usoDelDescuento'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -4043,6 +4044,17 @@ export async function recordOrderPayment(
             'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
             'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
           )
+        }
+        // 🔴 hz:e82938e1:D26 (Codex r2 #1, r3): si esta cuenta está anulada y el cobro la revive, su cierre vuelve a gastar los usos que la
+        // anulación devolvió. Esas filas `Discount` se APARTAN aquí, recién tomada la cuenta y antes del turno: Order → Discount → … →
+        // Shift, el orden de la anulación. Esta transacción no se reintenta (excepción R63 b): sin esto tomaba Discount ya con el turno y
+        // podía trabarse con una anulación que espera ese turno. Sólo si ya venía anulada (una cuenta viva no tiene filas marcadas, y así
+        // ningún cobro normal paga la consulta) y sólo con dinero capturado (COMPLETED es lo único que llega al cierre que gasta; Codex r4
+        // #3). Residuo declarado (Codex r4 #1-#2): una anulación que entra entre la lectura de arriba y este candado, o la venta de $0 de la
+        // TPV (que ya tomaba Shift → Discount, `order.tpv.service.ts`), pueden trabarse con este cierre; la víctima es esta transacción y,
+        // como en toda traba de este cuerpo (R63 b), la terminal reenvía el cobro con su llave. Nada queda a medias: se revierte entero.
+        if (paymentStatusSnapshot === 'COMPLETED' && claseDeEstado(activeOrder.status) === 'CANCELADA') {
+          await apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, venueId, activeOrder.id)
         }
 
         await tx.$executeRawUnsafe('SAVEPOINT exchange_sale_policy')

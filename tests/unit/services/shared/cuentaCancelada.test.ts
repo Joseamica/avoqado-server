@@ -50,7 +50,12 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
     ])
   })
 
-  const txDoble = () => ({ order: { update: jest.fn().mockResolvedValue({}) }, activityLog: { create: jest.fn().mockResolvedValue({}) } })
+  // D26: la reapertura busca las filas que devolvieron su uso al anular; aquí no hay ninguna.
+  const txDoble = () => ({
+    order: { update: jest.fn().mockResolvedValue({}) },
+    activityLog: { create: jest.fn().mockResolvedValue({}) },
+    orderDiscount: { findMany: jest.fn().mockResolvedValue([]) },
+  })
   it('🔴 dinero ya capturado sobre una cancelada de Avoqado ⇒ la reabre (PENDING) y deja UNA bitácora con el estado anterior, el canal y el cobro', async () => {
     const tx = txDoble()
     expect(
@@ -82,6 +87,22 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
         cobrado: '116.00',
       },
     })
+  })
+  it('🔴 D26: al revivir busca, en la misma transacción, los usos que la anulación devolvió; sin filas, sólo la bitácora de la reapertura', async () => {
+    const tx = txDoble()
+    await reabrirSiRecibeDinero(tx as any, {
+      venueId: 'v',
+      orderId: 'o',
+      status: 'CANCELLED',
+      originSystem: 'AVOQADO',
+      cobrado: 90,
+      cubreComoCancelada: false,
+      canal: 'payCashOrder:cola',
+    })
+    expect(tx.orderDiscount.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ orderId: 'o', usoDevueltoAlAnular: true }) }),
+    )
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
   })
   it('control: una viva, una cancelada sin dinero, o una cancelada EXTERNA que no cubre lo que debía (Codex r12 #5) no escriben nada', async () => {
     for (const [status, originSystem, cobrado] of [

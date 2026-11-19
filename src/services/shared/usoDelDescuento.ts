@@ -31,7 +31,7 @@ import { descuentoSinUsos } from './discount.service'
 const APARTADO_DEL_CUPON = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
 type FilaDelContador = { id: string; name: string; currentUses: number; maxTotalUses: number | null }
-type Camino = 'mesa' | 'mostrador'
+type Camino = 'mesa' | 'mostrador' | 'reapertura'
 
 /** Las filas `Discount`, tomadas en UNA pasada por id ascendente (`FOR NO KEY UPDATE`, el modo del UPDATE del contador). */
 async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): Promise<FilaDelContador[]> {
@@ -59,8 +59,10 @@ async function avisarSiPasoDelTopeEnTx(
     usos: number
     tope: number | null
     camino: Camino
-    sinRed: boolean
+    /** `null`: no se sabe (la reapertura llega por varios canales; va el canal en `canal`). */
+    sinRed: boolean | null
     quien?: string | null
+    canal?: string
   },
 ): Promise<boolean> {
   if (v.tope == null || v.usos <= v.tope) return false
@@ -79,6 +81,7 @@ async function avisarSiPasoDelTopeEnTx(
       camino: v.camino,
       sinRed: v.sinRed,
       subidaPor: v.quien ?? null,
+      ...(v.canal ? { canal: v.canal } : {}),
     },
   })
   return true
@@ -235,4 +238,86 @@ export async function devolverUsosDeCuentaAnuladaEnTx(
 ): Promise<{ usos: number; porDescuento: Record<string, number> }> {
   const usos = await devolverUsosMarcadosEnTx(tx, venueId, orderId, { soltarMarca: true })
   return { usos: sumar(usos), porDescuento: Object.fromEntries(usos) }
+}
+
+/** Las filas de la cuenta que devolvieron su uso al anular (D24), contadas por descuento (por páginas, sin tope que deje usos fuera). */
+async function usosDevueltosAlAnular(tx: TxConReintento, venueId: string, orderId: string): Promise<Map<string, number>> {
+  const usos = new Map<string, number>()
+  for (let despues: string | null = null; ; ) {
+    // `?? []` como en `tomarFilas`: un doble de prueba sin la tabla contesta `undefined`, que es «ninguna fila».
+    const pagina: Array<{ id: string; discountId: string | null }> =
+      (await tx.orderDiscount.findMany({
+        where: { ...devueltasAlAnular(venueId, orderId), ...(despues ? { id: { gt: despues } } : {}) },
+        select: { id: true, discountId: true },
+        orderBy: { id: 'asc' },
+        take: PAGINA,
+      })) ?? []
+    for (const f of pagina) usos.set(f.discountId!, (usos.get(f.discountId!) ?? 0) + 1)
+    if (pagina.length < PAGINA) break
+    despues = pagina[pagina.length - 1].id
+  }
+  return usos
+}
+
+const devueltasAlAnular = (venueId: string, orderId: string) =>
+  ({ orderId, order: { venueId }, usoDevueltoAlAnular: true, discountId: { not: null } }) satisfies Prisma.OrderDiscountWhereInput
+
+/**
+ * hz:e82938e1:D26 (Codex r2 #1, r3): la TPV (`recordOrderPayment`, cuya transacción no se reintenta) APARTA aquí, recién tomada la cuenta y
+ * ANTES del turno, las filas `Discount` que una reapertura de esta cuenta va a volver a gastar. Sin escribir nada: si el cobro no la reabre,
+ * el candado sólo dura lo que la transacción. Así el gasto de después (`volverAGastarUsosDeCuentaRevividaEnTx`, dentro de su cierre, ya con
+ * el turno) no espera ninguna fila nueva, y todos los caminos quedan Order → Discount → … → Shift, el orden de la anulación (D24). Una
+ * cuenta viva no tiene filas marcadas: sólo cuesta una consulta por el índice de la cuenta.
+ */
+export async function apartarDescuentosQueVolveriaAGastarEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
+  const usos = await usosDevueltosAlAnular(tx, venueId, orderId)
+  if (usos.size > 0) await tomarFilas(tx, venueId, [...usos.keys()].sort())
+}
+
+/**
+ * 🔴 hz:e82938e1:D26 (encargo 2f1901): la cuenta ANULADA revive porque llegó dinero ya capturado (`reabrirSiRecibeDinero`: la cola sin red
+ * del POS, la TPV, el pago manual del panel). Su anulación devolvió el uso de cada fila que lo había sumado (`usoDevueltoAlAnular`, D24);
+ * revivida y cobrada, ese descuento SÍ se dio: cada una lo vuelve a gastar. Antes el contador quedaba uno abajo y otra caja podía dar
+ * la misma rebaja.
+ *
+ * Regla del founder (D19 «A»): lo cobrado nunca se rechaza por el tope. Si otra caja ya tomó ese uso, el contador queda arriba y el
+ * dueño ve `DESCUENTO_SOBRE_TOPE` (camino `reapertura`). Las filas recuperan `usoContado` y sueltan `usoDevueltoAlAnular`: si la cuenta se
+ * anula otra vez, o le quitan la fila en el POS o en la TPV, devuelven el uso UNA vez, como cualquier fila viva.
+ *
+ * Con la cuenta ya tomada por quien llama (Order → Discount, el orden de la anulación): las filas `Discount` se toman en una pasada
+ * ascendente ANTES de escribir las de la cuenta. Un descuento que ya no está en el catálogo (o es de otro negocio) no tiene contador:
+ * sus filas se quedan como están. Devuelve cuántos usos se volvieron a gastar, por descuento.
+ */
+export async function volverAGastarUsosDeCuentaRevividaEnTx(
+  tx: TxConReintento,
+  v: { venueId: string; orderId: string; canal: string; quien?: string | null },
+): Promise<{ usos: number; porDescuento: Record<string, number> }> {
+  const usos = await usosDevueltosAlAnular(tx, v.venueId, v.orderId)
+  if (usos.size === 0) return { usos: 0, porDescuento: {} }
+
+  const gastados = new Map<string, number>()
+  for (const d of await tomarFilas(tx, v.venueId, [...usos.keys()].sort())) {
+    const n = usos.get(d.id) ?? 0
+    await tx.discount.update({ where: { id: d.id }, data: { currentUses: { increment: n } } })
+    gastados.set(d.id, n)
+    await avisarSiPasoDelTopeEnTx(tx, {
+      venueId: v.venueId,
+      orderId: v.orderId,
+      discountId: d.id,
+      nombre: d.name,
+      usos: d.currentUses + n,
+      tope: d.maxTotalUses,
+      camino: 'reapertura',
+      sinRed: null,
+      quien: v.quien,
+      canal: v.canal,
+    })
+  }
+  if (gastados.size > 0) {
+    await tx.orderDiscount.updateMany({
+      where: { ...devueltasAlAnular(v.venueId, v.orderId), discountId: { in: [...gastados.keys()] } },
+      data: { usoContado: true, usoDevueltoAlAnular: false },
+    })
+  }
+  return { usos: sumar(gastados), porDescuento: Object.fromEntries(gastados) }
 }
