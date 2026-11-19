@@ -18,7 +18,7 @@ import { DateTime } from 'luxon'
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
 import { WHERE_ORDEN_SIN_TARJETAS, sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
-import { sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -47,19 +47,17 @@ const ORDER_NOT_DISCARDED = Prisma.raw(`o."status" NOT IN ('PENDING','CANCELLED'
 /**
  * venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones.
  * Sin la cuenta de tarjetas de regalo: es una orden, pero no una venta (ranking, canales, horas pico y las gráficas del panel).
+ * D93/D2 («B», como Square): el rango es por la hora REAL de la orden (la del aparato si se vendió sin internet; si no, la
+ * llegada), igual que el Resumen de ventas. Antes sólo las horas pico la usaban (hz:47b359b5:D2).
  */
 const orderScope = (venueId: string, fromDate: Date, toDate: Date) =>
-  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
-
-/**
- * D93 («B», como Square): lo mismo, pero por la hora REAL de la orden (la del aparato si se vendió sin internet; si no, la llegada).
- * Sólo lo usan las horas pico por ahora (el primer lector elegido); las demás gráficas siguen con `orderScope`.
- */
-const orderScopeHoraReal = (venueId: string, fromDate: Date, toDate: Date) =>
   Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND ${sqlRangoHoraRealSql('o', fromDate, toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
 
+/** La hora real de la orden `o` (D2): el día, la hora y el día de la semana de las gráficas salen de ella. */
+const HORA_REAL_ORDEN = Prisma.raw(sqlHoraReal('o'))
+
 /** El instante en la zona del venue — réplica SQL de `DateTime.fromJSDate(x, { zone: 'utc' }).setZone(tz)`. */
-const localTs = (tz: string, col: Prisma.Sql = Prisma.raw('o."createdAt"')) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`
+const localTs = (tz: string, col: Prisma.Sql = HORA_REAL_ORDEN) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`
 
 const localDay = (tz: string, col?: Prisma.Sql) => Prisma.sql`to_char(${localTs(tz, col)}, 'YYYY-MM-DD')`
 const localHour = (tz: string) => Prisma.sql`EXTRACT(HOUR FROM ${localTs(tz)})::int`
@@ -88,22 +86,18 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   // los 5 campos que la transformación usa; el runtime `[query-guard]` denuncia
   // cuando el rango pedido devuelve un resultado gigante.
   const validPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-      order: {
-        status: { not: OrderStatus.CANCELLED },
-      },
-    },
+    // D2: por la hora real del cobro, como el Resumen.
+    where: dondeHoraRealEntre(
+      { venueId, status: TransactionStatus.COMPLETED, order: { status: { not: OrderStatus.CANCELLED } } },
+      fromDate,
+      toDate,
+    ),
     select: {
       id: true,
       amount: true,
       method: true,
       createdAt: true,
+      clientCreatedAt: true,
       tipAmount: true,
     },
     orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
@@ -140,7 +134,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     id: payment.id,
     amount: Number(payment.amount),
     method: mapPaymentMethod(payment.method),
-    createdAt: payment.createdAt.toISOString(),
+    createdAt: (payment.clientCreatedAt ?? payment.createdAt).toISOString(),
     tips: [
       {
         amount: Number(payment.tipAmount),
@@ -356,9 +350,9 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   const tz = timezone || DEFAULT_TIMEZONE
   // La hora se determina en la zona del venue (antes lo hacía Luxon fila por fila).
   const rows = await prisma.$queryRaw<Array<{ hour: number; sales: Prisma.Decimal; transactions: number }>>`
-    SELECT EXTRACT(HOUR FROM ${localTs(tz, Prisma.raw(sqlHoraReal('o')))})::int AS "hour", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
+    SELECT EXTRACT(HOUR FROM ${localTs(tz)})::int AS "hour", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
     FROM "Order" o
-    WHERE ${orderScopeHoraReal(venueId, fromDate, toDate)}
+    WHERE ${orderScope(venueId, fromDate, toDate)}
     GROUP BY 1
     ORDER BY 1
   `
@@ -447,13 +441,13 @@ async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate:
   // (el CASE del periodo anterior exige NO estar en el actual), igual que siempre.
   const rows = await prisma.$queryRaw<Array<{ idx: number; current: Prisma.Decimal; previous: Prisma.Decimal }>>`
     SELECT ${localIsoDow(tz)} AS "idx",
-           SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN o."total" ELSE 0 END) AS "current",
-           SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN 0 ELSE o."total" END) AS "previous"
+           SUM(CASE WHEN ${HORA_REAL_ORDEN} >= ${utcTs(fromDate)} AND ${HORA_REAL_ORDEN} <= ${utcTs(toDate)} THEN o."total" ELSE 0 END) AS "current",
+           SUM(CASE WHEN ${HORA_REAL_ORDEN} >= ${utcTs(fromDate)} AND ${HORA_REAL_ORDEN} <= ${utcTs(toDate)} THEN 0 ELSE o."total" END) AS "previous"
     FROM "Order" o
     WHERE o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND ${sqlOrdenSinTarjetas('o.id')}
       AND (
-        (o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)})
-        OR (o."createdAt" >= ${utcTs(prevFrom)} AND o."createdAt" <= ${utcTs(prevTo)})
+        (${sqlRangoHoraRealSql('o', fromDate, toDate)})
+        OR (${sqlRangoHoraRealSql('o', prevFrom, prevTo)})
       )
     GROUP BY 1
   `
@@ -538,7 +532,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
           WHEN p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') THEN 'Tarjeta'
           ELSE 'Otro'
         END AS "method",
-        EXTRACT(DOW FROM ${localTs(tz, Prisma.raw('p."createdAt"'))})::int AS "weekday",
+        EXTRACT(DOW FROM ${localTs(tz, Prisma.raw(sqlHoraReal('p')))})::int AS "weekday",
         COALESCE(SUM(p."amount"), 0) AS "total",
         COUNT(*) AS "count",
         COALESCE(SUM(p."tipAmount"), 0) AS "tips",
@@ -548,7 +542,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
       WHERE p."venueId" = ${venueId}
         AND p."status" = 'COMPLETED'
         AND p."type" <> 'REFUND'
-        AND p."createdAt" >= ${utcTs(fromDate)} AND p."createdAt" <= ${utcTs(toDate)}
+        AND ${sqlRangoHoraRealSql('p', fromDate, toDate)}
         AND (o."id" IS NULL OR o."status" <> 'CANCELLED')
         AND ${sqlOrdenSinTarjetas('p."orderId"')}
         AND ${sqlPaymentIsNotExchangeCredit('p')}
@@ -590,13 +584,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
   }
 
   // Listas de compatibilidad. Se mantiene la forma exacta de siempre.
-  const transformedPayments = payments.map(payment => ({
-    id: payment.id,
-    amount: Number(payment.amount),
-    method: mapPaymentMethod(payment.method),
-    createdAt: payment.createdAt.toISOString(),
-    tips: [{ amount: Number(payment.tipAmount) }],
-  }))
+  const transformedPayments = payments.map(payment => transformBasicMetricPayment(payment))
 
   // Puente legacy de MindForm (ver mergedPayments.service.ts): sus pagos QR no
   // están en Postgres, así que se suman aquí con las MISMAS reglas.
@@ -660,21 +648,32 @@ const LEGACY_BASIC_METRICS_BATCH_SIZE = 1000
 
 /** Lee el contrato legacy completo sin permitir una consulta individual sin tope. */
 async function fetchLegacyBasicMetricPayments(venueId: string, fromDate: Date, toDate: Date) {
-  const all: Array<{ id: string; amount: Prisma.Decimal; tipAmount: Prisma.Decimal; method: PaymentMethod; createdAt: Date }> = []
+  const all: Array<{
+    id: string
+    amount: Prisma.Decimal
+    tipAmount: Prisma.Decimal
+    method: PaymentMethod
+    createdAt: Date
+    clientCreatedAt: Date | null
+  }> = []
   let cursor: string | undefined
 
   do {
     const page = await prisma.payment.findMany({
-      where: {
-        venueId,
-        status: TransactionStatus.COMPLETED,
-        type: { not: 'REFUND' },
-        createdAt: { gte: fromDate, lte: toDate },
-        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
-        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
-        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
-      },
-      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+      // D2: por la hora real del cobro, como el KPI de arriba.
+      where: dondeHoraRealEntre(
+        {
+          venueId,
+          status: TransactionStatus.COMPLETED,
+          type: { not: 'REFUND' },
+          // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+          order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+          AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+        },
+        fromDate,
+        toDate,
+      ),
+      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true, clientCreatedAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: LEGACY_BASIC_METRICS_BATCH_SIZE + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -778,32 +777,35 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
     // K rows from either source, so this stays exact without loading history.
     if (venueId === MINDFORM_NEW_VENUE_ID) {
       const boundary = filters.cursor ? decodeMindFormDetailsCursor(filters.cursor) : undefined
-      const nativeWhere: Prisma.PaymentWhereInput = {
-        venueId,
-        status: TransactionStatus.COMPLETED,
-        type: { not: 'REFUND' },
-        createdAt: { gte: fromDate, lte: toDate },
-        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
-        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
-        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
-        ...(boundary
-          ? {
-              AND: [
-                WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
-                {
-                  OR: [
-                    { createdAt: { lt: new Date(boundary.createdAt) } },
-                    { createdAt: new Date(boundary.createdAt), id: { lt: boundary.id } },
-                  ],
-                },
-              ],
-            }
-          : {}),
-      }
+      // D2: el rango es por la hora real del cobro; el orden y el cursor siguen con la llegada (`createdAt`), que no cambia.
+      const nativeWhere: Prisma.PaymentWhereInput = dondeHoraRealEntre(
+        {
+          venueId,
+          status: TransactionStatus.COMPLETED,
+          type: { not: 'REFUND' },
+          // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+          order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+          AND: [
+            WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
+            ...(boundary
+              ? [
+                  {
+                    OR: [
+                      { createdAt: { lt: new Date(boundary.createdAt) } },
+                      { createdAt: new Date(boundary.createdAt), id: { lt: boundary.id } },
+                    ],
+                  },
+                ]
+              : []),
+          ],
+        },
+        fromDate,
+        toDate,
+      )
       const [nativeRows, legacyPage] = await Promise.all([
         prisma.payment.findMany({
           where: nativeWhere,
-          select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+          select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true, clientCreatedAt: true },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: limit + 1,
         }),
@@ -829,16 +831,19 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
     }
 
     const rows = await prisma.payment.findMany({
-      where: {
-        venueId,
-        status: TransactionStatus.COMPLETED,
-        type: { not: 'REFUND' },
-        createdAt: { gte: fromDate, lte: toDate },
-        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
-        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
-        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
-      },
-      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+      where: dondeHoraRealEntre(
+        {
+          venueId,
+          status: TransactionStatus.COMPLETED,
+          type: { not: 'REFUND' },
+          // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+          order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+          AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+        },
+        fromDate,
+        toDate,
+      ),
+      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true, clientCreatedAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
@@ -876,12 +881,14 @@ function transformBasicMetricPayment(payment: {
   tipAmount: Prisma.Decimal | number
   method: PaymentMethod | string
   createdAt: Date
+  /** D2: la hora del aparato si se cobró sin internet; la lista enseña ésa (los cobros QR viejos de MindForm no la traen). */
+  clientCreatedAt?: Date | null
 }) {
   return {
     id: payment.id,
     amount: Number(payment.amount),
     method: mapPaymentMethod(payment.method),
-    createdAt: payment.createdAt.toISOString(),
+    createdAt: (payment.clientCreatedAt ?? payment.createdAt).toISOString(),
     tips: [{ amount: Number(payment.tipAmount) }],
   }
 }
@@ -1167,7 +1174,7 @@ async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate
     JOIN "Order" o ON o."id" = oi."orderId"
     WHERE p."venueId" = ${venueId}
       AND o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)}
+      AND ${sqlRangoHoraRealSql('o', fromDate, toDate)}
     GROUP BY 1
     ORDER BY 1
   `
@@ -1332,14 +1339,11 @@ async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: 
     WHERE t."od" > 0 OR t."idisc" > 0
   `
 
-  const totalOrders = await prisma.order.count({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: { gte: fromDate, lte: toDate },
-      ...WHERE_ORDEN_SIN_TARJETAS, // la cuenta de tarjetas no es una orden de mercancía: no baja la tasa de descuento
-    },
-  })
+  // Las mismas órdenes que el resto de las gráficas (`orderScope`: sin la cuenta de tarjetas, que no es una orden de mercancía
+  // y no baja la tasa de descuento), por su hora real (D2).
+  const [{ totalOrders }] = await prisma.$queryRaw<Array<{ totalOrders: number }>>`
+    SELECT COUNT(*)::int AS "totalOrders" FROM "Order" o WHERE ${orderScope(venueId, fromDate, toDate)}
+  `
 
   const ordersWithDiscount = row?.ordersWithDiscount ?? 0
   const orderLevelDiscount = Number(row?.orderLevelDiscount ?? 0)

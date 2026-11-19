@@ -109,6 +109,12 @@ export interface SlotOptions {
    * current booking. Resolved server-side from the cancelSecret.
    */
   excludeReservationId?: string
+  /**
+   * D110: el aviso mínimo (`minNoticeMin`) es regla de las reservas EN LÍNEA (como Square: «Appointments must be made in
+   * advance» vive en Online Booking). El panel lo pide para el personal, que sí puede agendar a quien llega «ya». Lo que
+   * ya pasó se sigue escondiendo. Nunca se llena desde una consulta pública.
+   */
+  ignoreMinNotice?: boolean
 }
 
 export interface AvailableSlot {
@@ -208,7 +214,7 @@ export async function getAvailableSlots(
   // Un slot que ya no se puede reservar (pasado o dentro del aviso mínimo) no
   // debe OFRECERSE: antes solo createReservation lo validaba (422) y los
   // pickers mostraban horas imposibles que morían al confirmar.
-  const minNoticeMin = moduleConfig?.scheduling?.minNoticeMin ?? 0
+  const minNoticeMin = options.ignoreMinNotice ? 0 : (moduleConfig?.scheduling?.minNoticeMin ?? 0)
   const earliestBookable = new Date(checkedAt.getTime() + minNoticeMin * 60000)
 
   // For each time range, generate slot start times (converted to UTC)

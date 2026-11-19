@@ -60,6 +60,7 @@ import {
   nuevoRepartoDirigido,
   porcentajeEnCentavos,
 } from '../shared/repartoDescuento'
+import { conMarcaDeVales } from '../shared/cuentaConVales'
 import {
   conservarDescuentoHistorico,
   filasDeLaOrden,
@@ -344,7 +345,8 @@ export async function getOrder(
       // shape `order.mobile.service.ts::getOrder` already uses (same Prisma
       // relation names, same field selection) — additive only, no existing
       // field removed or renamed.
-      orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
+      // D15: también el reparto, sólo para decir qué fila quedó fija al cobrar vales (`congeladoPorVales`); no viaja.
+      orderDiscounts: { select: { ...SELECT_DESCUENTO_DE_LA_CUENTA, reparto: true } },
       serviceCharges: true,
     },
   })
@@ -404,6 +406,8 @@ export async function getOrder(
 
   return {
     ...flattenedOrder,
+    // D15: cada descuento dice si quedó fijo al cobrar vales (Mesas pinta su «Quitar» en gris); el reparto no viaja.
+    orderDiscounts: (order.orderDiscounts ?? []).map(conMarcaDeVales),
     amount_left,
     tableName, // 🆕 Add computed tableName for Android MenuScreen title
     lastSplitType, // 🆕 For split type restriction in Android UI

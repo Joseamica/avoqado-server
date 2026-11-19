@@ -581,8 +581,8 @@ export interface OrderDetailResponse {
   covers: number | null
   /** Cumplimiento: DINE_IN | TAKEOUT | DELIVERY | PICKUP. */
   orderType: string
-  /** Applied ORDER-level discounts (check panel Descuentos). */
-  discounts: Array<{ id: string; name: string; amount: number }>
+  /** Applied ORDER-level discounts (check panel Descuentos). D15: `congeladoPorVales` = quedó fija al cobrar vales (no se quita). */
+  discounts: Array<{ id: string; name: string; amount: number; congeladoPorVales: boolean }>
   /** Cobros por servicio aplicados — SUMAN al total (ingreso gravable). */
   serviceChargeAmount: number
   serviceCharges: Array<{ id: string; serviceChargeId: string | null; name: string; amount: number; isAutomatic: boolean }>
@@ -2786,8 +2786,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           },
         },
       },
+      // D15: el reparto sólo para decir qué fila quedó fija al cobrar vales (`congeladoPorVales`); no viaja.
       orderDiscounts: {
-        select: { id: true, name: true, amount: true },
+        select: { id: true, name: true, amount: true, reparto: true },
       },
       // Promociones vendidas en la cuenta — el POS agrupa sus líneas bajo el
       // nombre del combo tal como se cobró (snapshot), no el nombre vivo.
@@ -2869,10 +2870,12 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     covers: flattenedOrder.covers ?? null,
     orderType: flattenedOrder.type,
     // Applied ORDER-level discounts, for the check panel's Descuentos list.
+    // D15: `congeladoPorVales` = la rebaja quedó fija al cobrar vales (Mesas pinta su «Quitar» en gris). Una app vieja lo ignora.
     discounts: (flattenedOrder.orderDiscounts || []).map((d: any) => ({
       id: d.id,
       name: d.name,
       amount: Number(d.amount),
+      congeladoPorVales: esFilaDeValeV7(d.reparto),
     })),
     serviceChargeAmount: Number(flattenedOrder.serviceChargeAmount ?? 0),
     serviceCharges: (flattenedOrder.serviceCharges || []).map((sc: any) => ({

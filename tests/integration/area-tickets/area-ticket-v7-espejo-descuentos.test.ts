@@ -1,7 +1,12 @@
 import { DiscountScope, DiscountType, Prisma, StaffRole, TerminalStatus, TerminalType } from '@prisma/client'
 
 import { getDiscountStats } from '@/services/dashboard/discount.dashboard.service'
-import { getCustomerDiscounts, getEligibleDiscounts, removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
+import {
+  applyDiscountToOrder,
+  getCustomerDiscounts,
+  getEligibleDiscounts,
+  removeDiscountFromOrder,
+} from '@/services/dashboard/discountEngine.service'
 import { listarDescuentosAplicados } from '@/services/dashboard/descuentosAplicados.service'
 import { listarMisDescuentos } from '@/services/public/customerPortal.public.service'
 import { getAvailableDiscounts } from '@/services/tpv/discount.tpv.service'
@@ -12,6 +17,8 @@ import {
   issueAreaTicket,
   materializeAreaTicketCheckout,
 } from '@/services/mobile/areaTicketV7.mobile.service'
+import { getOrder as getOrderDelPos } from '@/services/mobile/order.mobile.service'
+import { getOrder as getOrderDeLaTpv } from '@/services/tpv/order.tpv.service'
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
@@ -421,5 +428,50 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(filas[0]).toMatchObject({ discountId: dGerenteId, authorizedById: null, appliedById: staffVenueId })
     expect(filas[0].amount.toFixed(2)).toBe('20.00')
     await prisma.staff.delete({ where: { id: otra.id } })
+  })
+
+  // D15 (pizarrón hz:e82938e1:D15, 18-nov): Mesas de la TPV y de ANDROID/WINDOWS pintan en gris el «Quitar» de la rebaja fija. El
+  // detalle de la cuenta de las dos cajas dice cuál es (`congeladoPorVales`), con la misma marca del candado; una rebaja que la caja da
+  // después no la lleva. El `reparto` no viaja.
+  it('D15: el detalle de la cuenta del POS y de la TPV marca congeladoPorVales sólo en las rebajas fijas del cobro de vales', async () => {
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d15-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      lines: [{ clientLineId: `d15-jamon-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id }],
+    })
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `d15-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, { idempotencyKey: `d15-claim-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d15-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+      normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id }],
+    })
+    const orderId = materializada.order!.id
+    // Codex r4 #3: una rebaja de CUENTA del catálogo que la caja da después, por el camino real (el motor de la TPV), sin la marca.
+    const delCatalogo = await prisma.discount.create({
+      data: { venueId, name: 'Cliente frecuente D15', type: DiscountType.FIXED_AMOUNT, value: new Prisma.Decimal(1), scope: DiscountScope.ORDER },
+    })
+    await applyDiscountToOrder(orderId, delCatalogo.id, staffVenueId, undefined, venueId)
+    const deCuenta = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: delCatalogo.id } })
+
+    const delPos = await getOrderDelPos(venueId, orderId)
+    const marcasPos = Object.fromEntries(delPos.discounts.map(d => [d.id, d.congeladoPorVales]))
+    expect(Object.values(marcasPos).filter(Boolean)).toHaveLength(2) // la del vale y la del suelto
+    expect(marcasPos[deCuenta.id]).toBe(false)
+
+    const deLaTpv: any = await getOrderDeLaTpv(venueId, orderId)
+    const marcasTpv = Object.fromEntries(deLaTpv.orderDiscounts.map((d: any) => [d.id, d.congeladoPorVales]))
+    expect(marcasTpv).toEqual(marcasPos)
+    expect(deLaTpv.orderDiscounts.every((d: any) => !('reparto' in d))).toBe(true)
+
+    // La rebaja normal se quita como hoy y las dos fijas siguen ahí, marcadas.
+    await removeDiscountFromOrder(orderId, deCuenta.id, staffId, venueId)
+    const despues = await getOrderDelPos(venueId, orderId)
+    expect(despues.discounts.map(d => d.congeladoPorVales)).toEqual([true, true])
   })
 })

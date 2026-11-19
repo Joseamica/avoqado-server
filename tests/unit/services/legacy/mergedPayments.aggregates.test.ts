@@ -1,4 +1,5 @@
 import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '@/services/exchanges/exchangeMarks'
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 /**
  * Agregados en Postgres del puente legacy (2026-09-01, query-guard en producción).
  *
@@ -65,14 +66,18 @@ describe('aggregatePaymentsByMethod', () => {
     expect(args._sum).toEqual({ amount: true, tipAmount: true })
     expect(args.where).toEqual({
       AND: [
-        {
-          venueId: 'v1',
-          status: 'COMPLETED',
-          AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
-          createdAt: { gte: filters.fromDate, lte: filters.toDate },
-          type: { not: 'REFUND' },
-          order: { status: { not: 'CANCELLED' } },
-        },
+        // D2: por la hora real del cobro (la del aparato si se cobró sin internet), como el Resumen.
+        dondeHoraRealEntre(
+          {
+            venueId: 'v1',
+            status: 'COMPLETED',
+            AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+            type: { not: 'REFUND' },
+            order: { status: { not: 'CANCELLED' } },
+          },
+          filters.fromDate,
+          filters.toDate,
+        ),
         // Tarjetas de regalo (B5): la venta de tarjetas no es venta; en un `AND` para no pisar el filtro de canceladas.
         { order: { items: { none: { giftCardId: { not: null } } } } },
       ],
@@ -87,7 +92,7 @@ describe('aggregatePaymentsByMethod', () => {
   it('includeRefunds + excludeCancelledOrders=false quitan esos dos filtros (el "gross" del panel)', async () => {
     mockGroupBy.mockResolvedValue([])
     await aggregatePaymentsByMethod('v1', { ...filters, includeRefunds: true, excludeCancelledOrders: false })
-    const where = mockGroupBy.mock.calls[0][0].where.AND[0]
+    const where = mockGroupBy.mock.calls[0][0].where.AND[0].AND[0]
     expect(where.type).toBeUndefined()
     expect(where.order).toBeUndefined()
     expect(where.status).toBe('COMPLETED')
@@ -131,7 +136,9 @@ describe('aggregateTipsByProcessor', () => {
 
     const args = mockGroupBy.mock.calls[0][0]
     expect(args.by).toEqual(['processedById'])
-    expect(args.where).toMatchObject({ venueId: 'v1', status: 'COMPLETED', type: { not: 'REFUND' }, tipAmount: { gt: 0 } })
+    // D2: el filtro común va dentro del AND de la hora real; la propina > 0 se queda afuera.
+    expect(args.where.AND[0]).toMatchObject({ venueId: 'v1', status: 'COMPLETED', type: { not: 'REFUND' } })
+    expect(args.where.tipAmount).toEqual({ gt: 0 })
     // la consulta de nombres sólo pide los ids vistos y lleva un tope REAL
     expect(mockStaffFindMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: { in: ['fatima'] } }, take: MAX_CAJEROS_CON_NOMBRE }),
