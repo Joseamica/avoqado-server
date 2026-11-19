@@ -564,6 +564,16 @@ export function mensajeCerrarConSaldo(pendiente: Prisma.Decimal): string {
 }
 
 /**
+ * La fecha que manda el formulario del DASHBOARD: `toISOString().slice(0, 16)`, o sea UTC SIN zona. `new Date()` la leería en la zona del
+ * servidor (en uno con la de México, cada guardado movería la venta 6 h); se lee como UTC. Con zona u otro formato, como siempre.
+ */
+function fechaDelFormulario(v: unknown): Date {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(v)
+    ? new Date(`${v}Z`)
+    : new Date(v as string | Date)
+}
+
+/**
  * Actualizar una orden.
  * SUPERADMIN puede actualizar más campos que usuarios normales.
  */
@@ -611,7 +621,7 @@ export async function updateOrder(
     ...(customerName !== undefined && { customerName }),
     ...(tableId !== undefined && { tableId: tableId || null }),
     ...(servedById !== undefined && { servedById: servedById || null }),
-    ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
+    ...(createdAt !== undefined && { createdAt: fechaDelFormulario(createdAt) }),
     ...(orderNumber !== undefined && { orderNumber }),
     ...(type !== undefined && { type }),
   }

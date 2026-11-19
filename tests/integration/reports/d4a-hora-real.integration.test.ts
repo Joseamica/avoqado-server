@@ -228,7 +228,15 @@ beforeAll(async () => {
   // Borde del comparativo histórico: Té con red en el ÚLTIMO milisegundo del 9; Pan con red el 10.
   await venta({ venueId: n.venueId, productId: null, nombre: 'Té', monto: 2, llegada: new Date('2026-11-10T05:59:59.999Z') })
   await venta({ venueId: n.venueId, productId: null, nombre: 'Pan', monto: 4, llegada: new Date('2026-11-10T18:00:00.000Z') })
-  // Una venta fechada a futuro (a mano), con el extra: un rango con sólo «desde» la alcanza, como antes.
+  // Una venta fechada a futuro (a mano) y otra muy vieja, con el extra: un rango con un solo extremo las alcanza, como antes.
+  await venta({
+    venueId: n.venueId,
+    productId: null,
+    nombre: 'Viejo',
+    monto: 1,
+    llegada: new Date('1999-06-01T18:00:00.000Z'),
+    conExtra: true,
+  })
   await venta({
     venueId: n.venueId,
     productId: null,
@@ -370,6 +378,8 @@ describe('D4a · reportes del negocio a la hora real', () => {
     expect(u12.find(u => u.modifierId === extra)).toBeUndefined()
     // Con sólo «desde» el 12: la Playera ya no (es del 11) y el otro extremo sigue abierto, como antes: entra la de 2030.
     // Con la llegada serían 2; con un tope en «ahora», ninguna.
+    // Y con sólo «hasta» el 12: la Playera (11) y la de 1999 (con un piso inventado, sólo 1).
+    expect((await getModifierUsageStats(n.venueId, { endDate: DIA_12.to })).find(u => u.modifierId === extra)?.timesUsed).toBe(2)
     expect((await getModifierUsageStats(n.venueId, { startDate: DIA_12.from })).find(u => u.modifierId === extra)?.timesUsed).toBe(1)
   })
 
@@ -395,8 +405,17 @@ describe('D4a · reportes del negocio a la hora real', () => {
   })
 
   it('corregir la fecha a mano manda: la venta sin red pasa al día nuevo (antes no salía en ninguno)', async () => {
-    // Reenviarla recortada a minutos, como el formulario del DASHBOARD en cada guardado, no es corregirla: no toca la hora del aparato.
-    await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10:00.000Z', customerName: 'Ed' } as never)
+    // Reenviarla recortada a minutos y SIN zona, como el formulario del DASHBOARD en cada guardado, no es corregirla: no toca la hora del
+    // aparato, aunque el servidor corra con la zona de México (sin el arreglo, la leería como 12:10Z y movería la venta).
+    const zona = process.env.TZ
+    process.env.TZ = 'America/Mexico_City'
+    try {
+      await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10', customerName: 'Ed' } as never)
+    } finally {
+      process.env.TZ = zona
+      if (zona === undefined) delete process.env.TZ
+    }
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).createdAt).toEqual(new Date('2026-11-14T06:10:00.000Z'))
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toEqual(new Date('2026-11-14T05:50:00.000Z'))
     await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T18:00:00.000Z') } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toBeNull()
