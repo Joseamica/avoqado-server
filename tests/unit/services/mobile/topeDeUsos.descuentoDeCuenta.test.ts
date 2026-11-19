@@ -462,6 +462,15 @@ describe('Codex r5: la etiqueta de renglón no cuenta, y un aviso que falla no b
     expect(db.catalogo[PROMO].currentUses).toBe(2)
   })
 
+  it('🔴 r6 #1: de la cola sin red, la etiqueta cuenta aunque el dueño ya la haya cambiado a POR RENGLÓN (la venta ya se cobró)', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { scope: 'ITEM', maxTotalUses: 10, currentUses: 2 }) })
+    await createOrderWithItems(
+      VENUE,
+      venta({ isOfflineReplay: true, createdAtLocal: Date.now(), performedBy: 'sesion-1', discount: 1000, descuentoDeCatalogoId: PROMO }),
+    )
+    expect(db.catalogo[PROMO].currentUses).toBe(3)
+  })
+
   it('🔴 r5 #3 y #4: cada descuento se suma en su propia transacción; si falla el aviso de uno, el otro conserva su uso', async () => {
     const db = baseEnMemoria({
       [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 1 }), // va a quedar arriba ⇒ aviso

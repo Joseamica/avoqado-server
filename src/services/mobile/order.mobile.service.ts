@@ -2085,14 +2085,16 @@ export async function crearVentaDeMostradorEnTx(
     ids: [
       ...venta.discounts.map(d => d.id),
       ...(conDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
-      // Codex r5 #2: sólo una etiqueta de CUENTA del negocio (la que se leyó arriba); una de renglón no puede gastar su cupo con una
-      // rebaja de cuenta.
+      // Codex r5 #2: en línea, sólo una etiqueta de CUENTA del negocio (la que se leyó arriba); una de renglón no puede gastar su cupo
+      // con una rebaja de cuenta. Codex r6 #1: de la cola, cualquier etiqueta del negocio: la venta ya se cobró con ella y el dueño pudo
+      // cambiar el alcance antes de que sincronizara.
       ...(importeLibreRegistrado &&
       !orderDiscount &&
       !cupon &&
       !prep.descuentoDelCliente &&
       input.descuentoDeCatalogoId &&
-      etiquetaDeCuenta?.scope === 'ORDER'
+      etiquetaDeCuenta != null &&
+      (enLaCola || etiquetaDeCuenta.scope === 'ORDER')
         ? [input.descuentoDeCatalogoId]
         : []),
     ],
