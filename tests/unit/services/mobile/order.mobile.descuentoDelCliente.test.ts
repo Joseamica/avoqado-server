@@ -30,6 +30,7 @@ import { createOrderWithItems, type CreateOrderInput } from '@/services/mobile/o
 import { filaDeDescuentoDeCuenta } from '@/services/shared/discount.service'
 import { importesDeLasFilas } from '@/services/shared/repartoDescuento'
 import { prismaMock } from '../../../__helpers__/setup'
+import { contestarFilasDeDescuentos, usosSumados } from '../../../__helpers__/usoDelDescuento'
 
 const COPY = 'Tu puesto no puede aplicar el descuento de Cecilia López. Pide autorización o quítalo.'
 const playera = { id: 'prod-1', name: 'Playera', price: new Decimal(100), sku: 'PLY-1', categoryId: 'cat-1', category: { name: 'Ropa' } }
@@ -302,13 +303,13 @@ describe('servicio: la venta con el descuento del cliente', () => {
 })
 
 describe('el uso del descuento del catálogo cuenta, como con orderDiscountId', () => {
-  const usosContados = () =>
-    (prismaMock.discount.updateMany as jest.Mock).mock.calls.filter(c => c[0]?.data?.currentUses).flatMap(c => c[0].where.id.in as string[])
+  // D19 (encargo 01765a): el uso se suma dentro de la transacción de la venta, bajo el candado del descuento.
+  beforeEach(() => contestarFilasDeDescuentos())
+  const usosContados = () => usosSumados()
 
   it('venta con el descuento del cliente (existe en el negocio): su currentUses sube una vez', async () => {
     await vender({ descuentoConPermisoPropio: true })
     expect(usosContados()).toEqual(['disc-1'])
-    expect((prismaMock.discount.updateMany as jest.Mock).mock.calls[0][0].data).toEqual({ currentUses: { increment: 1 } })
   })
 
   it('con el PIN del gerente también cuenta', async () => {

@@ -320,10 +320,6 @@
       "clase": "EN_TX",
       "etiqueta": "crearVentaDeMostradorEnTx"
     },
-    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
-      "clase": "SENTENCIA",
-      "etiqueta": "terminarVentaDeMostrador"
-    },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "clase": "EN_TX",
       "etiqueta": "cleanDemoData"
@@ -415,9 +411,17 @@
       "clase": "EN_TX",
       "etiqueta": "devolverUsoDelDescuentoEnTx"
     },
-    "src/services/shared/usoDelDescuento.ts#sumarUsoDelDescuentoEnTx": {
+    "src/services/shared/usoDelDescuento.ts#devolverUsosDeCuentaQueSeBorraEnTx": {
       "clase": "EN_TX",
-      "etiqueta": "sumarUsoDelDescuentoEnTx"
+      "etiqueta": "devolverUsosDeCuentaQueSeBorraEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#sumarUsosDelDescuentoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "sumarUsosDelDescuentoEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#tomarFilas": {
+      "clase": "EN_TX",
+      "etiqueta": "tomarFilas"
     },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",
@@ -946,11 +950,6 @@
     "src/services/mobile/order.mobile.service.ts#splitOrderItems": {
       "etiqueta": "splitOrderItems",
       "cantidad": 1
-    },
-    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
-      "etiqueta": "terminarVentaDeMostrador",
-      "cantidad": 1,
-      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
     },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",

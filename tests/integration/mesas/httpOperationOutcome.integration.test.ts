@@ -3308,7 +3308,14 @@ describe('Task4 receipt coverage', () => {
     const m = i.manifest
     if (m.action === 'applyOrderDiscount') {
       const { applyOrderDiscountInTransaction } = await import('@/services/mobile/order.mobile.service')
-      const r = await applyOrderDiscountInTransaction(tx, venueId, m.refs.orderId, m.refs.discountId, i.actorId)
+      // D19: escribe el contador de `Discount` ⇒ pide un TxConReintento (en producción lo da `executeHttpOperation`).
+      const r = await applyOrderDiscountInTransaction(
+        tx as unknown as TxConReintento,
+        venueId,
+        m.refs.orderId,
+        m.refs.discountId,
+        i.actorId,
+      )
       return {
         response: {
           status: 200,

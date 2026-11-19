@@ -16,6 +16,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 import { cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { contestarFilasDeDescuentos, usosSumados } from '../../../__helpers__/usoDelDescuento'
 
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -253,6 +254,7 @@ describe('order.mobile.service', () => {
       items: [],
     })
 
+    contestarFilasDeDescuentos() // D19: el candado y las filas del contador de usos
     const result = await createOrderWithItems('venue-1', {
       staffId: 'staff-1',
       items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-pct' }],
@@ -280,10 +282,8 @@ describe('order.mobile.service', () => {
     )
     expect(result.discountAmount).toBe(20)
     expect(result.total).toBe(80)
-    expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['disc-pct'] } },
-      data: { currentUses: { increment: 1 } },
-    })
+    // D19: el uso se suma dentro de la transacción de la venta, bajo el candado del descuento.
+    expect(usosSumados()).toEqual(['disc-pct'])
   })
 
   it('applies a FIXED_AMOUNT item discount', async () => {

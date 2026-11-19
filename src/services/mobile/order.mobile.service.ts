@@ -78,7 +78,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { devolverUsoDelDescuentoEnTx, sumarUsoDelDescuentoEnTx } from '../shared/usoDelDescuento'
+import { devolverUsoDelDescuentoEnTx, sumarUsosDelDescuentoEnTx } from '../shared/usoDelDescuento'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
@@ -2069,6 +2069,23 @@ export async function crearVentaDeMostradorEnTx(
     discounts: orderDiscount && !cupon ? [...discounts, orderDiscount] : discounts,
     cambiosDePrecio,
   }
+  // 🔴 D19 (hz:e82938e1:D19, encargo 01765a; punto 2 de la tarjeta, Codex r2 #3 y #5): el uso de cada descuento de catálogo de la venta
+  // (por renglón, el de la cuenta y el del cliente) se suma en ESTA transacción, bajo el candado del descuento, en las dos salidas de
+  // la venta nueva. Antes se sumaba después del commit, sin volver a revisar: dos cajas con el último uso pasaban las dos, y una caída
+  // entre guardar y sumar perdía el uso para siempre (el reintento con la misma llave ya no suma). En línea, sin usos la venta se
+  // rechaza entera (como hoy al validar); la cola nunca rechaza y deja su rastro si pasa del tope.
+  const sumarUsosDeLaVentaEnTx = (orderId: string, conDescuentoDelCliente: boolean) =>
+    sumarUsosDelDescuentoEnTx(tx, {
+      venueId,
+      orderId,
+      discountIds: [
+        ...venta.discounts.map(d => d.id),
+        ...(conDescuentoDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
+      ],
+      enLaCola,
+      quien: input.performedBy ?? validatedStaffId ?? null,
+      camino: 'mostrador',
+    })
 
   if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
   // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
@@ -2280,6 +2297,7 @@ export async function crearVentaDeMostradorEnTx(
             },
           }
         : {}
+    await sumarUsosDeLaVentaEnTx(createdOrder.id, !!(prep.descuentoDelCliente && orderLevelDiscountDecimal > 0))
     if (regaloSinPromociones === 'SIN_PERMISO') {
       await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, orderLevelDiscountDecimal)
       return {
@@ -2393,6 +2411,7 @@ export async function crearVentaDeMostradorEnTx(
   if (regaloConPromociones === 'SIN_PERMISO') {
     await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, descuentoDeOrdenFinal)
   }
+  await sumarUsosDeLaVentaEnTx(createdOrder.id, !!(prep.descuentoDelCliente && !cupon && descuentoDeOrdenFinal > 0))
   const reafirmada = await tx.order.update({
     where: { id: createdOrder.id },
     data: {
@@ -2426,7 +2445,7 @@ export async function crearVentaDeMostradorEnTx(
  */
 export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeMostradorCreada, prep: PreparacionDeVenta): Promise<void> {
   const { order, promotionTotals } = creada
-  const { subtotal, discountDecimal, total, discounts } = creada.venta
+  const { subtotal, discountDecimal, total } = creada.venta
   const { tipDecimal, promocionesUnicas } = prep
 
   logger.info(
@@ -2455,64 +2474,7 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
     })
   }
 
-  // Bump usage counters for any Discount rows applied via item.discountId (mirrors
-  // order.tpv.service.ts). Best-effort: the order already committed above, so a
-  // failure here must not fail the request — it would only leave a discount's
-  // maxTotalUses counter stale, not corrupt the order/payment.
-  // Descuento del cliente (revisión r1): su uso cuenta igual que el del `orderDiscountId` (y que la TPV de la fase 1), sólo si se
-  // registró y el descuento existe en el negocio.
-  const usados = [
-    ...discounts.map(discount => discount.id),
-    ...(delCliente?.discountId && creada.descuentoDelCliente ? [delCliente.discountId] : []),
-  ]
-  if (usados.length > 0) {
-    try {
-      // D19 (encargo 01765a, Codex r1 #1 y #7): ya sumado, se lee bajo el mismo candado; lo que quedó ARRIBA de su tope (una venta de
-      // la cola que ya se cobró, o dos cajas en línea con el último uso a la vez, punto 2 de la tarjeta) deja su rastro en la bitácora.
-      const sobreElTope = await withDeadlockRetry(
-        async tx => {
-          await tx.discount.updateMany({
-            where: { id: { in: usados } },
-            data: { currentUses: { increment: 1 } },
-          })
-          const ahora = await tx.discount.findMany({
-            where: { id: { in: usados }, venueId },
-            select: { id: true, name: true, currentUses: true, maxTotalUses: true },
-            take: usados.length,
-          })
-          return ahora.filter(d => d.maxTotalUses != null && d.currentUses > d.maxTotalUses)
-        },
-        { etiqueta: 'terminarVentaDeMostrador' },
-      )
-      if (sobreElTope.length > 0) {
-        const { logAction } = await import('../dashboard/activity-log.service')
-        for (const d of sobreElTope) {
-          void logAction({
-            staffId: prep.validatedStaffId ?? null,
-            venueId,
-            action: 'DESCUENTO_SOBRE_TOPE',
-            entity: 'Order',
-            entityId: order.id,
-            data: {
-              orderId: order.id,
-              discountId: d.id,
-              nombre: d.name,
-              usos: d.currentUses,
-              tope: d.maxTotalUses,
-              camino: 'mostrador',
-              sinRed: prep.enLaCola,
-            },
-          })
-        }
-      }
-    } catch (error) {
-      logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
-        orderId: order.id,
-        discountIds: usados,
-        error: (error as Error).message,
-      })
-    }
-  }
+  // D19 (encargo 01765a): el contador de usos ya se sumó DENTRO de la transacción de la venta (`sumarUsosDelDescuentoEnTx`).
 
   if (promotionTotals) {
     logger.info(
@@ -3182,14 +3144,13 @@ export async function applyOrderDiscountInTransaction(
   // 🔴 D19 (hz:e82938e1:D19, encargo 01765a): el uso se SUMA aquí, en la misma transacción y antes de crear la fila. Antes el POS
   // revisaba el tope y nunca sumaba: un «primeros 100» aplicado en Mesas no se acababa. Las reglas (tope vigente dentro del UPDATE,
   // apartados de cupón, la cola que no rechaza y su rastro) viven en `sumarUsoDelDescuentoEnTx`.
-  await sumarUsoDelDescuentoEnTx(tx, {
+  await sumarUsosDelDescuentoEnTx(tx, {
     venueId,
-    discountId,
-    nombre: discount.name,
-    maxTotalUses: discount.maxTotalUses,
     orderId,
-    staffId,
+    discountIds: [discountId],
     enLaCola: opciones.enLaCola,
+    quien: staffId ?? null,
+    camino: 'mesa',
   })
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.

@@ -28,7 +28,6 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
-import { logAction } from '@/services/dashboard/activity-log.service'
 import { applyOrderDiscount, createOrderWithItems, removeOrderDiscount } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -86,6 +85,16 @@ function baseEnMemoria(catalogo: Record<string, Fila>) {
     return conRenglones(o)
   })
   prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    // El candado del descuento y la pasada de filas `Discount` (VIGENTES: el catálogo en memoria, no la foto que leyó la caja).
+    const sql = Array.isArray(strings) ? strings.join('?') : (strings as any).sql
+    if (sql.includes('pg_advisory_xact_lock')) return [{}]
+    if (sql.includes('FROM "Discount"')) {
+      const [venueId, ids] = valores
+      return (ids as string[])
+        .map(id => catalogo[id])
+        .filter(d => d && d.venueId === venueId)
+        .map(d => ({ id: d.id, name: d.name, currentUses: d.currentUses, maxTotalUses: d.maxTotalUses }))
+    }
     if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
     const [orderId, venueId] = valores
     const o = ordenes.get(orderId)
@@ -133,17 +142,14 @@ function baseEnMemoria(catalogo: Record<string, Fila>) {
       .filter(d => coincide(d, where))
       .map(d => ({ ...d })),
   )
-  // El UPDATE del POS (`sumarUsoDelDescuentoEnTx`): la condición contra el tope VIGENTE de la fila, como Postgres.
-  const estado = { apartados: 0 }
-  prismaMock.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
-    if (!strings.join('?').includes('UPDATE "Discount"')) throw new Error('doble en memoria: $executeRaw no soportado')
-    const [id, venueId, enLaCola, apartados] = valores
-    const d = catalogo[id]
-    if (!d || d.venueId !== venueId) return 0
-    if (!(enLaCola || d.maxTotalUses == null || d.currentUses + apartados < d.maxTotalUses)) return 0
-    d.currentUses += 1
-    return 1
+  // El contador: `update` con increment (sumar) o con el valor ya calculado (devolver por lotes).
+  prismaMock.discount.update.mockImplementation(async ({ where, data }: any) => {
+    const d = catalogo[where.id]
+    if (typeof data.currentUses === 'number') d.currentUses = data.currentUses
+    else if (data.currentUses?.increment) d.currentUses += data.currentUses.increment
+    return { ...d }
   })
+  const estado = { apartados: 0 }
   // Los usos que un cupón del mismo descuento apartó en una venta sin pagar.
   prismaMock.orderDiscount.count.mockImplementation(async () => estado.apartados)
   return { descuentos, catalogo, estado }
@@ -301,14 +307,22 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
 
     expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([expect.objectContaining({ discountId: PROMO, amount: 10 })])
     expect(db.catalogo[PROMO].currentUses).toBe(101)
-    // Codex r1 #1 y #7: queda el rastro para el dueño (también atrapa dos cajas en línea con el último uso, punto 2 de la tarjeta).
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
+    // Codex r1 #1 y #7, r2 #3: queda el rastro para el dueño, en la MISMA transacción que la venta (una caída no lo pierde).
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
         action: 'DESCUENTO_SOBRE_TOPE',
         entityId: creada.id,
-        data: expect.objectContaining({ discountId: PROMO, usos: 101, tope: 100, camino: 'mostrador', sinRed: true }),
+        staffId: null,
+        data: expect.objectContaining({
+          discountId: PROMO,
+          usos: 101,
+          tope: 100,
+          camino: 'mostrador',
+          sinRed: true,
+          subidaPor: 'sesion-1',
+        }),
       }),
-    )
+    })
   })
 
   it('regresión: Mostrador de la cola DEBAJO del tope no deja rastro de «sobre el tope»', async () => {
@@ -318,7 +332,19 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
       venta({ isOfflineReplay: true, createdAtLocal: Date.now(), performedBy: 'sesion-1', orderDiscountId: PROMO }),
     )
     expect(db.catalogo[PROMO].currentUses).toBe(11)
-    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }))
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }) })
+  })
+
+  it('🔴 punto 2 / Codex r2 #3: Mostrador EN LÍNEA con el último uso: la segunda venta (que validó con la foto vieja) se rechaza entera', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 0 }) })
+    const foto = { ...db.catalogo[PROMO] }
+    prismaMock.discount.findFirst.mockImplementation(async () => ({ ...foto, value: new Prisma.Decimal(10) }))
+    const primera = await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))
+    expect(db.catalogo[PROMO].currentUses).toBe(1)
+
+    await expect(createOrderWithItems(VENUE, venta({ performedBy: 'sesion-2', orderDiscountId: PROMO }))).rejects.toThrow(/usage limit/)
+    expect(db.catalogo[PROMO].currentUses).toBe(1)
+    expect(db.descuentos.filter(d => d.orderId === primera.id)).toHaveLength(1)
   })
 
   it('regresión: Mostrador EN LÍNEA con el tope lleno se sigue rechazando', async () => {
@@ -353,23 +379,25 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
   })
 })
 
-describe('Codex r1 #4: la cuenta vacía que se borra devuelve los usos que sus filas sumaron', () => {
-  it('sólo las filas con usoContado, por id de descuento ascendente', async () => {
-    prismaMock.orderDiscount.findMany.mockResolvedValue([{ discountId: 'desc-b' }, { discountId: 'desc-a' }] as any)
-    prismaMock.discount.updateMany.mockResolvedValue({ count: 1 } as any)
+describe('Codex r1 #4 / r2 #6: la cuenta vacía que se borra devuelve TODOS los usos que sus filas sumaron', () => {
+  it('por páginas (más de 200 filas), una sola vez por descuento y sin bajar de 0', async () => {
+    const db = baseEnMemoria({
+      [PROMO]: descuento(PROMO, { maxTotalUses: 500, currentUses: 250 }),
+      [SIN_TOPE]: descuento(SIN_TOPE, { currentUses: 0 }),
+    })
+    const filas = [
+      ...Array.from({ length: 201 }, (_, i) => ({ id: `od-${String(i).padStart(3, '0')}`, discountId: PROMO })),
+      { id: 'od-zzz', discountId: SIN_TOPE },
+    ]
+    prismaMock.orderDiscount.findMany.mockImplementation(async ({ where, take }: any) => {
+      expect(where).toMatchObject({ orderId: 'orden-vacia', order: { venueId: VENUE }, usoContado: true, discountId: { not: null } })
+      return filas.filter(f => !where.id?.gt || f.id > where.id.gt).slice(0, take)
+    })
 
     const n = await devolverUsosDeCuentaQueSeBorraEnTx(prismaMock as any, VENUE, 'orden-vacia')
 
-    expect(n).toBe(2)
-    expect(prismaMock.orderDiscount.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { orderId: 'orden-vacia', order: { venueId: VENUE }, usoContado: true, discountId: { not: null } },
-      }),
-    )
-    expect(prismaMock.discount.updateMany.mock.calls.map(([a]: any) => a.where.id)).toEqual(['desc-a', 'desc-b'])
-    expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
-      where: { id: 'desc-a', venueId: VENUE, currentUses: { gt: 0 } },
-      data: { currentUses: { decrement: 1 } },
-    })
+    expect(n).toBe(202)
+    expect(db.catalogo[PROMO].currentUses).toBe(49)
+    expect(db.catalogo[SIN_TOPE].currentUses).toBe(0)
   })
 })
