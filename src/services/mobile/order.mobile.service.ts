@@ -1977,7 +1977,7 @@ export async function crearVentaDeMostradorEnTx(
   const idDeLaEtiqueta = input.descuentoDeCatalogoId ?? input.descuentoDelCliente?.discountId
   const etiquetaDeCuenta =
     !orderDiscount && idDeLaEtiqueta && (input.discount ?? 0) > 0
-      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true } })
+      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true, scope: true } })
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
   // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.
@@ -2085,7 +2085,14 @@ export async function crearVentaDeMostradorEnTx(
     ids: [
       ...venta.discounts.map(d => d.id),
       ...(conDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
-      ...(importeLibreRegistrado && !orderDiscount && !cupon && !prep.descuentoDelCliente && input.descuentoDeCatalogoId
+      // Codex r5 #2: sólo una etiqueta de CUENTA del negocio (la que se leyó arriba); una de renglón no puede gastar su cupo con una
+      // rebaja de cuenta.
+      ...(importeLibreRegistrado &&
+      !orderDiscount &&
+      !cupon &&
+      !prep.descuentoDelCliente &&
+      input.descuentoDeCatalogoId &&
+      etiquetaDeCuenta?.scope === 'ORDER'
         ? [input.descuentoDeCatalogoId]
         : []),
     ],
@@ -2487,23 +2494,25 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
   // propósito: tomar la fila `Discount` dentro de ella la cruzaba con el turno, el premio de sellos, la tarjeta de regalo y otras filas
   // `Discount` (Codex r3 #3–#5, r4 #4–#6). Residuo aceptado (como antes): si el proceso muere entre el commit y esta suma, ese uso no se
   // cuenta y el reintento con la misma llave tampoco lo suma.
-  if (creada.usosPorSumar.ids.length > 0) {
+  // Codex r5 #3 y #4: UN descuento por transacción. Nunca tiene dos filas `Discount` a la vez (no se cruza con la TPV, que toma las suyas
+  // en otro orden) y, si falla el aviso de uno, los demás conservan su uso.
+  for (const discountId of [...new Set(creada.usosPorSumar.ids)].sort()) {
     try {
       await withDeadlockRetry(
         tx =>
           sumarUsosDeVentaEnTx(tx, {
             venueId,
             orderId: order.id,
-            discountIds: creada.usosPorSumar.ids,
+            discountIds: [discountId],
             enLaCola: prep.enLaCola,
             quien: creada.usosPorSumar.quien,
           }),
         { etiqueta: 'terminarVentaDeMostrador' },
       )
     } catch (error) {
-      logger.error('❌ [ORDER.MOBILE] No se pudo sumar el uso de los descuentos de la venta', {
+      logger.error('❌ [ORDER.MOBILE] No se pudo sumar el uso de un descuento de la venta', {
         orderId: order.id,
-        discountIds: creada.usosPorSumar.ids,
+        discountId,
         error: (error as Error).message,
       })
     }

@@ -28,7 +28,12 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
-import { applyOrderDiscount, createOrderWithItems, removeOrderDiscount } from '@/services/mobile/order.mobile.service'
+import {
+  applyOrderDiscount,
+  createOrderWithItems,
+  removeOrderDiscount,
+  terminarVentaDeMostrador,
+} from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 type Fila = Record<string, any>
@@ -447,6 +452,37 @@ describe('Codex r3 #1: el descuento de cuenta que ANDROID manda como importe + `
     )
     expect(db.catalogo[PROMO].currentUses).toBe(3)
     expect(db.catalogo[SIN_TOPE].currentUses).toBe(0)
+  })
+})
+
+describe('Codex r5: la etiqueta de renglón no cuenta, y un aviso que falla no borra los usos de los otros descuentos', () => {
+  it('🔴 r5 #2: una etiqueta que es un descuento POR RENGLÓN no gasta su cupo con una rebaja de cuenta', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { scope: 'ITEM', maxTotalUses: 10, currentUses: 2 }) })
+    await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', discount: 1000, descuentoDeCatalogoId: PROMO }))
+    expect(db.catalogo[PROMO].currentUses).toBe(2)
+  })
+
+  it('🔴 r5 #3 y #4: cada descuento se suma en su propia transacción; si falla el aviso de uno, el otro conserva su uso', async () => {
+    const db = baseEnMemoria({
+      [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 1 }), // va a quedar arriba ⇒ aviso
+      [SIN_TOPE]: descuento(SIN_TOPE, { currentUses: 5 }),
+    })
+    // El aviso de PROMO falla (la transacción de PROMO se revierte en Postgres; aquí basta con que no tumbe la otra).
+    prismaMock.activityLog.create.mockRejectedValueOnce(new Error('se venció la transacción'))
+    const transacciones = prismaMock.$transaction as jest.Mock
+    const antes = transacciones.mock.calls.length
+    await terminarVentaDeMostrador(
+      VENUE,
+      {
+        order: { id: 'orden-x', orderNumber: 'X' } as any,
+        promotionTotals: null,
+        venta: { subtotal: 100, discountDecimal: 10, total: 90, discounts: [], cambiosDePrecio: [] },
+        usosPorSumar: { ids: [SIN_TOPE, PROMO, PROMO], quien: 'sesion-1' },
+      } as any,
+      { tipDecimal: 0, promocionesUnicas: [], descuentoDelCliente: null, enLaCola: false } as any,
+    )
+    expect(transacciones.mock.calls.length - antes).toBe(2) // una por descuento, sin repetir PROMO
+    expect(db.catalogo[SIN_TOPE].currentUses).toBe(6)
   })
 })
 
