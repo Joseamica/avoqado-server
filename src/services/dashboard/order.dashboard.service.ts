@@ -761,6 +761,12 @@ export async function updateOrder(
     // protegida que el DELETE (candado de la orden → relectura → sin dinero → sin cobro de terminal vivo). Antes escribía
     // cualquier `status` sin revisar nada. Una anulación repetida sólo llega aquí con los mismos datos normalizados.
     const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
+    // D4: quien CORRIGE la fecha decide el día de la venta; la hora del aparato deja de mandar en los reportes, en la orden y en sus
+    // cobros (si no, la venta sin red quedaba fuera del día viejo y del nuevo, o la orden en un día y su cobro en otro). Se compara por
+    // MINUTO: el formulario del DASHBOARD reenvía la fecha recortada a minutos en cada guardado, y eso no es corregirla.
+    const corrigeLaFecha =
+      camposEditados.createdAt !== undefined &&
+      Math.floor(camposEditados.createdAt.getTime() / 60_000) !== Math.floor(currentOrder.createdAt.getTime() / 60_000)
     let valesSoltados: ValesSoltados | null = null
     const escribir = (client: Prisma.TransactionClient) =>
       client.order.update({
@@ -772,13 +778,7 @@ export async function updateOrder(
           ...(tableId !== undefined && { tableId: camposEditados.tableId }),
           ...(servedById !== undefined && { servedById: camposEditados.servedById }),
           ...(createdAt !== undefined && { createdAt: camposEditados.createdAt }),
-          // D4: quien CORRIGE la fecha decide el día de la venta; la hora del aparato deja de mandar en los reportes (si no, la
-          // venta sin red quedaba fuera del día viejo y del nuevo). Se compara por MINUTO: el formulario del DASHBOARD reenvía la
-          // fecha recortada a minutos en cada guardado, y eso no es corregirla.
-          ...(camposEditados.createdAt &&
-            Math.floor(camposEditados.createdAt.getTime() / 60_000) !== Math.floor(currentOrder.createdAt.getTime() / 60_000) && {
-              clientCreatedAt: null,
-            }),
+          ...(corrigeLaFecha && { clientCreatedAt: null }),
           ...(orderNumber !== undefined && { orderNumber: camposEditados.orderNumber }),
           ...(type !== undefined && { type: camposEditados.type }),
           ...(status === 'COMPLETED' && { completedAt: new Date() }),
@@ -817,6 +817,8 @@ export async function updateOrder(
       await devolverCanjesDeVentaAnuladaEnTx(client, { venueId, orderId, staffId: opciones.staffId, camino: 'updateOrder' })
     }
     const updatedOrder = await escribir(client)
+    // Sus cobros conservan su llegada (`createdAt`, la del dinero); sólo sueltan la hora del aparato, que es de reportes.
+    if (corrigeLaFecha) await client.payment.updateMany({ where: { orderId, venueId }, data: { clientCreatedAt: null } })
     // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
     if (cancelando) await desactivarSobresPendientesDeCuentaEnTx(client, { venueId, orderId, staffId: null })
     return { updatedOrder, cancelando, valesSoltados }

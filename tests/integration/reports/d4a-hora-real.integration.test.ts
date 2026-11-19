@@ -24,6 +24,7 @@ import { getModifierUsageStats } from '@/services/dashboard/modifierInventoryAna
 import { getHistoricalSummaries, HistoricalGrouping } from '@/services/tpv/historical-reports.service'
 import { getSalesByItem } from '@/services/dashboard/sales-by-item.dashboard.service'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
+import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { createProductWithVariants } from '@/services/product-variants/productGroup.service'
 import { registerProductVariantTools } from '@/mcp/tools/productVariants'
 import { registerOverviewTools } from '@/mcp/tools/overview'
@@ -404,15 +405,17 @@ describe('D4a · reportes del negocio a la hora real', () => {
     expect(s10.periods.map(p => [dia(p.periodStart), p.totalSales, p.salesChange])).toEqual([['2026-11-10', 4, 100]])
   })
 
-  it('corregir la fecha a mano manda: la venta sin red pasa al día nuevo (antes no salía en ninguno)', async () => {
+  it('corregir la fecha a mano manda: la orden Y su cobro sueltan la hora del aparato y caen juntos en el día corregido', async () => {
     // Reenviarla recortada a minutos y SIN zona, como el formulario del DASHBOARD en cada guardado, no es corregirla: no toca la hora del
     // aparato. (Que se lea igual con el servidor en la zona de México no se puede probar aquí: Jest no cambia la zona de Node; Codex r4
     // lo comprobó en UTC, CDMX y Tokio.)
     await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10', customerName: 'Ed' } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).createdAt).toEqual(new Date('2026-11-14T06:10:00.000Z'))
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toEqual(new Date('2026-11-14T05:50:00.000Z'))
-    await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T18:00:00.000Z') } as never)
+    // El gerente la corrige a las 21:00 del 14, el mismo día en que llegó (caso de «amieva-48», revisión de apps viejas de D11).
+    await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T03:00:00.000Z') } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toBeNull()
+    expect((await prisma.payment.findFirstOrThrow({ where: { orderId: ed } })).clientCreatedAt).toBeNull()
     const r = await getHistoricalSummaries(
       n.venueId,
       HistoricalGrouping.DAILY,
@@ -421,7 +424,12 @@ describe('D4a · reportes del negocio a la hora real', () => {
       undefined,
       10,
     )
-    expect(r.periods.map(p => [dia(p.periodStart), p.totalSales])).toEqual([['2026-11-15', 20]])
+    expect(r.periods.map(p => [dia(p.periodStart), p.totalSales])).toEqual([['2026-11-14', 20]]) // las órdenes, el 14
+    // Y los cobros, también el 14 (si el cobro conservara la hora del aparato, caería el 13 y la venta quedaría partida).
+    const cobros = async (desde: string, hasta: string) =>
+      (await SharedQueryService.getSalesForPeriod(n.venueId, { from: new Date(desde), to: new Date(hasta) })).totalRevenue
+    expect(await cobros('2026-11-13T06:00:00.000Z', '2026-11-14T05:59:59.999Z')).toBe(0)
+    expect(await cobros('2026-11-14T06:00:00.000Z', '2026-11-15T05:59:59.999Z')).toBe(20)
   })
 
   it('product_variants: la talla S se vendió el 11, no el 12', async () => {

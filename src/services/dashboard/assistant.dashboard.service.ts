@@ -6,6 +6,7 @@ import prisma from '../../utils/prismaClient'
 import { AILearningService } from './ai-learning.service'
 import { venueStartOfDay, venueEndOfDay, venueStartOfDayOffset } from '../../utils/datetime'
 import { subDays } from 'date-fns'
+import { dondeHoraRealEntre } from '../shared/horaRealDelAparato'
 
 interface AssistantQuery {
   message: string
@@ -445,56 +446,28 @@ ${JSON.stringify(liveData, null, 2)}`
 
       // Obtener payments de HOY
       const paymentsHoy = await prisma.payment.aggregate({
-        where: {
-          venueId,
-          status: 'COMPLETED' as const,
-          createdAt: {
-            gte: hoyInicio,
-            lte: hoyFin,
-          },
-        },
+        where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, hoyInicio, hoyFin), // D4b: hora real del cobro
         _sum: { amount: true },
         _count: true,
       })
 
       // Obtener payments de AYER
       const paymentsAyer = await prisma.payment.aggregate({
-        where: {
-          venueId,
-          status: 'COMPLETED' as const,
-          createdAt: {
-            gte: ayerInicio,
-            lte: ayerFin,
-          },
-        },
+        where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, ayerInicio, ayerFin), // D4b: hora real del cobro
         _sum: { amount: true },
         _count: true,
       })
 
       // Obtener payments de ÚLTIMOS 7 DÍAS (como Home.tsx)
       const paymentsSemana = await prisma.payment.aggregate({
-        where: {
-          venueId,
-          status: 'COMPLETED' as const,
-          createdAt: {
-            gte: semanaInicio,
-            lte: semanaFin,
-          },
-        },
+        where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, semanaInicio, semanaFin), // D4b: hora real del cobro
         _sum: { amount: true },
         _count: true,
       })
 
       // Obtener payments del MES
       const paymentsMes = await prisma.payment.aggregate({
-        where: {
-          venueId,
-          status: 'COMPLETED' as const,
-          createdAt: {
-            gte: mesInicio,
-            lte: mesFin,
-          },
-        },
+        where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, mesInicio, mesFin), // D4b: hora real del cobro
         _sum: { amount: true },
         _count: true,
       })
@@ -630,24 +603,14 @@ ${JSON.stringify(liveData, null, 2)}`
               firstName: true,
               lastName: true,
               paymentsProcessed: {
-                where: {
-                  createdAt: {
-                    gte: thirtyDaysAgo,
-                  },
-                  venueId,
-                },
+                where: dondeHoraRealEntre({ venueId }, thirtyDaysAgo, null), // D4b: hora real
                 select: {
                   tipAmount: true,
                   amount: true,
                 },
               },
               ordersCreated: {
-                where: {
-                  createdAt: {
-                    gte: thirtyDaysAgo,
-                  },
-                  venueId,
-                },
+                where: dondeHoraRealEntre({ venueId }, thirtyDaysAgo, null), // D4b: hora real
                 select: {
                   total: true,
                 },
@@ -730,15 +693,8 @@ ${JSON.stringify(liveData, null, 2)}`
       // sin cortesías y las piezas y las cuentas con todo, para que las dos formas den lo mismo.
       const porProductoYCortesia = await prisma.orderItem.groupBy({
         by: ['productId', 'isCortesia'],
-        where: {
-          order: {
-            venueId,
-            createdAt: {
-              gte: thirtyDaysAgo,
-            },
-            paymentStatus: 'PAID',
-          },
-        },
+        // D4b: el día de la cuenta (su hora real).
+        where: { order: dondeHoraRealEntre({ venueId, paymentStatus: 'PAID' as const }, thirtyDaysAgo, null) },
         _sum: {
           quantity: true,
           total: true,
@@ -1482,13 +1438,7 @@ ${JSON.stringify(liveData, null, 2)}`
 
       // Obtener ventas de hoy
       const ventasHoy = await prisma.order.aggregate({
-        where: {
-          venueId,
-          createdAt: {
-            gte: today,
-          },
-          paymentStatus: 'PAID',
-        },
+        where: dondeHoraRealEntre({ venueId, paymentStatus: 'PAID' as const }, today, null), // D4b: hora real
         _sum: {
           total: true,
         },
