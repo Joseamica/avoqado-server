@@ -112,7 +112,7 @@ async function staffVenueCan(params: {
 }
 
 /** Permisos cuya firma por PIN es de gerente o superior siempre, con o sin el switch del PIN de gerente (F1). */
-const PERMISOS_QUE_FIRMA_UN_GERENTE = new Set(['payments:reconcile-uncharged'])
+export const PERMISOS_QUE_FIRMA_UN_GERENTE: ReadonlySet<string> = new Set(['payments:reconcile-uncharged'])
 
 export async function createPermissionOverride(params: {
   venueId: string

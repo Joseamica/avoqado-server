@@ -14,7 +14,16 @@ import {
   OverrideDisabledError,
   OverrideInsufficientError,
   OverrideInvalidPinError,
+  PERMISOS_QUE_FIRMA_UN_GERENTE,
 } from '../../services/mobile/permission-override.mobile.service'
+
+/**
+ * 🔴 F1 (Codex android r2 #8): la firma de gerente («no se cobró») contesta IGUAL a un PIN desconocido y a uno sin autoridad, con el
+ * switch encendido o apagado: la respuesta no puede revelar si un PIN es de un empleado activo. Mismo código que la declaración
+ * (`reconcileUncharged`). Sólo la Bitácora distingue el motivo.
+ */
+const negativaDeFirma = (res: Response) =>
+  res.status(403).json({ success: false, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED', message: 'Ese PIN no es de un gerente con permiso' })
 
 /**
  * @route POST /api/v1/mobile/venues/:venueId/permission-overrides
@@ -59,7 +68,9 @@ export const createOverride = async (req: Request, res: Response, next: NextFunc
     if (error instanceof OverrideDisabledError) {
       return res.status(403).json({ success: false, code: 'OVERRIDE_DISABLED', message: error.message })
     }
+    const firmaDeGerente = PERMISOS_QUE_FIRMA_UN_GERENTE.has(permission)
     if (error instanceof OverrideInvalidPinError) {
+      if (firmaDeGerente) return negativaDeFirma(res)
       return res.status(401).json({ success: false, code: 'OVERRIDE_INVALID_PIN', message: error.message })
     }
     if (error instanceof OverrideInsufficientError) {
@@ -83,6 +94,7 @@ export const createOverride = async (req: Request, res: Response, next: NextFunc
         userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
       })
 
+      if (firmaDeGerente) return negativaDeFirma(res)
       return res.status(403).json({ success: false, code: 'OVERRIDE_INSUFFICIENT', message: error.message })
     }
     return next(error)
