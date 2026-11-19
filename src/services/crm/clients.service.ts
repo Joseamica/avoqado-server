@@ -23,7 +23,6 @@ import { scopeWhere, type CrmAccess } from './access.service'
 import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
 import { altaPendienteSql, monedaDelPagoSql } from './clientFacts'
 import { REAL_VENUE_SQL } from './realVenueSql'
-import { utcTs } from '../../utils/sqlDates'
 import {
   altaDeLaFila,
   altaFactsOf,
@@ -50,6 +49,7 @@ import {
 } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
 import { addEvent } from './timeline.service'
+import { sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 
 // The SQL lives in the leaf `clientsSql.ts`; these were imported from here before it existed.
 export { clientSql, clientsFilter, clientsQueries, planVigenteSql, scopeSql, type ClientFilters, type PaidPlan } from './clientsSql'
@@ -191,14 +191,14 @@ function teamMonth(now: Date): { gte: Date; lt: Date } {
  * What the organization charged for real this month, in MXN pesos (`MONEY` and `REAL_VENUE` in SQL), and whether it also charged
  * in another currency: currencies are never added up (Codex r2 #3, the rule of «Ingreso», `monedaDelPagoSql`).
  */
-async function monthSales(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
+export async function monthSales(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
   const { gte, lt } = teamMonth(now)
   const [row] = await prisma.$queryRaw<Array<{ ventasMXN: Prisma.Decimal | null; otraMoneda: boolean }>>(Prisma.sql`
     SELECT SUM(p."amount") FILTER (WHERE ${monedaDelPagoSql} = 'MXN') AS "ventasMXN",
       COALESCE(BOOL_OR(${monedaDelPagoSql} <> 'MXN'), false) AS "otraMoneda"
     FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
     WHERE v."organizationId" = ${organizationId} AND ${REAL_VENUE_SQL}
-      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(gte)} AND p."createdAt" < ${utcTs(lt)}`)
+      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND ${sqlRangoHoraRealSql('p', gte, new Date(lt.getTime() - 1))}`)
   return { total: row?.ventasMXN ?? new Prisma.Decimal(0), otraMoneda: row?.otraMoneda ?? false }
 }
 
@@ -208,14 +208,14 @@ const DAY_MS = 24 * 60 * 60 * 1000
  * C2 Tarea 5 — «Cobrado · 30 días»: every real charge of its real venues since 30 × 24 h ago (inclusive), with the SAME rules
  * as «Cobrado este mes» (`monthSales`): only MXN is added; another currency is only flagged, never converted.
  */
-async function cobradoEn30Dias(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
+export async function cobradoEn30Dias(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
   const desde = new Date(now.getTime() - 30 * DAY_MS)
   const [row] = await prisma.$queryRaw<Array<{ cobradoMXN: Prisma.Decimal | null; otraMoneda: boolean }>>(Prisma.sql`
     SELECT SUM(p."amount") FILTER (WHERE ${monedaDelPagoSql} = 'MXN') AS "cobradoMXN",
       COALESCE(BOOL_OR(${monedaDelPagoSql} <> 'MXN'), false) AS "otraMoneda"
     FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
     WHERE v."organizationId" = ${organizationId} AND ${REAL_VENUE_SQL}
-      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(desde)}`)
+      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND ${sqlRangoHoraRealSql('p', desde, null)}`)
   return { total: row?.cobradoMXN ?? new Prisma.Decimal(0), otraMoneda: row?.otraMoneda ?? false }
 }
 
