@@ -521,6 +521,14 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
       })
 
+      it('Codex r7 #2: exactamente 2 min después ya NO es en vivo ⇒ avisa; un milisegundo antes, calla', async () => {
+        await conSaldoEsperado(5000, 9000, AHORA.getTime() - 120_000)
+        expect(avisos()).toHaveLength(1)
+
+        await conSaldoEsperado(5000, 9000, AHORA.getTime() - 119_999)
+        expect(avisos()).toHaveLength(1)
+      })
+
       it('la hora del aparato en texto ISO también cuenta (en vivo ⇒ sin aviso); sin hora del aparato ⇒ avisa como antes', async () => {
         await conSaldoEsperado(5000, 9000, new Date(AHORA.getTime() - 3_000).toISOString())
         expect(avisos()).toHaveLength(0)

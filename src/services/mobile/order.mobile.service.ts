@@ -892,14 +892,15 @@ function normalizeExternalId(externalId?: string | null): string | null {
 /**
  * hz:bdd815fd:D2 (Codex r5 #1): ¿el cobro de la cola llegó EN VIVO? La TPV manda el efectivo de Mesas por la cola y lo reproduce
  * enseguida: con red llega en segundos. Se mide la hora del aparato al cobrar (`horaDelAparato`, sin recortar) contra la llegada de
- * la petición; un reloj del aparato desfasado más de 2 min cuenta como «sin red» y avisa como antes. Sin alguna de las dos, no.
+ * la petición, MENOS de 2 min. Es el reloj de la terminal: un desfase mueve la ventana (Codex r7 #1) y uno de más de 2 min cuenta como
+ * «sin red» y avisa como antes. Aun dentro de la ventana, sólo calla si el saldo es el que la terminal esperaba. Sin alguna, no.
  */
 const EN_VIVO_MS = 2 * 60 * 1000
 function llegoEnVivo(input: { horaDelAparato?: number | string | null; llegada?: Date }): boolean {
   if (input.horaDelAparato === undefined || input.horaDelAparato === null || !input.llegada) return false
   const crudo = input.horaDelAparato
   const hora = typeof crudo === 'number' || /^\d+$/.test(crudo) ? Number(crudo) : Date.parse(crudo)
-  return Number.isFinite(hora) && Math.abs(input.llegada.getTime() - hora) <= EN_VIVO_MS
+  return Number.isFinite(hora) && Math.abs(input.llegada.getTime() - hora) < EN_VIVO_MS
 }
 
 /**
