@@ -501,7 +501,7 @@ describe('online_ordering_settings', () => {
 
   it('ronda 1 (MCP en sync con el panel): trae el estado de la tienda y qué falta para encenderla, leyendo los ajustes UNA vez', async () => {
     const r = parse(await call('online_ordering_settings', { venueId: 'v1' }))
-    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false })
+    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false, autoPausedAt: null })
     expect(r.requirements).toEqual({ address: true, phone: false, privacyNotice: true })
     expect(mockGetSettings).toHaveBeenCalledTimes(1)
     expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), AJUSTES)
@@ -538,7 +538,7 @@ describe('online_ordering_configure', () => {
     const done = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { manualPause: true }, confirm: true }))
     expect(done).toMatchObject({
       ok: true,
-      store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true },
+      store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true, autoPausedAt: null },
       requirements: { address: true, phone: false, privacyNotice: true },
     })
     // El estado sale de lo que acaba de escribir (no de otra lectura): `getAcceptingStatus` recibe esos ajustes.

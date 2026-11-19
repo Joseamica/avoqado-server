@@ -1,6 +1,7 @@
 /**
  * Bandeja «Pedidos en línea» del restaurante. Vive en `/mobile` porque quien decide está en la tablet; el panel reutiliza
- * estos mismos manejadores bajo `/dashboard`. R13: sólo la bandeja en primer plano (`x-online-orders-tray: 1`) late.
+ * estos mismos manejadores bajo `/dashboard`. R13: late quien manda `x-online-orders-tray: 1`: la bandeja del panel y, desde D662
+ * (18-nov), el POS de ANDROID o WINDOWS a la vista en CUALQUIER pantalla (su vigilante global), no sólo en la bandeja.
  *
  * `:orderId` es SIEMPRE el id de la cuenta (`Order.id`, el `orderId` de la bandeja), nunca `onlineOrderId`.
  * R1: ninguna transición recibe `now` desde aquí: la transición toma su reloj DESPUÉS del candado de la orden.
@@ -13,6 +14,7 @@ import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.se
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import { getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
+import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -86,8 +88,8 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // A8: el Zod de la ruta ya validó el cursor (y que sólo venga con `status=active`).
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
     const data = await listInbox({ venueId, filter, ...(cursor ? { activeCursor: cursor } : {}) })
-    // R13: el latido va DESPUÉS de listar bien (una bandeja que falla no mantiene abierta la tienda) y sólo desde la pantalla
-    // de bandeja en primer plano. H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
+    // R13: el latido va DESPUÉS de listar bien (una bandeja que falla no mantiene abierta la tienda) y sólo con la app a la vista
+    // (D662: cualquier pantalla). H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
     // cuesta la lista al restaurante.
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
     if (latido) await touchInboxPoll(venueId).catch(() => false)
@@ -142,6 +144,8 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
+    // D662: una persona contestó; con la hora del TOQUE (aceptar con tarjeta espera a Stripe).
+    await marcarPedidoAtendido(venueId)
     const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
     if (r.outcome === 'PAYMENT_REQUIRED') {
@@ -159,6 +163,7 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
     const reason = req.body.reason as OnlineOrderRejectReason
     // Una nota de puros espacios no es nota: se guarda `null`, no `""`.
     const note = typeof req.body.note === 'string' ? req.body.note.trim() || null : null
+    await marcarPedidoAtendido(venueId) // D662: una persona contestó
     return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note }))
   } catch (e) {
     return next(e)

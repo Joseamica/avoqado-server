@@ -10,6 +10,7 @@ import {
 } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
+import { contarPedidoSinAtenderEnTx } from './autoPause'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
@@ -102,6 +103,8 @@ export type CasResult =
       releaseChargeId?: string
       /** S9: clientas con premio regresado; tras el commit se despierta su pase de Wallet (si no, lo manda el barrido). */
       clientasConPremio?: string[]
+      /** D662: el pedido era de «Mi equipo» (alguien tenía que aceptarlo); un folio de «Nadie» es `false`. */
+      requiresAcceptance?: boolean
     }
   | {
       r: 'STALE'
@@ -269,6 +272,7 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     orderNumber: row.order.orderNumber,
     orderWritten,
     orderStatus: orderWritten ? rule.order.to : null,
+    requiresAcceptance: row.requiresAcceptance !== false,
     ...(releaseChargeId ? { releaseChargeId } : {}),
     ...(canjes?.clientasConPremio.length ? { clientasConPremio: canjes.clientasConPremio } : {}),
   }
@@ -501,16 +505,35 @@ export async function rejectOnlineOrder(i: {
 }
 
 export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date; reloj?: Reloj }): Promise<TransitionResult> {
-  const r = await casTransition({
-    kind: 'EXPIRE',
-    venueId: i.venueId,
-    orderId: i.orderId,
-    now: i.now,
-    reloj: i.reloj,
-    extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
-    onlineData: now => ({ expiredAt: now }),
-  })
+  let pausoLaTienda = false
+  const r = await casTransition(
+    {
+      kind: 'EXPIRE',
+      venueId: i.venueId,
+      orderId: i.orderId,
+      now: i.now,
+      reloj: i.reloj,
+      extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
+      onlineData: now => ({ expiredAt: now }),
+    },
+    // D662: un pedido de «Mi equipo» vencido cuenta en la MISMA transacción (todos los que vencen pasan por aquí: el job, aceptar
+    // tarde y la captura de tarjeta); el segundo seguido pausa la tienda sola.
+    async (tx, cas) => (cas.r === 'OK' && cas.requiresAcceptance ? contarPedidoSinAtenderEnTx(tx, i.venueId, cas.now) : false),
+    valor => {
+      pausoLaTienda = valor === true
+    },
+  )
   if (r.r !== 'OK') return settled(r)
+  if (pausoLaTienda) {
+    void logAction({
+      staffId: null,
+      venueId: i.venueId,
+      action: 'ONLINE_ORDERING_AUTO_PAUSED',
+      entity: 'OnlineOrderingSettings',
+      entityId: i.venueId,
+      data: { lastOrderNumber: r.orderNumber },
+    })
+  }
   if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({

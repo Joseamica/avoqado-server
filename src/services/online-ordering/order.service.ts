@@ -849,6 +849,24 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
           const again = await findReplay(tx, input.venueId, externalId, requestHash)
           if (again) return { r: again }
 
+          // D662 (Codex r2 #3): la pausa (a mano, del piso o la sola) se vuelve a leer bajo este candado; la pausa sola lo toma antes
+          // de escribirse, así que un pedido que se estaba cotizando cuando venció el segundo sin atender ya no entra.
+          const pausa = await tx.onlineOrderingSettings.findUnique({
+            where: { venueId: input.venueId },
+            select: { manualPause: true, pausedUntil: true, autoPausedAt: true, requiresAcceptance: true },
+          })
+          if (
+            pausa &&
+            (pausa.manualPause ||
+              (pausa.pausedUntil && pausa.pausedUntil > now) ||
+              (pausa.autoPausedAt && pausa.requiresAcceptance !== false))
+          ) {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
+              status: 'PAUSED',
+              reason: 'MANUAL_PAUSE',
+            })
+          }
+
           // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente. T7: sólo con teléfono.
           if (phone) {
             const pendingByPhone =

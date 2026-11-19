@@ -15,9 +15,12 @@ export interface OnlineOrderingConfig {
   hours: HorarioSemanal | null
   /** Tienda híbrida: `true` = «Mi equipo» confirma cada pedido; `false` = «Nadie» (nace aceptado y se paga en caja). */
   requiresAcceptance: boolean
+  /** D662: la tienda se pausó sola (2 pedidos de «Mi equipo» sin atender seguidos), ISO; null = no. Sólo la escribe el servidor. */
+  autoPausedAt: string | null
 }
 
-export type OnlineOrderingSettingsPatch = Partial<OnlineOrderingConfig>
+/** Lo que una persona puede cambiar en ajustes: la pausa sola la pone el servidor y la quita «Reanudar». */
+export type OnlineOrderingSettingsPatch = Partial<Omit<OnlineOrderingConfig, 'autoPausedAt'>>
 
 export interface AcceptingState {
   status: AcceptingStatus

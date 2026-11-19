@@ -273,7 +273,12 @@ describe('settings.service', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ enabled: false }) as any)
     prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ enabled: true }) as any)
     await expect(updateSettings('v1', { enabled: true }, 'staff1')).resolves.toMatchObject({ enabled: true })
-    expect((prismaMock.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ enabled: true })
+    // D662: volver a encender la tienda es una persona decidiendo: la pausa sola y su cuenta empiezan de cero.
+    expect((prismaMock.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({
+      enabled: true,
+      autoPausedAt: null,
+      missedOrdersSince: expect.any(Date),
+    })
   })
 
   it('R18: apagar, cambiar otros campos o repetir enabled:true en una tienda YA encendida NUNCA exige requisitos (ni los consulta)', async () => {
@@ -353,7 +358,8 @@ describe('settings.service', () => {
 
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
       where: { venueId: 'v1' },
-      data: { pausedUntil: new Date('2026-10-14T19:00:00.000Z') },
+      // D662 (Codex r1 #4): pausar 15/30/60 NO quita la pausa sola; sí deja de contar lo vencido antes (hay alguien).
+      data: { pausedUntil: new Date('2026-10-14T19:00:00.000Z'), missedOrdersSince: now },
     })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_PAUSED', staffId: 'staff1', venueId: 'v1' }))
   })
@@ -362,7 +368,11 @@ describe('settings.service', () => {
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
     await expect(pauseOnlineOrdering('v1', null, 'staff1')).resolves.toEqual({ pausedUntil: null, manualPause: false })
-    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { pausedUntil: null } })
+    // D662: «Reanudar» es lo único que quita la pausa sola, y la cuenta vuelve a empezar.
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1' },
+      data: { pausedUntil: null, missedOrdersSince: expect.any(Date), autoPausedAt: null },
+    })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_RESUMED' }))
   })
 
@@ -574,6 +584,9 @@ describe('tienda híbrida T5: «¿Quién confirma?» y sus candados', () => {
     expect((tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({
       requiresAcceptance: false,
       acceptsPayAtPickup: true,
+      // D662: cambiar de modo limpia la pausa sola (en «Nadie» no aplica) y su cuenta empieza de cero.
+      autoPausedAt: null,
+      missedOrdersSince: expect.any(Date),
     })
   })
 

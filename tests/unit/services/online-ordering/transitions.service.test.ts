@@ -37,6 +37,10 @@ jest.mock('@/services/online-ordering/folios.service', () => ({
   cerrarFolioEnCeroEnTx: jest.fn(async () => ({ cerrado: false })),
   trasCerrarFolioEnCero: jest.fn(),
 }))
+jest.mock('@/services/online-ordering/autoPause', () => ({
+  __esModule: true,
+  contarPedidoSinAtenderEnTx: jest.fn(async () => false),
+}))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn() },
@@ -53,8 +57,10 @@ import { getSettings } from '@/services/online-ordering/settings.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { acceptCardOnlineOrder } from '@/services/online-ordering/card/capture.service'
 import { cerrarFolioEnCeroEnTx, trasCerrarFolioEnCero } from '@/services/online-ordering/folios.service'
+import { contarPedidoSinAtenderEnTx } from '@/services/online-ordering/autoPause'
 import {
   acceptOnlineOrder,
+  announceAccepted,
   cancelOnlineOrderByCustomer,
   casTransitionInTx,
   cancelOnlineOrderByStaff,
@@ -384,6 +390,53 @@ describe('rejectOnlineOrder', () => {
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
     expect(notifyOrderEvent).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('D662 · pausa sola tras 2 pedidos de «Mi equipo» sin atender', () => {
+  it('vencer un pedido de «Mi equipo» lo cuenta en la MISMA transacción, después del CAS', async () => {
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect(contarPedidoSinAtenderEnTx).toHaveBeenCalledWith(prismaMock, 'v1', NOW)
+    expect((contarPedidoSinAtenderEnTx as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_AUTO_PAUSED' }))
+  })
+
+  it('si con éste la tienda se pausó, queda en la bitácora con actor de sistema', async () => {
+    ;(contarPedidoSinAtenderEnTx as jest.Mock).mockResolvedValueOnce(true)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ONLINE_ORDERING_AUTO_PAUSED', staffId: null, venueId: 'v1', entity: 'OnlineOrderingSettings' }),
+    )
+  })
+
+  it('un folio de «Nadie» que vence no cuenta (nadie tenía que aceptarlo)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(
+      row({ requiresAcceptance: false, acceptDeadlineAt: NOW, order: { paidAmount: D('0') } }) as any,
+    )
+    await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
+    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
+  })
+
+  it('si el vencimiento no gana (otro actor aceptó antes), no cuenta', async () => {
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: NOW } as any)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
+  })
+
+  it('Codex r2 #2: la máquina de estados no marca «alguien contestó» (Stripe, el conciliador y los barridos también pasan por aquí)', async () => {
+    // El simulacro de `autoPause` no trae `marcarPedidoAtendido`: si la máquina de estados lo llamara, estas llamadas tronarían.
+    await acceptOnlineOrder(base)
+    await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS' as any })
+    announceAccepted(
+      { venueId: 'v1', orderId: 'ord1', staffId: null, minutes: 15, marcarCocina: false },
+      { r: 'OK', now: NOW, onlineOrderId: 'oo1', orderNumber: 'WABCD', orderWritten: true, orderStatus: 'CONFIRMED' as any },
+    )
+    expect(contarPedidoSinAtenderEnTx).not.toHaveBeenCalled()
   })
 })
 

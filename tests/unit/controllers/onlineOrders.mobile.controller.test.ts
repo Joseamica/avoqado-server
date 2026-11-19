@@ -12,6 +12,7 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
 jest.mock('@/services/online-ordering/folios.service', () => ({ __esModule: true, listFolios: jest.fn() }))
+jest.mock('@/services/online-ordering/autoPause', () => ({ __esModule: true, marcarPedidoAtendido: jest.fn(async () => undefined) }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   __esModule: true,
@@ -39,13 +40,14 @@ import {
   rejectOnlineOrder,
 } from '@/services/online-ordering/transitions.service'
 import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
+import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
 const LISTA = { serverTime: 'x', counts: { pending: 0, active: 0, done: 0 }, orders: [], truncated: false }
 const FOLIOS = { serverTime: 'x', counts: { toPay: 0, toDeliver: 0 }, toPay: [], toDeliver: [] }
 /** 1b: el estado de la tienda en la bandeja trae también las dos pausas (la del piso con su hora, y la del gerente). */
-const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false }
+const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false, autoPausedAt: null }
 /** La fila de `StaffVenue` que `resolveUserRoleForVenue` lee para el rol en este negocio. */
 const enElNegocio = (role: string) => ({ role, active: true, permissionSetId: null, permissionSet: null })
 
@@ -99,7 +101,10 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.inbox(req, res, next)
     expect(res.json).toHaveBeenCalledWith({
       success: true,
-      data: { ...LISTA, store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true } },
+      data: {
+        ...LISTA,
+        store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true, autoPausedAt: null },
+      },
     })
   })
 
@@ -177,6 +182,21 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.accept(b.req, b.res, b.next)
     expect(b.res.status).toHaveBeenCalledWith(409)
     expect(b.res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_STATE_CHANGED', status: 'EXPIRED' }))
+  })
+
+  it('D662: aceptar y rechazar desde la caja o el panel son una PERSONA contestando: se marca ANTES de la transición', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })
+    const a = mock({ body: { estimatedMinutes: 20 } })
+    await ctrl.accept(a.req, a.res, a.next)
+    expect(marcarPedidoAtendido).toHaveBeenCalledWith('v1')
+    expect((marcarPedidoAtendido as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (acceptOnlineOrder as jest.Mock).mock.invocationCallOrder[0],
+    )
+    ;(marcarPedidoAtendido as jest.Mock).mockClear()
+    ;(rejectOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'REJECTED' })
+    const r = mock({ body: { reason: 'CLOSED' } })
+    await ctrl.reject(r.req, r.res, r.next)
+    expect(marcarPedidoAtendido).toHaveBeenCalledWith('v1')
   })
 
   it('aceptar con PAYMENT_REQUIRED (un folio sin pagar) responde 409 «se cobra antes de prepararlo»', async () => {

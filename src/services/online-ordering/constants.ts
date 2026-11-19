@@ -22,6 +22,8 @@ export const CANCELLED_ELSEWHERE = 'ORDER_CANCELLED_ELSEWHERE'
 export const ACCEPT_TIMEOUT_MINUTES = 10
 /** Un aparato «cuenta» si su bandeja abierta consultó en los últimos 2 minutos. */
 export const PRESENCE_WINDOW_MS = 120_000
+/** D662 (founder, 18-nov, «como Uber Eats»): con estos pedidos de «Mi equipo» vencidos SEGUIDOS, la tienda se pausa sola. */
+export const AUTO_PAUSE_AFTER_MISSED = 2
 /**
  * D659 (17-nov): en «Nadie» la caja que cobra folios cuenta si latió en los últimos 15 min. Con la pantalla apagada la TPV duerme y su
  * vigía sólo late cuando la despierta la señal de la terminal; con 2 min la tienda salía «fuera de línea» casi todo el día.
@@ -32,7 +34,7 @@ export const PRESENCE_WINDOW_MS = 120_000
 export const FOLIO_PRESENCE_WINDOW_MS = 15 * 60_000
 /** La escritura del latido se amortigua: el sondeo es cada ~10 s, la base se toca cada 30 s. */
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
-/** R13: sólo la pantalla de bandeja en primer plano manda esta cabecera con `1`; es la única que cuenta como «hay alguien». */
+/** R13: la app a la vista manda esta cabecera con `1` (D662: en cualquier pantalla, no sólo la bandeja); es «hay alguien». */
 export const ONLINE_ORDERS_TRAY_HEADER = 'x-online-orders-tray'
 /** Tienda híbrida: la TPV y el POS que pueden cobrar folios mandan esta cabecera con `1` (las rutas que la leen son de T12). */
 export const ONLINE_ORDERS_TO_PAY_HEADER = 'x-online-orders-to-pay'

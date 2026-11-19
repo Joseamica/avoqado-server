@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   hours: null,
   // R37: toda fila nueva nace en «Mi equipo»; «Nadie» sólo lo pone quien lo manda.
   requiresAcceptance: true,
+  autoPausedAt: null,
 }
 
 export type OnlineOrderingSettingsRead = OnlineOrderingConfig & { lastInboxPollAt: Date | null; lastToPayPollAt: Date | null }
@@ -36,6 +37,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     pausedUntil: row.pausedUntil ? row.pausedUntil.toISOString() : null,
     hours: (row.hours as unknown as HorarioSemanal | null) ?? null,
     requiresAcceptance: row.requiresAcceptance,
+    autoPausedAt: row.autoPausedAt ? row.autoPausedAt.toISOString() : null,
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
   }
@@ -198,6 +200,12 @@ export async function updateSettings(
     if (patch.manualPause !== undefined) data.manualPause = patch.manualPause
     if (patch.pausedUntil !== undefined) data.pausedUntil = patch.pausedUntil ? new Date(patch.pausedUntil) : null
     if (patch.hours !== undefined) data.hours = patch.hours === null ? Prisma.DbNull : (patch.hours as unknown as Prisma.InputJsonValue)
+    // D662: cambiar de modo o volver a encender la tienda es una persona decidiendo: la pausa sola y su cuenta empiezan de cero.
+    const cambiaDeModo = patch.requiresAcceptance !== undefined && patch.requiresAcceptance !== current.requiresAcceptance
+    if (existing && (cambiaDeModo || (patch.enabled === true && !current.enabled))) {
+      data.autoPausedAt = null
+      data.missedOrdersSince = new Date()
+    }
 
     const row = await tx.onlineOrderingSettings.upsert({
       where: { venueId },
@@ -261,6 +269,8 @@ export async function updateSettings(
  * 16-oct: gerente para arriba por default, otorgable; en el POS, con el PIN del gerente). Sólo toca `pausedUntil`; la pausa del
  * gerente (`manualPause`) sigue en ajustes, y la respuesta la incluye (M-8): reanudar con ella puesta deja la tienda frenada.
  * No crea la fila: pausar una tienda que nunca se configuró no tiene sentido (y crearla aquí se saltaría la precarga del horario).
+ * D662: sólo «Reanudar» (`null`) quita la pausa SOLA; una pausa de 15/30/60 la deja (al vencer, la tienda sigue pausada hasta
+ * «Reanudar»). Las dos son una persona atendiendo: lo vencido antes ya no cuenta para la siguiente pausa sola.
  */
 export async function pauseOnlineOrdering(
   venueId: string,
@@ -269,7 +279,10 @@ export async function pauseOnlineOrdering(
   now: Date = new Date(),
 ): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
-  const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
+  const r = await prisma.onlineOrderingSettings.updateMany({
+    where: { venueId },
+    data: { pausedUntil, missedOrdersSince: now, ...(minutes === null ? { autoPausedAt: null } : {}) },
+  })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
   }

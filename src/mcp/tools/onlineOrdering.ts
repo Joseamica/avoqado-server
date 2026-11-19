@@ -18,6 +18,7 @@ import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } fro
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import { settingsView } from '@/services/online-ordering/settingsView.service'
 import {
   acceptOnlineOrder,
@@ -251,6 +252,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       }
 
       const staffId = scope.staffId
+      // D662: aceptar o rechazar es una persona contestando (la pausa sola deja de contar lo vencido antes).
+      if (action === 'ACCEPT' || action === 'REJECT') await marcarPedidoAtendido(venueId)
       const result =
         action === 'ACCEPT'
           ? await acceptOnlineOrder({ venueId, orderId, staffId, estimatedMinutes })
@@ -299,7 +302,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas (store.autoPausedAt: se pausó sola porque vencieron 2 pedidos seguidos sin aceptar), cuándo consultó un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
@@ -409,7 +412,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_pause',
-    'Frena la tienda en línea 15, 30 o 60 minutos (por ejemplo en hora pico) o la reanuda con minutes: null. Los pedidos ya recibidos no cambian. Sin confirm:true sólo muestra qué pasaría.',
+    'Frena la tienda en línea 15, 30 o 60 minutos (por ejemplo en hora pico) o la reanuda con minutes: null; reanudar (minutes: null) también quita la pausa que la tienda se pone sola cuando vencen 2 pedidos seguidos sin aceptar (store.autoPausedAt); pausar 15/30/60 no la quita. Los pedidos ya recibidos no cambian. Sin confirm:true sólo muestra qué pasaría.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       minutes: floorPauseMinutes.describe('15, 30 o 60 para pausar; null para reanudar'),
@@ -429,7 +432,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             accion: minutes === null ? 'REANUDAR' : `PAUSAR ${minutes} MIN`,
             efecto:
               minutes === null
-                ? 'La tienda vuelve a recibir pedidos (si está encendida, en horario, sin la pausa del gerente y con una bandeja abierta).'
+                ? 'La tienda vuelve a recibir pedidos (si está encendida, en horario, sin la pausa del gerente y con un POS de Avoqado a la vista).'
                 : `La tienda deja de recibir pedidos nuevos durante ${minutes} minutos.`,
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',

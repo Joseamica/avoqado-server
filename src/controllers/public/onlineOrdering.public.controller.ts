@@ -97,11 +97,12 @@ export async function getInfo(req: Request, res: Response) {
         status,
         reason,
         // S2: la pausa de 15/30/60 min de la bandeja y la del gerente comparten `reason`; la hora sólo se anuncia en la primera
-        // (la del gerente no termina sola) y mientras siga vigente. La tienda dice «Volvemos a recibir pedidos a las HH:MM».
+        // (la del gerente y la sola de D662 no terminan solas) y mientras siga vigente. La tienda dice «Volvemos a recibir pedidos a las HH:MM».
         pausedUntil:
           state.status === 'PAUSED' &&
           state.reason === 'MANUAL_PAUSE' &&
           !state.config.manualPause &&
+          !state.config.autoPausedAt &&
           state.config.pausedUntil &&
           new Date(state.config.pausedUntil) > new Date()
             ? state.config.pausedUntil

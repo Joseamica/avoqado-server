@@ -19,11 +19,12 @@ import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import * as avisos from '@/services/online-ordering/notifications.service'
 import { createOnlineOrder, type CreateOnlineOrderOptions } from '@/services/online-ordering/order.service'
-import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { __resetPresenceDebounceForTests, getAcceptingStatus, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import * as quoteModule from '@/services/online-ordering/quote.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
-import { updateSettings } from '@/services/online-ordering/settings.service'
+import { pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import { marcarPedidoAtendido } from '@/services/online-ordering/autoPause'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByStaff,
@@ -572,6 +573,51 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     expect(accept).toEqual({ outcome: 'STALE', status: 'EXPIRED' })
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status).toBe(OnlineOrderStatus.EXPIRED)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
+  })
+
+  it('D662: dos pedidos de «Mi equipo» vencen seguidos ⇒ la tienda se pausa sola y no admite; uno aceptado en medio la salva; «15 min» no la quita y «Reanudar» sí', async () => {
+    const vencer = async () => {
+      await beat()
+      const { orderId, onlineOrderId } = await newOrder()
+      await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 1_000) } })
+      await expect(expireOnlineOrder({ venueId: venueId!, orderId })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
+    }
+    const marca = async () => (await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).missedOrdersSince
+    await pauseOnlineOrdering(venueId!, null, null) // arranca sin pausa y contando desde ahora, pase lo que pase antes
+    try {
+      await vencer()
+      await beat()
+      const antes = await marca()
+      // Alguien contestó (como el controlador de la caja: primero la marca, luego aceptar): lo vencido antes ya no cuenta.
+      const enMedio = await newOrder()
+      await marcarPedidoAtendido(venueId!)
+      await aceptar(enMedio.orderId)
+      expect((await marca())!.getTime()).toBeGreaterThan(antes!.getTime())
+      await vencer()
+      await beat()
+      expect((await getAcceptingStatus(venueId!)).status).toBe('OPEN')
+
+      await vencer() // el segundo SEGUIDO
+      const pausada = await getAcceptingStatus(venueId!)
+      expect(pausada).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+      expect(pausada.config.autoPausedAt).not.toBeNull()
+      expect(pausada.config.manualPause).toBe(false)
+      await beat()
+      await expect(newOrder()).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+
+      // Codex r1 #4: una pausa de 15 min (de una caja o un panel viejo) no la quita: al vencer, sigue pausada.
+      await pauseOnlineOrdering(venueId!, 15, staffId!, new Date(Date.now() - 16 * 60_000))
+      await beat()
+      expect((await getAcceptingStatus(venueId!)).status).toBe('PAUSED')
+
+      await pauseOnlineOrdering(venueId!, null, staffId!) // «Reanudar» desde la caja o el panel
+      await beat()
+      const reanudada = await getAcceptingStatus(venueId!)
+      expect(reanudada.status).toBe('OPEN')
+      expect(reanudada.config.autoPausedAt).toBeNull()
+    } finally {
+      await pauseOnlineOrdering(venueId!, null, null)
+    }
   })
 
   it('rechazar cancela la cuenta; un segundo rechazo es STALE', async () => {

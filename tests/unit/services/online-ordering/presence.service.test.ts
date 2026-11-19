@@ -189,6 +189,24 @@ describe('getAcceptingStatus', () => {
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
   })
 
+  it('D662: pausada sola (2 pedidos sin atender) ⇒ PAUSED con el mismo motivo que la pausa a mano, hasta que alguien reanude', async () => {
+    const sola = new Date(NOW.getTime() - 3_600_000)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ autoPausedAt: sola }) as any)
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+    expect(storeView(st)).toMatchObject({ autoPausedAt: sola.toISOString(), manualPause: false, pausedUntil: null })
+  })
+
+  it('D662: en «Nadie» la pausa sola de «Mi equipo» no aplica (ahí nadie tenía que aceptar)', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ autoPausedAt: new Date(NOW.getTime() - 60_000), requiresAcceptance: false, lastToPayPollAt: NOW }) as any,
+    )
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st).toMatchObject({ status: 'OPEN' })
+    // Codex r1 #8: y la caja no puede decir «pausada» mientras la tienda vende.
+    expect(storeView(st).autoPausedAt).toBeNull()
+  })
+
   it('una pausa temporal ya vencida no cuenta', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ pausedUntil: new Date(NOW.getTime() - 60_000) }) as any)
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
@@ -268,6 +286,7 @@ describe('storeView (ronda 1: un solo armado del estado de la tienda para el pan
       reason: 'MANUAL_PAUSE',
       pausedUntil: hasta.toISOString(),
       manualPause: true,
+      autoPausedAt: null,
     })
   })
 
@@ -278,6 +297,7 @@ describe('storeView (ronda 1: un solo armado del estado de la tienda para el pan
       reason: null,
       pausedUntil: null,
       manualPause: false,
+      autoPausedAt: null,
     })
     expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
   })

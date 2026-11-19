@@ -60,7 +60,15 @@ export async function touchToPayPoll(venueId: string, now: Date = new Date()): P
 
 /** Lo que el panel, la bandeja y el MCP muestran del estado de la tienda: un solo armado. */
 export function storeView(state: AcceptingState) {
-  return { status: state.status, reason: state.reason, pausedUntil: state.config.pausedUntil, manualPause: state.config.manualPause }
+  return {
+    status: state.status,
+    reason: state.reason,
+    pausedUntil: state.config.pausedUntil,
+    manualPause: state.config.manualPause,
+    // D662 (aditivo): se pausó sola por 2 pedidos sin atender. Un cliente viejo no lo lee y dice «Pausada» por el `reason`. Sólo
+    // cuando APLICA: en «Nadie» la tienda vende aunque la marca siga guardada, y la caja no puede decir «pausada».
+    autoPausedAt: state.config.requiresAcceptance !== false ? (state.config.autoPausedAt ?? null) : null,
+  }
 }
 
 /** `preloaded`: los ajustes que quien llama ya leyó (p. ej. `GET /settings`), para no leerlos dos veces. */
@@ -79,6 +87,8 @@ export async function getAcceptingStatus(
 
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')
   if (config.manualPause || (config.pausedUntil && new Date(config.pausedUntil) > now)) return done('PAUSED', 'MANUAL_PAUSE')
+  // D662: la pausa sola es de «Mi equipo» (`=== false` es «Nadie»); mismo motivo que la pausa a mano para los clientes viejos.
+  if (config.autoPausedAt && config.requiresAcceptance !== false) return done('PAUSED', 'MANUAL_PAUSE')
   if (!isWithinHours(config.hours, now, timezone)) return done('CLOSED', 'OUTSIDE_HOURS')
   // R56: en «Nadie» (`=== false`), el último pedido para pagar en caja es FOLIO_LAST_CALL_MINUTES antes del cierre REAL de la franja
   // (`closesAt` junta las contiguas). Se dice igual que fuera de horario; `/info` sigue anunciando el cierre real.
@@ -86,7 +96,7 @@ export async function getAcceptingStatus(
     const cierre = closesAt(config.hours, now, timezone)
     if (cierre && cierre.getTime() - now.getTime() < FOLIO_LAST_CALL_MINUTES * 60_000) return done('CLOSED', 'OUTSIDE_HOURS')
   }
-  // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», a la Bandeja abierta.
+  // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», al POS a la vista (D662).
   const latido = config.requiresAcceptance === false ? lastToPayPollAt : lastInboxPollAt
   // D659/D660: la caja que cobra folios duerme con la pantalla apagada y late cada 2–11 min; la Bandeja abierta, cada ~10 s.
   const ventana = config.requiresAcceptance === false ? FOLIO_PRESENCE_WINDOW_MS : PRESENCE_WINDOW_MS
