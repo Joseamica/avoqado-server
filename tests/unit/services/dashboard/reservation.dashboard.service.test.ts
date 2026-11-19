@@ -665,6 +665,29 @@ describe('Reservation Dashboard Service', () => {
       expect(settingsSpy).toHaveBeenCalledWith(VENUE_ID, prismaMock)
     })
 
+    it('D110 · el personal (panel) agenda dentro del aviso mínimo: es regla de las reservas en línea, como Square', async () => {
+      jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings({ minNoticeMin: 60 }))
+      const startsAt = new Date(Date.now() + 15 * 60_000)
+      const endsAt = new Date(startsAt.getTime() + 60 * 60_000)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+
+      await expect(
+        createReservation(VENUE_ID, { startsAt, endsAt, duration: 60, channel: 'DASHBOARD' }, DASHBOARD_WRITE, STAFF_ID),
+      ).resolves.toBeDefined()
+    })
+
+    it('D110 · una reserva en línea dentro del aviso mínimo se sigue rechazando', async () => {
+      jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings({ minNoticeMin: 60 }))
+      const startsAt = new Date(Date.now() + 15 * 60_000)
+      const endsAt = new Date(startsAt.getTime() + 60 * 60_000)
+
+      await expect(
+        createReservation(VENUE_ID, { startsAt, endsAt, duration: 60, channel: 'WEB' }, { writeOrigin: 'PUBLIC' }),
+      ).rejects.toThrow('60 minutos de anticipación')
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
     async function arrangeStaffAwareAppointment(
       overrides: {
         pacingMaxPerSlot?: number | null
@@ -3676,6 +3699,13 @@ describe('Reservation Dashboard Service', () => {
 
       expect(result.reservations).toHaveLength(2)
       expect(result).not.toHaveProperty('grouped')
+    })
+
+    it('D112 · también trae terminadas, «no llegó» y canceladas: el panel decide qué enseña con sus filtros', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      await getReservationsCalendar(VENUE_ID, new Date('2026-03-01'), new Date('2026-03-02'))
+      const where = (prismaMock.reservation.findMany.mock.calls[0][0] as any).where
+      expect([...where.status.in].sort()).toEqual(['CANCELLED', 'CHECKED_IN', 'COMPLETED', 'CONFIRMED', 'NO_SHOW', 'PENDING'])
     })
 
     it('should group by table when specified', async () => {

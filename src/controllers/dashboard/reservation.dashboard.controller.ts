@@ -176,6 +176,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         excludeReservationId: reservation.id,
         includeFull,
         windowSemantics,
+        ignoreMinNotice: true, // D110: el panel es el personal
       }
     } else {
       const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
@@ -188,6 +189,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         productIds: canonicalProducts.productIds,
         includeFull,
         windowSemantics,
+        ignoreMinNotice: true, // D110: el panel es el personal
       }
     }
 

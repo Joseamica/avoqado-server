@@ -348,7 +348,10 @@ export async function createReservation(
       // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
       // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
       // hacía imposible registrar walk-ins con aviso mínimo configurado.
-      if (data.channel !== 'WALK_IN') {
+      // D110: la ventana (aviso mínimo y máximo de días) es regla de las reservas EN LÍNEA, como en Square; el personal
+      // (panel o MCP) agenda cuando el negocio lo decide.
+      const esDelCliente = context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER'
+      if (data.channel !== 'WALK_IN' && esDelCliente) {
         enforceBookingWindow(data.startsAt, settings.scheduling)
       }
 
@@ -2599,7 +2602,8 @@ export async function getReservationsCalendar(venueId: string, dateFrom: Date, d
     where: {
       venueId,
       startsAt: { gte: dateFrom, lte: dateTo },
-      status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+      // D112: también las terminadas, «no llegó» y canceladas; el panel decide qué enseña con «Atributos de la cita».
+      status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'NO_SHOW', 'CANCELLED'] },
     },
     include: RESERVATION_INCLUDE,
     orderBy: { startsAt: 'asc' },

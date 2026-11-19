@@ -412,6 +412,28 @@ describe('Reservation Availability Service', () => {
       expect(noon!.availableTables[0].id).toBe('table-2')
     })
 
+    describe('D110 · el aviso mínimo es de las reservas en línea, no del personal', () => {
+      const conAviso = { ...defaultModuleConfig, scheduling: { ...defaultModuleConfig.scheduling, minNoticeMin: 120 } }
+      beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] })
+        jest.setSystemTime(new Date(`${TEST_DATE}T08:30:00.000Z`))
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([])
+      })
+      afterEach(() => jest.useRealTimers())
+
+      it('en línea: a las 08:30 con 2 h de aviso, el primer horario es 11:00', async () => {
+        const result = await getSlots({}, conAviso)
+        expect(result[0].startsAt.toISOString()).toBe(`${TEST_DATE}T11:00:00.000Z`)
+      })
+
+      it('el personal (panel): el primer horario es 09:00, sólo se esconde lo que ya pasó', async () => {
+        const result = await getSlots({ ignoreMinNotice: true }, conAviso)
+        expect(result[0].startsAt.toISOString()).toBe(`${TEST_DATE}T09:00:00.000Z`)
+      })
+    })
+
     it('should use custom slot interval from module config', async () => {
       const config = {
         scheduling: {
