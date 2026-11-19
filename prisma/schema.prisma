@@ -21098,7 +21098,7 @@ model OnlineOrderingSettings {
   /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
   /// fila se precarga el horario de reservas si existe y es válido.
   hours              Json?
-  /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
+  /// Último sondeo con la app A LA VISTA (cabecera `x-online-orders-tray: 1`; D662: el POS en cualquier pantalla): «latido» de presencia.
   lastInboxPollAt    DateTime?
   /// Tienda híbrida: ¿los pedidos nuevos esperan a que alguien los acepte? `true` (default) = como hasta hoy. `false` = pedir por
   /// QR / pagar en la barra sin aceptación (el pedido nace aceptado).
