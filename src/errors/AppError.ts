@@ -214,6 +214,8 @@ export class TerminalBrandChangeBlocked extends AppError {
 export interface TerminalBusyBlockingRequest {
   requestId: string
   amountCents?: number
+  /** F1 (aditivo): la propina que se mandó con ese cobro. `0` = sin propina; ausente = desconocida (lápida de antes). */
+  tipCents?: number
   senderDevice?: string
   ageSeconds: number
 }

@@ -1483,12 +1483,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
  * se describe (ni monto ni aparato ajenos).
  */
 function bloqueadorVisible(
-  row: { requestId: string; amountCents: number; senderDevice: string | null; createdAt: Date } | null,
+  row: { requestId: string; amountCents: number; tipCents?: number; senderDevice: string | null; createdAt: Date } | null,
 ): TerminalBusyBlockingRequest {
   if (!row) return { requestId: 'unknown', ageSeconds: 0 }
   return {
     requestId: row.requestId,
     amountCents: row.amountCents,
+    // F1 (Codex android r2 #15): lo que de verdad se mandó es base + propina. `0` = sin propina; una lápida de antes no la trae.
+    ...(typeof row.tipCents === 'number' ? { tipCents: row.tipCents } : {}),
     ...(row.senderDevice ? { senderDevice: row.senderDevice } : {}),
     ageSeconds: Math.max(0, Math.floor((Date.now() - row.createdAt.getTime()) / 1000)),
   }

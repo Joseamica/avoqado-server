@@ -2825,6 +2825,82 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
     })
   })
 
+  /**
+   * 🔴 F1 · Codex android r2 #15: el bloqueador del 409 trae su propina para que la caja muestre lo que de verdad se mandó. Cero
+   * explícito = sin propina; ausente (lápida de antes) = desconocido. El replay repite lo guardado.
+   */
+  it('bloqueador409_repetido_conservaBaseYPropina', async () => {
+    // ORDER: A se mandó por $40 + $5 de propina desde otra terminal y quedó en duda.
+    const orden = await nuevaOrden()
+    const a = await auditRequest({
+      terminalId: terminalDe('propina-a'),
+      orderId: orden.id,
+      status: 'UNKNOWN',
+      amountCents: 4000,
+      tipCents: 500,
+    })
+    const porOrden = {
+      requestId: nextRequest(),
+      venueId,
+      terminalId: terminalDe('propina-b'),
+      orderId: orden.id,
+      amountCents: 4000,
+      requestedBy: fixture,
+    }
+    const primero = await enviar(porOrden)
+    await resolver(a.id)
+    const segundo = await enviar(porOrden)
+
+    expect(primero).toBeInstanceOf(TerminalBusyError)
+    expect((primero as TerminalBusyError).details).toMatchObject({
+      scope: 'ORDER',
+      blockingRequest: { requestId: a.requestId, amountCents: 4000, tipCents: 500 },
+    })
+    expect((segundo as TerminalBusyError).details).toEqual((primero as TerminalBusyError).details)
+
+    // TERMINAL: el que la ocupa se mandó SIN propina ⇒ cero explícito, no ausente.
+    const terminalId = terminalDe('propina-cero')
+    const c = await auditRequest({ terminalId, orderId: null, status: 'UNKNOWN', amountCents: 2500, tipCents: 0 })
+    const porTerminal = { requestId: nextRequest(), venueId, terminalId, amountCents: 1000, requestedBy: fixture }
+    const tercero = await enviar(porTerminal)
+    await resolver(c.id)
+    const cuarto = await enviar(porTerminal)
+
+    expect(directEmit).not.toHaveBeenCalled()
+    expect(tercero).toBeInstanceOf(TerminalBusyError)
+    expect((tercero as TerminalBusyError).details).toMatchObject({ scope: 'TERMINAL', blockingRequest: { amountCents: 2500, tipCents: 0 } })
+    expect((cuarto as TerminalBusyError).details).toEqual((tercero as TerminalBusyError).details)
+  })
+
+  it('control: la lápida de un 409 de antes (sin tipCents) se repite tal cual: la propina sigue desconocida', async () => {
+    const requestId = nextRequest()
+    const guardado = { requestId: 'A-viejo', amountCents: 4000, ageSeconds: 3 }
+    await prisma.terminalPaymentRequest.create({
+      data: {
+        requestId,
+        venueId,
+        terminalId: terminalDe('lapida-vieja'),
+        status: 'FAILED',
+        failureCode: 'REJECTED_ORDER_BUSY',
+        amountCents: 4000,
+        expiresAt: new Date(),
+        deliveryProvenance: { deliveries: [] },
+        resultJson: {
+          requestId,
+          status: 'failed',
+          httpStatus: 409,
+          code: 'TERMINAL_BUSY',
+          message: 'Esta venta tiene un cobro pendiente de confirmar.',
+          details: { blockingRequest: guardado, requestId, scope: 'ORDER' },
+        },
+      },
+    })
+    const r = await enviar({ requestId, venueId, terminalId: terminalDe('lapida-vieja'), amountCents: 4000, requestedBy: fixture })
+
+    expect(r).toBeInstanceOf(TerminalBusyError)
+    expect((r as TerminalBusyError).details.blockingRequest).toEqual(guardado)
+  })
+
   it('(d) orden inexistente en el venue ⇒ 400 ORDER_NOT_FOUND con lápida; aunque la orden aparezca, el MISMO requestId repite el 400', async () => {
     const ordenId = `${fixture}-orden-${randomUUID().slice(0, 8)}`
     const terminalId = terminalDe('orden-ausente')
