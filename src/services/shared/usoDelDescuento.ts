@@ -160,15 +160,25 @@ export async function devolverUsoDelDescuentoEnTx(tx: TxConReintento, venueId: s
 const PAGINA = 200
 
 /**
- * La cuenta se va a BORRAR (el barrido de cuentas vacías abandonadas): TODAS sus filas con `usoContado` devuelven su uso antes, en esta
- * transacción (Codex r1 #4, r2 #6: por páginas, sin tope que deje usos ocupados). Las filas `Discount` se toman en una pasada ascendente
- * y cada una baja lo suyo de una vez, sin bajar de 0. Devuelve cuántos usos regresó.
+ * Todas las filas de la cuenta con `usoContado` devuelven su uso en esta transacción (por páginas, sin tope que deje usos ocupados).
+ * Las filas `Discount` se toman en una pasada ascendente y cada una baja lo suyo de una vez, sin bajar de 0. Con `soltarMarca` (la
+ * anulación), las filas se quedan (historia de la cuenta anulada) sin `usoContado` y con `usoDevueltoAlAnular`, en la MISMA
+ * transacción: un reintento de la anulación, el barrido de vacías, quitar la fila desde el POS o la TPV después (la cuenta revivió por
+ * dinero tardío) ya no devuelven otra vez. La marca se suelta DESPUÉS de tomar las filas `Discount` (como quitar la fila: Discount
+ * antes que escribir cualquier fila de la cuenta, Codex r1 #6 de D19). Devuelve lo que de verdad bajó cada contador (Codex D24 r1 #3:
+ * un contador que ya estaba en 0 no «devuelve» nada).
  */
-export async function devolverUsosDeCuentaQueSeBorraEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<number> {
+async function devolverUsosMarcadosEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  orderId: string,
+  opciones: { soltarMarca: boolean },
+): Promise<Map<string, number>> {
+  const marcadas = { orderId, order: { venueId }, usoContado: true, discountId: { not: null } } satisfies Prisma.OrderDiscountWhereInput
   const usos = new Map<string, number>()
   for (let despues: string | null = null; ; ) {
     const pagina: Array<{ id: string; discountId: string | null }> = await tx.orderDiscount.findMany({
-      where: { orderId, order: { venueId }, usoContado: true, discountId: { not: null }, ...(despues ? { id: { gt: despues } } : {}) },
+      where: { ...marcadas, ...(despues ? { id: { gt: despues } } : {}) },
       select: { id: true, discountId: true },
       orderBy: { id: 'asc' },
       take: PAGINA,
@@ -177,9 +187,52 @@ export async function devolverUsosDeCuentaQueSeBorraEnTx(tx: TxConReintento, ven
     if (pagina.length < PAGINA) break
     despues = pagina[pagina.length - 1].id
   }
-  if (usos.size === 0) return 0
+  const devueltos = new Map<string, number>()
+  // Un descuento que ya no está en el catálogo (o es de otro negocio) no tiene contador que bajar. El piso es 0, como siempre: un
+  // contador que otro camino dejó abajo de 0 queda en 0 (Codex D24 r2 #4), y lo devuelto es sólo lo que de verdad bajó (r1 #3).
   for (const d of await tomarFilas(tx, venueId, [...usos.keys()].sort())) {
-    await tx.discount.update({ where: { id: d.id }, data: { currentUses: Math.max(0, d.currentUses - (usos.get(d.id) ?? 0)) } })
+    const nuevo = Math.max(0, d.currentUses - (usos.get(d.id) ?? 0))
+    if (nuevo !== d.currentUses) await tx.discount.update({ where: { id: d.id }, data: { currentUses: nuevo } })
+    if (d.currentUses > nuevo) devueltos.set(d.id, d.currentUses - nuevo)
   }
-  return [...usos.values()].reduce((s, n) => s + n, 0)
+  if (opciones.soltarMarca && usos.size > 0) {
+    await tx.orderDiscount.updateMany({ where: marcadas, data: { usoContado: false, usoDevueltoAlAnular: true } })
+  }
+  return devueltos
+}
+
+/**
+ * D24 (Codex r1 #4a, r2 #5): en una cuenta que se anula, la fila del POS cuyo descuento se borró del catálogo (`discountId` en null)
+ * ya no ocupa un uso (el contador se fue con el descuento): pierde la marca. Sólo escribe filas sin enlace a `Discount`.
+ */
+export async function soltarMarcaDeFilasSinDescuentoEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
+  await tx.orderDiscount.updateMany({
+    where: { orderId, order: { venueId }, usoContado: true, discountId: null },
+    data: { usoContado: false },
+  })
+}
+
+const sumar = (usos: Map<string, number>) => [...usos.values()].reduce((s, n) => s + n, 0)
+
+/**
+ * La cuenta se va a BORRAR (el barrido de cuentas vacías abandonadas): TODAS sus filas con `usoContado` devuelven su uso antes, en esta
+ * transacción (Codex r1 #4, r2 #6: por páginas, sin tope que deje usos ocupados). Devuelve cuántos usos regresó.
+ */
+export async function devolverUsosDeCuentaQueSeBorraEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<number> {
+  return sumar(await devolverUsosMarcadosEnTx(tx, venueId, orderId, { soltarMarca: false }))
+}
+
+/**
+ * 🔴 hz:e82938e1:D24: la cuenta se ANULA sin cobrar (POS, la cola sin red `CANCEL_ORDER`, la TPV al anular todo, el panel, el MCP, los
+ * vales, «Regresar saldo y cancelar»). Antes sólo regresaban los canjes de lealtad y el uso del descuento de cuenta se quedaba gastado: un
+ * «primeros 100» se agotaba antes de tiempo en todas las cajas. Las filas se quedan como historia de la anulada, sin la marca.
+ * Lo llama `devolverCanjesDeVentaAnuladaEnTx` (un solo lugar para todas las anulaciones), con la cuenta ya tomada (Order → Discount).
+ */
+export async function devolverUsosDeCuentaAnuladaEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  orderId: string,
+): Promise<{ usos: number; porDescuento: Record<string, number> }> {
+  const usos = await devolverUsosMarcadosEnTx(tx, venueId, orderId, { soltarMarca: true })
+  return { usos: sumar(usos), porDescuento: Object.fromEntries(usos) }
 }

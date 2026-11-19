@@ -1320,7 +1320,8 @@ export async function removeDiscountFromOrder(
 
         // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
         // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
-        if (orderDiscount.discountId && !orderDiscount.couponCodeId) {
+        // D24 (Codex r1 #1): la fila que ya devolvió su uso al anular la cuenta (que después revivió por dinero tardío) no resta otro.
+        if (orderDiscount.discountId && !orderDiscount.couponCodeId && !orderDiscount.usoDevueltoAlAnular) {
           await tx.discount.update({
             where: { id: orderDiscount.discountId },
             data: { currentUses: { decrement: 1 } },
