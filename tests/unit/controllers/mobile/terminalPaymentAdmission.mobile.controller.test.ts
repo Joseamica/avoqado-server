@@ -204,6 +204,27 @@ describe('sendTerminalPayment — cada rechazo de admisión sale con su código 
     },
   )
 
+  it.each([
+    { nombre: 'entero', valor: 2500, esperado: 2500 },
+    { nombre: 'cero (cuenta sin saldo)', valor: 0, esperado: 0 },
+    { nombre: 'ausente (apps publicadas)', valor: undefined, esperado: undefined },
+    { nombre: 'null', valor: null, esperado: undefined },
+    { nombre: 'texto', valor: '2500', esperado: undefined },
+    { nombre: 'decimal', valor: 25.5, esperado: undefined },
+    { nombre: 'negativo', valor: -1, esperado: undefined },
+  ])(
+    'hz:bdd815fd:D5: expectedRemainingCents $nombre ⇒ llega al servicio como $esperado (uno mal formado nunca impide cobrar)',
+    async ({ valor, esperado }) => {
+      sendPaymentToTerminalMock.mockResolvedValue({ requestId, status: 'success', paymentId: 'pay-1' })
+      const res = buildRes()
+      await sendTerminalPayment(buildReq({ orderId: 'order-1', ...(valor === undefined ? {} : { expectedRemainingCents: valor }) }), res)
+      expect(res.statusCode).toBe(200)
+      expect(sendPaymentToTerminalMock.mock.calls[0][0].expectedRemainingCents).toBe(esperado)
+      // El dato de vales no se toca: cada uno viaja por su lado.
+      expect(sendPaymentToTerminalMock.mock.calls[0][0].expectedBalanceBeforeCents).toBeUndefined()
+    },
+  )
+
   // hz:5bda0b30:D1: antes salían como 500 «Error interno del servidor» sin code. 412 por la misma razón que el «falta $X».
   it.each([
     {
