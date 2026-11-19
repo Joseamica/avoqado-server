@@ -11,7 +11,7 @@ import { lockExistingOrderForPayment } from '../services/shared/paymentShiftClai
 import { devolverCanjesDeVentaAnuladaEnTx } from '../services/shared/orderCancelGuard'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
-import { devolverUsosDeCuentaQueSeBorraEnTx } from '../services/shared/usoDelDescuento'
+import { devolverUsosDeCuentaQueSeBorraEnTx, devolverUsosTrasAnular } from '../services/shared/usoDelDescuento'
 
 /**
  * Qué es una orden abandonada — UNA sola definición, evaluada dos veces: al elegir candidatas y otra vez bajo el candado
@@ -194,6 +194,8 @@ export class AbandonedOrdersCleanupJob {
             { etiqueta: 'runOnce', timeout: 15_000, maxWait: 5_000 },
           )
           if (desenlace === 'cancelled') {
+            // D24: anulada (no borrada), su descuento de cuenta del POS devuelve el uso tras el commit (nunca lanza).
+            await devolverUsosTrasAnular({ venueId: order.venueId, orderId: order.id, camino: 'abandonedOrdersCleanup' })
             result.cancelled += 1
             logger.info(`  🎁 Cancelled order ${order.orderNumber}: its loyalty redemptions went back to the customer`)
             continue

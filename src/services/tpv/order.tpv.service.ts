@@ -3637,6 +3637,13 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     auditarValesSoltados({ venueId, orderId, staffId: input.actorId ?? null, soltados: valesSoltados })
   }
 
+  // 🔴 D24 (hz:e82938e1:D24): anular todos los renglones canceló la cuenta; el uso que su descuento de cuenta del POS sumó vuelve al tope
+  // del catálogo en su propia transacción corta, ya con la anulación firme (nunca lanza).
+  if (isVoidingAllItems) {
+    const { devolverUsosTrasAnular } = await import('../shared/usoDelDescuento')
+    await devolverUsosTrasAnular({ venueId, orderId, staffId: input.actorId ?? input.staffId, camino: 'voidItems' })
+  }
+
   // ⭐ If voided all items, remove customer linkages (pay-later orders)
   // No point keeping "cuenta por cobrar" for $0.00 order with 0 items (Toast/Square pattern)
   if (isVoidingAllItems) {

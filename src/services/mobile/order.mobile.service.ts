@@ -7635,6 +7635,10 @@ export async function publishCancelledOrder(
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
+  // 🔴 D24 (hz:e82938e1:D24): el uso que el descuento de cuenta del POS sumó vuelve al tope del catálogo, ya con la anulación firme y en
+  // su propia transacción corta (nunca lanza). Cubre «Anular cuenta», la cola sin red, el panel, el MCP, la TPV y «Regresar saldo».
+  const { devolverUsosTrasAnular } = await import('../shared/usoDelDescuento')
+  await devolverUsosTrasAnular({ venueId, orderId, staffId: staffId ?? null, camino: 'anularCuenta' })
   const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
   await onOrderCancelled({ orderId, venueId })
   const broadcastingService = socketManager.getBroadcastingService()

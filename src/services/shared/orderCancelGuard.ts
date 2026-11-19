@@ -6,7 +6,7 @@ import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
-import { devolverUsosDeCuentaAnuladaEnTx, soltarMarcaDeFilasSinDescuentoEnTx } from './usoDelDescuento'
+import { devolverUsosTrasAnular, marcarUsosPorDevolverEnTx, soltarMarcaDeFilasSinDescuentoEnTx } from './usoDelDescuento'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
 /**
@@ -220,10 +220,11 @@ export interface CanjesDevueltos {
   /** S9: las clientas con premio regresado en una cuenta de folio; quien anula despierta su pase después del commit. */
   clientasConPremio: string[]
   /**
-   * hz:e82938e1:D24: usos del tope del catálogo que regresaron las filas del POS que los sumaron (`usoContado`). No son canjes: no
-   * cuentan en `filasQuitadas` (la fila se queda como historia). En una cuenta de folio los regresa la cortesía y aquí va `undefined`.
+   * hz:e82938e1:D24: filas del POS que sumaron su uso al tope del catálogo y quedaron «por devolver». No son canjes: no cuentan en
+   * `filasQuitadas` (la fila se queda como historia). El uso se devuelve DESPUÉS del commit (`devolverUsosTrasAnular`), que llaman
+   * `publishCancelledOrder` y `avisarOrdenCancelada`. En una cuenta de folio los regresa la cortesía y aquí va `undefined`.
    */
-  usosDevueltos?: number
+  usosPorDevolver?: number
 }
 
 /** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
@@ -270,13 +271,9 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
     return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }
   }
   // 🔴 hz:e82938e1:D24 (DINERO, tope de usos): el descuento de cuenta del POS sumó su uso al aplicarse (D19); anular la cuenta sin
-  // cobrar lo devuelve, igual que quitar la fila o borrar la cuenta vacía. Va ANTES de los canjes y de todo lo demás (también en
-  // «Regresar saldo y cancelar», antes de sus cobros, sobres y turno): la fila `Discount` se toma antes que Customer/StampReward,
-  // Payment, GiftCard y Shift y antes de escribir cualquier fila de la cuenta, el mismo orden que `removeOrderDiscountInTransaction` y
-  // que la cortesía de un folio (`convertirBeneficiosEnCortesiaEnTx`). Codex D24 r2: tomarla después de los reembolsos abría tres
-  // ciclos (con Customer, GiftCard y el borrado del catálogo). Queda el cruce que el folio ya tenía con el cobro de $0 de la TPV
-  // (Turno → Discount): deuda anotada, la transacción se reintenta entera (`withDeadlockRetry`).
-  devuelto.usosDevueltos = await devolverUsosDeVentaAnuladaEnTx(tx, input)
+  // cobrar lo devuelve. Aquí sólo se MARCA «por devolver» (sin tomar la fila `Discount`: Codex D24 r1–r3, cada camino que anula trae
+  // otros candados y tomarla aquí abría ciclos); el uso baja después del commit, en su propia transacción (`devolverUsosTrasAnular`).
+  devuelto.usosPorDevolver = await marcarUsosPorDevolverEnTx(tx, input.venueId, input.orderId)
   await soltarMarcaDeFilasSinDescuentoEnTx(tx, input.venueId, input.orderId)
   const quitadas: string[] = []
   // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
@@ -321,39 +318,20 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
 }
 
 /**
- * 🔴 hz:e82938e1:D24: la venta que se anula sin cobrar devuelve los usos que su descuento de cuenta del POS sumó al tope del catálogo
- * (`usoContado`, D19), en la transacción del que anula y con la cuenta ya tomada. Las filas se quedan como historia, marcadas
- * (`usoDevueltoAlAnular`): nadie lo vuelve a devolver. Deja `ORDER_CANCEL_DISCOUNT_USES_RETURNED` si de verdad bajó un contador. Una
- * cuenta de folio no pasa por aquí: su cortesía ya devuelve el uso (`convertirBeneficiosEnCortesiaEnTx`). Devuelve cuántos usos bajaron.
- */
-export async function devolverUsosDeVentaAnuladaEnTx(
-  tx: TxConReintento,
-  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
-): Promise<number> {
-  const usos = await devolverUsosDeCuentaAnuladaEnTx(tx, input.venueId, input.orderId)
-  if (usos.usos > 0) {
-    await tx.activityLog.create({
-      data: {
-        action: 'ORDER_CANCEL_DISCOUNT_USES_RETURNED',
-        entity: 'Order',
-        entityId: input.orderId,
-        venueId: input.venueId,
-        staffId: input.staffId ?? null,
-        data: { camino: input.camino, usosDevueltos: usos.usos, porDescuento: usos.porDescuento },
-      },
-    })
-    logger.info('🏷️ [Anular] la venta anulada devolvió los usos de su descuento de cuenta', { ...input, ...usos })
-  }
-  return usos.usos
-}
-
-/**
  * El aviso en tiempo real que `cancelOrder` ya emitía (auditoría Fable 11-sep, P3-7): `ORDER_UPDATED` con el estado
  * nuevo, DESPUÉS del commit, para que las pantallas abiertas (POS, TPV, dashboard) no sigan mostrando una cuenta viva
  * que ya se canceló. Import dinámico por la misma razón que el servicio de terminal. Nunca lanza: la cancelación ya
  * quedó firme y un aviso perdido no puede convertirla en un error.
  */
-export async function avisarOrdenCancelada(venueId: string, orderId: string, status: 'CANCELLED' | 'DELETED' = 'CANCELLED'): Promise<void> {
+export async function avisarOrdenCancelada(
+  venueId: string,
+  orderId: string,
+  status: 'CANCELLED' | 'DELETED' = 'CANCELLED',
+  /** D24: quién anuló y por qué camino, para la bitácora del uso devuelto. */
+  quien: { staffId?: string | null; camino?: string } = {},
+): Promise<void> {
+  // 🔴 D24: después del commit, el uso que el descuento de cuenta del POS sumó vuelve al tope del catálogo (nunca lanza).
+  await devolverUsosTrasAnular({ venueId, orderId, staffId: quien.staffId ?? null, camino: quien.camino ?? 'avisarOrdenCancelada' })
   try {
     const [{ socketManager }, { SocketEventType }] = await Promise.all([
       import('../../communication/sockets/managers/socketManager'),
