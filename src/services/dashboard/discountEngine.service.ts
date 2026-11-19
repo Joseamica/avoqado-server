@@ -1612,7 +1612,8 @@ export async function applyManualDiscount(
     if (!order) return orderNotFound(venueId)
     // D21: la misma llave contesta el envío ya hecho (respuesta perdida, reintento, segundo toque), aun si después se pagó la cuenta
     // o alguien quitó la rebaja.
-    const llave = idempotencyKey ? { idempotencyKey, firma: `manual:${type}:${value}` } : undefined
+    // D16 r5 #3: el motivo es parte del descuento: $10 por «demora» y $10 por «producto dañado» son dos descuentos.
+    const llave = idempotencyKey ? { idempotencyKey, firma: `manual:${type}:${value}:${name}` } : undefined
     const repetida = await envioYaHecho(tx, order, llave)
     if (repetida) return repetida
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría

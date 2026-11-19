@@ -144,7 +144,7 @@ describe('D21: manual / cortesía con llave de envío', () => {
 
   it('la misma llave otra vez contesta el envío que ya se hizo y no crea otra fila ni toca la cuenta', async () => {
     prismaMock.order.findUnique.mockResolvedValue(cuenta({ discountAmount: new Decimal(10), total: new Decimal(106) }) as any)
-    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10', 'od-1', 10) as any)
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10:$10', 'od-1', 10) as any)
 
     const r = await applyManualDiscount(
       'order-123',
@@ -169,7 +169,7 @@ describe('D21: manual / cortesía con llave de envío', () => {
     // La fila ya no existe (otra caja la quitó), pero la constancia sí: el envío ya se había hecho.
     prismaMock.order.findUnique.mockResolvedValue(cuenta() as any)
     prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
-    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10', 'od-1', 10) as any)
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10:$10', 'od-1', 10) as any)
 
     const r = await applyManualDiscount(
       'order-123',
@@ -191,7 +191,7 @@ describe('D21: manual / cortesía con llave de envío', () => {
 
   it('con la cuenta ya pagada, la misma llave sigue contestando el envío (no «cuenta pagada»)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(cuenta({ paymentStatus: 'PAID', total: new Decimal(106) }) as any)
-    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10', 'od-1', 10) as any)
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10:$10', 'od-1', 10) as any)
 
     const r = await applyManualDiscount(
       'order-123',
@@ -212,7 +212,7 @@ describe('D21: manual / cortesía con llave de envío', () => {
 
   it('la misma llave con OTRO descuento se rechaza en español y no crea nada', async () => {
     prismaMock.order.findUnique.mockResolvedValue(cuenta() as any)
-    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10', 'od-1', 10) as any)
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(constancia('manual:FIXED_AMOUNT:10:$10', 'od-1', 10) as any)
 
     const r = await applyManualDiscount(
       'order-123',
@@ -232,10 +232,45 @@ describe('D21: manual / cortesía con llave de envío', () => {
     expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
   })
 
+  it('D16 r5 #3: la misma llave con el mismo importe y OTRO motivo se rechaza (el motivo es parte del descuento)', async () => {
+    // Primer envío: $10 por «demora», queda su constancia.
+    prismaMock.order.findUnique.mockResolvedValue(cuenta() as any)
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue(null)
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1', amount: new Decimal(10) } as any)
+    prismaMock.order.update.mockResolvedValue(cuenta() as any)
+    const manual = (motivo: string) =>
+      applyManualDiscount(
+        'order-123',
+        'FIXED_AMOUNT',
+        10,
+        motivo,
+        'sv-1',
+        undefined,
+        undefined,
+        'venue-123',
+        false,
+        undefined,
+        'llave-0001',
+      )
+    await manual('demora')
+    const guardada = (prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data
+    prismaMock.orderDiscount.create.mockClear()
+
+    // La misma llave llega con $10 por «producto dañado»: es otro descuento, no el reenvío del primero.
+    prismaMock.idempotencyRequest.findUnique.mockResolvedValue({ id: 'idem-1', ...guardada } as any)
+    const r = await manual('producto dañado')
+
+    expect(r).toMatchObject({ success: false, error: 'Esa llave ya se usó para otro descuento de esta cuenta.' })
+    expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
+
+    // Y el reenvío del MISMO («demora») sí contesta el envío ya hecho.
+    expect(await manual('demora')).toMatchObject({ success: true, orderDiscountId: 'od-1', repetida: true })
+  })
+
   it('una constancia vencida se borra y el envío se atiende como nuevo', async () => {
     prismaMock.order.findUnique.mockResolvedValue(cuenta() as any)
     prismaMock.idempotencyRequest.findUnique.mockResolvedValue(
-      constancia('manual:FIXED_AMOUNT:10', 'od-viejo', 10, Date.now() - 1000) as any,
+      constancia('manual:FIXED_AMOUNT:10:$10', 'od-viejo', 10, Date.now() - 1000) as any,
     )
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-2', amount: new Decimal(10) } as any)
     prismaMock.order.update.mockResolvedValue(cuenta() as any)
