@@ -316,17 +316,9 @@
       "clase": "EN_TX",
       "etiqueta": "refundLoyaltyForOrderDiscount"
     },
-    "src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction": {
-      "clase": "EN_TX",
-      "etiqueta": "applyOrderDiscountInTransaction"
-    },
     "src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx": {
       "clase": "EN_TX",
       "etiqueta": "crearVentaDeMostradorEnTx"
-    },
-    "src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction": {
-      "clase": "EN_TX",
-      "etiqueta": "removeOrderDiscountInTransaction"
     },
     "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
       "clase": "SENTENCIA",
@@ -418,6 +410,14 @@
     "src/services/shared/puntosAlReembolsar.ts#reversaEnTx": {
       "clase": "EN_TX",
       "etiqueta": "reversaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#devolverUsoDelDescuentoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "devolverUsoDelDescuentoEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#sumarUsoDelDescuentoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "sumarUsoDelDescuentoEnTx"
     },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",

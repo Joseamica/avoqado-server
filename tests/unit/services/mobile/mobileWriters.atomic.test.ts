@@ -262,7 +262,7 @@ beforeEach(() => {
   tx.promotion.findFirst.mockResolvedValue(PROMOTION)
   tx.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
   // D19 (encargo 01765a): el descuento de cuenta suma su uso en la misma transacción (con el tope dentro del UPDATE).
-  tx.discount.updateMany.mockResolvedValue({ count: 1 })
+  tx.$executeRaw = jest.fn().mockResolvedValue(1)
   tx.discount.findFirst.mockResolvedValue({
     id: 'disc',
     venueId: 'venue',
@@ -1151,12 +1151,10 @@ describe('Task4 captured transaction results', () => {
     expect(result.totals).toMatchObject({ subtotal: 150, discountAmount: 0, total: 150, version: 2 })
     // D19 (encargo 01765a): antes esta prueba fijaba que el POS NO sumaba el uso (el defecto). Ahora suma UNA vez, en la tx de quien llama.
     expect(tx.discount.update).not.toHaveBeenCalled()
-    expect(tx.discount.updateMany).toHaveBeenCalledTimes(1)
-    expect(tx.discount.updateMany).toHaveBeenCalledWith({
-      where: { id: 'disc', venueId: 'venue' },
-      data: { currentUses: { increment: 1 } },
-    })
-    expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
+    expect(tx.discount.updateMany).not.toHaveBeenCalled()
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1)
+    expect(tx.$executeRaw.mock.calls[0][0].join('?')).toContain('UPDATE "Discount" SET "currentUses" = "currentUses" + 1')
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })

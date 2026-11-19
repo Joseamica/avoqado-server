@@ -124,7 +124,7 @@ function baseEnMemoria() {
   )
   prismaMock.shift.findFirst.mockResolvedValue(null)
   // D19 (encargo 01765a): el descuento de cuenta de la mesa suma su uso (el tope lo prueba topeDeUsos.descuentoDeCuenta.test.ts).
-  prismaMock.discount.updateMany.mockResolvedValue({ count: 1 })
+  prismaMock.$executeRaw.mockResolvedValue(1)
   prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) => {
     const d = catalogo[where.id]
     return d && d.venueId === where.venueId ? { ...d, value: new Prisma.Decimal(d.value) } : null

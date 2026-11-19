@@ -11,6 +11,7 @@ import { lockExistingOrderForPayment } from '../services/shared/paymentShiftClai
 import { devolverCanjesDeVentaAnuladaEnTx } from '../services/shared/orderCancelGuard'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
+import { devolverUsosDeCuentaQueSeBorraEnTx } from '../services/shared/usoDelDescuento'
 
 /**
  * Qué es una orden abandonada — UNA sola definición, evaluada dos veces: al elegir candidatas y otra vez bajo el candado
@@ -184,6 +185,9 @@ export class AbandonedOrdersCleanupJob {
                 await tx.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', version: { increment: 1 } } })
                 return 'cancelled' as const
               }
+              // D19 (encargo 01765a, Codex r1 #4): el descuento de cuenta del POS ya sumó su uso al tope del catálogo; la cuenta vacía
+              // se borra con sus filas (en cascada), así que el uso se devuelve antes, en esta misma transacción.
+              await devolverUsosDeCuentaQueSeBorraEnTx(tx, order.venueId, order.id)
               await tx.order.delete({ where: { id: order.id } })
               return true
             },

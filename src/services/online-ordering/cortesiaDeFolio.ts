@@ -76,6 +76,7 @@ export async function convertirBeneficiosEnCortesiaEnTx(
       discountId: string | null
       couponCodeId: string | null
       loyaltyTransactionId: string | null
+      usoContado: boolean
       discount: { maxTotalUses: number | null; maxUsesPerCustomer: number | null } | null
     }> = await tx.orderDiscount.findMany({
       where: { orderId, order: { venueId }, ...(despues ? { id: { gt: despues } } : {}) },
@@ -85,6 +86,7 @@ export async function convertirBeneficiosEnCortesiaEnTx(
         discountId: true,
         couponCodeId: true,
         loyaltyTransactionId: true,
+        usoContado: true,
         discount: { select: { maxTotalUses: true, maxUsesPerCustomer: true } },
       },
       orderBy: { id: 'asc' },
@@ -99,7 +101,8 @@ export async function convertirBeneficiosEnCortesiaEnTx(
     const premioDe = new Map(premios.map(p => [p.orderDiscountId, p.id]))
     for (const f of pagina) {
       const premioId = premioDe.get(f.id) ?? null
-      const conLimite = f.discount?.maxTotalUses != null || f.discount?.maxUsesPerCustomer != null
+      // D19 (Codex r1 #5): una fila del POS que sumó su uso (`usoContado`) lo devuelve aunque su descuento hoy no tenga tope.
+      const conLimite = f.discount?.maxTotalUses != null || f.discount?.maxUsesPerCustomer != null || f.usoContado
       if (!f.loyaltyTransactionId && !f.couponCodeId && !premioId && !(f.discountId && conLimite)) continue
       filas.push({
         id: f.id,
@@ -108,7 +111,7 @@ export async function convertirBeneficiosEnCortesiaEnTx(
         couponCodeId: f.couponCodeId,
         loyaltyTransactionId: f.loyaltyTransactionId,
         premioId,
-        bajaUso: !!f.discountId && !f.couponCodeId && f.discount?.maxTotalUses != null,
+        bajaUso: !!f.discountId && !f.couponCodeId && (f.discount?.maxTotalUses != null || f.usoContado),
       })
     }
     if (pagina.length < PAGINA) break
@@ -167,6 +170,8 @@ export async function convertirBeneficiosEnCortesiaEnTx(
         discountId: null,
         couponCodeId: null,
         loyaltyTransactionId: null,
+        // D19: la cortesía ya no ocupa un uso (se devolvió en (1)).
+        usoContado: false,
       },
     })
     regresado.montoRegresado = regresado.montoRegresado.plus(f.amount)

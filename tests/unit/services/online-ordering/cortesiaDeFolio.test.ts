@@ -40,6 +40,8 @@ interface Fila {
   isComp: boolean
   compReason: string | null
   appliedToItemIds: string[]
+  /** D19: la fila del descuento de cuenta del POS que sumó su uso. */
+  usoContado?: boolean
 }
 interface Estado {
   folio: boolean
@@ -137,6 +139,7 @@ function txSobre(e: Estado): TxConReintento {
               discountId: f.discountId,
               couponCodeId: f.couponCodeId,
               loyaltyTransactionId: f.loyaltyTransactionId,
+              usoContado: f.usoContado ?? false,
               discount: d ? { maxTotalUses: d.maxTotalUses, maxUsesPerCustomer: d.maxUsesPerCustomer } : null,
             }
           })
@@ -361,6 +364,16 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
     expect(e.filas[0]).toMatchObject(CORTESIA(D(85)))
     expect(e.descuentos[0].currentUses).toBe(4)
     expect(e.llamadas.some(l => l.startsWith('Discount:'))).toBe(false)
+  })
+
+  it('D19 (Codex r1 #5): una fila del POS que sumó su uso lo devuelve aunque su descuento ya no tenga tope, y queda sin marca', async () => {
+    const e = estado({
+      filas: [fila('od1', { discountId: 'cdisc1', usoContado: true })],
+      descuentos: [{ id: 'cdisc1', venueId: VENUE, currentUses: 3, maxTotalUses: null, maxUsesPerCustomer: null }],
+    })
+    await convertir(e)
+    expect(e.descuentos[0].currentUses).toBe(2)
+    expect(e.filas[0]).toMatchObject({ ...CORTESIA(D(85)), usoContado: false })
   })
 
   it('un 20 % convertido no crece al agregar un producto a la cuenta revivida (repartoDescuento.ts:242, :296)', async () => {

@@ -18,6 +18,7 @@ jest.mock('@/communication/sockets', () => ({
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
 }))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
   ...jest.requireActual('@/services/mobile/avisoDeVentaSinRed'),
   avisarVentaSinRed: jest.fn().mockResolvedValue(undefined),
@@ -26,6 +27,8 @@ jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { validateDiscountActive } from '@/services/shared/discount.service'
+import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { applyOrderDiscount, createOrderWithItems, removeOrderDiscount } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -124,7 +127,26 @@ function baseEnMemoria(catalogo: Record<string, Fila>) {
     }
     return { count: filas.length }
   })
-  return { descuentos, catalogo }
+  // La lectura del Mostrador después de sumar (para el rastro «sobre el tope»).
+  prismaMock.discount.findMany.mockImplementation(async ({ where }: any) =>
+    Object.values(catalogo)
+      .filter(d => coincide(d, where))
+      .map(d => ({ ...d })),
+  )
+  // El UPDATE del POS (`sumarUsoDelDescuentoEnTx`): la condición contra el tope VIGENTE de la fila, como Postgres.
+  const estado = { apartados: 0 }
+  prismaMock.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    if (!strings.join('?').includes('UPDATE "Discount"')) throw new Error('doble en memoria: $executeRaw no soportado')
+    const [id, venueId, enLaCola, apartados] = valores
+    const d = catalogo[id]
+    if (!d || d.venueId !== venueId) return 0
+    if (!(enLaCola || d.maxTotalUses == null || d.currentUses + apartados < d.maxTotalUses)) return 0
+    d.currentUses += 1
+    return 1
+  })
+  // Los usos que un cupón del mismo descuento apartó en una venta sin pagar.
+  prismaMock.orderDiscount.count.mockImplementation(async () => estado.apartados)
+  return { descuentos, catalogo, estado }
 }
 
 const descuento = (id: string, extra: Fila = {}): Fila => ({
@@ -190,6 +212,26 @@ describe('(1) Mesas del POS: el descuento de cuenta SUMA su uso', () => {
     await expect(applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')).rejects.toBeInstanceOf(BadRequestError)
     expect(db.catalogo[PROMO].currentUses).toBe(100)
     expect(cuenta.filas()).toEqual([])
+  })
+
+  it('🔴 Codex r1 #2: el gerente bajó el tope mientras la caja aplicaba: manda el tope VIGENTE, no el que leyó', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 2, currentUses: 1 }) })
+    const cuenta = await cuentaAbierta(db)
+    const foto = { ...db.catalogo[PROMO] } // la caja leyó tope 2
+    prismaMock.discount.findFirst.mockImplementation(async () => ({ ...foto, value: new Prisma.Decimal(10) }))
+    db.catalogo[PROMO].maxTotalUses = 1 // el gerente lo bajó antes del UPDATE
+
+    await expect(applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')).rejects.toThrow(/usage limit/)
+    expect(db.catalogo[PROMO].currentUses).toBe(1)
+  })
+
+  it('🔴 Codex r1 #3: el último uso ya lo apartó un cupón en un pedido sin pagar: Mesas no lo toma', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 0 }) })
+    db.estado.apartados = 1
+    const cuenta = await cuentaAbierta(db)
+
+    await expect(applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1')).rejects.toThrow(/usage limit/)
+    expect(db.catalogo[PROMO].currentUses).toBe(0)
   })
 
   it('un descuento sin tope también cuenta su uso (como el motor de la TPV y el Mostrador)', async () => {
@@ -259,6 +301,24 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
 
     expect(db.descuentos.filter(d => d.orderId === creada.id)).toEqual([expect.objectContaining({ discountId: PROMO, amount: 10 })])
     expect(db.catalogo[PROMO].currentUses).toBe(101)
+    // Codex r1 #1 y #7: queda el rastro para el dueño (también atrapa dos cajas en línea con el último uso, punto 2 de la tarjeta).
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'DESCUENTO_SOBRE_TOPE',
+        entityId: creada.id,
+        data: expect.objectContaining({ discountId: PROMO, usos: 101, tope: 100, camino: 'mostrador', sinRed: true }),
+      }),
+    )
+  })
+
+  it('regresión: Mostrador de la cola DEBAJO del tope no deja rastro de «sobre el tope»', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 10 }) })
+    await createOrderWithItems(
+      VENUE,
+      venta({ isOfflineReplay: true, createdAtLocal: Date.now(), performedBy: 'sesion-1', orderDiscountId: PROMO }),
+    )
+    expect(db.catalogo[PROMO].currentUses).toBe(11)
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }))
   })
 
   it('regresión: Mostrador EN LÍNEA con el tope lleno se sigue rechazando', async () => {
@@ -274,5 +334,42 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
 
     expect(cuenta.filas()).toEqual([expect.objectContaining({ discountId: PROMO, usoContado: true })])
     expect(db.catalogo[PROMO].currentUses).toBe(101)
+    // Codex r1 #7: medido bajo el candado (después de sumar), no con la foto que se leyó antes.
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'DESCUENTO_SOBRE_TOPE',
+        entityId: cuenta.id,
+        data: expect.objectContaining({ discountId: PROMO, usos: 101, tope: 100, camino: 'mesa', sinRed: true }),
+      }),
+    })
+  })
+
+  it('regresión: la cola de Mesas debajo del tope suma sin rastro', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
+    const cuenta = await cuentaAbierta(db)
+    await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1', false, undefined, {}, { enLaCola: true })
+    expect(db.catalogo[PROMO].currentUses).toBe(4)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }) })
+  })
+})
+
+describe('Codex r1 #4: la cuenta vacía que se borra devuelve los usos que sus filas sumaron', () => {
+  it('sólo las filas con usoContado, por id de descuento ascendente', async () => {
+    prismaMock.orderDiscount.findMany.mockResolvedValue([{ discountId: 'desc-b' }, { discountId: 'desc-a' }] as any)
+    prismaMock.discount.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    const n = await devolverUsosDeCuentaQueSeBorraEnTx(prismaMock as any, VENUE, 'orden-vacia')
+
+    expect(n).toBe(2)
+    expect(prismaMock.orderDiscount.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { orderId: 'orden-vacia', order: { venueId: VENUE }, usoContado: true, discountId: { not: null } },
+      }),
+    )
+    expect(prismaMock.discount.updateMany.mock.calls.map(([a]: any) => a.where.id)).toEqual(['desc-a', 'desc-b'])
+    expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
+      where: { id: 'desc-a', venueId: VENUE, currentUses: { gt: 0 } },
+      data: { currentUses: { decrement: 1 } },
+    })
   })
 })

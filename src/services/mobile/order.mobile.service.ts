@@ -76,9 +76,9 @@ import {
   filaDeDescuentoDeCatalogoEnCuenta,
   filaDeDescuentoDeCuenta,
   validateDiscountActive,
-  descuentoSinUsos,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { devolverUsoDelDescuentoEnTx, sumarUsoDelDescuentoEnTx } from '../shared/usoDelDescuento'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
@@ -2467,14 +2467,44 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
   ]
   if (usados.length > 0) {
     try {
-      await withDeadlockRetry(
-        tx =>
-          tx.discount.updateMany({
+      // D19 (encargo 01765a, Codex r1 #1 y #7): ya sumado, se lee bajo el mismo candado; lo que quedó ARRIBA de su tope (una venta de
+      // la cola que ya se cobró, o dos cajas en línea con el último uso a la vez, punto 2 de la tarjeta) deja su rastro en la bitácora.
+      const sobreElTope = await withDeadlockRetry(
+        async tx => {
+          await tx.discount.updateMany({
             where: { id: { in: usados } },
             data: { currentUses: { increment: 1 } },
-          }),
+          })
+          const ahora = await tx.discount.findMany({
+            where: { id: { in: usados }, venueId },
+            select: { id: true, name: true, currentUses: true, maxTotalUses: true },
+            take: usados.length,
+          })
+          return ahora.filter(d => d.maxTotalUses != null && d.currentUses > d.maxTotalUses)
+        },
         { etiqueta: 'terminarVentaDeMostrador' },
       )
+      if (sobreElTope.length > 0) {
+        const { logAction } = await import('../dashboard/activity-log.service')
+        for (const d of sobreElTope) {
+          void logAction({
+            staffId: prep.validatedStaffId ?? null,
+            venueId,
+            action: 'DESCUENTO_SOBRE_TOPE',
+            entity: 'Order',
+            entityId: order.id,
+            data: {
+              orderId: order.id,
+              discountId: d.id,
+              nombre: d.name,
+              usos: d.currentUses,
+              tope: d.maxTotalUses,
+              camino: 'mostrador',
+              sinRed: prep.enLaCola,
+            },
+          })
+        }
+      }
     } catch (error) {
       logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
         orderId: order.id,
@@ -3149,25 +3179,18 @@ export async function applyOrderDiscountInTransaction(
     : null
   const aprobo = pideAprobacion && aprobacion ? (aprobacion.porPin ?? aplico) : null
 
-  // 🔴 D19 (hz:e82938e1:D19, encargo 01765a): el uso se SUMA aquí, en la misma transacción, antes de crear la fila. Antes el POS
-  // revisaba el tope y nunca sumaba: un «primeros 100» aplicado en Mesas no se acababa. La condición del tope va DENTRO del UPDATE:
-  // con dos cajas pidiendo el último uso, la segunda espera el candado de la fila, Postgres vuelve a evaluar `currentUses < tope` con
-  // el valor nuevo y no la toca (count 0 ⇒ el mismo rechazo de siempre; la transacción entera se revierte). La cola sin red no
-  // revisa el tope (la mesa ya lo dio): su uso cuenta aunque pase del tope, y queda en el log.
-  const conTope = discount.maxTotalUses != null && !opciones.enLaCola
-  const { count: usoSumado } = await tx.discount.updateMany({
-    where: { id: discountId, venueId, ...(conTope ? { currentUses: { lt: discount.maxTotalUses! } } : {}) },
-    data: { currentUses: { increment: 1 } },
+  // 🔴 D19 (hz:e82938e1:D19, encargo 01765a): el uso se SUMA aquí, en la misma transacción y antes de crear la fila. Antes el POS
+  // revisaba el tope y nunca sumaba: un «primeros 100» aplicado en Mesas no se acababa. Las reglas (tope vigente dentro del UPDATE,
+  // apartados de cupón, la cola que no rechaza y su rastro) viven en `sumarUsoDelDescuentoEnTx`.
+  await sumarUsoDelDescuentoEnTx(tx, {
+    venueId,
+    discountId,
+    nombre: discount.name,
+    maxTotalUses: discount.maxTotalUses,
+    orderId,
+    staffId,
+    enLaCola: opciones.enLaCola,
   })
-  if (usoSumado === 0) throw descuentoSinUsos(discount.name)
-  if (opciones.enLaCola && discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
-    logger.warn('🎟️ [Descuento] la cola sin red aplicó un descuento con el tope ya lleno: el uso cuenta y pasa del tope', {
-      orderId,
-      discountId,
-      currentUses: discount.currentUses,
-      maxTotalUses: discount.maxTotalUses,
-    })
-  }
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -3279,6 +3302,10 @@ export async function removeOrderDiscountInTransaction(
   if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
   // Tarjeta na24531d: la fila que nació al cobrar vales V7 (marcada) no se quita desde la caja (la anulación sólo regresa canjes).
   if (!opciones.porAnulacion) rechazarSiQuitaUnDescuentoDeVale(row)
+  // D19 (encargo 01765a): devuelve el uso SÓLO si esta fila lo sumó (`usoContado`); una fila vieja o de otro camino no resta lo que no
+  // sumó aquí. Va ANTES de escribir cualquier fila de la cuenta (Codex r1 #6): con el gerente borrando ese descuento del catálogo
+  // (Discount → poner en NULL las filas que lo usan), tomar Discount primero evita el ciclo con la fila que esta caja borra después.
+  if (row.usoContado && row.discountId) await devolverUsoDelDescuentoEnTx(tx, venueId, row.discountId)
   // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
   // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -3293,14 +3320,6 @@ export async function removeOrderDiscountInTransaction(
   const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
   if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
   await tx.orderDiscount.delete({ where: { id: row.id } })
-  // D19 (encargo 01765a): devuelve el uso SÓLO si esta fila lo sumó (`usoContado`, descuento de cuenta del POS desde el arreglo). Una
-  // fila vieja o de otro camino no resta lo que no sumó aquí. Nunca baja de 0.
-  if (row.usoContado && row.discountId) {
-    await tx.discount.updateMany({
-      where: { id: row.discountId, venueId, currentUses: { gt: 0 } },
-      data: { currentUses: { decrement: 1 } },
-    })
-  }
   const propinaYaCobrada = opciones.abonosDeSaldoSeRegresanEnEstaTx ? Number(order.tipAmount || 0) : 0
   const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx, propinaYaCobrada)
   return { row, refund: refunded, stampRefund: stamp, totals: t }
