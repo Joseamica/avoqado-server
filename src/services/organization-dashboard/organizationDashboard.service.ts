@@ -321,6 +321,20 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
   return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
 }
 
+/**
+ * ¿Es «AAAA-MM-DD» de un día que existe en el calendario? Por partes y sin `Date.UTC`, que lee los años 0–99 como 1900–1999
+ * (Codex a1988b r3).
+ */
+function esFechaCivil(valor: unknown): valor is string {
+  if (typeof valor !== 'string') return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(valor)
+  if (!m) return false
+  const [anio, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const bisiesto = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0
+  const diasDelMes = [31, bisiesto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mes - 1]
+  return diasDelMes !== undefined && dia >= 1 && dia <= diasDelMes
+}
+
 export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
 
 /**
@@ -2200,8 +2214,9 @@ class OrganizationDashboardService {
     // existe o se repite (Santiago) los días no se enciman ni dejan hueco (Codex r1 #3, el mismo cálculo que el correo nocturno).
     // Las fechas son cadenas civiles: nunca pasan por la zona del host.
     // Una fecha que no existe en el calendario (2026-11-32, 2026-02-30) es un 400, nunca otro día por desbordamiento (Codex a1988b r2).
-    for (const fecha of [dateStr, startDateStr, endDateStr]) {
-      if (fecha && (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || addCivilDays(fecha, 0) !== fecha)) {
+    // Una lista (`?date=a&date=b`) también es un 400 (r3).
+    for (const fecha of [dateStr, startDateStr, endDateStr] as unknown[]) {
+      if (fecha !== undefined && fecha !== '' && !esFechaCivil(fecha)) {
         throw new BadRequestError(`La fecha «${fecha}» no es válida: usa el formato AAAA-MM-DD con un día que exista.`)
       }
     }

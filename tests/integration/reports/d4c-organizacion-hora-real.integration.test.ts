@@ -675,6 +675,12 @@ describe('D4c · visión global, tiendas y vendedores', () => {
         statusCode: 400,
       })
       await expect(dashboard.getStaffAttendance(n.organizationId, '2026-02-30')).rejects.toMatchObject({ statusCode: 400 })
+      // Una lista (`?date=a&date=b` de Express) también es 400; un año válido de 4 cifras sigue entrando (r3).
+      await expect(dashboard.getStaffAttendance(n.organizationId, [DIA_12] as unknown as string)).rejects.toMatchObject({ statusCode: 400 })
+      await expect(dashboard.getStaffAttendance(n.organizationId, '2028-02-29')).resolves.toMatchObject({ staff: expect.any(Array) })
+      await expect(
+        dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, '0099-12-31', DIA_12),
+      ).resolves.toMatchObject({ staff: expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB })]) })
     } finally {
       await prisma.order.deleteMany({ where: { venueId: venueS } })
       await prisma.staffVenue.deleteMany({ where: { venueId: venueS } })
