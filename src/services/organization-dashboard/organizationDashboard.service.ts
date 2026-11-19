@@ -14,7 +14,7 @@
  * sí agrupan por `v."timezone"` de cada tienda. Si algún día hace falta, el arreglo es
  * "hoy" por tienda en TODAS las funciones de org, no sólo en algunas.
  */
-import { Prisma, StaffRole } from '@prisma/client'
+import { OrderStatus, Prisma, StaffRole } from '@prisma/client'
 import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
@@ -32,6 +32,7 @@ import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
 import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
@@ -431,7 +432,7 @@ class OrganizationDashboardService {
     // Aggregate sales from completed orders — sumas y categorías en Postgres (antes se
     // materializaban todas las órdenes del rango con sus items para reducirlas en Node).
     const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
-    const orderScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${rangeSql(Prisma.raw('o."createdAt"'), todayStart, rangeEnd)}`
+    const orderScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', todayStart, rangeEnd ?? null)}`
     const [todayTotals, categoryRows, weekOrders, monthOrders] = await Promise.all([
       prisma.$queryRaw<Array<{ sales: Prisma.Decimal | null; orders: number }>>`
         SELECT SUM(o."total") AS "sales", COUNT(*)::int AS "orders"
@@ -450,19 +451,11 @@ class OrganizationDashboardService {
         ORDER BY SUM(oi."quantity") DESC, 1
       `,
       prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: weekStart },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: monthStart },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, monthStart, null),
         _sum: { total: true },
       }),
     ])
@@ -499,11 +492,7 @@ class OrganizationDashboardService {
     // Count active stores (stores with sales in range)
     const storesWithSales = await prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: 'COMPLETED',
-        createdAt: rangeFilter,
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, todayStart, rangeEnd ?? null),
     })
 
     // Sum approved cash deposits in the date range
@@ -659,8 +648,6 @@ class OrganizationDashboardService {
     const needsWeekUnits = goalConfigs.some(g => g.period === 'WEEKLY' && g.goalType === 'QUANTITY')
     const needsMonthUnits = goalConfigs.some(g => g.period === 'MONTHLY' && g.goalType === 'QUANTITY')
 
-    const todayCreatedAtWhere = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
-
     // Bulk queries — replaces N per-venue loops with a constant number of queries
     const [
       todaySalesByVenue,
@@ -676,40 +663,33 @@ class OrganizationDashboardService {
       // 1. Today sales per venue
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: todayCreatedAtWhere },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, todayStart, rangeEnd ?? null),
         _sum: { total: true },
       }),
       // 2. Today units per venue (SUM quantity — OrderItem has no venueId, needs raw SQL)
-      rangeEnd
-        ? prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
+      prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
             SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
             FROM "Order" o
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(todayStart)}
-              AND o."createdAt" <= ${utcTs(rangeEnd)}
-            GROUP BY o."venueId"
-          `
-        : prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
-            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
-            FROM "Order" o
-            JOIN "OrderItem" oi ON oi."orderId" = o.id
-            WHERE o."venueId" IN (${Prisma.join(venueIds)})
-              AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(todayStart)}
+              AND ${sqlRangoHoraRealSql('o', todayStart, rangeEnd ?? null)}
             GROUP BY o."venueId"
           `,
       // 3. Week sales per venue
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       // 4. Previous week sales per venue (for trend calculation)
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: prevWeekStart, lt: weekStart } },
+        where: dondeHoraRealEntre(
+          { venueId: { in: venueIds }, status: OrderStatus.COMPLETED },
+          prevWeekStart,
+          new Date(weekStart.getTime() - 1),
+        ),
         _sum: { total: true },
       }),
       // 5. Staff counts per venue
@@ -724,7 +704,7 @@ class OrganizationDashboardService {
       needsMonthSales
         ? prisma.order.groupBy({
             by: ['venueId'],
-            where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: monthStart } },
+            where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, monthStart, null),
             _sum: { total: true },
           })
         : Promise.resolve([] as any[]),
@@ -736,7 +716,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(weekStart)}
+              AND ${sqlRangoHoraRealSql('o', weekStart, null)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -748,7 +728,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(monthStart)}
+              AND ${sqlRangoHoraRealSql('o', monthStart, null)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -1106,12 +1086,12 @@ class OrganizationDashboardService {
     const [todayByVenue, weekByVenue, promotersByVenue, activeEntries, goals] = await Promise.all([
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: todayStart } },
+        where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, todayStart, null),
         _sum: { total: true },
       }),
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       prisma.staffVenue.groupBy({
@@ -1762,11 +1742,7 @@ class OrganizationDashboardService {
 
       // Get actual revenue for this day
       const orders = await prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: dayStart, lt: dayEnd },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, dayStart, new Date(dayEnd.getTime() - 1)),
         _sum: { total: true },
       })
 
@@ -1849,11 +1825,7 @@ class OrganizationDashboardService {
 
       // Get actual order count for this day
       const orderCount = await prisma.order.count({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: dayStart, lt: dayEnd },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, dayStart, new Date(dayEnd.getTime() - 1)),
       })
 
       const goal = goals.find(g => g.periodDate.toDateString() === dayStart.toDateString())
@@ -1992,11 +1964,7 @@ class OrganizationDashboardService {
 
     const salesByVenue = await prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: allVenueIds },
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, todayStart, null),
       _sum: { total: true },
     })
 
@@ -2058,7 +2026,8 @@ class OrganizationDashboardService {
     // de la org con su vendedor y su tienda materializadas para contarlas en Node). La
     // tienda es la de su PRIMERA venta de hoy y el empate lo gana quien empezó a vender
     // primero — antes lo decidía el orden en que la base devolviera las filas.
-    const todayScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(todayStart)} AND o."createdById" IS NOT NULL`
+    const orderTime = Prisma.raw(sqlHoraReal('o'))
+    const todayScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', todayStart, null)} AND o."createdById" IS NOT NULL`
     const rows = await prisma.$queryRaw<
       Array<{
         staffId: string
@@ -2070,11 +2039,11 @@ class OrganizationDashboardService {
       }>
     >`
       WITH ranked AS (
-        SELECT o."createdById" AS "staffId", COUNT(*)::int AS "salesCount", MIN(o."createdAt") AS "firstAt"
+        SELECT o."createdById" AS "staffId", COUNT(*)::int AS "salesCount", MIN(${orderTime}) AS "firstAt"
         FROM "Order" o
         WHERE ${todayScope}
         GROUP BY o."createdById"
-        ORDER BY COUNT(*) DESC, MIN(o."createdAt") ASC, o."createdById" ASC
+        ORDER BY COUNT(*) DESC, "firstAt" ASC, o."createdById" ASC
         LIMIT 1
       )
       SELECT r."staffId", r."salesCount", s."firstName", s."lastName", first_sale."venueId", v."name" AS "venueName"
@@ -2084,7 +2053,7 @@ class OrganizationDashboardService {
         SELECT o."venueId"
         FROM "Order" o
         WHERE ${todayScope} AND o."createdById" = r."staffId"
-        ORDER BY o."createdAt" ASC, o."id" ASC
+        ORDER BY ${orderTime} ASC, o."id" ASC
         LIMIT 1
       ) first_sale ON TRUE
       LEFT JOIN "Venue" v ON v."id" = first_sale."venueId"
@@ -2322,7 +2291,7 @@ class OrganizationDashboardService {
             FROM "Payment" p
             ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
             WHERE p."venueId" IN (${Prisma.join(venueIds)})
-              AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
+              AND ${sqlRangoHoraRealSql('p', dayStart, dayEnd)}
               AND p."status" = 'COMPLETED'
               AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
             GROUP BY 1, 2
@@ -2504,10 +2473,10 @@ class OrganizationDashboardService {
 
     // Ventas de los últimos 7 días agrupadas por día de la semana (del venue) en Postgres.
     const rows = await prisma.$queryRaw<Array<{ dow: number; sales: Prisma.Decimal | null }>>`
-      SELECT EXTRACT(DOW FROM ${localWallClock(timezone, Prisma.raw('o."createdAt"'))})::int AS "dow", SUM(o."total") AS "sales"
+      SELECT EXTRACT(DOW FROM ${localWallClock(timezone, Prisma.raw(sqlHoraReal('o')))})::int AS "dow", SUM(o."total") AS "sales"
       FROM "Order" o
       WHERE o."venueId" IN (${orgVenueIdsSql(orgId)})
-        AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(sevenDaysAgo)}
+        AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', sevenDaysAgo, null)}
       GROUP BY 1
     `
 
@@ -3410,7 +3379,7 @@ class OrganizationDashboardService {
       Array<{ staffId: string; venueId: string; localDate: string; count: number; amount: Prisma.Decimal | null }>
     >`
       SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "staffId", p."venueId",
-             ${venueLocalDay(Prisma.raw('p."createdAt"'))} AS "localDate",
+             ${venueLocalDay(Prisma.raw(sqlHoraReal('p')))} AS "localDate",
              (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "count", SUM(p."amount") AS "amount"
       FROM "Payment" p
       JOIN "Venue" v ON v."id" = p."venueId"
@@ -3418,7 +3387,7 @@ class OrganizationDashboardService {
       WHERE ${SQL_VENDEDOR_DEL_MOVIMIENTO} IN (${Prisma.join(staffIds)})
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
-        AND ${rangeSql(Prisma.raw('p."createdAt"'), rangeStart, rangeEnd)}
+        AND ${sqlRangoHoraRealSql('p', rangeStart, rangeEnd)}
       GROUP BY 1, 2, 3
     `
 

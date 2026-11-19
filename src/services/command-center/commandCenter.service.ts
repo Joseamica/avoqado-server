@@ -3,11 +3,13 @@
  * Provides real-time KPIs, activity feeds, and operational insights
  * for the PlayTelecom/White-Label dashboard.
  */
+import { OrderStatus, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueStartOfMonth, venueStartOfDayOffset, parseDbDateRange, zonaValida } from '../../utils/datetime'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
-import { utcTs } from '../../utils/sqlDates'
+import { localWallClock } from '../../utils/sqlDates'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 /**
  * Get the timezone configured for a venue, falling back to Mexico City.
@@ -99,11 +101,7 @@ class CommandCenterService {
 
     // Get today's orders with lean item data (for category breakdown) and creator info
     const todayOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-      },
+      where: dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED }, todayStart, null),
       select: {
         total: true,
         createdBy: {
@@ -120,21 +118,23 @@ class CommandCenterService {
     const avgTicket = todayOrders.length > 0 ? todaySales / todayOrders.length : 0
 
     // Week/month: use aggregate for sales + SUM(quantity) for real unit counts
+    const weekOrders = dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED }, weekStart, null)
+    const monthOrders = dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED }, monthStart, null)
     const [weekAgg, weekUnitsAgg, monthAgg, monthUnitsAgg] = await Promise.all([
       prisma.order.aggregate({
-        where: { venueId, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        where: weekOrders,
         _sum: { total: true },
       }),
       prisma.orderItem.aggregate({
-        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: weekStart } } },
+        where: { order: weekOrders },
         _sum: { quantity: true },
       }),
       prisma.order.aggregate({
-        where: { venueId, status: 'COMPLETED', createdAt: { gte: monthStart } },
+        where: monthOrders,
         _sum: { total: true },
       }),
       prisma.orderItem.aggregate({
-        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: monthStart } } },
+        where: { order: monthOrders },
         _sum: { quantity: true },
       }),
     ])
@@ -447,11 +447,7 @@ class CommandCenterService {
 
     // Get orders grouped by creator
     const orders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-      },
+      where: dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED }, todayStart, null),
       include: {
         createdBy: {
           select: { id: true, firstName: true, lastName: true, photoUrl: true },
@@ -578,6 +574,8 @@ class CommandCenterService {
     const previousPeriodStart = midnight(addCivilDays(startKey, -dayKeys.length))
     const previousPeriodEnd = new Date(currentPeriodStart.getTime() - 1)
 
+    const previousOrders = dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED }, previousPeriodStart, previousPeriodEnd)
+
     // Aggregate current period per day in SQL (avoids loading all orders+items into memory)
     const [dailyData, prevAgg, prevUnitsAgg] = await Promise.all([
       // Current period: sales + transactions + units per day via subquery
@@ -592,28 +590,27 @@ class CommandCenterService {
           SUM(sub.units) as units
         FROM (
           SELECT
-            DATE(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}) as date_key,
+            DATE(${localWallClock(timezone, Prisma.raw(sqlHoraReal('o')))}) as date_key,
             o.total,
             COALESCE(SUM(oi.quantity), 0) as units
           FROM "Order" o
           LEFT JOIN "OrderItem" oi ON oi."orderId" = o.id
           WHERE o."venueId" = ${venueId}
             AND o.status = 'COMPLETED'
-            AND o."createdAt" >= ${utcTs(currentPeriodStart)}
-            AND o."createdAt" <= ${utcTs(currentPeriodEnd)}
-          GROUP BY o.id, DATE(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}), o.total
+            AND ${sqlRangoHoraRealSql('o', currentPeriodStart, currentPeriodEnd)}
+          GROUP BY o.id, 1, o.total
         ) sub
         GROUP BY sub.date_key
         ORDER BY sub.date_key
       `,
       // Previous period totals
       prisma.order.aggregate({
-        where: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } },
+        where: previousOrders,
         _sum: { total: true },
         _count: true,
       }),
       prisma.orderItem.aggregate({
-        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } } },
+        where: { order: previousOrders },
         _sum: { quantity: true },
       }),
     ])

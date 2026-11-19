@@ -117,12 +117,14 @@ export function sqlRangoHoraReal(alias: string, desde: string, hasta: string): s
   )
 }
 
-/** Lo mismo que `sqlRangoHoraReal`, para `$queryRaw` con plantilla: las fechas viajan como parámetros con `utcTs`. */
-export function sqlRangoHoraRealSql(alias: string, desde: Date, hasta: Date): Prisma.Sql {
+/** Rango inclusivo para `$queryRaw` con plantilla. Con `hasta: null`, no se pone techo al reporte. */
+export function sqlRangoHoraRealSql(alias: string, desde: Date, hasta: Date | null): Prisma.Sql {
   const a = alias ? `${alias}.` : ''
   const llegada = Prisma.raw(`${a}"createdAt"`)
   const real = Prisma.raw(sqlHoraReal(alias))
   const antes = Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_ANTES_MS / (60 * 60 * 1000)} hours'`)
+  if (hasta === null) return Prisma.sql`${llegada} >= ${utcTs(desde)} - ${antes} AND ${real} >= ${utcTs(desde)}`
+
   const despues = Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_MS / (60 * 60 * 1000)} hours'`)
   return Prisma.sql`${llegada} >= ${utcTs(desde)} - ${antes} AND ${llegada} <= ${utcTs(hasta)} + ${despues} AND ${real} >= ${utcTs(desde)} AND ${real} <= ${utcTs(hasta)}`
 }
