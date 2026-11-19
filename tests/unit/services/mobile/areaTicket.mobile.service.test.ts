@@ -293,6 +293,31 @@ describe('vales por área — claim de la caja (§5.4)', () => {
     expect(prismaMock.orderItem.create.mock.calls[0][0].data.fulfillmentAreaId).toBe(AREA)
   })
 
+  // D11 (18-nov): el vale viejo tampoco acepta un descuento con tope de usos (una app vieja podría llamarlo); se rechaza antes de escribir.
+  it('🔴 D11: agregar al vale viejo un renglón con un descuento con tope ⇒ 400 y no escribe nada', async () => {
+    mockAreaTerminal()
+    prismaMock.order.findUnique.mockResolvedValue(ticketRow())
+    prismaMock.discount.findMany.mockResolvedValue([{ name: 'Primeros 100', maxTotalUses: 100, maxUsesPerCustomer: null }])
+
+    await expect(
+      addAreaTicketItems(VENUE, CODE, { deviceUid: DEVICE, items: [{ productId: 'p-jamon', quantity: 1, discountId: 'd-tope' }] }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT' })
+    expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D11: abrir el vale viejo con un descuento con tope ⇒ 400 y no abre la cuenta', async () => {
+    mockAreaTerminal()
+    prismaMock.order.findUnique.mockResolvedValue(null)
+    prismaMock.order.findFirst.mockResolvedValue(null)
+    prismaMock.discount.findMany.mockResolvedValue([{ name: 'Primeros 100', maxTotalUses: 100, maxUsesPerCustomer: null }])
+
+    await expect(
+      openAreaTicket(VENUE, { code: CODE, deviceUid: DEVICE, items: [{ productId: 'p-jamon', quantity: 1, discountId: 'd-tope' }] } as any),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT' })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
   it('nadie puede agregar a una cuenta ya pagada', async () => {
     mockAreaTerminal()
     prismaMock.order.findUnique.mockResolvedValue(ticketRow({ paymentStatus: 'PAID' }))

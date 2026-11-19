@@ -1,4 +1,5 @@
 import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
+import { rechazarDescuentosConTopeEnVales } from '../shared/descuentoConTopeEnVales'
 /**
  * Vales por área (AREA_TICKETS) — cuenta compartida entre áreas emisoras.
  *
@@ -555,6 +556,12 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
   }
 
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+  // 🔴 D11: un descuento con tope de usos no entra a un vale, tampoco al viejo (una app vieja podría llamarlo); antes de escribir.
+  await rechazarDescuentosConTopeEnVales(
+    venueId,
+    input.items.map(item => item.discountId),
+    'VALE',
+  )
 
   // 🔴 El área la pone el SERVER desde el binding de la terminal, jamás el payload.
   const { itemsData, subtotal, itemDiscountTotal, discounts, motivosPorRenglon } = await buildOrderItemsData(
@@ -702,6 +709,12 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   assertTicketAcceptsItems(order, terminal.id)
 
   await validateStaffVenue(input.staffId ?? undefined, venueId)
+  // 🔴 D11: un descuento con tope de usos no entra a un vale, tampoco al viejo; antes de escribir.
+  await rechazarDescuentosConTopeEnVales(
+    venueId,
+    input.items.map(item => item.discountId),
+    'VALE',
+  )
 
   // Misma aritmética que abrir la cuenta y que el mostrador: una sola función.
   const { itemsData, discounts, motivosPorRenglon } = await buildOrderItemsData(

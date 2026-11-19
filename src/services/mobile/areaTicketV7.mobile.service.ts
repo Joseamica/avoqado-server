@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomInt } from 'node:crypto'
+import { rechazarDescuentosConTopeEnVales } from '../shared/descuentoConTopeEnVales'
 import {
   AreaSettlementRoute,
   AreaTicketCheckoutStatus,
@@ -993,6 +994,23 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   // Cambiar la ruta del área después no reescribe vales ya emitidos.
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+  // 🔴 D11: un descuento con tope de usos no entra a un vale (`descuentoConTopeEnVales.ts`). Antes de validar el descuento y de escribir
+  // nada. La ruta EXTERNAL sigue con su propio rechazo de rebajas. Si con esta llave ya hay un vale (el primer POST terminó mientras
+  // éste revisaba), se devuelve ése: la misma llave no contesta éxito y 400.
+  if (!isExternal) {
+    try {
+      await rechazarDescuentosConTopeEnVales(
+        venueId,
+        input.lines.map(line => line.discountId),
+        'VALE',
+      )
+    } catch (error) {
+      const ganador = await prisma.areaTicket.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } }, include: ticketInclude })
+      if (!ganador) throw error
+      assertIssueIdempotencyMatch(ganador, input.lines)
+      return mapTicket(ganador)
+    }
+  }
   const normalizedItems = normalizeIssueLines(input.lines)
   const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory, discounts } = await buildOrderItemsData(
     venueId,
@@ -2016,6 +2034,13 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   if (normalItems.length > 0 && settings?.allowMixedCart === false) {
     throw domainError(409, 'MIXED_CART_DISABLED', 'Este local no permite mezclar vales con productos de caja.')
   }
+  // 🔴 D11: un descuento con tope de usos no entra a un suelto de la venta de vales; antes de validar el descuento y de crear la orden
+  // (sin folio gastado). La venta no se arma y los vales siguen en la caja.
+  await rechazarDescuentosConTopeEnVales(
+    venueId,
+    normalItems.map(item => item.discountId),
+    'CAJA',
+  )
   const normalBuild =
     normalItems.length > 0
       ? await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input)
