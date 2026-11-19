@@ -242,7 +242,7 @@ beforeAll(async () => {
     productId: null,
     nombre: 'Futuro',
     monto: 3,
-    llegada: new Date('2030-01-01T18:00:00.000Z'),
+    llegada: new Date('9999-06-01T18:00:00.000Z'),
     conExtra: true,
   })
 
@@ -376,7 +376,7 @@ describe('D4a · reportes del negocio a la hora real', () => {
     expect(u11.find(u => u.modifierId === extra)?.timesUsed).toBe(1)
     const u12 = await getModifierUsageStats(n.venueId, { startDate: DIA_12.from, endDate: DIA_12.to })
     expect(u12.find(u => u.modifierId === extra)).toBeUndefined()
-    // Con sólo «desde» el 12: la Playera ya no (es del 11) y el otro extremo sigue abierto, como antes: entra la de 2030.
+    // Con sólo «desde» el 12: la Playera ya no (es del 11) y el otro extremo sigue abierto, como antes: entra la del año 9999.
     // Con la llegada serían 2; con un tope en «ahora», ninguna.
     // Y con sólo «hasta» el 12: la Playera (11) y la de 1999 (con un piso inventado, sólo 1).
     expect((await getModifierUsageStats(n.venueId, { endDate: DIA_12.to })).find(u => u.modifierId === extra)?.timesUsed).toBe(2)
@@ -406,15 +406,9 @@ describe('D4a · reportes del negocio a la hora real', () => {
 
   it('corregir la fecha a mano manda: la venta sin red pasa al día nuevo (antes no salía en ninguno)', async () => {
     // Reenviarla recortada a minutos y SIN zona, como el formulario del DASHBOARD en cada guardado, no es corregirla: no toca la hora del
-    // aparato, aunque el servidor corra con la zona de México (sin el arreglo, la leería como 12:10Z y movería la venta).
-    const zona = process.env.TZ
-    process.env.TZ = 'America/Mexico_City'
-    try {
-      await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10', customerName: 'Ed' } as never)
-    } finally {
-      process.env.TZ = zona
-      if (zona === undefined) delete process.env.TZ
-    }
+    // aparato. (Que se lea igual con el servidor en la zona de México no se puede probar aquí: Jest no cambia la zona de Node; Codex r4
+    // lo comprobó en UTC, CDMX y Tokio.)
+    await updateOrder(n.venueId, ed, { createdAt: '2026-11-14T06:10', customerName: 'Ed' } as never)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).createdAt).toEqual(new Date('2026-11-14T06:10:00.000Z'))
     expect((await prisma.order.findUniqueOrThrow({ where: { id: ed } })).clientCreatedAt).toEqual(new Date('2026-11-14T05:50:00.000Z'))
     await updateOrder(n.venueId, ed, { createdAt: new Date('2026-11-15T18:00:00.000Z') } as never)
@@ -472,7 +466,7 @@ describe('D4a · herramientas de IA relativas a hoy', () => {
     const r = await ia('revenue_by_venue', { days: 1 })
     const filaB = r.venues.find((v: { venueId: string }) => v.venueId === venueB)
     expect(filaB.gross).toBeCloseTo(10 + 7, 2) // con la llegada, 67
-    // Sólo «desde», como antes: lo fechado a futuro también entra (negocio A: la de 2030, $3; con un tope en «ahora», 0).
+    // Sólo «desde», como antes: lo fechado a futuro también entra (negocio A: la del año 9999, $3; con un tope en «ahora», 0).
     expect(r.venues.find((v: { venueId: string }) => v.venueId === n.venueId).gross).toBeCloseTo(3, 2)
   })
 
