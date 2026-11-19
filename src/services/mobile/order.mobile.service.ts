@@ -5520,20 +5520,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const avisarSiLlegoConProblema = (
     _posRawData: Prisma.JsonValue | undefined,
     saldo: Partial<OrderBalanceSnapshot>,
-    cobradoCents: number,
+    abonoQueLaTerminalEsperaba: boolean,
   ): void => {
     const delAviso = { externalId: input.idempotencyKey ?? orderId, orderId, montoCents: amount }
     // S3: el aviso de venta apartada (`TURNO_CERRADO`) ya no sale de aquí: lo manda el efecto durable `AVISO_TURNO_CERRADO`.
     const saldoCents = saldo.remainingBalanceCents ?? 0
     const sobrepagoCents =
       saldo.totalPaidCents !== undefined && saldo.orderTotalCents !== undefined ? saldo.totalPaidCents - saldo.orderTotalCents : 0
-    // hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red, así que un abono parcial
-    // a propósito ($20 de una cuenta de $50) llegaba aquí con saldo y salía «una venta sin conexión no cuadra». Si la terminal dijo
-    // cuánto creía que debía la cuenta ANTES de cobrar y lo que queda es justo eso menos lo cobrado (sin la propina), la cuenta sigue
-    // debiendo lo que la terminal sabía: no hay nada que avisar. Si el servidor tenía otro saldo, el aviso sigue saliendo (y además
-    // `COBRO_SIN_RED_CON_DIFERENCIA`). Una TPV que no manda el saldo esperado avisa como antes. El sobrepago no cambia.
-    const esperado = input.saldoEsperadoSinRed
-    const abonoQueLaTerminalEsperaba = esperado !== undefined && Math.abs(saldoCents - Math.max(0, esperado.antesCents - cobradoCents)) <= 1
+    // hz:bdd815fd:D2 (encargo 8cfa9e): un saldo que la terminal ya sabía que iba a quedar (abono parcial de Mesas, que la TPV manda
+    // por la cola también con red) no es «una venta sin conexión que no cuadra». Quién lo decide: `abonoEsperadoAlCobrar` (cobro
+    // nuevo) y `abonoEsperadoAlReintentar` (reintento). El sobrepago avisa siempre, como antes.
     if ((saldoCents > 1 && !abonoQueLaTerminalEsperaba) || sobrepagoCents > 1) {
       avisarSiEsDeLaColaDeTerminal(venueId, input, 'PRECIO_CAMBIADO', {
         ...delAviso,
@@ -5545,13 +5541,43 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     }
   }
 
+  /**
+   * hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red, así que un abono parcial a
+   * propósito ($20 de una cuenta de $50) avisaba «una venta sin conexión no cuadra». Si la terminal dijo cuánto creía que debía la
+   * cuenta ANTES de cobrar (`saldoEsperadoSinRed`) y el servidor debía eso mismo (±1 centavo), el saldo que queda es el que la terminal
+   * sabía: no se avisa. Si el servidor tenía otro saldo, el aviso sigue (y además `COBRO_SIN_RED_CON_DIFERENCIA`). Una TPV que no manda
+   * el saldo esperado avisa como antes. Rappi 2b (efectivo con dinero de terceros) avisa como antes: su saldo no es el de la venta
+   * (Codex r1 #3).
+   */
+  const abonoEsperadoAlCobrar = (saldoAntesCents: number): boolean =>
+    order.thirdPartyCashDue == null &&
+    input.saldoEsperadoSinRed !== undefined &&
+    Math.abs(input.saldoEsperadoSinRed.antesCents - saldoAntesCents) <= 1
+
+  /**
+   * El reintento no conoce el saldo de ANTES: relee el de ahora. Calla sólo si lo que queda es lo esperado menos lo GUARDADO de este
+   * cobro y nadie cobró algo más en esta cuenta después de él (otro abono movería el saldo: Codex r1 #1); si no, avisa como antes.
+   */
+  const abonoEsperadoAlReintentar = async (pago: CobroDeLaLlave, saldo: Partial<OrderBalanceSnapshot>): Promise<boolean> => {
+    const esperado = input.saldoEsperadoSinRed
+    const saldoCents = saldo.remainingBalanceCents ?? 0
+    // Sin serial de terminal o fuera de la cola no hay aviso que callar: ni se consulta.
+    if (input.isOfflineReplay !== true || !input.terminalSerialNumber) return false
+    if (esperado === undefined || order.thirdPartyCashDue != null || saldoCents <= 1) return false
+    if (Math.abs(saldoCents - Math.max(0, esperado.antesCents - pesosToCents(Number(pago.amount)))) > 1) return false
+    const cobrosDespues = await prisma.payment.count({
+      where: { venueId, orderId, status: 'COMPLETED', id: { not: pago.id }, createdAt: { gte: pago.createdAt } },
+    })
+    return cobrosDespues === 0
+  }
+
   const responderConElCobroDeLaLlave = async (pago: CobroDeLaLlave, via: string): Promise<CashPaymentResponse> => {
     assertLlaveEsEsteCobro(pago, orderId)
     logger.info(`🔄 [ORDER.MOBILE] Reintento idempotente (${via}, key=${input.idempotencyKey}) — devuelvo el pago existente ${pago.id}`)
     await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
     // El saldo REAL de la orden ahora (relectura): quien reintenta la parte 1 de un cobro dividido sigue viendo lo que falta.
     const saldo = await readOrderBalanceSnapshot(venueId, orderId)
-    avisarSiLlegoConProblema(pago.posRawData, saldo, pesosToCents(Number(pago.amount)))
+    avisarSiLlegoConProblema(pago.posRawData, saldo, await abonoEsperadoAlReintentar(pago, saldo))
     // S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante (idempotente).
     await asegurarAvisoDeVentaApartada({
       venueId,
@@ -5891,7 +5917,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
-  avisarSiLlegoConProblema(payment.posRawData, balance, aplicadoCents)
+  avisarSiLlegoConProblema(payment.posRawData, balance, abonoEsperadoAlCobrar(paymentResult.saldoAntesCents))
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
