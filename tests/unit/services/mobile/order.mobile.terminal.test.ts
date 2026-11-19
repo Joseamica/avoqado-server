@@ -427,6 +427,46 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
       expect(avisos()).toHaveLength(0)
     })
 
+    // hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red. Un abono parcial a
+    // propósito ($50 de una cuenta de $90) dejaba un saldo y salía «una venta sin conexión no cuadra». Si la terminal dijo cuánto
+    // creía que debía la cuenta (`saldoEsperadoSinRed`) y lo que queda es justo eso menos lo cobrado, no hay nada que avisar.
+    describe('abono parcial de Mesas (la terminal dijo el saldo que esperaba)', () => {
+      const conSaldoEsperado = (amount: number, antesCents: number) =>
+        deLaCola({ amount, saldoEsperadoSinRed: { antesCents, deviceId: 'pax-1' } })
+
+      it('esperaba $90, cobra $50 y quedan $40 ⇒ sin aviso: la cuenta sigue debiendo lo que la terminal sabía', async () => {
+        await conSaldoEsperado(5000, 9000)
+
+        expect(avisos()).toHaveLength(0)
+      })
+
+      it('esperaba $70 pero el servidor tenía $90: cobra $50 y quedan $40 (no $20) ⇒ PRECIO_CAMBIADO sigue saliendo', async () => {
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any) // COBRO_SIN_RED_CON_DIFERENCIA de siempre
+        await conSaldoEsperado(5000, 7000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
+      })
+
+      it('esperaba $90 y paga $90 exacto ⇒ sin aviso (como siempre)', async () => {
+        await conSaldoEsperado(9000, 9000)
+
+        expect(avisos()).toHaveLength(0)
+      })
+
+      it('esperaba $120 (otra tablet ya cobró $30) y cobra los $120 ⇒ el sobrepago sigue avisando', async () => {
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+        await conSaldoEsperado(12000, 12000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$30.00') })]])
+      })
+
+      it('un centavo de redondeo entre lo esperado y lo que queda ⇒ sin aviso (la misma tolerancia de siempre)', async () => {
+        await conSaldoEsperado(5000, 9001)
+
+        expect(avisos()).toHaveLength(0)
+      })
+    })
+
     // S3 «Efectivo sin red en el turno correcto» (cambio A PROPÓSITO): el aviso de la venta de un turno cerrado ya no sale directo
     // después del commit; nace con el dinero como efecto durable `AVISO_TURNO_CERRADO` y lo manda el trabajador de efectos (único
     // emisor, Codex plan r3 #6 y r4 #3). Lo que se fija aquí: el efecto se encola con su llave y sus datos, y no hay aviso directo.
@@ -534,6 +574,25 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         await deLaCola({ amount: 9000 })
 
         expect(avisos()).toHaveLength(0)
+      })
+
+      // hz:bdd815fd:D2: el reintento del abono parcial de Mesas responde igual que la primera vez (lo cobrado es lo GUARDADO, $50).
+      it('abono parcial que la terminal esperaba ($90 − $50 = $40) ⇒ sin aviso, igual que la primera vez', async () => {
+        pagoGuardado(null)
+        ordenTrasElPago(50, 40)
+
+        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' } })
+
+        expect(avisos()).toHaveLength(0)
+      })
+
+      it('la terminal esperaba $70 y quedan $40 ⇒ PRECIO_CAMBIADO, igual que la primera vez', async () => {
+        pagoGuardado(null)
+        ordenTrasElPago(50, 40)
+
+        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 7000, deviceId: 'pax-1' } })
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
       })
 
       it('Android (sin serial) ⇒ sin aviso, como en el primer intento', async () => {

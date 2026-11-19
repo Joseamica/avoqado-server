@@ -5517,13 +5517,24 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
    * 🔴 Codex servidor r1 #6: sale de datos DURABLES (la marca del pago y el saldo guardado de la orden) para que el reintento idempotente
    * lo repita: si el servidor murió entre el commit y el aviso, el siguiente intento lo manda; si no, lo absorbe el dedupe del aviso.
    */
-  const avisarSiLlegoConProblema = (_posRawData: Prisma.JsonValue | undefined, saldo: Partial<OrderBalanceSnapshot>): void => {
+  const avisarSiLlegoConProblema = (
+    _posRawData: Prisma.JsonValue | undefined,
+    saldo: Partial<OrderBalanceSnapshot>,
+    cobradoCents: number,
+  ): void => {
     const delAviso = { externalId: input.idempotencyKey ?? orderId, orderId, montoCents: amount }
     // S3: el aviso de venta apartada (`TURNO_CERRADO`) ya no sale de aquí: lo manda el efecto durable `AVISO_TURNO_CERRADO`.
     const saldoCents = saldo.remainingBalanceCents ?? 0
     const sobrepagoCents =
       saldo.totalPaidCents !== undefined && saldo.orderTotalCents !== undefined ? saldo.totalPaidCents - saldo.orderTotalCents : 0
-    if (saldoCents > 1 || sobrepagoCents > 1) {
+    // hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red, así que un abono parcial
+    // a propósito ($20 de una cuenta de $50) llegaba aquí con saldo y salía «una venta sin conexión no cuadra». Si la terminal dijo
+    // cuánto creía que debía la cuenta ANTES de cobrar y lo que queda es justo eso menos lo cobrado (sin la propina), la cuenta sigue
+    // debiendo lo que la terminal sabía: no hay nada que avisar. Si el servidor tenía otro saldo, el aviso sigue saliendo (y además
+    // `COBRO_SIN_RED_CON_DIFERENCIA`). Una TPV que no manda el saldo esperado avisa como antes. El sobrepago no cambia.
+    const esperado = input.saldoEsperadoSinRed
+    const abonoQueLaTerminalEsperaba = esperado !== undefined && Math.abs(saldoCents - Math.max(0, esperado.antesCents - cobradoCents)) <= 1
+    if ((saldoCents > 1 && !abonoQueLaTerminalEsperaba) || sobrepagoCents > 1) {
       avisarSiEsDeLaColaDeTerminal(venueId, input, 'PRECIO_CAMBIADO', {
         ...delAviso,
         motivo:
@@ -5540,7 +5551,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
     // El saldo REAL de la orden ahora (relectura): quien reintenta la parte 1 de un cobro dividido sigue viendo lo que falta.
     const saldo = await readOrderBalanceSnapshot(venueId, orderId)
-    avisarSiLlegoConProblema(pago.posRawData, saldo)
+    avisarSiLlegoConProblema(pago.posRawData, saldo, pesosToCents(Number(pago.amount)))
     // S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante (idempotente).
     await asegurarAvisoDeVentaApartada({
       venueId,
@@ -5880,7 +5891,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
-  avisarSiLlegoConProblema(payment.posRawData, balance)
+  avisarSiLlegoConProblema(payment.posRawData, balance, aplicadoCents)
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
