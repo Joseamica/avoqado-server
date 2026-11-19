@@ -335,18 +335,41 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }) })
   })
 
-  it('🔴 punto 2 / Codex r2 #3: Mostrador EN LÍNEA con el último uso: la segunda venta (que validó con la foto vieja) se rechaza entera', async () => {
+  it('🔴 decisión «A» (19-nov): Mostrador EN LÍNEA con el último uso a la vez: la segunda venta (ya cobrada) ENTRA, queda un uso arriba y avisa', async () => {
     const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 0 }) })
+    // Las dos cajas validaron con la misma foto (0 de 1) antes de que la otra escribiera.
     const foto = { ...db.catalogo[PROMO] }
     prismaMock.discount.findFirst.mockImplementation(async () => ({ ...foto, value: new Prisma.Decimal(10) }))
     const primera = await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))
     expect(db.catalogo[PROMO].currentUses).toBe(1)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }) })
 
-    await expect(createOrderWithItems(VENUE, venta({ performedBy: 'sesion-2', orderDiscountId: PROMO }))).rejects.toThrow(/usage limit/)
-    expect(db.catalogo[PROMO].currentUses).toBe(1)
+    const segunda = await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-2', orderDiscountId: PROMO }))
+
+    expect(db.catalogo[PROMO].currentUses).toBe(2)
     expect(db.descuentos.filter(d => d.orderId === primera.id)).toHaveLength(1)
+    expect(db.descuentos.filter(d => d.orderId === segunda.id)).toEqual([expect.objectContaining({ discountId: PROMO, amount: 10 })])
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'DESCUENTO_SOBRE_TOPE',
+        entityId: segunda.id,
+        data: expect.objectContaining({ discountId: PROMO, usos: 2, tope: 1, camino: 'mostrador', sinRed: false, subidaPor: 'sesion-2' }),
+      }),
+    })
   })
 
+  it('🔴 Codex r3 #5: el uso se suma como lo ÚLTIMO de la transacción de la venta (la fila `Discount` es el último candado)', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 3 }) })
+    await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))
+    expect(db.catalogo[PROMO].currentUses).toBe(4)
+    const ultimo = (m: jest.Mock) => Math.max(0, ...m.mock.invocationCallOrder)
+    const suma = (prismaMock.discount.update as jest.Mock).mock.invocationCallOrder[0]
+    expect(suma).toBeGreaterThan(ultimo(prismaMock.order.create as jest.Mock))
+    expect(suma).toBeGreaterThan(ultimo(prismaMock.orderDiscount.create as jest.Mock))
+    // Sin el candado consultivo del cupón (Codex r3 #3 y #4): sólo la pasada de filas `Discount`.
+    const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([q]) => (Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)))
+    expect(consultas.some(q => q.includes('pg_advisory_xact_lock'))).toBe(false)
+  })
   it('regresión: Mostrador EN LÍNEA con el tope lleno se sigue rechazando', async () => {
     baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 100, currentUses: 100 }) })
     await expect(createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', orderDiscountId: PROMO }))).rejects.toThrow(/usage limit/)
@@ -376,6 +399,50 @@ describe('(4) la cola sin red nunca rechaza por tope lo que ya pasó', () => {
     await applyOrderDiscount(VENUE, cuenta.id, PROMO, 'sesion-1', false, undefined, {}, { enLaCola: true })
     expect(db.catalogo[PROMO].currentUses).toBe(4)
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'DESCUENTO_SOBRE_TOPE' }) })
+  })
+})
+
+describe('Codex r3 #1: el descuento de cuenta que ANDROID manda como importe + `descuentoDeCatalogoId` también gasta su uso', () => {
+  it('🔴 la etiqueta con importe cuenta UN uso (antes nunca contaba: un «primeros 1» se daba en todas las cajas)', async () => {
+    const db = baseEnMemoria({ [PROMO]: descuento(PROMO, { maxTotalUses: 1, currentUses: 0 }) })
+
+    await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', discount: 1000, descuentoDeCatalogoId: PROMO }))
+    expect(db.catalogo[PROMO].currentUses).toBe(1)
+
+    // La segunda caja (ya cobró): entra igual, queda arriba y avisa (decisión «A»).
+    const segunda = await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-2', discount: 1000, descuentoDeCatalogoId: PROMO }))
+    expect(db.catalogo[PROMO].currentUses).toBe(2)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'DESCUENTO_SOBRE_TOPE',
+        entityId: segunda.id,
+        data: expect.objectContaining({ discountId: PROMO, usos: 2, tope: 1, camino: 'mostrador' }),
+      }),
+    })
+  })
+
+  it('regresión: sin importe, o con una etiqueta de otro negocio, no cuenta nada', async () => {
+    const db = baseEnMemoria({
+      [PROMO]: descuento(PROMO, { maxTotalUses: 10, currentUses: 2 }),
+      ajeno: descuento('ajeno', { venueId: 'otro-negocio', currentUses: 0 }),
+    })
+    await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', descuentoDeCatalogoId: PROMO }))
+    await createOrderWithItems(VENUE, venta({ performedBy: 'sesion-1', discount: 1000, descuentoDeCatalogoId: 'ajeno' }))
+    expect(db.catalogo[PROMO].currentUses).toBe(2)
+    expect(db.catalogo.ajeno.currentUses).toBe(0)
+  })
+
+  it('regresión: con `orderDiscountId` manda el de catálogo y la etiqueta no suma un segundo uso', async () => {
+    const db = baseEnMemoria({
+      [PROMO]: descuento(PROMO, { maxTotalUses: 10, currentUses: 2 }),
+      [SIN_TOPE]: descuento(SIN_TOPE, { currentUses: 0 }),
+    })
+    await createOrderWithItems(
+      VENUE,
+      venta({ performedBy: 'sesion-1', orderDiscountId: PROMO, discount: 1000, descuentoDeCatalogoId: SIN_TOPE }),
+    )
+    expect(db.catalogo[PROMO].currentUses).toBe(3)
+    expect(db.catalogo[SIN_TOPE].currentUses).toBe(0)
   })
 })
 

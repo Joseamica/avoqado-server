@@ -1,13 +1,22 @@
 /**
- * 🔴 DINERO (hz:e82938e1:D19, encargo 01765a): el ÚNICO dueño del uso que gastan las ventas del POS (Mesas y Mostrador de
- * ANDROID/WINDOWS, y la venta de la cola de la TPV que entra por aquí) en el tope de usos del catálogo (`Discount.currentUses` /
- * `maxTotalUses`, «primeros 100»). Antes Mesas revisaba el tope y nunca sumaba, y el Mostrador sumaba DESPUÉS de guardar la venta,
- * fuera de su transacción y sin volver a revisar.
+ * 🔴 DINERO (hz:e82938e1:D19, encargos 01765a y 5b78aa): el ÚNICO dueño del uso que gastan las ventas del POS (Mesas y Mostrador de
+ * ANDROID/WINDOWS, y la venta de la cola de la TPV que entra por `/mobile/orders`) en el tope de usos del catálogo
+ * (`Discount.currentUses` / `maxTotalUses`, «primeros 100»). Antes Mesas revisaba el tope y nunca sumaba, y el Mostrador sumaba
+ * DESPUÉS de guardar la venta, fuera de su transacción (una caída perdía el uso) y nunca contaba el descuento de cuenta que ANDROID manda
+ * como importe con su etiqueta `descuentoDeCatalogoId`.
  *
- * Decide bajo el MISMO candado que el cupón (`bloquearDescuentoDelCupon`) y con la fila `Discount` tomada, así que el contador, el tope
- * vigente y los usos que un cupón apartó en una venta sin pagar se leen juntos y nadie más los mueve mientras tanto (Codex r1 #2 y #3,
- * r2 #1 y #2). Todo va en la transacción de quien llama, que ya tiene la cuenta (Order → candado del descuento → fila `Discount`, el
- * orden de `apartarCupon` en la TPV) y corre con reintento por traba (S5b).
+ * La regla del founder (19-nov, «A», como Shopify y como el canje del cupón): **lo ya cobrado nunca se rechaza por el tope; se acepta,
+ * la promoción queda un uso arriba y el dueño ve `DESCUENTO_SOBRE_TOPE` en la bitácora.** De ahí salen dos funciones:
+ *
+ * - `apartarUsoDeMesaEnTx` — Mesas pone el descuento en una cuenta abierta, ANTES de cobrar: ahí sí se puede decir «ya no hay» (en
+ *   línea), contando los usos que un cupón apartó en una venta sin pagar. De la cola (la mesa ya lo dio sin red) nunca rechaza.
+ * - `sumarUsosDeVentaEnTx` — la venta de Mostrador (ya cobrada o por cobrar en la misma petición): suma y avisa, nunca rechaza. La
+ *   validación de antes de crear la venta (`validateDiscountActive`, como siempre) sigue diciendo «ya no hay» cuando el tope YA estaba
+ *   lleno; lo que esta función absorbe es el choque de dos cajas en el mismo segundo.
+ *
+ * 🔴 Orden de candados (Codex r3 #3, #4, #5, #8): ninguna de las dos toma el candado consultivo del cupón. La fila `Discount` es SIEMPRE
+ * lo último que se toma: Mesas ya tiene la cuenta (Order → Discount); el Mostrador suma al FINAL de la transacción de su llamador, después
+ * del turno y del cobro (Order → Shift → Discount, como el motor de la TPV), en una pasada por id ascendente.
  *
  * Las filas de Mesas que sumaron quedan con `OrderDiscount.usoContado`; sólo ésas devuelven su uso (al quitarlas, al borrarse su cuenta
  * vacía o al convertirse en cortesía en un folio). El motor de la TPV y el canje del cupón cuentan por su lado.
@@ -15,13 +24,13 @@
 import { Prisma } from '@prisma/client'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 import type { TxConReintento } from '@/utils/serializableRetry'
-import { bloquearDescuentoDelCupon } from './cuponDeLaVenta'
 import { descuentoSinUsos } from './discount.service'
 
 /** Lo que un cupón ya apartó del mismo descuento: una venta con cupón sin pagar (el canje sube el contador al cobrar). */
 const APARTADO_DEL_CUPON = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
 type FilaDelContador = { id: string; name: string; currentUses: number; maxTotalUses: number | null }
+type Camino = 'mesa' | 'mostrador'
 
 /** Las filas `Discount`, tomadas en UNA pasada por id ascendente (`FOR NO KEY UPDATE`, el modo del UPDATE del contador). */
 async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): Promise<FilaDelContador[]> {
@@ -36,51 +45,105 @@ async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): P
 }
 
 /**
- * Suma UN uso de cada descuento de la venta (uno por venta aunque se repita), o rechaza la venta entera con el texto de siempre.
- *
- * - En línea: rechaza si `currentUses + apartados del cupón >= tope`, todo leído bajo el candado (dos cajas con el último uso: pasa una).
- * - De la cola sin red (`enLaCola`): lo que ya pasó frente al cliente nunca se rechaza. El uso cuenta aunque pase del tope y, si pasa,
- *   queda `DESCUENTO_SOBRE_TOPE` en la bitácora del negocio EN ESTA transacción (Codex r1 #1 y #7, r2 #3). Sin `staffId` en la fila (va
- *   en `data`): una referencia a una persona dada de baja no puede tumbar la venta (Codex r2 #4).
+ * El rastro para el dueño cuando un uso dejó el contador ARRIBA de su tope, en la transacción de quien sumó (si la venta se revierte, el
+ * rastro también). Sin `staffId` en la fila (va en `data`): una referencia a una persona dada de baja no puede tumbar la venta.
  */
-export async function sumarUsosDelDescuentoEnTx(
+async function avisarSiPasoDelTopeEnTx(
   tx: TxConReintento,
-  v: { venueId: string; orderId: string; discountIds: string[]; enLaCola?: boolean; quien?: string | null; camino: 'mesa' | 'mostrador' },
+  v: {
+    venueId: string
+    orderId: string
+    discountId: string
+    nombre: string
+    usos: number
+    tope: number | null
+    camino: Camino
+    sinRed: boolean
+    quien?: string | null
+  },
+): Promise<boolean> {
+  if (v.tope == null || v.usos <= v.tope) return false
+  await writeLegacyActivityAuditTx(tx, {
+    staffId: null,
+    venueId: v.venueId,
+    action: 'DESCUENTO_SOBRE_TOPE',
+    entity: 'Order',
+    entityId: v.orderId,
+    data: {
+      orderId: v.orderId,
+      discountId: v.discountId,
+      nombre: v.nombre,
+      usos: v.usos,
+      tope: v.tope,
+      camino: v.camino,
+      sinRed: v.sinRed,
+      subidaPor: v.quien ?? null,
+    },
+  })
+  return true
+}
+
+/**
+ * Mesas: el descuento de cuenta entra a una cuenta abierta y gasta UN uso, en la transacción que ya tiene la cuenta.
+ *
+ * - En línea: rechaza con el texto de siempre si `currentUses + apartados del cupón >= tope`, leído con la fila `Discount` tomada (dos
+ *   cajas con el último uso: la segunda espera la fila y lee el valor nuevo; el tope es el VIGENTE, no el que se leyó antes).
+ * - De la cola sin red (`enLaCola`): la mesa ya lo dio; nunca rechaza, el uso cuenta y, si pasa del tope, deja `DESCUENTO_SOBRE_TOPE`.
+ *
+ * Los apartados se cuentan sin el candado consultivo del cupón (Codex r3 #4: ese candado contra la cuenta abría un ciclo con el
+ * Mostrador con cupón y mesa). Si un cupón aparta el mismo último uso en ese instante, su canje al cobrar no rechaza (queda un uso
+ * arriba, como decidió el founder; el canje todavía no deja el aviso: anotado como deuda).
+ */
+export async function apartarUsoDeMesaEnTx(
+  tx: TxConReintento,
+  v: { venueId: string; orderId: string; discountId: string; enLaCola?: boolean; quien?: string | null },
 ): Promise<void> {
-  const ids = [...new Set(v.discountIds)].sort()
-  if (ids.length === 0) return
   const enLaCola = v.enLaCola === true
-  // Primero TODOS los candados del descuento (ascendentes) y después las filas: como la tienda (S10), nunca uno después de una fila.
-  for (const id of ids) await bloquearDescuentoDelCupon(tx, id)
-  // Un descuento que ya no está (el dueño lo borró mientras tanto) no tiene uso que contar: no rechaza la venta (como antes, que sumaba
-  // con `updateMany` y no encontraba nada).
-  const filas = await tomarFilas(tx, v.venueId, ids)
-  for (const d of filas) {
-    if (enLaCola || d.maxTotalUses == null) continue
+  const [d] = await tomarFilas(tx, v.venueId, [v.discountId])
+  // El dueño lo borró del catálogo mientras tanto: no hay uso que contar (quien llama ya lo leyó y decide).
+  if (!d) return
+  if (!enLaCola && d.maxTotalUses != null) {
     const apartados = await tx.orderDiscount.count({
       where: { couponCode: { discountId: d.id }, order: { venueId: v.venueId, ...APARTADO_DEL_CUPON } },
     })
     if (d.currentUses + apartados >= d.maxTotalUses) throw descuentoSinUsos(d.name)
   }
-  for (const d of filas) {
+  await tx.discount.update({ where: { id: d.id }, data: { currentUses: { increment: 1 } } })
+  await avisarSiPasoDelTopeEnTx(tx, {
+    venueId: v.venueId,
+    orderId: v.orderId,
+    discountId: d.id,
+    nombre: d.name,
+    usos: d.currentUses + 1,
+    tope: d.maxTotalUses,
+    camino: 'mesa',
+    sinRed: enLaCola,
+    quien: v.quien,
+  })
+}
+
+/**
+ * La venta de Mostrador gasta UN uso de cada descuento de catálogo que lleva (uno por venta aunque se repita en varios renglones), y
+ * NUNCA la rechaza (decisión «A»): si el contador queda arriba del tope, deja `DESCUENTO_SOBRE_TOPE`. Se llama como lo ÚLTIMO de la
+ * transacción de la venta (después del turno y del cobro). Un id que no es del negocio o que ya no existe no cuenta nada.
+ */
+export async function sumarUsosDeVentaEnTx(
+  tx: TxConReintento,
+  v: { venueId: string; orderId: string; discountIds: string[]; enLaCola?: boolean; quien?: string | null },
+): Promise<void> {
+  const ids = [...new Set(v.discountIds.filter(Boolean))].sort()
+  for (const d of await tomarFilas(tx, v.venueId, ids)) {
     await tx.discount.update({ where: { id: d.id }, data: { currentUses: { increment: 1 } } })
-    if (d.maxTotalUses == null || d.currentUses + 1 <= d.maxTotalUses) continue
-    await writeLegacyActivityAuditTx(tx, {
-      staffId: null,
+    await avisarSiPasoDelTopeEnTx(tx, {
       venueId: v.venueId,
-      action: 'DESCUENTO_SOBRE_TOPE',
-      entity: 'Order',
-      entityId: v.orderId,
-      data: {
-        orderId: v.orderId,
-        discountId: d.id,
-        nombre: d.name,
-        usos: d.currentUses + 1,
-        tope: d.maxTotalUses,
-        camino: v.camino,
-        sinRed: enLaCola,
-        subidaPor: v.quien ?? null,
-      },
+      orderId: v.orderId,
+      discountId: d.id,
+      nombre: d.name,
+      usos: d.currentUses + 1,
+      tope: d.maxTotalUses,
+      camino: 'mostrador',
+      sinRed: v.enLaCola === true,
+      quien: v.quien,
     })
   }
 }

@@ -407,6 +407,10 @@
       "clase": "EN_TX",
       "etiqueta": "reversaEnTx"
     },
+    "src/services/shared/usoDelDescuento.ts#apartarUsoDeMesaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "apartarUsoDeMesaEnTx"
+    },
     "src/services/shared/usoDelDescuento.ts#devolverUsoDelDescuentoEnTx": {
       "clase": "EN_TX",
       "etiqueta": "devolverUsoDelDescuentoEnTx"
@@ -415,9 +419,9 @@
       "clase": "EN_TX",
       "etiqueta": "devolverUsosDeCuentaQueSeBorraEnTx"
     },
-    "src/services/shared/usoDelDescuento.ts#sumarUsosDelDescuentoEnTx": {
+    "src/services/shared/usoDelDescuento.ts#sumarUsosDeVentaEnTx": {
       "clase": "EN_TX",
-      "etiqueta": "sumarUsosDelDescuentoEnTx"
+      "etiqueta": "sumarUsosDeVentaEnTx"
     },
     "src/services/shared/usoDelDescuento.ts#tomarFilas": {
       "clase": "EN_TX",
