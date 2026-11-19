@@ -1,7 +1,12 @@
 import { DiscountScope, DiscountType, Prisma, StaffRole, TerminalStatus, TerminalType } from '@prisma/client'
 
 import { getDiscountStats } from '@/services/dashboard/discount.dashboard.service'
-import { getCustomerDiscounts, getEligibleDiscounts, removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
+import {
+  applyDiscountToOrder,
+  getCustomerDiscounts,
+  getEligibleDiscounts,
+  removeDiscountFromOrder,
+} from '@/services/dashboard/discountEngine.service'
 import { listarDescuentosAplicados } from '@/services/dashboard/descuentosAplicados.service'
 import { listarMisDescuentos } from '@/services/public/customerPortal.public.service'
 import { getAvailableDiscounts } from '@/services/tpv/discount.tpv.service'
@@ -447,10 +452,12 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
       normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id }],
     })
     const orderId = materializada.order!.id
-    // Una rebaja de cuenta que la caja da después (sin la marca): la del catálogo, sin reparto de vales.
-    const deCuenta = await prisma.orderDiscount.create({
-      data: { orderId, discountId: null, type: 'FIXED_AMOUNT', name: 'Cliente frecuente', value: 1, amount: 1, isManual: true },
+    // Codex r4 #3: una rebaja de CUENTA del catálogo que la caja da después, por el camino real (el motor de la TPV), sin la marca.
+    const delCatalogo = await prisma.discount.create({
+      data: { venueId, name: 'Cliente frecuente D15', type: DiscountType.FIXED_AMOUNT, value: new Prisma.Decimal(1), scope: DiscountScope.ORDER },
     })
+    await applyDiscountToOrder(orderId, delCatalogo.id, staffVenueId, undefined, venueId)
+    const deCuenta = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: delCatalogo.id } })
 
     const delPos = await getOrderDelPos(venueId, orderId)
     const marcasPos = Object.fromEntries(delPos.discounts.map(d => [d.id, d.congeladoPorVales]))
@@ -461,5 +468,10 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     const marcasTpv = Object.fromEntries(deLaTpv.orderDiscounts.map((d: any) => [d.id, d.congeladoPorVales]))
     expect(marcasTpv).toEqual(marcasPos)
     expect(deLaTpv.orderDiscounts.every((d: any) => !('reparto' in d))).toBe(true)
+
+    // La rebaja normal se quita como hoy y las dos fijas siguen ahí, marcadas.
+    await removeDiscountFromOrder(orderId, deCuenta.id, staffId, venueId)
+    const despues = await getOrderDelPos(venueId, orderId)
+    expect(despues.discounts.map(d => d.congeladoPorVales)).toEqual([true, true])
   })
 })
