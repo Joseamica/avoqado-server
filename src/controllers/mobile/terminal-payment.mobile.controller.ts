@@ -54,9 +54,29 @@ function sanitizeRelayCustomerId(raw: unknown): string | null {
 export async function sendTerminalPayment(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId, processedByStaffId, customerId } = req.body
+    const {
+      terminalId,
+      amountCents,
+      tipCents,
+      rating,
+      skipReview,
+      orderId,
+      requestId,
+      processedByStaffId,
+      customerId,
+      expectedBalanceBeforeCents,
+    } = req.body
     const userId = (req as any).authContext?.userId
     const relayCustomerId = sanitizeRelayCustomerId(customerId)
+    // hz:e9ce0be7:D53: el saldo que la caja vio al armar el cobro de vales. Mal formado se IGNORA (con aviso): un dato de
+    // protección nunca impide cobrar, igual que `customerId`. Las apps publicadas no lo mandan.
+    const saldoEsperado =
+      Number.isSafeInteger(expectedBalanceBeforeCents) && expectedBalanceBeforeCents >= 0
+        ? (expectedBalanceBeforeCents as number)
+        : undefined
+    if (expectedBalanceBeforeCents != null && saldoEsperado === undefined) {
+      logger.warn('[API] expectedBalanceBeforeCents inválido; se ignora y el cobro sigue', { venueId, orderId, requestId })
+    }
 
     // Esta frontera termina en columnas Int + un SDK de dinero: no se coercionan
     // strings ni decimales. Aceptarlos aquí crea diferencias silenciosas entre lo
@@ -108,6 +128,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       userId,
       processedByStaffId: validatedProcessedByStaffId,
       customerId: relayCustomerId,
+      expectedBalanceBeforeCents: saldoEsperado,
     })
 
     const result = await terminalPaymentService.sendPaymentToTerminal({
@@ -124,6 +145,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       requestId, // Client-generated for cancel tracking
       // Se guarda en la fila; NUNCA se emite a la terminal (ver terminal-payment.service.ts).
       customerId: relayCustomerId,
+      expectedBalanceBeforeCents: saldoEsperado,
     })
 
     const { cancelRequested, ...resultado } = result
@@ -232,6 +254,8 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       error instanceof AppError &&
       (error.code === 'EXCHANGE_DIFFERENCE_ALREADY_CHARGED' ||
         error.code === 'AMOUNT_EXCEEDS_REMAINING_BALANCE' ||
+        // hz:e9ce0be7:D53: la cuenta cambió mientras se cobraba (y su réplica, que sale de la rama `default` de la lápida).
+        error.code === 'ORDER_BALANCE_CHANGED' ||
         error.code === 'RAPPI_CASH_ORDER_CASH_ONLY' ||
         error.code === 'ONLINE_ORDER_PAID_BY_CARD')
     ) {
