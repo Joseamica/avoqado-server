@@ -890,6 +890,20 @@ function normalizeExternalId(externalId?: string | null): string | null {
 }
 
 /**
+ * hz:bdd815fd:D2 (Codex r5 #1): ¿el cobro de la cola llegó EN VIVO? La TPV manda el efectivo de Mesas por la cola y lo reproduce
+ * enseguida: con red llega en segundos. Se mide la hora del aparato al cobrar (`horaDelAparato`, sin recortar) contra la llegada de
+ * la petición, MENOS de 2 min. Es el reloj de la terminal: un desfase mueve la ventana (Codex r7 #1) y uno de más de 2 min cuenta como
+ * «sin red» y avisa como antes. Aun dentro de la ventana, sólo calla si el saldo es el que la terminal esperaba. Sin alguna, no.
+ */
+const EN_VIVO_MS = 2 * 60 * 1000
+function llegoEnVivo(input: { horaDelAparato?: number | string | null; llegada?: Date }): boolean {
+  if (input.horaDelAparato === undefined || input.horaDelAparato === null || !input.llegada) return false
+  const crudo = input.horaDelAparato
+  const hora = typeof crudo === 'number' || /^\d+$/.test(crudo) ? Number(crudo) : Date.parse(crudo)
+  return Number.isFinite(hora) && Math.abs(input.llegada.getTime() - hora) < EN_VIVO_MS
+}
+
+/**
  * S7 («Cobrar sin red»): la venta de la cola de una terminal SÍ se registró, pero con problema ⇒ aviso al gerente, después del
  * commit y sin esperarlo (nunca toca la respuesta; `avisarVentaSinRed` no lanza). Sólo con `isOfflineReplay` y el serial del
  * token: la cola de Android no avisa.
@@ -4721,6 +4735,11 @@ export interface AbonoEnTx {
   ventaCerrada: boolean
   /** Pedidos en línea 1c (S1): la cuenta estaba CANCELADA y este dinero capturado la reabrió ⇒ quien llama no arma la comanda. */
   reabiertaDeCancelada: boolean
+  /**
+   * hz:bdd815fd:D2: al leerla bajo el candado de este cobro, la cuenta estaba VIVA (ni anulada ni borrada) y era una cuenta propia de
+   * Avoqado (no de SoftRestaurant, de una plataforma de reparto ni de Rappi): la única que puede callar el aviso de abono esperado.
+   */
+  cuentaPropiaVivaAlCobrar: boolean
   areaTicketOrder: boolean
   areaTicketSessionId?: string
   tableId?: string | null
@@ -5425,6 +5444,7 @@ export async function registrarAbonoEnTx(
     isFullyPaid: efectosDeSaldar,
     ventaCerrada: cobro.cerrada,
     reabiertaDeCancelada,
+    cuentaPropiaVivaAlCobrar: claseDeEstado(fresh.status) === 'VIVA' && fresh.originSystem === 'AVOQADO' && fresh.source !== 'RAPPI',
     aplicadoCents,
     cambioCents,
     saldoAntesCents: pesosToCents(saldoAntes.remainingBalance.toNumber()),
@@ -5517,13 +5537,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
    * 🔴 Codex servidor r1 #6: sale de datos DURABLES (la marca del pago y el saldo guardado de la orden) para que el reintento idempotente
    * lo repita: si el servidor murió entre el commit y el aviso, el siguiente intento lo manda; si no, lo absorbe el dedupe del aviso.
    */
-  const avisarSiLlegoConProblema = (_posRawData: Prisma.JsonValue | undefined, saldo: Partial<OrderBalanceSnapshot>): void => {
+  const avisarSiLlegoConProblema = (
+    _posRawData: Prisma.JsonValue | undefined,
+    saldo: Partial<OrderBalanceSnapshot>,
+    abonoQueLaTerminalEsperaba: boolean,
+  ): void => {
     const delAviso = { externalId: input.idempotencyKey ?? orderId, orderId, montoCents: amount }
     // S3: el aviso de venta apartada (`TURNO_CERRADO`) ya no sale de aquí: lo manda el efecto durable `AVISO_TURNO_CERRADO`.
     const saldoCents = saldo.remainingBalanceCents ?? 0
     const sobrepagoCents =
       saldo.totalPaidCents !== undefined && saldo.orderTotalCents !== undefined ? saldo.totalPaidCents - saldo.orderTotalCents : 0
-    if (saldoCents > 1 || sobrepagoCents > 1) {
+    // hz:bdd815fd:D2 (encargo 8cfa9e): un saldo que la terminal ya sabía que iba a quedar (abono parcial de Mesas, que la TPV manda
+    // por la cola también con red) no es «una venta sin conexión que no cuadra». Lo decide `abonoEsperadoAlCobrar`, sólo en el cobro
+    // nuevo; el reintento avisa como antes. El sobrepago avisa siempre, como antes.
+    if ((saldoCents > 1 && !abonoQueLaTerminalEsperaba) || sobrepagoCents > 1) {
       avisarSiEsDeLaColaDeTerminal(venueId, input, 'PRECIO_CAMBIADO', {
         ...delAviso,
         motivo:
@@ -5534,13 +5561,40 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     }
   }
 
+  /**
+   * hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red, así que un abono parcial a
+   * propósito ($20 de una cuenta de $50) avisaba «una venta sin conexión no cuadra». Sólo el cobro NUEVO puede callar ese aviso, y
+   * sólo si se cumple TODO (si falta algo, avisa como antes):
+   *  - la terminal dijo cuánto creía que debía la cuenta ANTES de cobrar (`saldoEsperadoSinRed`) y el servidor, bajo el candado,
+   *    debía eso mismo (±1 centavo): el saldo que queda es el que la terminal sabía;
+   *  - el cobro llegó EN VIVO (`llegoEnVivo`): con la red caída, otra caja pudo separar productos y agregar una ronda que deje el
+   *    mismo saldo por casualidad (Codex r5 #1); el cobro que de verdad viajó sin red avisa como antes;
+   *  - la cuenta era propia de Avoqado y estaba viva (`cuentaPropiaVivaAlCobrar`): anulada, borrada (r3, r4), de SoftRestaurant, de
+   *    una plataforma o de Rappi (r1 #3, r5 #2) avisa como antes; y no se reabrió ni trae aviso de Rappi.
+   * El reintento no conoce el saldo de antes y el de ahora pudo moverlo otro abono, un cupón o un pago confirmado tarde (r1 #1, r2):
+   * avisa como antes, aunque sea de más en ese caso raro. El sobrepago avisa siempre.
+   */
+  const abonoEsperadoAlCobrar = (cobro: {
+    saldoAntesCents: number
+    cuentaPropiaVivaAlCobrar: boolean
+    reabiertaDeCancelada: boolean
+    avisoRappi: string | null
+  }): boolean =>
+    order.thirdPartyCashDue == null &&
+    cobro.cuentaPropiaVivaAlCobrar &&
+    !cobro.reabiertaDeCancelada &&
+    cobro.avisoRappi == null &&
+    llegoEnVivo(input) &&
+    input.saldoEsperadoSinRed !== undefined &&
+    Math.abs(input.saldoEsperadoSinRed.antesCents - cobro.saldoAntesCents) <= 1
+
   const responderConElCobroDeLaLlave = async (pago: CobroDeLaLlave, via: string): Promise<CashPaymentResponse> => {
     assertLlaveEsEsteCobro(pago, orderId)
     logger.info(`🔄 [ORDER.MOBILE] Reintento idempotente (${via}, key=${input.idempotencyKey}) — devuelvo el pago existente ${pago.id}`)
     await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
     // El saldo REAL de la orden ahora (relectura): quien reintenta la parte 1 de un cobro dividido sigue viendo lo que falta.
     const saldo = await readOrderBalanceSnapshot(venueId, orderId)
-    avisarSiLlegoConProblema(pago.posRawData, saldo)
+    avisarSiLlegoConProblema(pago.posRawData, saldo, false)
     // S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante (idempotente).
     await asegurarAvisoDeVentaApartada({
       venueId,
@@ -5880,7 +5934,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
-  avisarSiLlegoConProblema(payment.posRawData, balance)
+  avisarSiLlegoConProblema(payment.posRawData, balance, abonoEsperadoAlCobrar(paymentResult))
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
