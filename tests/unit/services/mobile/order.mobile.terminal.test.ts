@@ -485,6 +485,18 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
       })
 
+      // Codex r3: otra caja anuló la cuenta mientras la terminal cobraba sin red; el dinero la reabre y el dueño debe enterarse.
+      it('la cuenta estaba anulada y el abono la reabre ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, status: 'CANCELLED', originSystem: 'AVOQADO' } as any)
+        prismaMock.order.update.mockResolvedValue({ ...sembrada, status: 'PENDING' } as any)
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+
+        await conSaldoEsperado(5000, 9000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
       it('un centavo de redondeo entre lo esperado y lo que queda ⇒ sin aviso (la misma tolerancia de siempre)', async () => {
         await conSaldoEsperado(5000, 9001)
 

@@ -5550,10 +5550,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
    * (Codex r1 #3). Sólo decide el cobro NUEVO: el reintento no conoce el saldo de antes y el de ahora pudo moverlo otro abono, un
    * cupón o un pago confirmado tarde (Codex r1 #1, r2 #1-#3), así que avisa como antes, aunque sea de más en ese caso raro.
    */
-  const abonoEsperadoAlCobrar = (saldoAntesCents: number): boolean =>
+  const abonoEsperadoAlCobrar = (cobro: { saldoAntesCents: number; reabiertaDeCancelada: boolean; avisoRappi: string | null }): boolean =>
     order.thirdPartyCashDue == null &&
+    // Codex r3: si otra caja anuló la cuenta mientras la terminal estaba sin red, el dinero la reabre y su saldo vuelve a ser el que
+    // la terminal vio, pero el dueño debe saberlo: avisa como antes. Lo mismo un pedido de Rappi que llega con dinero.
+    !cobro.reabiertaDeCancelada &&
+    cobro.avisoRappi == null &&
     input.saldoEsperadoSinRed !== undefined &&
-    Math.abs(input.saldoEsperadoSinRed.antesCents - saldoAntesCents) <= 1
+    Math.abs(input.saldoEsperadoSinRed.antesCents - cobro.saldoAntesCents) <= 1
 
   const responderConElCobroDeLaLlave = async (pago: CobroDeLaLlave, via: string): Promise<CashPaymentResponse> => {
     assertLlaveEsEsteCobro(pago, orderId)
@@ -5901,7 +5905,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
-  avisarSiLlegoConProblema(payment.posRawData, balance, abonoEsperadoAlCobrar(paymentResult.saldoAntesCents))
+  avisarSiLlegoConProblema(payment.posRawData, balance, abonoEsperadoAlCobrar(paymentResult))
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
