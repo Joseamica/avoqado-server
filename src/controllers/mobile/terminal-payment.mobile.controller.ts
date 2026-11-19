@@ -65,6 +65,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       processedByStaffId,
       customerId,
       expectedBalanceBeforeCents,
+      expectedRemainingCents,
     } = req.body
     const userId = (req as any).authContext?.userId
     const relayCustomerId = sanitizeRelayCustomerId(customerId)
@@ -76,6 +77,12 @@ export async function sendTerminalPayment(req: Request, res: Response) {
         : undefined
     if (expectedBalanceBeforeCents != null && saldoEsperado === undefined) {
       logger.warn('[API] expectedBalanceBeforeCents inválido; se ignora y el cobro sigue', { venueId, orderId, requestId })
+    }
+    // hz:bdd815fd:D5: lo que faltaba según la pantalla de «Pedidos». Mismo trato: mal formado se ignora con aviso.
+    const faltabaEnPantalla =
+      Number.isSafeInteger(expectedRemainingCents) && expectedRemainingCents >= 0 ? (expectedRemainingCents as number) : undefined
+    if (expectedRemainingCents != null && faltabaEnPantalla === undefined) {
+      logger.warn('[API] expectedRemainingCents inválido; se ignora y el cobro sigue', { venueId, orderId, requestId })
     }
 
     // Esta frontera termina en columnas Int + un SDK de dinero: no se coercionan
@@ -129,6 +136,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       processedByStaffId: validatedProcessedByStaffId,
       customerId: relayCustomerId,
       expectedBalanceBeforeCents: saldoEsperado,
+      expectedRemainingCents: faltabaEnPantalla,
     })
 
     const result = await terminalPaymentService.sendPaymentToTerminal({
@@ -146,6 +154,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       // Se guarda en la fila; NUNCA se emite a la terminal (ver terminal-payment.service.ts).
       customerId: relayCustomerId,
       expectedBalanceBeforeCents: saldoEsperado,
+      expectedRemainingCents: faltabaEnPantalla,
     })
 
     const { cancelRequested, ...resultado } = result

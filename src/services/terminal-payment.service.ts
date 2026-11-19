@@ -104,6 +104,14 @@ export interface TerminalPaymentRequest {
    * mientras se cobraba), no se cobra: 412 `ORDER_BALANCE_CHANGED`, con lápida y antes de tocar la terminal.
    */
   expectedBalanceBeforeCents?: number
+  /**
+   * 🔴 hz:bdd815fd:D5 · lo que faltaba de la cuenta (centavos, sin propina) según la pantalla que abrió ESTE cobro: el
+   * `preBillBalance.remainingBalanceCents` de «Pedidos → detalle» (`saldoPorCobrar`). Distinto de [expectedBalanceBeforeCents]: ése
+   * se compara con la columna guardada `Order.remainingBalance`, y la columna se descuadra con la propina (unos escritores guardan
+   * `Order.total` con ella y otros sin ella), así que frenaría cobros buenos. Éste se compara con lo que falta calculado bajo el
+   * candado con la MISMA cuenta que la pantalla (`faltaCents` de D7). Opcional: las apps publicadas no lo mandan y nada cambia.
+   */
+  expectedRemainingCents?: number
 }
 
 export interface TerminalPaymentResult {
@@ -2095,6 +2103,24 @@ class TerminalPaymentService {
                 ),
               )
             }
+          }
+          // 🔴 hz:bdd815fd:D5 · «Pedidos → Cobrar» de una cuenta abierta: la pantalla leyó que faltaban `expectedRemainingCents`. Si un
+          // abono (panel, otra caja, un reembolso que reabre) o un cambio de productos movió lo que falta, el importe ya no es el que
+          // vio la pantalla: hasta $1 de más cabe en el margen de D7. Misma cuenta que la pantalla (`saldoPorCobrar` = `faltaCents`
+          // aquí: Rappi en efectivo ya se rechazó arriba), nunca la columna guardada. Sin el dato no cambia nada.
+          const loQueVioLaPantalla = request.expectedRemainingCents
+          if (loQueVioLaPantalla !== undefined && faltaCents !== loQueVioLaPantalla) {
+            return rechazar(
+              'REJECTED_ORDER_BALANCE_CHANGED',
+              new AppError(
+                `La cuenta ${order.orderNumber ?? request.orderId} cambió mientras se cobraba: ahora falta $${(faltaCents / 100).toFixed(2)}. ` +
+                  'No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.',
+                HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                true,
+                LA_CUENTA_CAMBIO,
+                { ...detalles, remainingCents: faltaCents, expectedRemainingCents: loQueVioLaPantalla },
+              ),
+            )
           }
           if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
             const falta = (faltaCents / 100).toFixed(2)

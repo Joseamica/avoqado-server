@@ -3368,3 +3368,167 @@ describe('IQ: cancelación recuperable tras reiniciar la TPV', () => {
     }
   })
 })
+
+describe('TerminalPaymentService — hz:bdd815fd:D5: «Pedidos → Cobrar» manda lo que faltaba según su pantalla', () => {
+  /**
+   * La pantalla de «Pedidos» de ANDROID enseña `preBillBalance.remainingBalanceCents` (`saldoPorCobrar`, calculado con los pagos y sus
+   * propinas) y manda la tarjeta por ese importe. Si en medio alguien abona en el DASHBOARD, el importe ya no es lo que falta: la regla
+   * D7 sólo frena si pasa de lo que falta + $1. La caja manda lo que faltaba según su pantalla (`expectedRemainingCents`) y la
+   * admisión lo compara, bajo el candado de la orden, con lo que falta calculado con la MISMA cuenta. No con la columna guardada
+   * `Order.remainingBalance` (la de D53): esa columna se descuadra con la propina y frenaría cobros buenos.
+   */
+  const order = () => prismaMock.order
+  const rechazo = (p: Promise<unknown>) =>
+    p.then(
+      () => null,
+      (e: any) => e,
+    )
+
+  it('P1 abono de $0.50 en el panel entre leer la cuenta y enviar ⇒ 412 ORDER_BALANCE_CHANGED con lápida, sin tocar la terminal', async () => {
+    // La pantalla leyó $80.00; ahora hay $0.50 abonados: faltan $79.50 y la caja manda $80.00 (D7 sola lo dejaba pasar).
+    order().findFirst.mockResolvedValue({
+      paymentStatus: 'PARTIAL',
+      orderNumber: 'ORD-80',
+      status: 'CONFIRMED',
+      subtotal: '80',
+      remainingBalance: '79.50',
+    })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: '0.50', tipAmount: '0' }, _count: 1 } as any)
+
+    const error = await rechazo(
+      terminalPaymentService.sendPaymentToTerminal(
+        baseRequest({
+          terminalId: 'T-D5',
+          orderId: 'order-abierta',
+          requestId: 'REQ-D5-1',
+          amountCents: 8000,
+          expectedRemainingCents: 8000,
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({
+      statusCode: 412,
+      code: 'ORDER_BALANCE_CHANGED',
+      details: { requestId: 'REQ-D5-1', remainingCents: 7950, expectedRemainingCents: 8000 },
+    })
+    expect(error.message).toMatch(/^La cuenta ORD-80 cambió mientras se cobraba: ahora falta \$79\.50\./)
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED' })
+    expect(tpr().create.mock.calls[0][0].data.resultJson).toMatchObject({ httpStatus: 412, code: 'ORDER_BALANCE_CHANGED' })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('P1 la columna guardada descuadrada por la propina NO frena: mesa de $50 con $25 + $10 de propina, la pantalla dice $25 ⇒ cobra', async () => {
+    // Lo que falta (misma cuenta que la pantalla): total $50 + $10 de propina − $35 recibidos = $25. La columna dice otra cosa ($15):
+    // con el dato de D53 este cobro recibiría 412 en cada intento y la mesa nunca se podría cobrar con tarjeta desde «Pedidos».
+    order().findFirst.mockResolvedValue({
+      paymentStatus: 'PARTIAL',
+      orderNumber: 'MESA-50',
+      status: 'CONFIRMED',
+      subtotal: '50',
+      remainingBalance: '15.00',
+    })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: '25', tipAmount: '10' }, _count: 1 } as any)
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({
+        terminalId: 'T-D5B',
+        orderId: 'order-mesa',
+        requestId: 'REQ-D5-2',
+        amountCents: 2500,
+        tipCents: 300,
+        expectedRemainingCents: 2500,
+      }),
+    )
+    await flush()
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'PENDING', amountCents: 2500, tipCents: 300 })
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-D5-2' }),
+      expect.any(Function),
+    )
+
+    committedRequests({ 'REQ-D5-2': 'pay-d5-2' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-D5-2', status: 'success', paymentId: 'pay-d5-2' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('un cobro parcial por menos de lo que falta sigue si la cuenta no cambió (el dato es lo que faltaba, no el importe)', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'ORD-90', status: 'CONFIRMED', subtotal: '90' })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: null, tipAmount: null }, _count: 0 } as any)
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-D5C', orderId: 'order-90', requestId: 'REQ-D5-3', amountCents: 3000, expectedRemainingCents: 9000 }),
+    )
+    await flush()
+    expect(directEmit).toHaveBeenCalled()
+    committedRequests({ 'REQ-D5-3': 'pay-d5-3' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-D5-3', status: 'success', paymentId: 'pay-d5-3' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('un reembolso que reabrió saldo (D19) también cambia lo que falta ⇒ 412', async () => {
+    // $100 cobrados de $100 y un reembolso de $20 que vuelve a deberse (D19): faltan $20, la pantalla había leído $10.
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PARTIAL', orderNumber: 'ORD-100', status: 'CONFIRMED', subtotal: '100' })
+    prismaMock.payment.aggregate
+      .mockResolvedValueOnce({ _sum: { amount: '100', tipAmount: '0' }, _count: 1 } as any)
+      .mockResolvedValueOnce({ _sum: { reopenedAmount: '20', reopenedTipAmount: '0' } } as any)
+
+    const error = await rechazo(
+      terminalPaymentService.sendPaymentToTerminal(
+        baseRequest({ terminalId: 'T-D5D', orderId: 'order-100', requestId: 'REQ-D5-4', amountCents: 1000, expectedRemainingCents: 1000 }),
+      ),
+    )
+    expect(error).toMatchObject({ statusCode: 412, code: 'ORDER_BALANCE_CHANGED', details: { remainingCents: 2000 } })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('regresión (apps publicadas): sin el dato, el mismo abono de $0.50 pasa como hoy (sólo la regla D7)', async () => {
+    order().findFirst.mockResolvedValue({
+      paymentStatus: 'PARTIAL',
+      orderNumber: 'ORD-80B',
+      status: 'CONFIRMED',
+      subtotal: '80',
+      remainingBalance: '79.50',
+    })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: '0.50', tipAmount: '0' }, _count: 1 } as any)
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-D5E', orderId: 'order-abierta', requestId: 'REQ-D5-5', amountCents: 8000 }),
+    )
+    await flush()
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'PENDING' })
+    expect(directEmit).toHaveBeenCalled()
+    committedRequests({ 'REQ-D5-5': 'pay-d5-5' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-D5-5', status: 'success', paymentId: 'pay-d5-5' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('regresión D53: el dato de vales sigue comparando la columna guardada, aunque venga también el de la pantalla', async () => {
+    order().findFirst.mockResolvedValue({
+      paymentStatus: 'PARTIAL',
+      orderNumber: 'AREA-85',
+      status: 'CONFIRMED',
+      subtotal: '80',
+      remainingBalance: '79.50',
+    })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: '0.50', tipAmount: '0' }, _count: 1 } as any)
+
+    const error = await rechazo(
+      terminalPaymentService.sendPaymentToTerminal(
+        baseRequest({
+          terminalId: 'T-D5F',
+          orderId: 'order-vales',
+          requestId: 'REQ-D5-6',
+          amountCents: 7950,
+          expectedBalanceBeforeCents: 8000,
+          expectedRemainingCents: 7950,
+        }),
+      ),
+    )
+    expect(error).toMatchObject({ statusCode: 412, code: 'ORDER_BALANCE_CHANGED', details: { expectedBalanceBeforeCents: 8000 } })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+})
