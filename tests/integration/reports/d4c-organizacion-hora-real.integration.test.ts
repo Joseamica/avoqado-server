@@ -31,7 +31,15 @@ let staffB: string
 let manager: string
 let sequence = 0
 
-async function sale(venueId: string, staffId: string, amount: number, quantity: number, arrival: string, deviceTime?: string) {
+async function sale(
+  venueId: string,
+  staffId: string,
+  amount: number,
+  quantity: number,
+  arrival: string,
+  deviceTime?: string,
+  method: 'CASH' | 'CREDIT_CARD' = 'CASH',
+) {
   const createdAt = new Date(arrival)
   const clientCreatedAt = deviceTime ? new Date(deviceTime) : null
   return prisma.order.create({
@@ -55,7 +63,7 @@ async function sale(venueId: string, staffId: string, amount: number, quantity: 
           venueId,
           processedById: staffId,
           amount,
-          method: 'CASH',
+          method,
           status: 'COMPLETED',
           type: 'REGULAR',
           feePercentage: 0,
@@ -408,6 +416,24 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     }
   })
 
+  it('R22 · la venta tardía con TARJETA de quien no checó también conserva su fila del día de llegada (Codex 4c r3 #2)', async () => {
+    jest.setSystemTime(new Date('2026-11-16T18:00:00Z'))
+    // 23:50 del 15 en CDMX con tarjeta, subida a las 00:10 del 16; el gerente no checa.
+    const tarjeta = await sale(venueB, manager, 15, 1, '2026-11-16T06:10:00Z', '2026-11-16T05:50:00Z', 'CREDIT_CARD')
+    try {
+      const day16 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-16')
+      expect(day16.staff).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: manager, venueId: venueB, sales: 0, cashSales: 0, checkInTime: null })]),
+      )
+      const day15 = await dashboard.getStaffAttendance(n.organizationId, '2026-11-15')
+      expect(day15.staff).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: manager, venueId: venueB, sales: 15, cashSales: 0 })]),
+      )
+    } finally {
+      await prisma.order.deleteMany({ where: { id: tarjeta.id, venue: { organizationId: n.organizationId } } })
+    }
+  })
+
   it('R22 · con red, quien no checó ni vendió y sólo devolvió efectivo de otra venta no aparece, como antes (Codex 4c r2 #2)', async () => {
     jest.setSystemTime(new Date('2026-11-14T18:00:00Z'))
     const original = await prisma.payment.findFirstOrThrow({
@@ -467,6 +493,33 @@ describe('D4c · visión global, tiendas y vendedores', () => {
       expect(summary.weekUnits).toBe(chartUnits)
     } finally {
       await prisma.order.deleteMany({ where: { id: { in: [vieja.id, primerDia.id] }, venue: { organizationId: n.organizationId } } })
+    }
+  })
+
+  it('R24 · en Tijuana el cobro de las 23:50 del 12 sale el 12 (el fin del rango también es el de la sucursal, Codex 4c r3 #3)', async () => {
+    const venueT = (
+      await prisma.venue.create({
+        data: {
+          organizationId: n.organizationId,
+          name: 'Sucursal Tijuana',
+          slug: `d4c-t-${n.venueId}`,
+          status: 'ACTIVE',
+          timezone: 'America/Tijuana',
+        },
+        select: { id: true },
+      })
+    ).id
+    try {
+      await prisma.staffVenue.create({ data: { staffId: staffB, venueId: venueT, role: 'CASHIER' } })
+      // 23:50 del 12 en Tijuana (UTC−8) = 07:50Z del 13, con red: en CDMX ya es la 01:50 del 13.
+      await sale(venueT, staffB, 35, 1, '2026-11-13T07:50:00Z')
+      const get = (from: string, to: string) => dashboard.getSalesHeatmap(n.organizationId, from, to, 'OWNER', n.staffId, venueT)
+      expect((await get(DIA_12, DIA_12)).summary.byDay).toEqual([{ date: DIA_12, totalCount: 1, totalAmount: 35 }])
+      expect((await get('2026-11-13', '2026-11-13')).summary.byDay).toEqual([{ date: '2026-11-13', totalCount: 0, totalAmount: 0 }])
+    } finally {
+      await prisma.order.deleteMany({ where: { venueId: venueT } })
+      await prisma.staffVenue.deleteMany({ where: { venueId: venueT } })
+      await prisma.venue.delete({ where: { id: venueT } })
     }
   })
 
