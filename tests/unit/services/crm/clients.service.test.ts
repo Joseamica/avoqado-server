@@ -1016,9 +1016,10 @@ describe('getLive', () => {
 
     expect(live).toMatchObject({ ventasBloqueadas: false, ventasMesOtraMoneda: true })
     expect(live.ligada && live.ventasMes?.toString()).toBe('1500.5')
-    // October in Mexico City: 1-oct 00:00 (06:00Z) up to, not including, 1-nov 00:00 (06:00Z). Real money, real venues, MXN.
+    // October in Mexico City: 1-oct 00:00 (06:00Z) up to the last millisecond before 1-nov 00:00 (06:00Z), by the REAL time of the charge
+    // (D4d: the device's for a charge made offline). Real money, real venues, MXN.
     const mes = rawQueries().filter(isMes)
-    expect(mes[0].values).toEqual(expect.arrayContaining([ORG, new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]))
+    expect(mes[0].values).toEqual(expect.arrayContaining([ORG, new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T05:59:59.999Z')]))
     const sql = mes[0].sql.replace(/\s+/g, ' ')
     expect(sql).toContain(`p."status" = 'COMPLETED' AND p."amount" > 0`)
     expect(sql).toContain('v."demoExpiresAt" IS NULL')
@@ -1028,14 +1029,14 @@ describe('getLive', () => {
     // 21:00 of 31-oct in Mexico City is already November in UTC: still October here.
     await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-11-01T03:00:00.000Z'))
     expect(rawQueries().filter(isMes)[1].values).toEqual(
-      expect.arrayContaining([new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]),
+      expect.arrayContaining([new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T05:59:59.999Z')]),
     )
 
     // December rolls over to January of the next year; a month without sales is $0, not null.
     mesDb({ ventasMXN: null, otraMoneda: false })
     const december = await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-12-15T18:00:00.000Z'))
     expect(rawQueries().filter(isMes)[2].values).toEqual(
-      expect.arrayContaining([new Date('2026-12-01T06:00:00.000Z'), new Date('2027-01-01T06:00:00.000Z')]),
+      expect.arrayContaining([new Date('2026-12-01T06:00:00.000Z'), new Date('2027-01-01T05:59:59.999Z')]),
     )
     expect(december.ligada && december.ventasMes?.toString()).toBe('0')
     expect(december).toMatchObject({ ventasMesOtraMoneda: false })
