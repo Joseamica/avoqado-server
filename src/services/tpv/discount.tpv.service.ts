@@ -227,14 +227,23 @@ export async function applyPredefinedDiscount(
   discountId: string,
   staffVenueId: string | undefined,
   cortesia?: { porPin?: string },
-): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string }> {
-  logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
+  idempotencyKey?: string,
+): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string; repetida?: boolean }> {
+  logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId, conLlave: !!idempotencyKey })
 
   // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
   // rule active (404), eligibility with the hand-picked id forced (400, see `forceDiscountId`), amount and tax.
   // D2: una regla que «requiere aprobación» sólo la aprueba ese autorizador, y el motor sólo lo acepta en una cortesía.
   const authorizedById = cortesia ? (cortesia.porPin ?? staffVenueId) : undefined
-  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId, cortesia !== undefined)
+  return discountEngine.applyDiscountToOrder(
+    orderId,
+    discountId,
+    staffVenueId,
+    authorizedById,
+    venueId,
+    cortesia !== undefined,
+    idempotencyKey,
+  )
 }
 
 // ==========================================
@@ -266,8 +275,9 @@ export async function applyManualDiscount(
   authorizedById?: string,
   cortesia?: { porPin?: string },
   quienLlama?: string,
-): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string }> {
-  logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
+  idempotencyKey?: string,
+): Promise<{ success: boolean; orderDiscountId?: string; amount: number; newOrderTotal: number; error?: string; repetida?: boolean }> {
+  logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason, conLlave: !!idempotencyKey })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
   // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp`; antes bastaba cualquier `authorizedById` que mandara el
@@ -290,9 +300,11 @@ export async function applyManualDiscount(
     venueId,
     !!cortesia,
     autorizadorSiRegala,
+    idempotencyKey,
   )
-  // D5: el motor ya hizo commit; la bitácora sale después y sólo si quedó aplicado.
-  if (result.success) {
+  // D5: el motor ya hizo commit; la bitácora sale después y sólo si quedó aplicado. D21: una repetición (misma llave) no se vuelve
+  // a anotar: la fila ya tiene su asiento.
+  if (result.success && !result.repetida) {
     void logAction({
       staffId: quienLlama ?? null,
       venueId,

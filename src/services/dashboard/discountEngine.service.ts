@@ -16,6 +16,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
+import { createHash } from 'crypto'
 import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
 import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
@@ -163,6 +164,103 @@ interface ApplyDiscountResult {
   amount: number
   newOrderTotal: number
   error?: string
+  /** D21: la llave ya tenía su envío hecho en esta cuenta; no se creó nada. */
+  repetida?: boolean
+}
+
+// ==========================================
+// D21 (hz:e82938e1:D21): llave por envío de la TPV al aplicar un descuento
+// ==========================================
+//
+// La TPV crea la llave al tocar y la repite si no supo la respuesta (sin red a media llamada, el transporte reenvía, la caja lo vuelve
+// a tocar). La constancia vive en `IdempotencyRequest` (tabla genérica que ya existe), escrita en la MISMA transacción que la fila:
+// sobrevive a que alguien quite la rebaja después (Codex D16 r4 #5) y no necesita migración. Se busca CON el candado de la cuenta
+// tomado: dos envíos simultáneos con la misma llave se ordenan y el segundo ve la constancia del primero (el índice único es el respaldo).
+
+const VIGENCIA_DE_LA_LLAVE_MS = 24 * 60 * 60 * 1000
+
+interface LlaveDeEnvio {
+  idempotencyKey: string
+  /** Qué descuento era (`manual:<tipo>:<valor>` o `catalogo:<id>`): la misma llave con otro descuento se rechaza. */
+  firma: string
+}
+
+function endpointDeLaLlave(orderId: string): string {
+  return `POST /tpv/orders/${orderId}/discounts`
+}
+
+async function organizacionDeLaCuenta(tx: Prisma.TransactionClient, venueId: string): Promise<string | null> {
+  return (await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } }))?.organizationId ?? null
+}
+
+/** El envío que ya se hizo con esta llave, o null. Una constancia vencida se borra y el envío se atiende como nuevo. */
+async function envioYaHecho(
+  tx: Prisma.TransactionClient,
+  order: { id: string; venueId: string; total: Prisma.Decimal | number },
+  llave: LlaveDeEnvio | undefined,
+): Promise<ApplyDiscountResult | null> {
+  if (!llave) return null
+  const organizationId = await organizacionDeLaCuenta(tx, order.venueId)
+  if (!organizationId) return null
+  const previa = await tx.idempotencyRequest.findUnique({
+    where: {
+      organizationId_actorStaffId_endpoint_idempotencyKey: {
+        organizationId,
+        actorStaffId: 'tpv',
+        endpoint: endpointDeLaLlave(order.id),
+        idempotencyKey: llave.idempotencyKey,
+      },
+    },
+  })
+  if (!previa) return null
+  if (previa.expiresAt.getTime() <= Date.now()) {
+    await tx.idempotencyRequest.delete({ where: { id: previa.id } })
+    return null
+  }
+  if (previa.requestHash !== hashDeLaFirma(llave.firma)) {
+    return {
+      success: false,
+      amount: 0,
+      newOrderTotal: Number(order.total),
+      error: 'Esa llave ya se usó para otro descuento de esta cuenta.',
+    }
+  }
+  const respuesta = (previa.responseBody ?? {}) as { orderDiscountId?: string; amount?: number }
+  return {
+    success: true,
+    orderDiscountId: respuesta.orderDiscountId,
+    amount: Number(respuesta.amount ?? 0),
+    newOrderTotal: Number(order.total),
+    repetida: true,
+  }
+}
+
+/** Deja la constancia del envío en la MISMA transacción que creó la fila. */
+async function anotarEnvio(
+  tx: Prisma.TransactionClient,
+  order: { id: string; venueId: string },
+  llave: LlaveDeEnvio | undefined,
+  resultado: ApplyDiscountResult,
+): Promise<void> {
+  if (!llave || !resultado.success || !resultado.orderDiscountId) return
+  const organizationId = await organizacionDeLaCuenta(tx, order.venueId)
+  if (!organizationId) return
+  await tx.idempotencyRequest.create({
+    data: {
+      organizationId,
+      actorStaffId: 'tpv',
+      endpoint: endpointDeLaLlave(order.id),
+      idempotencyKey: llave.idempotencyKey,
+      requestHash: hashDeLaFirma(llave.firma),
+      responseStatus: 200,
+      responseBody: { orderDiscountId: resultado.orderDiscountId, amount: resultado.amount },
+      expiresAt: new Date(Date.now() + VIGENCIA_DE_LA_LLAVE_MS),
+    },
+  })
+}
+
+function hashDeLaFirma(firma: string): string {
+  return createHash('sha256').update(firma).digest('hex')
 }
 
 // ==========================================
@@ -964,6 +1062,7 @@ export async function applyDiscountToOrder(
   authorizedById?: string,
   venueId?: string,
   puedeRegalar = false,
+  idempotencyKey?: string,
 ): Promise<ApplyDiscountResult> {
   // R65 b: las bitácoras nacen DENTRO de cada intento y salen en el retorno; un intento abortado por 40P01 no deja las suyas.
   const { result, audits } = await withDeadlockRetry(
@@ -975,10 +1074,14 @@ export async function applyDiscountToOrder(
           ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE })
           : null
         if (!order) return orderNotFound(venueId)
-        if (order.paymentStatus === 'PAID') throw new BadRequestError(CUENTA_PAGADA_SIN_DESCUENTOS)
-
         const picked = typeof discount === 'string'
         const discountId = picked ? discount : discount.discountId
+        // D21: la misma llave contesta el envío ya hecho, aun si después se pagó la cuenta o alguien quitó la rebaja.
+        const llave = idempotencyKey ? { idempotencyKey, firma: `catalogo:${discountId}` } : undefined
+        const repetida = await envioYaHecho(tx, order, llave)
+        if (repetida) return repetida
+        if (order.paymentStatus === 'PAID') throw new BadRequestError(CUENTA_PAGADA_SIN_DESCUENTOS)
+
         if (picked) {
           const catalog = await tx.discount.findFirst({
             where: { id: discountId, venueId: order.venueId, active: true },
@@ -1006,7 +1109,9 @@ export async function applyDiscountToOrder(
         // Aquí una COMP ya trae `orders:comp` verificado: ésa ES la aprobación, aunque no quede autorizador registrado (dueño de la
         // organización sin membresía en la sucursal, como la cortesía manual).
         const aprobada = fresh.type === 'COMP' && fresh.requiresApproval ? { ...fresh, requiresApproval: false } : fresh
-        return applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
+        const aplicado = await applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
+        await anotarEnvio(tx, order, llave, aplicado)
+        return aplicado
       })()
       return { result, audits }
     },
@@ -1498,12 +1603,18 @@ export async function applyManualDiscount(
   venueId?: string,
   puedeRegalar = false,
   autorizadorSiRegala?: string,
+  idempotencyKey?: string,
 ): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
     // The remaining base below comes from THIS read, under the canonical Order lock.
     const tenant = await lockDiscountOrder(tx, orderId, venueId)
     const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant } }) : null
     if (!order) return orderNotFound(venueId)
+    // D21: la misma llave contesta el envío ya hecho (respuesta perdida, reintento, segundo toque), aun si después se pagó la cuenta
+    // o alguien quitó la rebaja.
+    const llave = idempotencyKey ? { idempotencyKey, firma: `manual:${type}:${value}` } : undefined
+    const repetida = await envioYaHecho(tx, order, llave)
+    if (repetida) return repetida
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(order)
@@ -1618,12 +1729,15 @@ export async function applyManualDiscount(
 
     logger.info(`🎟️ Manual discount applied to order ${orderId}: ${name} (-$${amount})`)
 
-    return {
+    const aplicado: ApplyDiscountResult = {
       success: true,
       orderDiscountId: orderDiscount.id,
       amount,
       newOrderTotal: newTotal,
     }
+    // D21: la constancia del envío, en esta misma transacción.
+    await anotarEnvio(tx, order, llave, aplicado)
+    return aplicado
   }, ORDER_LOCK_WAIT_BUDGET)
 }
 

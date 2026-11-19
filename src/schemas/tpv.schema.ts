@@ -753,6 +753,12 @@ export const applyPredefinedDiscountSchema = z.object({
   body: z.object({
     discountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }),
     authorizedById: z.string().cuid({ message: 'El ID del autorizador debe ser un CUID válido.' }).optional(),
+    // D21: llave del envío (la TPV la crea al tocar y la repite en el reintento). Opcional: una TPV vieja no la manda.
+    idempotencyKey: z
+      .string()
+      .min(8, { message: 'La llave del envío debe tener al menos 8 caracteres.' })
+      .max(64, { message: 'La llave del envío no puede tener más de 64 caracteres.' })
+      .optional(),
   }),
 })
 
@@ -767,6 +773,12 @@ export const applyManualDiscountSchema = z.object({
       value: z.number().nonnegative({ message: 'El valor debe ser un número no negativo.' }),
       reason: z.string().min(1, { message: 'La razón del descuento es requerida.' }),
       authorizedById: z.string().cuid({ message: 'El ID del autorizador debe ser un CUID válido.' }).optional(),
+      // D21: llave del envío (la TPV la crea al tocar y la repite en el reintento). Opcional: una TPV vieja no la manda.
+      idempotencyKey: z
+        .string()
+        .min(8, { message: 'La llave del envío debe tener al menos 8 caracteres.' })
+        .max(64, { message: 'La llave del envío no puede tener más de 64 caracteres.' })
+        .optional(),
     })
     .refine(
       data => {

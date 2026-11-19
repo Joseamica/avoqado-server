@@ -83,7 +83,8 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
   try {
     const { venueId, orderId } = req.params
     // D2 (hz:f34960c5:D2): el `authorizedById` del cuerpo ya no cuenta; la aprobación sale del permiso comprobado en la ruta.
-    const { discountId } = req.body as { discountId: string }
+    // D21: `idempotencyKey` (opcional): la misma llave contesta la fila que ya existe.
+    const { discountId, idempotencyKey } = req.body as { discountId: string; idempotencyKey?: string }
     const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyPredefinedDiscount(
@@ -92,6 +93,7 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
       discountId,
       staffVenueId,
       tieneCortesiaAutorizada(req) ? { porPin: pinDeLaCortesia(req) } : undefined,
+      idempotencyKey,
     )
 
     if (result.success) {
@@ -102,6 +104,8 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
           orderDiscountId: result.orderDiscountId,
           amount: result.amount,
           newOrderTotal: result.newOrderTotal,
+          // D21: el envío ya se había hecho (misma llave); no se creó otra fila.
+          ...(result.repetida ? { repetida: true } : {}),
         },
         message: 'Discount applied successfully',
       })
@@ -128,11 +132,13 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
 export async function applyManualDiscount(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId } = req.params
-    const { type, value, reason, authorizedById } = req.body as {
+    const { type, value, reason, authorizedById, idempotencyKey } = req.body as {
       type: DiscountType
       value: number
       reason: string
       authorizedById?: string
+      /** D21: la misma llave contesta la fila que ya existe (respuesta perdida, reintento). */
+      idempotencyKey?: string
     }
     const staffVenueId = await membresiaDe(req)
 
@@ -150,6 +156,7 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
         authorizedById,
         cortesia,
         req.authContext?.userId,
+        idempotencyKey,
       ),
     )
     if (!result) return
@@ -162,6 +169,8 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
           orderDiscountId: result.orderDiscountId,
           amount: result.amount,
           newOrderTotal: result.newOrderTotal,
+          // D21: el envío ya se había hecho (misma llave); no se creó otra fila.
+          ...(result.repetida ? { repetida: true } : {}),
         },
         message: 'Manual discount applied successfully',
       })

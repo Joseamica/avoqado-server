@@ -216,6 +216,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
       'id-inventado',
       { porPin: 'sv-gerente' },
       'u-cajera',
+      undefined, // D21: sin llave
     )
   })
 
@@ -234,7 +235,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
       .post('/venues/v1/orders/o1/discounts/apply')
       .send({ discountId: 'd-comp', authorizedById: 'id-inventado' })
-    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, { porPin: 'sv-gerente' })
+    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, { porPin: 'sv-gerente' }, undefined) // D21: sin llave
   })
 
   it('D2: predefinido sin acreditación: el authorizedById del cuerpo no llega al servicio', async () => {
@@ -242,7 +243,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     await request(app({ userId: 'u-cajera' }))
       .post('/venues/v1/orders/o1/discounts/apply')
       .send({ discountId: 'd-aprobar', authorizedById: 'id-inventado' })
-    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-aprobar', undefined, undefined)
+    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-aprobar', undefined, undefined, undefined) // D21: sin llave
   })
 
   // D3 (hz:f34960c5:D3): con la sesión real (sin `staffVenueId`), el servicio recibe la membresía de quien llama.
@@ -324,6 +325,35 @@ describe('D16: aplicar un descuento en la TPV devuelve el id de la fila creada',
     const res = await aplicar()
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual({ orderDiscountId: 'od-cupon', couponId: 'c1', discountName: 'Promo 10', amount: 10, newOrderTotal: 90 })
+  })
+
+  // D21 (hz:e82938e1:D21): la llave del envío llega al servicio; sin ella, `undefined` (TPV vieja).
+  it('D21: la llave del envío manual y del catálogo llega al servicio', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    manualMock.mockResolvedValue({ success: true, orderDiscountId: 'od-1', amount: 10, newOrderTotal: 90 })
+    predefinidoMock.mockResolvedValue({ success: true, orderDiscountId: 'od-2', amount: 10, newOrderTotal: 80 })
+    await request(app())
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'FIXED_AMOUNT', value: 10, reason: 'x', idempotencyKey: 'llave-0001' })
+    await request(app()).post('/venues/v1/orders/o1/discounts/apply').send({ discountId: 'd-catalogo', idempotencyKey: 'llave-0002' })
+    expect(manualMock.mock.calls[0][9]).toBe('llave-0001')
+    expect(predefinidoMock.mock.calls[0][5]).toBe('llave-0002')
+  })
+
+  it('D21: un reenvío con la misma llave lo dice en la respuesta (`repetida`), para no volver a sumar su importe', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    manualMock.mockResolvedValue({ success: true, orderDiscountId: 'od-1', amount: 10, newOrderTotal: 90, repetida: true })
+    const res = await request(app())
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'FIXED_AMOUNT', value: 10, reason: 'x', idempotencyKey: 'llave-0001' })
+    expect(res.body.data).toEqual({ orderDiscountId: 'od-1', amount: 10, newOrderTotal: 90, repetida: true })
+  })
+
+  it('D21: sin llave, el servicio recibe `undefined`', async () => {
+    ;(tieneCortesiaAutorizada as jest.Mock).mockReturnValue(false)
+    manualMock.mockResolvedValue({ success: true, orderDiscountId: 'od-1', amount: 10, newOrderTotal: 90 })
+    await request(app()).post('/venues/v1/orders/o1/discounts/manual').send({ type: 'FIXED_AMOUNT', value: 10, reason: 'x' })
+    expect(manualMock.mock.calls[0][9]).toBeUndefined()
   })
 
   // Regresión: un rechazo del servicio sigue sin `data` (sólo `success:false` + `error`).
