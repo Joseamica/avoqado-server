@@ -4,8 +4,8 @@
  *
  * El reloj (sólo `Date`) se fija a las 16:00 del 12 en CDMX: «hoy» es el 12 y «ayer» el 11. La Playera vendida sin internet a las 23:50
  * del 11 y subida a las 00:10 del 12 guarda `createdAt` = la llegada y `clientCreatedAt` = 23:50, en la orden y en su cobro: sale el 11
- * (y a las 23:00 en la gráfica por hora) en cada lector, y no el 12. «Té viejo», vendido sin internet 10 min ANTES de hace 30 días y
- * subido 10 min DESPUÉS, ya no entra en los «últimos 30 días» del asistente anterior.
+ * (y a las 23:00 en la gráfica por hora) en cada lector, y no el 12. «Té viejo», vendido sin internet 2 h ANTES de hace 30 días y
+ * subido 2 h DESPUÉS, ya no entra en los «últimos 30 días» del asistente anterior.
  *
  *   TEST_DATABASE_URL='postgresql://…/<base desechable>' npx jest --selectProjects integration --testPathPattern d4b-asistente
  */
@@ -26,7 +26,7 @@ let n: NegocioDePrueba
 let seq = 0
 const anterior = asistenteAnterior as unknown as Record<string, (venueId: string, ...a: unknown[]) => Promise<any>>
 
-async function venta(p: { nombre: string; monto: number; llegada: Date; delAparato?: Date }) {
+async function venta(p: { nombre: string; monto: number; propina?: number; llegada: Date; delAparato?: Date }) {
   seq += 1
   const product = await prisma.product.create({
     data: { venueId: n.venueId, categoryId: n.categoryId, sku: `D4B-${seq}-${n.venueId}`, name: p.nombre, price: p.monto },
@@ -57,7 +57,7 @@ async function venta(p: { nombre: string; monto: number; llegada: Date; delApara
       orderId: order.id,
       processedById: n.staffId,
       amount: p.monto,
-      tipAmount: 0,
+      tipAmount: p.propina ?? 0,
       method: 'CASH',
       status: 'COMPLETED',
       type: 'REGULAR',
@@ -92,30 +92,34 @@ beforeAll(async () => {
   // El negocio de prueba no liga a su persona; el ranking del personal la necesita activa en la sucursal.
   await prisma.staffVenue.create({ data: { staffId: n.staffId, venueId: n.venueId, role: 'WAITER', active: true } })
 
-  await venta({ nombre: 'Café', monto: 100, llegada: new Date('2026-11-12T00:00:00.000Z') }) // 18:00 del 11, con red
+  await venta({ nombre: 'Café', monto: 100, propina: 10, llegada: new Date('2026-11-12T00:00:00.000Z') }) // 18:00 del 11, con red
   await venta({
     nombre: 'Playera',
     monto: 50,
+    propina: 5,
     llegada: new Date('2026-11-12T06:10:00.000Z'), // 00:10 del 12
     delAparato: new Date('2026-11-12T05:50:00.000Z'), // 23:50 del 11
   })
-  await venta({ nombre: 'Jugo', monto: 30, llegada: new Date('2026-11-12T16:00:00.000Z') }) // 10:00 del 12, con red
+  await venta({ nombre: 'Jugo', monto: 30, propina: 3, llegada: new Date('2026-11-12T16:00:00.000Z') }) // 10:00 del 12, con red
   await venta({
     nombre: 'Té viejo',
     monto: 7,
-    llegada: new Date(HACE_30_DIAS + 10 * MIN),
-    delAparato: new Date(HACE_30_DIAS - 10 * MIN),
+    propina: 2,
+    // ±2 h: el corte de «30 días» del asistente anterior es de calendario (con horario de verano puede correrse una hora).
+    llegada: new Date(HACE_30_DIAS + 120 * MIN),
+    delAparato: new Date(HACE_30_DIAS - 120 * MIN),
   })
 })
 
 afterAll(async () => {
-  await prisma.payment.deleteMany({ where: { venueId: n?.venueId } })
-  await prisma.orderItem.deleteMany({ where: { order: { venueId: n?.venueId } } })
-  await prisma.order.deleteMany({ where: { venueId: n?.venueId } })
-  await prisma.staffVenue.deleteMany({ where: { venueId: n?.venueId } })
-  await n?.limpiar()
-  await prisma.$disconnect()
   jest.useRealTimers()
+  if (!n?.venueId) return await prisma.$disconnect() // sin negocio no se borra nada (un filtro vacío borraría toda la base)
+  await prisma.payment.deleteMany({ where: { venueId: n.venueId } })
+  await prisma.orderItem.deleteMany({ where: { order: { venueId: n.venueId } } })
+  await prisma.order.deleteMany({ where: { venueId: n.venueId } })
+  await prisma.staffVenue.deleteMany({ where: { venueId: n.venueId } })
+  await n.limpiar()
+  await prisma.$disconnect()
 })
 
 describe('D4b · asistente nuevo (SharedQueryService)', () => {
@@ -176,10 +180,11 @@ describe('D4b · asistente anterior (POST /assistant/query)', () => {
     expect([r.ventasHoy, r.ordenesHoy]).toEqual([30, 1])
   })
 
-  it('personal y productos de los últimos 30 días: el «Té viejo» (de hace 30 días y 10 min) ya no entra', async () => {
+  it('personal y productos de los últimos 30 días: el «Té viejo» (de hace 30 días y 2 h) ya no entra', async () => {
     const staff = await anterior.getStaffData.call(asistenteAnterior, n.venueId)
-    const suma = (k: 'ventas' | 'ordenes') => staff.ranking.reduce((t: number, r: Record<string, number>) => t + r[k], 0)
-    expect([suma('ventas'), suma('ordenes')]).toEqual([180, 3]) // con la llegada, 187 y 4
+    const suma = (k: 'ventas' | 'ordenes' | 'propinas') => staff.ranking.reduce((t: number, r: Record<string, number>) => t + r[k], 0)
+    // Órdenes y cobros del personal: con la llegada, 187, 4 y $20 de propinas.
+    expect([suma('ventas'), suma('ordenes'), suma('propinas')]).toEqual([180, 3, 18])
     const productos = await anterior.getProductsData.call(asistenteAnterior, n.venueId)
     expect(productos.masVendidos.map((p: { nombre: string }) => p.nombre)).not.toContain('Té viejo')
     expect(productos.masVendidos.map((p: { nombre: string }) => p.nombre)).toContain('Playera')
