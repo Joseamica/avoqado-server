@@ -590,3 +590,56 @@ describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ',
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * F1 · bloque 1 (18-nov): entregada a una PAX v2 (`executionVersion >= 2` en la procedencia), la firma exige el certificado de
+ * declaración de esa terminal y el CAS lo vuelve a exigir. Sin la capacidad, todo como hoy.
+ */
+describe('F1 · bloque 1 — certificado de declaración de la PAX v2', () => {
+  const entregaV = (executionVersion?: number) => ({
+    protocol: 'DURABLE',
+    ackVersion: 1,
+    socketId: 's1',
+    ...(executionVersion === undefined ? {} : { executionVersion }),
+  })
+  const casDeLaFirma = () =>
+    prismaMock.$executeRaw.mock.calls
+      .map((c: unknown[]) => JSON.stringify(c))
+      .find((t: string) => t.includes('OPERATOR_RECONCILED_NO_CHARGE'))
+
+  it('con simple acuse y sin certificado ⇒ TERMINAL_CONFIRMATION_PENDING, sin escribir', async () => {
+    montar(filaDelIncidente({ deliveryProvenance: { deliveries: [entregaV(2)] } }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({
+      code: 'TERMINAL_CONFIRMATION_PENDING',
+      message: expect.stringContaining('Esperando confirmación de la terminal'),
+    })
+    expect(casDeLaFirma()).toBeUndefined()
+  })
+
+  it('con el cese físico pero «no se puede declarar» (aprobado propio) ⇒ TERMINAL_HAS_RESULT, sin escribir', async () => {
+    montar(
+      filaDelIncidente({ deliveryProvenance: { deliveries: [entregaV(2)] }, executionClosedAt: new Date(), executionDeclarable: false }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_HAS_RESULT' })
+    expect(casDeLaFirma()).toBeUndefined()
+  })
+
+  it('con el certificado «se puede declarar» firma, y el CAS lo vuelve a exigir', async () => {
+    montar(
+      filaDelIncidente({ deliveryProvenance: { deliveries: [entregaV(2)] }, executionClosedAt: new Date(), executionDeclarable: true }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    expect(casDeLaFirma()).toContain('\\"executionDeclarable\\" IS TRUE')
+  })
+
+  it.each([
+    ['v1', { deliveries: [entregaV(1)] }],
+    ['sin versión', { deliveries: [entregaV()] }],
+    ['procedencia desconocida', null],
+  ])('TPV vieja (%s): el acuse basta y el CAS no pide certificado — como hoy', async (_n, deliveryProvenance) => {
+    montar(filaDelIncidente({ deliveryProvenance }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    expect(casDeLaFirma()).toBeDefined()
+    expect(casDeLaFirma()).not.toContain('executionDeclarable')
+  })
+})

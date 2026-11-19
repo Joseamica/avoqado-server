@@ -46,7 +46,7 @@ import {
 } from './tpv/evidenciaPositivaSql'
 import { utcTs, utcTsOrNull } from '../utils/sqlDates'
 import { getContext, runOutsideContext, runWithContext } from '../observability/executionContext'
-import { sondaReportoActiva } from './tpv/sondaActiva'
+import { EXECUTION_VERSION_DECLARABLE, sondaReportoActiva, TERMINAL_CONFIRMATION_PENDING, TERMINAL_HAS_RESULT } from './tpv/sondaActiva'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
 import AppError, {
@@ -6260,6 +6260,22 @@ class TerminalPaymentService {
     return { completed, marked, released, lateReconciled, aliasesRetirados, heldWithLinkedPayment, heldWithoutPayment }
   }
 
+  /** F1 · bloque 1: la sonda de UNA solicitud a su terminal, si está en línea en este negocio. Nunca lanza. */
+  private async pedirCertificadoDeDeclaracion(requestId: string, venueId: string): Promise<void> {
+    try {
+      const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId }, select: { terminalId: true } })
+      const entry = row ? terminalRegistry.getTerminal(row.terminalId) : undefined
+      if (row && entry?.socketId && entry.venueId === venueId)
+        await this.probeUnresolvedForTerminal(row.terminalId, venueId, entry.socketId, requestId)
+    } catch (err) {
+      logger.warn('⚠️ [TerminalPayment] could not ask the terminal for its declaration certificate', {
+        requestId,
+        venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   /**
    * Manual release (MCP / superadmin / a manager on the tablet). Same money rule as the
    * watchdog: if a reconcilable card payment exists the row is closed as COMPLETED and NOT
@@ -6294,11 +6310,19 @@ class TerminalPaymentService {
     // 🔴 A5 · E3: y ANTES de buscar la fila. Sin fila (el POST nunca llegó) la declaración autorizada deja la LÁPIDA en el núcleo
     // (`reconcileUncharged`), que además autoriza ANTES de buscar nada; aquí ya no se devuelve «no existe» por ausencia de fila.
     if (input.declaration !== undefined && input.declaration !== null) {
-      const { reconcileUncharged, hayContradiccionDeProcedencia } = await import('./tpv/uncharged-reconciliation.service')
+      const { reconcileUncharged, hayContradiccionDeProcedencia, UnchargedReconciliationError } = await import(
+        './tpv/uncharged-reconciliation.service'
+      )
       const resolution = await reconcileUncharged(
         { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
         input.declaration,
-      )
+      ).catch(err => {
+        // F1 · bloque 1: sin el certificado de la PAX v2 se le vuelve a preguntar a esa terminal por ESTA solicitud (la ranura ya
+        // suelta no la sondea el vigía), para que el siguiente intento del gerente lo encuentre. Sin esperarlo: el rechazo sale igual.
+        if (err instanceof UnchargedReconciliationError && [TERMINAL_CONFIRMATION_PENDING, TERMINAL_HAS_RESULT].includes(err.code))
+          void this.pedirCertificadoDeDeclaracion(requestId, venueId)
+        throw err
+      })
       // 🔴 P1 de la auditoría de Codex (18-sep): `released` NO puede ser incondicional. En un REPLAY la
       // declaración se devuelve tal cual (es correcto: fue aceptada), pero entretanto pudo aparecer el dinero
       // y la fila estar COMPLETED o retenida por el banco. Decir «Terminal liberada» ahí es mentirle al cajero
@@ -7775,6 +7799,19 @@ class TerminalPaymentService {
   }
 
   /**
+   * F1 · bloque 1: con el cese acreditado, la PAX v2 dice además si ESTA solicitud se puede declarar «no se cobró» (`declarable`).
+   * `null` = no lo dijo (TPV v1, cliente falso o campo ausente): no se escribe nada, y para una solicitud entregada a una v2 eso
+   * deja la declaración humana esperando su certificado (falla cerrado).
+   */
+  private declarabilidadAcreditada(
+    event: { declarable?: unknown },
+    terminal: { terminalPaymentExecutionVersion?: number },
+  ): boolean | null {
+    if ((terminal.terminalPaymentExecutionVersion ?? 0) < EXECUTION_VERSION_DECLARABLE) return null
+    return typeof event.declarable === 'boolean' ? event.declarable : null
+  }
+
+  /**
    * S1 · «La terminal cerró esa solicitud y no tiene ejecución viva». Contabilidad, no desenlace: nunca dice «no se cobró».
    *  - `executionClosedAt` se sella UNA vez: la TPV repite la respuesta en cada sonda y eso no mueve el reloj de S2.
    *  - Desmiente el ACTIVE previo con el MISMO CAS que la rama RESOLVED: `probeResolvedAt` sólo si `probeActiveAt` sigue
@@ -7793,15 +7830,18 @@ class TerminalPaymentService {
       probeActiveAt: Date | null
       probeResolvedAt: Date | null
       executionClosedAt: Date | null
+      executionDeclarable?: boolean | null
     },
     terminal: { socketId: string | null; terminalId: string; venueId: string; terminalPaymentExecutionVersion?: number },
     origen: 'PROBE' | 'CANCEL_DISPOSITION',
+    declarable: boolean | null = null,
   ): Promise<boolean> {
     const enVuelo: TerminalPaymentRequestStatus[] = [TerminalPaymentRequestStatus.SENT, TerminalPaymentRequestStatus.CANCEL_REQUESTED]
     // La ranura se sondea en cada pasada (~30 s) y la TPV repite la misma respuesta: si ya está sellada, no queda estado en
     // vuelo y el ACTIVE ya está desmentido, no hay nada que escribir (ni fila, ni `updatedAt`, ni aviso).
     const desmentida = !row.probeActiveAt || (!!row.probeResolvedAt && row.probeResolvedAt > row.probeActiveAt)
-    if (row.executionClosedAt && !enVuelo.includes(row.status) && desmentida) return false
+    const sinCambioDeDeclarabilidad = declarable === null || row.executionDeclarable === declarable
+    if (row.executionClosedAt && !enVuelo.includes(row.status) && desmentida && sinCambioDeDeclarabilidad) return false
 
     const { primera, antes, despues } = await prisma.$transaction(async tx => {
       // RETURNING: el estado con la fila ya bloqueada por esta transacción, no el de la lectura previa.
@@ -7822,6 +7862,31 @@ class TerminalPaymentService {
           ).count > 0
         : false
       const despues = aUnknown ? TerminalPaymentRequestStatus.UNKNOWN : antes
+      // F1 · bloque 1: el certificado de declaración se guarda sólo cuando CAMBIA (la TPV lo repite en cada sonda); manda el
+      // último. `false` (aprobado propio, evidencia pendiente o hermano) veta la declaración humana; un `true` posterior la abre.
+      if (declarable !== null) {
+        const cambio = await tx.$queryRaw<{ id: string }[]>`
+          UPDATE "TerminalPaymentRequest" SET "executionDeclarable" = ${declarable}
+          WHERE "id" = ${row.id} AND "executionDeclarable" IS DISTINCT FROM ${declarable}
+          RETURNING "id"`
+        if (cambio.length > 0)
+          await tx.activityLog.create({
+            data: {
+              venueId: terminal.venueId,
+              action: 'TERMINAL_PAYMENT_DECLARATION_CLEARANCE',
+              entity: 'TerminalPaymentRequest',
+              entityId: row.id,
+              data: {
+                requestId: row.requestId,
+                terminalId: normalizeTerminalId(terminal.terminalId),
+                origen,
+                declarable,
+                socketId: terminal.socketId,
+                executionVersion: terminal.terminalPaymentExecutionVersion ?? null,
+              },
+            },
+          })
+      }
       if (sellada.length > 0) {
         // `tx.activityLog.create` directo: `logAction` abre su propia conexión y se tragaría el fallo.
         await tx.activityLog.create({
@@ -7857,14 +7922,21 @@ class TerminalPaymentService {
 
   /** Authenticated cancellation admission; this is distinct from a payment result. */
   async handleCancelDispositionFromSocket(
-    event: { requestId: string; disposition: string; executionAlive?: boolean; closedForExecution?: boolean },
+    event: { requestId: string; disposition: string; executionAlive?: boolean; closedForExecution?: boolean; declarable?: unknown },
     terminal: { socketId: string | null; terminalId: string; venueId: string; terminalPaymentExecutionVersion?: number },
   ): Promise<boolean> {
     if (!event.requestId || !['ACTIVE', 'ACCEPTED', 'ALREADY_RESOLVED'].includes(event.disposition)) return false
     const where = { requestId: event.requestId, venueId: terminal.venueId, terminalId: normalizeTerminalId(terminal.terminalId) }
     const row = await prisma.terminalPaymentRequest.findFirst({
       where,
-      select: { id: true, status: true, probeActiveAt: true, probeResolvedAt: true, executionClosedAt: true },
+      select: {
+        id: true,
+        status: true,
+        probeActiveAt: true,
+        probeResolvedAt: true,
+        executionClosedAt: true,
+        executionDeclarable: true,
+      },
     })
     if (!row) return false
 
@@ -7893,7 +7965,12 @@ class TerminalPaymentService {
       }
     }
     if (this.ejecucionCerradaAcreditada(event, terminal)) {
-      await this.marcarEjecucionCerrada({ ...row, requestId: event.requestId }, terminal, 'CANCEL_DISPOSITION')
+      await this.marcarEjecucionCerrada(
+        { ...row, requestId: event.requestId },
+        terminal,
+        'CANCEL_DISPOSITION',
+        this.declarabilidadAcreditada(event, terminal),
+      )
     }
     return true
   }
@@ -8029,6 +8106,7 @@ class TerminalPaymentService {
       finalResult?: Partial<TerminalPaymentResult> | null
       executionAlive?: boolean
       closedForExecution?: boolean
+      declarable?: unknown
     },
     terminal: { socketId: string | null; terminalId: string; venueId: string; terminalPaymentExecutionVersion?: number },
   ): Promise<boolean> {
@@ -8052,6 +8130,7 @@ class TerminalPaymentService {
         // S1: para no reescribir la fila cuando la TPV repite la evidencia del cese.
         probeResolvedAt: true,
         executionClosedAt: true,
+        executionDeclarable: true,
       },
     })
     if (!row) {
@@ -8068,7 +8147,7 @@ class TerminalPaymentService {
       // S1: el ACTIVE de una TPV nueva puede venir con la barrera ya puesta («cerré la solicitud, nada la ejecuta»).
       // Entonces DESMIENTE el ACTIVE previo en vez de sellar uno nuevo.
       if (this.ejecucionCerradaAcreditada(event, terminal)) {
-        await this.marcarEjecucionCerrada({ ...row, requestId }, terminal, 'PROBE')
+        await this.marcarEjecucionCerrada({ ...row, requestId }, terminal, 'PROBE', this.declarabilidadAcreditada(event, terminal))
         return true
       }
       logger.info('🔎 [TerminalPayment] Probe: terminal still executing the attempt — reservation kept', { requestId })

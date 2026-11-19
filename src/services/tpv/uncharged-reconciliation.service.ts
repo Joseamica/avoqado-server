@@ -34,7 +34,15 @@ import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
-import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
+import {
+  exigeAcreditacionDeLaTerminal,
+  sondaReportoActiva,
+  sondaVetaLaDeclaracion,
+  TERMINAL_CONFIRMATION_PENDING,
+  TERMINAL_HAS_RESULT,
+  TEXTO_TERMINAL_CON_RESULTADO,
+  TEXTO_TERMINAL_SIN_CONFIRMAR,
+} from './sondaActiva'
 import logger from '../../config/logger'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
@@ -93,15 +101,19 @@ export class UnchargedReconciliationError extends Error {
           ? 'Esta terminal nunca confirmó haber recibido el cobro. No se puede declarar: consulta su resultado.'
           : code === 'EXECUTION_STILL_ACTIVE'
             ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
-            : code === 'NOT_ALLOWED'
-              ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
-              : code === 'SUPERVISOR_AUTHORIZATION_REQUIRED'
-                ? 'Pide a un gerente que ingrese su PIN para confirmar que este cobro no pasó.'
-                : code === 'RESOLUTION_CONFLICT'
-                  ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
-                  : code === 'ATTEMPT_NOT_FOUND'
-                    ? 'No encontré ese cobro en este negocio.'
-                    : 'Este cobro todavía no se puede declarar. Vuelve a consultar en un momento.',
+            : code === TERMINAL_CONFIRMATION_PENDING
+              ? TEXTO_TERMINAL_SIN_CONFIRMAR
+              : code === TERMINAL_HAS_RESULT
+                ? TEXTO_TERMINAL_CON_RESULTADO
+                : code === 'NOT_ALLOWED'
+                  ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
+                  : code === 'SUPERVISOR_AUTHORIZATION_REQUIRED'
+                    ? 'Pide a un gerente que ingrese su PIN para confirmar que este cobro no pasó.'
+                    : code === 'RESOLUTION_CONFLICT'
+                      ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
+                      : code === 'ATTEMPT_NOT_FOUND'
+                        ? 'No encontré ese cobro en este negocio.'
+                        : 'Este cobro todavía no se puede declarar. Vuelve a consultar en un momento.',
     )
   }
 }
@@ -659,6 +671,14 @@ export async function reconcileUncharged(
     const { desenlaceCanonico } = await import('../terminal-payment.service')
     if (desenlaceCanonico(row).outcome !== 'UNRESOLVED') throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
+    // 🔴 F1 · bloque 1 (R1, 18-nov): entregada a una PAX v2, el acuse o el cese físico ya NO bastan. Una persona declara sólo si esa
+    // terminal acreditó que ESTA solicitud se puede declarar (su libreta no tiene aprobado propio, evidencia pendiente ni hermano
+    // que lo impida). Sin certificado se espera; con «no se puede», se veta hasta el pago o un certificado posterior. Y se revalida
+    // en el CAS. El rechazo del banco (AngelPay) no pasa por aquí: su evidencia es el procesador. TPV vieja: como hoy.
+    const exigeCertificado = !porElBanco && exigeAcreditacionDeLaTerminal(row)
+    if (exigeCertificado && row.executionDeclarable !== true)
+      throw new UnchargedReconciliationError(row.executionDeclarable === false ? TERMINAL_HAS_RESULT : TERMINAL_CONFIRMATION_PENDING)
+
     const saved: UnchargedReconciliation = {
       id: declaration.resolutionId,
       kind: declaration.statement,
@@ -712,7 +732,8 @@ export async function reconcileUncharged(
           "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb,
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}`
+        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}
+        ${exigeCertificado ? Prisma.sql`AND "executionDeclarable" IS TRUE` : Prisma.empty}`
     if (cas !== 1) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Asiento DENTRO de la transacción: una declaración = un asiento.

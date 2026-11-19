@@ -6195,6 +6195,11 @@ model TerminalPaymentRequest {
   /// cancel con `executionAlive=false` + `closedForExecution=true`, TPV con `terminalPaymentExecutionVersion >= 1`).
   /// Columna propia por la misma razón que `probeActiveAt`. La escriben A3–A5 de «ninguna duda de un cobro sin salida».
   executionClosedAt       DateTime?
+  /// F1 · bloque 1 (18-nov): además del cese, la TERMINAL (PAX con `terminalPaymentExecutionVersion >= 2`) dice si ESTA solicitud
+  /// se puede declarar «no se cobró». `true` = su libreta no tiene aprobado propio, evidencia pendiente ni intento hermano que lo
+  /// impida; `false` = terminó, pero NO se puede declarar (veto hasta el pago o un certificado posterior); `null` = sin certificado.
+  /// Manda el último certificado. Sólo se exige a una solicitud entregada a una terminal v2; las viejas siguen como hoy.
+  executionDeclarable     Boolean?
   expiresAt               DateTime
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt

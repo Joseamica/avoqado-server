@@ -74,3 +74,31 @@ export function sondaVetaLaDeclaracion(
   const entregas = (row.deliveryProvenance as { deliveries?: { executionVersion?: number }[] } | null)?.deliveries
   return Array.isArray(entregas) && entregas.some(e => Number(e?.executionVersion) >= 1)
 }
+
+/**
+ * F1 · bloque 1 (18-nov): la versión de la capacidad de ejecución con la que la PAX, además del cese, acredita si ESTA solicitud se
+ * puede declarar «no se cobró» (`declarable` en su respuesta a la sonda o a la disposición del cancel).
+ */
+export const EXECUTION_VERSION_DECLARABLE = 2
+
+/**
+ * ¿Esta solicitud se entregó a una terminal que sabe acreditar la declaración? Entonces una persona sólo la declara con el certificado
+ * de esa terminal (`executionDeclarable === true`): el acuse de entrega sólo prueba que llegó. Una TPV vieja (v1, sin versión o
+ * procedencia desconocida) nunca lo anunció y sigue exactamente como hoy, con la excepción del 3-nov incluida.
+ */
+export function exigeAcreditacionDeLaTerminal(row: { deliveryProvenance?: unknown }): boolean {
+  const entregas = (row.deliveryProvenance as { deliveries?: { executionVersion?: number }[] } | null)?.deliveries
+  return Array.isArray(entregas) && entregas.some(e => Number(e?.executionVersion) >= EXECUTION_VERSION_DECLARABLE)
+}
+
+/**
+ * F1 · bloque 1 (18-nov): una solicitud entregada a una PAX v2 sólo la declara una persona con el certificado de esa terminal
+ * (`executionDeclarable`). Sin certificado, o con uno que dice «terminé pero no se puede declarar», la firma se rechaza con estos
+ * códigos; los comparten la firma del POS (`uncharged-reconciliation.service`) y «no presentó tarjeta» (`no-instrument-resolution.service`). Las apps pintan el `message`.
+ */
+export const TERMINAL_CONFIRMATION_PENDING = 'TERMINAL_CONFIRMATION_PENDING'
+export const TERMINAL_HAS_RESULT = 'TERMINAL_HAS_RESULT'
+export const TEXTO_TERMINAL_SIN_CONFIRMAR =
+  'Esperando confirmación de la terminal. Déjala encendida y conectada: en cuanto confirme que terminó con este cobro, podrás firmar.'
+export const TEXTO_TERMINAL_CON_RESULTADO =
+  'La terminal tiene un resultado de este cobro que todavía no llega a Avoqado. No lo declares: déjala encendida y conectada para que lo envíe.'

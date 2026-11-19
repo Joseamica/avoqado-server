@@ -808,3 +808,109 @@ describe('S2-bis · retenida por dinero con el cese acreditado: suelta el aparat
     expect(await negativosPorSilencio()).toBe(0)
   })
 })
+
+/**
+ * F1 · bloque 1 (18-nov, R1 de `plan-minimo-v2-tpv.md`): una solicitud entregada a una PAX que anunció
+ * `terminalPaymentExecutionVersion >= 2` sólo la declara una persona con el certificado de ESA terminal: «terminé y esta solicitud
+ * se puede declarar» (`executionDeclarable = true`). El acuse de entrega sólo prueba que llegó; el cese físico sólo suelta el lector.
+ * Las TPV de hoy (v1) siguen exactamente igual.
+ */
+describe('F1 · bloque 1 — la firma de una solicitud entregada a una PAX v2 exige su certificado de declaración', () => {
+  const pax2 = () => ({ ...conCapacidad(), terminalPaymentExecutionVersion: 2 })
+  const entregaV2 = () => ({ ...entrega(), executionVersion: 2 })
+  const noPresento = async (requestId: string, attemptId: string, extra: Record<string, unknown> = {}) => {
+    const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
+    return resolveNoInstrument(
+      { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId: f.staffId },
+      {
+        requestId,
+        resolutionId: randomUUID(),
+        statement: 'NO_INSTRUMENT_PRESENTED',
+        statementVersion: 1,
+        supervisorPin: f.gerente.pin,
+        ...extra,
+      },
+    )
+  }
+  const protegida = async (requestId: string, orderId: string) => {
+    const r = await fila(requestId)
+    expect(r.failureCode).not.toBe('OPERATOR_RECONCILED_NO_CHARGE')
+    expect(r.operatorReconciliation).toBeNull()
+    expect(desenlaceCanonico(r).outcome).toBe('UNRESOLVED')
+    expect(await ventaCercada(orderId)).toBe(true)
+    return r
+  }
+
+  it('ROJA: el POS firma con simple acuse y después con el cese físico mientras la PAX tiene un aprobado: A queda protegida', async () => {
+    const { solicitud, venta, attemptId } = await enDuda({ deliveryProvenance: { deliveries: [entregaV2()] } })
+    const { requestId } = solicitud
+
+    // 1. Sólo el acuse de entrega: «Esperando confirmación de la terminal».
+    await expect(declarar(requestId, f.staffId)).rejects.toMatchObject({ code: 'TERMINAL_CONFIRMATION_PENDING' })
+    await expect(noPresento(requestId, attemptId)).rejects.toMatchObject({ code: 'TERMINAL_CONFIRMATION_PENDING' })
+    await protegida(requestId, venta.id)
+
+    // 2. La PAX terminó con el lector, pero su libreta tiene un aprobado propio: certifica el cese y «no se puede declarar».
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: false }, pax2())).toBe(true)
+    const cerrada = await fila(requestId)
+    expect(cerrada.executionClosedAt).not.toBeNull()
+    expect(cerrada.executionDeclarable).toBe(false)
+    await expect(declarar(requestId, f.staffId)).rejects.toMatchObject({ code: 'TERMINAL_HAS_RESULT' })
+    // Ni la terminal dueña declara encima sin un certificado posterior.
+    await expect(noPresento(requestId, attemptId)).rejects.toMatchObject({ code: 'TERMINAL_HAS_RESULT' })
+    await protegida(requestId, venta.id)
+
+    // 3. La RANURA física sí se suelta a los 10 s (B puede cobrar en esa terminal); la venta A sigue protegida.
+    expect(await soltar(requestId, new Date(cerrada.executionClosedAt!.getTime() + 10_000))).toBe('RELEASED')
+    expect(await ocupada()).toBe(false)
+    await expect(declarar(requestId, f.staffId)).rejects.toMatchObject({ code: 'TERMINAL_HAS_RESULT' })
+    const final = await protegida(requestId, venta.id)
+    expect(final).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED', paymentId: null })
+    expect(
+      await prisma.activityLog.count({ where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED' } }),
+    ).toBe(0)
+    // El certificado quedó UNA vez (la TPV lo repite en cada sonda).
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: false }, pax2())).toBe(true)
+    expect(await asientos(final.id, 'TERMINAL_PAYMENT_DECLARATION_CLEARANCE')).toHaveLength(1)
+  })
+
+  it('con el certificado posterior «se puede declarar», el gerente firma y la venta se libera', async () => {
+    const { solicitud } = await enDuda({ deliveryProvenance: { deliveries: [entregaV2()] } })
+    const { requestId } = solicitud
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: false }, pax2())).toBe(true)
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: true }, pax2())).toBe(true)
+    expect((await fila(requestId)).executionDeclarable).toBe(true)
+    await expect(declarar(requestId, f.staffId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
+  })
+
+  it('«no presentó tarjeta» de la PAX v2 dueña trae su certificado en la declaración y libera; sin él, espera', async () => {
+    const { solicitud, attemptId } = await enDuda({ deliveryProvenance: { deliveries: [entregaV2()] } })
+    const { requestId } = solicitud
+    await expect(noPresento(requestId, attemptId, { executionClearance: 'DECLARABLE' })).resolves.toMatchObject({
+      resolution: { by: 'SUPERVISOR_PIN' },
+    })
+    expect(await fila(requestId)).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+      executionDeclarable: true,
+    })
+  })
+
+  it('con dinero ya registrado, ni el certificado «se puede declarar» libera: manda el dinero', async () => {
+    const { solicitud, venta, attemptId } = await enDuda({ deliveryProvenance: { deliveries: [entregaV2()] } })
+    const { requestId } = solicitud
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: true }, pax2())).toBe(true)
+    await dineroPorLaLlave(venta.id, attemptId)
+    await expect(declarar(requestId, f.staffId)).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    await protegida(requestId, venta.id)
+  })
+
+  it('TPV vieja (v1): el acuse basta y el `declarable` que mande no escribe nada — exactamente como hoy', async () => {
+    const { solicitud } = await enDuda()
+    const { requestId } = solicitud
+    expect(await svc.handleProbeResultFromSocket({ requestId, ...CERRADA, declarable: false }, conCapacidad())).toBe(true)
+    expect((await fila(requestId)).executionDeclarable).toBeNull()
+    await expect(declarar(requestId, f.staffId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+})

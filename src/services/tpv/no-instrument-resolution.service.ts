@@ -30,6 +30,13 @@ import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO }
 import { puertaDelDinero } from './avisosNoGuardados'
 import { avisoDelBancoComprobado } from './avisoDelBancoComprobado'
 import {
+  exigeAcreditacionDeLaTerminal,
+  TERMINAL_CONFIRMATION_PENDING,
+  TERMINAL_HAS_RESULT,
+  TEXTO_TERMINAL_CON_RESULTADO,
+  TEXTO_TERMINAL_SIN_CONFIRMAR,
+} from './sondaActiva'
+import {
   eventosQueVetanSql,
   hayDineroConEstaLlaveSql,
   sinDineroConEstaLlaveSql,
@@ -85,6 +92,10 @@ const schema = z
     // terminal: viaja igual en cada reintento, así que el replay idempotente (mismo `bodyHash`) sigue funcionando.
     amountCents: z.number().int().nonnegative().max(MAX_CENTAVOS).optional(),
     tipCents: z.number().int().nonnegative().max(MAX_CENTAVOS).optional(),
+    // F1 · bloque 1 (18-nov): la PAX v2 que declara sobre una solicitud del POS certifica aquí, bajo su candado de evidencia, que
+    // ESA solicitud se puede declarar (sin aprobado propio, evidencia pendiente ni hermano). La declarante es la terminal dueña
+    // (su JWT): vale como su certificado más reciente. Las TPV de hoy no lo mandan y no cambian.
+    executionClearance: z.literal('DECLARABLE').optional(),
   })
   .strict()
 
@@ -100,7 +111,11 @@ export class NoInstrumentResolutionError extends Error {
           ? 'La sesión de esta terminal no pertenece a este negocio. Vuelve a iniciar sesión.'
           : code === 'WEBHOOK_NOT_CONFIRMED'
             ? 'Este comercio no tiene comprobado el aviso del banco: confirma tú si el cliente presentó tarjeta.'
-            : 'No se pudo cerrar este intento. Conserva el cobro pendiente y consulta su resultado.',
+            : code === TERMINAL_CONFIRMATION_PENDING
+              ? TEXTO_TERMINAL_SIN_CONFIRMAR
+              : code === TERMINAL_HAS_RESULT
+                ? TEXTO_TERMINAL_CON_RESULTADO
+                : 'No se pudo cerrar este intento. Conserva el cobro pendiente y consulta su resultado.',
     )
   }
 }
@@ -517,6 +532,25 @@ export async function resolveNoInstrument(
     if (desenlaceCanonico(row).outcome !== 'UNRESOLVED' || row.status === TerminalPaymentRequestStatus.PENDING || retenidaPorLaVentana)
       throw new NoInstrumentResolutionError(retenidaPorLaVentana ? 'POSITIVE_EVIDENCE_EXISTS' : 'ATTEMPT_NOT_ELIGIBLE')
 
+    // 🔴 F1 · bloque 1 (R1): entregada a una PAX v2, el vínculo no basta: hace falta el certificado de declaración de esa terminal.
+    // Lo trae esta misma declaración (la terminal dueña, con su candado de evidencia) o una sonda anterior. Se guarda en la MISMA
+    // transacción (si el CAS falla, no queda) y el CAS lo vuelve a exigir.
+    const exigeCertificado = exigeAcreditacionDeLaTerminal(row)
+    if (exigeCertificado && row.executionDeclarable !== true) {
+      if (declaration.executionClearance !== 'DECLARABLE')
+        throw new NoInstrumentResolutionError(row.executionDeclarable === false ? TERMINAL_HAS_RESULT : TERMINAL_CONFIRMATION_PENDING)
+      await tx.$executeRaw`UPDATE "TerminalPaymentRequest" SET "executionDeclarable" = true WHERE "id" = ${row.id}`
+      await tx.activityLog.create({
+        data: {
+          action: 'TERMINAL_PAYMENT_DECLARATION_CLEARANCE',
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          venueId: identity.venueId,
+          data: { requestId, terminalId, origen: 'DECLARATION', declarable: true, attemptId },
+        },
+      })
+    }
+
     const saved: OperatorResolution = {
       id: declaration.resolutionId,
       kind: 'NO_INSTRUMENT_PRESENTED',
@@ -549,7 +583,8 @@ export async function resolveNoInstrument(
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
         AND ${sinVetoDeDineroSql({ requestId, venueId: identity.venueId, attemptIds: [attemptId], terminalId })}
         AND ${sinDineroConEstaLlaveSql(attemptId)}
-        AND ${sinEventoQueVetaSql(attemptId, identity.venueId, terminalId, true)}`
+        AND ${sinEventoQueVetaSql(attemptId, identity.venueId, terminalId, true)}
+        ${exigeCertificado ? Prisma.sql`AND "executionDeclarable" IS TRUE` : Prisma.empty}`
     if (cas !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
     await tx.terminalPaymentAttemptLink.update({
       where: { attemptId },

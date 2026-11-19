@@ -404,6 +404,7 @@ export class SocketManager implements ISocketManager {
             disposition: payload?.disposition,
             executionAlive: payload?.executionAlive,
             closedForExecution: payload?.closedForExecution,
+            declarable: payload?.declarable,
           },
           terminal,
         )
@@ -434,6 +435,7 @@ export class SocketManager implements ISocketManager {
             finalResult: payload?.finalResult ?? null,
             executionAlive: payload?.executionAlive,
             closedForExecution: payload?.closedForExecution,
+            declarable: payload?.declarable,
           },
           terminal,
         )

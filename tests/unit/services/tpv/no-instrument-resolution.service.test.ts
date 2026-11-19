@@ -727,3 +727,41 @@ describe('Revisión final · A: la declaración despierta al POS (después del c
     expect(despertar).not.toHaveBeenCalled()
   })
 })
+
+/** F1 · bloque 1 (18-nov): sobre una solicitud entregada a una PAX v2, «no presentó tarjeta» exige el certificado de esa terminal. */
+describe('F1 · bloque 1 — «no presentó tarjeta» sobre una solicitud entregada a una PAX v2', () => {
+  const v2 = { deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, executionVersion: 2 }] } }
+  /** Cada UPDATE de la solicitud, con sus fragmentos anidados (`Prisma.Sql`) a la vista. */
+  const updates = () =>
+    prismaMock.$executeRaw.mock.calls
+      .filter((c: any[]) => sqlDe(c).includes('UPDATE "TerminalPaymentRequest"'))
+      .map((c: any[]) => JSON.stringify(c))
+
+  it('sin certificado y sin traerlo ⇒ 409 TERMINAL_CONFIRMATION_PENDING, nada escrito', async () => {
+    rearmar(v2)
+    await rechaza(resolveNoInstrument(identidad, declaracion()), 'TERMINAL_CONFIRMATION_PENDING')
+    nadaEscrito()
+  })
+
+  it('con el veto de la terminal («terminé pero no se puede declarar») ⇒ 409 TERMINAL_HAS_RESULT, nada escrito', async () => {
+    rearmar({ ...v2, executionClosedAt: new Date(), executionDeclarable: false })
+    await rechaza(resolveNoInstrument(identidad, declaracion()), 'TERMINAL_HAS_RESULT')
+    nadaEscrito()
+  })
+
+  it('la terminal dueña trae su certificado: se guarda en la MISMA transacción y el CAS lo vuelve a exigir', async () => {
+    rearmar(v2)
+    await resolveNoInstrument(identidad, { ...declaracion(), executionClearance: 'DECLARABLE' })
+    const [guardado, cas] = updates()
+    expect(guardado).toContain('\\"executionDeclarable\\" = true')
+    expect(cas).toContain('OPERATOR_RECONCILED_NO_CHARGE')
+    expect(cas).toContain('\\"executionDeclarable\\" IS TRUE')
+    expect(prismaMock.activityLog.create.mock.calls.map((c: any[]) => c[0].data.action)).toContain('TERMINAL_PAYMENT_DECLARATION_CLEARANCE')
+  })
+
+  it('TPV vieja: sin la capacidad, la declaración y su CAS no cambian (el campo nuevo se ignora)', async () => {
+    await resolveNoInstrument(identidad, declaracion())
+    expect(updates()).toHaveLength(1)
+    expect(updates()[0]).not.toContain('executionDeclarable')
+  })
+})
